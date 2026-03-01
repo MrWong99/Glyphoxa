@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -220,6 +221,7 @@ func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
 				s.currentState = stateSpeaking
 				s.consecutiveSpeechFrames = 0
 				s.consecutiveSilenceFrames = 0
+				slog.Debug("vad/energy: speech start", "prob", prob, "rms", rms, "peak", s.peakEnergy)
 				return vad.VADEvent{Type: vad.VADSpeechStart, Probability: prob}, nil
 			}
 		} else {
@@ -234,6 +236,7 @@ func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
 				s.currentState = stateSilence
 				s.consecutiveSilenceFrames = 0
 				s.consecutiveSpeechFrames = 0
+				slog.Debug("vad/energy: speech end", "prob", prob)
 				return vad.VADEvent{Type: vad.VADSpeechEnd, Probability: prob}, nil
 			}
 		} else {

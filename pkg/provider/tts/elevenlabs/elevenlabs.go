@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"mime/multipart"
 	"net/http"
@@ -116,6 +117,9 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 		return nil, fmt.Errorf("elevenlabs: dial: %w", err)
 	}
 
+	// ElevenLabs audio chunks can exceed the default 32 KB read limit.
+	conn.SetReadLimit(1 << 20) // 1 MiB
+
 	// Send the initial BOI message to authenticate and configure the stream.
 	boi := boiMessage{
 		Text: " ", // ElevenLabs requires a non-empty first text value
@@ -134,6 +138,8 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 
 	audioCh := make(chan []byte, 256)
 
+	slog.Debug("elevenlabs: stream started", "voiceID", voice.ID, "model", p.model)
+
 	go func() {
 		defer close(audioCh)
 		defer conn.Close(websocket.StatusNormalClosure, "done")
@@ -142,25 +148,39 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 		readDone := make(chan struct{})
 		go func() {
 			defer close(readDone)
+			chunks := 0
+			totalBytes := 0
 			for {
 				_, msg, err := conn.Read(ctx)
 				if err != nil {
+					slog.Debug("elevenlabs: reader done", "chunks", chunks, "totalBytes", totalBytes, "error", err)
 					return
 				}
 				var resp audioResponse
 				if err := json.Unmarshal(msg, &resp); err != nil {
+					slog.Debug("elevenlabs: unmarshal error", "error", err)
 					continue
+				}
+				if resp.IsFinal {
+					slog.Debug("elevenlabs: received isFinal marker", "chunks", chunks, "totalBytes", totalBytes)
+				}
+				if resp.Message != "" {
+					slog.Debug("elevenlabs: server message", "message", resp.Message)
 				}
 				if resp.Audio == "" {
 					continue
 				}
 				pcm, err := base64.StdEncoding.DecodeString(resp.Audio)
 				if err != nil {
+					slog.Debug("elevenlabs: base64 decode error", "error", err)
 					continue
 				}
+				chunks++
+				totalBytes += len(pcm)
 				select {
 				case audioCh <- pcm:
 				case <-ctx.Done():
+					slog.Debug("elevenlabs: reader cancelled by context", "chunks", chunks)
 					return
 				}
 			}
@@ -172,25 +192,30 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 			select {
 			case sentence, ok := <-text:
 				if !ok {
+					slog.Debug("elevenlabs: text channel closed, sending flush")
 					// Text channel closed — send flush command.
 					flush := textMessage{Text: ""}
 					flushBytes, _ := json.Marshal(flush)
 					_ = conn.Write(ctx, websocket.MessageText, flushBytes)
 					// Wait for the reader to finish draining audio.
 					<-readDone
+					slog.Debug("elevenlabs: reader drained, stream complete")
 					return
 				}
 				if sentence == "" {
 					continue
 				}
+				slog.Debug("elevenlabs: sending text fragment", "len", len(sentence))
 				payload := textMessage{Text: sentence, VoiceSettings: vs}
 				// Only send voice settings on the first chunk; subsequent chunks can omit them.
 				vs = nil
 				msgBytes, _ := json.Marshal(payload)
 				if err := conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
+					slog.Debug("elevenlabs: write error", "error", err)
 					return
 				}
 			case <-ctx.Done():
+				slog.Debug("elevenlabs: writer cancelled by context")
 				return
 			}
 		}

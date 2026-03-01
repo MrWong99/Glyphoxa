@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,15 @@ type AgentConfig struct {
 	// TTS is an optional TTS provider used by [liveAgent.SpeakText] for
 	// direct text-to-speech synthesis. When nil, SpeakText returns an error.
 	TTS tts.Provider
+
+	// TTSSampleRate is the sample rate in Hz of PCM audio produced by the TTS
+	// provider (e.g., 16000 for ElevenLabs, 22050 for Coqui XTTS). When zero,
+	// defaults to 22050.
+	TTSSampleRate int
+
+	// TTSChannels is the number of audio channels produced by the TTS provider
+	// (1 = mono, 2 = stereo). When zero, defaults to 1.
+	TTSChannels int
 }
 
 // defaultAudioPriority is the priority used when enqueuing NPC audio segments.
@@ -78,9 +88,11 @@ type liveAgent struct {
 	assembler   *hotctx.Assembler
 	mcpHost     mcp.Host     // may be nil if no tools
 	mixer       audio.Mixer  // may be nil if not using mixer
-	ttsProvider tts.Provider // may be nil; required for SpeakText
-	sessionID   string
-	budgetTier  mcp.BudgetTier
+	ttsProvider   tts.Provider // may be nil; required for SpeakText
+	ttsSampleRate int          // Hz of PCM from TTS; default 22050
+	ttsChannels   int          // 1=mono, 2=stereo; default 1
+	sessionID     string
+	budgetTier    mcp.BudgetTier
 
 	mu       sync.Mutex
 	scene    SceneContext
@@ -113,16 +125,27 @@ func NewAgent(cfg AgentConfig) (NPCAgent, error) {
 		return nil, errors.New("agent: SessionID must not be empty")
 	}
 
+	ttsSR := cfg.TTSSampleRate
+	if ttsSR == 0 {
+		ttsSR = 22050
+	}
+	ttsCh := cfg.TTSChannels
+	if ttsCh == 0 {
+		ttsCh = 1
+	}
+
 	a := &liveAgent{
-		id:          cfg.ID,
-		identity:    cfg.Identity,
-		eng:         cfg.Engine,
-		assembler:   cfg.Assembler,
-		mcpHost:     cfg.MCPHost,
-		mixer:       cfg.Mixer,
-		ttsProvider: cfg.TTS,
-		sessionID:   cfg.SessionID,
-		budgetTier:  cfg.BudgetTier,
+		id:            cfg.ID,
+		identity:      cfg.Identity,
+		eng:           cfg.Engine,
+		assembler:     cfg.Assembler,
+		mcpHost:       cfg.MCPHost,
+		mixer:         cfg.Mixer,
+		ttsProvider:   cfg.TTS,
+		ttsSampleRate: ttsSR,
+		ttsChannels:   ttsCh,
+		sessionID:     cfg.SessionID,
+		budgetTier:    cfg.BudgetTier,
 	}
 
 	// Wire MCP tools into the engine when a host is provided.
@@ -343,17 +366,30 @@ func (a *liveAgent) SpeakText(ctx context.Context, text string) error {
 	textCh <- text
 	close(textCh)
 
-	audioCh, err := a.ttsProvider.SynthesizeStream(ctx, textCh, a.identity.Voice)
+	slog.Debug("agent: SpeakText starting TTS synthesis",
+		"npcID", a.id, "textLen", len(text),
+		"voiceID", a.identity.Voice.ID,
+		"sampleRate", a.ttsSampleRate, "channels", a.ttsChannels,
+	)
+
+	// The TTS stream outlives this call — audio is consumed asynchronously by
+	// the mixer. Detach from the caller's cancellation so the stream isn't
+	// killed when the caller (e.g., a Discord command handler) returns.
+	ttsCtx := context.WithoutCancel(ctx)
+	audioCh, err := a.ttsProvider.SynthesizeStream(ttsCtx, textCh, a.identity.Voice)
 	if err != nil {
 		return fmt.Errorf("agent: speak text: %w", err)
 	}
 
 	// Enqueue the audio in the mixer at default priority.
 	if a.mixer != nil {
+		slog.Debug("agent: SpeakText enqueuing audio segment", "npcID", a.id)
 		seg := &audio.AudioSegment{
-			NPCID:    a.id,
-			Audio:    audioCh,
-			Priority: defaultAudioPriority,
+			NPCID:      a.id,
+			Audio:      audioCh,
+			SampleRate: a.ttsSampleRate,
+			Channels:   a.ttsChannels,
+			Priority:   defaultAudioPriority,
 		}
 		a.mixer.Enqueue(seg, defaultAudioPriority)
 	} else {

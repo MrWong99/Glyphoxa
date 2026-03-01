@@ -121,6 +121,8 @@ func (p *NativeProvider) StartStream(ctx context.Context, cfg stt.StreamConfig) 
 		ch = 1
 	}
 
+	slog.Debug("whisper: starting native stream", "language", lang, "sampleRate", sr, "channels", ch)
+
 	s := &nativeSession{
 		model:               p.model,
 		language:            lang,
@@ -242,35 +244,47 @@ func (s *nativeSession) processLoop(ctx context.Context) {
 			return
 		}
 		if text == "" {
+			slog.Debug("whisper: inference returned empty text", "pcmBytes", len(pcm))
 			return
 		}
+
+		slog.Debug("whisper: transcribed", "text", text, "pcmBytes", len(pcm))
 
 		select {
 		case s.partials <- stt.Transcript{Text: text, IsFinal: false}:
 		default:
+			slog.Debug("whisper: partials channel full, dropping transcript")
 		}
 		select {
 		case s.finals <- stt.Transcript{Text: text, IsFinal: true}:
 		default:
+			slog.Debug("whisper: finals channel full, dropping transcript")
 		}
 	}
+
+	chunksReceived := 0
+	flushCount := 0
 
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Debug("whisper: processLoop context cancelled", "chunksReceived", chunksReceived, "flushes", flushCount)
 			doFlush()
 			return
 
 		case <-s.done:
+			slog.Debug("whisper: processLoop done signal", "chunksReceived", chunksReceived, "flushes", flushCount)
 			doFlush()
 			return
 
 		case chunk, ok := <-s.audioCh:
 			if !ok {
+				slog.Debug("whisper: processLoop audioCh closed", "chunksReceived", chunksReceived, "flushes", flushCount)
 				doFlush()
 				return
 			}
 
+			chunksReceived++
 			rms := computeRMS(chunk)
 			chunkMs := chunkDurationMs(chunk, s.sampleRate, s.channels)
 
@@ -279,14 +293,25 @@ func (s *nativeSession) processLoop(ctx context.Context) {
 					silenceMs += chunkMs
 					buffer = append(buffer, chunk...)
 					if silenceMs >= s.silenceThresholdMs {
+						flushCount++
+						slog.Debug("whisper: flushing speech buffer (silence detected)",
+							"bufferLen", len(buffer), "silenceMs", silenceMs, "flushNum", flushCount,
+						)
 						doFlush()
 					}
 				}
 			} else {
+				if !hadSpeech {
+					slog.Debug("whisper: speech detected", "rms", rms, "chunkMs", chunkMs)
+				}
 				hadSpeech = true
 				silenceMs = 0
 				buffer = append(buffer, chunk...)
 				if maxBufferBytes > 0 && len(buffer) >= maxBufferBytes {
+					flushCount++
+					slog.Debug("whisper: flushing speech buffer (max duration)",
+						"bufferLen", len(buffer), "flushNum", flushCount,
+					)
 					doFlush()
 				}
 			}

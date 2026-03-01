@@ -345,6 +345,36 @@ func buildEngine(providers *Providers, npc config.NPCConfig) (engine.VoiceEngine
 	}
 }
 
+// ttsFormatFromConfig returns the TTS output sample rate (Hz) and channel count
+// derived from a TTS provider config entry. It inspects the provider name and
+// the optional "output_format" option (e.g., "pcm_16000", "pcm_24000").
+func ttsFormatFromConfig(entry config.ProviderEntry) (sampleRate, channels int) {
+	channels = 1 // all supported TTS providers output mono
+
+	// Check for an explicit output_format option (e.g., "pcm_16000").
+	if entry.Options != nil {
+		if v, ok := entry.Options["output_format"]; ok {
+			if s, ok := v.(string); ok {
+				var rate int
+				if _, err := fmt.Sscanf(s, "pcm_%d", &rate); err == nil && rate > 0 {
+					return rate, channels
+				}
+			}
+		}
+	}
+
+	// Fall back to per-provider defaults.
+	switch entry.Name {
+	case "elevenlabs":
+		sampleRate = 16000
+	case "coqui":
+		sampleRate = 22050
+	default:
+		sampleRate = 22050
+	}
+	return sampleRate, channels
+}
+
 // ─── Accessors ───────────────────────────────────────────────────────────────
 
 // SessionStore returns the session transcript store. May be nil if memory

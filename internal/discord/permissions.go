@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"log/slog"
 	"slices"
 
 	"github.com/bwmarrin/discordgo"
@@ -27,5 +28,6 @@ func (p *PermissionChecker) IsDM(i *discordgo.InteractionCreate) bool {
 	if i.Member == nil {
 		return false
 	}
+	slog.Debug("checking permissions for user", "username", i.Member.DisplayName(), "roles", i.Member.Roles)
 	return slices.Contains(i.Member.Roles, p.dmRoleID)
 }

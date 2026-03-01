@@ -19,6 +19,8 @@ import (
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
+	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
+	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
 )
 
 // consolidationInterval is the consolidation period for alpha mode sessions.
@@ -170,6 +172,22 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 			Interval:   consolidationInterval,
 		})
 		consolid.Start(sessionCtx)
+	}
+
+	// Wire input pipeline: Discord → VAD → STT → Agent.
+	if sm.providers.VAD != nil && sm.providers.STT != nil {
+		pipeline := newAudioPipeline(audioPipelineConfig{
+			conn:        conn,
+			vadEngine:   sm.providers.VAD,
+			sttProvider: sm.providers.STT,
+			orch:        orch,
+			mixer:       mixer,
+			vadCfg:      vadConfigFromProvider(sm.cfg.Providers.VAD),
+			sttCfg:      sttConfigFromProvider(sm.cfg.Providers.STT),
+			ctx:         sessionCtx,
+		})
+		pipeline.Start()
+		closers = append(closers, pipeline.Stop)
 	}
 
 	sm.active = true
@@ -355,6 +373,8 @@ func (sm *SessionManager) loadAgents(ctx context.Context, assembler *hotctx.Asse
 	}
 	if sm.providers.TTS != nil {
 		loaderOpts = append(loaderOpts, agent.WithTTS(sm.providers.TTS))
+		sr, ch := ttsFormatFromConfig(sm.cfg.Providers.TTS)
+		loaderOpts = append(loaderOpts, agent.WithTTSFormat(sr, ch))
 	}
 
 	loader, err := agent.NewLoader(assembler, sessionID, loaderOpts...)
@@ -416,4 +436,87 @@ type noopSummariser struct{}
 
 func (n *noopSummariser) Summarise(_ context.Context, _ []llm.Message) (string, error) {
 	return "", nil
+}
+
+// vadConfigFromProvider extracts VAD session parameters from a provider config
+// entry. Defaults: 16000 Hz sample rate, 30ms frames, 0.5 speech threshold,
+// 0.35 silence threshold.
+func vadConfigFromProvider(entry config.ProviderEntry) vad.Config {
+	cfg := vad.Config{
+		SampleRate:       16000,
+		FrameSizeMs:      30,
+		SpeechThreshold:  0.5,
+		SilenceThreshold: 0.35,
+	}
+
+	if entry.Options == nil {
+		return cfg
+	}
+
+	if v, ok := entry.Options["frame_size_ms"]; ok {
+		if n, ok := toInt(v); ok && n > 0 {
+			cfg.FrameSizeMs = n
+		}
+	}
+	if v, ok := entry.Options["speech_threshold"]; ok {
+		if f, ok := toFloat64(v); ok {
+			cfg.SpeechThreshold = f
+		}
+	}
+	if v, ok := entry.Options["silence_threshold"]; ok {
+		if f, ok := toFloat64(v); ok {
+			cfg.SilenceThreshold = f
+		}
+	}
+
+	return cfg
+}
+
+// sttConfigFromProvider extracts STT stream parameters from a provider config
+// entry. Defaults: 16000 Hz sample rate, 1 channel (mono), auto-detect language.
+func sttConfigFromProvider(entry config.ProviderEntry) stt.StreamConfig {
+	cfg := stt.StreamConfig{
+		SampleRate: 16000,
+		Channels:   1,
+	}
+
+	if entry.Options == nil {
+		return cfg
+	}
+
+	if v, ok := entry.Options["language"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Language = s
+		}
+	}
+
+	return cfg
+}
+
+// toInt converts a YAML-decoded numeric value to int.
+func toInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case float64:
+		return int(n), true
+	case int64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
+// toFloat64 converts a YAML-decoded numeric value to float64.
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
 }

@@ -119,6 +119,11 @@ func (m *PriorityMixer) Enqueue(segment *audio.AudioSegment, priority int) {
 	}
 
 	m.seq++
+	slog.Debug("mixer: enqueued segment",
+		"npcID", segment.NPCID, "priority", priority,
+		"sampleRate", segment.SampleRate, "channels", segment.Channels,
+		"seq", m.seq, "queueLen", m.queue.Len()+1,
+	)
 	heap.Push(&m.queue, entry{
 		segment:  segment,
 		priority: priority,
@@ -324,18 +329,26 @@ func (m *PriorityMixer) dequeue() (seg *audio.AudioSegment, _ int, cancel chan s
 // play streams audio chunks from seg to the output callback until the segment
 // ends or cancel is closed (interrupt).
 func (m *PriorityMixer) play(seg *audio.AudioSegment, cancel chan struct{}) {
+	chunks := 0
+	totalBytes := 0
+	slog.Debug("mixer: play started", "npcID", seg.NPCID, "sampleRate", seg.SampleRate, "channels", seg.Channels)
 	for {
 		select {
 		case <-m.done:
+			slog.Debug("mixer: play interrupted by close", "npcID", seg.NPCID, "chunks", chunks, "totalBytes", totalBytes)
 			go audio.Drain(seg.Audio)
 			return
 		case <-cancel:
+			slog.Debug("mixer: play interrupted by cancel", "npcID", seg.NPCID, "chunks", chunks, "totalBytes", totalBytes)
 			go audio.Drain(seg.Audio)
 			return
 		case chunk, ok := <-seg.Audio:
 			if !ok {
+				slog.Debug("mixer: play finished", "npcID", seg.NPCID, "chunks", chunks, "totalBytes", totalBytes)
 				return // segment finished naturally
 			}
+			chunks++
+			totalBytes += len(chunk)
 			m.output(audio.AudioFrame{
 				Data:       chunk,
 				SampleRate: seg.SampleRate,

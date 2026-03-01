@@ -19,11 +19,13 @@ import (
 //
 // Loader is safe for concurrent use after construction; its fields are immutable.
 type Loader struct {
-	assembler   *hotctx.Assembler
-	mcpHost     mcp.Host
-	mixer       audio.Mixer
-	ttsProvider tts.Provider
-	sessionID   string
+	assembler     *hotctx.Assembler
+	mcpHost       mcp.Host
+	mixer         audio.Mixer
+	ttsProvider   tts.Provider
+	ttsSampleRate int
+	ttsChannels   int
+	sessionID     string
 }
 
 // LoaderOption is a functional option for [NewLoader].
@@ -45,6 +47,16 @@ func WithMixer(mixer audio.Mixer) LoaderOption {
 // agent it creates, enabling [NPCAgent.SpeakText] for DM puppet mode.
 func WithTTS(provider tts.Provider) LoaderOption {
 	return func(l *Loader) { l.ttsProvider = provider }
+}
+
+// WithTTSFormat configures the TTS output format so that [NPCAgent.SpeakText]
+// can tag audio segments correctly. sampleRate is in Hz (e.g., 16000 for
+// ElevenLabs, 22050 for Coqui XTTS). channels is 1 for mono, 2 for stereo.
+func WithTTSFormat(sampleRate, channels int) LoaderOption {
+	return func(l *Loader) {
+		l.ttsSampleRate = sampleRate
+		l.ttsChannels = channels
+	}
 }
 
 // NewLoader creates a [Loader] with the given shared dependencies.
@@ -84,14 +96,16 @@ func NewLoader(assembler *hotctx.Assembler, sessionID string, opts ...LoaderOpti
 // Errors are prefixed with "agent: ".
 func (l *Loader) Load(id string, identity NPCIdentity, eng engine.VoiceEngine, budgetTier mcp.BudgetTier) (NPCAgent, error) {
 	return NewAgent(AgentConfig{
-		ID:         id,
-		Identity:   identity,
-		Engine:     eng,
-		Assembler:  l.assembler,
-		MCPHost:    l.mcpHost,
-		Mixer:      l.mixer,
-		TTS:        l.ttsProvider,
-		SessionID:  l.sessionID,
-		BudgetTier: budgetTier,
+		ID:            id,
+		Identity:      identity,
+		Engine:        eng,
+		Assembler:     l.assembler,
+		MCPHost:       l.mcpHost,
+		Mixer:         l.mixer,
+		TTS:           l.ttsProvider,
+		TTSSampleRate: l.ttsSampleRate,
+		TTSChannels:   l.ttsChannels,
+		SessionID:     l.sessionID,
+		BudgetTier:    budgetTier,
 	})
 }

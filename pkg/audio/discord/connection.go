@@ -132,25 +132,41 @@ func (c *Connection) Disconnect() error {
 func (c *Connection) recvLoop() {
 	// Each SSRC gets its own decoder to maintain state across frames.
 	decoders := make(map[uint32]*opusDecoder)
+	packetsReceived := 0
+	framesDecoded := 0
+	framesDropped := 0
+
+	slog.Debug("discord: recvLoop started")
 
 	for {
 		select {
 		case <-c.done:
+			slog.Debug("discord: recvLoop stopped",
+				"packetsReceived", packetsReceived,
+				"framesDecoded", framesDecoded,
+				"framesDropped", framesDropped,
+			)
 			return
 		case pkt, ok := <-c.vc.OpusRecv:
 			if !ok {
+				slog.Debug("discord: recvLoop OpusRecv closed",
+					"packetsReceived", packetsReceived,
+					"framesDecoded", framesDecoded,
+				)
 				return
 			}
 			if pkt == nil {
 				continue
 			}
 
+			packetsReceived++
 			ssrc := pkt.SSRC
 			ssrcStr := strconv.FormatUint(uint64(ssrc), 10)
 
 			// Lazily create a decoder for this SSRC.
 			dec, exists := decoders[ssrc]
 			if !exists {
+				slog.Debug("discord: recvLoop new SSRC", "ssrc", ssrcStr)
 				var err error
 				dec, err = newOpusDecoder()
 				if err != nil {
@@ -171,6 +187,7 @@ func (c *Connection) recvLoop() {
 			c.inputsMu.Unlock()
 
 			if !chExists {
+				slog.Debug("discord: recvLoop new participant channel", "ssrc", ssrcStr)
 				// Notify about a new participant (identified by SSRC for now).
 				c.emitEvent(audio.Event{
 					Type:   audio.EventJoin,
@@ -184,6 +201,7 @@ func (c *Connection) recvLoop() {
 				continue
 			}
 
+			framesDecoded++
 			frame := audio.AudioFrame{
 				Data:       pcm,
 				SampleRate: opusSampleRate,
@@ -194,7 +212,17 @@ func (c *Connection) recvLoop() {
 			select {
 			case ch <- frame:
 			default:
+				framesDropped++
 				// Channel full — drop frame rather than block.
+			}
+
+			if packetsReceived%500 == 0 {
+				slog.Debug("discord: recvLoop progress",
+					"packetsReceived", packetsReceived,
+					"framesDecoded", framesDecoded,
+					"framesDropped", framesDropped,
+					"activeSSRCs", len(decoders),
+				)
 			}
 		}
 	}
@@ -222,16 +250,28 @@ func (c *Connection) sendLoop() {
 
 	var buf []byte
 
+	framesReceived := 0
+	opusPacketsSent := 0
+
 	for {
 		select {
 		case <-c.done:
+			slog.Debug("discord: sendLoop stopped", "framesReceived", framesReceived, "opusPacketsSent", opusPacketsSent)
 			if speakingSet {
 				c.setSpeaking(false)
 			}
 			return
 		case frame, ok := <-c.output:
 			if !ok {
+				slog.Debug("discord: sendLoop output channel closed", "framesReceived", framesReceived, "opusPacketsSent", opusPacketsSent)
 				return
+			}
+
+			framesReceived++
+			if framesReceived == 1 {
+				slog.Debug("discord: sendLoop received first frame",
+					"dataLen", len(frame.Data), "sampleRate", frame.SampleRate, "channels", frame.Channels,
+				)
 			}
 
 			if !speakingSet {
@@ -242,6 +282,11 @@ func (c *Connection) sendLoop() {
 			// Convert to Discord's target format (48 kHz stereo).
 			frame = conv.Convert(frame)
 			data := frame.Data
+
+			if len(data) == 0 {
+				slog.Debug("discord: sendLoop frame converted to empty data", "frameNum", framesReceived)
+				continue
+			}
 
 			buf = append(buf, data...)
 
@@ -254,12 +299,17 @@ func (c *Connection) sendLoop() {
 					continue
 				}
 				buf = buf[opusFrameBytes:]
+				opusPacketsSent++
 
 				select {
 				case c.vc.OpusSend <- opus:
 				case <-c.done:
 					return
 				}
+			}
+
+			if framesReceived%50 == 0 {
+				slog.Debug("discord: sendLoop progress", "framesReceived", framesReceived, "opusPacketsSent", opusPacketsSent, "bufLen", len(buf))
 			}
 		}
 	}

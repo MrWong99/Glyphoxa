@@ -21,13 +21,12 @@ server:
 # the key with no sub-keys) to disable that pipeline stage.
 # ────────────────────────────────────────────────────────────
 providers:
-
   # LLM backend — used for NPC reasoning in cascaded mode.
   llm:
-    name: openai          # registered name, e.g. "openai" | "anthropic" | "ollama"
-    api_key: sk-...       # your API key
-    base_url: ""          # override API endpoint (optional)
-    model: gpt-4o         # model name
+    name: openai # registered name, e.g. "openai" | "anthropic" | "ollama"
+    api_key: sk-... # your API key
+    base_url: "" # override API endpoint (optional)
+    model: gpt-4o # model name
     options:
       max_tokens: 1024
 
@@ -73,7 +72,7 @@ providers:
   # "webrtc" enables browser-based voice sessions (alpha).
   audio:
     name: discord
-    api_key: "Bot MTIz..."           # Discord bot token
+    api_key: "Bot MTIz..." # Discord bot token
     options:
       guild_id: "123456789012345678" # target guild (server) ID
       dm_role_id: "987654321098765432" # DM role ID (empty = all users are DMs)
@@ -98,13 +97,13 @@ npcs:
       there is more to know than you are willing to reveal.
     voice:
       provider: elevenlabs
-      voice_id: pNInz6obpgDQGcFmaJgB  # "Adam" voice
-      pitch_shift: -2.0                # slightly lower pitch for gravitas
-      speed_factor: 0.85              # speak a touch slower
+      voice_id: pNInz6obpgDQGcFmaJgB # "Adam" voice
+      pitch_shift: -2.0 # slightly lower pitch for gravitas
+      speed_factor: 0.85 # speak a touch slower
     # "cascaded" = STT → LLM → TTS pipeline
     # "s2s"      = end-to-end speech model
     engine: cascaded
-    budget_tier: standard   # fast | standard | deep
+    budget_tier: standard # fast | standard | deep
     knowledge_scope:
       - ancient history
       - arcane magic
@@ -120,7 +119,7 @@ npcs:
       You know the local gossip and are happy to share it — for the right price.
     voice:
       provider: elevenlabs
-      voice_id: EXAVITQu4vr4xnSDxMaL  # "Bella" voice
+      voice_id: EXAVITQu4vr4xnSDxMaL # "Bella" voice
       pitch_shift: 1.5
       speed_factor: 1.1
     engine: s2s
