@@ -82,12 +82,12 @@ const defaultAudioPriority = 1
 // tool wiring, and audio output. Concurrent calls to [liveAgent.HandleUtterance]
 // are serialised via an internal mutex to preserve conversational coherence.
 type liveAgent struct {
-	id          string
-	identity    NPCIdentity
-	eng         engine.VoiceEngine
-	assembler   *hotctx.Assembler
-	mcpHost     mcp.Host     // may be nil if no tools
-	mixer       audio.Mixer  // may be nil if not using mixer
+	id            string
+	identity      NPCIdentity
+	eng           engine.VoiceEngine
+	assembler     *hotctx.Assembler
+	mcpHost       mcp.Host     // may be nil if no tools
+	mixer         audio.Mixer  // may be nil if not using mixer
 	ttsProvider   tts.Provider // may be nil; required for SpeakText
 	ttsSampleRate int          // Hz of PCM from TTS; default 22050
 	ttsChannels   int          // 1=mono, 2=stereo; default 1

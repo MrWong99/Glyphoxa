@@ -129,11 +129,9 @@ func (p *audioPipeline) startWorker(id string, ch <-chan audio.AudioFrame) {
 		Channels:   1,
 	})
 
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		p.processParticipant(workerCtx, id, converted)
-	}()
+	})
 
 	slog.Info("audio pipeline: started worker", "user_id", id)
 }
