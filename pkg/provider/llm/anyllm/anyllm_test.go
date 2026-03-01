@@ -477,3 +477,113 @@ func TestCapabilities_ReturnsForModel(t *testing.T) {
 		t.Errorf("expected SupportsVision %v, got %v", expected.SupportsVision, caps.SupportsVision)
 	}
 }
+
+// TestCountTokens_OpenAIModel verifies that an OpenAI model (gpt-4o) uses the
+// tiktoken tokenizer for accurate per-token counting.
+func TestCountTokens_OpenAIModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		model   string
+		content string
+		want    int
+	}{
+		// "Hello world" → 2 tiktoken tokens (O200kBase) + 4 message overhead = 6.
+		{name: "gpt-4o hello world", model: "gpt-4o", content: "Hello world", want: 6},
+		// "Hello, world!" → 4 tiktoken tokens (O200kBase) + 4 message overhead = 8.
+		{name: "gpt-4o hello world!", model: "gpt-4o", content: "Hello, world!", want: 8},
+		// Versioned gpt-4o variant – prefix match selects O200kBase.
+		{name: "gpt-4o versioned", model: "gpt-4o-2024-11-20", content: "Hello world", want: 6},
+		// GPT-4 uses Cl100kBase; "Hello world" is also 2 tokens there.
+		{name: "gpt-4 hello world", model: "gpt-4", content: "Hello world", want: 6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &Provider{model: tt.model}
+			msgs := []llm.Message{{Role: "user", Content: tt.content}}
+			got, err := p.CountTokens(msgs)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("CountTokens(%q, model=%q) = %d, want %d", tt.content, tt.model, got, tt.want)
+			}
+			// Sanity: codec must have been initialised.
+			if p.codec == nil {
+				t.Error("expected codec to be non-nil for OpenAI model")
+			}
+		})
+	}
+}
+
+// TestCountTokens_NonOpenAIModel verifies that Claude, Gemini, and Ollama models
+// fall back to the ~4 chars/token heuristic and leave codec as nil.
+func TestCountTokens_NonOpenAIModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		model   string
+		content string
+		want    int
+	}{
+		// "Hello world" (11 chars): (11+3)/4 = 3 + 4 overhead = 7.
+		{name: "claude", model: "claude-3-5-sonnet-latest", content: "Hello world", want: 7},
+		{name: "gemini", model: "gemini-1.5-pro", content: "Hello world", want: 7},
+		{name: "ollama/llama3", model: "llama3", content: "Hello world", want: 7},
+		{name: "unknown", model: "my-custom-model", content: "Hello world", want: 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &Provider{model: tt.model}
+			msgs := []llm.Message{{Role: "user", Content: tt.content}}
+			got, err := p.CountTokens(msgs)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("CountTokens(%q, model=%q) = %d, want %d", tt.content, tt.model, got, tt.want)
+			}
+			// Codec must remain nil for non-OpenAI models.
+			if p.codec != nil {
+				t.Error("expected codec to be nil for non-OpenAI model")
+			}
+		})
+	}
+}
+
+// TestCountTokens_LazyInit verifies that the tokenizer is initialised at most
+// once regardless of how many times CountTokens is called.
+func TestCountTokens_LazyInit(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	msgs := []llm.Message{{Role: "user", Content: "Hello world"}}
+
+	// First call: initialises the codec.
+	count1, err := p.CountTokens(msgs)
+	if err != nil {
+		t.Fatalf("first call: unexpected error: %v", err)
+	}
+	if p.codec == nil {
+		t.Fatal("first call: expected codec to be initialised")
+	}
+	capturedCodec := p.codec
+
+	// Second call: must reuse the same codec instance.
+	count2, err := p.CountTokens(msgs)
+	if err != nil {
+		t.Fatalf("second call: unexpected error: %v", err)
+	}
+	if count1 != count2 {
+		t.Errorf("expected identical counts on repeated calls: %d != %d", count1, count2)
+	}
+	if p.codec != capturedCodec {
+		t.Error("expected codec to be the same instance (not re-initialised)")
+	}
+}

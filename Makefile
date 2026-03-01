@@ -1,7 +1,7 @@
 # Glyphoxa Makefile
 # Requires: Go 1.26+, CGO_ENABLED=1
 
-.PHONY: build test lint vet fmt check clean whisper-libs
+.PHONY: build test lint vet fmt check clean whisper-libs install-lint
 
 # Build
 build:
@@ -21,9 +21,14 @@ test-cover:
 	go tool cover -func=coverage.out | tail -1
 	@echo "HTML report: go tool cover -html=coverage.out"
 
-# Lint with golangci-lint (install: https://golangci-lint.run/welcome/install/)
+# Lint with golangci-lint v2 (config requires v2).
+# Install: make install-lint   OR   https://golangci-lint.run/welcome/install/
 lint:
-	golangci-lint run ./...
+	$(shell go env GOPATH)/bin/golangci-lint run ./...
+
+# Install golangci-lint v2 into GOPATH/bin.
+install-lint:
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
 # Go vet
 vet:

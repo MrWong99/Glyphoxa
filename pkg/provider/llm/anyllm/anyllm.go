@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 	"github.com/mozilla-ai/any-llm-go/providers/anthropic"
@@ -23,6 +24,7 @@ import (
 	"github.com/mozilla-ai/any-llm-go/providers/mistral"
 	"github.com/mozilla-ai/any-llm-go/providers/ollama"
 	anyllmoai "github.com/mozilla-ai/any-llm-go/providers/openai"
+	"github.com/tiktoken-go/tokenizer"
 
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
 )
@@ -31,6 +33,13 @@ import (
 type Provider struct {
 	backend anyllmlib.Provider
 	model   string
+
+	// tokenizerOnce guards lazy initialisation of codec.
+	tokenizerOnce sync.Once
+	// codec is a tiktoken Codec used for accurate token counting on OpenAI
+	// models. It is nil for non-OpenAI models, which fall back to the
+	// ~4 chars/token heuristic.
+	codec tokenizer.Codec
 }
 
 // New creates a new Provider backed by the given LLM provider name.
@@ -245,12 +254,31 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 }
 
 // CountTokens implements llm.Provider.
-// TODO: replace with a real tokenizer (e.g., tiktoken-go) for accurate per-model counting.
+// For OpenAI models (GPT-4o, GPT-4, GPT-3.5-turbo, o1, o3, etc.) it uses the
+// tiktoken tokenizer for accurate per-model counting. For all other models
+// (Claude, Gemini, Ollama, unknown) it falls back to a ~4 chars/token heuristic.
+// The tokenizer is initialised lazily on the first call and reused thereafter.
 func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
+	p.tokenizerOnce.Do(func() {
+		c, err := tokenizer.ForModel(tokenizer.Model(strings.ToLower(p.model)))
+		if err == nil {
+			p.codec = c
+		}
+		// ErrModelNotSupported means non-OpenAI model; p.codec stays nil → heuristic.
+	})
+
 	total := 0
 	for _, m := range messages {
-		// ~4 chars per token is a rough approximation for most models.
-		total += (len(m.Content) + 3) / 4
+		if p.codec != nil {
+			n, err := p.codec.Count(m.Content)
+			if err != nil {
+				return 0, fmt.Errorf("anyllm: count tokens: %w", err)
+			}
+			total += n
+		} else {
+			// ~4 chars per token is a rough approximation for non-OpenAI models.
+			total += (len(m.Content) + 3) / 4
+		}
 		// Per-message overhead (role + formatting tokens).
 		total += 4
 	}

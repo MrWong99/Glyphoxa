@@ -3,13 +3,16 @@
 package elevenlabs
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"mime/multipart"
 	"net/http"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
 	"github.com/coder/websocket"
@@ -18,6 +21,7 @@ import (
 const (
 	wsEndpointFmt    = "wss://api.elevenlabs.io/v1/text-to-speech/%s/stream-input?model_id=%s"
 	voicesEndpoint   = "https://api.elevenlabs.io/v1/voices"
+	addVoiceEndpoint = "https://api.elevenlabs.io/v1/voices/add"
 	defaultModel     = "eleven_flash_v2_5"
 	defaultOutputFmt = "pcm_16000"
 )
@@ -45,6 +49,9 @@ type Provider struct {
 	model        string
 	outputFormat string
 	httpClient   *http.Client
+	// addVoiceURL is the endpoint for POST /v1/voices/add.
+	// It defaults to addVoiceEndpoint and can be overridden in tests.
+	addVoiceURL string
 }
 
 // New creates a new ElevenLabs Provider. apiKey must be non-empty.
@@ -57,6 +64,7 @@ func New(apiKey string, opts ...Option) (*Provider, error) {
 		model:        defaultModel,
 		outputFormat: defaultOutputFmt,
 		httpClient:   &http.Client{},
+		addVoiceURL:  addVoiceEndpoint,
 	}
 	for _, o := range opts {
 		o(p)
@@ -247,11 +255,161 @@ func (p *Provider) ListVoices(ctx context.Context) ([]tts.VoiceProfile, error) {
 	return profiles, nil
 }
 
-// CloneVoice is not implemented in Phase 1.
-// TODO: implement voice cloning via POST /v1/voices/add
-func (p *Provider) CloneVoice(_ context.Context, samples [][]byte) (*tts.VoiceProfile, error) {
-	_ = samples
-	return nil, errors.New("elevenlabs: CloneVoice is not implemented in Phase 1")
+// ---- CloneVoice ----
+
+// CloneVoiceOption is a functional option for CloneVoiceWithOptions.
+type CloneVoiceOption func(*cloneVoiceConfig)
+
+// cloneVoiceConfig holds configuration for a voice cloning request.
+type cloneVoiceConfig struct {
+	name                  string
+	removeBackgroundNoise bool
+	description           string
+	labels                map[string]string
+}
+
+// WithCloneName overrides the auto-generated voice name used when cloning.
+func WithCloneName(name string) CloneVoiceOption {
+	return func(c *cloneVoiceConfig) {
+		c.name = name
+	}
+}
+
+// WithRemoveBackgroundNoise enables or disables background noise removal during cloning.
+func WithRemoveBackgroundNoise(enabled bool) CloneVoiceOption {
+	return func(c *cloneVoiceConfig) {
+		c.removeBackgroundNoise = enabled
+	}
+}
+
+// WithDescription sets an optional human-readable description for the cloned voice.
+func WithDescription(desc string) CloneVoiceOption {
+	return func(c *cloneVoiceConfig) {
+		c.description = desc
+	}
+}
+
+// WithLabels sets optional metadata labels (e.g., language, accent) for the cloned voice.
+func WithLabels(labels map[string]string) CloneVoiceOption {
+	return func(c *cloneVoiceConfig) {
+		c.labels = labels
+	}
+}
+
+// addVoiceResponse is the JSON response body from POST /v1/voices/add.
+type addVoiceResponse struct {
+	VoiceID              string `json:"voice_id"`
+	RequiresVerification bool   `json:"requires_verification"`
+}
+
+// CloneVoice clones a voice from the provided audio samples using the ElevenLabs
+// /v1/voices/add API. It delegates to CloneVoiceWithOptions with no options.
+//
+// samples must be non-nil and non-empty; each element is treated as a WAV audio file.
+// Returns a *tts.VoiceProfile with the provider-assigned voice ID on success.
+func (p *Provider) CloneVoice(ctx context.Context, samples [][]byte) (*tts.VoiceProfile, error) {
+	return p.CloneVoiceWithOptions(ctx, samples)
+}
+
+// CloneVoiceWithOptions clones a voice from audio samples with optional configuration.
+//
+// samples must be non-nil and non-empty. Each sample is uploaded as a separate WAV
+// file part (named sample_0.wav, sample_1.wav, …). The voice name defaults to
+// "glyphoxa-clone-<unix-timestamp>" but can be overridden with WithCloneName.
+//
+// Returns a *tts.VoiceProfile with the provider-assigned voice ID on success.
+func (p *Provider) CloneVoiceWithOptions(ctx context.Context, samples [][]byte, opts ...CloneVoiceOption) (*tts.VoiceProfile, error) {
+	if samples == nil {
+		return nil, errors.New("elevenlabs: samples must not be nil")
+	}
+	if len(samples) == 0 {
+		return nil, errors.New("elevenlabs: samples must not be empty")
+	}
+
+	cfg := &cloneVoiceConfig{
+		name: fmt.Sprintf("glyphoxa-clone-%d", time.Now().Unix()),
+	}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	// Required: voice name.
+	if err := mw.WriteField("name", cfg.name); err != nil {
+		return nil, fmt.Errorf("elevenlabs: clone voice: write name field: %w", err)
+	}
+
+	// Required: audio sample files.
+	for i, sample := range samples {
+		fw, err := mw.CreateFormFile("files", fmt.Sprintf("sample_%d.wav", i))
+		if err != nil {
+			return nil, fmt.Errorf("elevenlabs: clone voice: create file part %d: %w", i, err)
+		}
+		if _, err := fw.Write(sample); err != nil {
+			return nil, fmt.Errorf("elevenlabs: clone voice: write file part %d: %w", i, err)
+		}
+	}
+
+	// Optional: remove background noise.
+	if cfg.removeBackgroundNoise {
+		if err := mw.WriteField("remove_background_noise", "true"); err != nil {
+			return nil, fmt.Errorf("elevenlabs: clone voice: write remove_background_noise: %w", err)
+		}
+	}
+
+	// Optional: description.
+	if cfg.description != "" {
+		if err := mw.WriteField("description", cfg.description); err != nil {
+			return nil, fmt.Errorf("elevenlabs: clone voice: write description: %w", err)
+		}
+	}
+
+	// Optional: labels (JSON-encoded map).
+	if len(cfg.labels) > 0 {
+		labelsJSON, err := json.Marshal(cfg.labels)
+		if err != nil {
+			return nil, fmt.Errorf("elevenlabs: clone voice: marshal labels: %w", err)
+		}
+		if err := mw.WriteField("labels", string(labelsJSON)); err != nil {
+			return nil, fmt.Errorf("elevenlabs: clone voice: write labels: %w", err)
+		}
+	}
+
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("elevenlabs: clone voice: close multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.addVoiceURL, &buf)
+	if err != nil {
+		return nil, fmt.Errorf("elevenlabs: clone voice: create request: %w", err)
+	}
+	req.Header.Set("xi-api-key", p.apiKey)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("elevenlabs: clone voice: HTTP: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("elevenlabs: clone voice: unexpected status %d", resp.StatusCode)
+	}
+
+	var avr addVoiceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&avr); err != nil {
+		return nil, fmt.Errorf("elevenlabs: clone voice: decode response: %w", err)
+	}
+
+	return &tts.VoiceProfile{
+		ID:       avr.VoiceID,
+		Name:     cfg.name,
+		Provider: "elevenlabs",
+		Metadata: map[string]string{},
+	}, nil
 }
 
 // ---- helpers ----
