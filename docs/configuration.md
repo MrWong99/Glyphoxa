@@ -82,7 +82,7 @@ The `Diff` function tracks which changes are safe to apply at runtime:
 | Removing an NPC | :white_check_mark: Yes | NPC is unloaded |
 | Provider changes (api_key, model, etc.) | :x: No | Requires restart |
 | `server.listen_addr` / `server.tls` | :x: No | Requires restart |
-| `discord.*` | :x: No | Requires restart |
+| `providers.audio.*` | :x: No | Requires restart |
 | `memory.*` | :x: No | Requires restart |
 | `mcp.servers` | :x: No | Requires restart |
 | `campaign.*` | :x: No | Requires restart |
@@ -108,23 +108,6 @@ server:
   tls:
     cert_file: /etc/ssl/glyphoxa.crt
     key_file: /etc/ssl/glyphoxa.key
-```
-
----
-
-### `discord` -- Discord Bot
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `discord.token` | `string` | `""` | Discord bot token (e.g., `"Bot MTIz..."`). Leave empty to disable the Discord bot entirely. |
-| `discord.guild_id` | `string` | `""` | Target Discord guild (server) ID. Alpha deployments support one guild per bot instance. |
-| `discord.dm_role_id` | `string` | `""` | Discord role ID for Dungeon Master permissions. Users with this role can execute `/session`, `/npc`, `/entity`, and `/campaign` commands. When empty, **all users are treated as DMs** (useful for development). |
-
-```yaml
-discord:
-  token: "Bot MTIz..."
-  guild_id: "123456789012345678"
-  dm_role_id: "987654321098765432"
 ```
 
 ---
@@ -236,18 +219,52 @@ providers:
 
 #### `providers.audio` -- Audio Platform
 
-Connects Glyphoxa to a voice channel. When Discord is enabled, this is
-automatically provided by the Discord bot and does not need explicit
-configuration.
+Connects Glyphoxa to a voice channel. The audio provider determines which
+voice transport is used and, for Discord, also creates the bot that provides
+slash commands and DM permissions.
 
-**Registered providers:** `discord`
+**Registered providers:** `discord`, `webrtc`
+
+##### Audio: `discord`
+
+Creates a Discord bot, connects to the gateway, and provides voice channel
+transport plus slash commands (`/session`, `/npc`, `/entity`, `/campaign`).
+
+| Field | Type | Description |
+|---|---|---|
+| `api_key` | `string` | **Required.** Discord bot token (e.g., `"Bot MTIz..."`). Obtain from https://discord.com/developers/applications. |
+| `options.guild_id` | `string` | **Required.** Target Discord guild (server) ID. Alpha: one guild per bot instance. |
+| `options.dm_role_id` | `string` | Discord role ID for Dungeon Master permissions. Users with this role can execute privileged slash commands. When empty, **all users are treated as DMs** (useful for development). |
 
 ```yaml
 providers:
   audio:
     name: discord
+    api_key: "Bot MTIz..."
     options:
       guild_id: "123456789012345678"
+      dm_role_id: "987654321098765432"
+```
+
+##### Audio: `webrtc`
+
+Enables browser-based voice sessions via WebRTC. No Discord account required.
+Currently in **alpha** -- the `PeerTransport` interface abstracts the
+`pion/webrtc` integration.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `options.stun_servers` | `[]string` | `["stun:stun.l.google.com:19302"]` | STUN server URLs for ICE negotiation. |
+| `options.sample_rate` | `int` | `48000` | Audio sample rate in Hz. |
+
+```yaml
+providers:
+  audio:
+    name: webrtc
+    options:
+      stun_servers:
+        - "stun:stun.l.google.com:19302"
+      sample_rate: 48000
 ```
 
 ---

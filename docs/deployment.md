@@ -456,7 +456,7 @@ glyphoxa:
 - [ ] Store API keys and secrets outside the config file (environment variables or a secrets manager)
 - [ ] Run the container as non-root (the distroless image uses `nonroot` by default)
 - [ ] Restrict network access -- Ollama, Coqui TTS, and PostgreSQL should not be exposed publicly
-- [ ] Set a `dm_role_id` in the Discord config to restrict privileged slash commands
+- [ ] Set `providers.audio.options.dm_role_id` to restrict privileged slash commands
 
 ### Log configuration
 

@@ -533,11 +533,14 @@ discord: open session: ...
 
 **Fix**
 
-1. Verify `discord.token` in your config file. The token should not include the `Bot ` prefix (Glyphoxa adds it automatically).
+1. Verify `providers.audio.api_key` in your config file. The token should not include the `Bot ` prefix (Glyphoxa adds it automatically).
    ```yaml
-   discord:
-     token: "MTIz..."  # just the token, no "Bot " prefix
-     guild_id: "123456789"
+   providers:
+     audio:
+       name: discord
+       api_key: "MTIz..."  # just the token, no "Bot " prefix
+       options:
+         guild_id: "123456789"
    ```
 2. In the [Discord Developer Portal](https://discord.com/developers/applications), ensure these **Privileged Gateway Intents** are enabled for your bot:
    - **Server Members Intent** (for role-based DM permission checks)
@@ -557,7 +560,7 @@ discord: open session: ...
 
 **Fix**
 
-1. Double-check `discord.guild_id` matches your target server. You can copy the guild ID by right-clicking the server name in Discord (Developer Mode must be enabled).
+1. Double-check `providers.audio.options.guild_id` matches your target server. You can copy the guild ID by right-clicking the server name in Discord (Developer Mode must be enabled).
 2. Verify the bot was invited with the `applications.commands` OAuth2 scope. The invite URL should include:
    ```
    &scope=bot+applications.commands
@@ -608,8 +611,13 @@ discord: open session: ...
 
 1. If `dm_role_id` is empty, **all users are treated as DMs** (development mode). Set it to restrict access:
    ```yaml
-   discord:
-     dm_role_id: "987654321012345678"
+   providers:
+     audio:
+       name: discord
+       api_key: "Bot MTIz..."
+       options:
+         guild_id: "123456789012345678"
+         dm_role_id: "987654321012345678"
    ```
 2. The role ID must be a Discord role in the target guild. Copy it from Server Settings > Roles (right-click the role with Developer Mode enabled).
 3. Interactions from DM channels (outside guilds) always return `IsDM = false` because there is no `Member` object. Privileged commands must be run inside the guild.

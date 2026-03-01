@@ -152,11 +152,13 @@ server:
   listen_addr: ":8080"
   log_level: info
 
-discord:
-  token: "Bot YOUR_BOT_TOKEN_HERE"
-  guild_id: "YOUR_GUILD_ID"
-
 providers:
+  audio:
+    name: discord
+    api_key: "Bot YOUR_BOT_TOKEN_HERE"
+    options:
+      guild_id: "YOUR_GUILD_ID"
+
   llm:
     name: openai
     api_key: sk-...

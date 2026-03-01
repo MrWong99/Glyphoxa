@@ -21,7 +21,7 @@ var ValidProviderNames = map[string][]string{
 	"s2s":        {"openai-realtime", "gemini-live"},
 	"embeddings": {"openai", "ollama"},
 	"vad":        {"energy", "silero"},
-	"audio":      {"discord"},
+	"audio":      {"discord", "webrtc"},
 }
 
 // Load reads the YAML configuration file at path and returns a validated [Config].

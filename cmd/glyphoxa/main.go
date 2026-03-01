@@ -20,6 +20,8 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/discord/commands"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
+	"github.com/MrWong99/glyphoxa/pkg/audio"
+	"github.com/MrWong99/glyphoxa/pkg/audio/webrtc"
 	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
 	ollamaembed "github.com/MrWong99/glyphoxa/pkg/provider/embeddings/ollama"
 	oaembed "github.com/MrWong99/glyphoxa/pkg/provider/embeddings/openai"
@@ -70,7 +72,12 @@ func run() int {
 
 	// ── Provider registry ─────────────────────────────────────────────────────
 	reg := config.NewRegistry()
-	registerBuiltinProviders(reg)
+
+	// bot is populated by the "discord" audio factory when providers.audio.name
+	// is "discord". It provides the Discord gateway session, command router,
+	// and permission checker needed for slash commands.
+	var bot *discordbot.Bot
+	registerBuiltinProviders(reg, &bot)
 
 	// ── Instantiate providers ─────────────────────────────────────────────────
 	providers, err := buildProviders(cfg, reg)
@@ -83,25 +90,6 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// ── Discord bot (optional) ────────────────────────────────────────────────
-	var bot *discordbot.Bot
-	if cfg.Discord.Token != "" {
-		botCfg := discordbot.Config{
-			Token:    cfg.Discord.Token,
-			GuildID:  cfg.Discord.GuildID,
-			DMRoleID: cfg.Discord.DMRoleID,
-		}
-
-		bot, err = discordbot.New(ctx, botCfg)
-		if err != nil {
-			slog.Error("failed to create Discord bot", "err", err)
-			return 1
-		}
-		// Use the bot's audio platform instead of the provider registry's audio.
-		providers.Audio = bot.Platform()
-		slog.Info("discord bot connected", "guild_id", cfg.Discord.GuildID)
-	}
-
 	// ── Startup summary ───────────────────────────────────────────────────────
 	printStartupSummary(cfg)
 
@@ -111,12 +99,12 @@ func run() int {
 		return 1
 	}
 
-	// ── Discord commands ─────────────────────────────────────────────────────
+	// ── Discord commands (when audio provider is "discord") ──────────────────
 	if bot != nil {
 		perms := bot.Permissions()
 
 		sessionMgr := app.NewSessionManager(app.SessionManagerConfig{
-			Platform:     bot.Platform(),
+			Platform:     providers.Audio,
 			Config:       cfg,
 			Providers:    providers,
 			SessionStore: application.SessionStore(),
@@ -199,7 +187,11 @@ func run() int {
 // registerBuiltinProviders wires all built-in provider factories into reg.
 // Each factory receives a config.ProviderEntry and constructs the appropriate
 // provider from the real implementation packages.
-func registerBuiltinProviders(reg *config.Registry) {
+//
+// bot is populated by the "discord" audio factory when it creates a Discord bot.
+// The caller can check *bot != nil after buildProviders to determine whether
+// Discord slash commands should be registered.
+func registerBuiltinProviders(reg *config.Registry, bot **discordbot.Bot) {
 	// ── LLM ───────────────────────────────────────────────────────────────────
 	// openai, anthropic, gemini, deepseek, mistral, groq, llamacpp, llamafile
 	// all share the same pattern: optional APIKey + optional BaseURL.
@@ -350,6 +342,43 @@ func registerBuiltinProviders(reg *config.Registry) {
 		return energyvad.New(opts...), nil
 	})
 
+	// ── Audio ─────────────────────────────────────────────────────────────────
+
+	reg.RegisterAudio("discord", func(entry config.ProviderEntry) (audio.Platform, error) {
+		token := entry.APIKey
+		if token == "" {
+			return nil, fmt.Errorf("discord audio provider requires api_key (bot token)")
+		}
+		guildID := optString(entry.Options, "guild_id")
+		if guildID == "" {
+			return nil, fmt.Errorf("discord audio provider requires options.guild_id")
+		}
+		dmRoleID := optString(entry.Options, "dm_role_id")
+
+		b, err := discordbot.New(context.Background(), discordbot.Config{
+			Token:    token,
+			GuildID:  guildID,
+			DMRoleID: dmRoleID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		*bot = b
+		slog.Info("discord bot connected", "guild_id", guildID)
+		return b.Platform(), nil
+	})
+
+	reg.RegisterAudio("webrtc", func(entry config.ProviderEntry) (audio.Platform, error) {
+		var opts []webrtc.Option
+		if servers := optStringSlice(entry.Options, "stun_servers"); len(servers) > 0 {
+			opts = append(opts, webrtc.WithSTUNServers(servers...))
+		}
+		if rate := optInt(entry.Options, "sample_rate"); rate > 0 {
+			opts = append(opts, webrtc.WithSampleRate(rate))
+		}
+		return webrtc.New(opts...), nil
+	})
+
 	// Debug log of all registered providers.
 	for kind, names := range config.ValidProviderNames {
 		for _, name := range names {
@@ -463,11 +492,6 @@ func printStartupSummary(cfg *config.Config) {
 	printProvider("Embeddings", cfg.Providers.Embeddings.Name, cfg.Providers.Embeddings.Model)
 	printProvider("VAD", cfg.Providers.VAD.Name, "")
 	printProvider("Audio", cfg.Providers.Audio.Name, "")
-	if cfg.Discord.Token != "" {
-		fmt.Printf("║  Discord         : %-19s ║\n", "connected")
-	} else {
-		fmt.Printf("║  Discord         : %-19s ║\n", "(disabled)")
-	}
 	fmt.Printf("║  NPCs configured : %-19d ║\n", len(cfg.NPCs))
 	fmt.Printf("║  MCP servers     : %-19d ║\n", len(cfg.MCP.Servers))
 	if cfg.Server.ListenAddr != "" {
@@ -543,6 +567,32 @@ func optInt(opts map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+// optStringSlice extracts a []string option from the provider Options map.
+// YAML sequences of strings are decoded as []any; each element is asserted to string.
+// Returns nil if the key is absent, the value is not a slice, or any element is not a string.
+func optStringSlice(opts map[string]any, key string) []string {
+	if opts == nil {
+		return nil
+	}
+	v, ok := opts[key]
+	if !ok {
+		return nil
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, elem := range raw {
+		s, ok := elem.(string)
+		if !ok {
+			return nil
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // optFloat extracts a float64 option from the provider Options map.

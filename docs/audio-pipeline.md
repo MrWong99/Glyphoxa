@@ -140,9 +140,14 @@ The Discord transport bridges Discord's Opus-based voice protocol with Glyphoxa'
 
 **Configuration:**
 
-```go
-platform := discord.New(session, guildID)
-conn, err := platform.Connect(ctx, channelID)
+```yaml
+providers:
+  audio:
+    name: discord
+    api_key: "Bot MTIz..."
+    options:
+      guild_id: "123456789012345678"
+      dm_role_id: "987654321098765432"
 ```
 
 **When to use:** Production Discord bot deployments. This is the primary transport for TTRPG sessions hosted on Discord.
@@ -163,12 +168,14 @@ The WebRTC transport enables browser-based voice sessions via `pion/webrtc`, wit
 
 **Configuration:**
 
-```go
-platform := webrtc.New(
-    webrtc.WithSTUNServers("stun:stun.l.google.com:19302"),
-    webrtc.WithSampleRate(48000),
-)
-conn, err := platform.Connect(ctx, roomID)
+```yaml
+providers:
+  audio:
+    name: webrtc
+    options:
+      stun_servers:
+        - "stun:stun.l.google.com:19302"
+      sample_rate: 48000
 ```
 
 **When to use:** Custom web UIs, browser-based TTRPG tools, or environments where Discord is not available. Currently in alpha -- the `PeerTransport` interface abstracts the pion/webrtc integration so it can be developed independently.
@@ -177,9 +184,10 @@ conn, err := platform.Connect(ctx, roomID)
 
 | Feature | Discord | WebRTC |
 |---|---|---|
+| Provider name | `discord` | `webrtc` |
 | Codec | Opus (48 kHz stereo) | Configurable (default 48 kHz) |
 | Client | Discord app | Any WebRTC browser |
-| Setup | Bot token + guild ID | Signaling server + STUN |
+| Config | `api_key` + `options.guild_id` | `options.stun_servers` + `options.sample_rate` |
 | Maturity | Production | Alpha |
 | Participant tracking | VoiceStateUpdate events | Explicit AddPeer/RemovePeer |
 | Multi-room | One connection per channel | One connection per room |
