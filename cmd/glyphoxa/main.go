@@ -34,6 +34,8 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts/coqui"
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts/elevenlabs"
+	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
+	energyvad "github.com/MrWong99/glyphoxa/pkg/provider/vad/energy"
 )
 
 func main() {
@@ -332,6 +334,22 @@ func registerBuiltinProviders(reg *config.Registry) {
 		return geminilive.New(entry.APIKey, opts...), nil
 	})
 
+	// ── VAD ───────────────────────────────────────────────────────────────────
+
+	reg.RegisterVAD("energy", func(entry config.ProviderEntry) (vad.Engine, error) {
+		var opts []energyvad.Option
+		if n := optInt(entry.Options, "min_speech_frames"); n > 0 {
+			opts = append(opts, energyvad.WithMinSpeechFrames(n))
+		}
+		if n := optInt(entry.Options, "min_silence_frames"); n > 0 {
+			opts = append(opts, energyvad.WithMinSilenceFrames(n))
+		}
+		if f := optFloat(entry.Options, "smoothing_factor"); f > 0 {
+			opts = append(opts, energyvad.WithSmoothingFactor(f))
+		}
+		return energyvad.New(opts...), nil
+	})
+
 	// Debug log of all registered providers.
 	for kind, names := range config.ValidProviderNames {
 		for _, name := range names {
@@ -505,4 +523,44 @@ func optString(opts map[string]any, key string) string {
 		return ""
 	}
 	return s
+}
+
+// optInt extracts an integer option from the provider Options map.
+// Returns 0 if the key is absent or the value is not numeric.
+func optInt(opts map[string]any, key string) int {
+	if opts == nil {
+		return 0
+	}
+	v, ok := opts[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n) // YAML numbers decode as float64
+	default:
+		return 0
+	}
+}
+
+// optFloat extracts a float64 option from the provider Options map.
+// Returns 0 if the key is absent or the value is not numeric.
+func optFloat(opts map[string]any, key string) float64 {
+	if opts == nil {
+		return 0
+	}
+	v, ok := opts[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	default:
+		return 0
+	}
 }

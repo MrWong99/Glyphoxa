@@ -20,7 +20,7 @@ var ValidProviderNames = map[string][]string{
 	"tts":        {"elevenlabs", "coqui"},
 	"s2s":        {"openai-realtime", "gemini-live"},
 	"embeddings": {"openai", "ollama"},
-	"vad":        {"silero"},
+	"vad":        {"energy", "silero"},
 	"audio":      {"discord"},
 }
 
