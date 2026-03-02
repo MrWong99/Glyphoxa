@@ -335,14 +335,18 @@ func (a *App) initAgents(ctx context.Context) error {
 }
 
 // registerNPCEntities upserts a memory.Entity record in the knowledge graph
-// for each configured NPC. This allows the hot-context assembler to resolve
-// NPC identity snapshots via graph.IdentitySnapshot. Registration failures
-// are logged at Warn level and do not abort startup — the graph may not be
-// available in all environments.
+// for each configured NPC and creates any configured relationships. This allows
+// the hot-context assembler to resolve NPC identity snapshots via
+// graph.IdentitySnapshot. Registration failures are logged at Warn level and
+// do not abort startup — the graph may not be available in all environments.
 func registerNPCEntities(ctx context.Context, graph memory.KnowledgeGraph, npcs []config.NPCConfig) {
 	now := time.Now().UTC()
+
+	// First pass: create all NPC entities so that relationship targets can be resolved.
+	npcIDs := make(map[string]string, len(npcs)) // NPC name → entity ID
 	for i, npc := range npcs {
 		npcID := fmt.Sprintf("npc-%d-%s", i, npc.Name)
+		npcIDs[npc.Name] = npcID
 		e := memory.Entity{
 			ID:   npcID,
 			Type: "npc",
@@ -358,6 +362,62 @@ func registerNPCEntities(ctx context.Context, graph memory.KnowledgeGraph, npcs 
 			slog.Warn("app: failed to register NPC entity in knowledge graph", "npc", npc.Name, "npc_id", npcID, "err", err)
 		} else {
 			slog.Info("app: registered NPC entity in knowledge graph", "npc", npc.Name, "npc_id", npcID)
+		}
+	}
+
+	// Second pass: create relationships for NPCs that have them configured.
+	for i, npc := range npcs {
+		npcID := fmt.Sprintf("npc-%d-%s", i, npc.Name)
+		for _, rel := range npc.Relationships {
+			targetID := rel.TargetID
+			if targetID == "" && rel.TargetName != "" {
+				// Resolve target by name — check NPC IDs first.
+				if id, ok := npcIDs[rel.TargetName]; ok {
+					targetID = id
+				} else {
+					// Try the graph for non-NPC entities (locations, factions, etc.).
+					ents, err := graph.FindEntities(ctx, memory.EntityFilter{Name: rel.TargetName})
+					if err != nil || len(ents) == 0 {
+						slog.Warn("app: relationship target not found, skipping",
+							"npc", npc.Name, "target_name", rel.TargetName, "rel_type", rel.Type)
+						continue
+					}
+					targetID = ents[0].ID
+				}
+			}
+			if targetID == "" {
+				slog.Warn("app: relationship has no target, skipping",
+					"npc", npc.Name, "rel_type", rel.Type)
+				continue
+			}
+
+			r := memory.Relationship{
+				SourceID:  npcID,
+				TargetID:  targetID,
+				RelType:   rel.Type,
+				CreatedAt: now,
+			}
+			if err := graph.AddRelationship(ctx, r); err != nil {
+				slog.Warn("app: failed to add NPC relationship",
+					"npc", npc.Name, "target", targetID, "type", rel.Type, "err", err)
+			} else {
+				slog.Info("app: registered NPC relationship",
+					"npc", npc.Name, "target", targetID, "type", rel.Type)
+			}
+
+			// Create reverse edge for bidirectional relationships.
+			if rel.Bidirectional {
+				reverse := memory.Relationship{
+					SourceID:  targetID,
+					TargetID:  npcID,
+					RelType:   rel.Type,
+					CreatedAt: now,
+				}
+				if err := graph.AddRelationship(ctx, reverse); err != nil {
+					slog.Warn("app: failed to add reverse NPC relationship",
+						"npc", npc.Name, "target", targetID, "type", rel.Type, "err", err)
+				}
+			}
 		}
 	}
 }

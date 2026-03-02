@@ -72,6 +72,15 @@ func newAudioPipeline(cfg audioPipelineConfig) *audioPipeline {
 	}
 }
 
+// UpdateKeywords atomically replaces the keyword boost list used when opening
+// new STT sessions. Already-active sessions are unaffected (they are short-lived
+// per speech segment and will pick up the new keywords on the next VAD cycle).
+func (p *audioPipeline) UpdateKeywords(keywords []stt.KeywordBoost) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sttCfg.Keywords = keywords
+}
+
 // Start registers a participant change callback and starts workers
 // for any participants already in the channel.
 func (p *audioPipeline) Start() {

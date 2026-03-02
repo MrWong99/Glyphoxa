@@ -65,6 +65,9 @@ type SessionManager struct {
 	// Zero-value is ready; no initialisation required.
 	recorderWG sync.WaitGroup
 
+	// pipeline is the active audio pipeline (nil when no session or no STT/VAD).
+	pipeline *audioPipeline
+
 	// closers are called in reverse order during Stop.
 	closers []func() error
 
@@ -244,8 +247,9 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 	}
 
 	// Wire input pipeline: Discord → VAD → STT → Agent.
+	var activePipeline *audioPipeline
 	if sm.providers.VAD != nil && sm.providers.STT != nil {
-		pipeline := newAudioPipeline(audioPipelineConfig{
+		activePipeline = newAudioPipeline(audioPipelineConfig{
 			conn:        conn,
 			vadEngine:   sm.providers.VAD,
 			sttProvider: sm.providers.STT,
@@ -257,13 +261,14 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 			pipeline:    correctionPipeline,
 			entities:    entityNamesFn,
 		})
-		pipeline.Start()
-		closers = append(closers, pipeline.Stop)
+		activePipeline.Start()
+		closers = append(closers, activePipeline.Stop)
 	}
 
 	sm.active = true
 	sm.conn = conn
 	sm.orch = orch
+	sm.pipeline = activePipeline
 	sm.consolidator = consolid
 	sm.mixer = mixer
 	sm.agents = agents
@@ -341,6 +346,7 @@ func (sm *SessionManager) Stop(ctx context.Context) error {
 	sm.orch = nil
 	sm.consolidator = nil
 	sm.mixer = nil
+	sm.pipeline = nil
 	sm.agents = nil
 	sm.cancel = nil
 	sm.closers = nil
@@ -378,9 +384,8 @@ func (sm *SessionManager) Orchestrator() *orchestrator.Orchestrator {
 // graph for mid-session use. Steps:
 //  1. Add entity to the entity store.
 //  2. Convert to memory.Entity and add to the knowledge graph.
-//  3. (Best-effort) STT keyword boosting and phonetic index are logged but
-//     not yet wired through agents; providers that support mid-session keyword
-//     updates will be integrated in a future release.
+//  3. Update the audio pipeline's STT keyword boost list so new STT sessions
+//     benefit from improved recognition of the entity name.
 //
 // Returns the stored entity (with generated ID) and any error.
 func (sm *SessionManager) PropagateEntity(ctx context.Context, def entity.EntityDefinition) (entity.EntityDefinition, error) {
@@ -425,10 +430,22 @@ func (sm *SessionManager) PropagateEntity(ctx context.Context, def entity.Entity
 		}
 	}
 
-	// Step 3: STT keyword boost (best-effort, not yet wired through agents).
-	// Future: iterate over active agents and call SessionHandle.SetKeywords
-	// with the entity name added to the boost list.
-	slog.Debug("propagate entity: STT keyword boost not yet wired for mid-session updates", "name", stored.Name)
+	// Step 3: STT keyword boost — update the pipeline's keyword list so new STT
+	// sessions pick up the entity name. Existing short-lived sessions will catch
+	// the update on the next VAD cycle.
+	if sm.pipeline != nil && sm.graph != nil {
+		ents, err := sm.graph.FindEntities(ctx, memory.EntityFilter{})
+		if err != nil {
+			slog.Warn("propagate entity: failed to fetch entities for keyword boost", "err", err)
+		} else {
+			keywords := make([]stt.KeywordBoost, len(ents))
+			for i, e := range ents {
+				keywords[i] = stt.KeywordBoost{Keyword: e.Name, Boost: 1.0}
+			}
+			sm.pipeline.UpdateKeywords(keywords)
+			slog.Info("propagate entity: updated STT keyword boost list", "name", stored.Name, "total_keywords", len(keywords))
+		}
+	}
 
 	return stored, nil
 }

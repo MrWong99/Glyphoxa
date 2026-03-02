@@ -5,7 +5,7 @@ Scope: voice receiver → memory → mixer → audio output, checked against `do
 
 ---
 
-## 1. [MEDIUM] No format negotiation between TTS and mixer
+## 1. ~~[MEDIUM] No format negotiation between TTS and mixer~~ DONE
 
 **Files:** `internal/agent/npc.go`, `pkg/audio/mixer/mixer.go`, `pkg/audio/discord/connection.go`
 
@@ -13,11 +13,11 @@ The mixer accepts `AudioSegment` values with arbitrary `SampleRate` and `Channel
 
 In a session with multiple NPCs at different TTS sample rates (e.g., 22050Hz for Coqui, 16000Hz for ElevenLabs), only the first NPC's mismatch is logged. If one NPC's format causes issues, debugging the second NPC's format problems requires removing the `sync.Once`.
 
-**Fix:** Consider per-format-pair warnings or a debug-level log on every conversion.
+**Fix:** Replaced `sync.Once` with `sync.Map` keyed by `(rate, channels)` pair — now logs once per unique source format.
 
 ---
 
-## 2. [MEDIUM] STT keyword boosting not propagated to active sessions
+## 2. ~~[MEDIUM] STT keyword boosting not propagated to active sessions~~ DONE
 
 **Files:** `internal/app/session_manager.go:304-306`
 
@@ -25,7 +25,7 @@ In a session with multiple NPCs at different TTS sample rates (e.g., 22050Hz for
 
 **Impact:** STT accuracy for newly introduced entity names (NPCs joining mid-session, new locations discovered) doesn't benefit from keyword boosting. Only entities known at session start are boosted via the transcript correction pipeline.
 
-**Fix:** When `PropagateEntity()` adds an entity, iterate active STT sessions and call a keyword boost API (provider-dependent). At minimum, update the phonetic matcher's dictionary so the correction pipeline (once wired) can fix these names.
+**Fix:** `PropagateEntity()` now rebuilds the keyword list from graph entities and calls `audioPipeline.UpdateKeywords()` so new STT sessions pick up the updated keywords.
 
 ---
 
@@ -79,7 +79,7 @@ Even if `PreFetchResults` were populated (see TODO #14), the `FormatSystemPrompt
 
 ---
 
-## 7. [LOW] Entity upsert at startup doesn't create relationships
+## 7. ~~[LOW] Entity upsert at startup doesn't create relationships~~ DONE
 
 **Files:** `internal/app/app.go` (entity registration), `internal/entity/store.go`
 
@@ -87,7 +87,7 @@ NPCs are registered as knowledge graph entities at startup, but only as bare nod
 
 **Impact:** Scene context building (`buildSceneContext`) finds no LOCATED_AT relationships, so NPCs have no location awareness. Quest tracking and faction membership are empty.
 
-**Fix:** Extend the campaign config / entity YAML to include relationship definitions. During startup entity registration, also call `graph.AddRelationship()` for each configured relationship.
+**Fix:** Added `Relationships []RelationshipConfig` to `NPCConfig`. `registerNPCEntities()` now creates relationships (with bidirectional support and name-based target resolution) in a second pass after all entities exist.
 
 ---
 
@@ -103,13 +103,13 @@ NPCs are registered as knowledge graph entities at startup, but only as bare nod
 
 ---
 
-## 9. [LOW] `wg.Go` (Go 1.25+) used without Go version gate
+## 9. ~~[LOW] `wg.Go` (Go 1.25+) used without Go version gate~~ NOT AN ISSUE
 
 **Files:** `internal/engine/cascade/cascade.go:221`, `internal/engine/s2s/engine.go:240`, `internal/app/audio_pipeline.go:132`
 
 `sync.WaitGroup.Go()` was added in Go 1.25. The `go.mod` specifies Go 1.26 so this is currently fine, but it's a portability note: anyone trying to build with Go < 1.25 will get a compile error with no clear message about the minimum version requirement.
 
-**Impact:** Minor — just a compatibility note.
+**Impact:** Non-issue — `go.mod` requires Go 1.26, which satisfies the Go 1.25+ requirement.
 
 ---
 
@@ -117,12 +117,12 @@ NPCs are registered as knowledge graph entities at startup, but only as bare nod
 
 | # | Severity | Area | Issue |
 |---|----------|------|-------|
-| 1 | MEDIUM | Audio | FormatConverter warning suppression across NPCs |
-| 2 | MEDIUM | Pipeline | STT keyword boosting not propagated mid-session |
-| 3 | MEDIUM | Engine | Cascade engine doesn't handle tool calls |
-| 4 | LOW | Engine | Sentence boundary detection too simplistic |
+| 1 | ~~MEDIUM~~ | ~~Audio~~ | ~~FormatConverter warning suppression across NPCs~~ |
+| 2 | ~~MEDIUM~~ | ~~Pipeline~~ | ~~STT keyword boosting not propagated mid-session~~ |
+| 3 | ~~MEDIUM~~ | ~~Engine~~ | ~~Cascade engine doesn't handle tool calls~~ |
+| 4 | ~~LOW~~ | ~~Engine~~ | ~~Sentence boundary detection too simplistic~~ |
 | 5 | ~~LOW~~ | ~~Context~~ | ~~Prefetcher not integrated into assembler~~ |
 | 6 | ~~LOW~~ | ~~Context~~ | ~~FormatSystemPrompt ignores PreFetchResults~~ |
-| 7 | LOW | Entity | Startup entity registration creates no relationships |
+| 7 | ~~LOW~~ | ~~Entity~~ | ~~Startup entity registration creates no relationships~~ |
 | 8 | ~~LOW~~ | ~~Agent~~ | ~~SpeakText doesn't write transcript entries~~ |
-| 9 | LOW | Build | wg.Go requires Go 1.25+ (currently fine) |
+| 9 | ~~LOW~~ | ~~Build~~ | ~~wg.Go requires Go 1.25+ (non-issue, go.mod requires 1.26)~~ |

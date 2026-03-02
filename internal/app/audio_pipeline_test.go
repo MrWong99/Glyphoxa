@@ -161,6 +161,47 @@ func TestCollectAndRoute_WithoutCorrection(t *testing.T) {
 	}
 }
 
+// ─── TestAudioPipeline_UpdateKeywords ─────────────────────────────────────────
+
+// TestAudioPipeline_UpdateKeywords verifies that UpdateKeywords atomically
+// replaces the keyword list in the STT config used for future sessions.
+func TestAudioPipeline_UpdateKeywords(t *testing.T) {
+	t.Parallel()
+
+	p := &audioPipeline{
+		sttCfg: stt.StreamConfig{SampleRate: 16000, Channels: 1},
+	}
+
+	if len(p.sttCfg.Keywords) != 0 {
+		t.Fatal("expected empty keywords initially")
+	}
+
+	keywords := []stt.KeywordBoost{
+		{Keyword: "Eldrinax", Boost: 1.0},
+		{Keyword: "Greymantle", Boost: 1.0},
+	}
+	p.UpdateKeywords(keywords)
+
+	if got := len(p.sttCfg.Keywords); got != 2 {
+		t.Fatalf("expected 2 keywords, got %d", got)
+	}
+	if p.sttCfg.Keywords[0].Keyword != "Eldrinax" {
+		t.Errorf("keyword 0: got %q, want %q", p.sttCfg.Keywords[0].Keyword, "Eldrinax")
+	}
+	if p.sttCfg.Keywords[1].Keyword != "Greymantle" {
+		t.Errorf("keyword 1: got %q, want %q", p.sttCfg.Keywords[1].Keyword, "Greymantle")
+	}
+
+	// Overwrite with a single keyword.
+	p.UpdateKeywords([]stt.KeywordBoost{{Keyword: "Strahd", Boost: 0.8}})
+	if got := len(p.sttCfg.Keywords); got != 1 {
+		t.Fatalf("expected 1 keyword after overwrite, got %d", got)
+	}
+	if p.sttCfg.Keywords[0].Keyword != "Strahd" {
+		t.Errorf("keyword 0 after overwrite: got %q, want %q", p.sttCfg.Keywords[0].Keyword, "Strahd")
+	}
+}
+
 // ─── TestCollectAndRoute_CorrectionError ──────────────────────────────────────
 
 // TestCollectAndRoute_CorrectionError verifies that when the correction

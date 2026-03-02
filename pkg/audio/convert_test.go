@@ -273,6 +273,50 @@ func TestResampleStereo16_ZeroRate(t *testing.T) {
 	}
 }
 
+func TestFormatConverter_MultiFormatWarnings(t *testing.T) {
+	t.Parallel()
+	// A single FormatConverter should track distinct source formats independently.
+	// Two different source formats should each be "seen" (no suppression).
+	conv := audio.FormatConverter{
+		Target: audio.Format{SampleRate: 48000, Channels: 2},
+	}
+
+	mono22k := audio.AudioFrame{
+		Data:       samplesToBytes([]int16{100, 200}),
+		SampleRate: 22050,
+		Channels:   1,
+	}
+	mono16k := audio.AudioFrame{
+		Data:       samplesToBytes([]int16{300, 400}),
+		SampleRate: 16000,
+		Channels:   1,
+	}
+
+	// Convert both formats — both should produce valid output.
+	r1 := conv.Convert(mono22k)
+	r2 := conv.Convert(mono16k)
+
+	if len(r1.Data) == 0 {
+		t.Error("expected non-empty output for 22050Hz mono")
+	}
+	if len(r2.Data) == 0 {
+		t.Error("expected non-empty output for 16000Hz mono")
+	}
+
+	// Converting the same format again should still work (no new warning, same path).
+	r3 := conv.Convert(mono22k)
+	if len(r3.Data) == 0 {
+		t.Error("expected non-empty output for repeated 22050Hz mono")
+	}
+
+	// All outputs should be target format.
+	for i, r := range []audio.AudioFrame{r1, r2, r3} {
+		if r.SampleRate != 48000 || r.Channels != 2 {
+			t.Errorf("frame %d: expected 48000Hz stereo, got %dHz %dch", i, r.SampleRate, r.Channels)
+		}
+	}
+}
+
 func TestConvertStream(t *testing.T) {
 	in := make(chan audio.AudioFrame, 3)
 	target := audio.Format{SampleRate: 48000, Channels: 2}

@@ -208,6 +208,28 @@ type NPCConfig struct {
 	// CascadeConfig holds sentence-cascade-specific settings.
 	// Only used when Engine is [EngineSentenceCascade].
 	CascadeConfig *CascadeConfig `yaml:"cascade,omitempty"`
+
+	// Relationships defines connections to other entities in the knowledge graph.
+	// Each entry specifies a target entity (by ID or name) and a relationship type
+	// (e.g., "located_at", "knows", "member_of"). Optional — omit for NPCs
+	// without pre-configured relationships.
+	Relationships []RelationshipConfig `yaml:"relationships,omitempty"`
+}
+
+// RelationshipConfig defines a relationship to another entity, used in NPC config.
+type RelationshipConfig struct {
+	// TargetID is the unique ID of the related entity.
+	TargetID string `yaml:"target_id,omitempty"`
+
+	// TargetName is an alternative to TargetID — resolved by name during registration.
+	// If both TargetID and TargetName are set, TargetID takes precedence.
+	TargetName string `yaml:"target_name,omitempty"`
+
+	// Type describes the relationship (e.g., "located_at", "knows", "allied_with").
+	Type string `yaml:"type"`
+
+	// Bidirectional indicates the relationship applies in both directions.
+	Bidirectional bool `yaml:"bidirectional,omitempty"`
 }
 
 // CascadeConfig holds configuration for the dual-model sentence cascade engine.

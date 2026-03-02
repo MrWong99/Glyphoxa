@@ -13,12 +13,18 @@ type Format struct {
 }
 
 // FormatConverter converts AudioFrames to a target format. It logs a warning
-// on the first format mismatch and validates PCM data alignment.
+// once per unique source format on mismatch and validates PCM data alignment.
 // Create one per stream; not designed for shared use across goroutines.
 type FormatConverter struct {
-	Target         Format
-	warnedMismatch sync.Once
-	warnedCorrupt  sync.Once
+	Target        Format
+	warnedFormats sync.Map // key: formatPair, value: struct{}
+	warnedCorrupt sync.Once
+}
+
+// formatPair is the sync.Map key for per-source-format mismatch warnings.
+type formatPair struct {
+	rate     int
+	channels int
 }
 
 // Convert converts a frame to the target format. If the source format already
@@ -47,13 +53,14 @@ func (c *FormatConverter) Convert(frame AudioFrame) AudioFrame {
 		return frame
 	}
 
-	// Log warning on first mismatch.
-	c.warnedMismatch.Do(func() {
+	// Log warning once per unique source format.
+	key := formatPair{rate: frame.SampleRate, channels: frame.Channels}
+	if _, loaded := c.warnedFormats.LoadOrStore(key, struct{}{}); !loaded {
 		slog.Warn("audio format mismatch: converting",
 			"from", formatString(frame.SampleRate, frame.Channels),
 			"to", formatString(c.Target.SampleRate, c.Target.Channels),
 		)
-	})
+	}
 
 	pcm := frame.Data
 	currentRate := frame.SampleRate
