@@ -2,9 +2,9 @@
 nav_order: 7
 ---
 
-# :wrench: MCP Tools
+# 🔧 MCP Tools
 
-## :globe_with_meridians: Overview
+## 🌐 Overview
 
 Glyphoxa uses the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to give NPC agents access to tools -- dice rolling, rule lookups, world state queries, file I/O, and more. MCP is a vendor-neutral JSON-RPC protocol that lets any language implement a "tool server" that Glyphoxa discovers, connects to, and exposes to LLMs at runtime.
 
@@ -37,11 +37,11 @@ The MCP Go SDK (`github.com/modelcontextprotocol/go-sdk`) provides the client im
 
 ---
 
-## :hammer: Built-in Tools
+## 🔨 Built-in Tools
 
 Built-in tools are implemented as Go functions that run in-process, bypassing MCP protocol overhead entirely. They are defined in `internal/mcp/tools/` and registered with the host via `RegisterBuiltin`. Each sub-package exports a constructor that returns a `[]tools.Tool` slice.
 
-### :game_die: Dice Roller (`internal/mcp/tools/diceroller`)
+### 🎲 Dice Roller (`internal/mcp/tools/diceroller`)
 
 | Tool | Description | Parameters | P50 / Max | Tier |
 |---|---|---|---|---|
@@ -66,7 +66,7 @@ Built-in tools are implemented as Go functions that run in-process, bypassing MC
 {"table": "wild_magic", "roll": 3, "result": "You cast Fireball centred on yourself."}
 ```
 
-### :brain: Memory Tools (`internal/mcp/tools/memorytool`)
+### 🧠 Memory Tools (`internal/mcp/tools/memorytool`)
 
 These tools expose Glyphoxa's three-layer memory architecture (L1 session transcripts, L2 semantic index, L3 knowledge graph) to NPC agents. Constructed via `memorytool.NewTools(sessions, index, graph)`.
 
@@ -77,7 +77,7 @@ These tools expose Glyphoxa's three-layer memory architecture (L1 session transc
 | `get_summary` | Retrieve a full identity snapshot for a knowledge-graph entity, including attributes, relationships, and connected entities. | `entity_id` (string, required) | 80ms / 300ms | FAST |
 | `search_facts` | Full-text search for facts across session history. Falls back to L1 transcript search when no embedding provider is available. | `query` (string, required), `top_k` (int, optional, default 10) | 200ms / 800ms | FAST |
 
-### :scroll: Rules Lookup (`internal/mcp/tools/ruleslookup`)
+### 📜 Rules Lookup (`internal/mcp/tools/ruleslookup`)
 
 Provides keyword-based search over an embedded D&D 5e SRD dataset. The dataset is stored in-process (no external I/O) and includes conditions, combat rules, spells, and general rules.
 
@@ -88,7 +88,7 @@ Provides keyword-based search over an embedded D&D 5e SRD dataset. The dataset i
 
 **Available rule categories:** condition, combat, spell, general.
 
-### :file_folder: File I/O (`internal/mcp/tools/fileio`)
+### 📁 File I/O (`internal/mcp/tools/fileio`)
 
 Sandboxed file reading and writing. All paths are resolved relative to a configured base directory; path traversal attempts (`../`) are rejected. Constructed via `fileio.NewTools(baseDir)`.
 
@@ -99,7 +99,7 @@ Sandboxed file reading and writing. All paths are resolved relative to a configu
 
 ---
 
-## :zap: Performance Budgets
+## ⚡ Performance Budgets
 
 ### The Problem
 
@@ -183,7 +183,7 @@ dice-roller (15ms) + query_entities (80ms) + search_facts (200ms)
 
 ---
 
-## :gear: Configuring MCP Servers
+## ⚙️ Configuring MCP Servers
 
 External MCP servers are declared in `glyphoxa.yaml` under the `mcp.servers` key. The configuration is modelled by `config.MCPServerConfig` in `internal/config/config.go`.
 
@@ -270,7 +270,7 @@ mcp:
 
 ---
 
-## :building_construction: Building a Custom MCP Tool
+## 🏗️ Building a Custom MCP Tool
 
 This section walks through creating a built-in Go tool. The same pattern applies to all tools in `internal/mcp/tools/`.
 
@@ -436,7 +436,7 @@ func TestGetWeatherHandler(t *testing.T) {
 
 ---
 
-## :busts_in_silhouette: Wiring Tools to NPCs
+## 👥 Wiring Tools to NPCs
 
 ### Per-NPC Tool Lists
 
@@ -494,7 +494,7 @@ Both `cascaded` and `s2s` engines support tools. The wiring differs:
 
 ---
 
-## :bridge_at_night: S2S / MCP Bridge
+## 🌉 S2S / MCP Bridge
 
 Speech-to-speech engines (OpenAI Realtime, Gemini Live) have native function-calling interfaces but know nothing about MCP. The **Bridge** (`internal/mcp/bridge`) translates between the two worlds.
 
@@ -568,7 +568,7 @@ The S2S model immediately sees the expanded tool set (or reduced set if downgrad
 
 ---
 
-## :link: See Also
+## 🔗 See Also
 
 - [`architecture.md`](architecture.md) -- system architecture and component overview
 - [`configuration.md`](configuration.md) -- full YAML configuration reference

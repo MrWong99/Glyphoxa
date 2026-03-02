@@ -2,7 +2,7 @@
 nav_order: 12
 ---
 
-# :test_tube: Testing Guide
+# 🧪 Testing Guide
 
 This guide covers everything you need to know about writing and running tests
 for Glyphoxa. If you are reading this before your first contribution, start with
@@ -10,7 +10,7 @@ the [Getting Started](getting-started.md) guide, then come back here.
 
 ---
 
-## :compass: Overview
+## 🧭 Overview
 
 Tests are non-negotiable in Glyphoxa. Every public method must be safe for
 concurrent use, and the race detector is enabled on **every** test run. The
@@ -26,7 +26,7 @@ developer machine and in CI.
 
 ---
 
-## :rocket: Running Tests
+## 🚀 Running Tests
 
 ### Quick reference
 
@@ -59,12 +59,12 @@ make test-cover
 go tool cover -html=coverage.out
 ```
 
-> :bulb: Always run `make check` before pushing. CI will run the same checks and
+> 💡 Always run `make check` before pushing. CI will run the same checks and
 > block the PR if anything fails.
 
 ---
 
-## :straight_ruler: Testing Conventions
+## 📏 Testing Conventions
 
 ### 1. `t.Parallel()` is mandatory
 
@@ -247,7 +247,7 @@ if got != want {
 
 ---
 
-## :performing_arts: Mock Conventions
+## 🎭 Mock Conventions
 
 ### Directory layout
 
@@ -357,7 +357,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 
 ---
 
-## :electric_plug: Testing Providers
+## 🔌 Testing Providers
 
 Provider implementations in `pkg/provider/` follow a consistent pattern. Each
 provider package tests:
@@ -403,7 +403,7 @@ test files as templates.
 
 ---
 
-## :hammer_and_wrench: Testing MCP Tools
+## 🛠️ Testing MCP Tools
 
 MCP tool handlers follow the function signature
 `func(ctx context.Context, args string) (string, error)`. Tests should cover:
@@ -494,7 +494,7 @@ func TestTools(t *testing.T) {
 
 ---
 
-## :whale: Integration Testing
+## 🐳 Integration Testing
 
 For tests that require external services (PostgreSQL with pgvector, Ollama,
 Coqui TTS), use the Docker Compose stack in `deployments/compose/`:
@@ -553,7 +553,7 @@ func TestPostgresIntegration(t *testing.T) {
 
 ---
 
-## :jigsaw: Common Test Patterns
+## 🧩 Common Test Patterns
 
 ### Context cancellation
 
@@ -691,7 +691,7 @@ func TestWatcher_DetectsChange(t *testing.T) {
 
 ---
 
-## :link: See also
+## 🔗 See also
 
 - [Getting Started](getting-started.md) — prerequisites, build, and first run
 - [Providers](design/02-providers.md) — LLM, STT, TTS, Audio provider interfaces

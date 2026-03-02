@@ -103,7 +103,7 @@ Player speaks
 
 ---
 
-## :satellite: Platform Transports
+## 📡 Platform Transports
 
 Platform transports implement the `audio.Platform` and `audio.Connection` interfaces, abstracting voice channel connectivity from the rest of the pipeline.
 
@@ -124,7 +124,7 @@ type Connection interface {
 }
 ```
 
-### :video_game: Discord Transport (`pkg/audio/discord/`)
+### 🎮 Discord Transport (`pkg/audio/discord/`)
 
 The Discord transport bridges Discord's Opus-based voice protocol with Glyphoxa's PCM `AudioFrame` pipeline using the `bwmarrin/discordgo` library.
 
@@ -152,7 +152,7 @@ providers:
 
 **When to use:** Production Discord bot deployments. This is the primary transport for TTRPG sessions hosted on Discord.
 
-### :globe_with_meridians: WebRTC Transport (`pkg/audio/webrtc/`)
+### 🌐 WebRTC Transport (`pkg/audio/webrtc/`)
 
 The WebRTC transport enables browser-based voice sessions via `pion/webrtc`, without requiring Discord or any third-party voice platform.
 
@@ -194,7 +194,7 @@ providers:
 
 ---
 
-## :loud_sound: Voice Activity Detection (VAD)
+## 🔊 Voice Activity Detection (VAD)
 
 VAD sits between the platform transport and the engine, segmenting continuous audio into discrete speech regions. Only audio classified as speech is forwarded to the engine, saving STT/S2S costs and preventing hallucinated transcriptions of silence.
 
@@ -264,7 +264,7 @@ For noisy environments (background music, fan noise), increase `SpeechThreshold`
 
 ---
 
-## :gear: Engine Types
+## ⚙️ Engine Types
 
 The `VoiceEngine` interface is the core abstraction over the AI processing pipeline. All engines implement the same interface, making them interchangeable per NPC:
 
@@ -279,7 +279,7 @@ type VoiceEngine interface {
 }
 ```
 
-### :chains: Cascaded Engine (STT -> LLM -> TTS)
+### ⛓️ Cascaded Engine (STT -> LLM -> TTS)
 
 **Package:** `internal/engine/cascade/` (sentence cascade variant) and the standard cascaded pipeline
 
@@ -299,7 +299,7 @@ The cascaded engine breaks voice processing into three explicit stages, each bac
 
 **Trade-off:** Highest latency of the three engines due to three sequential network hops (STT + LLM + TTS).
 
-### :zap: Speech-to-Speech Engine (S2S)
+### ⚡ Speech-to-Speech Engine (S2S)
 
 **Package:** `internal/engine/s2s/`
 
@@ -317,7 +317,7 @@ The S2S engine wraps a speech-to-speech provider (e.g., OpenAI Realtime, Gemini 
 
 **Trade-off:** Less control over voice characteristics, model selection, and STT quality. No keyword boosting for fantasy names. S2S transcripts require more aggressive correction.
 
-### :test_tube: Sentence Cascade Engine (Experimental)
+### 🧪 Sentence Cascade Engine (Experimental)
 
 **Package:** `internal/engine/cascade/`
 
@@ -358,7 +358,7 @@ The sentence cascade reduces **perceived** latency by starting TTS playback with
 
 ---
 
-## :control_knobs: Audio Mixer
+## 🎛️ Audio Mixer
 
 **Package:** `pkg/audio/mixer/`
 
@@ -423,7 +423,7 @@ type Mixer interface {
 
 ---
 
-## :speech_balloon: Utterance Buffer
+## 💬 Utterance Buffer
 
 **Package:** `internal/agent/orchestrator/`
 
@@ -473,7 +473,7 @@ orch := orchestrator.New(agents,
 
 ---
 
-## :bar_chart: Choosing an Engine
+## 📊 Choosing an Engine
 
 Use this decision guide to select the right engine for each NPC:
 
@@ -481,8 +481,8 @@ Use this decision guide to select the right engine for each NPC:
 |---|---|---|---|
 | **Best for** | Most NPCs, full control | Low-latency, simple NPCs | High-importance, complex NPCs |
 | **Latency** | 1.5--3s | 0.5--1.5s | ~0.5s perceived |
-| **Voice quality** | :star: :star: :star: Dedicated TTS voices | :star: :star: Model-dependent | :star: :star: :star: Dedicated TTS voices |
-| **Response quality** | :star: :star: :star: Any LLM | :star: :star: S2S model only | :star: :star: :star: Strong model continuation |
+| **Voice quality** | ⭐ ⭐ ⭐ Dedicated TTS voices | ⭐ ⭐ Model-dependent | ⭐ ⭐ ⭐ Dedicated TTS voices |
+| **Response quality** | ⭐ ⭐ ⭐ Any LLM | ⭐ ⭐ S2S model only | ⭐ ⭐ ⭐ Strong model continuation |
 | **Cost** | $$ | $ -- $$ | $$$ (~2x LLM) |
 | **Tool calling** | Full MCP tool support | Provider-dependent | Strong model only |
 | **Fantasy name handling** | Good (STT keyword boost) | Poor (no boost) | Good (STT keyword boost) |
@@ -512,7 +512,7 @@ Is sub-second latency critical for this NPC?
 
 ---
 
-## :book: See Also
+## 📖 See Also
 
 - [architecture.md](architecture.md) -- system-level architecture overview
 - [providers.md](providers.md) -- provider configuration and supported backends

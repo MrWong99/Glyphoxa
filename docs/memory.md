@@ -2,7 +2,7 @@
 nav_order: 6
 ---
 
-# :brain: Memory System
+# 🧠 Memory System
 
 Glyphoxa uses a **3-layer hybrid memory architecture** backed by a single PostgreSQL instance. The design ensures NPCs maintain identity, recall past conversations, and build persistent world knowledge across sessions -- all while meeting the sub-150ms latency budget for real-time voice interaction.
 
@@ -10,7 +10,7 @@ For the full design rationale (hot/cold layer tradeoffs, speculative pre-fetch, 
 
 ---
 
-## :bricks: Architecture Overview
+## 🧱 Architecture Overview
 
 Every NPC prompt is assembled from two retrieval paths:
 
@@ -27,7 +27,7 @@ All three storage layers share a single PostgreSQL connection pool (`pgxpool.Poo
 
 ---
 
-## :scroll: Layer 1: Session Log
+## 📜 Layer 1: Session Log
 
 The session log is the hot, append-only transcript record. Every utterance -- player speech and NPC response -- is written here with full provenance.
 
@@ -75,7 +75,7 @@ CREATE INDEX idx_session_entries_fts                  ON session_entries USING G
 
 ---
 
-## :mag: Layer 2: Semantic Index
+## 🔍 Layer 2: Semantic Index
 
 The semantic index enables embedding-based similarity search over chunked transcript content. This is the primary retrieval layer for "do you remember when..." queries.
 
@@ -131,7 +131,7 @@ The vector dimension (e.g., `1536`) is baked into the column type at schema crea
 
 ---
 
-## :spider_web: Layer 3: Knowledge Graph
+## 🕸️ Layer 3: Knowledge Graph
 
 The knowledge graph stores named entities and typed relationships, forming the structural backbone of NPC identity, scene context, and cross-session continuity.
 
@@ -241,7 +241,7 @@ CREATE INDEX idx_rel_provenance_confidence ON relationships ((provenance->>'conf
 
 ---
 
-## :elephant: PostgreSQL Setup
+## 🐘 PostgreSQL Setup
 
 ### Required Extensions
 
@@ -274,7 +274,7 @@ l2 := store.L2()  // memory.SemanticIndex
 
 ---
 
-## :gear: Configuration
+## ⚙️ Configuration
 
 Memory-related fields live in the `memory` section of the YAML config:
 
@@ -312,7 +312,7 @@ These are set programmatically when constructing the pipeline:
 
 ---
 
-## :mag_right: Inspecting Memory State
+## 🔎 Inspecting Memory State
 
 ### Count Entries Per Session
 
@@ -506,7 +506,7 @@ The knowledge graph serves as the canonical entity list for all correction stage
 
 ---
 
-## :arrows_counterclockwise: Session Lifecycle
+## 🔄 Session Lifecycle
 
 Long TTRPG sessions (4+ hours) require active management of context windows, memory durability, and connection stability.
 
@@ -578,7 +578,7 @@ Session End
 
 ---
 
-## :link: See also
+## 🔗 See also
 
 - [`architecture.md`](architecture.md) -- System architecture and component overview
 - [`configuration.md`](configuration.md) -- Full configuration reference

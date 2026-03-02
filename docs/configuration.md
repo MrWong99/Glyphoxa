@@ -2,7 +2,7 @@
 nav_order: 3
 ---
 
-# :gear: Configuration Reference
+# ⚙️ Configuration Reference
 
 Glyphoxa is configured through a single YAML file. This document is the
 authoritative reference for every configuration field, provider option, and
@@ -10,7 +10,7 @@ runtime behaviour related to configuration.
 
 ---
 
-## :open_book: Overview
+## 📖 Overview
 
 ### Config file format
 
@@ -48,7 +48,7 @@ These are read by the upstream SDKs, not by Glyphoxa's config loader. If you set
 
 ---
 
-## :arrows_counterclockwise: Hot Reload
+## 🔄 Hot Reload
 
 The configuration file can be edited while Glyphoxa is running. A background
 **config watcher** detects changes and applies them without a restart.
@@ -74,22 +74,22 @@ The `Diff` function tracks which changes are safe to apply at runtime:
 
 | Change | Hot-reloaded? | Notes |
 |---|---|---|
-| `server.log_level` | :white_check_mark: Yes | Takes effect immediately |
-| NPC `personality` | :white_check_mark: Yes | System prompt updated on next interaction |
-| NPC `voice` (provider, voice_id, pitch, speed) | :white_check_mark: Yes | Applied to new TTS sessions |
-| NPC `budget_tier` | :white_check_mark: Yes | Changes tool filtering immediately |
-| Adding a new NPC | :white_check_mark: Yes | NPC becomes available without restart |
-| Removing an NPC | :white_check_mark: Yes | NPC is unloaded |
-| Provider changes (api_key, model, etc.) | :x: No | Requires restart |
-| `server.listen_addr` / `server.tls` | :x: No | Requires restart |
-| `providers.audio.*` | :x: No | Requires restart |
-| `memory.*` | :x: No | Requires restart |
-| `mcp.servers` | :x: No | Requires restart |
-| `campaign.*` | :x: No | Requires restart |
+| `server.log_level` | ✅ Yes | Takes effect immediately |
+| NPC `personality` | ✅ Yes | System prompt updated on next interaction |
+| NPC `voice` (provider, voice_id, pitch, speed) | ✅ Yes | Applied to new TTS sessions |
+| NPC `budget_tier` | ✅ Yes | Changes tool filtering immediately |
+| Adding a new NPC | ✅ Yes | NPC becomes available without restart |
+| Removing an NPC | ✅ Yes | NPC is unloaded |
+| Provider changes (api_key, model, etc.) | ❌ No | Requires restart |
+| `server.listen_addr` / `server.tls` | ❌ No | Requires restart |
+| `providers.audio.*` | ❌ No | Requires restart |
+| `memory.*` | ❌ No | Requires restart |
+| `mcp.servers` | ❌ No | Requires restart |
+| `campaign.*` | ❌ No | Requires restart |
 
 ---
 
-## :card_index_dividers: Complete Field Reference
+## 🗂️ Complete Field Reference
 
 ### `server` -- Server Settings
 
@@ -422,7 +422,7 @@ campaign:
 
 ---
 
-## :jigsaw: Provider-Specific Options
+## 🧩 Provider-Specific Options
 
 The `options` map in each provider entry accepts provider-specific keys. These
 are consumed by the provider factory functions at startup.
@@ -537,7 +537,7 @@ Unknown models are auto-probed on first use.
 
 ---
 
-## :rocket: Minimal Configuration
+## 🚀 Minimal Configuration
 
 The smallest valid config to get Glyphoxa running with a single NPC in cascaded
 mode:
@@ -589,7 +589,7 @@ npcs:
 
 ---
 
-## :page_facing_up: Full Example
+## 📄 Full Example
 
 A fully annotated example configuration is maintained at
 [`configs/example.yaml`](https://github.com/MrWong99/glyphoxa/blob/main/configs/example.yaml). Copy it, rename it to
@@ -597,7 +597,7 @@ A fully annotated example configuration is maintained at
 
 ---
 
-## :link: See Also
+## 🔗 See Also
 
 - [`docs/getting-started.md`](getting-started.md) -- First-run quickstart guide
 - [`docs/providers.md`](providers.md) -- Deep dive into each provider's

@@ -28,7 +28,7 @@ All slash commands that modify session state or NPC behaviour require the **DM r
 
 ---
 
-## :zap: Slash Commands
+## ⚡ Slash Commands
 
 ### `/session`
 
@@ -152,8 +152,8 @@ List all NPCs with their current mute status.
 **Example output (embed):**
 ```
 NPC Agents
-:speaker: Grimjaw (ID: grimjaw-001)
-:mute: Elara (ID: elara-002)
+🔊 Grimjaw (ID: grimjaw-001)
+🔇 Elara (ID: elara-002)
 ```
 
 ---
@@ -502,7 +502,7 @@ Session: abc123-def456
 
 ---
 
-## :studio_microphone: Voice Commands
+## 🎙️ Voice Commands
 
 Voice commands are spoken aloud by the DM during a live session. The voice command filter runs on the DM's speech-to-text output *before* it reaches the NPC routing pipeline, so these phrases are intercepted and never forwarded to NPC agents.
 
@@ -525,7 +525,7 @@ Voice commands are **case-insensitive** and only processed for the configured DM
 
 ---
 
-## :performing_arts: Puppet Mode
+## 🎭 Puppet Mode
 
 Puppet mode lets the DM speak *as* an NPC -- the DM's words come out in the NPC's voice, bypassing the LLM entirely. This is useful when:
 
@@ -581,7 +581,7 @@ The routing priority order is:
 
 ---
 
-## :bar_chart: Dashboard
+## 📊 Dashboard
 
 The session dashboard is a live-updating Discord embed that displays real-time metrics for the active session. It is automatically posted to the text channel when a session starts and updated every **10 seconds**.
 
@@ -629,7 +629,7 @@ Total: p50=380.5ms p95=820.1ms
 
 ---
 
-## :link: See Also
+## 🔗 See Also
 
 - [npc-agents.md](npc-agents.md) -- NPC agent configuration, voice settings, and personality authoring.
 - [configuration.md](configuration.md) -- Bot configuration reference (`token`, `guild_id`, `dm_role_id`, campaign YAML format).

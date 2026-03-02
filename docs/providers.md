@@ -4,7 +4,7 @@ nav_order: 4
 
 # Providers
 
-## :jigsaw: Overview
+## 🧩 Overview
 
 Glyphoxa uses an **interface-first provider architecture** to decouple the voice AI pipeline from any specific vendor or service. Every external AI capability -- LLM completions, speech-to-text, text-to-speech, speech-to-speech, embeddings, and voice activity detection -- sits behind a Go interface defined in `pkg/provider/`. Swapping a cloud API for a local model, or migrating between vendors, is a configuration change that instantiates a different struct. No pipeline code needs to change.
 
@@ -17,7 +17,7 @@ Key design principles:
 
 ---
 
-## :electric_plug: Provider Interfaces
+## 🔌 Provider Interfaces
 
 | Interface | Package | Key Methods | Purpose |
 |---|---|---|---|
@@ -103,7 +103,7 @@ The `SessionHandle` exposes synchronous `ProcessFrame(frame []byte) (VADEvent, e
 
 ---
 
-## :package: Supported Providers
+## 📦 Supported Providers
 
 ### LLM Providers
 
@@ -167,7 +167,7 @@ All LLM providers are implemented through a single unified adapter (`anyllm.Prov
 
 ---
 
-## :gear: Configuring Providers
+## ⚙️ Configuring Providers
 
 Providers are configured in the `providers` section of the Glyphoxa YAML config file. Each entry follows the same `name` / `api_key` / `base_url` / `model` / `options` pattern.
 
@@ -280,7 +280,7 @@ providers:
 
 ---
 
-## :hammer_and_wrench: Adding a New Provider
+## 🛠️ Adding a New Provider
 
 Follow these steps to add a new provider implementation.
 
@@ -364,7 +364,7 @@ If your provider has a session-based interface, consider adding a mock implement
 
 ---
 
-## :white_check_mark: Compile-Time Interface Assertions
+## ✅ Compile-Time Interface Assertions
 
 Every concrete provider in Glyphoxa includes a compile-time assertion of the form:
 
@@ -408,7 +408,7 @@ Session handle interfaces (e.g., `stt.SessionHandle`, `s2s.SessionHandle`, `vad.
 
 ---
 
-## :shield: Resilience and Failover
+## 🛡️ Resilience and Failover
 
 The `internal/resilience` package provides automatic failover and circuit breaking for provider calls. It ensures that a single provider outage does not take down the entire voice pipeline.
 
@@ -472,7 +472,7 @@ When all providers in a group fail, `Execute` returns `ErrAllFailed` wrapping th
 
 ---
 
-## :scales: Engine Trade-offs
+## ⚖️ Engine Trade-offs
 
 Glyphoxa supports three conversation engine modes, each offering a different balance of latency, quality, cost, and flexibility. The engine is selected per-NPC via the `engine` field in the NPC configuration.
 
@@ -553,7 +553,7 @@ npcs:
 
 ---
 
-## :books: See also
+## 📚 See also
 
 - [architecture.md](architecture.md) -- System architecture overview
 - [configuration.md](configuration.md) -- Full configuration reference

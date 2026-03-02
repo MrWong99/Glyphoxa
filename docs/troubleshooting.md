@@ -8,7 +8,7 @@ Common issues and their fixes for the Glyphoxa voice AI framework.
 
 ---
 
-## :hammer_and_wrench: Build Issues
+## 🛠️ Build Issues
 
 ### libopus not found
 
@@ -154,7 +154,7 @@ CGO_ENABLED=0 but package requires CGO
 
 ---
 
-## :electric_plug: Provider Issues
+## 🔌 Provider Issues
 
 ### Deepgram: WebSocket disconnects
 
@@ -399,7 +399,7 @@ Double-check the model name against the provider's documentation. Common valid v
 
 ---
 
-## :gear: Runtime Issues
+## ⚙️ Runtime Issues
 
 ### NPC not responding to speech
 
@@ -518,7 +518,7 @@ Double-check the model name against the provider's documentation. Common valid v
 
 ---
 
-## :speech_balloon: Discord Issues
+## 💬 Discord Issues
 
 ### Bot not connecting
 
@@ -624,7 +624,7 @@ discord: open session: ...
 
 ---
 
-## :page_facing_up: Configuration Issues
+## 📄 Configuration Issues
 
 ### Hot-reload not picking up changes
 
@@ -737,7 +737,7 @@ Remove or correct the unrecognised field. Check the field name against the struc
 
 ---
 
-## :mag: Diagnostic Steps
+## 🔍 Diagnostic Steps
 
 ### Health endpoint check
 
