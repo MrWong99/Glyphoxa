@@ -2,6 +2,7 @@ package hotctx_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -222,6 +223,131 @@ func TestPreFetcher_ConcurrentProcessPartial(t *testing.T) {
 	// After all goroutines finish, GetCachedEntities must not panic.
 	_ = pf.GetCachedEntities()
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retrieve (GraphRAG) tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPreFetcher_Retrieve_GraphRAG verifies that Retrieve calls
+// QueryWithContext with a scope built from the NPC's neighbours.
+func TestPreFetcher_Retrieve_GraphRAG(t *testing.T) {
+	t.Parallel()
+
+	kg := &mock.GraphRAGQuerier{
+		KnowledgeGraph: mock.KnowledgeGraph{
+			NeighborsResult: []memory.Entity{
+				{ID: "loc-1", Name: "The Forge"},
+				{ID: "npc-2", Name: "Torvel"},
+			},
+		},
+		QueryWithContextResult: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "loc-1", Name: "The Forge"}, Content: "A roaring furnace", Score: 0.9},
+			{Entity: memory.Entity{ID: "npc-2", Name: "Torvel"}, Content: "Torvel is a ranger", Score: 0.7},
+		},
+	}
+
+	pf := hotctx.NewPreFetcher(kg)
+
+	results := pf.Retrieve(context.Background(), "npc-1", "tell me about the forge")
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// Verify QueryWithContext was called with scope including npcID + neighbours.
+	if kg.CallCount("QueryWithContext") != 1 {
+		t.Fatalf("expected 1 QueryWithContext call, got %d", kg.CallCount("QueryWithContext"))
+	}
+	calls := kg.Calls()
+	for _, c := range calls {
+		if c.Method == "QueryWithContext" {
+			scope, ok := c.Args[1].([]string)
+			if !ok {
+				t.Fatal("expected []string scope arg")
+			}
+			if len(scope) != 3 {
+				t.Errorf("expected scope of 3 (npc + 2 neighbours), got %d", len(scope))
+			}
+			if scope[0] != "npc-1" {
+				t.Errorf("scope[0] = %q, want %q", scope[0], "npc-1")
+			}
+		}
+	}
+}
+
+// TestPreFetcher_Retrieve_DegradeWithPlainKnowledgeGraph verifies that
+// Retrieve returns nil when the graph does not implement GraphRAGQuerier.
+func TestPreFetcher_Retrieve_DegradeWithPlainKnowledgeGraph(t *testing.T) {
+	t.Parallel()
+
+	kg := &mock.KnowledgeGraph{}
+	pf := hotctx.NewPreFetcher(kg)
+
+	results := pf.Retrieve(context.Background(), "npc-1", "anything")
+	if results != nil {
+		t.Errorf("expected nil results for plain KnowledgeGraph, got %v", results)
+	}
+}
+
+// TestPreFetcher_Retrieve_CapsResults verifies that Retrieve returns at most
+// maxRetrieveResults (5) entries.
+func TestPreFetcher_Retrieve_CapsResults(t *testing.T) {
+	t.Parallel()
+
+	// Return 8 results — more than the cap.
+	many := make([]memory.ContextResult, 8)
+	for i := range many {
+		many[i] = memory.ContextResult{
+			Entity:  memory.Entity{ID: "e-" + string(rune('0'+i))},
+			Content: "content",
+			Score:   float64(8-i) / 10,
+		}
+	}
+
+	kg := &mock.GraphRAGQuerier{
+		QueryWithContextResult: many,
+	}
+
+	pf := hotctx.NewPreFetcher(kg)
+
+	results := pf.Retrieve(context.Background(), "npc-1", "query")
+	if len(results) != 5 {
+		t.Errorf("expected 5 results (capped), got %d", len(results))
+	}
+}
+
+// TestPreFetcher_Retrieve_NeighborsFail verifies that Retrieve still works
+// when Neighbors() fails — it falls through with an empty scope.
+func TestPreFetcher_Retrieve_NeighborsFail(t *testing.T) {
+	t.Parallel()
+
+	kg := &mock.GraphRAGQuerier{
+		KnowledgeGraph: mock.KnowledgeGraph{
+			NeighborsErr: errors.New("db timeout"),
+		},
+		QueryWithContextResult: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "e-1"}, Content: "found it", Score: 0.5},
+		},
+	}
+
+	pf := hotctx.NewPreFetcher(kg)
+
+	results := pf.Retrieve(context.Background(), "npc-1", "query")
+	if len(results) != 1 {
+		t.Errorf("expected 1 result despite neighbors failure, got %d", len(results))
+	}
+
+	// Scope should contain only the npcID (no neighbours).
+	for _, c := range kg.Calls() {
+		if c.Method == "QueryWithContext" {
+			scope := c.Args[1].([]string)
+			if len(scope) != 1 || scope[0] != "npc-1" {
+				t.Errorf("scope = %v, want [npc-1]", scope)
+			}
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // TestPreFetcher_CaseInsensitive verifies that entity detection is
 // case-insensitive ("GRIMJAW" matches entity named "Grimjaw").

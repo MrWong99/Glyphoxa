@@ -151,14 +151,14 @@ Four data flows to wire:
 - `internal/hotctx/prefetch_test.go` — Test with `mock.GraphRAGQuerier`
 
 **Tasks:**
-- [ ] Add a `Retrieve(ctx context.Context, npcID string, transcript string) []memory.ContextResult` method to `PreFetcher`
-- [ ] Inside `Retrieve()`:
+- [x] Add a `Retrieve(ctx context.Context, npcID string, transcript string) []memory.ContextResult` method to `PreFetcher`
+- [x] Inside `Retrieve()`:
   1. Type-assert `graph` to `memory.GraphRAGQuerier`; if fails, return nil (graceful degradation)
   2. Build `graphScope`: call `graph.Neighbors(npcID)` (or `VisibleSubgraph`) to get entity IDs within NPC's reach
   3. Call `ragQuerier.QueryWithContext(ctx, transcript, graphScope)` — FTS-based, no embedding needed
   4. Return results capped at 5 entries
-- [ ] Do NOT call `QueryWithEmbedding` in the hot path — embedding adds network latency violating <50ms budget
-- [ ] Tests: mock GraphRAGQuerier returning canned results; test type assertion fallback with plain KnowledgeGraph mock; test scope construction
+- [x] Do NOT call `QueryWithEmbedding` in the hot path — embedding adds network latency violating <50ms budget
+- [x] Tests: mock GraphRAGQuerier returning canned results; test type assertion fallback with plain KnowledgeGraph mock; test scope construction
 
 **Acceptance criteria:** `Retrieve()` returns GraphRAG context results scoped to NPC's visible graph. Degrades to nil when graph doesn't implement `GraphRAGQuerier`.
 
@@ -172,9 +172,9 @@ Four data flows to wire:
 - `internal/hotctx/assembler_test.go` — Test with and without PreFetcher
 
 **Tasks:**
-- [ ] Add `preFetcher *PreFetcher` field to `Assembler` struct
-- [ ] Add `WithPreFetcher(pf *PreFetcher) Option` functional option
-- [ ] In `Assemble()`, AFTER the errgroup block (not inside it), run PreFetcher with its own 40ms timeout:
+- [x] Add `preFetcher *PreFetcher` field to `Assembler` struct
+- [x] Add `WithPreFetcher(pf *PreFetcher) Option` functional option
+- [x] In `Assemble()`, AFTER the errgroup block (not inside it), run PreFetcher with its own 40ms timeout:
   ```go
   if a.preFetcher != nil {
       pfCtx, pfCancel := context.WithTimeout(ctx, 40*time.Millisecond)
@@ -182,15 +182,15 @@ Four data flows to wire:
       hctx.PreFetchResults = a.preFetcher.Retrieve(pfCtx, npcID, lastTranscript)
   }
   ```
-  Run concurrently with the errgroup (both start together, errgroup results are critical, PreFetcher is best-effort)
-- [ ] In `FormatSystemPrompt` (`formatter.go`), add rendering after scene context and before transcript:
+  Run after errgroup completes so transcript text is available for FTS query. Uses isolated 40ms timeout.
+- [x] In `FormatSystemPrompt` (`formatter.go`), add rendering after scene context and before transcript:
   ```
   ## Relevant Knowledge
   - **EntityName**: Content snippet...
   ```
   Cap at 5 results, truncate each Content to 500 chars. Skip section if `PreFetchResults` is nil/empty.
-- [ ] Tests: assembler with mock PreFetcher; assembler without PreFetcher (backward compat); formatter with and without PreFetchResults
-- [ ] Wire PreFetcher creation in `App.initHotContext` and `SessionManager.Start`, passing `a.graph`
+- [x] Tests: assembler with mock PreFetcher; assembler without PreFetcher (backward compat); formatter with and without PreFetchResults
+- [x] Wire PreFetcher creation in `App.initHotContext` and `SessionManager.Start`, passing `a.graph`
 
 **Acceptance criteria:** Hot-context assembly includes GraphRAG results when PreFetcher is configured. PreFetcher timeout/failure does not block or abort identity/transcript/scene assembly. NPC prompt includes `## Relevant Knowledge` section when results exist.
 

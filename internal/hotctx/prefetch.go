@@ -3,6 +3,7 @@ package hotctx
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -162,6 +163,57 @@ func (p *PreFetcher) GetCachedEntities() []*memory.Entity {
 		out = append(out, e)
 	}
 	return out
+}
+
+// maxRetrieveResults caps the number of GraphRAG context results returned by
+// [PreFetcher.Retrieve] to keep prompt size bounded.
+const maxRetrieveResults = 5
+
+// Retrieve performs a GraphRAG query scoped to the given NPC's visible graph.
+// It type-asserts the underlying KnowledgeGraph to [memory.GraphRAGQuerier];
+// if the graph does not implement GraphRAG, it returns nil (graceful
+// degradation).
+//
+// The transcript is used as the FTS query string via
+// [memory.GraphRAGQuerier.QueryWithContext] — no embedding is required, so
+// this stays within the <50ms hot-context budget.
+//
+// Results are capped at [maxRetrieveResults].
+func (p *PreFetcher) Retrieve(ctx context.Context, npcID string, transcript string) []memory.ContextResult {
+	ragQuerier, ok := p.graph.(memory.GraphRAGQuerier)
+	if !ok {
+		return nil
+	}
+
+	// Build graphScope from the NPC's 1-hop neighbours.
+	neighbors, err := p.graph.Neighbors(ctx, npcID, 1)
+	if err != nil {
+		slog.Debug("pre-fetch: retrieve: neighbors lookup failed",
+			"npc_id", npcID,
+			"error", err,
+		)
+		// Fall through with empty scope — QueryWithContext will search all chunks.
+	}
+
+	scope := make([]string, 0, len(neighbors)+1)
+	scope = append(scope, npcID)
+	for _, n := range neighbors {
+		scope = append(scope, n.ID)
+	}
+
+	results, err := ragQuerier.QueryWithContext(ctx, transcript, scope)
+	if err != nil {
+		slog.Debug("pre-fetch: retrieve: GraphRAG query failed",
+			"npc_id", npcID,
+			"error", err,
+		)
+		return nil
+	}
+
+	if len(results) > maxRetrieveResults {
+		results = results[:maxRetrieveResults]
+	}
+	return results
 }
 
 // Reset clears the pre-fetch cache. Call this at the start of each new voice

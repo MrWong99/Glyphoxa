@@ -239,6 +239,61 @@ func TestAssemble_ContextCancellation(t *testing.T) {
 	_ = err
 }
 
+// TestAssemble_WithPreFetcher verifies that the PreFetcher runs during
+// assembly and populates PreFetchResults in the returned HotContext.
+func TestAssemble_WithPreFetcher(t *testing.T) {
+	t.Parallel()
+
+	ragKG := &mock.GraphRAGQuerier{
+		KnowledgeGraph: mock.KnowledgeGraph{
+			IdentitySnapshotResult: makeIdentity("npc-1", "Grimjaw"),
+			NeighborsResult:        []memory.Entity{{ID: "loc-1", Name: "The Forge"}},
+		},
+		QueryWithContextResult: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "loc-1", Name: "The Forge"}, Content: "A roaring furnace", Score: 0.9},
+		},
+	}
+
+	ss := &mock.SessionStore{
+		GetRecentResult: makeTranscript(3),
+	}
+
+	pf := hotctx.NewPreFetcher(ragKG)
+
+	a := hotctx.NewAssembler(ss, ragKG, hotctx.WithPreFetcher(pf))
+	hctx, err := a.Assemble(context.Background(), "npc-1", "session-abc")
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+
+	if len(hctx.PreFetchResults) == 0 {
+		t.Error("expected PreFetchResults to be populated")
+	}
+}
+
+// TestAssemble_WithoutPreFetcher verifies backward compatibility: when no
+// PreFetcher is configured, PreFetchResults is nil.
+func TestAssemble_WithoutPreFetcher(t *testing.T) {
+	t.Parallel()
+
+	kg := &mock.KnowledgeGraph{
+		IdentitySnapshotResult: makeIdentity("npc-1", "Grimjaw"),
+	}
+	ss := &mock.SessionStore{
+		GetRecentResult: makeTranscript(2),
+	}
+
+	a := hotctx.NewAssembler(ss, kg) // no WithPreFetcher
+	hctx, err := a.Assemble(context.Background(), "npc-1", "session-abc")
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+
+	if hctx.PreFetchResults != nil {
+		t.Errorf("expected nil PreFetchResults without PreFetcher, got %v", hctx.PreFetchResults)
+	}
+}
+
 // TestAssemble_WithOptions verifies that functional options are applied.
 func TestAssemble_WithOptions(t *testing.T) {
 	kg := &mock.KnowledgeGraph{

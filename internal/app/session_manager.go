@@ -145,8 +145,17 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 	mixer = pm
 	closers = append(closers, pm.Close)
 
-	// Create hot-context assembler.
-	assembler := hotctx.NewAssembler(sm.sessionStore, sm.graph)
+	// Create hot-context assembler with optional GraphRAG pre-fetcher.
+	var assemblerOpts []hotctx.Option
+	if sm.graph != nil {
+		pf := hotctx.NewPreFetcher(sm.graph)
+		if err := pf.RefreshEntityList(ctx); err != nil {
+			slog.Warn("session: pre-fetcher entity refresh failed (GraphRAG disabled)", "err", err)
+		} else {
+			assemblerOpts = append(assemblerOpts, hotctx.WithPreFetcher(pf))
+		}
+	}
+	assembler := hotctx.NewAssembler(sm.sessionStore, sm.graph, assemblerOpts...)
 
 	// Create NPC agents from config.
 	agents, agentClosers, err := sm.loadAgents(ctx, assembler, mixer, sessionID)
