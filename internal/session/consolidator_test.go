@@ -473,21 +473,21 @@ func TestConsolidate_WriteFailure(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error from partial write failure")
 		}
-		if store.SessionStore.CallCount("WriteEntry") != 2 {
-			t.Fatalf("expected 2 successful writes, got %d", store.SessionStore.CallCount("WriteEntry"))
+		if store.CallCount("WriteEntry") != 2 {
+			t.Fatalf("expected 2 successful writes, got %d", store.CallCount("WriteEntry"))
 		}
 
 		// Retry: clear failure and consolidate again.
 		store.setFailAfter(-1)
-		store.SessionStore.Reset()
+		store.Reset()
 
 		err = c.ConsolidateNow(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error on retry: %v", err)
 		}
 		// Should write remaining 2 entries (msg-2, msg-3), not all 4.
-		if store.SessionStore.CallCount("WriteEntry") != 2 {
-			t.Errorf("expected 2 retry writes, got %d", store.SessionStore.CallCount("WriteEntry"))
+		if store.CallCount("WriteEntry") != 2 {
+			t.Errorf("expected 2 retry writes, got %d", store.CallCount("WriteEntry"))
 		}
 	})
 
