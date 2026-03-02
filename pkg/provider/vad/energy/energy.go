@@ -27,8 +27,13 @@ const (
 	defaultMinSpeechFrames = 3
 
 	// defaultMinSilenceFrames is the default number of consecutive below-threshold
-	// frames required before a VADSpeechEnd event is emitted (~450 ms at 30 ms/frame).
-	defaultMinSilenceFrames = 15
+	// frames required before a VADSpeechEnd event is emitted (~600 ms at 30 ms/frame).
+	defaultMinSilenceFrames = 20
+
+	// defaultMinSpeechDurationFrames is the default minimum number of frames
+	// that must elapse after SpeechStart before a SpeechEnd can be emitted
+	// (~300ms at 30ms frames). Zero disables the check.
+	defaultMinSpeechDurationFrames = 10
 
 	// defaultSmoothingFactor is the default EMA coefficient: 70% history, 30% new value.
 	defaultSmoothingFactor = 0.7
@@ -70,7 +75,7 @@ func WithMinSpeechFrames(n int) Option {
 // consecutive silence frames (i.e. frames whose smoothed normalised energy
 // falls below Config.SilenceThreshold) required before a VADSpeechEnd event
 // is emitted. Higher values prevent premature speech-end detection at the cost
-// of slightly increased silence-detection latency. Default: 15.
+// of slightly increased silence-detection latency. Default: 20.
 func WithMinSilenceFrames(n int) Option {
 	return func(e *Engine) {
 		e.minSilenceFrames = n
@@ -87,20 +92,32 @@ func WithSmoothingFactor(f float64) Option {
 	}
 }
 
+// WithMinSpeechDurationFrames returns an Option that sets the minimum number
+// of frames that must elapse after SpeechStart before a SpeechEnd can be
+// emitted. This prevents zero-duration speech segments from transient noise.
+// A value of 0 disables the check entirely. Default: 10 (~300ms at 30ms frames).
+func WithMinSpeechDurationFrames(n int) Option {
+	return func(e *Engine) {
+		e.minSpeechDurationFrames = n
+	}
+}
+
 // Engine is the stateless factory for energy-based VAD sessions. It is safe
 // for concurrent use; multiple goroutines may call NewSession simultaneously.
 type Engine struct {
-	minSpeechFrames  int
-	minSilenceFrames int
-	smoothingFactor  float64
+	minSpeechFrames         int
+	minSilenceFrames        int
+	minSpeechDurationFrames int
+	smoothingFactor         float64
 }
 
 // New constructs an Engine with sensible defaults, then applies opts in order.
 func New(opts ...Option) *Engine {
 	e := &Engine{
-		minSpeechFrames:  defaultMinSpeechFrames,
-		minSilenceFrames: defaultMinSilenceFrames,
-		smoothingFactor:  defaultSmoothingFactor,
+		minSpeechFrames:         defaultMinSpeechFrames,
+		minSilenceFrames:        defaultMinSilenceFrames,
+		minSpeechDurationFrames: defaultMinSpeechDurationFrames,
+		smoothingFactor:         defaultSmoothingFactor,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -134,12 +151,13 @@ func (e *Engine) NewSession(cfg vad.Config) (vad.SessionHandle, error) {
 	frameBytes := cfg.SampleRate * cfg.FrameSizeMs / 1000 * 2
 
 	return &session{
-		cfg:              cfg,
-		frameBytes:       frameBytes,
-		minSpeechFrames:  e.minSpeechFrames,
-		minSilenceFrames: e.minSilenceFrames,
-		smoothingFactor:  e.smoothingFactor,
-		peakEnergy:       initialPeak,
+		cfg:                     cfg,
+		frameBytes:              frameBytes,
+		minSpeechFrames:         e.minSpeechFrames,
+		minSilenceFrames:        e.minSilenceFrames,
+		minSpeechDurationFrames: e.minSpeechDurationFrames,
+		smoothingFactor:         e.smoothingFactor,
+		peakEnergy:              initialPeak,
 	}, nil
 }
 
@@ -150,11 +168,12 @@ type session struct {
 	mu     sync.Mutex
 	closed uint32 // atomic: 1 when the session has been closed
 
-	cfg              vad.Config
-	frameBytes       int
-	minSpeechFrames  int
-	minSilenceFrames int
-	smoothingFactor  float64
+	cfg                     vad.Config
+	frameBytes              int
+	minSpeechFrames         int
+	minSilenceFrames        int
+	minSpeechDurationFrames int
+	smoothingFactor         float64
 
 	// Detection state — all guarded by mu.
 	currentState             vadState
@@ -162,6 +181,9 @@ type session struct {
 	peakEnergy               float64
 	consecutiveSpeechFrames  int
 	consecutiveSilenceFrames int
+	// speechDurationCount counts frames elapsed since the last SpeechStart.
+	// Used to enforce a minimum speech duration before SpeechEnd can fire.
+	speechDurationCount int
 }
 
 // ProcessFrame analyses a single PCM audio frame and returns the VAD result.
@@ -221,6 +243,7 @@ func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
 				s.currentState = stateSpeaking
 				s.consecutiveSpeechFrames = 0
 				s.consecutiveSilenceFrames = 0
+				s.speechDurationCount = 0
 				slog.Debug("vad/energy: speech start", "prob", prob, "rms", rms, "peak", s.peakEnergy)
 				return vad.VADEvent{Type: vad.VADSpeechStart, Probability: prob}, nil
 			}
@@ -230,14 +253,23 @@ func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
 		return vad.VADEvent{Type: vad.VADSilence, Probability: prob}, nil
 
 	case stateSpeaking:
+		// Increment per-frame counter used to enforce the minimum speech duration.
+		s.speechDurationCount++
+
 		if prob < s.cfg.SilenceThreshold {
-			s.consecutiveSilenceFrames++
-			if s.consecutiveSilenceFrames >= s.minSilenceFrames {
-				s.currentState = stateSilence
-				s.consecutiveSilenceFrames = 0
-				s.consecutiveSpeechFrames = 0
-				slog.Debug("vad/energy: speech end", "prob", prob)
-				return vad.VADEvent{Type: vad.VADSpeechEnd, Probability: prob}, nil
+			// Only accumulate silence frames once the minimum speech duration has
+			// elapsed. This prevents zero-duration segments from transient noise
+			// causing a SpeechStart immediately followed by a SpeechEnd.
+			if s.minSpeechDurationFrames <= 0 || s.speechDurationCount >= s.minSpeechDurationFrames {
+				s.consecutiveSilenceFrames++
+				if s.consecutiveSilenceFrames >= s.minSilenceFrames {
+					s.currentState = stateSilence
+					s.consecutiveSilenceFrames = 0
+					s.consecutiveSpeechFrames = 0
+					s.speechDurationCount = 0
+					slog.Debug("vad/energy: speech end", "prob", prob)
+					return vad.VADEvent{Type: vad.VADSpeechEnd, Probability: prob}, nil
+				}
 			}
 		} else {
 			s.consecutiveSilenceFrames = 0
@@ -261,6 +293,7 @@ func (s *session) Reset() {
 	s.peakEnergy = initialPeak
 	s.consecutiveSpeechFrames = 0
 	s.consecutiveSilenceFrames = 0
+	s.speechDurationCount = 0
 }
 
 // Close marks the session as closed. Any subsequent call to ProcessFrame

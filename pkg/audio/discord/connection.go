@@ -31,8 +31,8 @@ type Connection struct {
 	guildID string
 
 	inputsMu sync.RWMutex
-	inputs   map[string]chan audio.AudioFrame // keyed by SSRC string
-	ssrcUser map[uint32]string                // SSRC -> userID mapping
+	inputs   map[string]chan audio.AudioFrame // keyed by Discord user ID (falls back to SSRC string)
+	ssrcUser map[uint32]string                // SSRC -> Discord user ID mapping
 
 	output chan audio.AudioFrame
 
@@ -42,7 +42,7 @@ type Connection struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	removeHandler func() // removes the VoiceStateUpdate handler
+	removeHandlers []func() // removes registered event handlers (VoiceStateUpdate, VoiceSpeakingUpdate)
 
 	// disconnectVC is called during Disconnect to tear down the voice connection.
 	// Defaults to vc.Disconnect; overridden in tests.
@@ -64,7 +64,10 @@ func newConnection(vc *discordgo.VoiceConnection, session *discordgo.Session, gu
 	}
 
 	// Register a VoiceStateUpdate handler to detect participant join/leave.
-	c.removeHandler = session.AddHandler(c.handleVoiceStateUpdate)
+	c.removeHandlers = append(c.removeHandlers, session.AddHandler(c.handleVoiceStateUpdate))
+
+	// Register a VoiceSpeakingUpdate handler to map SSRC → Discord user ID.
+	c.removeHandlers = append(c.removeHandlers, session.AddHandler(c.handleSpeakingUpdate))
 
 	// Start the receive loop (reads Opus from Discord, demuxes by SSRC, decodes to PCM).
 	go c.recvLoop()
@@ -76,7 +79,8 @@ func newConnection(vc *discordgo.VoiceConnection, session *discordgo.Session, gu
 }
 
 // InputStreams returns a snapshot of the current per-participant audio channels.
-// The map key is the SSRC (as a string); the value is the read-only input channel.
+// The map key is the Discord user ID when known, or the SSRC string for participants
+// whose identity has not yet been resolved via a VoiceSpeakingUpdate event.
 func (c *Connection) InputStreams() map[string]<-chan audio.AudioFrame {
 	c.inputsMu.RLock()
 	defer c.inputsMu.RUnlock()
@@ -108,8 +112,10 @@ func (c *Connection) Disconnect() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
 
-		if c.removeHandler != nil {
-			c.removeHandler()
+		for _, remove := range c.removeHandlers {
+			if remove != nil {
+				remove()
+			}
 		}
 
 		if c.disconnectVC != nil {
@@ -176,22 +182,26 @@ func (c *Connection) recvLoop() {
 				decoders[ssrc] = dec
 			}
 
-			// Ensure an input channel exists for this SSRC.
+			// Ensure an input channel exists for this participant.
+			// Use the Discord user ID if already known; fall back to SSRC string.
 			c.inputsMu.Lock()
-			ch, chExists := c.inputs[ssrcStr]
+			userID := ssrcStr
+			if knownID, ok := c.ssrcUser[ssrc]; ok && knownID != ssrcStr {
+				userID = knownID
+			}
+			ch, chExists := c.inputs[userID]
 			if !chExists {
 				ch = make(chan audio.AudioFrame, inputChannelBuffer)
-				c.inputs[ssrcStr] = ch
-				c.ssrcUser[ssrc] = ssrcStr
+				c.inputs[userID] = ch
 			}
 			c.inputsMu.Unlock()
 
 			if !chExists {
-				slog.Debug("discord: recvLoop new participant channel", "ssrc", ssrcStr)
-				// Notify about a new participant (identified by SSRC for now).
+				slog.Debug("discord: recvLoop new participant channel", "ssrc", ssrcStr, "userID", userID)
+				// Notify about a new participant.
 				c.emitEvent(audio.Event{
 					Type:   audio.EventJoin,
-					UserID: ssrcStr,
+					UserID: userID,
 				})
 			}
 
@@ -352,6 +362,25 @@ func (c *Connection) handleVoiceStateUpdate(_ *discordgo.Session, vsu *discordgo
 	}
 }
 
+// handleSpeakingUpdate processes Discord VoiceSpeakingUpdate events to build
+// the SSRC → Discord user ID mapping. When a speaking event arrives, the SSRC
+// is resolved to the real user ID and any existing channel keyed by the SSRC
+// string is re-keyed to the user ID.
+func (c *Connection) handleSpeakingUpdate(_ *discordgo.Session, vs *discordgo.VoiceSpeakingUpdate) {
+	c.inputsMu.Lock()
+	defer c.inputsMu.Unlock()
+
+	c.ssrcUser[uint32(vs.SSRC)] = vs.UserID
+
+	// If an input channel was already created under the SSRC string key,
+	// re-key it to the Discord user ID now that we know who it belongs to.
+	ssrcStr := strconv.FormatUint(uint64(vs.SSRC), 10)
+	if ch, ok := c.inputs[ssrcStr]; ok && vs.UserID != ssrcStr {
+		c.inputs[vs.UserID] = ch
+		delete(c.inputs, ssrcStr)
+	}
+}
+
 // setSpeaking sends a speaking notification to Discord, logging any errors.
 func (c *Connection) setSpeaking(b bool) {
 	if err := c.vc.Speaking(b); err != nil {
@@ -370,8 +399,9 @@ func (c *Connection) emitEvent(ev audio.Event) {
 }
 
 // SSRCToUserID returns the user ID associated with the given SSRC, if known.
-// This mapping is populated as audio packets arrive and VoiceStateUpdate events
-// provide user identity. Returns an empty string if the SSRC is unknown.
+// This mapping is populated as VoiceSpeakingUpdate events arrive and provide
+// the correlation between SSRC and Discord user ID. Returns the SSRC formatted
+// as a decimal string if the user ID is not yet known.
 func (c *Connection) SSRCToUserID(ssrc uint32) string {
 	c.inputsMu.RLock()
 	defer c.inputsMu.RUnlock()

@@ -37,6 +37,9 @@ func TestNew_Defaults(t *testing.T) {
 	if eng.minSilenceFrames != defaultMinSilenceFrames {
 		t.Errorf("minSilenceFrames = %d, want %d", eng.minSilenceFrames, defaultMinSilenceFrames)
 	}
+	if eng.minSpeechDurationFrames != defaultMinSpeechDurationFrames {
+		t.Errorf("minSpeechDurationFrames = %d, want %d", eng.minSpeechDurationFrames, defaultMinSpeechDurationFrames)
+	}
 	if eng.smoothingFactor != defaultSmoothingFactor {
 		t.Errorf("smoothingFactor = %g, want %g", eng.smoothingFactor, defaultSmoothingFactor)
 	}
@@ -222,6 +225,9 @@ func TestProcessFrame_SpeechEnd(t *testing.T) {
 	eng := New(
 		WithMinSpeechFrames(minSpeech),
 		WithMinSilenceFrames(minSilence),
+		// Disable the minimum speech duration guard so this test exercises
+		// only the silence-frame counter in isolation.
+		WithMinSpeechDurationFrames(1),
 		WithSmoothingFactor(0.0),
 	)
 	sess, err := eng.NewSession(vad.Config{
@@ -277,6 +283,9 @@ func TestProcessFrame_FullCycle(t *testing.T) {
 	eng := New(
 		WithMinSpeechFrames(minSpeech),
 		WithMinSilenceFrames(minSilence),
+		// Disable the minimum speech duration guard so this test exercises
+		// only the full silence/speech cycle in isolation.
+		WithMinSpeechDurationFrames(1),
 		WithSmoothingFactor(0.0),
 	)
 	sess, err := eng.NewSession(vad.Config{
@@ -446,4 +455,138 @@ func TestSession_ConcurrentClose(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestProcessFrame_MinSpeechDuration verifies that SpeechEnd is not emitted
+// before minSpeechDurationFrames have elapsed since SpeechStart, even when
+// minSilenceFrames consecutive silent frames arrive immediately after onset.
+func TestProcessFrame_MinSpeechDuration(t *testing.T) {
+	t.Parallel()
+	const (
+		sampleRate        = 16000
+		frameSizeMs       = 20
+		minSpeech         = 3
+		minSilence        = 2
+		minSpeechDuration = 5
+	)
+	eng := New(
+		WithMinSpeechFrames(minSpeech),
+		WithMinSilenceFrames(minSilence),
+		WithMinSpeechDurationFrames(minSpeechDuration),
+		WithSmoothingFactor(0.0),
+	)
+	sess, err := eng.NewSession(vad.Config{
+		SampleRate:       sampleRate,
+		FrameSizeMs:      frameSizeMs,
+		SpeechThreshold:  0.5,
+		SilenceThreshold: 0.3,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	loudFrame := generatePCMFrame(sampleRate, frameSizeMs, 32767)
+	silentFrame := generatePCMFrame(sampleRate, frameSizeMs, 0)
+
+	// Drive into speaking state.
+	for i := range minSpeech {
+		if _, err := sess.ProcessFrame(loudFrame); err != nil {
+			t.Fatalf("setup loud frame %d: %v", i, err)
+		}
+	}
+
+	// Send minSilence silent frames immediately after SpeechStart. SpeechEnd
+	// must NOT fire because speechDurationCount < minSpeechDuration.
+	for i := range minSilence {
+		ev, err := sess.ProcessFrame(silentFrame)
+		if err != nil {
+			t.Fatalf("early silent frame %d: %v", i, err)
+		}
+		if ev.Type == vad.VADSpeechEnd {
+			t.Errorf("early silent frame %d: got VADSpeechEnd before minSpeechDurationFrames (%d) elapsed", i, minSpeechDuration)
+		}
+	}
+
+	// Continue silent frames until we reach (but not exceed) the protection
+	// window. None of these should trigger SpeechEnd either.
+	for i := minSilence; i < minSpeechDuration-1; i++ {
+		ev, err := sess.ProcessFrame(silentFrame)
+		if err != nil {
+			t.Fatalf("protection-window silent frame %d: %v", i, err)
+		}
+		if ev.Type == vad.VADSpeechEnd {
+			t.Errorf("protection-window frame %d: unexpected VADSpeechEnd before minSpeechDurationFrames (%d) elapsed", i, minSpeechDuration)
+		}
+	}
+
+	// Now that the protection window has been reached, minSilence more silent
+	// frames should drive us to SpeechEnd.
+	for i := range minSilence {
+		ev, err := sess.ProcessFrame(silentFrame)
+		if err != nil {
+			t.Fatalf("post-protection silent frame %d: %v", i, err)
+		}
+		if i == minSilence-1 {
+			if ev.Type != vad.VADSpeechEnd {
+				t.Errorf("post-protection frame %d: got %v, want VADSpeechEnd", i, ev.Type)
+			}
+		} else {
+			if ev.Type == vad.VADSpeechEnd {
+				t.Errorf("post-protection frame %d: premature VADSpeechEnd", i)
+			}
+		}
+	}
+}
+
+// TestProcessFrame_TransientNoise verifies that fewer than minSpeechFrames
+// consecutive loud frames do not emit VADSpeechStart, and that subsequent
+// silence frames emit only VADSilence (not any speech event).
+func TestProcessFrame_TransientNoise(t *testing.T) {
+	t.Parallel()
+	const (
+		sampleRate  = 16000
+		frameSizeMs = 20
+		minSpeech   = 3
+	)
+	eng := New(
+		WithMinSpeechFrames(minSpeech),
+		WithSmoothingFactor(0.0),
+	)
+	sess, err := eng.NewSession(vad.Config{
+		SampleRate:       sampleRate,
+		FrameSizeMs:      frameSizeMs,
+		SpeechThreshold:  0.5,
+		SilenceThreshold: 0.3,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	loudFrame := generatePCMFrame(sampleRate, frameSizeMs, 32767)
+	silentFrame := generatePCMFrame(sampleRate, frameSizeMs, 0)
+
+	// Send fewer than minSpeech loud frames (simulating a transient noise burst).
+	for i := range minSpeech - 1 {
+		ev, err := sess.ProcessFrame(loudFrame)
+		if err != nil {
+			t.Fatalf("transient frame %d: %v", i, err)
+		}
+		if ev.Type == vad.VADSpeechStart {
+			t.Errorf("transient frame %d: unexpected VADSpeechStart", i)
+		}
+	}
+
+	// Subsequent silence must not produce any speech events — the counter
+	// should have been reset when energy dropped below SpeechThreshold.
+	for i := range 10 {
+		ev, err := sess.ProcessFrame(silentFrame)
+		if err != nil {
+			t.Fatalf("post-transient silent frame %d: %v", i, err)
+		}
+		if ev.Type != vad.VADSilence {
+			t.Errorf("post-transient frame %d: got %v, want VADSilence", i, ev.Type)
+		}
+	}
 }

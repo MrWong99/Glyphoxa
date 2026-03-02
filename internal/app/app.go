@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
@@ -305,7 +306,39 @@ func (a *App) initAgents(ctx context.Context) error {
 
 	a.agents = agents
 	a.router = orchestrator.New(agents)
+
+	if a.graph != nil {
+		registerNPCEntities(ctx, a.graph, a.cfg.NPCs)
+	}
 	return nil
+}
+
+// registerNPCEntities upserts a memory.Entity record in the knowledge graph
+// for each configured NPC. This allows the hot-context assembler to resolve
+// NPC identity snapshots via graph.IdentitySnapshot. Registration failures
+// are logged at Warn level and do not abort startup — the graph may not be
+// available in all environments.
+func registerNPCEntities(ctx context.Context, graph memory.KnowledgeGraph, npcs []config.NPCConfig) {
+	now := time.Now().UTC()
+	for i, npc := range npcs {
+		npcID := fmt.Sprintf("npc-%d-%s", i, npc.Name)
+		e := memory.Entity{
+			ID:   npcID,
+			Type: "npc",
+			Name: npc.Name,
+			Attributes: map[string]any{
+				"personality":     npc.Personality,
+				"knowledge_scope": npc.KnowledgeScope,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := graph.AddEntity(ctx, e); err != nil {
+			slog.Warn("app: failed to register NPC entity in knowledge graph", "npc", npc.Name, "npc_id", npcID, "err", err)
+		} else {
+			slog.Info("app: registered NPC entity in knowledge graph", "npc", npc.Name, "npc_id", npcID)
+		}
+	}
 }
 
 // buildEngine constructs the appropriate VoiceEngine for an NPC config.

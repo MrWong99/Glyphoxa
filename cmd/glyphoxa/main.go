@@ -336,6 +336,9 @@ func registerBuiltinProviders(reg *config.Registry, bot **discordbot.Bot) {
 		if n := optInt(entry.Options, "min_silence_frames"); n > 0 {
 			opts = append(opts, energyvad.WithMinSilenceFrames(n))
 		}
+		if n := optInt(entry.Options, "min_speech_duration_frames"); n > 0 {
+			opts = append(opts, energyvad.WithMinSpeechDurationFrames(n))
+		}
 		if f := optFloat(entry.Options, "smoothing_factor"); f > 0 {
 			opts = append(opts, energyvad.WithSmoothingFactor(f))
 		}

@@ -28,6 +28,10 @@ func (p *PermissionChecker) IsDM(i *discordgo.InteractionCreate) bool {
 	if i.Member == nil {
 		return false
 	}
-	slog.Debug("checking permissions for user", "username", i.Member.DisplayName(), "roles", i.Member.Roles)
+	username := ""
+	if i.Member.User != nil {
+		username = i.Member.DisplayName()
+	}
+	slog.Debug("checking permissions for user", "username", username, "roles", i.Member.Roles)
 	return slices.Contains(i.Member.Roles, p.dmRoleID)
 }

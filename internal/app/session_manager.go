@@ -417,7 +417,9 @@ func (sm *SessionManager) loadAgents(ctx context.Context, assembler *hotctx.Asse
 		slog.Info("session: loaded NPC agent", "name", npc.Name, "engine", npc.Engine, "tier", tier)
 	}
 
-	_ = ctx // reserved for future async agent init
+	if sm.graph != nil {
+		registerNPCEntities(ctx, sm.graph, sm.cfg.NPCs)
+	}
 	return agents, closers, nil
 }
 
@@ -446,7 +448,7 @@ func vadConfigFromProvider(entry config.ProviderEntry) vad.Config {
 		SampleRate:       16000,
 		FrameSizeMs:      30,
 		SpeechThreshold:  0.5,
-		SilenceThreshold: 0.35,
+		SilenceThreshold: 0.25, // lower threshold means more tolerance before cutting
 	}
 
 	if entry.Options == nil {
