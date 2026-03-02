@@ -1,7 +1,7 @@
 ---
 title: "Wire Semantic Index (L2) and GraphRAG Query Paths"
 type: fix
-status: active
+status: completed
 date: 2026-03-02
 todos: [5, 6, 8, 14, 15]
 prerequisites: [1, 2]
@@ -204,23 +204,23 @@ Four data flows to wire:
 - `internal/app/app.go` — Register built-in memory tools with MCP host
 
 **Tasks:**
-- [ ] Change `NewTools` signature to accept all dependencies:
+- [x] Change `NewTools` signature to accept all dependencies:
   ```go
   func NewTools(sessions memory.SessionStore, index memory.SemanticIndex, graph memory.KnowledgeGraph, embedProvider embeddings.Provider) []tools.Tool
   ```
-- [ ] In `search_facts` handler: if `embedProvider != nil && index != nil`, embed query via `embedProvider.Embed()`, call `index.Search()`, merge with existing FTS results from `sessions.Search()`. Rank by combining FTS relevance and vector distance. Fall back to FTS-only when embedding unavailable.
-- [ ] Add new `search_graph` tool:
+- [x] In `search_facts` handler: if `embedProvider != nil && index != nil`, embed query via `embedProvider.Embed()`, call `index.Search()`, merge with existing FTS results from `sessions.Search()`. Rank by combining FTS relevance and vector distance. Fall back to FTS-only when embedding unavailable.
+- [x] Add new `search_graph` tool:
   - Parameters: `query` (string), `scope` (optional string[] of entity IDs)
   - Handler: type-assert `graph` to `GraphRAGQuerier`; if embeddings available, call `QueryWithEmbedding()`; else call `QueryWithContext()`. If graph is not `GraphRAGQuerier`, return error message.
   - Tier: STANDARD (est. 200-800ms)
-- [ ] Register memory tools in `initMCP` (`app.go`):
+- [x] Register memory tools in `initMCP` (`app.go`):
   ```go
   memTools := memorytool.NewTools(a.sessions, a.semantic, a.graph, a.providers.Embeddings)
   for _, t := range memTools {
       a.mcpHost.RegisterBuiltin(t)  // type-assert to *mcphost.Host if needed
   }
   ```
-- [ ] Tests: semantic search with mock embeddings + mock index; FTS fallback when embeddings nil; search_graph with mock GraphRAGQuerier; search_graph degradation with plain KnowledgeGraph
+- [x] Tests: semantic search with mock embeddings + mock index; FTS fallback when embeddings nil; search_graph with mock GraphRAGQuerier; search_graph degradation with plain KnowledgeGraph
 
 **Acceptance criteria:** `search_facts` uses vector search when embeddings available, falls back to FTS. `search_graph` performs graph-augmented retrieval. Memory tools are registered with MCP host at startup.
 
@@ -232,9 +232,9 @@ Four data flows to wire:
 - `internal/app/integration_test.go` or `internal/session/integration_test.go` (new, build-tagged)
 
 **Tasks:**
-- [ ] Write integration test exercising full round-trip: write TranscriptEntry to L1 -> trigger consolidation -> verify chunks in L2 via `SemanticIndex.Search()` -> verify GraphRAG `QueryWithContext()` returns relevant results
-- [ ] Use mock embeddings provider (deterministic vectors) and in-memory or test-Postgres stores
-- [ ] Verify graceful degradation: run same flow with nil embeddings provider, confirm L1 write succeeds and L2 is skipped
+- [x] Write integration test exercising full round-trip: write TranscriptEntry to L1 -> trigger consolidation -> verify chunks in L2 via `SemanticIndex.Search()` -> verify GraphRAG `QueryWithContext()` returns relevant results
+- [x] Use mock embeddings provider (deterministic vectors) and in-memory or test-Postgres stores
+- [x] Verify graceful degradation: run same flow with nil embeddings provider, confirm L1 write succeeds and L2 is skipped
 
 **Acceptance criteria:** Full pipeline from transcript write to semantic query works end-to-end. Degradation path verified.
 

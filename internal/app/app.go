@@ -26,6 +26,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
+	"github.com/MrWong99/glyphoxa/internal/mcp/tools/memorytool"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
@@ -247,6 +248,22 @@ func (a *App) initMCP(ctx context.Context) error {
 
 	if err := a.mcpHost.Calibrate(ctx); err != nil {
 		slog.Warn("MCP calibration failed, using declared latencies", "err", err)
+	}
+
+	// Register built-in memory tools (search_sessions, query_entities, etc.).
+	if host, ok := a.mcpHost.(*mcphost.Host); ok {
+		memTools := memorytool.NewTools(a.sessions, a.semantic, a.graph, a.providers.Embeddings)
+		for _, t := range memTools {
+			if err := host.RegisterBuiltin(mcphost.BuiltinTool{
+				Definition:  t.Definition,
+				Handler:     t.Handler,
+				DeclaredP50: t.DeclaredP50,
+				DeclaredMax: t.DeclaredMax,
+			}); err != nil {
+				return fmt.Errorf("register builtin memory tool %q: %w", t.Definition.Name, err)
+			}
+		}
+		slog.Info("registered built-in memory tools", "count", len(memTools))
 	}
 
 	return nil
