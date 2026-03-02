@@ -274,6 +274,12 @@ type session struct {
 	toolHandler  s2s.ToolCallHandler
 	errorHandler func(error)
 
+	// pendingToolCalls buffers tool call messages that arrive before a handler
+	// is registered via OnToolCall. When OnToolCall is called, any buffered
+	// calls are replayed immediately. This eliminates the race between
+	// receiveLoop (which starts on Connect) and handler registration.
+	pendingToolCalls []*toolCallMsg
+
 	mu     sync.Mutex
 	errVal error
 	done   chan struct{}
@@ -453,11 +459,13 @@ func (s *session) handleServerContent(sc *serverContent) {
 func (s *session) handleToolCall(tc *toolCallMsg) {
 	s.mu.Lock()
 	handler := s.toolHandler
-	s.mu.Unlock()
-
 	if handler == nil {
+		// Buffer the tool call for replay when a handler is registered.
+		s.pendingToolCalls = append(s.pendingToolCalls, tc)
+		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
 
 	for _, fc := range tc.FunctionCalls {
 		argsJSON, err := json.Marshal(fc.Args)
@@ -568,10 +576,23 @@ func (s *session) OnError(handler func(error)) {
 }
 
 // OnToolCall registers a callback for tool invocations from the model.
+// Any tool calls that arrived before the handler was registered are replayed
+// immediately in a background goroutine.
 func (s *session) OnToolCall(handler s2s.ToolCallHandler) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.toolHandler = handler
+	pending := s.pendingToolCalls
+	s.pendingToolCalls = nil
+	s.mu.Unlock()
+
+	// Replay buffered tool calls outside the lock.
+	if len(pending) > 0 {
+		go func() {
+			for _, tc := range pending {
+				s.handleToolCall(tc)
+			}
+		}()
+	}
 }
 
 // SetTools is not supported by the Gemini Live protocol; an error is always

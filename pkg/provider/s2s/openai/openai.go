@@ -208,6 +208,10 @@ type session struct {
 	toolHandler  s2s.ToolCallHandler
 	errorHandler func(error)
 
+	// pendingToolCalls buffers tool call events that arrive before a handler
+	// is registered via OnToolCall. Replayed when OnToolCall is called.
+	pendingToolCalls []*serverEvent
+
 	mu     sync.Mutex
 	errVal error
 	closed bool
@@ -359,11 +363,13 @@ func (s *session) handleErrorEvent(evt *serverEvent) {
 func (s *session) handleFunctionCall(evt *serverEvent) {
 	s.mu.Lock()
 	handler := s.toolHandler
-	s.mu.Unlock()
-
 	if handler == nil {
+		// Buffer the tool call for replay when a handler is registered.
+		s.pendingToolCalls = append(s.pendingToolCalls, evt)
+		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
 
 	result, callErr := handler(evt.Name, evt.Arguments)
 	if callErr != nil {
@@ -450,10 +456,23 @@ func (s *session) OnError(handler func(error)) {
 }
 
 // OnToolCall registers a callback for tool invocations from the model.
+// Any tool calls that arrived before the handler was registered are replayed
+// immediately in a background goroutine.
 func (s *session) OnToolCall(handler s2s.ToolCallHandler) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.toolHandler = handler
+	pending := s.pendingToolCalls
+	s.pendingToolCalls = nil
+	s.mu.Unlock()
+
+	// Replay buffered tool calls outside the lock.
+	if len(pending) > 0 {
+		go func() {
+			for _, evt := range pending {
+				s.handleFunctionCall(evt)
+			}
+		}()
+	}
 }
 
 // SetTools replaces the active tools by sending a session.update event.
