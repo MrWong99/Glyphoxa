@@ -2,6 +2,7 @@ package cascade_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,70 @@ func newTTS() *ttsmock.Provider {
 // emptyAudioFrame is a zero-value audio frame used in tests that do not
 // exercise the STT path.
 var emptyAudioFrame = audio.AudioFrame{}
+
+// ─── TestFirstSentenceBoundary ────────────────────────────────────────────────
+
+// TestFirstSentenceBoundary exercises the sentence-boundary heuristic directly
+// via the exported FirstSentenceBoundaryForTest helper.
+func TestFirstSentenceBoundary(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+		want  int // expected index of boundary, -1 if none
+	}{
+		// ── Basic boundaries ──────────────────────────────────────────────
+		{name: "period space", input: "Hello. World", want: 5},
+		{name: "exclamation space", input: "Stop! Who goes", want: 4},
+		{name: "question space", input: "What? Really", want: 4},
+		{name: "period newline", input: "End.\nStart", want: 3},
+		{name: "period tab", input: "Done.\tNext", want: 4},
+		{name: "no boundary", input: "Hello world", want: -1},
+		{name: "period at end no space", input: "Hello.", want: -1},
+		{name: "empty string", input: "", want: -1},
+
+		// ── Abbreviations (should NOT split) ─────────────────────────────
+		{name: "Dr abbreviation", input: "Dr. Smith is here. Welcome", want: 17},
+		{name: "Mr abbreviation", input: "Mr. Jones arrived. Hello", want: 17},
+		{name: "Mrs abbreviation", input: "Mrs. Lee spoke. Listen", want: 14},
+		{name: "Ms abbreviation", input: "Ms. Park said hello. OK", want: 19},
+		{name: "St abbreviation", input: "St. Elmo is burning. Run", want: 19},
+		{name: "Lt abbreviation", input: "Lt. Dan fought. Hard", want: 14},
+		{name: "Prof abbreviation", input: "Prof. Oak knows. Much", want: 15},
+		{name: "vs abbreviation", input: "Red vs. Blue is fun. Yeah", want: 19},
+		{name: "no followed by period", input: "Say no. Then leave", want: 6},
+		{name: "single letter abbreviation", input: "J. R. R. Tolkien wrote. Lots", want: 22},
+		{name: "only abbreviation no real boundary", input: "Dr. Smith", want: -1},
+
+		// ── Decimal numbers (should NOT split) ──────────────────────────
+		{name: "decimal number", input: "Costs 2.5 gold. Pay up", want: 14},
+		{name: "decimal in sentence", input: "The scroll costs 3.14 coins. Buy it", want: 27},
+		{name: "only decimal no boundary", input: "The value is 2.5 gold", want: -1},
+
+		// ── Ellipses (should NOT split) ──────────────────────────────────
+		{name: "ellipsis ASCII", input: "But then... it happened. Wow", want: 23},
+		{name: "ellipsis at end", input: "Hmm...", want: -1},
+		{name: "ellipsis mid sentence", input: "Wait... no. Stop", want: 10},
+		{name: "unicode ellipsis", input: "Hmm\u2026 something. OK", want: 16},
+		{name: "unicode ellipsis only", input: "Hmm\u2026 something", want: -1},
+
+		// ── Mixed cases ──────────────────────────────────────────────────
+		{name: "abbreviation then real boundary", input: "Dr. Smith said hello. Then left", want: 20},
+		{name: "decimal then real boundary", input: "It costs 2.5 gold. Pay up now", want: 17},
+		{name: "multiple abbreviations then boundary", input: "Dr. J. Smith arrived. Welcome", want: 20},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := cascade.FirstSentenceBoundaryForTest(tc.input)
+			if got != tc.want {
+				t.Errorf("firstSentenceBoundary(%q) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
 
 // ─── TestProcess_FastModelOnly ────────────────────────────────────────────────
 
@@ -863,6 +928,383 @@ func TestProcess_EmitsTranscriptEntries_NoPlayerMessage(t *testing.T) {
 	}
 	if entries[0].Text != "Greetings, stranger." {
 		t.Errorf("NPC entry text: want %q, got %q", "Greetings, stranger.", entries[0].Text)
+	}
+}
+
+// ─── TestProcess_ToolCallSingleIteration ──────────────────────────────────────
+
+// TestProcess_ToolCallSingleIteration verifies that when the strong model
+// requests a tool call, the registered handler is invoked and the result is
+// fed back to the LLM, which then produces a text continuation for TTS.
+func TestProcess_ToolCallSingleIteration(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Let me check. "},
+			{Text: "One moment.", FinishReason: "stop"},
+		},
+	}
+
+	// Strong model: first call returns a tool call, second call returns text.
+	strongLLM := &llmmock.Provider{
+		StreamChunksSequence: [][]llm.Chunk{
+			// First call: request a tool.
+			{
+				{Text: "Looking that up"},
+				{
+					ToolCalls:    []llm.ToolCall{{ID: "tc_1", Name: "query_lore", Arguments: `{"q":"artifact"}`}},
+					FinishReason: "tool_calls",
+				},
+			},
+			// Second call: return text after receiving tool result.
+			{
+				{Text: "The artifact is ancient.", FinishReason: "stop"},
+			},
+		},
+	}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	tools := []llm.ToolDefinition{{Name: "query_lore", Description: "Queries the lore database."}}
+	if err := e.SetTools(tools); err != nil {
+		t.Fatalf("SetTools: %v", err)
+	}
+
+	var handlerCalls int32
+	e.OnToolCall(func(name, args string) (string, error) {
+		atomic.AddInt32(&handlerCalls, 1)
+		if name != "query_lore" {
+			t.Errorf("tool name: want %q, got %q", "query_lore", name)
+		}
+		return `{"result": "The artifact was forged in the First Age."}`, nil
+	})
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are a lore keeper.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+
+	// Handler must have been called exactly once.
+	if n := atomic.LoadInt32(&handlerCalls); n != 1 {
+		t.Errorf("tool handler calls: want 1, got %d", n)
+	}
+
+	// Strong model must have been called twice (tool request + continuation).
+	if len(strongLLM.StreamCalls) != 2 {
+		t.Fatalf("strong model calls: want 2, got %d", len(strongLLM.StreamCalls))
+	}
+
+	// Second call must include tool result messages.
+	secondReq := strongLLM.StreamCalls[1].Req
+	var hasToolResult bool
+	for _, m := range secondReq.Messages {
+		if m.Role == "tool" && m.ToolCallID == "tc_1" {
+			hasToolResult = true
+			break
+		}
+	}
+	if !hasToolResult {
+		t.Error("second strong model call missing tool result message")
+	}
+
+	if resp.Err() != nil {
+		t.Errorf("resp.Err(): unexpected error: %v", resp.Err())
+	}
+}
+
+// ─── TestProcess_ToolCallMultiIteration ──────────────────────────────────────
+
+// TestProcess_ToolCallMultiIteration verifies that the engine handles multiple
+// sequential tool call iterations where the model requests different tools.
+func TestProcess_ToolCallMultiIteration(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Hold on. "},
+			{Text: "Checking.", FinishReason: "stop"},
+		},
+	}
+
+	strongLLM := &llmmock.Provider{
+		StreamChunksSequence: [][]llm.Chunk{
+			// Iteration 1: request tool A.
+			{{ToolCalls: []llm.ToolCall{{ID: "tc_a", Name: "tool_a", Arguments: "{}"}}, FinishReason: "tool_calls"}},
+			// Iteration 2: request tool B.
+			{{ToolCalls: []llm.ToolCall{{ID: "tc_b", Name: "tool_b", Arguments: "{}"}}, FinishReason: "tool_calls"}},
+			// Iteration 3: return text.
+			{{Text: "Here is the combined answer.", FinishReason: "stop"}},
+		},
+	}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	if err := e.SetTools([]llm.ToolDefinition{{Name: "tool_a"}, {Name: "tool_b"}}); err != nil {
+		t.Fatalf("SetTools: %v", err)
+	}
+
+	var toolsCalled []string
+	var callMu sync.Mutex
+	e.OnToolCall(func(name, args string) (string, error) {
+		callMu.Lock()
+		toolsCalled = append(toolsCalled, name)
+		callMu.Unlock()
+		return `"ok"`, nil
+	})
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are an NPC.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+
+	callMu.Lock()
+	defer callMu.Unlock()
+
+	if len(toolsCalled) != 2 {
+		t.Fatalf("tools called: want 2, got %d: %v", len(toolsCalled), toolsCalled)
+	}
+	if toolsCalled[0] != "tool_a" || toolsCalled[1] != "tool_b" {
+		t.Errorf("tool call order: want [tool_a, tool_b], got %v", toolsCalled)
+	}
+
+	// Strong model must have been called 3 times.
+	if len(strongLLM.StreamCalls) != 3 {
+		t.Errorf("strong model calls: want 3, got %d", len(strongLLM.StreamCalls))
+	}
+}
+
+// ─── TestProcess_ToolCallNilHandler ──────────────────────────────────────────
+
+// TestProcess_ToolCallNilHandler verifies that when no tool handler is registered
+// but the strong model requests a tool call, the engine does not panic and
+// gracefully flushes text.
+func TestProcess_ToolCallNilHandler(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Let me check. "},
+			{Text: "Searching.", FinishReason: "stop"},
+		},
+	}
+
+	strongLLM := &llmmock.Provider{
+		StreamChunksSequence: [][]llm.Chunk{
+			// Request a tool call with some preceding text.
+			{
+				{Text: "Before the tool."},
+				{ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "query", Arguments: "{}"}}, FinishReason: "tool_calls"},
+			},
+		},
+	}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	if err := e.SetTools([]llm.ToolDefinition{{Name: "query"}}); err != nil {
+		t.Fatalf("SetTools: %v", err)
+	}
+
+	// Deliberately do NOT register a tool handler.
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are an NPC.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+
+	// Must not panic. Strong model should have been called only once (no retry).
+	if len(strongLLM.StreamCalls) != 1 {
+		t.Errorf("strong model calls: want 1, got %d", len(strongLLM.StreamCalls))
+	}
+}
+
+// ─── TestProcess_ToolCallHandlerError ────────────────────────────────────────
+
+// TestProcess_ToolCallHandlerError verifies that when a tool handler returns an
+// error, the error message is fed back to the LLM as a tool result (not a crash).
+func TestProcess_ToolCallHandlerError(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "One moment. "},
+			{Text: "Please wait.", FinishReason: "stop"},
+		},
+	}
+
+	strongLLM := &llmmock.Provider{
+		StreamChunksSequence: [][]llm.Chunk{
+			// Request a tool.
+			{{ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "broken_tool", Arguments: "{}"}}, FinishReason: "tool_calls"}},
+			// After error result, return text.
+			{{Text: "I cannot access that right now.", FinishReason: "stop"}},
+		},
+	}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	if err := e.SetTools([]llm.ToolDefinition{{Name: "broken_tool"}}); err != nil {
+		t.Fatalf("SetTools: %v", err)
+	}
+
+	e.OnToolCall(func(name, args string) (string, error) {
+		return "", fmt.Errorf("connection refused")
+	})
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are an NPC.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+
+	// Strong model must have been called twice (tool request + after error result).
+	if len(strongLLM.StreamCalls) != 2 {
+		t.Fatalf("strong model calls: want 2, got %d", len(strongLLM.StreamCalls))
+	}
+
+	// Second call must include tool result with error message.
+	secondReq := strongLLM.StreamCalls[1].Req
+	var foundToolResult bool
+	for _, m := range secondReq.Messages {
+		if m.Role == "tool" && m.ToolCallID == "tc_1" {
+			if !strings.Contains(m.Content, "Tool error: connection refused") {
+				t.Errorf("tool result content: want error message, got %q", m.Content)
+			}
+			foundToolResult = true
+			break
+		}
+	}
+	if !foundToolResult {
+		t.Error("second strong model call missing tool result message with error")
+	}
+}
+
+// ─── TestProcess_ToolCallIterationCap ────────────────────────────────────────
+
+// TestProcess_ToolCallIterationCap verifies that the tool loop terminates when
+// the iteration cap is reached, even if the model keeps requesting tools.
+func TestProcess_ToolCallIterationCap(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Hold on. "},
+			{Text: "Working.", FinishReason: "stop"},
+		},
+	}
+
+	// Every call requests a tool — should be capped at maxToolIters.
+	strongLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{ToolCalls: []llm.ToolCall{{ID: "tc", Name: "loop_tool", Arguments: "{}"}}, FinishReason: "tool_calls"},
+		},
+	}
+	ttsProv := newTTS()
+
+	const maxIters = 2
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{},
+		cascade.WithMaxToolIterations(maxIters),
+	)
+	t.Cleanup(func() { _ = e.Close() })
+
+	if err := e.SetTools([]llm.ToolDefinition{{Name: "loop_tool"}}); err != nil {
+		t.Fatalf("SetTools: %v", err)
+	}
+
+	e.OnToolCall(func(name, args string) (string, error) {
+		return `"ok"`, nil
+	})
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are an NPC.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+
+	// Strong model should have been called exactly maxIters times.
+	if len(strongLLM.StreamCalls) != maxIters {
+		t.Errorf("strong model calls: want %d, got %d", maxIters, len(strongLLM.StreamCalls))
+	}
+}
+
+// ─── TestAccumulateToolCalls ──────────────────────────────────────────────────
+
+// TestAccumulateToolCalls verifies that tool calls spread across multiple chunks
+// are correctly merged by index.
+func TestAccumulateToolCalls(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		existing []llm.ToolCall
+		incoming []llm.ToolCall
+		want     []llm.ToolCall
+	}{
+		{
+			name:     "new tool call",
+			existing: nil,
+			incoming: []llm.ToolCall{{ID: "tc_1", Name: "search", Arguments: `{"q":"hello`}},
+			want:     []llm.ToolCall{{ID: "tc_1", Name: "search", Arguments: `{"q":"hello`}},
+		},
+		{
+			name:     "merge arguments by index",
+			existing: []llm.ToolCall{{ID: "tc_1", Name: "search", Arguments: `{"q":"hel`}},
+			incoming: []llm.ToolCall{{Arguments: `lo"}`}},
+			want:     []llm.ToolCall{{ID: "tc_1", Name: "search", Arguments: `{"q":"hello"}`}},
+		},
+		{
+			name:     "multiple tools appended",
+			existing: []llm.ToolCall{{ID: "tc_1", Name: "tool_a", Arguments: "{}"}},
+			incoming: []llm.ToolCall{{}, {ID: "tc_2", Name: "tool_b", Arguments: `{"x":1}`}},
+			want:     []llm.ToolCall{{ID: "tc_1", Name: "tool_a", Arguments: "{}"}, {ID: "tc_2", Name: "tool_b", Arguments: `{"x":1}`}},
+		},
+		{
+			name:     "prefer non-empty ID from later chunk",
+			existing: []llm.ToolCall{{Name: "tool"}},
+			incoming: []llm.ToolCall{{ID: "tc_1"}},
+			want:     []llm.ToolCall{{ID: "tc_1", Name: "tool"}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := cascade.AccumulateToolCallsForTest(tc.existing, tc.incoming)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len: want %d, got %d: %+v", len(tc.want), len(got), got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d]: want %+v, got %+v", i, tc.want[i], got[i])
+				}
+			}
+		})
 	}
 }
 

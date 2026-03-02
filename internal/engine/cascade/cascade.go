@@ -22,6 +22,7 @@ package cascade
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,10 @@ const (
 	// dual-model path. Sized to absorb the opener plus several strong-model sentences
 	// without blocking the synthesis goroutine.
 	defaultTextBuf = 16
+
+	// defaultMaxToolIters is the maximum number of tool-call loop iterations
+	// before the cascade engine gives up and flushes accumulated text.
+	defaultMaxToolIters = 5
 )
 
 // Engine implements [engine.VoiceEngine] using a dual-model sentence cascade.
@@ -83,6 +88,10 @@ type Engine struct {
 	done          chan struct{}
 	closed        bool
 
+	// maxToolIters caps how many tool-call round-trips the strong model is
+	// allowed during a single Process call. Defaults to defaultMaxToolIters.
+	maxToolIters int
+
 	// wg tracks background goroutines spawned by Process so callers (and tests)
 	// can synchronise with the end of the strong-model stage.
 	wg sync.WaitGroup
@@ -114,6 +123,12 @@ func WithOpenerPromptSuffix(s string) Option {
 	return func(e *Engine) { e.openerSuffix = s }
 }
 
+// WithMaxToolIterations sets the maximum number of tool-call loop iterations
+// before the cascade gives up and flushes accumulated text. Defaults to 5.
+func WithMaxToolIterations(n int) Option {
+	return func(e *Engine) { e.maxToolIters = n }
+}
+
 // WithTTSFormat sets the expected TTS output format for the audio pipeline.
 // sampleRate is in Hz (e.g., 22050 for Coqui XTTS, 16000 for ElevenLabs).
 // channels is the number of audio channels (1 = mono, 2 = stereo).
@@ -140,12 +155,15 @@ func New(fastLLM, strongLLM llm.Provider, ttsP tts.Provider, voice tts.VoiceProf
 	for _, o := range opts {
 		o(e)
 	}
-	// Apply defaults for TTS format if not set by options.
+	// Apply defaults for TTS format and tool iterations if not set by options.
 	if e.ttsSampleRate == 0 {
 		e.ttsSampleRate = 22050
 	}
 	if e.ttsChannels == 0 {
 		e.ttsChannels = 1
+	}
+	if e.maxToolIters == 0 {
+		e.maxToolIters = defaultMaxToolIters
 	}
 	// Create transcript channel after options so WithTranscriptBuffer takes effect.
 	e.transcriptCh = make(chan memory.TranscriptEntry, e.transcriptBuf)
@@ -235,7 +253,7 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 	strongReq := e.buildStrongPrompt(prompt, tools, opener)
 	resp := &engine.Response{Text: opener, Audio: audioCh, SampleRate: e.ttsSampleRate, Channels: e.ttsChannels}
 
-	// Background goroutine: send opener → strong model → close textCh.
+	// Background goroutine: send opener → strong model (with tool loop) → close textCh.
 	e.wg.Go(func() {
 		defer close(textCh)
 
@@ -246,16 +264,8 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 			return
 		}
 
-		// Launch the strong model.
-		strongCh, err := e.strongLLM.StreamCompletion(ctx, strongReq)
-		if err != nil {
-			resp.SetStreamErr(fmt.Errorf("cascade: strong model stream failed: %w", err))
-			return
-		}
-
-		// Forward the strong model's output as sentence-level chunks to TTS,
-		// and collect the full continuation text for the transcript.
-		continuation := e.forwardSentences(ctx, strongCh, textCh, resp)
+		// Run the strong model with tool-call loop support.
+		continuation := e.forwardStrongModel(ctx, strongReq, textCh, resp)
 		fullText := opener
 		if continuation != "" {
 			fullText = opener + " " + continuation
@@ -444,17 +454,97 @@ func (e *Engine) collectFirstSentence(ctx context.Context, ch <-chan llm.Chunk) 
 	}
 }
 
-// forwardSentences reads token chunks from ch, accumulates them into complete
-// sentences, and writes each sentence to textCh. Any text remaining when the
-// stream ends is flushed as a final fragment. Errors are recorded via resp.
-// It returns the full concatenation of all text chunks received from the stream.
-func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, textCh chan<- string, resp *engine.Response) string {
-	var buf strings.Builder
-	var collected strings.Builder
+// forwardStrongModel runs the strong model, forwarding text to TTS and handling
+// tool calls in a loop. It returns the full concatenation of all text emitted
+// across all iterations.
+func (e *Engine) forwardStrongModel(
+	ctx context.Context,
+	strongReq llm.CompletionRequest,
+	textCh chan<- string,
+	resp *engine.Response,
+) string {
+	var fullText strings.Builder
+
+	for iter := range e.maxToolIters {
+		ch, err := e.strongLLM.StreamCompletion(ctx, strongReq)
+		if err != nil {
+			resp.SetStreamErr(fmt.Errorf("cascade: strong model stream (iter %d): %w", iter, err))
+			return fullText.String()
+		}
+
+		text, toolCalls, finished := e.forwardSentencesWithTools(ctx, ch, textCh)
+		fullText.WriteString(text)
+
+		if finished || len(toolCalls) == 0 {
+			return fullText.String()
+		}
+
+		// Read the tool handler under lock, then release before executing.
+		e.mu.Lock()
+		handler := e.toolHandler
+		e.mu.Unlock()
+
+		if handler == nil {
+			slog.Warn("cascade: tool calls requested but no handler registered",
+				"tool_count", len(toolCalls), "iter", iter)
+			return fullText.String()
+		}
+
+		// Build the assistant message that requested tools (required by LLM APIs).
+		assistantMsg := llm.Message{
+			Role:      "assistant",
+			Content:   text,
+			ToolCalls: toolCalls,
+		}
+
+		// Execute each tool call and build result messages.
+		var toolResults []llm.Message
+		for _, tc := range toolCalls {
+			slog.Debug("cascade: executing tool call",
+				"tool", tc.Name, "iter", iter)
+			result, toolErr := handler(tc.Name, tc.Arguments)
+			if toolErr != nil {
+				slog.Debug("cascade: tool call failed",
+					"tool", tc.Name, "error", toolErr)
+				result = fmt.Sprintf("Tool error: %s", toolErr.Error())
+			}
+			toolResults = append(toolResults, llm.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
+		}
+
+		// Rebuild the request with tool results appended.
+		strongReq.Messages = append(strongReq.Messages, assistantMsg)
+		strongReq.Messages = append(strongReq.Messages, toolResults...)
+	}
+
+	slog.Warn("cascade: tool call iteration cap reached", "max", e.maxToolIters)
+	return fullText.String()
+}
+
+// forwardSentencesWithTools reads token chunks from ch, accumulates them into
+// complete sentences, and writes each sentence to textCh for TTS. It also
+// accumulates tool calls across chunks (streaming providers may split arguments
+// across multiple chunks).
+//
+// Returns:
+//   - text: the full concatenation of all text chunks received.
+//   - toolCalls: accumulated tool calls, non-empty only when FinishReason is "tool_calls".
+//   - finished: true when the stream completed normally without pending tool calls.
+func (e *Engine) forwardSentencesWithTools(
+	ctx context.Context,
+	ch <-chan llm.Chunk,
+	textCh chan<- string,
+) (text string, toolCalls []llm.ToolCall, finished bool) {
+	var buf, collected strings.Builder
+	var accum []llm.ToolCall
+
 	for {
 		select {
 		case <-ctx.Done():
-			return collected.String()
+			return collected.String(), nil, true
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed: flush remaining text.
@@ -464,7 +554,12 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 					case <-ctx.Done():
 					}
 				}
-				return collected.String()
+				return collected.String(), nil, true
+			}
+
+			// Accumulate tool calls across chunks.
+			if len(chunk.ToolCalls) > 0 {
+				accum = accumulateToolCalls(accum, chunk.ToolCalls)
 			}
 
 			if chunk.Text != "" {
@@ -473,7 +568,6 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 			}
 
 			// Flush complete sentences eagerly for lower TTS latency.
-			// Call buf.String() once per iteration to avoid redundant allocations.
 			for {
 				s := buf.String()
 				idx := firstSentenceBoundary(s)
@@ -487,7 +581,7 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 				select {
 				case textCh <- sentence:
 				case <-ctx.Done():
-					return collected.String()
+					return collected.String(), nil, true
 				}
 			}
 
@@ -499,26 +593,137 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 					case <-ctx.Done():
 					}
 				}
-				return collected.String()
+				if chunk.FinishReason == "tool_calls" && len(accum) > 0 {
+					return collected.String(), accum, false
+				}
+				return collected.String(), nil, true
 			}
 		}
 	}
 }
 
-// firstSentenceBoundary returns the index of the first '.', '!', or '?'
-// character that is immediately followed by a whitespace character (' ', '\n',
-// '\r', or '\t'). Returns -1 if no such boundary exists in s.
+// accumulateToolCalls merges incremental ToolCall chunks into complete calls.
+// Streaming providers (e.g., OpenAI) send partial Arguments strings across
+// chunks at the same index position. This function concatenates Arguments by
+// index and prefers non-empty ID/Name fields from later chunks.
+func accumulateToolCalls(existing []llm.ToolCall, incoming []llm.ToolCall) []llm.ToolCall {
+	for i, tc := range incoming {
+		if i < len(existing) {
+			if tc.ID != "" {
+				existing[i].ID = tc.ID
+			}
+			if tc.Name != "" {
+				existing[i].Name = tc.Name
+			}
+			existing[i].Arguments += tc.Arguments
+		} else {
+			existing = append(existing, tc)
+		}
+	}
+	return existing
+}
+
+// firstSentenceBoundary returns the index of the first sentence-ending
+// punctuation ('.', '!', or '?') followed by whitespace, skipping common false
+// positives:
+//
+//   - Abbreviations: single uppercase letter + period ("A. Smith")
+//   - Common title abbreviations: "Dr.", "Mr.", "Mrs.", "Ms.", "St.", etc.
+//   - Decimal numbers: digit + period + digit ("2.5 gold")
+//   - Ellipses: ASCII "..." or Unicode '\u2026'
+//
+// Returns -1 if no boundary exists in s.
 func firstSentenceBoundary(s string) int {
-	for i := 0; i < len(s)-1; i++ {
+	n := len(s)
+	for i := 0; i < n-1; i++ {
 		switch s[i] {
-		case '.', '!', '?':
-			switch s[i+1] {
-			case ' ', '\n', '\r', '\t':
-				return i
+		case '.':
+			if !isSentenceWhitespace(s[i+1]) {
+				continue
+			}
+			if isEllipsisDot(s, i) {
+				continue
+			}
+			if isDecimalDot(s, i) {
+				continue
+			}
+			if isAbbreviationDot(s, i) {
+				continue
+			}
+			return i
+		case '!', '?':
+			if !isSentenceWhitespace(s[i+1]) {
+				continue
+			}
+			return i
+		case 0xE2: // First byte of Unicode ellipsis '…' (U+2026: 0xE2 0x80 0xA6).
+			if i+2 < n && s[i+1] == 0x80 && s[i+2] == 0xA6 {
+				i += 2 // Skip the remaining bytes of the 3-byte sequence.
 			}
 		}
 	}
 	return -1
+}
+
+// isSentenceWhitespace reports whether b is a whitespace byte that follows
+// sentence-ending punctuation.
+func isSentenceWhitespace(b byte) bool {
+	return b == ' ' || b == '\n' || b == '\r' || b == '\t'
+}
+
+// isEllipsisDot reports whether the period at index i is part of an ASCII
+// ellipsis ("..."). A period adjacent to another period is always part of an
+// ellipsis.
+func isEllipsisDot(s string, i int) bool {
+	if i >= 1 && s[i-1] == '.' {
+		return true
+	}
+	if i+1 < len(s) && s[i+1] == '.' {
+		return true
+	}
+	return false
+}
+
+// isDecimalDot reports whether the period at index i sits between two ASCII
+// digits (e.g., "2.5").
+func isDecimalDot(s string, i int) bool {
+	if i == 0 || i+1 >= len(s) {
+		return false
+	}
+	return s[i-1] >= '0' && s[i-1] <= '9' && s[i+1] >= '0' && s[i+1] <= '9'
+}
+
+// isAbbreviationDot reports whether the period at index i follows a likely
+// abbreviation:
+//
+//   - A single uppercase letter: "A. Smith", "J. R. R. Tolkien"
+//   - A common title or military abbreviation: "Dr.", "Mr.", "Lt.", etc.
+func isAbbreviationDot(s string, i int) bool {
+	if i == 0 {
+		return false
+	}
+
+	// Single uppercase letter: "A." at string start or after whitespace.
+	if i == 1 || (i >= 2 && (s[i-2] == ' ' || s[i-2] == '\n')) {
+		c := s[i-1]
+		if c >= 'A' && c <= 'Z' {
+			return true
+		}
+	}
+
+	// Scan backwards to the word start and check against known abbreviations.
+	wordStart := i - 1
+	for wordStart > 0 && s[wordStart-1] != ' ' && s[wordStart-1] != '\n' {
+		wordStart--
+	}
+	word := strings.ToLower(s[wordStart:i])
+
+	switch word {
+	case "dr", "mr", "mrs", "ms", "st", "jr", "sr", "vs",
+		"lt", "cpt", "cmdr", "prof", "sgt", "gen", "col":
+		return true
+	}
+	return false
 }
 
 // drainChunks discards all remaining chunks from ch. Used to prevent the LLM
