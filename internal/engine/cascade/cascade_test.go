@@ -700,6 +700,172 @@ func TestWithTranscriptBuffer(t *testing.T) {
 	e.Wait()
 }
 
+// ─── TestProcess_EmitsTranscriptEntries_SingleModel ──────────────────────────
+
+// TestProcess_EmitsTranscriptEntries_SingleModel verifies that the fast-only path
+// emits both a player input entry and an NPC response entry to the transcript channel.
+func TestProcess_EmitsTranscriptEntries_SingleModel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Well met, traveller.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	ch := e.Transcripts()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are an innkeeper.",
+		Messages: []llm.Message{
+			{Role: "user", Content: "Hello there!", Name: "player1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process: unexpected error: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+	_ = e.Close()
+
+	var entries []memory.TranscriptEntry
+	for entry := range ch {
+		entries = append(entries, entry)
+	}
+
+	// Expect two entries: player input + NPC response.
+	if len(entries) != 2 {
+		t.Fatalf("transcript entries: want 2, got %d: %+v", len(entries), entries)
+	}
+
+	// First entry: player input.
+	if entries[0].Text != "Hello there!" {
+		t.Errorf("player entry text: want %q, got %q", "Hello there!", entries[0].Text)
+	}
+	if entries[0].SpeakerID != "player1" {
+		t.Errorf("player entry SpeakerID: want %q, got %q", "player1", entries[0].SpeakerID)
+	}
+
+	// Second entry: NPC response.
+	if entries[1].Text != "Well met, traveller." {
+		t.Errorf("NPC entry text: want %q, got %q", "Well met, traveller.", entries[1].Text)
+	}
+	if entries[1].Timestamp.IsZero() {
+		t.Error("NPC entry Timestamp should not be zero")
+	}
+}
+
+// ─── TestProcess_EmitsTranscriptEntries_DualModel ─────────────────────────────
+
+// TestProcess_EmitsTranscriptEntries_DualModel verifies that the dual-model path
+// emits transcript entries containing the combined opener + strong continuation.
+func TestProcess_EmitsTranscriptEntries_DualModel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			// "! " triggers a sentence boundary → opener = "Ah, traveller!"
+			{Text: "Ah, traveller! "},
+			{Text: "more", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "What brings you here?", FinishReason: "stop"},
+		},
+	}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	ch := e.Transcripts()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are a guild master.",
+		Messages: []llm.Message{
+			{Role: "user", Content: "I seek the guild.", Name: "hero"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process: unexpected error: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+	_ = e.Close()
+
+	var entries []memory.TranscriptEntry
+	for entry := range ch {
+		entries = append(entries, entry)
+	}
+
+	// Expect two entries: player input + NPC response.
+	if len(entries) != 2 {
+		t.Fatalf("transcript entries: want 2, got %d: %+v", len(entries), entries)
+	}
+
+	// First entry: player input.
+	if entries[0].Text != "I seek the guild." {
+		t.Errorf("player entry text: want %q, got %q", "I seek the guild.", entries[0].Text)
+	}
+	if entries[0].SpeakerID != "hero" {
+		t.Errorf("player entry SpeakerID: want %q, got %q", "hero", entries[0].SpeakerID)
+	}
+
+	// Second entry: NPC response — should include both opener and continuation.
+	npcText := entries[1].Text
+	if !strings.Contains(npcText, "Ah, traveller!") {
+		t.Errorf("NPC entry should contain opener %q, got %q", "Ah, traveller!", npcText)
+	}
+	if !strings.Contains(npcText, "What brings you here?") {
+		t.Errorf("NPC entry should contain continuation %q, got %q", "What brings you here?", npcText)
+	}
+}
+
+// ─── TestProcess_EmitsTranscriptEntries_NoPlayerMessage ──────────────────────
+
+// TestProcess_EmitsTranscriptEntries_NoPlayerMessage verifies that when prompt.Messages
+// is empty, only the NPC response entry is emitted (no player entry).
+func TestProcess_EmitsTranscriptEntries_NoPlayerMessage(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Greetings, stranger.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	ch := e.Transcripts()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are a guard.",
+		// Messages intentionally empty.
+	})
+	if err != nil {
+		t.Fatalf("Process: unexpected error: %v", err)
+	}
+	drainAudio(resp.Audio)
+	e.Wait()
+	_ = e.Close()
+
+	var entries []memory.TranscriptEntry
+	for entry := range ch {
+		entries = append(entries, entry)
+	}
+
+	// Only NPC response entry — no player entry since Messages was empty.
+	if len(entries) != 1 {
+		t.Fatalf("transcript entries: want 1, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Text != "Greetings, stranger." {
+		t.Errorf("NPC entry text: want %q, got %q", "Greetings, stranger.", entries[0].Text)
+	}
+}
+
 // ─── TestWithSTT_OptionStored ─────────────────────────────────────────────────
 
 // TestWithSTT_OptionStored verifies that WithSTT is accepted without panicking.

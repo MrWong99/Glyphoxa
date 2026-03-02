@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/engine"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
@@ -202,6 +203,23 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 		if err != nil {
 			return nil, fmt.Errorf("cascade: TTS start failed: %w", err)
 		}
+
+		// Emit player input transcript entry.
+		if playerMsg, ok := lastUserMessage(prompt.Messages); ok {
+			e.emitTranscript(memory.TranscriptEntry{
+				SpeakerID:   playerMsg.Name,
+				SpeakerName: playerMsg.Name,
+				Text:        playerMsg.Content,
+				Timestamp:   time.Now(),
+			})
+		}
+
+		// Emit NPC response transcript entry.
+		e.emitTranscript(memory.TranscriptEntry{
+			Text:      opener,
+			Timestamp: time.Now(),
+		})
+
 		return &engine.Response{Text: opener, Audio: audioCh, SampleRate: e.ttsSampleRate, Channels: e.ttsChannels}, nil
 	}
 
@@ -235,8 +253,29 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 			return
 		}
 
-		// Forward the strong model's output as sentence-level chunks to TTS.
-		e.forwardSentences(ctx, strongCh, textCh, resp)
+		// Forward the strong model's output as sentence-level chunks to TTS,
+		// and collect the full continuation text for the transcript.
+		continuation := e.forwardSentences(ctx, strongCh, textCh, resp)
+		fullText := opener
+		if continuation != "" {
+			fullText = opener + " " + continuation
+		}
+
+		// Emit player input transcript entry.
+		if playerMsg, ok := lastUserMessage(prompt.Messages); ok {
+			e.emitTranscript(memory.TranscriptEntry{
+				SpeakerID:   playerMsg.Name,
+				SpeakerName: playerMsg.Name,
+				Text:        playerMsg.Content,
+				Timestamp:   time.Now(),
+			})
+		}
+
+		// Emit NPC response transcript entry.
+		e.emitTranscript(memory.TranscriptEntry{
+			Text:      strings.TrimSpace(fullText),
+			Timestamp: time.Now(),
+		})
 	})
 
 	return resp, nil
@@ -408,12 +447,14 @@ func (e *Engine) collectFirstSentence(ctx context.Context, ch <-chan llm.Chunk) 
 // forwardSentences reads token chunks from ch, accumulates them into complete
 // sentences, and writes each sentence to textCh. Any text remaining when the
 // stream ends is flushed as a final fragment. Errors are recorded via resp.
-func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, textCh chan<- string, resp *engine.Response) {
+// It returns the full concatenation of all text chunks received from the stream.
+func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, textCh chan<- string, resp *engine.Response) string {
 	var buf strings.Builder
+	var collected strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return collected.String()
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed: flush remaining text.
@@ -423,11 +464,12 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 					case <-ctx.Done():
 					}
 				}
-				return
+				return collected.String()
 			}
 
 			if chunk.Text != "" {
 				buf.WriteString(chunk.Text)
+				collected.WriteString(chunk.Text)
 			}
 
 			// Flush complete sentences eagerly for lower TTS latency.
@@ -445,7 +487,7 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 				select {
 				case textCh <- sentence:
 				case <-ctx.Done():
-					return
+					return collected.String()
 				}
 			}
 
@@ -457,7 +499,7 @@ func (e *Engine) forwardSentences(ctx context.Context, ch <-chan llm.Chunk, text
 					case <-ctx.Done():
 					}
 				}
-				return
+				return collected.String()
 			}
 		}
 	}
@@ -485,6 +527,26 @@ func firstSentenceBoundary(s string) int {
 func drainChunks(ch <-chan llm.Chunk) {
 	for range ch {
 	}
+}
+
+// emitTranscript sends a TranscriptEntry to the transcript channel if the
+// engine is still open. It is safe to call concurrently.
+func (e *Engine) emitTranscript(entry memory.TranscriptEntry) {
+	select {
+	case e.transcriptCh <- entry:
+	case <-e.done:
+	}
+}
+
+// lastUserMessage returns the last user-role message from the conversation
+// history, if one exists.
+func lastUserMessage(msgs []llm.Message) (llm.Message, bool) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i], true
+		}
+	}
+	return llm.Message{}, false
 }
 
 // mergeContextUpdate applies a [engine.ContextUpdate] onto a [engine.PromptContext],
