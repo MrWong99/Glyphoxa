@@ -52,7 +52,17 @@ type Provider struct {
 
 	// StreamChunks is the sequence of Chunk values emitted on the channel returned
 	// by StreamCompletion. All chunks are sent before the channel is closed.
+	// When StreamChunksSequence is also set, this field serves as the fallback
+	// after the sequence is exhausted.
 	StreamChunks []llm.Chunk
+
+	// StreamChunksSequence, when non-empty, provides a different set of chunks for
+	// each successive StreamCompletion call. The first call pops the first entry,
+	// the second call the second, and so on. Once the sequence is exhausted,
+	// subsequent calls fall back to StreamChunks. This is useful for testing
+	// multi-turn interactions (e.g., tool-call loops) where the model must return
+	// different responses on each invocation.
+	StreamChunksSequence [][]llm.Chunk
 
 	// StreamErr, if non-nil, is returned as the error from StreamCompletion instead
 	// of starting a channel.
@@ -98,8 +108,16 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 		p.mu.Unlock()
 		return nil, err
 	}
-	chunks := make([]llm.Chunk, len(p.StreamChunks))
-	copy(chunks, p.StreamChunks)
+	// If a sequence is configured and not exhausted, pop the next entry.
+	var source []llm.Chunk
+	if len(p.StreamChunksSequence) > 0 {
+		source = p.StreamChunksSequence[0]
+		p.StreamChunksSequence = p.StreamChunksSequence[1:]
+	} else {
+		source = p.StreamChunks
+	}
+	chunks := make([]llm.Chunk, len(source))
+	copy(chunks, source)
 	p.StreamCalls = append(p.StreamCalls, StreamCall{Ctx: ctx, Req: req})
 	p.mu.Unlock()
 
