@@ -447,6 +447,82 @@ func TestClose_StopsForwarding(t *testing.T) {
 	}
 }
 
+// ─── TestProcess_UpdateInstructionsError ───────────────────────────────────────
+
+func TestProcess_UpdateInstructionsError(t *testing.T) {
+	t.Parallel()
+
+	sess := newSession()
+	sess.UpdateInstructionsErr = errors.New("instructions rejected")
+	p := &s2smock.Provider{Session: sess}
+	e := newTestEngine(p)
+	t.Cleanup(func() { _ = e.Close() })
+
+	frame := audio.AudioFrame{Data: []byte("audio"), SampleRate: 16000, Channels: 1}
+	prompt := enginepkg.PromptContext{SystemPrompt: "Be a wizard."}
+
+	_, err := e.Process(context.Background(), frame, prompt)
+	if err == nil {
+		t.Fatal("expected error from Process when UpdateInstructions fails")
+	}
+	if !errors.Is(err, sess.UpdateInstructionsErr) {
+		t.Fatalf("expected wrapped UpdateInstructionsErr, got: %v", err)
+	}
+}
+
+// ─── TestProcess_InjectTextContextError ───────────────────────────────────────
+
+func TestProcess_InjectTextContextError(t *testing.T) {
+	t.Parallel()
+
+	sess := newSession()
+	sess.InjectTextContextErr = errors.New("context injection failed")
+	p := &s2smock.Provider{Session: sess}
+	e := newTestEngine(p)
+	t.Cleanup(func() { _ = e.Close() })
+
+	frame := audio.AudioFrame{Data: []byte("audio"), SampleRate: 16000, Channels: 1}
+	prompt := enginepkg.PromptContext{HotContext: "Scene: tavern"}
+
+	_, err := e.Process(context.Background(), frame, prompt)
+	if err == nil {
+		t.Fatal("expected error from Process when InjectTextContext fails")
+	}
+	if !errors.Is(err, sess.InjectTextContextErr) {
+		t.Fatalf("expected wrapped InjectTextContextErr, got: %v", err)
+	}
+}
+
+// ─── TestEnsureSession_SetToolsWarning ────────────────────────────────────────
+
+func TestEnsureSession_SetToolsWarning(t *testing.T) {
+	t.Parallel()
+
+	sess := newSession()
+	sess.SetToolsErr = errors.New("tools rejected")
+	p := &s2smock.Provider{Session: sess}
+	e := newTestEngine(p)
+	t.Cleanup(func() { _ = e.Close() })
+
+	// Pre-register tools before any session is open.
+	tools := []llm.ToolDefinition{
+		{Name: "dice_roll", Description: "Roll dice"},
+	}
+	if err := e.SetTools(tools); err != nil {
+		t.Fatalf("SetTools (pre-session): %v", err)
+	}
+
+	// Process opens the session — ensureSessionLocked applies tools.
+	// SetTools returns an error, but the session should still be created.
+	resp := mustProcess(t, e, nil)
+	go drainAudio(resp.Audio)
+
+	// Verify session was created despite SetTools failure.
+	if len(p.ConnectCalls) != 1 {
+		t.Fatalf("expected 1 ConnectCall, got %d", len(p.ConnectCalls))
+	}
+}
+
 // ─── TestConcurrentProcessCalls ───────────────────────────────────────────────
 
 func TestConcurrentProcessCalls(t *testing.T) {

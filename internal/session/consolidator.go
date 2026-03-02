@@ -149,10 +149,14 @@ func (c *Consolidator) consolidate(ctx context.Context) error {
 
 	var entries []memory.TranscriptEntry
 	var writeErr error
+	newLastIndex := c.lastIndex
+
 	for i := c.lastIndex; i < len(msgs); i++ {
 		m := msgs[i]
-		// Skip synthetic summary messages.
+		// Skip synthetic summary messages. They are not written to the
+		// store but still count as "processed" for index tracking.
 		if len(m.Content) > 0 && m.Content[0] == '[' {
+			newLastIndex = i + 1
 			continue
 		}
 
@@ -175,16 +179,18 @@ func (c *Consolidator) consolidate(ctx context.Context) error {
 				"index", i,
 				"error", err,
 			)
-			// Continue writing remaining entries — partial consolidation is
-			// better than none.
+			// Stop advancing — this entry and all subsequent ones will be
+			// retried on the next tick.
+			break
 		}
 
 		entries = append(entries, entry)
+		newLastIndex = i + 1
 	}
 
-	c.lastIndex = len(msgs)
+	c.lastIndex = newLastIndex
 
-	// L2 indexing: chunk, embed, and index entries when providers are configured.
+	// L2 indexing: chunk, embed, and index only successfully written entries.
 	// This is best-effort — failures do not affect the L1 write or lastIndex.
 	if c.semantic != nil && c.embedProvider != nil && len(entries) > 0 {
 		c.indexChunks(ctx, entries)

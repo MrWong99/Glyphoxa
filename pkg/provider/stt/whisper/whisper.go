@@ -59,9 +59,6 @@ const (
 // Compile-time assertion that Provider implements stt.Provider.
 var _ stt.Provider = (*Provider)(nil)
 
-// errNotSupported is returned by SetKeywords because whisper.cpp does not
-// expose a keyword boosting API.
-var errNotSupported = errors.New("keyword boosting is not supported by whisper.cpp")
 
 // Option is a functional option for configuring a Provider.
 type Option func(*Provider)
@@ -258,7 +255,7 @@ func (s *session) Finals() <-chan stt.Transcript { return s.finals }
 // keyword-boosting API. The caller should treat this as a best-effort hint;
 // the session remains usable after this call.
 func (s *session) SetKeywords(_ []stt.KeywordBoost) error {
-	return fmt.Errorf("whisper: %w", errNotSupported)
+	return fmt.Errorf("whisper: %w", stt.ErrNotSupported)
 }
 
 // Close terminates the session, flushes any pending speech audio to

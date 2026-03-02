@@ -2,6 +2,7 @@ package whisper_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -109,8 +110,12 @@ func TestNativeSetKeywords_ReturnsError(t *testing.T) {
 	}
 	defer h.Close()
 
-	if err := h.SetKeywords([]stt.KeywordBoost{{Keyword: "test", Boost: 5}}); err == nil {
+	err = h.SetKeywords([]stt.KeywordBoost{{Keyword: "test", Boost: 5}})
+	if err == nil {
 		t.Fatal("expected error from SetKeywords, got nil")
+	}
+	if !errors.Is(err, stt.ErrNotSupported) {
+		t.Fatalf("expected errors.Is(err, stt.ErrNotSupported), got %v", err)
 	}
 }
 

@@ -193,7 +193,7 @@ func (s *nativeSession) Finals() <-chan stt.Transcript { return s.finals }
 // SetKeywords always returns an error because whisper.cpp does not expose a
 // keyword-boosting API.
 func (s *nativeSession) SetKeywords(_ []stt.KeywordBoost) error {
-	return fmt.Errorf("whisper: %w", errNotSupported)
+	return fmt.Errorf("whisper: %w", stt.ErrNotSupported)
 }
 
 // Close terminates the session, flushes any pending speech audio, closes the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,36 @@ import (
 	embedmock "github.com/MrWong99/glyphoxa/pkg/provider/embeddings/mock"
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
 )
+
+// failingStore wraps a memorymock.SessionStore and injects WriteEntry failures
+// after a configurable number of successful writes. Set failAfter to -1 to
+// disable failures (useful for retry tests).
+type failingStore struct {
+	*memorymock.SessionStore
+	mu        sync.Mutex
+	failAfter int // fail after this many successful writes; -1 = never fail
+	count     int
+}
+
+func (f *failingStore) WriteEntry(ctx context.Context, sessionID string, entry memory.TranscriptEntry) error {
+	f.mu.Lock()
+	f.count++
+	shouldFail := f.failAfter >= 0 && f.count > f.failAfter
+	f.mu.Unlock()
+
+	if shouldFail {
+		return errors.New("store: write failed")
+	}
+	return f.SessionStore.WriteEntry(ctx, sessionID, entry)
+}
+
+// setFailAfter resets the call counter and configures the failure threshold.
+func (f *failingStore) setFailAfter(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failAfter = n
+	f.count = 0
+}
 
 func TestConsolidator_ConsolidateNow(t *testing.T) {
 	t.Run("writes new messages to store", func(t *testing.T) {
@@ -406,4 +437,140 @@ func TestConsolidator_StartStop(t *testing.T) {
 
 	// Calling Stop again should not panic.
 	c.Stop()
+}
+
+func TestConsolidate_WriteFailure(t *testing.T) {
+	t.Parallel()
+
+	t.Run("partial failure advances index to last success", func(t *testing.T) {
+		t.Parallel()
+
+		store := &failingStore{
+			SessionStore: &memorymock.SessionStore{},
+			failAfter:    2, // first 2 writes succeed, 3rd fails
+		}
+		s := &mockSummariser{result: "summary"}
+		cm := NewContextManager(ContextManagerConfig{
+			MaxTokens:  100000,
+			Summariser: s,
+		})
+
+		_ = cm.AddMessages(context.Background(),
+			llm.Message{Role: "user", Name: "P1", Content: "msg-0"},
+			llm.Message{Role: "user", Name: "P1", Content: "msg-1"},
+			llm.Message{Role: "user", Name: "P1", Content: "msg-2"},
+			llm.Message{Role: "user", Name: "P1", Content: "msg-3"},
+		)
+
+		c := NewConsolidator(ConsolidatorConfig{
+			Store:      store,
+			ContextMgr: cm,
+			SessionID:  "session-partial",
+		})
+
+		// First consolidation: 2 succeed, 3rd fails.
+		err := c.ConsolidateNow(context.Background())
+		if err == nil {
+			t.Fatal("expected error from partial write failure")
+		}
+		if store.SessionStore.CallCount("WriteEntry") != 2 {
+			t.Fatalf("expected 2 successful writes, got %d", store.SessionStore.CallCount("WriteEntry"))
+		}
+
+		// Retry: clear failure and consolidate again.
+		store.setFailAfter(-1)
+		store.SessionStore.Reset()
+
+		err = c.ConsolidateNow(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error on retry: %v", err)
+		}
+		// Should write remaining 2 entries (msg-2, msg-3), not all 4.
+		if store.SessionStore.CallCount("WriteEntry") != 2 {
+			t.Errorf("expected 2 retry writes, got %d", store.SessionStore.CallCount("WriteEntry"))
+		}
+	})
+
+	t.Run("all writes fail leaves index unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		store := &failingStore{
+			SessionStore: &memorymock.SessionStore{},
+			failAfter:    0, // fail on first write
+		}
+		s := &mockSummariser{result: "summary"}
+		cm := NewContextManager(ContextManagerConfig{
+			MaxTokens:  100000,
+			Summariser: s,
+		})
+
+		_ = cm.AddMessages(context.Background(),
+			llm.Message{Role: "user", Name: "P1", Content: "msg-0"},
+			llm.Message{Role: "user", Name: "P1", Content: "msg-1"},
+			llm.Message{Role: "user", Name: "P1", Content: "msg-2"},
+		)
+
+		c := NewConsolidator(ConsolidatorConfig{
+			Store:      store,
+			ContextMgr: cm,
+			SessionID:  "session-all-fail",
+		})
+
+		err := c.ConsolidateNow(context.Background())
+		if err == nil {
+			t.Fatal("expected error when all writes fail")
+		}
+
+		// Clear failure and retry — all 3 should be written.
+		store.setFailAfter(-1)
+
+		err = c.ConsolidateNow(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error on retry: %v", err)
+		}
+		if store.SessionStore.CallCount("WriteEntry") != 3 {
+			t.Errorf("expected 3 retry writes, got %d", store.SessionStore.CallCount("WriteEntry"))
+		}
+	})
+
+	t.Run("L2 receives only successfully written entries", func(t *testing.T) {
+		t.Parallel()
+
+		store := &failingStore{
+			SessionStore: &memorymock.SessionStore{},
+			failAfter:    2,
+		}
+		semantic := &memorymock.SemanticIndex{}
+		embedProv := &embedmock.Provider{
+			EmbedBatchResult: [][]float32{{0.1}, {0.2}},
+		}
+		s := &mockSummariser{result: "summary"}
+		cm := NewContextManager(ContextManagerConfig{
+			MaxTokens:  100000,
+			Summariser: s,
+		})
+
+		_ = cm.AddMessages(context.Background(),
+			llm.Message{Role: "user", Name: "P1", Content: "msg-0"},
+			llm.Message{Role: "assistant", Name: "NPC", Content: "reply-0"},
+			llm.Message{Role: "user", Name: "P1", Content: "msg-1"},
+			llm.Message{Role: "assistant", Name: "NPC", Content: "reply-1"},
+		)
+
+		c := NewConsolidator(ConsolidatorConfig{
+			Store:         store,
+			ContextMgr:    cm,
+			SessionID:     "session-partial-l2",
+			SemanticIndex: semantic,
+			EmbedProvider: embedProv,
+		})
+
+		// Partial failure — only 2 of 4 entries written.
+		_ = c.ConsolidateNow(context.Background())
+
+		// L2 should have received only the 2 successful entries.
+		if semantic.CallCount("IndexChunk") != 2 {
+			t.Errorf("expected 2 IndexChunk calls for successful entries, got %d", semantic.CallCount("IndexChunk"))
+		}
+	})
 }

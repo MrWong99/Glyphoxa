@@ -5,13 +5,19 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	agentmock "github.com/MrWong99/glyphoxa/internal/agent/mock"
 	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
 	enginemock "github.com/MrWong99/glyphoxa/internal/engine/mock"
 	"github.com/MrWong99/glyphoxa/internal/transcript"
+	"github.com/MrWong99/glyphoxa/pkg/audio"
+	audiomock "github.com/MrWong99/glyphoxa/pkg/audio/mock"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
+	sttmock "github.com/MrWong99/glyphoxa/pkg/provider/stt/mock"
+	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
+	vadmock "github.com/MrWong99/glyphoxa/pkg/provider/vad/mock"
 )
 
 // ─── mockSTTSession ───────────────────────────────────────────────────────────
@@ -202,6 +208,52 @@ func TestAudioPipeline_UpdateKeywords(t *testing.T) {
 	}
 }
 
+// ─── TestCollectAndRoute_ContextCancellation ──────────────────────────────────
+
+// TestCollectAndRoute_ContextCancellation verifies that collectAndRoute exits
+// promptly when its context is cancelled, even if the STT session's Finals()
+// channel is never closed. This guards against goroutine leaks when a
+// participant leaves mid-utterance and the STT provider doesn't clean up.
+func TestCollectAndRoute_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	orch, npc := newTestNPCAndOrch()
+
+	p := &audioPipeline{
+		orch:     orch,
+		pipeline: nil,
+		entities: nil,
+	}
+
+	// Create an STT session whose Finals() channel is never closed.
+	hangingSession := &mockSTTSession{
+		finals: make(chan stt.Transcript), // unbuffered, never written to or closed
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		p.collectAndRoute(ctx, "player-1", hangingSession)
+		close(done)
+	}()
+
+	// Cancel the context — collectAndRoute must exit.
+	cancel()
+
+	select {
+	case <-done:
+		// Success: goroutine exited.
+	case <-time.After(2 * time.Second):
+		t.Fatal("collectAndRoute did not exit after context cancellation (goroutine leak)")
+	}
+
+	// No utterances should have been handled.
+	if len(npc.HandleUtteranceCalls) != 0 {
+		t.Errorf("HandleUtterance called %d times, want 0", len(npc.HandleUtteranceCalls))
+	}
+}
+
 // ─── TestCollectAndRoute_CorrectionError ──────────────────────────────────────
 
 // TestCollectAndRoute_CorrectionError verifies that when the correction
@@ -235,5 +287,75 @@ func TestCollectAndRoute_CorrectionError(t *testing.T) {
 	}
 	if pipe.calls != 1 {
 		t.Errorf("pipeline.Correct called %d times, want 1", pipe.calls)
+	}
+}
+
+// ─── TestAudioPipeline_ConcurrentKeywordUpdate ────────────────────────────────
+
+// TestAudioPipeline_ConcurrentKeywordUpdate verifies that concurrent calls to
+// UpdateKeywords do not race with processParticipant reading sttCfg. The VAD
+// mock always returns SpeechStart so every frame triggers a StartStream call
+// (and thus an sttCfg read). Run with -race to detect unsynchronized access.
+func TestAudioPipeline_ConcurrentKeywordUpdate(t *testing.T) {
+	t.Parallel()
+
+	// VAD always returns SpeechStart so each frame triggers StartStream.
+	vadSess := &vadmock.Session{
+		EventResult: vad.VADEvent{Type: vad.VADSpeechStart, Probability: 0.9},
+	}
+	vadEng := &vadmock.Engine{Session: vadSess}
+
+	sttProv := &sttmock.Provider{}
+	orch, _ := newTestNPCAndOrch()
+	mixer := &audiomock.Mixer{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := newAudioPipeline(audioPipelineConfig{
+		vadEngine:   vadEng,
+		sttProvider: sttProv,
+		orch:        orch,
+		mixer:       mixer,
+		vadCfg:      vad.Config{SampleRate: 16000, FrameSizeMs: 30},
+		sttCfg:      stt.StreamConfig{SampleRate: 16000, Channels: 1},
+		ctx:         ctx,
+	})
+
+	frames := make(chan audio.AudioFrame, 100)
+	frameSize := 16000 * 30 / 1000 * 2 // bytes per VAD frame
+
+	// Pre-fill frames and close the channel.
+	for range 20 {
+		frames <- audio.AudioFrame{
+			Data:       make([]byte, frameSize),
+			SampleRate: 16000,
+			Channels:   1,
+		}
+	}
+	close(frames)
+
+	// Goroutine: concurrently update keywords while processParticipant runs.
+	var kwWG sync.WaitGroup
+	kwWG.Add(1)
+	go func() {
+		defer kwWG.Done()
+		for i := range 200 {
+			p.UpdateKeywords([]stt.KeywordBoost{
+				{Keyword: "Eldrinax", Boost: float64(i)},
+				{Keyword: "Greymantle", Boost: 1.0},
+			})
+		}
+	}()
+
+	// Run processParticipant — it reads from the pre-filled frames channel.
+	p.processParticipant(ctx, "player-test", frames)
+
+	kwWG.Wait()
+
+	// The test passes if -race detects no data race. Verify StartStream
+	// was called at least once (sttCfg was actually read).
+	if len(sttProv.StartStreamCalls) == 0 {
+		t.Fatal("expected at least 1 StartStream call (sttCfg must have been read)")
 	}
 }

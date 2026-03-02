@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -168,6 +169,9 @@ func TestSetKeywords_ReturnsError(t *testing.T) {
 	err := h.SetKeywords([]stt.KeywordBoost{{Keyword: "Eldrinax", Boost: 5}})
 	if err == nil {
 		t.Fatal("expected error from SetKeywords, got nil")
+	}
+	if !errors.Is(err, stt.ErrNotSupported) {
+		t.Fatalf("expected errors.Is(err, stt.ErrNotSupported), got %v", err)
 	}
 }
 

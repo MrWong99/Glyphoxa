@@ -206,10 +206,8 @@ func (s *session) SetKeywords(keywords []stt.KeywordBoost) error {
 	s.kwMu.Lock()
 	s.keywords = keywords
 	s.kwMu.Unlock()
-	return fmt.Errorf("deepgram: %w", errNotSupported)
+	return fmt.Errorf("deepgram: %w", stt.ErrNotSupported)
 }
-
-var errNotSupported = errors.New("mid-session keyword updates are not supported")
 
 // Close terminates the session cleanly.
 func (s *session) Close() error {

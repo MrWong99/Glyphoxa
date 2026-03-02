@@ -73,8 +73,12 @@ type toolEntry struct {
 }
 
 // serverConn holds a live connection to an external MCP server.
+// The inflight WaitGroup tracks in-progress CallTool calls so that
+// RegisterServer and Close can wait for them to finish before closing
+// the underlying session.
 type serverConn struct {
-	session *mcpsdk.ClientSession
+	session  *mcpsdk.ClientSession
+	inflight sync.WaitGroup
 }
 
 // Host is a concrete implementation of [mcp.Host].
@@ -86,8 +90,8 @@ type serverConn struct {
 // The zero value is NOT usable; create instances with [New].
 type Host struct {
 	mu      sync.RWMutex
-	tools   map[string]toolEntry  // key: tool name
-	servers map[string]serverConn // key: server name
+	tools   map[string]toolEntry   // key: tool name
+	servers map[string]*serverConn // key: server name
 
 	// client is reused across all server connections. The official SDK allows
 	// a single Client to manage multiple sessions concurrently.
@@ -107,7 +111,7 @@ func New() *Host {
 	)
 	return &Host{
 		tools:   make(map[string]toolEntry),
-		servers: make(map[string]serverConn),
+		servers: make(map[string]*serverConn),
 		client:  client,
 	}
 }
@@ -169,11 +173,11 @@ func (h *Host) RegisterServer(ctx context.Context, cfg mcp.ServerConfig) error {
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 
-	// Close the old connection if it exists.
+	// Capture the old connection for deferred close outside the lock.
+	var oldConn *serverConn
 	if old, ok := h.servers[cfg.Name]; ok {
-		_ = old.session.Close()
+		oldConn = old
 		// Remove tools that belonged to this server.
 		for name, t := range h.tools {
 			if t.serverName == cfg.Name {
@@ -182,12 +186,22 @@ func (h *Host) RegisterServer(ctx context.Context, cfg mcp.ServerConfig) error {
 		}
 	}
 
-	h.servers[cfg.Name] = serverConn{session: session}
+	h.servers[cfg.Name] = &serverConn{session: session}
 
 	// Register each discovered tool.
 	for _, mcpTool := range discoveredTools {
 		entry := buildToolEntry(mcpTool, cfg.Name)
 		h.tools[mcpTool.Name] = entry
+	}
+
+	h.mu.Unlock()
+
+	// Close the old connection outside the lock after waiting for in-flight
+	// calls to finish. This prevents the TOCTOU race where CallTool operates
+	// on a session that's been closed by RegisterServer.
+	if oldConn != nil {
+		oldConn.inflight.Wait()
+		_ = oldConn.session.Close()
 	}
 
 	return nil
@@ -360,11 +374,15 @@ func (h *Host) executeBuiltin(ctx context.Context, entry toolEntry, args string)
 func (h *Host) executeMCPTool(ctx context.Context, entry toolEntry, args string) (*mcp.ToolResult, error) {
 	h.mu.RLock()
 	conn, ok := h.servers[entry.serverName]
+	if ok {
+		conn.inflight.Add(1)
+	}
 	h.mu.RUnlock()
 
 	if !ok {
 		return nil, fmt.Errorf("mcp host: server %q not found for tool %q", entry.serverName, entry.def.Name)
 	}
+	defer conn.inflight.Done()
 
 	// Decode args into a map for the SDK.
 	var argsMap map[string]any
@@ -447,18 +465,23 @@ func tierFromMeasuredP50(p50Ms int64) mcp.BudgetTier {
 // After Close returns the Host must not be used again.
 func (h *Host) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	var firstErr error
+	// Snapshot server connections and clear maps under the lock.
+	snapshot := make(map[string]*serverConn, len(h.servers))
 	for name, conn := range h.servers {
+		snapshot[name] = conn
+	}
+	h.servers = make(map[string]*serverConn)
+	h.tools = make(map[string]toolEntry)
+	h.mu.Unlock()
+
+	// Wait for in-flight calls and close sessions outside the lock.
+	var firstErr error
+	for name, conn := range snapshot {
+		conn.inflight.Wait()
 		if err := conn.session.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("mcp host: error closing server %q: %w", name, err)
 		}
-		delete(h.servers, name)
 	}
-
-	// Clear the tool registry.
-	h.tools = make(map[string]toolEntry)
 
 	return firstErr
 }

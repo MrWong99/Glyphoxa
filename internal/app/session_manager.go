@@ -315,19 +315,14 @@ func (sm *SessionManager) Stop(ctx context.Context) error {
 		sm.consolidator.Stop()
 	}
 
-	// Disconnect from voice.
-	if sm.conn != nil {
-		if err := sm.conn.Disconnect(); err != nil {
-			slog.Warn("session: voice disconnect error", "session_id", sessionID, "err", err)
-		}
-	}
-
-	// Cancel session context (stops consolidator loop and background work).
+	// Cancel session context — stops pipeline workers, consolidator loop,
+	// and background goroutines. Must happen before closers so that no new
+	// work starts during teardown.
 	if sm.cancel != nil {
 		sm.cancel()
 	}
 
-	// Run closers (engines, mixer) in reverse order.
+	// Run closers (engines, pipeline, mixer) in reverse order.
 	// engine.Close() closes the Transcripts() channel, which lets any
 	// recorder goroutines in their drain loop finish.
 	for i := len(sm.closers) - 1; i >= 0; i-- {
@@ -339,6 +334,14 @@ func (sm *SessionManager) Stop(ctx context.Context) error {
 	// Wait for transcript recorders to finish draining all buffered entries
 	// before we clear state.
 	sm.recorderWG.Wait()
+
+	// Disconnect from voice last — no participant-change events can race
+	// with background goroutines since they have all exited.
+	if sm.conn != nil {
+		if err := sm.conn.Disconnect(); err != nil {
+			slog.Warn("session: voice disconnect error", "session_id", sessionID, "err", err)
+		}
+	}
 
 	// Clear state.
 	sm.active = false

@@ -1,6 +1,7 @@
 package deepgram
 
 import (
+	"errors"
 	"net/url"
 	"testing"
 	"time"
@@ -234,6 +235,21 @@ func TestNew_Defaults(t *testing.T) {
 	assertEqual(t, "language", defaultLanguage, p.language)
 	if p.sampleRate != defaultSampleRate {
 		t.Errorf("expected sampleRate %d, got %d", defaultSampleRate, p.sampleRate)
+	}
+}
+
+// ---- keyword support ----
+
+func TestSetKeywords_ReturnsErrNotSupported(t *testing.T) {
+	t.Parallel()
+	// SetKeywords only touches kwMu and keywords — no websocket needed.
+	s := &session{}
+	err := s.SetKeywords([]stt.KeywordBoost{{Keyword: "Eldrinax", Boost: 5}})
+	if err == nil {
+		t.Fatal("expected error from SetKeywords, got nil")
+	}
+	if !errors.Is(err, stt.ErrNotSupported) {
+		t.Fatalf("expected errors.Is(err, stt.ErrNotSupported), got %v", err)
 	}
 }
 

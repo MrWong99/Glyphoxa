@@ -99,7 +99,9 @@ type Session struct {
 	// SendAudioErr, if non-nil, is returned by every SendAudio call.
 	SendAudioErr error
 
-	// SetKeywordsErr, if non-nil, is returned by every SetKeywords call.
+	// SetKeywordsErr is returned by every SetKeywords call. Defaults to
+	// [stt.ErrNotSupported] to match real provider behavior. Set to nil to
+	// simulate a provider that supports mid-session keyword updates.
 	SetKeywordsErr error
 
 	// CloseErr, if non-nil, is returned by Close.

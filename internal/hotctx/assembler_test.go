@@ -326,3 +326,71 @@ func TestAssemble_WithOptions(t *testing.T) {
 		t.Error("GetRecent was not called with WithRecentDuration(10min)")
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assembly timeout tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// slowKnowledgeGraph wraps a mock.KnowledgeGraph and adds configurable latency
+// to IdentitySnapshot to simulate a slow database.
+type slowKnowledgeGraph struct {
+	*mock.KnowledgeGraph
+	delay time.Duration
+}
+
+func (s *slowKnowledgeGraph) IdentitySnapshot(ctx context.Context, npcID string) (*memory.NPCIdentity, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(s.delay):
+	}
+	return s.KnowledgeGraph.IdentitySnapshot(ctx, npcID)
+}
+
+// TestAssemble_TimeoutFires verifies that when a store is slower than the
+// assembly timeout, Assemble returns an error rather than silently blowing the
+// latency budget.
+func TestAssemble_TimeoutFires(t *testing.T) {
+	t.Parallel()
+
+	kg := &slowKnowledgeGraph{
+		KnowledgeGraph: &mock.KnowledgeGraph{
+			IdentitySnapshotResult: makeIdentity("npc-1", "Grimjaw"),
+		},
+		delay: 200 * time.Millisecond, // well over the 5ms timeout below
+	}
+	ss := &mock.SessionStore{
+		GetRecentResult: makeTranscript(2),
+	}
+
+	a := hotctx.NewAssembler(ss, kg, hotctx.WithAssemblyTimeout(5*time.Millisecond))
+	_, err := a.Assemble(context.Background(), "npc-1", "session-abc")
+	if err == nil {
+		t.Fatal("expected error from assembly timeout, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got: %v", err)
+	}
+}
+
+// TestAssemble_CustomTimeoutSuccess verifies that a generous custom timeout
+// allows assembly to succeed normally.
+func TestAssemble_CustomTimeoutSuccess(t *testing.T) {
+	t.Parallel()
+
+	kg := &mock.KnowledgeGraph{
+		IdentitySnapshotResult: makeIdentity("npc-1", "Grimjaw"),
+	}
+	ss := &mock.SessionStore{
+		GetRecentResult: makeTranscript(2),
+	}
+
+	a := hotctx.NewAssembler(ss, kg, hotctx.WithAssemblyTimeout(5*time.Second))
+	hctx, err := a.Assemble(context.Background(), "npc-1", "session-abc")
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if hctx.Identity == nil {
+		t.Fatal("Identity is nil")
+	}
+}

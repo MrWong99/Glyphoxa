@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -206,8 +207,15 @@ func (p *audioPipeline) processParticipant(ctx context.Context, speakerID string
 					// Barge-in: interrupt current NPC playback and clear queue.
 					p.mixer.Interrupt(audio.PlayerBargeIn)
 
+					// Snapshot STT config under lock — UpdateKeywords may be
+					// writing p.sttCfg.Keywords concurrently.
+					p.mu.Lock()
+					cfg := p.sttCfg
+					cfg.Keywords = slices.Clone(p.sttCfg.Keywords)
+					p.mu.Unlock()
+
 					// Open a new STT session.
-					sttSession, err = p.sttProvider.StartStream(ctx, p.sttCfg)
+					sttSession, err = p.sttProvider.StartStream(ctx, cfg)
 					if err != nil {
 						slog.Error("audio pipeline: start STT stream",
 							"speaker", speakerID, "err", err)
@@ -255,48 +263,61 @@ func (p *audioPipeline) processParticipant(ctx context.Context, speakerID string
 // collectAndRoute drains final transcripts from an STT session, optionally
 // applies transcript correction, and routes each to the appropriate NPC agent
 // via the orchestrator.
+//
+// The function exits when ctx is cancelled or session.Finals() is closed,
+// whichever comes first. This ensures the goroutine does not leak if the STT
+// provider fails to close its channel on context cancellation.
 func (p *audioPipeline) collectAndRoute(ctx context.Context, speakerID string, session stt.SessionHandle) {
-	for t := range session.Finals() {
-		if strings.TrimSpace(t.Text) == "" {
-			continue
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t, ok := <-session.Finals():
+			if !ok {
+				return
+			}
 
-		// Apply transcript correction if pipeline and entities are available.
-		if p.pipeline != nil && p.entities != nil {
-			entities := p.entities()
-			if len(entities) > 0 {
-				corrected, err := p.pipeline.Correct(ctx, t, entities)
-				if err != nil {
-					slog.Warn("audio pipeline: transcript correction failed, using raw",
-						"speaker", speakerID, "err", err)
-				} else if corrected.Corrected != t.Text {
-					slog.Info("audio pipeline: transcript corrected",
-						"speaker", speakerID,
-						"raw", t.Text,
-						"corrected", corrected.Corrected,
-						"corrections", len(corrected.Corrections),
-					)
-					t.Text = corrected.Corrected
+			if strings.TrimSpace(t.Text) == "" {
+				continue
+			}
+
+			// Apply transcript correction if pipeline and entities are available.
+			if p.pipeline != nil && p.entities != nil {
+				entities := p.entities()
+				if len(entities) > 0 {
+					corrected, err := p.pipeline.Correct(ctx, t, entities)
+					if err != nil {
+						slog.Warn("audio pipeline: transcript correction failed, using raw",
+							"speaker", speakerID, "err", err)
+					} else if corrected.Corrected != t.Text {
+						slog.Info("audio pipeline: transcript corrected",
+							"speaker", speakerID,
+							"raw", t.Text,
+							"corrected", corrected.Corrected,
+							"corrections", len(corrected.Corrections),
+						)
+						t.Text = corrected.Corrected
+					}
 				}
 			}
-		}
 
-		slog.Info("audio pipeline: transcript",
-			"speaker", speakerID,
-			"text", t.Text,
-			"confidence", t.Confidence,
-		)
+			slog.Info("audio pipeline: transcript",
+				"speaker", speakerID,
+				"text", t.Text,
+				"confidence", t.Confidence,
+			)
 
-		target, err := p.orch.Route(ctx, speakerID, t)
-		if err != nil {
-			slog.Debug("audio pipeline: route transcript",
-				"speaker", speakerID, "err", err)
-			continue
-		}
+			target, err := p.orch.Route(ctx, speakerID, t)
+			if err != nil {
+				slog.Debug("audio pipeline: route transcript",
+					"speaker", speakerID, "err", err)
+				continue
+			}
 
-		if err := target.HandleUtterance(ctx, speakerID, t); err != nil {
-			slog.Error("audio pipeline: handle utterance",
-				"speaker", speakerID, "npc", target.Name(), "err", err)
+			if err := target.HandleUtterance(ctx, speakerID, t); err != nil {
+				slog.Error("audio pipeline: handle utterance",
+					"speaker", speakerID, "npc", target.Name(), "err", err)
+			}
 		}
 	}
 }

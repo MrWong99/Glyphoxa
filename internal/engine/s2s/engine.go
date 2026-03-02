@@ -168,7 +168,9 @@ func (e *Engine) ensureSessionLocked(ctx context.Context) error {
 
 	// Apply any previously registered tools and handler.
 	if len(e.tools) > 0 {
-		_ = sess.SetTools(e.tools)
+		if err := sess.SetTools(e.tools); err != nil {
+			slog.Warn("s2s: failed to restore tools on reconnect", "err", err)
+		}
 	}
 	if e.toolHandler != nil {
 		sess.OnToolCall(e.toolHandler)
@@ -214,12 +216,18 @@ func (e *Engine) Process(ctx context.Context, input audio.AudioFrame, prompt eng
 	// Inject prompt context updates. SessionHandle methods are concurrency-safe
 	// and may block on network I/O, so they are called without holding e.mu.
 	if prompt.SystemPrompt != "" {
-		_ = session.UpdateInstructions(prompt.SystemPrompt)
+		if err := session.UpdateInstructions(prompt.SystemPrompt); err != nil {
+			slog.Warn("s2s: failed to update instructions", "err", err)
+			return nil, fmt.Errorf("s2s: update instructions: %w", err)
+		}
 	}
 	if prompt.HotContext != "" {
-		_ = session.InjectTextContext([]providers2s.ContextItem{
+		if err := session.InjectTextContext([]providers2s.ContextItem{
 			{Role: "system", Content: prompt.HotContext},
-		})
+		}); err != nil {
+			slog.Warn("s2s: failed to inject text context", "err", err)
+			return nil, fmt.Errorf("s2s: inject context: %w", err)
+		}
 	}
 
 	// Send audio frame to the session.

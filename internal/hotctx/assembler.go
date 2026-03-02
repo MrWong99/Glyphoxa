@@ -69,11 +69,12 @@ type SceneContext struct {
 // Assembler concurrently fetches all three hot-layer components and combines
 // them into a [HotContext].
 type Assembler struct {
-	sessionStore   memory.SessionStore
-	graph          memory.KnowledgeGraph
-	recentDuration time.Duration
-	maxEntries     int
-	preFetcher     *PreFetcher
+	sessionStore    memory.SessionStore
+	graph           memory.KnowledgeGraph
+	recentDuration  time.Duration
+	maxEntries      int
+	preFetcher      *PreFetcher
+	assemblyTimeout time.Duration
 }
 
 // Option is a functional option for [NewAssembler].
@@ -100,14 +101,24 @@ func WithPreFetcher(pf *PreFetcher) Option {
 	return func(a *Assembler) { a.preFetcher = pf }
 }
 
+// WithAssemblyTimeout overrides the deadline applied to the critical-path
+// fetches (identity snapshot, recent transcript, scene context). If the
+// fetches do not complete within d, [Assembler.Assemble] returns a
+// context.DeadlineExceeded error. Defaults to 50 ms per the design target.
+// The pre-fetcher has its own independent timeout and is not affected.
+func WithAssemblyTimeout(d time.Duration) Option {
+	return func(a *Assembler) { a.assemblyTimeout = d }
+}
+
 // NewAssembler creates an [Assembler] with sensible defaults.
 // Apply [Option] values to override the defaults.
 func NewAssembler(sessionStore memory.SessionStore, graph memory.KnowledgeGraph, opts ...Option) *Assembler {
 	a := &Assembler{
-		sessionStore:   sessionStore,
-		graph:          graph,
-		recentDuration: 5 * time.Minute,
-		maxEntries:     50,
+		sessionStore:    sessionStore,
+		graph:           graph,
+		recentDuration:  5 * time.Minute,
+		maxEntries:      50,
+		assemblyTimeout: 50 * time.Millisecond,
 	}
 	for _, o := range opts {
 		o(a)
@@ -126,13 +137,18 @@ func NewAssembler(sessionStore memory.SessionStore, graph memory.KnowledgeGraph,
 func (a *Assembler) Assemble(ctx context.Context, npcID string, sessionID string) (*HotContext, error) {
 	start := time.Now()
 
+	// Apply the assembly timeout to the critical-path fetches. The
+	// pre-fetcher has its own independent timeout and uses the original ctx.
+	assemblyCtx, assemblyCancel := context.WithTimeout(ctx, a.assemblyTimeout)
+	defer assemblyCancel()
+
 	var (
 		identity   *memory.NPCIdentity
 		transcript []memory.TranscriptEntry
 		scene      *SceneContext
 	)
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	eg, egCtx := errgroup.WithContext(assemblyCtx)
 
 	// ── goroutine 1: NPC identity snapshot ───────────────────────────────────
 	eg.Go(func() error {

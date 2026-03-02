@@ -13,7 +13,13 @@ package stt
 
 import (
 	"context"
+	"errors"
 )
+
+// ErrNotSupported is returned by [SessionHandle] methods when the underlying
+// provider does not support the requested operation (e.g., mid-session keyword
+// updates). Callers can check for it with [errors.Is].
+var ErrNotSupported = errors.New("stt: operation not supported")
 
 // StreamConfig describes the audio format and recognition hints for a new STT
 // session. All fields must be compatible with what the underlying provider supports;
