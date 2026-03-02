@@ -32,6 +32,7 @@ import (
 	oais2s "github.com/MrWong99/glyphoxa/pkg/provider/s2s/openai"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt/deepgram"
+	elevenlabsstt "github.com/MrWong99/glyphoxa/pkg/provider/stt/elevenlabs"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt/whisper"
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts/coqui"
@@ -263,6 +264,17 @@ func registerBuiltinProviders(reg *config.Registry, bot **discordbot.Bot) {
 			opts = append(opts, whisper.WithNativeLanguage(lang))
 		}
 		return whisper.NewNative(modelPath, opts...)
+	})
+
+	reg.RegisterSTT("elevenlabs", func(entry config.ProviderEntry) (stt.Provider, error) {
+		var opts []elevenlabsstt.Option
+		if entry.Model != "" {
+			opts = append(opts, elevenlabsstt.WithModel(entry.Model))
+		}
+		if lang := optString(entry.Options, "language"); lang != "" {
+			opts = append(opts, elevenlabsstt.WithLanguage(lang))
+		}
+		return elevenlabsstt.New(entry.APIKey, opts...)
 	})
 
 	// ── TTS ───────────────────────────────────────────────────────────────────

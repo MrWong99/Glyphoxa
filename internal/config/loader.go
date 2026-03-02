@@ -16,7 +16,7 @@ import (
 // Used by [Validate] to warn about unrecognised provider names.
 var ValidProviderNames = map[string][]string{
 	"llm":        {"openai", "anthropic", "ollama", "gemini", "deepseek", "mistral", "groq", "llamacpp", "llamafile"},
-	"stt":        {"deepgram", "whisper", "whisper-native"},
+	"stt":        {"deepgram", "whisper", "whisper-native", "elevenlabs"},
 	"tts":        {"elevenlabs", "coqui"},
 	"s2s":        {"openai-realtime", "gemini-live"},
 	"embeddings": {"openai", "ollama"},
