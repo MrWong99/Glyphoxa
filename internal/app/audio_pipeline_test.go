@@ -309,8 +309,7 @@ func TestAudioPipeline_ConcurrentKeywordUpdate(t *testing.T) {
 	orch, _ := newTestNPCAndOrch()
 	mixer := &audiomock.Mixer{}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	p := newAudioPipeline(audioPipelineConfig{
 		vadEngine:   vadEng,
@@ -337,16 +336,14 @@ func TestAudioPipeline_ConcurrentKeywordUpdate(t *testing.T) {
 
 	// Goroutine: concurrently update keywords while processParticipant runs.
 	var kwWG sync.WaitGroup
-	kwWG.Add(1)
-	go func() {
-		defer kwWG.Done()
+	kwWG.Go(func() {
 		for i := range 200 {
 			p.UpdateKeywords([]stt.KeywordBoost{
 				{Keyword: "Eldrinax", Boost: float64(i)},
 				{Keyword: "Greymantle", Boost: 1.0},
 			})
 		}
-	}()
+	})
 
 	// Run processParticipant — it reads from the pre-filled frames channel.
 	p.processParticipant(ctx, "player-test", frames)

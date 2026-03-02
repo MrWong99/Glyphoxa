@@ -40,6 +40,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os/exec"
 	"strings"
 	"sync"
@@ -467,9 +468,7 @@ func (h *Host) Close() error {
 	h.mu.Lock()
 	// Snapshot server connections and clear maps under the lock.
 	snapshot := make(map[string]*serverConn, len(h.servers))
-	for name, conn := range h.servers {
-		snapshot[name] = conn
-	}
+	maps.Copy(snapshot, h.servers)
 	h.servers = make(map[string]*serverConn)
 	h.tools = make(map[string]toolEntry)
 	h.mu.Unlock()

@@ -59,7 +59,6 @@ const (
 // Compile-time assertion that Provider implements stt.Provider.
 var _ stt.Provider = (*Provider)(nil)
 
-
 // Option is a functional option for configuring a Provider.
 type Option func(*Provider)
 
