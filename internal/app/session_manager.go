@@ -58,6 +58,10 @@ type SessionManager struct {
 	agents       []agent.NPCAgent
 	cancel       context.CancelFunc
 
+	// recorderWG tracks in-flight transcript recorder goroutines.
+	// Zero-value is ready; no initialisation required.
+	recorderWG sync.WaitGroup
+
 	// closers are called in reverse order during Stop.
 	closers []func() error
 
@@ -174,6 +178,15 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		consolid.Start(sessionCtx)
 	}
 
+	// Start transcript recorders for each NPC agent.
+	if sm.sessionStore != nil {
+		for _, ag := range agents {
+			sm.recorderWG.Go(func() {
+				sm.recordTranscripts(sessionCtx, ag, sessionID)
+			})
+		}
+	}
+
 	// Wire input pipeline: Discord → VAD → STT → Agent.
 	if sm.providers.VAD != nil && sm.providers.STT != nil {
 		pipeline := newAudioPipeline(audioPipelineConfig{
@@ -252,11 +265,17 @@ func (sm *SessionManager) Stop(ctx context.Context) error {
 	}
 
 	// Run closers (engines, mixer) in reverse order.
+	// engine.Close() closes the Transcripts() channel, which lets any
+	// recorder goroutines in their drain loop finish.
 	for i := len(sm.closers) - 1; i >= 0; i-- {
 		if err := sm.closers[i](); err != nil {
 			slog.Warn("session: closer error", "session_id", sessionID, "index", i, "err", err)
 		}
 	}
+
+	// Wait for transcript recorders to finish draining all buffered entries
+	// before we clear state.
+	sm.recorderWG.Wait()
 
 	// Clear state.
 	sm.active = false
@@ -354,6 +373,35 @@ func (sm *SessionManager) PropagateEntity(ctx context.Context, def entity.Entity
 	slog.Debug("propagate entity: STT keyword boost not yet wired for mid-session updates", "name", stored.Name)
 
 	return stored, nil
+}
+
+// recordTranscripts drains the engine's transcript channel and writes entries
+// to the session store. It exits when the channel is closed or the context is
+// cancelled. On context cancellation it drains any remaining buffered entries
+// before returning, so no in-flight transcripts are lost.
+func (sm *SessionManager) recordTranscripts(ctx context.Context, ag agent.NPCAgent, sessionID string) {
+	ch := ag.Engine().Transcripts()
+	for {
+		select {
+		case <-ctx.Done():
+			// Drain remaining buffered entries before exiting. The engine's
+			// Close() (called by the closers loop in Stop()) will close ch,
+			// which terminates this range loop.
+			for entry := range ch {
+				if err := sm.sessionStore.WriteEntry(context.Background(), sessionID, entry); err != nil {
+					slog.Warn("session: failed to record transcript on drain", "npc", ag.Name(), "err", err)
+				}
+			}
+			return
+		case entry, ok := <-ch:
+			if !ok {
+				return
+			}
+			if err := sm.sessionStore.WriteEntry(ctx, sessionID, entry); err != nil {
+				slog.Warn("session: failed to record transcript", "npc", ag.Name(), "err", err)
+			}
+		}
+	}
 }
 
 // loadAgents creates per-NPC engines and agents, mirroring App.initAgents.

@@ -447,14 +447,33 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // recordTranscripts drains the engine's transcript channel and writes entries
-// to the session store.
+// to the session store. On context cancellation it drains any remaining
+// buffered entries before returning, so no in-flight transcripts are lost
+// (fixes the context-cancellation race described in TODOS #12).
 func (a *App) recordTranscripts(ctx context.Context, ag agent.NPCAgent) {
 	ch := ag.Engine().Transcripts()
 	sid := a.sessionID()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			// Non-blocking drain of any buffered entries that arrived before
+			// the context was cancelled. We do NOT block on channel close here
+			// because the engine's Transcripts channel is only closed when
+			// engine.Close() is called during Shutdown — which happens after
+			// Run returns. Blocking on range would deadlock.
+			for {
+				select {
+				case entry, ok := <-ch:
+					if !ok {
+						return
+					}
+					if err := a.sessions.WriteEntry(context.Background(), sid, entry); err != nil {
+						slog.Warn("failed to record transcript on drain", "npc", ag.Name(), "err", err)
+					}
+				default:
+					return
+				}
+			}
 		case entry, ok := <-ch:
 			if !ok {
 				return
