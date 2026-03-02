@@ -1,92 +1,147 @@
 # TODOS — Codebase Audit (2026-03-02)
 
 Audit comparing implementation against `docs/design/` specifications.
+Runtime bugs from live testing session (2026-03-03, config `v1.yaml`).
 
 ---
 
-## HIGH
+## HIGH — Runtime bugs (from live session 2026-03-03)
 
-### 1. ~~`collectAndRoute` goroutine can hang forever, deadlocking `Stop()`~~ FIXED
+### 10. TTS sample rate mismatch causes pitched-up NPC voices
 
-**`internal/app/audio_pipeline.go`**
+**`internal/app/app.go:438-443`, `internal/engine/cascade/cascade.go:159`**
 
-Replaced `for t := range session.Finals()` with a `select` loop that also listens
-on `ctx.Done()`. Added `TestCollectAndRoute_ContextCancellation` to verify the
-goroutine exits promptly when context is cancelled even if `Finals()` never closes.
+`buildEngine()` creates a cascade engine without passing `WithTTSFormat()`.
+The cascade engine defaults to `ttsSampleRate = 22050`. But ElevenLabs TTS
+actually outputs at 16000 Hz (correctly detected by `ttsFormatFromConfig()`
+at line 482, but only used for the agent loader, not the main engine).
 
-### 2. ~~Hot context assembler has no timeout — silently blows latency budget~~ FIXED
+The Discord send path sees the audio tagged as 22050 Hz mono and resamples to
+48000 Hz stereo using the wrong ratio (22050/48000 instead of 16000/48000).
+This stretches/compresses samples incorrectly, producing audible pitch shift.
 
-**`internal/hotctx/assembler.go`**
+Log evidence: `audio format mismatch: converting from="22050Hz mono" to="48000Hz stereo"`
 
-Added `assemblyTimeout` field (default 50ms) with `WithAssemblyTimeout` option.
-`Assemble` now wraps the caller's context with `context.WithTimeout` before the
-critical-path errgroup. The pre-fetcher retains its own independent 40ms timeout.
-Added `TestAssemble_TimeoutFires` and `TestAssemble_CustomTimeoutSuccess`.
+**Fix**: Pass `cascade.WithTTSFormat(sr, ch)` from `ttsFormatFromConfig()` into
+the `cascade.New()` call in `buildEngine()`. Requires threading the TTS provider
+config entry through.
+
+### 11. LLM transcript correction is overly aggressive / runs unconstrained
+
+**`internal/transcript/corrector.go:129-131`, `internal/transcript/llmcorrect/`**
+
+The LLM correction always runs when there is no per-word confidence data
+(`len(t.Words) == 0`). Even when per-word data IS present, the LLM ignores its
+own "be conservative" system prompt and aggressively replaces arbitrary words
+with NPC names, destroying the original meaning:
+
+- `"Wir sind heute in einer Story, die befindet sich."` →
+  `"Wir sind heute in Hildegard die Kräuterfrau befindet sich."` —
+  replaced `"einer Story, die"` with an NPC name. The original was correct;
+  the user was describing the setting, not addressing an NPC. This forced the
+  NPC to respond out of context.
+- `"Ist die des."` → `"Hildegard die Kräuterfrau"` — entire utterance replaced.
+- `"Wenn ich über die Pflanzen am Talgrund rede"` →
+  `"Wenn Hildegard die Kräuterfrau Pflanzen am Talgrund rede"` — replaced
+  `"ich über die"`.
+
+The verification layer (`llmcorrect/verify.go`) validates that claimed
+corrections exist in the token diff but does not validate plausibility (i.e.,
+whether the original text actually sounds like an NPC name).
+
+**Fix options**:
+- Add edit-distance or phonetic-similarity threshold in the verifier to reject
+  corrections where the original bears no resemblance to any known entity name.
+- Skip LLM correction entirely when per-word confidence is unavailable (rather
+  than treating "no data" as "all low confidence").
+- Consider making LLM correction opt-in via config.
+
+### 12. ElevenLabs STT session close always times out (goroutine lifecycle bug)
+
+**`pkg/provider/stt/elevenlabs/elevenlabs.go:268-286`**
+
+`Close()` signals `s.done`, then waits up to 5 s for `writeLoop` and `readLoop`
+to exit. But `readLoop` blocks on `s.conn.Read(ctx)` and has no `select` on
+`s.done`. The websocket close at line 283 (which would unblock `readLoop`)
+only happens _after_ the wait times out. So the timeout fires on every single
+session close — it is not a transient failure.
+
+Log evidence: `elevenlabs: close timed out waiting for goroutines` appears after
+every speech segment without exception.
+
+**Fix**: Close the websocket connection (or cancel a derived context) _before_
+`wg.Wait()` so `readLoop`'s `conn.Read` returns an error and the goroutine
+exits promptly. Ensure `writeLoop` sends its final commit first (e.g., wait on a
+`writeLoop`-specific done signal before closing the socket).
+
+### 13. Knowledge graph `Neighbors()` recursive CTE fails on PostgreSQL
+
+**`pkg/memory/postgres/knowledge_graph.go:293-331`**
+
+The bidirectional traversal query uses two `UNION ALL` branches that both
+reference `reachable`. PostgreSQL parses `A UNION ALL B UNION ALL C` as
+`(A UNION ALL B) UNION ALL C`, making `B` part of the "non-recursive term" of
+the outer union — which then contains a recursive self-reference, violating
+SQL:1999 rules (SQLSTATE 42P19).
+
+Log evidence: `pre-fetch: retrieve: neighbors lookup failed … ERROR: recursive
+reference to query "reachable" must not appear within its non-recursive term`
+
+This breaks knowledge graph neighbor lookups during hot-context assembly,
+degrading NPC context quality.
+
+**Fix**: Merge the two recursive legs into a single `SELECT` using a
+sub-`UNION` for the join direction, or restructure as two separate CTEs.
+
+### 14. ElevenLabs STT emits duplicate final transcripts
+
+**`pkg/provider/stt/elevenlabs/elevenlabs.go:389`**
+
+`parseResponse` handles both `"committed_transcript"` and
+`"committed_transcript_with_timestamps"` as `IsFinal = true`. If ElevenLabs
+sends both message types for the same commit (which it does), the same
+transcript is emitted twice on the `finals` channel. Downstream processing
+(correction + routing) runs twice for the identical utterance.
+
+Log evidence: identical transcript `"Ist die des."` corrected and routed twice
+at 00:39:35.646 and 00:39:35.836.
+
+**Fix**: Track the last committed text (or a sequence ID) and deduplicate, or
+only handle one of the two message types.
 
 ---
 
-## MEDIUM
+## MEDIUM — Runtime bugs (from live session 2026-03-03)
 
-### 3. ~~`sttCfg` data race in audio pipeline~~ FIXED
+### 15. Orchestrator routing fails for most utterances after mute/unmute cycle
 
-**`internal/app/audio_pipeline.go`**
+**`internal/agent/orchestrator/address.go`, `orchestrator.go`**
 
-Snapshot `p.sttCfg` under `p.mu.Lock()` at `VADSpeechStart` with `slices.Clone()`
-for the Keywords slice. Added `TestAudioPipeline_ConcurrentKeywordUpdate` to verify
-no races under concurrent `UpdateKeywords` + `processParticipant`.
+After `/npc muteall` + `/npc unmuteall`, no NPCs respond. The mute state itself
+is cleared correctly (`UnmuteAll` sets `entry.muted = false`), but the routing
+chain (explicit name match → DM override → last-speaker → single-NPC fallback)
+fails because:
 
-### 4. ~~Consolidator advances `lastIndex` despite L1 write failures~~ FIXED
+1. The single-NPC fallback only fires when exactly 1 NPC is unmuted; with 3
+   unmuted NPCs it is skipped.
+2. Last-speaker continuation requires a previous successful route, which may
+   not exist after a mute cycle resets conversational flow.
+3. Explicit name matching via `strings.Contains` on the transcript fails when
+   the transcript has been corrupted by LLM correction (see #11) or when the
+   user simply doesn't say an NPC name.
 
-**`internal/session/consolidator.go`**
+The net effect is that with 3 NPCs and no explicit name in the utterance,
+routing returns `"orchestrator: no target NPC identified"` every time.
 
-Track `newLastIndex` separately — only advance past successfully written entries.
-Break on first `WriteEntry` failure so subsequent entries are retried on the next
-tick. Only successfully written entries are passed to `indexChunks`.
-Added `TestConsolidate_WriteFailure` with partial failure, all-fail, and L2
-consistency subtests.
-
-### 5. ~~S2S engine silently drops context injection errors~~ FIXED
-
-**`internal/engine/s2s/engine.go`**
-
-- `SetTools` on reconnect: log `slog.Warn` (non-critical, don't propagate).
-- `UpdateInstructions` in `Process`: propagate error (critical path).
-- `InjectTextContext` in `Process`: propagate error (critical path).
-
-Added `TestProcess_UpdateInstructionsError`, `TestProcess_InjectTextContextError`,
-and `TestEnsureSession_SetToolsWarning`.
-
-### 6. ~~`stt.ErrNotSupported` sentinel doesn't exist~~ FIXED
-
-**`pkg/provider/stt/provider.go`**
-
-Added exported `var ErrNotSupported`. Deepgram and Whisper providers wrap it via
-`fmt.Errorf("provider: %w", stt.ErrNotSupported)`. Added `errors.Is` assertions
-in deepgram, whisper, and native whisper tests.
-
-### 7. ~~MCP host TOCTOU: server session can be closed mid-call~~ FIXED
-
-**`internal/mcp/mcphost/host.go`**
-
-Added `inflight sync.WaitGroup` to `serverConn` (now stored as `*serverConn`
-pointer in the map). `executeMCPTool` calls `inflight.Add(1)` under RLock before
-using the session, `Done()` after. `RegisterServer` and `Close` call
-`inflight.Wait()` outside the lock before closing old sessions. Added
-`TestCloseWaitsForInflight` and `TestConcurrentExecuteAndClose`.
-
-### 8. ~~Session manager: `Disconnect()` before `cancel()` ordering bug~~ FIXED
-
-**`internal/app/session_manager.go`**
-
-Reordered `Stop()`: consolidate → `cancel()` → closers in reverse →
-`recorderWG.Wait()` → `conn.Disconnect()` last. This ensures no participant-change
-events race with background goroutines during teardown.
+**Fix**: Consider a more robust fallback — e.g., use the LLM orchestrator to
+infer intent, or allow routing to the most contextually relevant NPC based on
+recent conversation history rather than requiring an explicit name.
 
 ---
 
 ## LOW
 
-### 9. `sentence_cascade` engine is a forward declaration only
+### 1. `sentence_cascade` engine is a forward declaration only
 
 **`internal/config/config.go`, `internal/app/app.go:431`**
 
@@ -94,7 +149,7 @@ events race with background goroutines during teardown.
 `EngineCascaded` — both LLM slots receive the same provider. The dual-model
 sentence cascade described in `05-sentence-cascade.md` is not implemented.
 
-### 10. Orchestrator `lastSpeaker` updated before success
+### 2. Orchestrator `lastSpeaker` updated before success
 
 **`internal/agent/orchestrator/orchestrator.go:123`**
 
@@ -104,7 +159,7 @@ target, corrupting conversational continuity state.
 
 **Fix**: Move the `lastSpeaker` assignment after the `InjectContext` call succeeds.
 
-### 11. Cascade sentence boundary: dead code in helper functions
+### 3. Cascade sentence boundary: dead code in helper functions
 
 **`internal/engine/cascade/cascade.go:689-694, 681`**
 
@@ -115,14 +170,14 @@ Both are effectively dead code (the outer guard still protects correctly, so no
 functional bugs). Also, the abbreviation allow-list is missing common
 TTRPG/military titles (`Adm`, `Capt`, `Pvt`, etc.).
 
-### 12. TTS `MeasureLatency()` specified in design but not implemented
+### 4. TTS `MeasureLatency()` specified in design but not implemented
 
 **`pkg/provider/tts/provider.go`**
 
 Design doc `02-providers.md` specifies `MeasureLatency(voice VoiceProfile) LatencyReport`
 on the TTS provider interface. This method does not exist in the codebase.
 
-### 13. Audio `OutputStream` per-NPC named output not in interface
+### 5. Audio `OutputStream` per-NPC named output not in interface
 
 **`pkg/audio/platform.go`**
 
@@ -130,7 +185,7 @@ Design specifies `OutputStream(voiceID string)` for per-NPC named output streams
 The actual interface has `OutputStream() chan<- AudioFrame` with no `voiceID`
 parameter — a single mixed output channel.
 
-### 14. Missing provider implementations from design
+### 6. Missing provider implementations from design
 
 Per `02-providers.md` and `07-technology.md`:
 
@@ -138,21 +193,21 @@ Per `02-providers.md` and `07-technology.md`:
 - **Cartesia** TTS provider — not implemented (only ElevenLabs + Coqui).
 - **Voyage AI** embeddings provider — not implemented (only OpenAI + Ollama).
 
-### 15. Missing built-in tool servers from design
+### 7. Missing built-in tool servers from design
 
 Per `04-mcp-tools.md`:
 
 - `image-gen`, `web-search`, `music-ambiance`, `session-manager` — not implemented
   (only dice-roller, file-io, memory tools, rules-lookup exist).
 
-### 16. WebRTC is a stub
+### 8. WebRTC is a stub
 
 **`pkg/audio/webrtc/`**
 
 `PeerTransport` has only a `mockTransport` with stub SDP. No real pion/webrtc
 integration. Signaling server returns mock SDPs. Documented as "alpha".
 
-### 17. Feedback store is file-based placeholder
+### 9. Feedback store is file-based placeholder
 
 **`internal/feedback/store.go`**
 
