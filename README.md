@@ -1,7 +1,3 @@
----
-permalink: /
----
-
 ![Glyphoxa](assets/banner-logo.png)
 
 # 🐉 Glyphoxa
