@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
+	"github.com/MrWong99/glyphoxa/internal/transcript"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
 	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
@@ -22,6 +23,8 @@ type audioPipelineConfig struct {
 	vadCfg      vad.Config
 	sttCfg      stt.StreamConfig
 	ctx         context.Context
+	pipeline    transcript.Pipeline // may be nil — correction is skipped when nil
+	entities    func() []string     // returns current entity names; may be nil
 }
 
 // audioPipeline manages per-participant audio processing goroutines.
@@ -38,6 +41,8 @@ type audioPipeline struct {
 	mixer       audio.Mixer
 	vadCfg      vad.Config
 	sttCfg      stt.StreamConfig
+	pipeline    transcript.Pipeline
+	entities    func() []string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -59,6 +64,8 @@ func newAudioPipeline(cfg audioPipelineConfig) *audioPipeline {
 		mixer:       cfg.mixer,
 		vadCfg:      cfg.vadCfg,
 		sttCfg:      cfg.sttCfg,
+		pipeline:    cfg.pipeline,
+		entities:    cfg.entities,
 		ctx:         ctx,
 		cancel:      cancel,
 		workers:     make(map[string]context.CancelFunc),
@@ -236,28 +243,49 @@ func (p *audioPipeline) processParticipant(ctx context.Context, speakerID string
 	}
 }
 
-// collectAndRoute drains final transcripts from an STT session and routes
-// each to the appropriate NPC agent via the orchestrator.
+// collectAndRoute drains final transcripts from an STT session, optionally
+// applies transcript correction, and routes each to the appropriate NPC agent
+// via the orchestrator.
 func (p *audioPipeline) collectAndRoute(ctx context.Context, speakerID string, session stt.SessionHandle) {
-	for transcript := range session.Finals() {
-		if strings.TrimSpace(transcript.Text) == "" {
+	for t := range session.Finals() {
+		if strings.TrimSpace(t.Text) == "" {
 			continue
+		}
+
+		// Apply transcript correction if pipeline and entities are available.
+		if p.pipeline != nil && p.entities != nil {
+			entities := p.entities()
+			if len(entities) > 0 {
+				corrected, err := p.pipeline.Correct(ctx, t, entities)
+				if err != nil {
+					slog.Warn("audio pipeline: transcript correction failed, using raw",
+						"speaker", speakerID, "err", err)
+				} else if corrected.Corrected != t.Text {
+					slog.Info("audio pipeline: transcript corrected",
+						"speaker", speakerID,
+						"raw", t.Text,
+						"corrected", corrected.Corrected,
+						"corrections", len(corrected.Corrections),
+					)
+					t.Text = corrected.Corrected
+				}
+			}
 		}
 
 		slog.Info("audio pipeline: transcript",
 			"speaker", speakerID,
-			"text", transcript.Text,
-			"confidence", transcript.Confidence,
+			"text", t.Text,
+			"confidence", t.Confidence,
 		)
 
-		target, err := p.orch.Route(ctx, speakerID, transcript)
+		target, err := p.orch.Route(ctx, speakerID, t)
 		if err != nil {
 			slog.Debug("audio pipeline: route transcript",
 				"speaker", speakerID, "err", err)
 			continue
 		}
 
-		if err := target.HandleUtterance(ctx, speakerID, transcript); err != nil {
+		if err := target.HandleUtterance(ctx, speakerID, t); err != nil {
 			slog.Error("audio pipeline: handle utterance",
 				"speaker", speakerID, "npc", target.Name(), "err", err)
 		}

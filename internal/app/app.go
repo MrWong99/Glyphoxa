@@ -26,7 +26,6 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
-	"github.com/MrWong99/glyphoxa/internal/transcript"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
@@ -66,7 +65,6 @@ type App struct {
 	conn      audio.Connection
 	agents    []agent.NPCAgent
 	router    agent.Router
-	pipeline  transcript.Pipeline
 
 	// closers are called in order during Shutdown.
 	closers []func() error
@@ -155,9 +153,6 @@ func New(ctx context.Context, cfg *config.Config, providers *Providers, opts ...
 	if err := a.initAgents(ctx); err != nil {
 		return nil, fmt.Errorf("app: init agents: %w", err)
 	}
-
-	// ── 7. Transcript pipeline ───────────────────────────────────────────
-	a.pipeline = transcript.NewPipeline()
 
 	return a, nil
 }

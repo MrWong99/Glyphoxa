@@ -15,6 +15,9 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/session"
+	"github.com/MrWong99/glyphoxa/internal/transcript"
+	"github.com/MrWong99/glyphoxa/internal/transcript/llmcorrect"
+	"github.com/MrWong99/glyphoxa/internal/transcript/phonetic"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
@@ -164,10 +167,16 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 	var consolid *session.Consolidator
 	if sm.sessionStore != nil {
 		// Create a context manager for the consolidator.
+		// Use LLMSummariser when an LLM provider is available; fall back to
+		// noopSummariser (no compression) in offline / test modes.
+		var summariser session.Summariser = &noopSummariser{}
+		if sm.providers.LLM != nil {
+			summariser = session.NewLLMSummariser(sm.providers.LLM)
+		}
 		ctxMgr := session.NewContextManager(session.ContextManagerConfig{
 			MaxTokens:      128000,
 			ThresholdRatio: 0.75,
-			Summariser:     &noopSummariser{},
+			Summariser:     summariser,
 		})
 		consolid = session.NewConsolidator(session.ConsolidatorConfig{
 			Store:      sm.sessionStore,
@@ -187,6 +196,39 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		}
 	}
 
+	// Build transcript correction pipeline.
+	var correctionPipeline transcript.Pipeline
+	if sm.providers.LLM != nil || sm.graph != nil {
+		var pipelineOpts []transcript.PipelineOption
+		// Stage 1: phonetic matching (always available, no LLM needed).
+		pipelineOpts = append(pipelineOpts, transcript.WithPhoneticMatcher(phonetic.New()))
+		// Stage 2: LLM correction (when LLM provider is available).
+		if sm.providers.LLM != nil {
+			pipelineOpts = append(pipelineOpts, transcript.WithLLMCorrector(
+				llmcorrect.New(sm.providers.LLM),
+			))
+		}
+		correctionPipeline = transcript.NewPipeline(pipelineOpts...)
+	}
+
+	// Entity name provider for transcript correction. The closure is evaluated
+	// lazily each time correction runs so mid-session entities are picked up.
+	var entityNamesFn func() []string
+	if sm.graph != nil {
+		entityNamesFn = func() []string {
+			ents, err := sm.graph.FindEntities(context.Background(), memory.EntityFilter{})
+			if err != nil {
+				slog.Warn("audio pipeline: failed to fetch entity names for correction", "err", err)
+				return nil
+			}
+			names := make([]string, len(ents))
+			for i, e := range ents {
+				names[i] = e.Name
+			}
+			return names
+		}
+	}
+
 	// Wire input pipeline: Discord → VAD → STT → Agent.
 	if sm.providers.VAD != nil && sm.providers.STT != nil {
 		pipeline := newAudioPipeline(audioPipelineConfig{
@@ -198,6 +240,8 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 			vadCfg:      vadConfigFromProvider(sm.cfg.Providers.VAD),
 			sttCfg:      sttConfigFromProvider(sm.cfg.Providers.STT),
 			ctx:         sessionCtx,
+			pipeline:    correctionPipeline,
+			entities:    entityNamesFn,
 		})
 		pipeline.Start()
 		closers = append(closers, pipeline.Stop)

@@ -11,6 +11,8 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	audiomock "github.com/MrWong99/glyphoxa/pkg/audio/mock"
 	memorymock "github.com/MrWong99/glyphoxa/pkg/memory/mock"
+	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
+	llmmock "github.com/MrWong99/glyphoxa/pkg/provider/llm/mock"
 )
 
 func newTestSessionManager() (*app.SessionManager, *audiomock.Platform, *audiomock.Connection) {
@@ -419,5 +421,86 @@ func TestSessionManager_PropagateEntity_NoGraph(t *testing.T) {
 	}
 	if got.Name != "Test Entity" {
 		t.Errorf("stored Name = %q, want %q", got.Name, "Test Entity")
+	}
+}
+
+// TestSessionManager_UsesLLMSummariser verifies that Start does not panic or
+// error when an LLM provider is wired in — the LLMSummariser path is used.
+func TestSessionManager_UsesLLMSummariser(t *testing.T) {
+	t.Parallel()
+
+	conn := &audiomock.Connection{}
+	platform := &audiomock.Platform{ConnectResult: conn}
+	store := &memorymock.SessionStore{}
+	cfg := &config.Config{
+		Campaign: config.CampaignConfig{Name: "TestCampaign"},
+	}
+
+	// Provide a mock LLM so the LLMSummariser path is exercised.
+	llmProv := &llmmock.Provider{
+		CompleteResponse: &llm.CompletionResponse{Content: "Summary text."},
+	}
+
+	sm := app.NewSessionManager(app.SessionManagerConfig{
+		Platform:     platform,
+		Config:       cfg,
+		Providers:    &app.Providers{LLM: llmProv},
+		SessionStore: store,
+	})
+
+	ctx := context.Background()
+	if err := sm.Start(ctx, "ch-1", "user-1"); err != nil {
+		t.Fatalf("Start() with LLM provider error: %v", err)
+	}
+
+	if !sm.IsActive() {
+		t.Fatal("expected session to be active after Start")
+	}
+
+	if err := sm.Stop(ctx); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	if sm.IsActive() {
+		t.Fatal("expected session to be inactive after Stop")
+	}
+}
+
+// TestSessionManager_FallbackNoopSummariser verifies graceful degradation:
+// when Providers.LLM is nil the session still starts and stops correctly,
+// using the noopSummariser fallback.
+func TestSessionManager_FallbackNoopSummariser(t *testing.T) {
+	t.Parallel()
+
+	conn := &audiomock.Connection{}
+	platform := &audiomock.Platform{ConnectResult: conn}
+	store := &memorymock.SessionStore{}
+	cfg := &config.Config{
+		Campaign: config.CampaignConfig{Name: "TestCampaign"},
+	}
+
+	// No LLM provider — noopSummariser should be used transparently.
+	sm := app.NewSessionManager(app.SessionManagerConfig{
+		Platform:     platform,
+		Config:       cfg,
+		Providers:    &app.Providers{LLM: nil},
+		SessionStore: store,
+	})
+
+	ctx := context.Background()
+	if err := sm.Start(ctx, "ch-1", "user-1"); err != nil {
+		t.Fatalf("Start() without LLM provider error: %v", err)
+	}
+
+	if !sm.IsActive() {
+		t.Fatal("expected session to be active after Start")
+	}
+
+	if err := sm.Stop(ctx); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	if sm.IsActive() {
+		t.Fatal("expected session to be inactive after Stop")
 	}
 }
