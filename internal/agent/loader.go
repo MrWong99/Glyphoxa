@@ -7,6 +7,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
+	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
 )
 
@@ -26,6 +27,7 @@ type Loader struct {
 	ttsSampleRate int
 	ttsChannels   int
 	sessionID     string
+	onTranscript  func(memory.TranscriptEntry)
 }
 
 // LoaderOption is a functional option for [NewLoader].
@@ -57,6 +59,13 @@ func WithTTSFormat(sampleRate, channels int) LoaderOption {
 		l.ttsSampleRate = sampleRate
 		l.ttsChannels = channels
 	}
+}
+
+// WithOnTranscript configures the [Loader] to inject the given callback into
+// every agent it creates, enabling immediate persistence of transcript entries
+// produced outside the engine pipeline (e.g., [NPCAgent.SpeakText]).
+func WithOnTranscript(fn func(memory.TranscriptEntry)) LoaderOption {
+	return func(l *Loader) { l.onTranscript = fn }
 }
 
 // NewLoader creates a [Loader] with the given shared dependencies.
@@ -107,5 +116,6 @@ func (l *Loader) Load(id string, identity NPCIdentity, eng engine.VoiceEngine, b
 		TTSChannels:   l.ttsChannels,
 		SessionID:     l.sessionID,
 		BudgetTier:    budgetTier,
+		OnTranscript:  l.onTranscript,
 	})
 }

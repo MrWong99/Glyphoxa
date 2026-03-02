@@ -482,6 +482,16 @@ func (sm *SessionManager) loadAgents(ctx context.Context, assembler *hotctx.Asse
 		sr, ch := ttsFormatFromConfig(sm.cfg.Providers.TTS)
 		loaderOpts = append(loaderOpts, agent.WithTTSFormat(sr, ch))
 	}
+	if sm.sessionStore != nil {
+		loaderOpts = append(loaderOpts, agent.WithOnTranscript(func(entry memory.TranscriptEntry) {
+			if err := sm.sessionStore.WriteEntry(context.Background(), sessionID, entry); err != nil {
+				slog.Warn("session: failed to record puppet transcript",
+					"npc", entry.SpeakerName,
+					"err", err,
+				)
+			}
+		}))
+	}
 
 	loader, err := agent.NewLoader(assembler, sessionID, loaderOpts...)
 	if err != nil {

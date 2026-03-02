@@ -57,7 +57,7 @@ The cascade engine splits sentences at `.`, `!`, or `?` followed by whitespace. 
 
 ---
 
-## 5. [LOW] Hot-context assembler doesn't include pre-fetched cold-layer results
+## 5. ~~[LOW] Hot-context assembler doesn't include pre-fetched cold-layer results~~ DONE
 
 **Files:** `internal/hotctx/assembler.go`, `internal/hotctx/prefetch.go`
 
@@ -69,7 +69,7 @@ The `HotContext` struct has a `PreFetchResults` field for cold-layer (GraphRAG) 
 
 ---
 
-## 6. [LOW] `FormatSystemPrompt` doesn't include PreFetchResults
+## 6. ~~[LOW] `FormatSystemPrompt` doesn't include PreFetchResults~~ DONE
 
 **Files:** `internal/hotctx/assembler.go`
 
@@ -91,7 +91,7 @@ NPCs are registered as knowledge graph entities at startup, but only as bare nod
 
 ---
 
-## 8. [LOW] `SpeakText` doesn't write transcript entries
+## 8. ~~[LOW] `SpeakText` doesn't write transcript entries~~ DONE
 
 **Files:** `internal/agent/npc.go` — `SpeakText()`
 
@@ -121,8 +121,8 @@ NPCs are registered as knowledge graph entities at startup, but only as bare nod
 | 2 | MEDIUM | Pipeline | STT keyword boosting not propagated mid-session |
 | 3 | MEDIUM | Engine | Cascade engine doesn't handle tool calls |
 | 4 | LOW | Engine | Sentence boundary detection too simplistic |
-| 5 | LOW | Context | Prefetcher not integrated into assembler |
-| 6 | LOW | Context | FormatSystemPrompt ignores PreFetchResults |
+| 5 | ~~LOW~~ | ~~Context~~ | ~~Prefetcher not integrated into assembler~~ |
+| 6 | ~~LOW~~ | ~~Context~~ | ~~FormatSystemPrompt ignores PreFetchResults~~ |
 | 7 | LOW | Entity | Startup entity registration creates no relationships |
-| 8 | LOW | Agent | SpeakText doesn't write transcript entries |
+| 8 | ~~LOW~~ | ~~Agent~~ | ~~SpeakText doesn't write transcript entries~~ |
 | 9 | LOW | Build | wg.Go requires Go 1.25+ (currently fine) |

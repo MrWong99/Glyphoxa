@@ -71,6 +71,11 @@ type AgentConfig struct {
 	// TTSChannels is the number of audio channels produced by the TTS provider
 	// (1 = mono, 2 = stereo). When zero, defaults to 1.
 	TTSChannels int
+
+	// OnTranscript is called when the agent produces a transcript entry
+	// outside the engine pipeline (e.g., SpeakText). If nil, entries are
+	// only persisted via the Consolidator.
+	OnTranscript func(memory.TranscriptEntry)
 }
 
 // defaultAudioPriority is the priority used when enqueuing NPC audio segments.
@@ -92,6 +97,7 @@ type liveAgent struct {
 	ttsSampleRate int          // Hz of PCM from TTS; default 22050
 	ttsChannels   int          // 1=mono, 2=stereo; default 1
 	sessionID     string
+	onTranscript  func(memory.TranscriptEntry) // may be nil
 	budgetTier    mcp.BudgetTier
 
 	mu       sync.Mutex
@@ -146,6 +152,7 @@ func NewAgent(cfg AgentConfig) (NPCAgent, error) {
 		ttsChannels:   ttsCh,
 		sessionID:     cfg.SessionID,
 		budgetTier:    cfg.BudgetTier,
+		onTranscript:  cfg.OnTranscript,
 	}
 
 	// Wire MCP tools into the engine when a host is provided.
@@ -408,6 +415,20 @@ func (a *liveAgent) SpeakText(ctx context.Context, text string) error {
 		Name:    a.identity.Name,
 	})
 	a.mu.Unlock()
+
+	// Persist the transcript entry immediately (outside the mutex to avoid
+	// blocking I/O under lock). The Consolidator will eventually write the
+	// same entry from a.messages — this is consistent with the engine path
+	// where recordTranscripts and the Consolidator both write.
+	if a.onTranscript != nil {
+		a.onTranscript(memory.TranscriptEntry{
+			SpeakerID:   a.identity.Name,
+			SpeakerName: a.identity.Name,
+			Text:        text,
+			NPCID:       a.id,
+			Timestamp:   time.Now(),
+		})
+	}
 
 	return nil
 }
