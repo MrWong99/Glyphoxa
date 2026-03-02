@@ -109,6 +109,7 @@ func run() int {
 			Providers:    providers,
 			SessionStore: application.SessionStore(),
 			Graph:        application.KnowledgeGraph(),
+			Semantic:     application.SemanticIndex(),
 			MCPHost:      application.MCPHost(),
 			Entities:     application.EntityStore(),
 		})

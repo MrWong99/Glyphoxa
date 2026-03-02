@@ -60,6 +60,7 @@ type App struct {
 	entities  entity.Store
 	sessions  memory.SessionStore
 	graph     memory.KnowledgeGraph
+	semantic  memory.SemanticIndex
 	assembler *hotctx.Assembler
 	mixer     audio.Mixer
 	conn      audio.Connection
@@ -94,6 +95,11 @@ func WithEntityStore(s entity.Store) Option {
 // WithMixer injects an audio mixer instead of creating a PriorityMixer.
 func WithMixer(m audio.Mixer) Option {
 	return func(a *App) { a.mixer = m }
+}
+
+// WithSemanticIndex injects a semantic index instead of creating one from config.
+func WithSemanticIndex(s memory.SemanticIndex) Option {
+	return func(a *App) { a.semantic = s }
 }
 
 // WithMCPHost injects an MCP host instead of creating one from config.
@@ -206,6 +212,9 @@ func (a *App) initMemory(ctx context.Context) error {
 	}
 	if a.graph == nil {
 		a.graph = store
+	}
+	if a.semantic == nil {
+		a.semantic = store.L2()
 	}
 
 	a.closers = append(a.closers, func() error {
@@ -412,6 +421,10 @@ func (a *App) SessionStore() memory.SessionStore { return a.sessions }
 // KnowledgeGraph returns the knowledge graph. May be nil if memory is not
 // configured.
 func (a *App) KnowledgeGraph() memory.KnowledgeGraph { return a.graph }
+
+// SemanticIndex returns the L2 semantic index. May be nil if memory or
+// embeddings are not configured.
+func (a *App) SemanticIndex() memory.SemanticIndex { return a.semantic }
 
 // MCPHost returns the MCP host. May be nil if no MCP servers are configured.
 func (a *App) MCPHost() mcp.Host { return a.mcpHost }

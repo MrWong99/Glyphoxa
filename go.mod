@@ -7,6 +7,7 @@ require (
 	github.com/bwmarrin/discordgo v0.29.1-0.20260214123928-f43dd94faaac
 	github.com/coder/websocket v1.8.14
 	github.com/ggerganov/whisper.cpp/bindings/go v0.0.0-20260227185758-9453b4b9be9b
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/modelcontextprotocol/go-sdk v1.4.0
 	github.com/mozilla-ai/any-llm-go v0.8.0
@@ -41,7 +42,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.12 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
