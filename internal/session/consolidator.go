@@ -8,16 +8,25 @@ import (
 	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/memory"
+	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
 )
 
 // defaultConsolidationInterval is the default period between consolidation
 // ticks.
 const defaultConsolidationInterval = 30 * time.Minute
 
+// embedBatchSize is the maximum number of texts per EmbedBatch call to stay
+// within provider API limits.
+const embedBatchSize = 512
+
 // Consolidator periodically flushes hot conversation context to the memory
 // store. This ensures that long-running sessions (4+ hours) persist their
 // conversation history even if the process crashes or the context window
 // is pruned.
+//
+// When a SemanticIndex and EmbedProvider are configured, the consolidator also
+// chunks and embeds new entries into the L2 vector store after writing to L1.
+// L2 indexing is best-effort: failures are logged but do not block L1 writes.
 //
 // All methods are safe for concurrent use.
 type Consolidator struct {
@@ -25,6 +34,11 @@ type Consolidator struct {
 	contextMgr *ContextManager
 	interval   time.Duration
 	sessionID  string
+
+	// Optional L2 dependencies. When both are non-nil, consolidation also
+	// writes to the semantic index.
+	semantic      memory.SemanticIndex
+	embedProvider embeddings.Provider
 
 	mu sync.Mutex
 	// lastIndex tracks how many messages have already been consolidated
@@ -47,6 +61,15 @@ type ConsolidatorConfig struct {
 
 	// Interval is how often to consolidate. Defaults to 30 minutes if zero.
 	Interval time.Duration
+
+	// SemanticIndex is the optional L2 vector index for chunk storage.
+	// When non-nil (together with EmbedProvider), consolidated entries are
+	// also chunked, embedded, and indexed for semantic search.
+	SemanticIndex memory.SemanticIndex
+
+	// EmbedProvider produces vector embeddings for chunk content.
+	// Required together with SemanticIndex for L2 indexing.
+	EmbedProvider embeddings.Provider
 }
 
 // NewConsolidator creates a new [Consolidator] with the given configuration.
@@ -56,11 +79,13 @@ func NewConsolidator(cfg ConsolidatorConfig) *Consolidator {
 		interval = defaultConsolidationInterval
 	}
 	return &Consolidator{
-		store:      cfg.Store,
-		contextMgr: cfg.ContextMgr,
-		interval:   interval,
-		sessionID:  cfg.SessionID,
-		done:       make(chan struct{}),
+		store:         cfg.Store,
+		contextMgr:    cfg.ContextMgr,
+		interval:      interval,
+		sessionID:     cfg.SessionID,
+		semantic:      cfg.SemanticIndex,
+		embedProvider: cfg.EmbedProvider,
+		done:          make(chan struct{}),
 	}
 }
 
@@ -110,8 +135,8 @@ func (c *Consolidator) loop(ctx context.Context) {
 	}
 }
 
-// consolidate writes new messages to the session store. Must be called with
-// c.mu held.
+// consolidate writes new messages to the session store and optionally indexes
+// them in the L2 semantic index. Must be called with c.mu held.
 func (c *Consolidator) consolidate(ctx context.Context) error {
 	msgs := c.contextMgr.Messages()
 
@@ -122,6 +147,7 @@ func (c *Consolidator) consolidate(ctx context.Context) error {
 		return nil // nothing new
 	}
 
+	var entries []memory.TranscriptEntry
 	var writeErr error
 	for i := c.lastIndex; i < len(msgs); i++ {
 		m := msgs[i]
@@ -152,8 +178,70 @@ func (c *Consolidator) consolidate(ctx context.Context) error {
 			// Continue writing remaining entries — partial consolidation is
 			// better than none.
 		}
+
+		entries = append(entries, entry)
 	}
 
 	c.lastIndex = len(msgs)
+
+	// L2 indexing: chunk, embed, and index entries when providers are configured.
+	// This is best-effort — failures do not affect the L1 write or lastIndex.
+	if c.semantic != nil && c.embedProvider != nil && len(entries) > 0 {
+		c.indexChunks(ctx, entries)
+	}
+
 	return writeErr
+}
+
+// indexChunks chunks, embeds, and indexes entries into the L2 semantic index.
+// Errors are logged but never propagated — L2 indexing is best-effort.
+func (c *Consolidator) indexChunks(ctx context.Context, entries []memory.TranscriptEntry) {
+	chunks := ChunkEntries(c.sessionID, entries)
+	if len(chunks) == 0 {
+		return
+	}
+
+	// Extract content strings for embedding.
+	texts := make([]string, len(chunks))
+	for i, ch := range chunks {
+		texts[i] = ch.Content
+	}
+
+	// Embed in batches of embedBatchSize.
+	allEmbeddings := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += embedBatchSize {
+		end := min(start+embedBatchSize, len(texts))
+
+		batch, err := c.embedProvider.EmbedBatch(ctx, texts[start:end])
+		if err != nil {
+			slog.Error("consolidator: L2 embedding failed, skipping remaining chunks",
+				"session_id", c.sessionID,
+				"batch_start", start,
+				"error", err,
+			)
+			return
+		}
+		allEmbeddings = append(allEmbeddings, batch...)
+	}
+
+	// Assign embeddings and index each chunk.
+	for i := range chunks {
+		if i >= len(allEmbeddings) {
+			break
+		}
+		chunks[i].Embedding = allEmbeddings[i]
+
+		if err := c.semantic.IndexChunk(ctx, chunks[i]); err != nil {
+			slog.Warn("consolidator: failed to index chunk in L2",
+				"session_id", c.sessionID,
+				"chunk_id", chunks[i].ID,
+				"error", err,
+			)
+		}
+	}
+
+	slog.Debug("consolidator: indexed chunks in L2",
+		"session_id", c.sessionID,
+		"count", len(chunks),
+	)
 }

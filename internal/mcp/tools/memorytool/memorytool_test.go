@@ -10,6 +10,7 @@ import (
 
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/memory/mock"
+	embmock "github.com/MrWong99/glyphoxa/pkg/provider/embeddings/mock"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +310,7 @@ func TestSearchFacts_Success(t *testing.T) {
 		},
 	}
 
-	handler := makeSearchFactsHandler(store)
+	handler := makeSearchFactsHandler(store, nil, nil)
 	out, err := handler(context.Background(), `{"query":"prophecy","top_k":5}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -337,7 +338,7 @@ func TestSearchFacts_Success(t *testing.T) {
 func TestSearchFacts_DefaultTopK(t *testing.T) {
 	t.Parallel()
 	store := &mock.SessionStore{}
-	handler := makeSearchFactsHandler(store)
+	handler := makeSearchFactsHandler(store, nil, nil)
 
 	_, err := handler(context.Background(), `{"query":"anything"}`)
 	if err != nil {
@@ -357,7 +358,7 @@ func TestSearchFacts_DefaultTopK(t *testing.T) {
 func TestSearchFacts_EmptyQuery(t *testing.T) {
 	t.Parallel()
 	store := &mock.SessionStore{}
-	handler := makeSearchFactsHandler(store)
+	handler := makeSearchFactsHandler(store, nil, nil)
 
 	_, err := handler(context.Background(), `{"query":""}`)
 	if err == nil {
@@ -370,7 +371,7 @@ func TestSearchFacts_StoreError(t *testing.T) {
 	store := &mock.SessionStore{
 		SearchErr: errors.New("disk full"),
 	}
-	handler := makeSearchFactsHandler(store)
+	handler := makeSearchFactsHandler(store, nil, nil)
 
 	_, err := handler(context.Background(), `{"query":"anything"}`)
 	if err == nil {
@@ -388,9 +389,9 @@ func TestNewTools_ReturnsExpectedTools(t *testing.T) {
 	index := &mock.SemanticIndex{}
 	graph := &mock.KnowledgeGraph{}
 
-	ts := NewTools(store, index, graph)
-	if len(ts) != 4 {
-		t.Fatalf("NewTools returned %d tools, want 4", len(ts))
+	ts := NewTools(store, index, graph, nil)
+	if len(ts) != 5 {
+		t.Fatalf("NewTools returned %d tools, want 5", len(ts))
 	}
 
 	wantNames := map[string]bool{
@@ -398,6 +399,7 @@ func TestNewTools_ReturnsExpectedTools(t *testing.T) {
 		"query_entities":  true,
 		"get_summary":     true,
 		"search_facts":    true,
+		"search_graph":    true,
 	}
 
 	for _, tool := range ts {
@@ -419,5 +421,281 @@ func TestNewTools_ReturnsExpectedTools(t *testing.T) {
 
 	for missing := range wantNames {
 		t.Errorf("NewTools missing tool %q", missing)
+	}
+}
+
+func TestNewTools_NoGraphOmitsSearchGraph(t *testing.T) {
+	t.Parallel()
+	store := &mock.SessionStore{}
+
+	ts := NewTools(store, nil, nil, nil)
+	for _, tool := range ts {
+		if tool.Definition.Name == "search_graph" {
+			t.Error("search_graph should not be present when graph is nil")
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// search_facts — semantic search path
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSearchFacts_SemanticSearch(t *testing.T) {
+	t.Parallel()
+	store := &mock.SessionStore{
+		SearchResult: []memory.TranscriptEntry{
+			{SpeakerID: "npc1", Text: "FTS result about dragons"},
+		},
+	}
+	index := &mock.SemanticIndex{
+		SearchResult: []memory.ChunkResult{
+			{
+				Chunk: memory.Chunk{
+					SpeakerID: "npc1",
+					Content:   "Semantic result about dragons",
+					Timestamp: time.Now(),
+				},
+				Distance: 0.05,
+			},
+		},
+	}
+	embedProv := &embmock.Provider{
+		EmbedResult: []float32{0.1, 0.2, 0.3},
+	}
+
+	handler := makeSearchFactsHandler(store, index, embedProv)
+	out, err := handler(context.Background(), `{"query":"dragons","top_k":10}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var entries []memory.TranscriptEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		t.Fatalf("failed to unmarshal: %v\noutput: %s", err, out)
+	}
+
+	// Should have both semantic and FTS results (merged).
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries (semantic + FTS), got %d", len(entries))
+	}
+	// Semantic result should come first.
+	if len(entries) > 0 && entries[0].Text != "Semantic result about dragons" {
+		t.Errorf("first entry = %q, want semantic result", entries[0].Text)
+	}
+
+	// Verify embed was called.
+	if len(embedProv.EmbedCalls) != 1 {
+		t.Errorf("Embed called %d times, want 1", len(embedProv.EmbedCalls))
+	}
+	// Verify index.Search was called.
+	if index.CallCount("Search") != 1 {
+		t.Errorf("index.Search called %d times, want 1", index.CallCount("Search"))
+	}
+}
+
+func TestSearchFacts_SemanticDedup(t *testing.T) {
+	t.Parallel()
+	store := &mock.SessionStore{
+		SearchResult: []memory.TranscriptEntry{
+			{SpeakerID: "npc1", Text: "same text about dragons"},
+		},
+	}
+	index := &mock.SemanticIndex{
+		SearchResult: []memory.ChunkResult{
+			{
+				Chunk: memory.Chunk{
+					SpeakerID: "npc1",
+					Content:   "same text about dragons",
+					Timestamp: time.Now(),
+				},
+				Distance: 0.05,
+			},
+		},
+	}
+	embedProv := &embmock.Provider{
+		EmbedResult: []float32{0.1, 0.2, 0.3},
+	}
+
+	handler := makeSearchFactsHandler(store, index, embedProv)
+	out, err := handler(context.Background(), `{"query":"dragons"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var entries []memory.TranscriptEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// Duplicate text should be deduplicated.
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry (deduped), got %d", len(entries))
+	}
+}
+
+func TestSearchFacts_EmbedFailureFallsBackToFTS(t *testing.T) {
+	t.Parallel()
+	store := &mock.SessionStore{
+		SearchResult: []memory.TranscriptEntry{
+			{SpeakerID: "npc1", Text: "FTS only result"},
+		},
+	}
+	index := &mock.SemanticIndex{}
+	embedProv := &embmock.Provider{
+		EmbedErr: errors.New("embedding service down"),
+	}
+
+	handler := makeSearchFactsHandler(store, index, embedProv)
+	out, err := handler(context.Background(), `{"query":"anything"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var entries []memory.TranscriptEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 FTS entry, got %d", len(entries))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// search_graph
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSearchGraph_Success(t *testing.T) {
+	t.Parallel()
+	graph := &mock.GraphRAGQuerier{
+		QueryWithContextResult: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "loc-1", Name: "The Forge"}, Content: "A roaring furnace", Score: 0.9},
+		},
+	}
+
+	handler := makeSearchGraphHandler(graph, nil)
+	out, err := handler(context.Background(), `{"query":"forge","scope":["loc-1"]}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var results []memory.ContextResult
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		t.Fatalf("failed to unmarshal: %v\noutput: %s", err, out)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Entity.Name != "The Forge" {
+		t.Errorf("Entity.Name = %q, want %q", results[0].Entity.Name, "The Forge")
+	}
+
+	// Should have used QueryWithContext (no embedding provider).
+	if graph.CallCount("QueryWithContext") != 1 {
+		t.Errorf("QueryWithContext called %d times, want 1", graph.CallCount("QueryWithContext"))
+	}
+	if graph.CallCount("QueryWithEmbedding") != 0 {
+		t.Errorf("QueryWithEmbedding called %d times, want 0", graph.CallCount("QueryWithEmbedding"))
+	}
+}
+
+func TestSearchGraph_WithEmbeddings(t *testing.T) {
+	t.Parallel()
+	graph := &mock.GraphRAGQuerier{
+		QueryWithEmbeddingResult: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "npc-1", Name: "Grimjaw"}, Content: "A gruff blacksmith", Score: 0.85},
+		},
+	}
+	embedProv := &embmock.Provider{
+		EmbedResult: []float32{0.1, 0.2, 0.3},
+	}
+
+	handler := makeSearchGraphHandler(graph, embedProv)
+	out, err := handler(context.Background(), `{"query":"blacksmith"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var results []memory.ContextResult
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+
+	// Should prefer QueryWithEmbedding when embeddings available.
+	if graph.CallCount("QueryWithEmbedding") != 1 {
+		t.Errorf("QueryWithEmbedding called %d times, want 1", graph.CallCount("QueryWithEmbedding"))
+	}
+	if graph.CallCount("QueryWithContext") != 0 {
+		t.Errorf("QueryWithContext called %d times, want 0 (should prefer embeddings)", graph.CallCount("QueryWithContext"))
+	}
+}
+
+func TestSearchGraph_EmbedFailureFallsBackToFTS(t *testing.T) {
+	t.Parallel()
+	graph := &mock.GraphRAGQuerier{
+		QueryWithContextResult: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "loc-1", Name: "Tavern"}, Content: "A dimly lit tavern", Score: 0.7},
+		},
+	}
+	embedProv := &embmock.Provider{
+		EmbedErr: errors.New("embedding model unavailable"),
+	}
+
+	handler := makeSearchGraphHandler(graph, embedProv)
+	out, err := handler(context.Background(), `{"query":"tavern"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var results []memory.ContextResult
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected 1 result, got %d", len(results))
+	}
+
+	// Should fall back to QueryWithContext after embed failure.
+	if graph.CallCount("QueryWithContext") != 1 {
+		t.Errorf("QueryWithContext called %d times, want 1 (fallback)", graph.CallCount("QueryWithContext"))
+	}
+}
+
+func TestSearchGraph_PlainKnowledgeGraphReturnsError(t *testing.T) {
+	t.Parallel()
+	// Plain KnowledgeGraph does not implement GraphRAGQuerier.
+	graph := &mock.KnowledgeGraph{}
+
+	handler := makeSearchGraphHandler(graph, nil)
+	_, err := handler(context.Background(), `{"query":"anything"}`)
+	if err == nil {
+		t.Error("expected error for non-GraphRAGQuerier graph")
+	}
+	if !strings.Contains(err.Error(), "does not support GraphRAG") {
+		t.Errorf("error %q should mention GraphRAG not supported", err.Error())
+	}
+}
+
+func TestSearchGraph_EmptyQuery(t *testing.T) {
+	t.Parallel()
+	graph := &mock.GraphRAGQuerier{}
+
+	handler := makeSearchGraphHandler(graph, nil)
+	_, err := handler(context.Background(), `{"query":""}`)
+	if err == nil {
+		t.Error("expected error for empty query")
+	}
+}
+
+func TestSearchGraph_BadJSON(t *testing.T) {
+	t.Parallel()
+	graph := &mock.GraphRAGQuerier{}
+
+	handler := makeSearchGraphHandler(graph, nil)
+	_, err := handler(context.Background(), `{bad json}`)
+	if err == nil {
+		t.Error("expected error for bad JSON")
 	}
 }

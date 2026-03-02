@@ -250,6 +250,55 @@ func TestFormatSystemPrompt_EmptyScene(t *testing.T) {
 	}
 }
 
+// TestFormatSystemPrompt_KnowledgeSection verifies that PreFetchResults are
+// rendered in a "## Relevant Knowledge" section.
+func TestFormatSystemPrompt_KnowledgeSection(t *testing.T) {
+	t.Parallel()
+
+	hctx := &hotctx.HotContext{
+		Identity: &memory.NPCIdentity{
+			Entity: memory.Entity{ID: "npc-1", Name: "Grimjaw", Type: "npc"},
+		},
+		PreFetchResults: []memory.ContextResult{
+			{Entity: memory.Entity{ID: "e-1", Name: "The Forge"}, Content: "A roaring furnace in the dwarven district.", Score: 0.9},
+			{Entity: memory.Entity{ID: "e-2", Name: "Torvel"}, Content: "A mysterious ranger from the north.", Score: 0.7},
+		},
+	}
+
+	result := hotctx.FormatSystemPrompt(hctx, "")
+
+	if !strings.Contains(result, "## Relevant Knowledge") {
+		t.Errorf("output missing '## Relevant Knowledge' section:\n%s", result)
+	}
+	if !strings.Contains(result, "**The Forge**") {
+		t.Errorf("output missing entity name 'The Forge':\n%s", result)
+	}
+	if !strings.Contains(result, "roaring furnace") {
+		t.Errorf("output missing content text:\n%s", result)
+	}
+	if !strings.Contains(result, "**Torvel**") {
+		t.Errorf("output missing entity name 'Torvel':\n%s", result)
+	}
+}
+
+// TestFormatSystemPrompt_KnowledgeSectionOmittedWhenEmpty verifies the section
+// is not rendered when PreFetchResults is nil or empty.
+func TestFormatSystemPrompt_KnowledgeSectionOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	hctx := &hotctx.HotContext{
+		Identity: &memory.NPCIdentity{
+			Entity: memory.Entity{ID: "npc-1", Name: "Grimjaw", Type: "npc"},
+		},
+		PreFetchResults: nil,
+	}
+
+	result := hotctx.FormatSystemPrompt(hctx, "")
+	if strings.Contains(result, "## Relevant Knowledge") {
+		t.Errorf("nil PreFetchResults should not produce knowledge section:\n%s", result)
+	}
+}
+
 // TestFormatSystemPrompt_IsPure verifies that calling FormatSystemPrompt twice
 // with the same input produces identical output (pure function).
 func TestFormatSystemPrompt_IsPure(t *testing.T) {

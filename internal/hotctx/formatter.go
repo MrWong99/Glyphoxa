@@ -49,6 +49,9 @@ func FormatSystemPrompt(hctx *HotContext, npcPersonality string) string {
 	// ── Scene section ─────────────────────────────────────────────────────────
 	writeSceneSection(&sb, hctx.SceneContext)
 
+	// ── Relevant knowledge section (GraphRAG pre-fetch results) ──────────────
+	writeKnowledgeSection(&sb, hctx.PreFetchResults)
+
 	// ── Recent conversation section ───────────────────────────────────────────
 	writeTranscriptSection(&sb, hctx.RecentTranscript)
 
@@ -205,6 +208,40 @@ func writeSceneSection(sb *strings.Builder, sc *SceneContext) {
 			questParts = append(questParts, entry)
 		}
 		writeLine("Active quests: %s", strings.Join(questParts, ", "))
+	}
+}
+
+// maxKnowledgeResults caps the number of pre-fetch results rendered in the
+// prompt to avoid context bloat.
+const maxKnowledgeResults = 5
+
+// maxKnowledgeContentLen truncates each pre-fetch result's content to keep
+// the prompt section bounded.
+const maxKnowledgeContentLen = 500
+
+// writeKnowledgeSection writes GraphRAG pre-fetch results as a bullet list.
+// Skips the section entirely when results is nil or empty.
+func writeKnowledgeSection(sb *strings.Builder, results []memory.ContextResult) {
+	if len(results) == 0 {
+		return
+	}
+
+	sb.WriteString("\n\n## Relevant Knowledge\n")
+	limit := min(len(results), maxKnowledgeResults)
+	for i := range limit {
+		r := results[i]
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		name := r.Entity.Name
+		if name == "" {
+			name = r.Entity.ID
+		}
+		content := r.Content
+		if len(content) > maxKnowledgeContentLen {
+			content = content[:maxKnowledgeContentLen] + "..."
+		}
+		fmt.Fprintf(sb, "- **%s**: %s", name, content)
 	}
 }
 

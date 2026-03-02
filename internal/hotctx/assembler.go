@@ -14,6 +14,7 @@ package hotctx
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,7 @@ type Assembler struct {
 	graph          memory.KnowledgeGraph
 	recentDuration time.Duration
 	maxEntries     int
+	preFetcher     *PreFetcher
 }
 
 // Option is a functional option for [NewAssembler].
@@ -88,6 +90,14 @@ func WithRecentDuration(d time.Duration) Option {
 // entries the most-recent n are kept. Defaults to 50.
 func WithMaxTranscriptEntries(n int) Option {
 	return func(a *Assembler) { a.maxEntries = n }
+}
+
+// WithPreFetcher configures a [PreFetcher] that is run concurrently during
+// assembly to inject GraphRAG context results into [HotContext.PreFetchResults].
+// The pre-fetcher runs with its own timeout and does not block or abort the
+// critical assembly path (identity, transcript, scene).
+func WithPreFetcher(pf *PreFetcher) Option {
+	return func(a *Assembler) { a.preFetcher = pf }
 }
 
 // NewAssembler creates an [Assembler] with sensible defaults.
@@ -162,10 +172,34 @@ func (a *Assembler) Assemble(ctx context.Context, npcID string, sessionID string
 		return nil, err
 	}
 
+	// ── best-effort: GraphRAG pre-fetch (after errgroup, isolated) ──────────
+	// Runs after the critical path completes so we have actual transcript text
+	// for the FTS query. Uses its own 40ms timeout to stay within budget.
+	// Failures are swallowed — they never abort assembly.
+	var preFetchResults []memory.ContextResult
+	if a.preFetcher != nil {
+		var query string
+		if len(transcript) > 0 {
+			var sb strings.Builder
+			limit := min(len(transcript), 5)
+			for _, e := range transcript[len(transcript)-limit:] {
+				if sb.Len() > 0 {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(e.Text)
+			}
+			query = sb.String()
+		}
+		pfCtx, pfCancel := context.WithTimeout(ctx, 40*time.Millisecond)
+		preFetchResults = a.preFetcher.Retrieve(pfCtx, npcID, query)
+		pfCancel()
+	}
+
 	return &HotContext{
 		Identity:         identity,
 		RecentTranscript: transcript,
 		SceneContext:     scene,
+		PreFetchResults:  preFetchResults,
 		AssemblyDuration: time.Since(start),
 	}, nil
 }
