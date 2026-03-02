@@ -528,8 +528,8 @@ func TestConsolidate_WriteFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error on retry: %v", err)
 		}
-		if store.SessionStore.CallCount("WriteEntry") != 3 {
-			t.Errorf("expected 3 retry writes, got %d", store.SessionStore.CallCount("WriteEntry"))
+		if store.CallCount("WriteEntry") != 3 {
+			t.Errorf("expected 3 retry writes, got %d", store.CallCount("WriteEntry"))
 		}
 	})
 
