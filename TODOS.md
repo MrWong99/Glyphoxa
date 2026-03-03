@@ -74,7 +74,7 @@ every speech segment without exception.
 exits promptly. Ensure `writeLoop` sends its final commit first (e.g., wait on a
 `writeLoop`-specific done signal before closing the socket).
 
-### 13. Knowledge graph `Neighbors()` recursive CTE fails on PostgreSQL
+### ~~13. Knowledge graph `Neighbors()` recursive CTE fails on PostgreSQL~~ ✅ Fixed
 
 **`pkg/memory/postgres/knowledge_graph.go:293-331`**
 
@@ -90,8 +90,9 @@ reference to query "reachable" must not appear within its non-recursive term`
 This breaks knowledge graph neighbor lookups during hot-context assembly,
 degrading NPC context quality.
 
-**Fix**: Merge the two recursive legs into a single `SELECT` using a
-sub-`UNION` for the join direction, or restructure as two separate CTEs.
+**Fix**: Merged the two recursive legs into a single `SELECT` using
+`OR` on the join condition and a `CASE` expression to pick the opposite end
+of the edge. Also fixed the same pattern in `FindPath()`.
 
 ### 14. ElevenLabs STT emits duplicate final transcripts
 
