@@ -498,7 +498,8 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 				[]byte(`{"message_type":"session_started"}`))
 
 			// Read audio chunks until we see a commit, then respond with
-			// a committed_transcript.
+			// a committed_transcript and keep reading until the client
+			// closes the connection.
 			for {
 				_, msg, err := conn.Read(ctx)
 				if err != nil {
@@ -511,7 +512,12 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 				if chunk.Commit {
 					resp := `{"message_type":"committed_transcript","text":"hello","language_code":"en"}`
 					_ = conn.Write(ctx, websocket.MessageText, []byte(resp))
-					return
+					// Keep reading until the client closes.
+					for {
+						if _, _, err := conn.Read(ctx); err != nil {
+							return
+						}
+					}
 				}
 			}
 		})
@@ -567,7 +573,12 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 				if chunk.Commit {
 					resp := `{"message_type":"committed_transcript","text":"final result","language_code":"en"}`
 					_ = conn.Write(ctx, websocket.MessageText, []byte(resp))
-					return
+					// Keep reading until the client closes.
+					for {
+						if _, _, err := conn.Read(ctx); err != nil {
+							return
+						}
+					}
 				}
 			}
 		})
