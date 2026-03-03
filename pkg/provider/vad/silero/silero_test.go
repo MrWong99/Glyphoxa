@@ -71,12 +71,6 @@ func (m *mockInferencer) close() error {
 	return m.closeErr
 }
 
-func (m *mockInferencer) callCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.calls)
-}
-
 func (m *mockInferencer) callAt(i int) inferCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -109,16 +103,6 @@ func makeSession(t *testing.T, cfg vad.Config, m *mockInferencer, minSpeech, min
 		t.Fatalf("validateConfig: %v", err)
 	}
 	return newSession(cfg, m, minSpeech, minSilence)
-}
-
-// int16LEFrame builds a PCM frame where every sample equals val (int16, LE).
-func int16LEFrame(cfg vad.Config, val int16) []byte {
-	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
-	frame := make([]byte, chunkSize*2)
-	for i := 0; i < chunkSize; i++ {
-		binary.LittleEndian.PutUint16(frame[i*2:], uint16(val))
-	}
-	return frame
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
