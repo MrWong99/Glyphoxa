@@ -3,15 +3,16 @@ package commands
 import (
 	"testing"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 )
 
 func newTestEntityCommands(store entity.Store, dmRoleID string) *EntityCommands {
 	return NewEntityCommands(
-		discord.NewPermissionChecker(dmRoleID),
+		discordbot.NewPermissionChecker(dmRoleID),
 		func() entity.Store { return store },
 	)
 }
@@ -31,8 +32,8 @@ func TestEntityDefinition(t *testing.T) {
 		t.Fatalf("subcommand count = %d, want %d", len(def.Options), len(wantSubs))
 	}
 	for i, want := range wantSubs {
-		if def.Options[i].Name != want {
-			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].Name, want)
+		if def.Options[i].OptionName() != want {
+			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].OptionName(), want)
 		}
 	}
 }
@@ -44,20 +45,21 @@ func TestEntityDefinition_ListHasTypeFilter(t *testing.T) {
 	def := ec.Definition()
 
 	// Find the list subcommand.
-	var listOpt *discordgo.ApplicationCommandOption
+	var listSub discord.ApplicationCommandOptionSubCommand
+	var found bool
 	for _, opt := range def.Options {
-		if opt.Name == "list" {
-			listOpt = opt
+		if opt.OptionName() == "list" {
+			listSub, found = opt.(discord.ApplicationCommandOptionSubCommand)
 			break
 		}
 	}
-	if listOpt == nil {
+	if !found {
 		t.Fatal("list subcommand not found")
 	}
-	if len(listOpt.Options) == 0 {
+	if len(listSub.Options) == 0 {
 		t.Fatal("list subcommand has no options")
 	}
-	typeOpt := listOpt.Options[0]
+	typeOpt := listSub.Options[0].(discord.ApplicationCommandOptionString)
 	if typeOpt.Name != "type" {
 		t.Errorf("first option = %q, want %q", typeOpt.Name, "type")
 	}
@@ -72,20 +74,21 @@ func TestEntityDefinition_RemoveHasAutocomplete(t *testing.T) {
 	ec := newTestEntityCommands(entity.NewMemStore(), "")
 	def := ec.Definition()
 
-	var removeOpt *discordgo.ApplicationCommandOption
+	var removeSub discord.ApplicationCommandOptionSubCommand
+	var found bool
 	for _, opt := range def.Options {
-		if opt.Name == "remove" {
-			removeOpt = opt
+		if opt.OptionName() == "remove" {
+			removeSub, found = opt.(discord.ApplicationCommandOptionSubCommand)
 			break
 		}
 	}
-	if removeOpt == nil {
+	if !found {
 		t.Fatal("remove subcommand not found")
 	}
-	if len(removeOpt.Options) == 0 {
+	if len(removeSub.Options) == 0 {
 		t.Fatal("remove subcommand has no options")
 	}
-	nameOpt := removeOpt.Options[0]
+	nameOpt := removeSub.Options[0].(discord.ApplicationCommandOptionString)
 	if nameOpt.Name != "name" {
 		t.Errorf("option name = %q, want %q", nameOpt.Name, "name")
 	}
@@ -99,14 +102,13 @@ func TestEntityRegister(t *testing.T) {
 
 	store := entity.NewMemStore()
 	ec := newTestEntityCommands(store, "")
-	router := discord.NewCommandRouter()
+	router := discordbot.NewCommandRouter()
 	ec.Register(router)
 
-	// The router should have the entity command registered.
 	cmds := router.ApplicationCommands()
 	found := false
 	for _, cmd := range cmds {
-		if cmd.Name == "entity" {
+		if cmd.CommandName() == "entity" {
 			found = true
 			break
 		}
@@ -119,80 +121,18 @@ func TestEntityRegister(t *testing.T) {
 func TestEntityAdd_NoDMRole(t *testing.T) {
 	t.Parallel()
 
-	perms := discord.NewPermissionChecker("dm-role-123")
+	perms := discordbot.NewPermissionChecker("123456789012345678")
 	ec := NewEntityCommands(perms, func() entity.Store { return entity.NewMemStore() })
 
-	i := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Member: &discordgo.Member{
-				User:  &discordgo.User{ID: "user-1"},
-				Roles: []string{"other-role"},
-			},
-		},
-	}
+	member := testMemberWithRoles(snowflake.ID(999))
 
-	if perms.IsDM(i) {
+	if perms.IsDM(member) {
 		t.Fatal("expected IsDM to return false for user without DM role")
 	}
 
-	// Verify the entity commands struct was constructed properly.
 	if ec.perms != perms {
 		t.Error("perms not set correctly")
 	}
-}
-
-func TestSubcommandOptions(t *testing.T) {
-	t.Parallel()
-
-	t.Run("with subcommand options", func(t *testing.T) {
-		t.Parallel()
-		i := &discordgo.InteractionCreate{
-			Interaction: &discordgo.Interaction{
-				Type: discordgo.InteractionApplicationCommand,
-				Data: discordgo.ApplicationCommandInteractionData{
-					Name: "entity",
-					Options: []*discordgo.ApplicationCommandInteractionDataOption{
-						{
-							Name: "list",
-							Type: discordgo.ApplicationCommandOptionSubCommand,
-							Options: []*discordgo.ApplicationCommandInteractionDataOption{
-								{
-									Name:  "type",
-									Type:  discordgo.ApplicationCommandOptionString,
-									Value: "npc",
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-
-		opts := subcommandOptions(i)
-		if len(opts) != 1 {
-			t.Fatalf("got %d options, want 1", len(opts))
-		}
-		if opts[0].Name != "type" {
-			t.Errorf("option name = %q, want %q", opts[0].Name, "type")
-		}
-	})
-
-	t.Run("no subcommand", func(t *testing.T) {
-		t.Parallel()
-		i := &discordgo.InteractionCreate{
-			Interaction: &discordgo.Interaction{
-				Type: discordgo.InteractionApplicationCommand,
-				Data: discordgo.ApplicationCommandInteractionData{
-					Name: "entity",
-				},
-			},
-		}
-
-		opts := subcommandOptions(i)
-		if opts != nil {
-			t.Errorf("expected nil, got %v", opts)
-		}
-	})
 }
 
 func TestEntityModalFields(t *testing.T) {
@@ -202,18 +142,19 @@ func TestEntityModalFields(t *testing.T) {
 	def := ec.Definition()
 
 	// Verify the add subcommand exists (modal is opened from it).
-	var addOpt *discordgo.ApplicationCommandOption
+	var addSub discord.ApplicationCommandOptionSubCommand
+	var found bool
 	for _, opt := range def.Options {
-		if opt.Name == "add" {
-			addOpt = opt
+		if opt.OptionName() == "add" {
+			addSub, found = opt.(discord.ApplicationCommandOptionSubCommand)
 			break
 		}
 	}
-	if addOpt == nil {
+	if !found {
 		t.Fatal("add subcommand not found")
 	}
 	// The add subcommand has no inline options — it opens a modal.
-	if len(addOpt.Options) != 0 {
-		t.Errorf("add subcommand options = %d, want 0 (modal-based)", len(addOpt.Options))
+	if len(addSub.Options) != 0 {
+		t.Errorf("add subcommand options = %d, want 0 (modal-based)", len(addSub.Options))
 	}
 }

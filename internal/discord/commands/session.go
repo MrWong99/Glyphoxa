@@ -6,22 +6,23 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 )
 
 // SessionCommands holds the dependencies for /session slash commands.
 type SessionCommands struct {
 	sessionMgr *app.SessionManager
-	perms      *discord.PermissionChecker
-	bot        *discord.Bot
+	perms      *discordbot.PermissionChecker
+	bot        *discordbot.Bot
 }
 
 // NewSessionCommands creates a SessionCommands and registers its handlers
 // with the bot's router.
-func NewSessionCommands(bot *discord.Bot, sessionMgr *app.SessionManager, perms *discord.PermissionChecker) *SessionCommands {
+func NewSessionCommands(bot *discordbot.Bot, sessionMgr *app.SessionManager, perms *discordbot.PermissionChecker) *SessionCommands {
 	sc := &SessionCommands{
 		sessionMgr: sessionMgr,
 		perms:      perms,
@@ -32,34 +33,30 @@ func NewSessionCommands(bot *discord.Bot, sessionMgr *app.SessionManager, perms 
 }
 
 // Register registers the /session command group with the router.
-func (sc *SessionCommands) Register(router *discord.CommandRouter) {
+func (sc *SessionCommands) Register(router *discordbot.CommandRouter) {
 	def := sc.Definition()
-	router.RegisterCommand("session", def, func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		// This handler is for the top-level command; subcommands are routed below.
-		discord.RespondEphemeral(s, i, "Please use a subcommand: `/session start` or `/session stop`.")
+	router.RegisterCommand("session", def, func(e *events.ApplicationCommandInteractionCreate) {
+		discordbot.RespondEphemeral(e, "Please use a subcommand: `/session start` or `/session stop`.")
 	})
 	router.RegisterHandler("session/start", sc.handleStart)
 	router.RegisterHandler("session/stop", sc.handleStop)
 }
 
-// Definition returns the ApplicationCommand definition for Discord.
-func (sc *SessionCommands) Definition() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
+// Definition returns the SlashCommandCreate definition for Discord.
+func (sc *SessionCommands) Definition() discord.SlashCommandCreate {
+	return discord.SlashCommandCreate{
 		Name:        "session",
 		Description: "Manage voice sessions",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "start",
 				Description: "Start a voice session in your current voice channel",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "stop",
 				Description: "Stop the active voice session",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "recap",
 				Description: "Show a recap of the current or most recent session",
 			},
@@ -68,43 +65,39 @@ func (sc *SessionCommands) Definition() *discordgo.ApplicationCommand {
 }
 
 // handleStart handles /session start.
-func (sc *SessionCommands) handleStart(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Check DM role.
-	if !sc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to start a session.")
+func (sc *SessionCommands) handleStart(e *events.ApplicationCommandInteractionCreate) {
+	if !sc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to start a session.")
 		return
 	}
 
 	// Check that the user is in a voice channel.
 	guildID := sc.bot.GuildID()
-	userID := interactionUserID(i)
-	vs, err := s.State.VoiceState(guildID, userID)
-	if err != nil || vs == nil || vs.ChannelID == "" {
-		discord.RespondEphemeral(s, i, "You must be in a voice channel to start a session.")
+	userID := e.User().ID
+	vs, ok := e.Client().Caches.VoiceState(guildID, userID)
+	if !ok || vs.ChannelID == nil {
+		discordbot.RespondEphemeral(e, "You must be in a voice channel to start a session.")
 		return
 	}
 
-	// Check no session already active.
 	if sc.sessionMgr.IsActive() {
 		info := sc.sessionMgr.Info()
-		discord.RespondEphemeral(s, i, fmt.Sprintf("A session is already active (ID: `%s`).", info.SessionID))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("A session is already active (ID: `%s`).", info.SessionID))
 		return
 	}
 
-	// Defer reply since connecting may take a moment.
-	discord.DeferReply(s, i)
+	discordbot.DeferReply(e)
 
-	// Start the session.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := sc.sessionMgr.Start(ctx, vs.ChannelID, userID); err != nil {
-		discord.FollowUp(s, i, fmt.Sprintf("Failed to start session: %v", err))
+	if err := sc.sessionMgr.Start(ctx, vs.ChannelID.String(), userID.String()); err != nil {
+		discordbot.FollowUp(e, fmt.Sprintf("Failed to start session: %v", err))
 		return
 	}
 
 	info := sc.sessionMgr.Info()
-	discord.FollowUp(s, i, fmt.Sprintf(
+	discordbot.FollowUp(e, fmt.Sprintf(
 		"Session started!\n**Session ID:** `%s`\n**Campaign:** %s\n**Channel:** <#%s>",
 		info.SessionID,
 		info.CampaignName,
@@ -113,16 +106,14 @@ func (sc *SessionCommands) handleStart(s *discordgo.Session, i *discordgo.Intera
 }
 
 // handleStop handles /session stop.
-func (sc *SessionCommands) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Check DM role.
-	if !sc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to stop a session.")
+func (sc *SessionCommands) handleStop(e *events.ApplicationCommandInteractionCreate) {
+	if !sc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to stop a session.")
 		return
 	}
 
-	// Check session is active.
 	if !sc.sessionMgr.IsActive() {
-		discord.RespondEphemeral(s, i, "No active session to stop.")
+		discordbot.RespondEphemeral(e, "No active session to stop.")
 		return
 	}
 
@@ -133,25 +124,13 @@ func (sc *SessionCommands) handleStop(s *discordgo.Session, i *discordgo.Interac
 	defer cancel()
 
 	if err := sc.sessionMgr.Stop(ctx); err != nil {
-		discord.RespondError(s, i, fmt.Errorf("discord: stop session: %w", err))
+		discordbot.RespondError(e, fmt.Errorf("discord: stop session: %w", err))
 		return
 	}
 
-	discord.RespondEphemeral(s, i, fmt.Sprintf(
+	discordbot.RespondEphemeral(e, fmt.Sprintf(
 		"Session `%s` stopped.\n**Duration:** %s",
 		info.SessionID,
 		duration.String(),
 	))
-}
-
-// interactionUserID extracts the user ID from an interaction, handling
-// both guild (Member) and DM (User) contexts.
-func interactionUserID(i *discordgo.InteractionCreate) string {
-	if i.Member != nil && i.Member.User != nil {
-		return i.Member.User.ID
-	}
-	if i.User != nil {
-		return i.User.ID
-	}
-	return ""
 }

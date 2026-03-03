@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
 )
 
 // AttachmentFormat identifies the detected file format of a Discord attachment.
@@ -65,31 +65,22 @@ func DetectFormat(filename string) AttachmentFormat {
 	}
 }
 
-// FirstAttachment extracts the first attachment from an interaction's resolved
-// data. Returns nil if no attachments are present or the interaction is not
-// an application command.
-func FirstAttachment(i *discordgo.InteractionCreate) *discordgo.MessageAttachment {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return nil
-	}
-	data := i.ApplicationCommandData()
-	if data.Resolved == nil || len(data.Resolved.Attachments) == 0 {
-		return nil
+// FirstAttachment extracts the first attachment from slash command resolved data.
+// Returns the zero value and false if no attachments are present.
+func FirstAttachment(data discord.SlashCommandInteractionData) (discord.Attachment, bool) {
+	if len(data.Resolved.Attachments) == 0 {
+		return discord.Attachment{}, false
 	}
 	for _, a := range data.Resolved.Attachments {
-		return a
+		return a, true
 	}
-	return nil
+	return discord.Attachment{}, false
 }
 
 // DownloadAttachment downloads a Discord attachment with the given context.
 // The returned body is limited to maxImportSize+1 bytes. The caller must
 // close the returned DownloadedAttachment.Body when done.
-func DownloadAttachment(ctx context.Context, attachment *discordgo.MessageAttachment) (*DownloadedAttachment, error) {
-	if attachment == nil {
-		return nil, fmt.Errorf("attachment is nil")
-	}
-
+func DownloadAttachment(ctx context.Context, attachment discord.Attachment) (*DownloadedAttachment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, attachment.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create download request: %w", err)

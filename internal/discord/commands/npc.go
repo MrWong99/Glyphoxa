@@ -6,21 +6,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 
 	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 )
 
 // NPCCommands handles /npc slash command group.
 type NPCCommands struct {
-	perms *discord.PermissionChecker
+	perms *discordbot.PermissionChecker
 	// getOrch returns the current session's orchestrator, or nil if no session is active.
 	getOrch func() *orchestrator.Orchestrator
 }
 
 // NewNPCCommands creates an NPCCommands handler.
-func NewNPCCommands(perms *discord.PermissionChecker, getOrch func() *orchestrator.Orchestrator) *NPCCommands {
+func NewNPCCommands(perms *discordbot.PermissionChecker, getOrch func() *orchestrator.Orchestrator) *NPCCommands {
 	return &NPCCommands{
 		perms:   perms,
 		getOrch: getOrch,
@@ -28,10 +29,10 @@ func NewNPCCommands(perms *discord.PermissionChecker, getOrch func() *orchestrat
 }
 
 // Register registers all /npc subcommands with the router.
-func (nc *NPCCommands) Register(router *discord.CommandRouter) {
+func (nc *NPCCommands) Register(router *discordbot.CommandRouter) {
 	def := nc.Definition()
-	router.RegisterCommand("npc", def, func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		discord.RespondEphemeral(s, i, "Please use a subcommand: `/npc list`, `/npc mute`, `/npc unmute`, `/npc speak`, `/npc muteall`, `/npc unmuteall`.")
+	router.RegisterCommand("npc", def, func(e *events.ApplicationCommandInteractionCreate) {
+		discordbot.RespondEphemeral(e, "Please use a subcommand: `/npc list`, `/npc mute`, `/npc unmute`, `/npc speak`, `/npc muteall`, `/npc unmuteall`.")
 	})
 	router.RegisterHandler("npc/list", nc.handleList)
 	router.RegisterHandler("npc/mute", nc.handleMute)
@@ -45,95 +46,72 @@ func (nc *NPCCommands) Register(router *discord.CommandRouter) {
 	router.RegisterAutocomplete("npc/speak", nc.handleAutocomplete)
 }
 
-// Definition returns the /npc ApplicationCommand for Discord registration.
-func (nc *NPCCommands) Definition() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
+// Definition returns the /npc SlashCommandCreate for Discord registration.
+func (nc *NPCCommands) Definition() discord.SlashCommandCreate {
+	npcNameOption := discord.ApplicationCommandOptionString{
+		Name:         "name",
+		Description:  "NPC name",
+		Required:     true,
+		Autocomplete: true,
+	}
+	return discord.SlashCommandCreate{
 		Name:        "npc",
 		Description: "Manage NPC agents",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "list",
 				Description: "List all NPCs with their status",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
 			},
-			{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "mute",
 				Description: "Mute an NPC",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Name:         "name",
-						Description:  "NPC name",
-						Type:         discordgo.ApplicationCommandOptionString,
-						Required:     true,
-						Autocomplete: true,
-					},
-				},
+				Options:     []discord.ApplicationCommandOption{npcNameOption},
 			},
-			{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "unmute",
 				Description: "Unmute an NPC",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Name:         "name",
-						Description:  "NPC name",
-						Type:         discordgo.ApplicationCommandOptionString,
-						Required:     true,
-						Autocomplete: true,
-					},
-				},
+				Options:     []discord.ApplicationCommandOption{npcNameOption},
 			},
-			{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "speak",
 				Description: "Make an NPC speak pre-written text",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Name:         "name",
-						Description:  "NPC name",
-						Type:         discordgo.ApplicationCommandOptionString,
-						Required:     true,
-						Autocomplete: true,
-					},
-					{
+				Options: []discord.ApplicationCommandOption{
+					npcNameOption,
+					discord.ApplicationCommandOptionString{
 						Name:        "text",
 						Description: "Text for the NPC to speak",
-						Type:        discordgo.ApplicationCommandOptionString,
 						Required:    true,
 					},
 				},
 			},
-			{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "muteall",
 				Description: "Mute all NPCs",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
 			},
-			{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "unmuteall",
 				Description: "Unmute all NPCs",
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
 			},
 		},
 	}
 }
 
 // handleList handles /npc list.
-func (nc *NPCCommands) handleList(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !nc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to manage NPCs.")
+func (nc *NPCCommands) handleList(e *events.ApplicationCommandInteractionCreate) {
+	if !nc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to manage NPCs.")
 		return
 	}
 
 	orch := nc.getOrch()
 	if orch == nil {
-		discord.RespondEphemeral(s, i, "No active session.")
+		discordbot.RespondEphemeral(e, "No active session.")
 		return
 	}
 
 	agents := orch.ActiveAgents()
 	if len(agents) == 0 {
-		discord.RespondEphemeral(s, i, "No NPCs in this session.")
+		discordbot.RespondEphemeral(e, "No NPCs in this session.")
 		return
 	}
 
@@ -147,89 +125,91 @@ func (nc *NPCCommands) handleList(s *discordgo.Session, i *discordgo.Interaction
 		lines = append(lines, fmt.Sprintf("%s **%s** (ID: `%s`)", icon, a.Name(), a.ID()))
 	}
 
-	embed := &discordgo.MessageEmbed{
+	discordbot.RespondEmbed(e, discord.Embed{
 		Title:       "NPC Agents",
 		Description: strings.Join(lines, "\n"),
 		Color:       0x5865F2,
-	}
-	discord.RespondEmbed(s, i, embed)
+	})
 }
 
 // handleMute handles /npc mute <name>.
-func (nc *NPCCommands) handleMute(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !nc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to manage NPCs.")
+func (nc *NPCCommands) handleMute(e *events.ApplicationCommandInteractionCreate) {
+	if !nc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to manage NPCs.")
 		return
 	}
 
 	orch := nc.getOrch()
 	if orch == nil {
-		discord.RespondEphemeral(s, i, "No active session.")
+		discordbot.RespondEphemeral(e, "No active session.")
 		return
 	}
 
-	name := subcommandStringOption(i, "name")
+	data := e.SlashCommandInteractionData()
+	name := data.String("name")
 	a := orch.AgentByName(name)
 	if a == nil {
-		discord.RespondEphemeral(s, i, fmt.Sprintf("NPC %q not found.", name))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("NPC %q not found.", name))
 		return
 	}
 
 	if err := orch.MuteAgent(a.ID()); err != nil {
-		discord.RespondError(s, i, err)
+		discordbot.RespondError(e, err)
 		return
 	}
 
-	discord.RespondEphemeral(s, i, fmt.Sprintf("Muted **%s**.", a.Name()))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("Muted **%s**.", a.Name()))
 }
 
 // handleUnmute handles /npc unmute <name>.
-func (nc *NPCCommands) handleUnmute(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !nc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to manage NPCs.")
+func (nc *NPCCommands) handleUnmute(e *events.ApplicationCommandInteractionCreate) {
+	if !nc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to manage NPCs.")
 		return
 	}
 
 	orch := nc.getOrch()
 	if orch == nil {
-		discord.RespondEphemeral(s, i, "No active session.")
+		discordbot.RespondEphemeral(e, "No active session.")
 		return
 	}
 
-	name := subcommandStringOption(i, "name")
+	data := e.SlashCommandInteractionData()
+	name := data.String("name")
 	a := orch.AgentByName(name)
 	if a == nil {
-		discord.RespondEphemeral(s, i, fmt.Sprintf("NPC %q not found.", name))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("NPC %q not found.", name))
 		return
 	}
 
 	if err := orch.UnmuteAgent(a.ID()); err != nil {
-		discord.RespondError(s, i, err)
+		discordbot.RespondError(e, err)
 		return
 	}
 
-	discord.RespondEphemeral(s, i, fmt.Sprintf("Unmuted **%s**.", a.Name()))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("Unmuted **%s**.", a.Name()))
 }
 
 // handleSpeak handles /npc speak <name> <text>.
-func (nc *NPCCommands) handleSpeak(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !nc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to manage NPCs.")
+func (nc *NPCCommands) handleSpeak(e *events.ApplicationCommandInteractionCreate) {
+	if !nc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to manage NPCs.")
 		return
 	}
 
 	orch := nc.getOrch()
 	if orch == nil {
-		discord.RespondEphemeral(s, i, "No active session.")
+		discordbot.RespondEphemeral(e, "No active session.")
 		return
 	}
 
-	name := subcommandStringOption(i, "name")
-	text := subcommandStringOption(i, "text")
+	data := e.SlashCommandInteractionData()
+	name := data.String("name")
+	text := data.String("text")
 
 	a := orch.AgentByName(name)
 	if a == nil {
-		discord.RespondEphemeral(s, i, fmt.Sprintf("NPC %q not found.", name))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("NPC %q not found.", name))
 		return
 	}
 
@@ -237,103 +217,71 @@ func (nc *NPCCommands) handleSpeak(s *discordgo.Session, i *discordgo.Interactio
 	defer cancel()
 
 	if err := a.SpeakText(ctx, text); err != nil {
-		discord.RespondError(s, i, err)
+		discordbot.RespondError(e, err)
 		return
 	}
 
-	discord.RespondEphemeral(s, i, fmt.Sprintf("**%s** is speaking: %q", a.Name(), text))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("**%s** is speaking: %q", a.Name(), text))
 }
 
 // handleMuteAll handles /npc muteall.
-func (nc *NPCCommands) handleMuteAll(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !nc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to manage NPCs.")
+func (nc *NPCCommands) handleMuteAll(e *events.ApplicationCommandInteractionCreate) {
+	if !nc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to manage NPCs.")
 		return
 	}
 
 	orch := nc.getOrch()
 	if orch == nil {
-		discord.RespondEphemeral(s, i, "No active session.")
+		discordbot.RespondEphemeral(e, "No active session.")
 		return
 	}
 
 	count := orch.MuteAll()
-	discord.RespondEphemeral(s, i, fmt.Sprintf("Muted %d NPC(s).", count))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("Muted %d NPC(s).", count))
 }
 
 // handleUnmuteAll handles /npc unmuteall.
-func (nc *NPCCommands) handleUnmuteAll(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !nc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to manage NPCs.")
+func (nc *NPCCommands) handleUnmuteAll(e *events.ApplicationCommandInteractionCreate) {
+	if !nc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to manage NPCs.")
 		return
 	}
 
 	orch := nc.getOrch()
 	if orch == nil {
-		discord.RespondEphemeral(s, i, "No active session.")
+		discordbot.RespondEphemeral(e, "No active session.")
 		return
 	}
 
 	count := orch.UnmuteAll()
-	discord.RespondEphemeral(s, i, fmt.Sprintf("Unmuted %d NPC(s).", count))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("Unmuted %d NPC(s).", count))
 }
 
 // handleAutocomplete provides autocomplete for the "name" option across
 // /npc mute, /npc unmute, and /npc speak.
-func (nc *NPCCommands) handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (nc *NPCCommands) handleAutocomplete(e *events.AutocompleteInteractionCreate) {
 	orch := nc.getOrch()
 	if orch == nil {
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-			Data: &discordgo.InteractionResponseData{},
-		})
+		_ = e.AutocompleteResult(nil)
 		return
 	}
 
-	// Find the focused option's partial value.
-	partial := ""
-	data := i.ApplicationCommandData()
-	if len(data.Options) > 0 && data.Options[0].Type == discordgo.ApplicationCommandOptionSubCommand {
-		for _, opt := range data.Options[0].Options {
-			if opt.Focused {
-				partial = strings.ToLower(opt.StringValue())
-				break
-			}
-		}
-	}
+	partial := strings.ToLower(e.Data.String("name"))
 
 	agents := orch.ActiveAgents()
-	var choices []*discordgo.ApplicationCommandOptionChoice
+	var choices []discord.AutocompleteChoice
 	for _, a := range agents {
 		if partial == "" || strings.HasPrefix(strings.ToLower(a.Name()), partial) {
-			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+			choices = append(choices, discord.AutocompleteChoiceString{
 				Name:  a.Name(),
 				Value: a.Name(),
 			})
 		}
-		// Discord limits autocomplete to 25 choices.
 		if len(choices) >= 25 {
 			break
 		}
 	}
 
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-		Data: &discordgo.InteractionResponseData{
-			Choices: choices,
-		},
-	})
-}
-
-// subcommandStringOption extracts a string option value from a subcommand interaction.
-func subcommandStringOption(i *discordgo.InteractionCreate, name string) string {
-	data := i.ApplicationCommandData()
-	if len(data.Options) > 0 && data.Options[0].Type == discordgo.ApplicationCommandOptionSubCommand {
-		for _, opt := range data.Options[0].Options {
-			if opt.Name == name {
-				return opt.StringValue()
-			}
-		}
-	}
-	return ""
+	_ = e.AutocompleteResult(choices)
 }

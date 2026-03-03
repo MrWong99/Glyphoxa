@@ -7,16 +7,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 )
 
 // CampaignCommands holds the dependencies for /campaign slash commands.
 type CampaignCommands struct {
-	perms    *discord.PermissionChecker
+	perms    *discordbot.PermissionChecker
 	getStore func() entity.Store
 	getCfg   func() *config.CampaignConfig
 	isActive func() bool // returns true if a session is currently active
@@ -24,7 +25,7 @@ type CampaignCommands struct {
 
 // NewCampaignCommands creates a CampaignCommands handler.
 func NewCampaignCommands(
-	perms *discord.PermissionChecker,
+	perms *discordbot.PermissionChecker,
 	getStore func() entity.Store,
 	getCfg func() *config.CampaignConfig,
 	isActive func() bool,
@@ -38,10 +39,10 @@ func NewCampaignCommands(
 }
 
 // Register registers the /campaign command group with the router.
-func (cc *CampaignCommands) Register(router *discord.CommandRouter) {
+func (cc *CampaignCommands) Register(router *discordbot.CommandRouter) {
 	def := cc.Definition()
-	router.RegisterCommand("campaign", def, func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		discord.RespondEphemeral(s, i, "Please use a subcommand: `/campaign info`, `/campaign load`, or `/campaign switch`.")
+	router.RegisterCommand("campaign", def, func(e *events.ApplicationCommandInteractionCreate) {
+		discordbot.RespondEphemeral(e, "Please use a subcommand: `/campaign info`, `/campaign load`, or `/campaign switch`.")
 	})
 	router.RegisterHandler("campaign/info", cc.handleInfo)
 	router.RegisterHandler("campaign/load", cc.handleLoad)
@@ -49,29 +50,25 @@ func (cc *CampaignCommands) Register(router *discord.CommandRouter) {
 	router.RegisterAutocomplete("campaign/switch", cc.autocompleteCampaignSwitch)
 }
 
-// Definition returns the /campaign ApplicationCommand for Discord registration.
-func (cc *CampaignCommands) Definition() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
+// Definition returns the /campaign SlashCommandCreate for Discord registration.
+func (cc *CampaignCommands) Definition() discord.SlashCommandCreate {
+	return discord.SlashCommandCreate{
 		Name:        "campaign",
 		Description: "Manage the active campaign",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "info",
 				Description: "Display current campaign metadata",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "load",
 				Description: "Load a campaign from a YAML attachment (stops active session)",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "switch",
 				Description: "Switch to a different campaign (requires session stop first)",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:         discordgo.ApplicationCommandOptionString,
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
 						Name:         "name",
 						Description:  "Campaign name",
 						Required:     true,
@@ -84,9 +81,9 @@ func (cc *CampaignCommands) Definition() *discordgo.ApplicationCommand {
 }
 
 // handleInfo displays campaign metadata.
-func (cc *CampaignCommands) handleInfo(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !cc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to view campaign info.")
+func (cc *CampaignCommands) handleInfo(e *events.ApplicationCommandInteractionCreate) {
+	if !cc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to view campaign info.")
 		return
 	}
 
@@ -110,7 +107,6 @@ func (cc *CampaignCommands) handleInfo(s *discordgo.Session, i *discordgo.Intera
 		system = "(not set)"
 	}
 
-	// Count entities by type.
 	typeCounts := make(map[entity.EntityType]int)
 	for _, ent := range entities {
 		typeCounts[ent.Type]++
@@ -126,75 +122,76 @@ func (cc *CampaignCommands) handleInfo(s *discordgo.Session, i *discordgo.Intera
 		}
 	}
 
-	embed := &discordgo.MessageEmbed{
+	embed := discord.Embed{
 		Title: "Campaign Info",
-		Fields: []*discordgo.MessageEmbedField{
-			{Name: "Name", Value: name, Inline: true},
-			{Name: "System", Value: system, Inline: true},
-			{Name: "Total Entities", Value: fmt.Sprintf("%d", len(entities)), Inline: true},
+		Fields: []discord.EmbedField{
+			{Name: "Name", Value: name, Inline: new(true)},
+			{Name: "System", Value: system, Inline: new(true)},
+			{Name: "Total Entities", Value: fmt.Sprintf("%d", len(entities)), Inline: new(true)},
 		},
 	}
 
 	if breakdown.Len() > 0 {
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+		embed.Fields = append(embed.Fields, discord.EmbedField{
 			Name:  "Entity Breakdown",
 			Value: breakdown.String(),
 		})
 	}
 
-	discord.RespondEmbed(s, i, embed)
+	discordbot.RespondEmbed(e, embed)
 }
 
 // handleLoad parses a YAML campaign attachment, reinitializes entities.
-func (cc *CampaignCommands) handleLoad(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !cc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to load a campaign.")
+func (cc *CampaignCommands) handleLoad(e *events.ApplicationCommandInteractionCreate) {
+	if !cc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to load a campaign.")
 		return
 	}
 
 	if cc.isActive() {
-		discord.RespondEphemeral(s, i, "A session is active. Please stop it with `/session stop` before loading a new campaign.")
+		discordbot.RespondEphemeral(e, "A session is active. Please stop it with `/session stop` before loading a new campaign.")
 		return
 	}
 
-	attachment := FirstAttachment(i)
-	if attachment == nil {
-		discord.RespondEphemeral(s, i, "Please attach a campaign YAML file.")
+	data := e.Data.(discord.SlashCommandInteractionData)
+	attachment, ok := FirstAttachment(data)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Please attach a campaign YAML file.")
 		return
 	}
 
 	if DetectFormat(attachment.Filename) != FormatYAML {
-		discord.RespondEphemeral(s, i, "Campaign files must be YAML (.yaml or .yml).")
+		discordbot.RespondEphemeral(e, "Campaign files must be YAML (.yaml or .yml).")
 		return
 	}
 
 	if attachment.Size > maxImportSize {
-		discord.RespondEphemeral(s, i, fmt.Sprintf("File too large (%d bytes). Maximum is 10 MB.", attachment.Size))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("File too large (%d bytes). Maximum is 10 MB.", attachment.Size))
 		return
 	}
 
-	discord.DeferReply(s, i)
+	discordbot.DeferReply(e)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	dl, err := DownloadAttachment(ctx, attachment)
 	if err != nil {
-		discord.FollowUp(s, i, fmt.Sprintf("Failed to download attachment: %v", err))
+		discordbot.FollowUp(e, fmt.Sprintf("Failed to download attachment: %v", err))
 		return
 	}
 	defer dl.Body.Close()
 
 	cf, parseErr := entity.LoadCampaignFromReader(dl.Body)
 	if parseErr != nil {
-		discord.FollowUp(s, i, fmt.Sprintf("Failed to parse campaign YAML: %v", parseErr))
+		discordbot.FollowUp(e, fmt.Sprintf("Failed to parse campaign YAML: %v", parseErr))
 		return
 	}
 
 	store := cc.getStore()
 	count, importErr := entity.ImportCampaign(ctx, store, cf)
 	if importErr != nil {
-		discord.FollowUp(s, i, fmt.Sprintf("Import error: %v (imported %d entities before error)", importErr, count))
+		discordbot.FollowUp(e, fmt.Sprintf("Import error: %v (imported %d entities before error)", importErr, count))
 		return
 	}
 
@@ -203,59 +200,50 @@ func (cc *CampaignCommands) handleLoad(s *discordgo.Session, i *discordgo.Intera
 		campaignName = "(unnamed)"
 	}
 
-	discord.FollowUp(s, i, fmt.Sprintf(
+	discordbot.FollowUp(e, fmt.Sprintf(
 		"Campaign loaded!\n**Name:** %s\n**System:** %s\n**Entities imported:** %d",
 		campaignName, cf.Campaign.System, count,
 	))
 }
 
 // handleSwitch switches to a different campaign configuration.
-func (cc *CampaignCommands) handleSwitch(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !cc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to switch campaigns.")
+func (cc *CampaignCommands) handleSwitch(e *events.ApplicationCommandInteractionCreate) {
+	if !cc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to switch campaigns.")
 		return
 	}
 
 	if cc.isActive() {
-		discord.RespondEphemeral(s, i, "A session is active. Please stop it with `/session stop` before switching campaigns.")
+		discordbot.RespondEphemeral(e, "A session is active. Please stop it with `/session stop` before switching campaigns.")
 		return
 	}
 
-	subOpts := subcommandOptions(i)
-	var name string
-	for _, opt := range subOpts {
-		if opt.Name == "name" {
-			name = opt.StringValue()
-		}
-	}
+	data := e.Data.(discord.SlashCommandInteractionData)
+	name := data.String("name")
 	if name == "" {
-		discord.RespondEphemeral(s, i, "Please provide a campaign name.")
+		discordbot.RespondEphemeral(e, "Please provide a campaign name.")
 		return
 	}
 
-	// Look up the campaign config file by name.
 	cfg := cc.getCfg()
 	if cfg == nil {
-		discord.RespondEphemeral(s, i, "No campaign configuration available.")
+		discordbot.RespondEphemeral(e, "No campaign configuration available.")
 		return
 	}
 
-	discord.RespondEphemeral(s, i, fmt.Sprintf("Switched to campaign **%s**.", name))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("Switched to campaign **%s**.", name))
 }
 
 // autocompleteCampaignSwitch provides autocomplete for /campaign switch.
-func (cc *CampaignCommands) autocompleteCampaignSwitch(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (cc *CampaignCommands) autocompleteCampaignSwitch(e *events.AutocompleteInteractionCreate) {
 	cfg := cc.getCfg()
-	var choices []*discordgo.ApplicationCommandOptionChoice
+	var choices []discord.AutocompleteChoice
 	if cfg != nil && cfg.Name != "" {
-		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+		choices = append(choices, discord.AutocompleteChoiceString{
 			Name:  cfg.Name,
 			Value: cfg.Name,
 		})
 	}
 
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-		Data: &discordgo.InteractionResponseData{Choices: choices},
-	})
+	_ = e.AutocompleteResult(choices)
 }

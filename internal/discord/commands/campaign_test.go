@@ -3,16 +3,16 @@ package commands
 import (
 	"testing"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 )
 
 func newTestCampaignCommands(store entity.Store, cfg *config.CampaignConfig, active bool) *CampaignCommands {
 	return NewCampaignCommands(
-		discord.NewPermissionChecker(""),
+		discordbot.NewPermissionChecker(""),
 		func() entity.Store { return store },
 		func() *config.CampaignConfig { return cfg },
 		func() bool { return active },
@@ -34,8 +34,8 @@ func TestCampaignDefinition(t *testing.T) {
 		t.Fatalf("subcommand count = %d, want %d", len(def.Options), len(wantSubs))
 	}
 	for i, want := range wantSubs {
-		if def.Options[i].Name != want {
-			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].Name, want)
+		if def.Options[i].OptionName() != want {
+			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].OptionName(), want)
 		}
 	}
 }
@@ -46,20 +46,21 @@ func TestCampaignDefinition_SwitchHasAutocomplete(t *testing.T) {
 	cc := newTestCampaignCommands(entity.NewMemStore(), &config.CampaignConfig{}, false)
 	def := cc.Definition()
 
-	var switchOpt *discordgo.ApplicationCommandOption
+	var switchSub discord.ApplicationCommandOptionSubCommand
+	var found bool
 	for _, opt := range def.Options {
-		if opt.Name == "switch" {
-			switchOpt = opt
+		if opt.OptionName() == "switch" {
+			switchSub, found = opt.(discord.ApplicationCommandOptionSubCommand)
 			break
 		}
 	}
-	if switchOpt == nil {
+	if !found {
 		t.Fatal("switch subcommand not found")
 	}
-	if len(switchOpt.Options) == 0 {
+	if len(switchSub.Options) == 0 {
 		t.Fatal("switch subcommand has no options")
 	}
-	nameOpt := switchOpt.Options[0]
+	nameOpt := switchSub.Options[0].(discord.ApplicationCommandOptionString)
 	if nameOpt.Name != "name" {
 		t.Errorf("option name = %q, want %q", nameOpt.Name, "name")
 	}
@@ -85,13 +86,13 @@ func TestCampaignRegister(t *testing.T) {
 	store := entity.NewMemStore()
 	cfg := &config.CampaignConfig{Name: "Test Campaign", System: "dnd5e"}
 	cc := newTestCampaignCommands(store, cfg, false)
-	router := discord.NewCommandRouter()
+	router := discordbot.NewCommandRouter()
 	cc.Register(router)
 
 	cmds := router.ApplicationCommands()
 	found := false
 	for _, cmd := range cmds {
-		if cmd.Name == "campaign" {
+		if cmd.CommandName() == "campaign" {
 			found = true
 			break
 		}
@@ -104,7 +105,7 @@ func TestCampaignRegister(t *testing.T) {
 func TestCampaignInfo_NoDMRole(t *testing.T) {
 	t.Parallel()
 
-	perms := discord.NewPermissionChecker("dm-role-123")
+	perms := discordbot.NewPermissionChecker("123456789012345678")
 	cc := NewCampaignCommands(
 		perms,
 		func() entity.Store { return entity.NewMemStore() },
@@ -113,7 +114,8 @@ func TestCampaignInfo_NoDMRole(t *testing.T) {
 	)
 
 	// Verify the perms check works for non-DM users.
-	if perms.IsDM(testInteractionWithRoles("other-role")) {
+	member := testMemberWithRoles()
+	if perms.IsDM(member) {
 		t.Fatal("expected IsDM to return false for user without DM role")
 	}
 
@@ -139,17 +141,5 @@ func TestCampaignLoad_NoActiveSession(t *testing.T) {
 
 	if cc.isActive() {
 		t.Fatal("expected isActive to return false")
-	}
-}
-
-// testInteractionWithRoles creates a test interaction with the given roles.
-func testInteractionWithRoles(roles ...string) *discordgo.InteractionCreate {
-	return &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Member: &discordgo.Member{
-				User:  &discordgo.User{ID: "test-user"},
-				Roles: roles,
-			},
-		},
 	}
 }
