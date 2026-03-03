@@ -113,7 +113,7 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 
 	mockLLM := &mock.Provider{
 		CompleteResponse: &llm.CompletionResponse{
-			Content: `{"corrected_text": "Eldrinax arrived at the tower.", "corrections": [{"original": "eldrinaks", "corrected": "Eldrinax", "confidence": 0.88}]}`,
+			Content: `{"corrected_text": "Eldrinax arrived at the tower and greeted the old wizard.", "corrections": [{"original": "eldrinaks", "corrected": "Eldrinax", "confidence": 0.88}]}`,
 		},
 	}
 	llmCorrector := llmcorrect.New(mockLLM)
@@ -121,8 +121,8 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 		transcript.WithLLMCorrector(llmCorrector),
 	)
 
-	// No per-word data + enough words (≥3) → LLM always runs.
-	tr := makeTranscript("eldrinaks arrived at the tower.")
+	// No per-word data + enough words (≥8) → LLM always runs.
+	tr := makeTranscript("eldrinaks arrived at the tower and greeted the old wizard.")
 	result, err := pipeline.Correct(context.Background(), tr, []string{"Eldrinax"})
 	if err != nil {
 		t.Fatalf("Correct returned error: %v", err)
@@ -136,8 +136,8 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 		t.Fatal("LLM was not called")
 	}
 	// Final text should come from LLM response.
-	if result.Corrected != "Eldrinax arrived at the tower." {
-		t.Errorf("Corrected=%q, want %q", result.Corrected, "Eldrinax arrived at the tower.")
+	if result.Corrected != "Eldrinax arrived at the tower and greeted the old wizard." {
+		t.Errorf("Corrected=%q, want %q", result.Corrected, "Eldrinax arrived at the tower and greeted the old wizard.")
 	}
 	// LLM corrections should be present.
 	llmCorrectionFound := false
@@ -172,9 +172,15 @@ func TestCorrectionPipeline_LowConfidenceFiltering(t *testing.T) {
 	wordDetails := []stt.WordDetail{
 		{Word: "eldrinax", Confidence: 0.95},
 		{Word: "speaks", Confidence: 0.98},
+		{Word: "ancient", Confidence: 0.96},
 		{Word: "wisdom", Confidence: 0.92},
+		{Word: "from", Confidence: 0.99},
+		{Word: "the", Confidence: 0.99},
+		{Word: "tower", Confidence: 0.97},
+		{Word: "of", Confidence: 0.99},
+		{Word: "light", Confidence: 0.96},
 	}
-	tr := makeTranscript("eldrinax speaks wisdom.", wordDetails...)
+	tr := makeTranscript("eldrinax speaks ancient wisdom from the tower of light.", wordDetails...)
 	result, err := pipeline.Correct(context.Background(), tr, []string{"Eldrinax"})
 	if err != nil {
 		t.Fatalf("Correct returned error: %v", err)
@@ -201,13 +207,19 @@ func TestCorrectionPipeline_LLMRunsOnLowConfidence(t *testing.T) {
 		transcript.WithLLMOnLowConfidence(0.5),
 	)
 
-	// One word below threshold → LLM should be called.
+	// One word below threshold → LLM should be called (transcript has ≥8 words).
 	wordDetails := []stt.WordDetail{
 		{Word: "eldrinaks", Confidence: 0.2}, // low confidence
 		{Word: "speaks", Confidence: 0.98},
+		{Word: "ancient", Confidence: 0.95},
 		{Word: "wisdom", Confidence: 0.92},
+		{Word: "from", Confidence: 0.99},
+		{Word: "the", Confidence: 0.99},
+		{Word: "tower", Confidence: 0.97},
+		{Word: "of", Confidence: 0.99},
+		{Word: "light", Confidence: 0.96},
 	}
-	tr := makeTranscript("eldrinaks speaks wisdom.", wordDetails...)
+	tr := makeTranscript("eldrinaks speaks ancient wisdom from the tower of light.", wordDetails...)
 	_, err := pipeline.Correct(context.Background(), tr, []string{"Eldrinax"})
 	if err != nil {
 		t.Fatalf("Correct returned error: %v", err)
@@ -228,7 +240,7 @@ func TestCorrectionPipeline_MinWordsSkipsLLM(t *testing.T) {
 		},
 	}
 	llmCorrector := llmcorrect.New(mockLLM)
-	// Default minWordsForLLM is 3; a 2-word transcript should NOT trigger the LLM.
+	// Default minWordsForLLM is 8; a 2-word transcript should NOT trigger the LLM.
 	pipeline := transcript.NewPipeline(
 		transcript.WithLLMCorrector(llmCorrector),
 	)
