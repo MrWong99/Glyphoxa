@@ -209,7 +209,12 @@ func (c *Connection) ProvideOpusFrame() ([]byte, error) {
 			return opus, nil
 		}
 
-		// Read the next frame from the output channel.
+		// Read the next frame from the output channel. The default case
+		// makes this non-blocking: when no audio is queued, we return nil
+		// so the audio sender can run its silence-frame logic. This is
+		// critical at connection startup — the sender sends a few silence
+		// frames over UDP which signals Discord to start routing incoming
+		// audio to the bot.
 		select {
 		case <-c.done:
 			return nil, io.EOF
@@ -225,6 +230,8 @@ func (c *Connection) ProvideOpusFrame() ([]byte, error) {
 			}
 
 			c.buf = append(c.buf, frame.Data...)
+		default:
+			return nil, nil
 		}
 	}
 }

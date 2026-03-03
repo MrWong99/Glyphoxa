@@ -205,7 +205,10 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 		return nil, fmt.Errorf("cascade: fast model stream failed: %w", err)
 	}
 
-	opener, fastFull := e.collectFirstSentence(ctx, fastCh)
+	opener, fastFull, streamErr := e.collectFirstSentence(ctx, fastCh)
+	if streamErr != nil {
+		return nil, streamErr
+	}
 	if opener == "" {
 		opener = "..." // guard: prevent silent TTS on empty opener
 	}
@@ -424,23 +427,30 @@ func (e *Engine) buildStrongPrompt(prompt engine.PromptContext, tools []llm.Tool
 //
 // When full is false, remaining chunks in ch are drained in a background goroutine
 // to prevent the provider's goroutine from leaking.
-func (e *Engine) collectFirstSentence(ctx context.Context, ch <-chan llm.Chunk) (sentence string, full bool) {
+func (e *Engine) collectFirstSentence(ctx context.Context, ch <-chan llm.Chunk) (sentence string, full bool, streamErr error) {
 	var buf strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
-			return buf.String(), true
+			return buf.String(), true, ctx.Err()
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed without a finish-reason chunk.
-				return buf.String(), true
+				return buf.String(), true, nil
 			}
+
+			// LLM provider error — do not pass the error text to TTS.
+			if chunk.FinishReason == "error" {
+				go drainChunks(ch)
+				return "", true, fmt.Errorf("cascade: LLM stream error: %s", chunk.Text)
+			}
+
 			buf.WriteString(chunk.Text)
 
 			// A finish-reason marks the end of the stream — the entire
 			// response fits in this buffer, so no strong model is needed.
 			if chunk.FinishReason != "" {
-				return buf.String(), true
+				return buf.String(), true, nil
 			}
 
 			// Look for a sentence boundary only while the stream is live.
@@ -448,7 +458,7 @@ func (e *Engine) collectFirstSentence(ctx context.Context, ch <-chan llm.Chunk) 
 			if idx := firstSentenceBoundary(s); idx >= 0 {
 				// Drain remaining fast-model output to avoid goroutine leaks.
 				go drainChunks(ch)
-				return s[:idx+1], false
+				return s[:idx+1], false, nil
 			}
 		}
 	}
@@ -587,6 +597,10 @@ func (e *Engine) forwardSentencesWithTools(
 
 			// On the final chunk, flush any remaining partial sentence.
 			if chunk.FinishReason != "" {
+				// LLM provider error — discard buffered error text.
+				if chunk.FinishReason == "error" {
+					return collected.String(), nil, true
+				}
 				if buf.Len() > 0 {
 					select {
 					case textCh <- buf.String():

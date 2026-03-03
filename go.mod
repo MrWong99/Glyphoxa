@@ -6,6 +6,7 @@ require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
 	github.com/coder/websocket v1.8.14
 	github.com/disgoorg/disgo v0.19.2
+	github.com/disgoorg/godave/golibdave v0.1.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/ggerganov/whisper.cpp/bindings/go v0.0.0-20260227185758-9453b4b9be9b
 	github.com/google/uuid v1.6.0
@@ -16,12 +17,12 @@ require (
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/tiktoken-go/tokenizer v0.7.0
 	github.com/yalue/onnxruntime_go v1.26.0
-	go.opentelemetry.io/otel v1.40.0
-	go.opentelemetry.io/otel/exporters/prometheus v0.62.0
-	go.opentelemetry.io/otel/metric v1.40.0
-	go.opentelemetry.io/otel/sdk v1.40.0
-	go.opentelemetry.io/otel/sdk/metric v1.40.0
-	go.opentelemetry.io/otel/trace v1.40.0
+	go.opentelemetry.io/otel v1.41.0
+	go.opentelemetry.io/otel/exporters/prometheus v0.63.0
+	go.opentelemetry.io/otel/metric v1.41.0
+	go.opentelemetry.io/otel/sdk v1.41.0
+	go.opentelemetry.io/otel/sdk/metric v1.41.0
+	go.opentelemetry.io/otel/trace v1.41.0
 	golang.org/x/sync v0.19.0
 	gopkg.in/yaml.v3 v3.0.1
 	layeh.com/gopus v0.0.0-20210501142526-1ee02d434e32
@@ -37,6 +38,7 @@ require (
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/disgoorg/godave v0.1.0 // indirect
+	github.com/disgoorg/godave/libdave v0.1.0 // indirect
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
 	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
@@ -55,7 +57,7 @@ require (
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/mailru/easyjson v0.9.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/ollama/ollama v0.17.5 // indirect
+	github.com/ollama/ollama v0.17.6 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
@@ -72,7 +74,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0 // indirect
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.66.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.51.0 // indirect

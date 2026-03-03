@@ -88,21 +88,29 @@ func (sc *SessionCommands) handleStart(e *events.ApplicationCommandInteractionCr
 
 	discordbot.DeferReply(e)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Run Start in a goroutine so the gateway event handler returns
+	// immediately. conn.Open() waits for VoiceStateUpdate and
+	// VoiceServerUpdate events, which are delivered on the same gateway
+	// event loop — blocking here would deadlock.
+	channelID := vs.ChannelID.String()
+	dmUserID := userID.String()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-	if err := sc.sessionMgr.Start(ctx, vs.ChannelID.String(), userID.String()); err != nil {
-		discordbot.FollowUp(e, fmt.Sprintf("Failed to start session: %v", err))
-		return
-	}
+		if err := sc.sessionMgr.Start(ctx, channelID, dmUserID); err != nil {
+			discordbot.FollowUp(e, fmt.Sprintf("Failed to start session: %v", err))
+			return
+		}
 
-	info := sc.sessionMgr.Info()
-	discordbot.FollowUp(e, fmt.Sprintf(
-		"Session started!\n**Session ID:** `%s`\n**Campaign:** %s\n**Channel:** <#%s>",
-		info.SessionID,
-		info.CampaignName,
-		info.ChannelID,
-	))
+		info := sc.sessionMgr.Info()
+		discordbot.FollowUp(e, fmt.Sprintf(
+			"Session started!\n**Session ID:** `%s`\n**Campaign:** %s\n**Channel:** <#%s>",
+			info.SessionID,
+			info.CampaignName,
+			info.ChannelID,
+		))
+	}()
 }
 
 // handleStop handles /session stop.
@@ -120,17 +128,24 @@ func (sc *SessionCommands) handleStop(e *events.ApplicationCommandInteractionCre
 	info := sc.sessionMgr.Info()
 	duration := time.Since(info.StartedAt).Truncate(time.Second)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	discordbot.DeferReply(e)
 
-	if err := sc.sessionMgr.Stop(ctx); err != nil {
-		discordbot.RespondError(e, fmt.Errorf("discord: stop session: %w", err))
-		return
-	}
+	// Run Stop in a goroutine so the gateway event handler returns
+	// immediately. conn.Close needs the gateway to process
+	// VoiceStateUpdate — blocking here would deadlock.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-	discordbot.RespondEphemeral(e, fmt.Sprintf(
-		"Session `%s` stopped.\n**Duration:** %s",
-		info.SessionID,
-		duration.String(),
-	))
+		if err := sc.sessionMgr.Stop(ctx); err != nil {
+			discordbot.FollowUp(e, fmt.Sprintf("Failed to stop session: %v", err))
+			return
+		}
+
+		discordbot.FollowUp(e, fmt.Sprintf(
+			"Session `%s` stopped.\n**Duration:** %s",
+			info.SessionID,
+			duration.String(),
+		))
+	}()
 }
