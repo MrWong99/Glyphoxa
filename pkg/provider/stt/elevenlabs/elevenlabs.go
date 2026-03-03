@@ -364,6 +364,13 @@ func (s *session) readLoop(ctx context.Context) {
 			select {
 			case s.finals <- t:
 			case <-s.done:
+				// During shutdown the committed transcript from a manual
+				// commit may still arrive. Try a non-blocking send so the
+				// result is not silently dropped when buffer space exists.
+				select {
+				case s.finals <- t:
+				default:
+				}
 			}
 		} else {
 			select {
