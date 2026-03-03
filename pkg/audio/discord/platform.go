@@ -44,6 +44,12 @@ func (p *Platform) Connect(ctx context.Context, channelID string) (audio.Connect
 	// Join the voice channel: mute=false (we send audio), deaf=false (we receive audio).
 	vc, err := p.session.ChannelVoiceJoin(p.guildID, channelID, false, false)
 	if err != nil {
+		// ChannelVoiceJoin may return a non-nil VoiceConnection even on
+		// error (e.g. timeout waiting for Ready). Disconnect it so the
+		// auto-reconnect goroutines stop and the bot leaves the channel.
+		if vc != nil {
+			_ = vc.Disconnect()
+		}
 		return nil, fmt.Errorf("discord: join voice channel %q: %w", channelID, err)
 	}
 

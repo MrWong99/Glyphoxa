@@ -112,6 +112,43 @@ final transcripts when ElevenLabs sends both message types for the same commit.
 
 ---
 
+## HIGH — Discord voice broken (DAVE enforcement 2026-03-01)
+
+### 16. Discord voice requires DAVE (E2EE) protocol — `bwmarrin/discordgo` does not support it
+
+**`pkg/audio/discord/platform.go`, `go.mod`**
+
+As of 2026-03-01, Discord enforces the DAVE (Discord Audio Video Encryption)
+protocol for all non-stage voice calls. Clients without DAVE support receive
+WebSocket close code 4017 (`E2EE/DAVE protocol required`) and are ejected from
+voice channels immediately after joining.
+
+`bwmarrin/discordgo` (currently at pseudo-version `v0.29.1-0.20260214123928`)
+does not implement the DAVE protocol. There is no open issue or PR on the
+repository tracking this. Voice functionality is completely broken — the bot
+joins the channel via the gateway but the voice WebSocket is immediately
+rejected, triggering an infinite auto-reconnect loop.
+
+Log evidence: `voice endpoint rotterdam12129.discord.media:443 websocket closed
+unexpectedly, websocket: close 4017: E2EE/DAVE protocol required`
+
+**Fix options** (in order of preference):
+
+1. **Migrate to `disgoorg/disgo`** — this Go Discord library already has DAVE
+   support via [`disgoorg/godave`](https://github.com/disgoorg/godave) (requires
+   CGO, wraps Discord's reference C++ `libdave`). This would require rewriting
+   `pkg/audio/discord/`, `internal/discord/`, and related wiring.
+2. **Wait for `bwmarrin/discordgo` to add DAVE support** — no timeline exists.
+3. **Implement DAVE directly** — wrap Discord's open-source
+   [`libdave`](https://github.com/discord/libdave) via CGO and integrate with
+   the existing discordgo voice connection. High effort, fragile.
+
+Reference: [Discord DAVE announcement](https://discord.com/blog/bringing-dave-to-all-discord-platforms),
+[DAVE whitepaper](https://daveprotocol.com/),
+[Discord enforcement notice](https://support.discord.com/hc/en-us/articles/38749827197591).
+
+---
+
 ## MEDIUM — Runtime bugs (from live session 2026-03-03)
 
 ### 15. Orchestrator routing fails for most utterances after mute/unmute cycle
