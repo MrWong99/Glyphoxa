@@ -3,14 +3,37 @@ package commands
 import (
 	"testing"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
 	"github.com/MrWong99/glyphoxa/internal/config"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	audiomock "github.com/MrWong99/glyphoxa/pkg/audio/mock"
 	memorymock "github.com/MrWong99/glyphoxa/pkg/memory/mock"
 )
+
+// mockInteractionMember satisfies the interactionMember interface used by
+// PermissionChecker.IsDM, allowing unit tests without real disgo events.
+type mockInteractionMember struct {
+	member *discord.ResolvedMember
+	user   discord.User
+}
+
+func (m *mockInteractionMember) Member() *discord.ResolvedMember { return m.member }
+func (m *mockInteractionMember) User() discord.User              { return m.user }
+
+// testMemberWithRoles creates a mockInteractionMember with the given role IDs.
+func testMemberWithRoles(roleIDs ...snowflake.ID) *mockInteractionMember {
+	return &mockInteractionMember{
+		member: &discord.ResolvedMember{
+			Member: discord.Member{
+				RoleIDs: roleIDs,
+			},
+		},
+		user: discord.User{ID: snowflake.ID(1)},
+	}
+}
 
 // newTestSessionMgr creates a SessionManager with mock dependencies.
 func newTestSessionMgr() *app.SessionManager {
@@ -30,7 +53,7 @@ func newTestSessionMgr() *app.SessionManager {
 func TestSessionStart_NoDMRole(t *testing.T) {
 	t.Parallel()
 
-	perms := discord.NewPermissionChecker("dm-role-123")
+	perms := discordbot.NewPermissionChecker("123456789012345678")
 	sm := newTestSessionMgr()
 	sc := &SessionCommands{
 		sessionMgr: sm,
@@ -38,17 +61,9 @@ func TestSessionStart_NoDMRole(t *testing.T) {
 	}
 
 	// Interaction without the DM role.
-	i := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Member: &discordgo.Member{
-				User:  &discordgo.User{ID: "user-1"},
-				Roles: []string{"other-role"},
-			},
-		},
-	}
+	member := testMemberWithRoles(snowflake.ID(999))
 
-	// IsDM should return false.
-	if sc.perms.IsDM(i) {
+	if sc.perms.IsDM(member) {
 		t.Fatal("expected IsDM to return false for user without DM role")
 	}
 }
@@ -57,32 +72,19 @@ func TestSessionStart_NotInVoice(t *testing.T) {
 	t.Parallel()
 
 	// With empty DM role, all users are DMs.
-	perms := discord.NewPermissionChecker("")
+	perms := discordbot.NewPermissionChecker("")
 	sm := newTestSessionMgr()
 	sc := &SessionCommands{
 		sessionMgr: sm,
 		perms:      perms,
 	}
 
-	// User is a DM.
-	i := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Member: &discordgo.Member{
-				User:  &discordgo.User{ID: "user-1"},
-				Roles: []string{},
-			},
-		},
-	}
+	member := testMemberWithRoles()
 
-	// IsDM should return true (empty role = all users are DMs).
-	if !sc.perms.IsDM(i) {
+	if !sc.perms.IsDM(member) {
 		t.Fatal("expected IsDM to return true when DMRoleID is empty")
 	}
 
-	// The actual voice-channel check happens in handleStart which requires
-	// a full discordgo.Session with state. Since we cannot easily mock
-	// discordgo.State.VoiceState, we verify that the check is correctly
-	// implemented by verifying IsActive remains false (session never started).
 	if sm.IsActive() {
 		t.Fatal("session should not be active without voice channel")
 	}
@@ -91,8 +93,6 @@ func TestSessionStart_NotInVoice(t *testing.T) {
 func TestSessionStart_Success(t *testing.T) {
 	t.Parallel()
 
-	// Verify the SessionManager itself correctly handles a start call,
-	// which is what the command handler delegates to.
 	sm := newTestSessionMgr()
 
 	if err := sm.Start(t.Context(), "voice-ch-1", "dm-user-1"); err != nil {
@@ -124,53 +124,11 @@ func TestDefinition(t *testing.T) {
 	if len(def.Options) != 3 {
 		t.Fatalf("Options count = %d, want 3", len(def.Options))
 	}
-	if def.Options[0].Name != "start" {
-		t.Errorf("first subcommand = %q, want %q", def.Options[0].Name, "start")
+
+	expectedSubs := []string{"start", "stop", "recap"}
+	for i, want := range expectedSubs {
+		if def.Options[i].OptionName() != want {
+			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].OptionName(), want)
+		}
 	}
-	if def.Options[1].Name != "stop" {
-		t.Errorf("second subcommand = %q, want %q", def.Options[1].Name, "stop")
-	}
-	if def.Options[2].Name != "recap" {
-		t.Errorf("third subcommand = %q, want %q", def.Options[2].Name, "recap")
-	}
-}
-
-func TestInteractionUserID(t *testing.T) {
-	t.Parallel()
-
-	t.Run("guild context with Member", func(t *testing.T) {
-		t.Parallel()
-		i := &discordgo.InteractionCreate{
-			Interaction: &discordgo.Interaction{
-				Member: &discordgo.Member{
-					User: &discordgo.User{ID: "member-123"},
-				},
-			},
-		}
-		if got := interactionUserID(i); got != "member-123" {
-			t.Errorf("got %q, want %q", got, "member-123")
-		}
-	})
-
-	t.Run("DM context with User", func(t *testing.T) {
-		t.Parallel()
-		i := &discordgo.InteractionCreate{
-			Interaction: &discordgo.Interaction{
-				User: &discordgo.User{ID: "dm-456"},
-			},
-		}
-		if got := interactionUserID(i); got != "dm-456" {
-			t.Errorf("got %q, want %q", got, "dm-456")
-		}
-	})
-
-	t.Run("no user info returns empty", func(t *testing.T) {
-		t.Parallel()
-		i := &discordgo.InteractionCreate{
-			Interaction: &discordgo.Interaction{},
-		}
-		if got := interactionUserID(i); got != "" {
-			t.Errorf("got %q, want empty", got)
-		}
-	})
 }

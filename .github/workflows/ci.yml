@@ -52,10 +52,54 @@ jobs:
           path: /tmp/whisper-install
           retention-days: 1
 
+  # ---------------------------------------------------------------------------
+  # Download libdave prebuilt shared library (shared across jobs via artifacts)
+  # ---------------------------------------------------------------------------
+  dave-setup:
+    name: Download libdave
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache libdave
+        id: cache-dave
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dave-install
+          key: libdave-${{ runner.os }}-${{ runner.arch }}-v1.1.0
+
+      - name: Download libdave prebuilt
+        if: steps.cache-dave.outputs.cache-hit != 'true'
+        run: |
+          DAVE_VERSION="v1.1.0/cpp"
+          DAVE_URL="https://github.com/discord/libdave/releases/download/${DAVE_VERSION}/libdave-Linux-X64-boringssl.zip"
+          curl -fsL "$DAVE_URL" -o /tmp/libdave.zip
+          mkdir -p /tmp/dave-install/include /tmp/dave-install/lib /tmp/dave-install/lib/pkgconfig
+          unzip -j -o /tmp/libdave.zip "include/dave/dave.h" -d /tmp/dave-install/include
+          unzip -j -o /tmp/libdave.zip "lib/libdave.so" -d /tmp/dave-install/lib
+          cat > /tmp/dave-install/lib/pkgconfig/dave.pc <<'PCEOF'
+          prefix=/tmp/dave-install
+          exec_prefix=${prefix}
+          libdir=${exec_prefix}/lib
+          includedir=${prefix}/include
+
+          Name: dave
+          Description: Discord Audio & Video End-to-End Encryption (DAVE) Protocol
+          Version: 1.1.0
+          Libs: -L${libdir} -ldave -Wl,-rpath,${libdir}
+          Cflags: -I${includedir}
+          PCEOF
+          rm -f /tmp/libdave.zip
+
+      - name: Upload dave artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dave-libs
+          path: /tmp/dave-install
+          retention-days: 1
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: [whisper-build]
+    needs: [whisper-build, dave-setup]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -71,10 +115,18 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
-      - name: Set whisper environment
+      - name: Download dave artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dave-libs
+          path: /tmp/dave-install
+
+      - name: Set native library environment
         run: |
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Check formatting
@@ -97,7 +149,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [whisper-build]
+    needs: [whisper-build, dave-setup]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -113,10 +165,18 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
-      - name: Set whisper environment
+      - name: Download dave artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dave-libs
+          path: /tmp/dave-install
+
+      - name: Set native library environment
         run: |
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Install C++ runtime
@@ -144,10 +204,18 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
-      - name: Set whisper environment
+      - name: Download dave artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dave-libs
+          path: /tmp/dave-install
+
+      - name: Set native library environment
         run: |
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Install C++ runtime
@@ -167,7 +235,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [whisper-build]
+    needs: [whisper-build, dave-setup]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -183,10 +251,18 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
-      - name: Set whisper environment
+      - name: Download dave artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dave-libs
+          path: /tmp/dave-install
+
+      - name: Set native library environment
         run: |
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Install C++ runtime

@@ -6,38 +6,38 @@ import (
 	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/audio"
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // ─── compile-time interface assertions ───────────────────────────────────────
 
 var _ audio.Platform = (*Platform)(nil)
 var _ audio.Connection = (*Connection)(nil)
+var _ voice.OpusFrameProvider = (*Connection)(nil)
+var _ voice.OpusFrameReceiver = (*Connection)(nil)
 
 // ─── test helpers ─────────────────────────────────────────────────────────────
 
 // newTestConnection creates a Connection suitable for unit testing without
-// a real Discord voice connection. It wires up fake OpusSend/OpusRecv channels.
+// a real Discord voice connection. It does not register with a voice.Conn.
 func newTestConnection(t *testing.T) *Connection {
 	t.Helper()
-	vc := &discordgo.VoiceConnection{
-		OpusSend: make(chan []byte, 16),
-		OpusRecv: make(chan *discordgo.Packet, 16),
-	}
 	c := &Connection{
-		vc:           vc,
-		session:      &discordgo.Session{},
-		guildID:      "guild-test",
-		inputs:       make(map[string]chan audio.AudioFrame),
-		ssrcUser:     make(map[uint32]string),
-		output:       make(chan audio.AudioFrame, outputChannelBuffer),
-		done:         make(chan struct{}),
-		disconnectVC: func() error { return nil }, // no-op for tests
+		guildID:        snowflake.ID(123456),
+		inputs:         make(map[snowflake.ID]chan audio.AudioFrame),
+		decoders:       make(map[snowflake.ID]*opusDecoder),
+		output:         make(chan audio.AudioFrame, outputChannelBuffer),
+		done:           make(chan struct{}),
+		disconnectConn: func() {}, // no-op for tests
 	}
-	// Start loops like the real constructor (but without registering the handler
-	// since session has no websocket).
-	go c.recvLoop()
-	go c.sendLoop()
+	// Create an encoder like the real constructor does.
+	enc, err := newOpusEncoder()
+	if err != nil {
+		t.Fatalf("newOpusEncoder: %v", err)
+	}
+	c.encoder = enc
+	c.conv = audio.FormatConverter{Target: audio.Format{SampleRate: opusSampleRate, Channels: opusChannels}}
 	t.Cleanup(func() { _ = c.Disconnect() })
 	return c
 }
@@ -48,16 +48,13 @@ func newTestConnection(t *testing.T) *Connection {
 func TestNewPlatform(t *testing.T) {
 	t.Parallel()
 
-	s := &discordgo.Session{}
-	p := New(s, "guild-123")
+	guildID := snowflake.ID(789)
+	p := New(nil, guildID)
 	if p == nil {
 		t.Fatal("New returned nil")
 	}
-	if p.session != s {
-		t.Error("session not stored correctly")
-	}
-	if p.guildID != "guild-123" {
-		t.Errorf("guildID = %q, want %q", p.guildID, "guild-123")
+	if p.guildID != guildID {
+		t.Errorf("guildID = %v, want %v", p.guildID, guildID)
 	}
 }
 
@@ -71,10 +68,7 @@ func TestConnection_DisconnectIdempotent(t *testing.T) {
 	c := newTestConnection(t)
 	for i := range 3 {
 		err := c.Disconnect()
-		// First call may return an error from the fake vc.Disconnect()
-		// (which is expected since there's no real connection).
-		// Subsequent calls must return nil (no-op).
-		if i > 0 && err != nil {
+		if err != nil {
 			t.Fatalf("Disconnect[%d]: unexpected error: %v", i, err)
 		}
 	}
@@ -163,55 +157,139 @@ func TestConnection_OnParticipantChangeRegisters(t *testing.T) {
 }
 
 // TestConnection_RecvDemux verifies that incoming Opus packets are demuxed
-// by SSRC and appear on separate input streams.
+// by user ID and appear on separate input streams.
 func TestConnection_RecvDemux(t *testing.T) {
 	t.Parallel()
 
 	c := newTestConnection(t)
 
-	// Create a valid Opus silence frame for decoding.
 	// Opus silence frame: 0xF8 0xFF 0xFE (3 bytes).
 	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
 
-	// Send packets from two different SSRCs.
-	c.vc.OpusRecv <- &discordgo.Packet{SSRC: 100, Opus: silenceOpus}
-	c.vc.OpusRecv <- &discordgo.Packet{SSRC: 200, Opus: silenceOpus}
+	user1 := snowflake.ID(100)
+	user2 := snowflake.ID(200)
 
-	// Wait a bit for the recvLoop to process.
-	time.Sleep(100 * time.Millisecond)
+	// Simulate receiving packets from two different users.
+	if err := c.ReceiveOpusFrame(user1, &voice.Packet{SSRC: 1, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame user1: %v", err)
+	}
+	if err := c.ReceiveOpusFrame(user2, &voice.Packet{SSRC: 2, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame user2: %v", err)
+	}
 
 	streams := c.InputStreams()
 	if len(streams) != 2 {
 		t.Fatalf("InputStreams: want 2 entries, got %d", len(streams))
 	}
-	if _, ok := streams["100"]; !ok {
-		t.Error("InputStreams: missing SSRC 100")
+	if _, ok := streams[user1.String()]; !ok {
+		t.Error("InputStreams: missing user1")
 	}
-	if _, ok := streams["200"]; !ok {
-		t.Error("InputStreams: missing SSRC 200")
+	if _, ok := streams[user2.String()]; !ok {
+		t.Error("InputStreams: missing user2")
 	}
 
 	// Drain a frame from each stream.
-	for ssrc, ch := range streams {
+	for uid, ch := range streams {
 		select {
 		case frame := <-ch:
 			if frame.SampleRate != opusSampleRate {
-				t.Errorf("SSRC %s: SampleRate = %d, want %d", ssrc, frame.SampleRate, opusSampleRate)
+				t.Errorf("user %s: SampleRate = %d, want %d", uid, frame.SampleRate, opusSampleRate)
 			}
 			if frame.Channels != opusChannels {
-				t.Errorf("SSRC %s: Channels = %d, want %d", ssrc, frame.Channels, opusChannels)
+				t.Errorf("user %s: Channels = %d, want %d", uid, frame.Channels, opusChannels)
 			}
 			if len(frame.Data) == 0 {
-				t.Errorf("SSRC %s: frame data is empty", ssrc)
+				t.Errorf("user %s: frame data is empty", uid)
 			}
 		case <-time.After(time.Second):
-			t.Fatalf("SSRC %s: timed out waiting for frame", ssrc)
+			t.Fatalf("user %s: timed out waiting for frame", uid)
 		}
 	}
 }
 
+// TestConnection_RecvJoinEvent verifies that receiving a frame from a new user
+// emits an EventJoin.
+func TestConnection_RecvJoinEvent(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+
+	events := make(chan audio.Event, 4)
+	c.OnParticipantChange(func(ev audio.Event) {
+		events <- ev
+	})
+
+	userID := snowflake.ID(42)
+	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
+
+	if err := c.ReceiveOpusFrame(userID, &voice.Packet{SSRC: 1, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame: %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != audio.EventJoin {
+			t.Errorf("event type = %v, want EventJoin", ev.Type)
+		}
+		if ev.UserID != userID.String() {
+			t.Errorf("event UserID = %q, want %q", ev.UserID, userID.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for join event")
+	}
+}
+
+// TestConnection_CleanupUserEvent verifies that CleanupUser closes the user's
+// channel and emits an EventLeave.
+func TestConnection_CleanupUserEvent(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+
+	events := make(chan audio.Event, 4)
+	c.OnParticipantChange(func(ev audio.Event) {
+		events <- ev
+	})
+
+	userID := snowflake.ID(42)
+	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
+
+	// First, create the user by receiving a frame.
+	if err := c.ReceiveOpusFrame(userID, &voice.Packet{SSRC: 1, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame: %v", err)
+	}
+
+	// Drain the join event.
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for join event")
+	}
+
+	// Now clean up the user.
+	c.CleanupUser(userID)
+
+	select {
+	case ev := <-events:
+		if ev.Type != audio.EventLeave {
+			t.Errorf("event type = %v, want EventLeave", ev.Type)
+		}
+		if ev.UserID != userID.String() {
+			t.Errorf("event UserID = %q, want %q", ev.UserID, userID.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for leave event")
+	}
+
+	// The user's input stream should be gone.
+	streams := c.InputStreams()
+	if len(streams) != 0 {
+		t.Errorf("InputStreams: want 0 entries after cleanup, got %d", len(streams))
+	}
+}
+
 // TestConnection_SendEncodes verifies that frames written to OutputStream
-// are encoded and appear on OpusSend.
+// are available via ProvideOpusFrame.
 func TestConnection_SendEncodes(t *testing.T) {
 	t.Parallel()
 
@@ -229,13 +307,25 @@ func TestConnection_SendEncodes(t *testing.T) {
 
 	c.OutputStream() <- frame
 
+	// ProvideOpusFrame should return the encoded opus data.
+	done := make(chan []byte, 1)
+	go func() {
+		opus, err := c.ProvideOpusFrame()
+		if err != nil {
+			t.Errorf("ProvideOpusFrame: %v", err)
+			done <- nil
+			return
+		}
+		done <- opus
+	}()
+
 	select {
-	case opus := <-c.vc.OpusSend:
+	case opus := <-done:
 		if len(opus) == 0 {
-			t.Error("OpusSend: received empty Opus packet")
+			t.Error("ProvideOpusFrame: received empty Opus packet")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for Opus packet on OpusSend")
+		t.Fatal("timed out waiting for Opus packet from ProvideOpusFrame")
 	}
 }
 
@@ -252,4 +342,18 @@ func TestConnection_ConcurrentDisconnect(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// TestConnection_ReceiveNilPacket verifies that a nil packet is silently ignored.
+func TestConnection_ReceiveNilPacket(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+	if err := c.ReceiveOpusFrame(snowflake.ID(1), nil); err != nil {
+		t.Fatalf("ReceiveOpusFrame(nil): %v", err)
+	}
+	streams := c.InputStreams()
+	if len(streams) != 0 {
+		t.Errorf("InputStreams: want 0 entries, got %d", len(streams))
+	}
 }

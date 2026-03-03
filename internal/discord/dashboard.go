@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/rest"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // SessionData provides the data needed to render a dashboard embed.
@@ -32,6 +34,13 @@ const embedColorRed = 0xE74C3C
 // defaultInterval is the default dashboard update interval.
 const defaultInterval = 10 * time.Second
 
+// dashboardMessenger abstracts the Discord REST calls needed by Dashboard.
+// In production this is satisfied by rest.Channels (from bot.Client.Rest).
+type dashboardMessenger interface {
+	CreateMessage(channelID snowflake.ID, messageCreate discord.MessageCreate, opts ...rest.RequestOpt) (*discord.Message, error)
+	UpdateMessage(channelID snowflake.ID, messageID snowflake.ID, messageUpdate discord.MessageUpdate, opts ...rest.RequestOpt) (*discord.Message, error)
+}
+
 // Dashboard renders and periodically updates a Discord embed showing
 // live session metrics. The embed is created on Start and edited in place
 // every update interval.
@@ -39,9 +48,9 @@ const defaultInterval = 10 * time.Second
 // Thread-safe for concurrent use.
 type Dashboard struct {
 	mu        sync.Mutex
-	session   *discordgo.Session
-	channelID string
-	messageID string // embed message; created on first update
+	rest      dashboardMessenger
+	channelID snowflake.ID
+	messageID snowflake.ID // embed message; created on first update
 	interval  time.Duration
 	getData   func() SessionData
 	stats     *PipelineStats
@@ -51,8 +60,8 @@ type Dashboard struct {
 
 // DashboardConfig holds dependencies for creating a Dashboard.
 type DashboardConfig struct {
-	Session   *discordgo.Session
-	ChannelID string
+	Rest      dashboardMessenger
+	ChannelID snowflake.ID
 	Interval  time.Duration // Default: 10 seconds
 	GetData   func() SessionData
 	Stats     *PipelineStats
@@ -65,7 +74,7 @@ func NewDashboard(cfg DashboardConfig) *Dashboard {
 		interval = defaultInterval
 	}
 	return &Dashboard{
-		session:   cfg.Session,
+		rest:      cfg.Rest,
 		channelID: cfg.ChannelID,
 		interval:  interval,
 		getData:   cfg.GetData,
@@ -114,7 +123,7 @@ func (d *Dashboard) loop(ctx context.Context) {
 }
 
 // update builds the embed from current data and creates or edits the message.
-func (d *Dashboard) update(ctx context.Context) {
+func (d *Dashboard) update(_ context.Context) {
 	data := d.getData()
 	var snap Snapshot
 	if d.stats != nil {
@@ -125,8 +134,10 @@ func (d *Dashboard) update(ctx context.Context) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.messageID == "" {
-		msg, err := d.session.ChannelMessageSendEmbed(d.channelID, embed)
+	if d.messageID == 0 {
+		msg, err := d.rest.CreateMessage(d.channelID, discord.MessageCreate{
+			Embeds: []discord.Embed{embed},
+		})
 		if err != nil {
 			slog.Warn("dashboard: failed to create embed message", "channel", d.channelID, "err", err)
 			return
@@ -134,13 +145,14 @@ func (d *Dashboard) update(ctx context.Context) {
 		d.messageID = msg.ID
 		slog.Debug("dashboard: created embed message", "message_id", msg.ID, "channel", d.channelID)
 	} else {
-		_, err := d.session.ChannelMessageEditEmbed(d.channelID, d.messageID, embed)
+		embeds := []discord.Embed{embed}
+		_, err := d.rest.UpdateMessage(d.channelID, d.messageID, discord.MessageUpdate{
+			Embeds: &embeds,
+		})
 		if err != nil {
 			slog.Warn("dashboard: failed to edit embed message", "message_id", d.messageID, "err", err)
 		}
 	}
-
-	_ = ctx // reserved for future context-aware API calls
 }
 
 // postFinalEmbed posts a "session ended" version of the embed.
@@ -155,81 +167,81 @@ func (d *Dashboard) postFinalEmbed(_ context.Context) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.messageID == "" {
+	if d.messageID == 0 {
 		return
 	}
-	_, err := d.session.ChannelMessageEditEmbed(d.channelID, d.messageID, embed)
+	embeds := []discord.Embed{embed}
+	_, err := d.rest.UpdateMessage(d.channelID, d.messageID, discord.MessageUpdate{
+		Embeds: &embeds,
+	})
 	if err != nil {
 		slog.Warn("dashboard: failed to post final embed", "message_id", d.messageID, "err", err)
 	}
 }
 
 // buildEmbed creates the live dashboard embed from session data and pipeline stats.
-func buildEmbed(data SessionData, snap Snapshot) *discordgo.MessageEmbed {
+func buildEmbed(data SessionData, snap Snapshot) discord.Embed {
 	duration := time.Since(data.StartedAt()).Truncate(time.Second)
 	npcField := fmt.Sprintf("%d", data.NPCCount())
 	if muted := data.MutedNPCCount(); muted > 0 {
 		npcField = fmt.Sprintf("%d (%d muted)", data.NPCCount(), muted)
 	}
 
-	fields := []*discordgo.MessageEmbedField{
-		{Name: "Campaign", Value: data.CampaignName(), Inline: true},
-		{Name: "Session ID", Value: fmt.Sprintf("`%s`", data.SessionID()), Inline: true},
-		{Name: "Duration", Value: duration.String(), Inline: true},
-		{Name: "Active NPCs", Value: npcField, Inline: true},
-		{Name: "Utterances", Value: fmt.Sprintf("%d", snap.Utterances), Inline: true},
-		{Name: "Errors", Value: fmt.Sprintf("%d", snap.Errors), Inline: true},
+	fields := []discord.EmbedField{
+		{Name: "Campaign", Value: data.CampaignName(), Inline: new(true)},
+		{Name: "Session ID", Value: fmt.Sprintf("`%s`", data.SessionID()), Inline: new(true)},
+		{Name: "Duration", Value: duration.String(), Inline: new(true)},
+		{Name: "Active NPCs", Value: npcField, Inline: new(true)},
+		{Name: "Utterances", Value: fmt.Sprintf("%d", snap.Utterances), Inline: new(true)},
+		{Name: "Errors", Value: fmt.Sprintf("%d", snap.Errors), Inline: new(true)},
 	}
 
 	// Add latency fields if we have samples.
 	if latency := formatLatencyField(snap); latency != "" {
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "Pipeline Latency",
-			Value:  latency,
-			Inline: false,
+		fields = append(fields, discord.EmbedField{
+			Name:  "Pipeline Latency",
+			Value: latency,
 		})
 	}
 
 	// Add memory entry count.
-	fields = append(fields, &discordgo.MessageEmbedField{
+	fields = append(fields, discord.EmbedField{
 		Name:   "Memory Entries",
 		Value:  fmt.Sprintf("%d", data.MemoryEntries()),
-		Inline: true,
+		Inline: new(true),
 	})
 
-	return &discordgo.MessageEmbed{
-		Title:  "Session Dashboard",
-		Color:  embedColorGreen,
-		Fields: fields,
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Live session",
-		},
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	now := time.Now().UTC()
+	return discord.Embed{
+		Title:     "Session Dashboard",
+		Color:     embedColorGreen,
+		Fields:    fields,
+		Footer:    &discord.EmbedFooter{Text: "Live session"},
+		Timestamp: &now,
 	}
 }
 
 // buildEndedEmbed creates the final "session ended" embed.
-func buildEndedEmbed(data SessionData, snap Snapshot) *discordgo.MessageEmbed {
+func buildEndedEmbed(data SessionData, snap Snapshot) discord.Embed {
 	duration := time.Since(data.StartedAt()).Truncate(time.Second)
 
-	fields := []*discordgo.MessageEmbedField{
-		{Name: "Campaign", Value: data.CampaignName(), Inline: true},
-		{Name: "Session ID", Value: fmt.Sprintf("`%s`", data.SessionID()), Inline: true},
-		{Name: "Duration", Value: duration.String(), Inline: true},
-		{Name: "Utterances", Value: fmt.Sprintf("%d", snap.Utterances), Inline: true},
-		{Name: "Errors", Value: fmt.Sprintf("%d", snap.Errors), Inline: true},
-		{Name: "Memory Entries", Value: fmt.Sprintf("%d", data.MemoryEntries()), Inline: true},
+	fields := []discord.EmbedField{
+		{Name: "Campaign", Value: data.CampaignName(), Inline: new(true)},
+		{Name: "Session ID", Value: fmt.Sprintf("`%s`", data.SessionID()), Inline: new(true)},
+		{Name: "Duration", Value: duration.String(), Inline: new(true)},
+		{Name: "Utterances", Value: fmt.Sprintf("%d", snap.Utterances), Inline: new(true)},
+		{Name: "Errors", Value: fmt.Sprintf("%d", snap.Errors), Inline: new(true)},
+		{Name: "Memory Entries", Value: fmt.Sprintf("%d", data.MemoryEntries()), Inline: new(true)},
 	}
 
-	return &discordgo.MessageEmbed{
+	now := time.Now().UTC()
+	return discord.Embed{
 		Title:       "Session Dashboard",
 		Description: "Session has ended.",
 		Color:       embedColorRed,
 		Fields:      fields,
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Session ended",
-		},
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Footer:      &discord.EmbedFooter{Text: "Session ended"},
+		Timestamp:   &now,
 	}
 }
 

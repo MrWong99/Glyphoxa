@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 )
 
@@ -22,13 +23,13 @@ const (
 
 // EntityCommands holds the dependencies for /entity slash commands.
 type EntityCommands struct {
-	perms    *discord.PermissionChecker
+	perms    *discordbot.PermissionChecker
 	getStore func() entity.Store
 }
 
 // NewEntityCommands creates an EntityCommands and registers its handlers
 // with the router.
-func NewEntityCommands(perms *discord.PermissionChecker, getStore func() entity.Store) *EntityCommands {
+func NewEntityCommands(perms *discordbot.PermissionChecker, getStore func() entity.Store) *EntityCommands {
 	return &EntityCommands{
 		perms:    perms,
 		getStore: getStore,
@@ -36,10 +37,10 @@ func NewEntityCommands(perms *discord.PermissionChecker, getStore func() entity.
 }
 
 // Register registers the /entity command group with the router.
-func (ec *EntityCommands) Register(router *discord.CommandRouter) {
+func (ec *EntityCommands) Register(router *discordbot.CommandRouter) {
 	def := ec.Definition()
-	router.RegisterCommand("entity", def, func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		discord.RespondEphemeral(s, i, "Please use a subcommand: `/entity add`, `/entity list`, `/entity remove`, or `/entity import`.")
+	router.RegisterCommand("entity", def, func(e *events.ApplicationCommandInteractionCreate) {
+		discordbot.RespondEphemeral(e, "Please use a subcommand: `/entity add`, `/entity list`, `/entity remove`, or `/entity import`.")
 	})
 	router.RegisterHandler("entity/add", ec.handleAdd)
 	router.RegisterHandler("entity/list", ec.handleList)
@@ -53,28 +54,24 @@ func (ec *EntityCommands) Register(router *discord.CommandRouter) {
 	router.RegisterComponentPrefix(entityRemoveConfirmPrefix, ec.handleRemoveConfirm)
 }
 
-// Definition returns the /entity ApplicationCommand for Discord registration.
-func (ec *EntityCommands) Definition() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
+// Definition returns the /entity SlashCommandCreate for Discord registration.
+func (ec *EntityCommands) Definition() discord.SlashCommandCreate {
+	return discord.SlashCommandCreate{
 		Name:        "entity",
 		Description: "Manage campaign entities (NPCs, locations, items, etc.)",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "add",
 				Description: "Add a new entity via a form",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "list",
 				Description: "List all entities, optionally filtered by type",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:        discordgo.ApplicationCommandOptionString,
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
 						Name:        "type",
 						Description: "Filter by entity type",
-						Required:    false,
-						Choices: []*discordgo.ApplicationCommandOptionChoice{
+						Choices: []discord.ApplicationCommandOptionChoiceString{
 							{Name: "NPC", Value: string(entity.EntityNPC)},
 							{Name: "Location", Value: string(entity.EntityLocation)},
 							{Name: "Item", Value: string(entity.EntityItem)},
@@ -85,13 +82,11 @@ func (ec *EntityCommands) Definition() *discordgo.ApplicationCommand {
 					},
 				},
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "remove",
 				Description: "Remove an entity by name",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:         discordgo.ApplicationCommandOptionString,
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
 						Name:         "name",
 						Description:  "Entity name",
 						Required:     true,
@@ -99,8 +94,7 @@ func (ec *EntityCommands) Definition() *discordgo.ApplicationCommand {
 					},
 				},
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "import",
 				Description: "Import entities from a YAML or JSON file attachment",
 			},
@@ -109,74 +103,57 @@ func (ec *EntityCommands) Definition() *discordgo.ApplicationCommand {
 }
 
 // handleAdd opens the entity creation modal.
-func (ec *EntityCommands) handleAdd(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !ec.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to add entities.")
+func (ec *EntityCommands) handleAdd(e *events.ApplicationCommandInteractionCreate) {
+	if !ec.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to add entities.")
 		return
 	}
 
-	discord.RespondModal(s, i, &discordgo.InteractionResponseData{
+	discordbot.RespondModal(e, discord.ModalCreate{
 		CustomID: entityAddModalID,
 		Title:    "Add Entity",
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.TextInput{
-					CustomID:    "entity_name",
-					Label:       "Name",
-					Style:       discordgo.TextInputShort,
-					Placeholder: "e.g., Gundren Rockseeker",
-					Required:    new(true),
-					MaxLength:   100,
-				},
-			}},
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.TextInput{
-					CustomID:    "entity_type",
-					Label:       "Type (npc, location, item, faction, quest, lore)",
-					Style:       discordgo.TextInputShort,
-					Placeholder: "npc",
-					Required:    new(true),
-					MaxLength:   20,
-				},
-			}},
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.TextInput{
-					CustomID:    "entity_description",
-					Label:       "Description",
-					Style:       discordgo.TextInputParagraph,
-					Placeholder: "A dwarf merchant who hired the party...",
-					Required:    new(false),
-					MaxLength:   2000,
-				},
-			}},
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.TextInput{
-					CustomID:    "entity_tags",
-					Label:       "Tags (comma-separated)",
-					Style:       discordgo.TextInputShort,
-					Placeholder: "ally, phandalin, quest-giver",
-					Required:    new(false),
-					MaxLength:   200,
-				},
-			}},
+		Components: []discord.LayoutComponent{
+			discord.NewLabel("Name", discord.TextInputComponent{
+				CustomID:    "entity_name",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "e.g., Gundren Rockseeker",
+				Required:    true,
+				MaxLength:   100,
+			}),
+			discord.NewLabel("Type (npc, location, item, faction, quest, lore)", discord.TextInputComponent{
+				CustomID:    "entity_type",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "npc",
+				Required:    true,
+				MaxLength:   20,
+			}),
+			discord.NewLabel("Description", discord.TextInputComponent{
+				CustomID:    "entity_description",
+				Style:       discord.TextInputStyleParagraph,
+				Placeholder: "A dwarf merchant who hired the party...",
+				MaxLength:   2000,
+			}),
+			discord.NewLabel("Tags (comma-separated)", discord.TextInputComponent{
+				CustomID:    "entity_tags",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "ally, phandalin, quest-giver",
+				MaxLength:   200,
+			}),
 		},
 	})
 }
 
 // handleList responds with a formatted embed of entities.
-func (ec *EntityCommands) handleList(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !ec.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to list entities.")
+func (ec *EntityCommands) handleList(e *events.ApplicationCommandInteractionCreate) {
+	if !ec.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to list entities.")
 		return
 	}
 
 	opts := entity.ListOptions{}
-	// Extract optional type filter from subcommand options.
-	subOpts := subcommandOptions(i)
-	for _, opt := range subOpts {
-		if opt.Name == "type" {
-			opts.Type = entity.EntityType(opt.StringValue())
-		}
+	data := e.Data.(discord.SlashCommandInteractionData)
+	if typeFilter, ok := data.OptString("type"); ok {
+		opts.Type = entity.EntityType(typeFilter)
 	}
 
 	store := ec.getStore()
@@ -185,17 +162,16 @@ func (ec *EntityCommands) handleList(s *discordgo.Session, i *discordgo.Interact
 
 	entities, err := store.List(ctx, opts)
 	if err != nil {
-		discord.RespondError(s, i, fmt.Errorf("list entities: %w", err))
+		discordbot.RespondError(e, fmt.Errorf("list entities: %w", err))
 		return
 	}
 
 	if len(entities) == 0 {
-		discord.RespondEphemeral(s, i, "No entities found.")
+		discordbot.RespondEphemeral(e, "No entities found.")
 		return
 	}
 
-	// Build embed fields, capping at 25 (Discord embed limit).
-	var fields []*discordgo.MessageEmbedField
+	var fields []discord.EmbedField
 	for idx, ent := range entities {
 		if idx >= 25 {
 			break
@@ -211,7 +187,7 @@ func (ec *EntityCommands) handleList(s *discordgo.Session, i *discordgo.Interact
 		if len(ent.Tags) > 0 {
 			value += fmt.Sprintf("\n**Tags:** %s", strings.Join(ent.Tags, ", "))
 		}
-		fields = append(fields, &discordgo.MessageEmbedField{
+		fields = append(fields, discord.EmbedField{
 			Name:  ent.Name,
 			Value: value,
 		})
@@ -222,44 +198,36 @@ func (ec *EntityCommands) handleList(s *discordgo.Session, i *discordgo.Interact
 		title = fmt.Sprintf("Entities (%s)", opts.Type)
 	}
 
-	embed := &discordgo.MessageEmbed{
+	discordbot.RespondEmbed(e, discord.Embed{
 		Title:  title,
 		Fields: fields,
-		Footer: &discordgo.MessageEmbedFooter{
+		Footer: &discord.EmbedFooter{
 			Text: fmt.Sprintf("%d total", len(entities)),
 		},
-	}
-
-	discord.RespondEmbed(s, i, embed)
+	})
 }
 
 // handleRemove prompts confirmation before removing an entity.
-func (ec *EntityCommands) handleRemove(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !ec.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to remove entities.")
+func (ec *EntityCommands) handleRemove(e *events.ApplicationCommandInteractionCreate) {
+	if !ec.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to remove entities.")
 		return
 	}
 
-	subOpts := subcommandOptions(i)
-	var name string
-	for _, opt := range subOpts {
-		if opt.Name == "name" {
-			name = opt.StringValue()
-		}
-	}
+	data := e.Data.(discord.SlashCommandInteractionData)
+	name := data.String("name")
 	if name == "" {
-		discord.RespondEphemeral(s, i, "Please provide an entity name.")
+		discordbot.RespondEphemeral(e, "Please provide an entity name.")
 		return
 	}
 
-	// Look up entity by name to get its ID.
 	store := ec.getStore()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	entities, err := store.List(ctx, entity.ListOptions{})
 	if err != nil {
-		discord.RespondError(s, i, fmt.Errorf("list entities: %w", err))
+		discordbot.RespondError(e, fmt.Errorf("list entities: %w", err))
 		return
 	}
 
@@ -272,35 +240,23 @@ func (ec *EntityCommands) handleRemove(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	if match == nil {
-		discord.RespondEphemeral(s, i, fmt.Sprintf("Entity %q not found.", name))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("Entity %q not found.", name))
 		return
 	}
 
-	// Respond with confirmation buttons.
-	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{{
-				Title:       "Remove Entity",
-				Description: fmt.Sprintf("Remove entity **%s** (%s)? This cannot be undone.", match.Name, match.Type),
-				Color:       0xFF4444,
-			}},
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Label:    "Cancel",
-						Style:    discordgo.SecondaryButton,
-						CustomID: entityRemoveCancelID,
-					},
-					discordgo.Button{
-						Label:    "Confirm Remove",
-						Style:    discordgo.DangerButton,
-						CustomID: entityRemoveConfirmPrefix + match.ID,
-					},
-				}},
-			},
-			Flags: discordgo.MessageFlagsEphemeral,
+	err = e.CreateMessage(discord.MessageCreate{
+		Embeds: []discord.Embed{{
+			Title:       "Remove Entity",
+			Description: fmt.Sprintf("Remove entity **%s** (%s)? This cannot be undone.", match.Name, match.Type),
+			Color:       0xFF4444,
+		}},
+		Components: []discord.LayoutComponent{
+			discord.NewActionRow(
+				discord.NewSecondaryButton("Cancel", entityRemoveCancelID),
+				discord.NewDangerButton("Confirm Remove", entityRemoveConfirmPrefix+match.ID),
+			),
 		},
+		Flags: discord.MessageFlagEphemeral,
 	})
 	if err != nil {
 		slog.Warn("discord: failed to send remove confirmation", "err", err)
@@ -308,16 +264,16 @@ func (ec *EntityCommands) handleRemove(s *discordgo.Session, i *discordgo.Intera
 }
 
 // handleRemoveCancel handles the cancel button on entity removal.
-func (ec *EntityCommands) handleRemoveCancel(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	discord.RespondEphemeral(s, i, "Entity removal cancelled.")
+func (ec *EntityCommands) handleRemoveCancel(e *events.ComponentInteractionCreate) {
+	discordbot.RespondEphemeral(e, "Entity removal cancelled.")
 }
 
 // handleRemoveConfirm handles the confirm button on entity removal.
-func (ec *EntityCommands) handleRemoveConfirm(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	customID := i.MessageComponentData().CustomID
+func (ec *EntityCommands) handleRemoveConfirm(e *events.ComponentInteractionCreate) {
+	customID := e.Data.CustomID()
 	entityID := strings.TrimPrefix(customID, entityRemoveConfirmPrefix)
 	if entityID == "" {
-		discord.RespondEphemeral(s, i, "Invalid entity ID.")
+		discordbot.RespondEphemeral(e, "Invalid entity ID.")
 		return
 	}
 
@@ -326,15 +282,15 @@ func (ec *EntityCommands) handleRemoveConfirm(s *discordgo.Session, i *discordgo
 	defer cancel()
 
 	if err := store.Remove(ctx, entityID); err != nil {
-		discord.RespondError(s, i, fmt.Errorf("remove entity: %w", err))
+		discordbot.RespondError(e, fmt.Errorf("remove entity: %w", err))
 		return
 	}
 
-	discord.RespondEphemeral(s, i, fmt.Sprintf("Entity `%s` removed.", entityID))
+	discordbot.RespondEphemeral(e, fmt.Sprintf("Entity `%s` removed.", entityID))
 }
 
 // autocompleteRemove provides name autocomplete for /entity remove.
-func (ec *EntityCommands) autocompleteRemove(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (ec *EntityCommands) autocompleteRemove(e *events.AutocompleteInteractionCreate) {
 	store := ec.getStore()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -342,28 +298,18 @@ func (ec *EntityCommands) autocompleteRemove(s *discordgo.Session, i *discordgo.
 	entities, err := store.List(ctx, entity.ListOptions{})
 	if err != nil {
 		slog.Warn("discord: entity autocomplete failed", "err", err)
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-			Data: &discordgo.InteractionResponseData{},
-		})
+		_ = e.AutocompleteResult(nil)
 		return
 	}
 
-	// Get the current typed value for filtering.
-	var typed string
-	subOpts := subcommandOptions(i)
-	for _, opt := range subOpts {
-		if opt.Name == "name" && opt.Focused {
-			typed = strings.ToLower(opt.StringValue())
-		}
-	}
+	typed := strings.ToLower(e.Data.String("name"))
 
-	var choices []*discordgo.ApplicationCommandOptionChoice
+	var choices []discord.AutocompleteChoice
 	for _, ent := range entities {
 		if typed != "" && !strings.Contains(strings.ToLower(ent.Name), typed) {
 			continue
 		}
-		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+		choices = append(choices, discord.AutocompleteChoiceString{
 			Name:  fmt.Sprintf("%s (%s)", ent.Name, ent.Type),
 			Value: ent.Name,
 		})
@@ -372,45 +318,42 @@ func (ec *EntityCommands) autocompleteRemove(s *discordgo.Session, i *discordgo.
 		}
 	}
 
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-		Data: &discordgo.InteractionResponseData{Choices: choices},
-	})
+	_ = e.AutocompleteResult(choices)
 }
 
 // handleImport processes a file attachment import.
-func (ec *EntityCommands) handleImport(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !ec.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to import entities.")
+func (ec *EntityCommands) handleImport(e *events.ApplicationCommandInteractionCreate) {
+	if !ec.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to import entities.")
 		return
 	}
 
-	attachment := FirstAttachment(i)
-	if attachment == nil {
-		discord.RespondEphemeral(s, i, "Please attach a YAML or JSON file to import.")
+	data := e.Data.(discord.SlashCommandInteractionData)
+	attachment, ok := FirstAttachment(data)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Please attach a YAML or JSON file to import.")
 		return
 	}
 
 	if attachment.Size > maxImportSize {
-		discord.RespondEphemeral(s, i, fmt.Sprintf("File too large (%d bytes). Maximum is 10 MB.", attachment.Size))
+		discordbot.RespondEphemeral(e, fmt.Sprintf("File too large (%d bytes). Maximum is 10 MB.", attachment.Size))
 		return
 	}
 
 	format := DetectFormat(attachment.Filename)
 	if format == FormatUnknown {
-		discord.RespondEphemeral(s, i, "Unsupported file format. Use .yaml, .yml, or .json.")
+		discordbot.RespondEphemeral(e, "Unsupported file format. Use .yaml, .yml, or .json.")
 		return
 	}
 
-	// Defer reply since download + parse may take a moment.
-	discord.DeferReply(s, i)
+	discordbot.DeferReply(e)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	dl, err := DownloadAttachment(ctx, attachment)
 	if err != nil {
-		discord.FollowUp(s, i, fmt.Sprintf("Failed to download attachment: %v", err))
+		discordbot.FollowUp(e, fmt.Sprintf("Failed to download attachment: %v", err))
 		return
 	}
 	defer dl.Body.Close()
@@ -422,7 +365,7 @@ func (ec *EntityCommands) handleImport(s *discordgo.Session, i *discordgo.Intera
 	case FormatYAML:
 		cf, parseErr := entity.LoadCampaignFromReader(dl.Body)
 		if parseErr != nil {
-			discord.FollowUp(s, i, fmt.Sprintf("Failed to parse YAML: %v", parseErr))
+			discordbot.FollowUp(e, fmt.Sprintf("Failed to parse YAML: %v", parseErr))
 			return
 		}
 		count, err = entity.ImportCampaign(ctx, store, cf)
@@ -431,19 +374,9 @@ func (ec *EntityCommands) handleImport(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	if err != nil {
-		discord.FollowUp(s, i, fmt.Sprintf("Import error: %v (imported %d entities before error)", err, count))
+		discordbot.FollowUp(e, fmt.Sprintf("Import error: %v (imported %d entities before error)", err, count))
 		return
 	}
 
-	discord.FollowUp(s, i, fmt.Sprintf("Import complete. **%d** entities imported from `%s`.", count, attachment.Filename))
-}
-
-// subcommandOptions extracts the options from the first subcommand in an
-// interaction's application command data. Returns nil if no subcommand exists.
-func subcommandOptions(i *discordgo.InteractionCreate) []*discordgo.ApplicationCommandInteractionDataOption {
-	data := i.ApplicationCommandData()
-	if len(data.Options) > 0 && data.Options[0].Type == discordgo.ApplicationCommandOptionSubCommand {
-		return data.Options[0].Options
-	}
-	return nil
+	discordbot.FollowUp(e, fmt.Sprintf("Import complete. **%d** entities imported from `%s`.", count, attachment.Filename))
 }

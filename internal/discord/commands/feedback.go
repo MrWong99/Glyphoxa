@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/MrWong99/glyphoxa/internal/discord"
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 )
 
 const (
@@ -34,13 +36,13 @@ type Feedback struct {
 
 // FeedbackCommands handles the /feedback slash command.
 type FeedbackCommands struct {
-	perms        *discord.PermissionChecker
+	perms        *discordbot.PermissionChecker
 	store        FeedbackStore
 	getSessionID func() string // returns current or last session ID
 }
 
 // NewFeedbackCommands creates a FeedbackCommands handler.
-func NewFeedbackCommands(perms *discord.PermissionChecker, store FeedbackStore, getSessionID func() string) *FeedbackCommands {
+func NewFeedbackCommands(perms *discordbot.PermissionChecker, store FeedbackStore, getSessionID func() string) *FeedbackCommands {
 	return &FeedbackCommands{
 		perms:        perms,
 		store:        store,
@@ -49,151 +51,96 @@ func NewFeedbackCommands(perms *discord.PermissionChecker, store FeedbackStore, 
 }
 
 // Register registers the /feedback command and modal handler with the router.
-func (fc *FeedbackCommands) Register(router *discord.CommandRouter) {
+func (fc *FeedbackCommands) Register(router *discordbot.CommandRouter) {
 	router.RegisterCommand("feedback", fc.Definition(), fc.handleFeedback)
 	router.RegisterModal(feedbackModalID, fc.handleFeedbackModal)
 }
 
-// Definition returns the /feedback ApplicationCommand for Discord registration.
-func (fc *FeedbackCommands) Definition() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
+// Definition returns the /feedback SlashCommandCreate for Discord registration.
+func (fc *FeedbackCommands) Definition() discord.SlashCommandCreate {
+	return discord.SlashCommandCreate{
 		Name:        "feedback",
 		Description: "Submit post-session feedback",
 	}
 }
 
 // handleFeedback opens the feedback modal.
-func (fc *FeedbackCommands) handleFeedback(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (fc *FeedbackCommands) handleFeedback(e *events.ApplicationCommandInteractionCreate) {
 	sessionID := fc.getSessionID()
 	if sessionID == "" {
-		discord.RespondEphemeral(s, i, "No session has been run yet. Start and stop a session before submitting feedback.")
+		discordbot.RespondEphemeral(e, "No session has been run yet. Start and stop a session before submitting feedback.")
 		return
 	}
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseModal,
-		Data: &discordgo.InteractionResponseData{
-			CustomID: feedbackModalID,
-			Title:    "Session Feedback",
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "voice_latency",
-							Label:       "Voice latency (1=terrible, 5=great)",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "1-5",
-							Required:    new(true),
-							MinLength:   1,
-							MaxLength:   1,
-						},
-					},
-				},
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "npc_personality",
-							Label:       "NPC personality quality (1-5)",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "1-5",
-							Required:    new(true),
-							MinLength:   1,
-							MaxLength:   1,
-						},
-					},
-				},
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "memory_accuracy",
-							Label:       "Memory accuracy (1-5)",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "1-5",
-							Required:    new(true),
-							MinLength:   1,
-							MaxLength:   1,
-						},
-					},
-				},
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "dm_workflow",
-							Label:       "DM workflow (1-5)",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "1-5",
-							Required:    new(true),
-							MinLength:   1,
-							MaxLength:   1,
-						},
-					},
-				},
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "comments",
-							Label:       "Comments (optional)",
-							Style:       discordgo.TextInputParagraph,
-							Placeholder: "What worked well? What needs improvement?",
-							Required:    new(false),
-							MaxLength:   1000,
-						},
-					},
-				},
-			},
+	minLen := 1
+	discordbot.RespondModal(e, discord.ModalCreate{
+		CustomID: feedbackModalID,
+		Title:    "Session Feedback",
+		Components: []discord.LayoutComponent{
+			discord.NewLabel("Voice latency (1=terrible, 5=great)", discord.TextInputComponent{
+				CustomID:    "voice_latency",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "1-5",
+				Required:    true,
+				MinLength:   &minLen,
+				MaxLength:   1,
+			}),
+			discord.NewLabel("NPC personality quality (1-5)", discord.TextInputComponent{
+				CustomID:    "npc_personality",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "1-5",
+				Required:    true,
+				MinLength:   &minLen,
+				MaxLength:   1,
+			}),
+			discord.NewLabel("Memory accuracy (1-5)", discord.TextInputComponent{
+				CustomID:    "memory_accuracy",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "1-5",
+				Required:    true,
+				MinLength:   &minLen,
+				MaxLength:   1,
+			}),
+			discord.NewLabel("DM workflow (1-5)", discord.TextInputComponent{
+				CustomID:    "dm_workflow",
+				Style:       discord.TextInputStyleShort,
+				Placeholder: "1-5",
+				Required:    true,
+				MinLength:   &minLen,
+				MaxLength:   1,
+			}),
+			discord.NewLabel("Comments (optional)", discord.TextInputComponent{
+				CustomID:    "comments",
+				Style:       discord.TextInputStyleParagraph,
+				Placeholder: "What worked well? What needs improvement?",
+				MaxLength:   1000,
+			}),
 		},
 	})
-	if err != nil {
-		slog.Error("discord: failed to open feedback modal", "error", err)
-	}
 }
 
 // handleFeedbackModal processes the submitted feedback form.
-func (fc *FeedbackCommands) handleFeedbackModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	data := i.ModalSubmitData()
-
+func (fc *FeedbackCommands) handleFeedbackModal(e *events.ModalSubmitInteractionCreate) {
 	fb := Feedback{
-		SessionID: fc.getSessionID(),
-	}
-	if i.Member != nil && i.Member.User != nil {
-		fb.UserID = i.Member.User.ID
-	}
-
-	for _, row := range data.Components {
-		ar, ok := row.(*discordgo.ActionsRow)
-		if !ok {
-			continue
-		}
-		for _, comp := range ar.Components {
-			ti, ok := comp.(*discordgo.TextInput)
-			if !ok {
-				continue
-			}
-			switch ti.CustomID {
-			case "voice_latency":
-				fb.VoiceLatency = parseRating(ti.Value)
-			case "npc_personality":
-				fb.NPCPersonality = parseRating(ti.Value)
-			case "memory_accuracy":
-				fb.MemoryAccuracy = parseRating(ti.Value)
-			case "dm_workflow":
-				fb.DMWorkflow = parseRating(ti.Value)
-			case "comments":
-				fb.Comments = strings.TrimSpace(ti.Value)
-			}
-		}
+		SessionID:      fc.getSessionID(),
+		UserID:         e.User().ID.String(),
+		VoiceLatency:   parseRating(e.Data.Text("voice_latency")),
+		NPCPersonality: parseRating(e.Data.Text("npc_personality")),
+		MemoryAccuracy: parseRating(e.Data.Text("memory_accuracy")),
+		DMWorkflow:     parseRating(e.Data.Text("dm_workflow")),
+		Comments:       strings.TrimSpace(e.Data.Text("comments")),
 	}
 
 	if fc.store != nil {
 		if err := fc.store.SaveFeedback(fb.SessionID, fb); err != nil {
 			slog.Error("discord: failed to save feedback", "error", err)
-			discord.RespondEphemeral(s, i, fmt.Sprintf("Failed to save feedback: %v", err))
+			discordbot.RespondEphemeral(e, fmt.Sprintf("Failed to save feedback: %v", err))
 			return
 		}
 	}
 
 	avg := float64(fb.VoiceLatency+fb.NPCPersonality+fb.MemoryAccuracy+fb.DMWorkflow) / 4.0
-	discord.RespondEphemeral(s, i, fmt.Sprintf(
+	discordbot.RespondEphemeral(e, fmt.Sprintf(
 		"Thank you for your feedback! Average rating: %.1f/5\n\nSession: `%s`",
 		avg, fb.SessionID,
 	))

@@ -46,6 +46,22 @@ The built-in Silero Voice Activity Detection provider requires the ONNX Runtime 
 2. Extract and place the shared library where your linker can find it (e.g. `/usr/local/lib`).
 3. Ensure the headers are accessible (e.g. `/usr/local/include/onnxruntime`).
 
+### libdave (Discord DAVE E2EE)
+
+The Discord audio transport requires the libdave shared library for Discord's Audio/Video End-to-End Encryption (DAVE) protocol.
+
+```bash
+make dave-libs
+```
+
+This downloads (or builds from source) the libdave shared library and installs it to `~/.local/lib`. After the build completes, set the environment variables:
+
+```bash
+export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
+export CGO_ENABLED=1
+```
+
 ### PostgreSQL with pgvector
 
 The memory subsystem requires PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension.

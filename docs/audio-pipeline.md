@@ -126,7 +126,7 @@ type Connection interface {
 
 ### 🎮 Discord Transport (`pkg/audio/discord/`)
 
-The Discord transport bridges Discord's Opus-based voice protocol with Glyphoxa's PCM `AudioFrame` pipeline using the `bwmarrin/discordgo` library.
+The Discord transport bridges Discord's Opus-based voice protocol with Glyphoxa's PCM `AudioFrame` pipeline using the `disgoorg/disgo` library.
 
 **How it works:**
 

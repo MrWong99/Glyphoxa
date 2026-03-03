@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/godave/golibdave"
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
@@ -375,6 +377,9 @@ func registerBuiltinProviders(reg *config.Registry, bot **discordbot.Bot) {
 			Token:    token,
 			GuildID:  guildID,
 			DMRoleID: dmRoleID,
+			VoiceOpts: []voice.ManagerConfigOpt{
+				voice.WithDaveSessionCreateFunc(golibdave.NewSession),
+			},
 		})
 		if err != nil {
 			return nil, err

@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/session"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
@@ -25,16 +26,16 @@ const maxEmbedDescriptionLen = 4096
 // RecapCommands handles the /session recap slash command.
 type RecapCommands struct {
 	sessionMgr   *app.SessionManager
-	perms        *discord.PermissionChecker
+	perms        *discordbot.PermissionChecker
 	sessionStore memory.SessionStore
 	summariser   session.Summariser
 }
 
 // RecapConfig holds dependencies for creating RecapCommands.
 type RecapConfig struct {
-	Bot          *discord.Bot
+	Bot          *discordbot.Bot
 	SessionMgr   *app.SessionManager
-	Perms        *discord.PermissionChecker
+	Perms        *discordbot.PermissionChecker
 	SessionStore memory.SessionStore
 	Summariser   session.Summariser // optional; if nil, raw transcript is shown
 }
@@ -55,26 +56,25 @@ func NewRecapCommands(cfg RecapConfig) *RecapCommands {
 // Register registers the /session recap subcommand handler with the router.
 // The parent /session command definition is expected to be already registered
 // by SessionCommands; this only adds the handler for the recap subcommand.
-func (rc *RecapCommands) Register(router *discord.CommandRouter) {
+func (rc *RecapCommands) Register(router *discordbot.CommandRouter) {
 	router.RegisterHandler("session/recap", rc.handleRecap)
 }
 
 // handleRecap handles /session recap.
-func (rc *RecapCommands) handleRecap(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if !rc.perms.IsDM(i) {
-		discord.RespondEphemeral(s, i, "You need the DM role to view session recaps.")
+func (rc *RecapCommands) handleRecap(e *events.ApplicationCommandInteractionCreate) {
+	if !rc.perms.IsDM(e) {
+		discordbot.RespondEphemeral(e, "You need the DM role to view session recaps.")
 		return
 	}
 
 	info := rc.sessionMgr.Info()
 
 	if info.SessionID == "" {
-		discord.RespondEphemeral(s, i, "No session data available. Start a session first with `/session start`.")
+		discordbot.RespondEphemeral(e, "No session data available. Start a session first with `/session start`.")
 		return
 	}
 
-	// Defer reply since transcript retrieval + summarisation may take time.
-	discord.DeferReply(s, i)
+	discordbot.DeferReply(e)
 
 	duration := time.Since(info.StartedAt).Truncate(time.Second)
 	status := "Ended"
@@ -82,23 +82,19 @@ func (rc *RecapCommands) handleRecap(s *discordgo.Session, i *discordgo.Interact
 		status = "Active"
 	}
 
-	// Build NPC list from the orchestrator if the session is active.
 	npcList := rc.buildNPCList()
-
-	// Retrieve transcript and build summary.
 	summary := rc.buildSummary(info.SessionID)
 
-	fields := []*discordgo.MessageEmbedField{
-		{Name: "Campaign", Value: info.CampaignName, Inline: true},
-		{Name: "Status", Value: status, Inline: true},
-		{Name: "Session ID", Value: fmt.Sprintf("`%s`", info.SessionID), Inline: true},
-		{Name: "Started By", Value: fmt.Sprintf("<@%s>", info.StartedBy), Inline: true},
-		{Name: "Duration", Value: duration.String(), Inline: true},
-		{Name: "Channel", Value: fmt.Sprintf("<#%s>", info.ChannelID), Inline: true},
-		{Name: "NPCs", Value: npcList, Inline: false},
+	fields := []discord.EmbedField{
+		{Name: "Campaign", Value: info.CampaignName, Inline: new(true)},
+		{Name: "Status", Value: status, Inline: new(true)},
+		{Name: "Session ID", Value: fmt.Sprintf("`%s`", info.SessionID), Inline: new(true)},
+		{Name: "Started By", Value: fmt.Sprintf("<@%s>", info.StartedBy), Inline: new(true)},
+		{Name: "Duration", Value: duration.String(), Inline: new(true)},
+		{Name: "Channel", Value: fmt.Sprintf("<#%s>", info.ChannelID), Inline: new(true)},
+		{Name: "NPCs", Value: npcList},
 	}
 
-	// Add entry count if session store is available.
 	if rc.sessionStore != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -106,22 +102,19 @@ func (rc *RecapCommands) handleRecap(s *discordgo.Session, i *discordgo.Interact
 		if err != nil {
 			slog.Warn("recap: failed to get entry count", "session_id", info.SessionID, "err", err)
 		} else {
-			fields = append(fields, &discordgo.MessageEmbedField{
-				Name: "Transcript Entries", Value: fmt.Sprintf("%d", count), Inline: true,
+			fields = append(fields, discord.EmbedField{
+				Name: "Transcript Entries", Value: fmt.Sprintf("%d", count), Inline: new(true),
 			})
 		}
 	}
 
-	// Build embeds, splitting summary if needed.
 	embeds := rc.buildRecapEmbeds(fields, summary)
 
-	// Send the first embed as follow-up.
 	if len(embeds) > 0 {
-		discord.FollowUpEmbed(s, i, embeds[0])
+		discordbot.FollowUpEmbed(e, embeds[0])
 	}
-	// Send additional embeds as separate follow-ups if summary was split.
 	for _, extra := range embeds[1:] {
-		discord.FollowUpEmbed(s, i, extra)
+		discordbot.FollowUpEmbed(e, extra)
 	}
 }
 
@@ -160,7 +153,6 @@ func (rc *RecapCommands) buildSummary(sessionID string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Get all entries from the session (up to 24h window).
 	entries, err := rc.sessionStore.GetRecent(ctx, sessionID, 24*time.Hour)
 	if err != nil {
 		slog.Warn("recap: failed to get transcript", "session_id", sessionID, "err", err)
@@ -170,7 +162,6 @@ func (rc *RecapCommands) buildSummary(sessionID string) string {
 		return "No transcript entries recorded."
 	}
 
-	// Try LLM summarisation if available.
 	if rc.summariser != nil {
 		messages := transcriptToMessages(entries)
 		summary, err := rc.summariser.Summarise(ctx, messages)
@@ -182,7 +173,6 @@ func (rc *RecapCommands) buildSummary(sessionID string) string {
 		}
 	}
 
-	// Fall back to a simple transcript listing.
 	return formatTranscript(entries)
 }
 
@@ -212,7 +202,6 @@ func formatTranscript(entries []memory.TranscriptEntry) string {
 		fmt.Fprintf(&sb, "**[%s] %s:** %s\n", ts, e.SpeakerName, e.Text)
 	}
 	result := sb.String()
-	// Truncate if too long for embed.
 	if len(result) > maxEmbedDescriptionLen-100 {
 		result = result[:maxEmbedDescriptionLen-150] + "\n\n*... (truncated)*"
 	}
@@ -221,31 +210,31 @@ func formatTranscript(entries []memory.TranscriptEntry) string {
 
 // buildRecapEmbeds builds one or more embeds for the recap, splitting the
 // summary across multiple embeds if it exceeds Discord's 4096-char limit.
-func (rc *RecapCommands) buildRecapEmbeds(fields []*discordgo.MessageEmbedField, summary string) []*discordgo.MessageEmbed {
+func (rc *RecapCommands) buildRecapEmbeds(fields []discord.EmbedField, summary string) []discord.Embed {
+	now := time.Now().UTC()
+
 	if summary == "" {
-		return []*discordgo.MessageEmbed{{
+		return []discord.Embed{{
 			Title:     "Session Recap",
 			Color:     recapColor,
 			Fields:    fields,
-			Footer:    &discordgo.MessageEmbedFooter{Text: "Session recap"},
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Footer:    &discord.EmbedFooter{Text: "Session recap"},
+			Timestamp: &now,
 		}}
 	}
 
-	// If summary fits in one embed, use it as description.
 	if len(summary) <= maxEmbedDescriptionLen {
-		return []*discordgo.MessageEmbed{{
+		return []discord.Embed{{
 			Title:       "Session Recap",
 			Description: summary,
 			Color:       recapColor,
 			Fields:      fields,
-			Footer:      &discordgo.MessageEmbedFooter{Text: "Session recap"},
-			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			Footer:      &discord.EmbedFooter{Text: "Session recap"},
+			Timestamp:   &now,
 		}}
 	}
 
-	// Split summary across multiple embeds.
-	var embeds []*discordgo.MessageEmbed
+	var embeds []discord.Embed
 	remaining := summary
 	first := true
 	for len(remaining) > 0 {
@@ -257,7 +246,7 @@ func (rc *RecapCommands) buildRecapEmbeds(fields []*discordgo.MessageEmbedField,
 			remaining = ""
 		}
 
-		embed := &discordgo.MessageEmbed{
+		embed := discord.Embed{
 			Description: chunk,
 			Color:       recapColor,
 		}
@@ -267,8 +256,8 @@ func (rc *RecapCommands) buildRecapEmbeds(fields []*discordgo.MessageEmbedField,
 			first = false
 		}
 		if remaining == "" {
-			embed.Footer = &discordgo.MessageEmbedFooter{Text: "Session recap"}
-			embed.Timestamp = time.Now().UTC().Format(time.RFC3339)
+			embed.Footer = &discord.EmbedFooter{Text: "Session recap"}
+			embed.Timestamp = &now
 		}
 		embeds = append(embeds, embed)
 	}

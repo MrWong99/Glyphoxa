@@ -150,7 +150,7 @@ After both paths, the complete exchange (player utterance + NPC response) is wri
 
 | Package | Location | Responsibility |
 |---------|----------|----------------|
-| `pkg/audio` | `pkg/audio/` | `Platform` and `Connection` interfaces for voice channel connectivity. `AudioFrame` types, drain utilities. Sub-packages: `discord` (discordgo voice adapter, Opus encode/decode), `webrtc` (Pion-based WebRTC platform, signaling, transport), `mixer` (priority queue with barge-in, natural pacing, heap-based scheduling), `mock`. |
+| `pkg/audio` | `pkg/audio/` | `Platform` and `Connection` interfaces for voice channel connectivity. `AudioFrame` types, drain utilities. Sub-packages: `discord` (disgo voice adapter, Opus encode/decode), `webrtc` (Pion-based WebRTC platform, signaling, transport), `mixer` (priority queue with barge-in, natural pacing, heap-based scheduling), `mock`. |
 | `pkg/memory` | `pkg/memory/` | Three-layer memory interfaces: `SessionStore` (L1), `SemanticIndex` (L2), `KnowledgeGraph` / `GraphRAGQuerier` (L3). Query options, schema SQL. Sub-packages: `postgres` (pgx/pgvector implementation, knowledge graph with recursive CTEs, semantic index), `mock`. |
 | `pkg/provider` | `pkg/provider/` | Provider interfaces and implementations for all external AI services. Sub-packages by capability: `llm` (Provider interface + any-llm-go adapter), `stt` (Provider interface + Deepgram, whisper.cpp), `tts` (Provider interface + ElevenLabs, Coqui XTTS), `s2s` (Provider interface + Gemini Live, OpenAI Realtime), `vad` (Engine interface + Silero), `embeddings` (Provider interface + OpenAI, Ollama). Each has a `mock` sub-package. |
 

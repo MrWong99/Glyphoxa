@@ -1,6 +1,10 @@
 package commands
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/disgoorg/disgo/discord"
+)
 
 func TestDetectFormat(t *testing.T) {
 	t.Parallel()
@@ -56,8 +60,8 @@ func TestAttachmentFormatString(t *testing.T) {
 func TestFirstAttachment_NoAttachments(t *testing.T) {
 	t.Parallel()
 
-	i := testInteractionWithRoles("dm-role")
-	if att := FirstAttachment(i); att != nil {
-		t.Errorf("expected nil, got %v", att)
+	data := discord.SlashCommandInteractionData{}
+	if _, ok := FirstAttachment(data); ok {
+		t.Error("expected no attachment, got one")
 	}
 }

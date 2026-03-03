@@ -3,12 +3,12 @@ package commands
 import (
 	"testing"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	"github.com/MrWong99/glyphoxa/internal/agent/mock"
 	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
-	"github.com/MrWong99/glyphoxa/internal/discord"
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 )
 
 func newTestOrchestrator(agents ...agent.NPCAgent) *orchestrator.Orchestrator {
@@ -18,7 +18,7 @@ func newTestOrchestrator(agents ...agent.NPCAgent) *orchestrator.Orchestrator {
 func TestNPCDefinition(t *testing.T) {
 	t.Parallel()
 
-	nc := NewNPCCommands(discord.NewPermissionChecker(""), nil)
+	nc := NewNPCCommands(discordbot.NewPermissionChecker(""), nil)
 	def := nc.Definition()
 
 	if def.Name != "npc" {
@@ -31,48 +31,46 @@ func TestNPCDefinition(t *testing.T) {
 	}
 
 	for i, name := range expectedSubs {
-		if def.Options[i].Name != name {
-			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].Name, name)
+		if def.Options[i].OptionName() != name {
+			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].OptionName(), name)
 		}
-		if def.Options[i].Type != discordgo.ApplicationCommandOptionSubCommand {
-			t.Errorf("subcommand[%d] type = %d, want SubCommand", i, def.Options[i].Type)
+		if def.Options[i].Type() != discord.ApplicationCommandOptionTypeSubCommand {
+			t.Errorf("subcommand[%d] type = %d, want SubCommand", i, def.Options[i].Type())
 		}
 	}
 
 	// Verify mute has a "name" option with autocomplete.
-	muteOpts := def.Options[1].Options
-	if len(muteOpts) != 1 {
-		t.Fatalf("mute options count = %d, want 1", len(muteOpts))
+	muteSub := def.Options[1].(discord.ApplicationCommandOptionSubCommand)
+	if len(muteSub.Options) != 1 {
+		t.Fatalf("mute options count = %d, want 1", len(muteSub.Options))
 	}
-	if muteOpts[0].Name != "name" {
-		t.Errorf("mute option name = %q, want %q", muteOpts[0].Name, "name")
+	muteNameOpt := muteSub.Options[0].(discord.ApplicationCommandOptionString)
+	if muteNameOpt.Name != "name" {
+		t.Errorf("mute option name = %q, want %q", muteNameOpt.Name, "name")
 	}
-	if !muteOpts[0].Autocomplete {
+	if !muteNameOpt.Autocomplete {
 		t.Error("mute name option should have autocomplete enabled")
 	}
 
 	// Verify speak has "name" and "text" options.
-	speakOpts := def.Options[3].Options
-	if len(speakOpts) != 2 {
-		t.Fatalf("speak options count = %d, want 2", len(speakOpts))
+	speakSub := def.Options[3].(discord.ApplicationCommandOptionSubCommand)
+	if len(speakSub.Options) != 2 {
+		t.Fatalf("speak options count = %d, want 2", len(speakSub.Options))
 	}
-	if speakOpts[0].Name != "name" {
-		t.Errorf("speak option[0] = %q, want %q", speakOpts[0].Name, "name")
+	if speakSub.Options[0].OptionName() != "name" {
+		t.Errorf("speak option[0] = %q, want %q", speakSub.Options[0].OptionName(), "name")
 	}
-	if speakOpts[1].Name != "text" {
-		t.Errorf("speak option[1] = %q, want %q", speakOpts[1].Name, "text")
+	if speakSub.Options[1].OptionName() != "text" {
+		t.Errorf("speak option[1] = %q, want %q", speakSub.Options[1].OptionName(), "text")
 	}
 }
 
 func TestNPCList_NoSession(t *testing.T) {
 	t.Parallel()
 
-	perms := discord.NewPermissionChecker("")
+	perms := discordbot.NewPermissionChecker("")
 	nc := NewNPCCommands(perms, func() *orchestrator.Orchestrator { return nil })
 
-	// Verify the handler does not panic when no orchestrator is available.
-	// We cannot easily test the Discord response without a real session,
-	// so we verify the orchestrator check by confirming getOrch returns nil.
 	orch := nc.getOrch()
 	if orch != nil {
 		t.Fatal("expected nil orchestrator")
@@ -101,16 +99,14 @@ func TestNPCList_WithAgents(t *testing.T) {
 
 	orch := newTestOrchestrator(npc1, npc2)
 
-	perms := discord.NewPermissionChecker("")
+	perms := discordbot.NewPermissionChecker("")
 	nc := NewNPCCommands(perms, func() *orchestrator.Orchestrator { return orch })
 
-	// Verify orchestrator has agents.
 	agents := nc.getOrch().ActiveAgents()
 	if len(agents) != 2 {
 		t.Fatalf("expected 2 agents, got %d", len(agents))
 	}
 
-	// Verify mute state queries work.
 	for _, a := range agents {
 		muted, err := orch.IsMuted(a.ID())
 		if err != nil {
@@ -131,7 +127,6 @@ func TestNPCMuteUnmute(t *testing.T) {
 	}
 	orch := newTestOrchestrator(npc)
 
-	// Mute the agent.
 	if err := orch.MuteAgent("greymantle"); err != nil {
 		t.Fatalf("MuteAgent error: %v", err)
 	}
@@ -143,7 +138,6 @@ func TestNPCMuteUnmute(t *testing.T) {
 		t.Error("expected agent to be muted")
 	}
 
-	// Unmute.
 	if err := orch.UnmuteAgent("greymantle"); err != nil {
 		t.Fatalf("UnmuteAgent error: %v", err)
 	}
@@ -168,7 +162,6 @@ func TestNPCMuteAll_UnmuteAll(t *testing.T) {
 		t.Errorf("MuteAll = %d, want 2", count)
 	}
 
-	// Muting again should change 0.
 	count = orch.MuteAll()
 	if count != 0 {
 		t.Errorf("second MuteAll = %d, want 0", count)
@@ -200,57 +193,20 @@ func TestNPCAgentByName(t *testing.T) {
 	}
 }
 
-func TestSubcommandStringOption(t *testing.T) {
-	t.Parallel()
-
-	i := &discordgo.InteractionCreate{
-		Interaction: &discordgo.Interaction{
-			Type: discordgo.InteractionApplicationCommand,
-			Data: discordgo.ApplicationCommandInteractionData{
-				Name: "npc",
-				Options: []*discordgo.ApplicationCommandInteractionDataOption{
-					{
-						Name: "mute",
-						Type: discordgo.ApplicationCommandOptionSubCommand,
-						Options: []*discordgo.ApplicationCommandInteractionDataOption{
-							{
-								Name:  "name",
-								Type:  discordgo.ApplicationCommandOptionString,
-								Value: "Greymantle",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	got := subcommandStringOption(i, "name")
-	if got != "Greymantle" {
-		t.Errorf("subcommandStringOption = %q, want %q", got, "Greymantle")
-	}
-
-	got = subcommandStringOption(i, "nonexistent")
-	if got != "" {
-		t.Errorf("subcommandStringOption for missing = %q, want empty", got)
-	}
-}
-
 func TestNPCRegister(t *testing.T) {
 	t.Parallel()
 
-	perms := discord.NewPermissionChecker("")
+	perms := discordbot.NewPermissionChecker("")
 	nc := NewNPCCommands(perms, func() *orchestrator.Orchestrator { return nil })
-	router := discord.NewCommandRouter()
+	router := discordbot.NewCommandRouter()
 
 	nc.Register(router)
 
-	// Verify command definitions are registered.
 	cmds := router.ApplicationCommands()
 	if len(cmds) != 1 {
 		t.Fatalf("expected 1 application command, got %d", len(cmds))
 	}
-	if cmds[0].Name != "npc" {
-		t.Errorf("command name = %q, want %q", cmds[0].Name, "npc")
+	if cmds[0].CommandName() != "npc" {
+		t.Errorf("command name = %q, want %q", cmds[0].CommandName(), "npc")
 	}
 }
