@@ -1,11 +1,10 @@
-//go:build onnxruntime
-
 // Package silero implements the vad.Engine interface using the Silero VAD v5
 // ONNX model via the yalue/onnxruntime_go binding.
 //
-// Build this package with the onnxruntime build tag:
-//
-//	go build -tags onnxruntime ./pkg/provider/vad/silero/...
+// The ONNX Runtime shared library (libonnxruntime.so) must be available at
+// runtime. Use [WithONNXLibPath] to specify a custom path, or install it
+// system-wide. Download from https://github.com/microsoft/onnxruntime/releases
+// or run: make onnx-libs
 //
 // The Silero VAD v5 model supports sample rates of 8000 Hz and 16000 Hz only.
 // Each session maintains independent LSTM hidden state and a speech/silence

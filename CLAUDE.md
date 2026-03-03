@@ -27,7 +27,7 @@ go test -race -count=1 -run TestFunctionName ./path/to/package/...
 ### Prerequisites
 
 - **libopus**: `apt install libopus-dev` / `pacman -S opus` / `brew install opus`
-- **ONNX Runtime**: shared library from onnxruntime releases (for Silero VAD)
+- **ONNX Runtime**: `make onnx-libs` then export `LD_LIBRARY_PATH=/tmp/onnx-install/lib:$LD_LIBRARY_PATH` (for Silero VAD, loaded at runtime via dlopen)
 - **libdave**: `make dave-libs` then export `PKG_CONFIG_PATH`, `LD_LIBRARY_PATH`, `CGO_ENABLED=1` (for Discord DAVE E2EE voice via disgo/godave)
 - **whisper.cpp** (optional): `make whisper-libs` then export `C_INCLUDE_PATH`, `LIBRARY_PATH`, `CGO_ENABLED=1`
 

@@ -80,6 +80,22 @@ jobs:
           cmake --build build-arm64 --config Release -j$(nproc)
           cmake --install build-arm64
 
+      - name: Download ONNX Runtime (amd64)
+        run: |
+          curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-x64-1.24.1.tgz" \
+            -o /tmp/onnxruntime-amd64.tgz
+          mkdir -p /tmp/onnx/amd64
+          tar xzf /tmp/onnxruntime-amd64.tgz -C /tmp/onnx/amd64 --strip-components=1
+          rm -f /tmp/onnxruntime-amd64.tgz
+
+      - name: Download ONNX Runtime (arm64)
+        run: |
+          curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-aarch64-1.24.1.tgz" \
+            -o /tmp/onnxruntime-arm64.tgz
+          mkdir -p /tmp/onnx/arm64
+          tar xzf /tmp/onnxruntime-arm64.tgz -C /tmp/onnx/arm64 --strip-components=1
+          rm -f /tmp/onnxruntime-arm64.tgz
+
       - name: Download libdave (amd64)
         run: |
           DAVE_VERSION="v1.1.0/cpp"
@@ -138,8 +154,10 @@ jobs:
           mkdir -p docker-ctx/linux/amd64 docker-ctx/linux/arm64
           cp dist/glyphoxa_linux_amd64*/glyphoxa docker-ctx/linux/amd64/
           cp /tmp/dave/amd64/lib/libdave.so docker-ctx/linux/amd64/
+          cp /tmp/onnx/amd64/lib/libonnxruntime.so.1.24.1 docker-ctx/linux/amd64/libonnxruntime.so
           cp dist/glyphoxa_linux_arm64*/glyphoxa docker-ctx/linux/arm64/
           cp /tmp/dave/arm64/lib/libdave.so docker-ctx/linux/arm64/
+          cp /tmp/onnx/arm64/lib/libonnxruntime.so.1.24.1 docker-ctx/linux/arm64/libonnxruntime.so
           cp Dockerfile.release docker-ctx/Dockerfile
 
       - name: Set up QEMU

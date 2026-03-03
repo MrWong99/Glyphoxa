@@ -6,6 +6,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 
 COPY ${TARGETOS}/${TARGETARCH}/libdave.so /usr/lib/
+COPY ${TARGETOS}/${TARGETARCH}/libonnxruntime.so /usr/lib/
 COPY ${TARGETOS}/${TARGETARCH}/glyphoxa /usr/local/bin/glyphoxa
 
 ENTRYPOINT ["glyphoxa"]

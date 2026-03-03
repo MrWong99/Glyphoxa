@@ -1,5 +1,3 @@
-//go:build onnxruntime
-
 package silero
 
 import (

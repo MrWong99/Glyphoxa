@@ -53,6 +53,36 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------------------
+  # Download ONNX Runtime shared library (shared across jobs via artifacts)
+  # ---------------------------------------------------------------------------
+  onnx-setup:
+    name: Download ONNX Runtime
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache ONNX Runtime
+        id: cache-onnx
+        uses: actions/cache@v4
+        with:
+          path: /tmp/onnx-install
+          key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-v1.24.1
+
+      - name: Download ONNX Runtime
+        if: steps.cache-onnx.outputs.cache-hit != 'true'
+        run: |
+          curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-x64-1.24.1.tgz" \
+            -o /tmp/onnxruntime.tgz
+          mkdir -p /tmp/onnx-install
+          tar xzf /tmp/onnxruntime.tgz -C /tmp/onnx-install --strip-components=1
+          rm -f /tmp/onnxruntime.tgz
+
+      - name: Upload ONNX Runtime artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnx-libs
+          path: /tmp/onnx-install
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
   # Download libdave prebuilt shared library (shared across jobs via artifacts)
   # ---------------------------------------------------------------------------
   dave-setup:
@@ -99,7 +129,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: [whisper-build, dave-setup]
+    needs: [whisper-build, onnx-setup, dave-setup]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -115,6 +145,12 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
+      - name: Download ONNX Runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: onnx-libs
+          path: /tmp/onnx-install
+
       - name: Download dave artifacts
         uses: actions/download-artifact@v4
         with:
@@ -126,7 +162,7 @@ jobs:
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib:/tmp/onnx-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Check formatting
@@ -149,7 +185,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [whisper-build, dave-setup]
+    needs: [whisper-build, onnx-setup, dave-setup]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -165,6 +201,12 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
+      - name: Download ONNX Runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: onnx-libs
+          path: /tmp/onnx-install
+
       - name: Download dave artifacts
         uses: actions/download-artifact@v4
         with:
@@ -176,7 +218,7 @@ jobs:
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib:/tmp/onnx-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Install C++ runtime
@@ -204,6 +246,12 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
+      - name: Download ONNX Runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: onnx-libs
+          path: /tmp/onnx-install
+
       - name: Download dave artifacts
         uses: actions/download-artifact@v4
         with:
@@ -215,7 +263,7 @@ jobs:
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib:/tmp/onnx-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Install C++ runtime
@@ -235,7 +283,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [whisper-build, dave-setup]
+    needs: [whisper-build, onnx-setup, dave-setup]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -251,6 +299,12 @@ jobs:
           name: whisper-libs
           path: /tmp/whisper-install
 
+      - name: Download ONNX Runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: onnx-libs
+          path: /tmp/onnx-install
+
       - name: Download dave artifacts
         uses: actions/download-artifact@v4
         with:
@@ -262,7 +316,7 @@ jobs:
           echo "C_INCLUDE_PATH=/tmp/whisper-install/include" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/tmp/whisper-install/lib" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/tmp/dave-install/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/tmp/dave-install/lib:/tmp/onnx-install/lib" >> $GITHUB_ENV
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
 
       - name: Install C++ runtime

@@ -41,6 +41,7 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts/elevenlabs"
 	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
 	energyvad "github.com/MrWong99/glyphoxa/pkg/provider/vad/energy"
+	silerovad "github.com/MrWong99/glyphoxa/pkg/provider/vad/silero"
 )
 
 func main() {
@@ -358,6 +359,27 @@ func registerBuiltinProviders(reg *config.Registry, bot **discordbot.Bot) {
 			opts = append(opts, energyvad.WithSmoothingFactor(f))
 		}
 		return energyvad.New(opts...), nil
+	})
+
+	reg.RegisterVAD("silero", func(entry config.ProviderEntry) (vad.Engine, error) {
+		modelPath := entry.Model
+		if modelPath == "" {
+			modelPath = optString(entry.Options, "model_path")
+		}
+		if modelPath == "" {
+			return nil, fmt.Errorf("silero VAD requires model (path to silero_vad.onnx)")
+		}
+		var opts []silerovad.Option
+		if n := optInt(entry.Options, "min_speech_frames"); n > 0 {
+			opts = append(opts, silerovad.WithMinSpeechFrames(n))
+		}
+		if n := optInt(entry.Options, "min_silence_frames"); n > 0 {
+			opts = append(opts, silerovad.WithMinSilenceFrames(n))
+		}
+		if p := optString(entry.Options, "onnx_lib_path"); p != "" {
+			opts = append(opts, silerovad.WithONNXLibPath(p))
+		}
+		return silerovad.New(modelPath, opts...)
 	})
 
 	// ── Audio ─────────────────────────────────────────────────────────────────

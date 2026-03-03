@@ -1,14 +1,16 @@
 # =============================================================================
-# Multi-stage build for Glyphoxa with native whisper.cpp and libdave bindings
+# Multi-stage build for Glyphoxa with native whisper.cpp, ONNX Runtime, and
+# libdave bindings
 # =============================================================================
 #
 # whisper.cpp is compiled from source and statically linked into the Go binary
-# via CGO. libdave (Discord DAVE E2EE) is downloaded as a prebuilt shared
-# library and dynamically linked.
+# via CGO. libdave (Discord DAVE E2EE) and ONNX Runtime (Silero VAD) are
+# downloaded as prebuilt shared libraries and dynamically linked.
 #
 # The final image is based on distroless/cc (includes glibc/libstdc++) because
-# libdave is dynamically linked. Whisper model files are NOT bundled — mount
-# them at runtime via a volume.
+# libdave and libonnxruntime are dynamically linked. Whisper model files and
+# the Silero VAD ONNX model are NOT bundled — mount them at runtime via a
+# volume.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -37,7 +39,27 @@ RUN cmake -B build \
     && cmake --build build --config Release -j$(nproc)
 
 # ---------------------------------------------------------------------------
-# Stage 2: Download libdave prebuilt shared library
+# Stage 2: Download ONNX Runtime shared library (for Silero VAD)
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS onnx-download
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG TARGETARCH
+ARG ONNX_VERSION=1.24.1
+
+RUN ONNX_ARCH="x64" \
+    && if [ "${TARGETARCH}" = "arm64" ]; then ONNX_ARCH="aarch64"; fi \
+    && curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz" \
+       -o /tmp/onnxruntime.tgz \
+    && mkdir -p /onnx \
+    && tar xzf /tmp/onnxruntime.tgz -C /onnx --strip-components=1 \
+    && rm -f /tmp/onnxruntime.tgz
+
+# ---------------------------------------------------------------------------
+# Stage 3: Download libdave prebuilt shared library
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS dave-download
 
@@ -71,7 +93,7 @@ Cflags: -I${includedir}
 EOF
 
 # ---------------------------------------------------------------------------
-# Stage 3: Build Glyphoxa Go binary
+# Stage 4: Build Glyphoxa Go binary
 # ---------------------------------------------------------------------------
 FROM golang:1.26 AS build
 
@@ -110,11 +132,12 @@ RUN CGO_ENABLED=1 go build \
     ./cmd/glyphoxa
 
 # ---------------------------------------------------------------------------
-# Stage 4: Final minimal image
+# Stage 5: Final minimal image
 # ---------------------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12:nonroot
 
 COPY --from=dave-download /dave/lib/libdave.so /usr/lib/
+COPY --from=onnx-download /onnx/lib/libonnxruntime.so /usr/lib/
 COPY --from=build /out/glyphoxa /usr/local/bin/glyphoxa
 
 ENTRYPOINT ["glyphoxa"]
