@@ -85,15 +85,25 @@ func (b BudgetTier) IsValid() bool {
 	return false
 }
 
+// TranscriptConfig configures the transcript correction pipeline.
+type TranscriptConfig struct {
+	// LLMCorrection enables the LLM-based transcript correction stage.
+	// When false (the default), only the zero-latency phonetic matcher runs.
+	// Enable this when STT accuracy is poor and entity names are frequently
+	// misheard beyond what phonetic matching can fix.
+	LLMCorrection bool `yaml:"llm_correction"`
+}
+
 // Config is the root configuration structure for Glyphoxa.
 // It is typically loaded from a YAML file using [Load] or [LoadFromReader].
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Providers ProvidersConfig `yaml:"providers"`
-	NPCs      []NPCConfig     `yaml:"npcs"`
-	Memory    MemoryConfig    `yaml:"memory"`
-	MCP       MCPConfig       `yaml:"mcp"`
-	Campaign  CampaignConfig  `yaml:"campaign"`
+	Server     ServerConfig     `yaml:"server"`
+	Providers  ProvidersConfig  `yaml:"providers"`
+	NPCs       []NPCConfig      `yaml:"npcs"`
+	Memory     MemoryConfig     `yaml:"memory"`
+	MCP        MCPConfig        `yaml:"mcp"`
+	Campaign   CampaignConfig   `yaml:"campaign"`
+	Transcript TranscriptConfig `yaml:"transcript"`
 }
 
 // CampaignConfig holds pre-session entity and campaign data.

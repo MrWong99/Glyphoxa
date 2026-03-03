@@ -219,8 +219,8 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		var pipelineOpts []transcript.PipelineOption
 		// Stage 1: phonetic matching (always available, no LLM needed).
 		pipelineOpts = append(pipelineOpts, transcript.WithPhoneticMatcher(phonetic.New()))
-		// Stage 2: LLM correction (when LLM provider is available).
-		if sm.providers.LLM != nil {
+		// Stage 2: LLM correction (when LLM provider is available and explicitly enabled).
+		if sm.providers.LLM != nil && sm.cfg.Transcript.LLMCorrection {
 			pipelineOpts = append(pipelineOpts, transcript.WithLLMCorrector(
 				llmcorrect.New(sm.providers.LLM),
 			))

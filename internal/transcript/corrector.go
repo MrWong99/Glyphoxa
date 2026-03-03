@@ -11,6 +11,7 @@ import (
 
 const (
 	defaultLLMConfidenceThreshold = 0.5
+	defaultMinWordsForLLM         = 3
 )
 
 // PipelineOption is a functional option for configuring a [CorrectionPipeline].
@@ -46,6 +47,16 @@ func WithLLMOnLowConfidence(threshold float64) PipelineOption {
 	}
 }
 
+// WithMinWordsForLLM sets the minimum number of words a transcript must
+// contain before the LLM correction stage is attempted. Transcripts with
+// fewer words than n are passed through without LLM correction because there
+// is too little context for meaningful entity-name correction. Default: 3.
+func WithMinWordsForLLM(n int) PipelineOption {
+	return func(p *CorrectionPipeline) {
+		p.minWordsForLLM = n
+	}
+}
+
 // CorrectionPipeline is the two-stage transcript correction implementation of
 // [Pipeline]. Stages are optional and are applied in order:
 //
@@ -54,9 +65,10 @@ func WithLLMOnLowConfidence(threshold float64) PipelineOption {
 //
 // CorrectionPipeline is safe for concurrent use.
 type CorrectionPipeline struct {
-	phonetic     PhoneticMatcher
-	llmCorrector *llmcorrect.Corrector
-	llmThreshold float64
+	phonetic       PhoneticMatcher
+	llmCorrector   *llmcorrect.Corrector
+	llmThreshold   float64
+	minWordsForLLM int
 }
 
 // Ensure CorrectionPipeline satisfies the Pipeline interface at compile time.
@@ -67,7 +79,8 @@ var _ Pipeline = (*CorrectionPipeline)(nil)
 // [WithLLMCorrector] to activate them.
 func NewPipeline(opts ...PipelineOption) *CorrectionPipeline {
 	p := &CorrectionPipeline{
-		llmThreshold: defaultLLMConfidenceThreshold,
+		llmThreshold:   defaultLLMConfidenceThreshold,
+		minWordsForLLM: defaultMinWordsForLLM,
 	}
 	for _, o := range opts {
 		o(p)
@@ -126,9 +139,13 @@ func (p *CorrectionPipeline) Correct(
 	if p.llmCorrector != nil && len(entities) > 0 {
 		lowConfSpans := p.collectLowConfidenceSpans(t.Words, phoneticCorrectedWords)
 
-		// When there is no per-word confidence data, we always run the LLM.
-		// When there IS per-word data, we only run if there are flagged spans.
-		if len(t.Words) == 0 || len(lowConfSpans) > 0 {
+		// Skip LLM for very short transcripts — too little context for meaningful correction.
+		tokens := strings.Fields(workingText)
+		if len(tokens) < p.minWordsForLLM {
+			// fall through to merge without LLM corrections
+		} else if len(t.Words) == 0 || len(lowConfSpans) > 0 {
+			// When there is no per-word confidence data, we always run the LLM.
+			// When there IS per-word data, we only run if there are flagged spans.
 			correctedText, rawCorrections, err := p.llmCorrector.Correct(
 				ctx,
 				workingText,

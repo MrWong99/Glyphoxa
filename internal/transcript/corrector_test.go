@@ -113,7 +113,7 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 
 	mockLLM := &mock.Provider{
 		CompleteResponse: &llm.CompletionResponse{
-			Content: `{"corrected_text": "Eldrinax arrived.", "corrections": [{"original": "eldrinaks", "corrected": "Eldrinax", "confidence": 0.88}]}`,
+			Content: `{"corrected_text": "Eldrinax arrived at the tower.", "corrections": [{"original": "eldrinaks", "corrected": "Eldrinax", "confidence": 0.88}]}`,
 		},
 	}
 	llmCorrector := llmcorrect.New(mockLLM)
@@ -121,8 +121,8 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 		transcript.WithLLMCorrector(llmCorrector),
 	)
 
-	// No per-word data → LLM always runs.
-	tr := makeTranscript("eldrinaks arrived.")
+	// No per-word data + enough words (≥3) → LLM always runs.
+	tr := makeTranscript("eldrinaks arrived at the tower.")
 	result, err := pipeline.Correct(context.Background(), tr, []string{"Eldrinax"})
 	if err != nil {
 		t.Fatalf("Correct returned error: %v", err)
@@ -136,8 +136,8 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 		t.Fatal("LLM was not called")
 	}
 	// Final text should come from LLM response.
-	if result.Corrected != "Eldrinax arrived." {
-		t.Errorf("Corrected=%q, want %q", result.Corrected, "Eldrinax arrived.")
+	if result.Corrected != "Eldrinax arrived at the tower." {
+		t.Errorf("Corrected=%q, want %q", result.Corrected, "Eldrinax arrived at the tower.")
 	}
 	// LLM corrections should be present.
 	llmCorrectionFound := false
@@ -214,6 +214,33 @@ func TestCorrectionPipeline_LLMRunsOnLowConfidence(t *testing.T) {
 	}
 	if len(mockLLM.CompleteCalls) != 1 {
 		t.Errorf("LLM called %d times, want 1 (one low-confidence word)", len(mockLLM.CompleteCalls))
+	}
+}
+
+// --- Min words gate ---
+
+func TestCorrectionPipeline_MinWordsSkipsLLM(t *testing.T) {
+	t.Parallel()
+
+	mockLLM := &mock.Provider{
+		CompleteResponse: &llm.CompletionResponse{
+			Content: `{"corrected_text": "Eldrinax arrives.", "corrections": [{"original": "eldrinaks", "corrected": "Eldrinax", "confidence": 0.9}]}`,
+		},
+	}
+	llmCorrector := llmcorrect.New(mockLLM)
+	// Default minWordsForLLM is 3; a 2-word transcript should NOT trigger the LLM.
+	pipeline := transcript.NewPipeline(
+		transcript.WithLLMCorrector(llmCorrector),
+	)
+
+	// 2-word transcript with no per-word confidence data (would normally trigger LLM).
+	tr := makeTranscript("eldrinaks arrives")
+	_, err := pipeline.Correct(context.Background(), tr, []string{"Eldrinax"})
+	if err != nil {
+		t.Fatalf("Correct returned error: %v", err)
+	}
+	if len(mockLLM.CompleteCalls) != 0 {
+		t.Errorf("LLM called %d times, want 0 (transcript too short)", len(mockLLM.CompleteCalls))
 	}
 }
 
