@@ -301,7 +301,7 @@ func (a *App) initAgents(ctx context.Context) error {
 
 	var agents []agent.NPCAgent
 	for i, npc := range a.cfg.NPCs {
-		eng, err := buildEngine(a.providers, npc)
+		eng, err := buildEngine(a.providers, npc, a.cfg.Providers.TTS)
 		if err != nil {
 			return fmt.Errorf("build engine for NPC %q (index %d): %w", npc.Name, i, err)
 		}
@@ -423,9 +423,12 @@ func registerNPCEntities(ctx context.Context, graph memory.KnowledgeGraph, npcs 
 }
 
 // buildEngine constructs the appropriate VoiceEngine for an NPC config.
-// This is a package-level function so both App and SessionManager can use it.
-func buildEngine(providers *Providers, npc config.NPCConfig) (engine.VoiceEngine, error) {
+// ttsEntry supplies the TTS provider configuration so the engine can tag its
+// audio output with the correct sample rate and channel count. This is a
+// package-level function so both App and SessionManager can use it.
+func buildEngine(providers *Providers, npc config.NPCConfig, ttsEntry config.ProviderEntry) (engine.VoiceEngine, error) {
 	voice := configVoiceProfile(npc.Voice)
+	ttsSR, ttsCh := ttsFormatFromConfig(ttsEntry)
 
 	switch npc.Engine {
 	case config.EngineCascaded, config.EngineSentenceCascade:
@@ -440,6 +443,7 @@ func buildEngine(providers *Providers, npc config.NPCConfig) (engine.VoiceEngine
 			providers.LLM, // strong LLM (same for now; cascade config can override)
 			providers.TTS,
 			voice,
+			cascade.WithTTSFormat(ttsSR, ttsCh),
 		), nil
 
 	case config.EngineS2S:
@@ -452,6 +456,7 @@ func buildEngine(providers *Providers, npc config.NPCConfig) (engine.VoiceEngine
 				Voice:        voice,
 				Instructions: npc.Personality,
 			},
+			s2sengine.WithTTSFormat(ttsSR, ttsCh),
 		), nil
 
 	default:

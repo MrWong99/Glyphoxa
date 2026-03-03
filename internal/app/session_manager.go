@@ -522,7 +522,7 @@ func (sm *SessionManager) loadAgents(ctx context.Context, assembler *hotctx.Asse
 	var closers []func() error
 
 	for i, npc := range sm.cfg.NPCs {
-		eng, err := buildEngine(sm.providers, npc)
+		eng, err := buildEngine(sm.providers, npc, sm.cfg.Providers.TTS)
 		if err != nil {
 			// Clean up already-created engines on failure.
 			for j := len(closers) - 1; j >= 0; j-- {
