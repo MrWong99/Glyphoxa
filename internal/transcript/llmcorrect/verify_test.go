@@ -101,7 +101,6 @@ func TestVerifyCorrectedText(t *testing.T) {
 			wantText:        "Eldrinax arrived",
 			wantCorrections: 1,
 		},
-
 	}
 
 	for _, tt := range tests {
