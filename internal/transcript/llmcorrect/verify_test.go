@@ -102,14 +102,14 @@ func TestVerifyCorrectedText(t *testing.T) {
 			wantCorrections: 1,
 		},
 		{
-			name:      "declared correction accepted — unrelated words replaced with entity",
+			name:      "span split by shared token rejects correction",
 			original:  "Wir sind heute in einer Story die befindet sich",
 			corrected: "Wir sind heute in Hildegard die Kräuterfrau befindet sich",
 			corrections: []Correction{
 				{Original: "einer Story die", Corrected: "Hildegard die Kräuterfrau", Confidence: 0.8},
 			},
-			wantText:        "Wir sind heute in Hildegard die Kräuterfrau befindet sich",
-			wantCorrections: 1,
+			wantText:        "Wir sind heute in einer Story die befindet sich",
+			wantCorrections: 0,
 		},
 	}
 
