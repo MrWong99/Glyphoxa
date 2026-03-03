@@ -7,7 +7,7 @@ Runtime bugs from live testing session (2026-03-03, config `v1.yaml`).
 
 ## HIGH — Runtime bugs (from live session 2026-03-03)
 
-### 10. TTS sample rate mismatch causes pitched-up NPC voices
+### ~~10. TTS sample rate mismatch causes pitched-up NPC voices~~ ✅ Fixed (721f7d3)
 
 **`internal/app/app.go:438-443`, `internal/engine/cascade/cascade.go:159`**
 
