@@ -629,6 +629,81 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 	})
 }
 
+func TestSession_DuplicateCommittedTranscriptDeduplicated(t *testing.T) {
+	t.Parallel()
+
+	srv := startElevenLabsServer(t, func(conn *websocket.Conn) {
+		ctx := context.Background()
+		_ = conn.Write(ctx, websocket.MessageText,
+			[]byte(`{"message_type":"session_started"}`))
+
+		for {
+			_, msg, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			var chunk audioChunkMessage
+			if err := json.Unmarshal(msg, &chunk); err != nil {
+				continue
+			}
+			if chunk.Commit {
+				// Send both message types like ElevenLabs does when
+				// include_timestamps is enabled.
+				ct := `{"message_type":"committed_transcript","text":"Ist die des.","language_code":"de"}`
+				_ = conn.Write(ctx, websocket.MessageText, []byte(ct))
+				ctts := `{"message_type":"committed_transcript_with_timestamps","text":"Ist die des.","language_code":"de","words":[{"text":"Ist","start":0,"end":0.2,"type":"word","logprob":-0.1},{"text":" ","start":0.2,"end":0.25,"type":"spacing","logprob":0},{"text":"die","start":0.25,"end":0.4,"type":"word","logprob":-0.05},{"text":" ","start":0.4,"end":0.45,"type":"spacing","logprob":0},{"text":"des.","start":0.45,"end":0.7,"type":"word","logprob":-0.2}]}`
+				_ = conn.Write(ctx, websocket.MessageText, []byte(ctts))
+				for {
+					if _, _, err := conn.Read(ctx); err != nil {
+						return
+					}
+				}
+			}
+		}
+	})
+
+	p, err := New("test-key", WithBaseURL(wsURL(srv)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	sess, err := p.StartStream(context.Background(), stt.StreamConfig{
+		SampleRate: 16000,
+		Language:   "de",
+	})
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+
+	if err := sess.SendAudio(make([]byte, 320)); err != nil {
+		t.Fatalf("SendAudio: %v", err)
+	}
+
+	var finals []stt.Transcript
+	collected := make(chan struct{})
+	go func() {
+		defer close(collected)
+		for t := range sess.Finals() {
+			finals = append(finals, t)
+		}
+	}()
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case <-collected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for finals channel to close")
+	}
+
+	if len(finals) != 1 {
+		t.Fatalf("expected exactly 1 final transcript (deduplicated), got %d", len(finals))
+	}
+	assertEqual(t, "text", "Ist die des.", finals[0].Text)
+}
+
 // ---- helpers ----
 
 func assertEqual(t *testing.T, label, want, got string) {

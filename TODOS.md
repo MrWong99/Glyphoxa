@@ -94,7 +94,7 @@ degrading NPC context quality.
 `OR` on the join condition and a `CASE` expression to pick the opposite end
 of the edge. Also fixed the same pattern in `FindPath()`.
 
-### 14. ElevenLabs STT emits duplicate final transcripts
+### ~~14. ElevenLabs STT emits duplicate final transcripts~~ ✅ Fixed
 
 **`pkg/provider/stt/elevenlabs/elevenlabs.go:389`**
 
@@ -107,8 +107,8 @@ transcript is emitted twice on the `finals` channel. Downstream processing
 Log evidence: identical transcript `"Ist die des."` corrected and routed twice
 at 00:39:35.646 and 00:39:35.836.
 
-**Fix**: Track the last committed text (or a sequence ID) and deduplicate, or
-only handle one of the two message types.
+**Fix**: `readLoop` now tracks the last committed text and skips duplicate
+final transcripts when ElevenLabs sends both message types for the same commit.
 
 ---
 

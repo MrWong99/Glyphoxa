@@ -369,6 +369,8 @@ func (s *session) readLoop(ctx context.Context) {
 	defer close(s.partials)
 	defer close(s.finals)
 
+	var lastCommitted string
+
 	for {
 		_, msg, err := s.conn.Read(ctx)
 		if err != nil {
@@ -381,6 +383,16 @@ func (s *session) readLoop(ctx context.Context) {
 		}
 
 		if t.IsFinal {
+			// ElevenLabs sends both committed_transcript and
+			// committed_transcript_with_timestamps for the same
+			// commit when include_timestamps is enabled. Skip the
+			// duplicate so downstream processing only runs once.
+			if t.Text == lastCommitted {
+				slog.Debug("elevenlabs: skipping duplicate committed transcript", "text", t.Text)
+				continue
+			}
+			lastCommitted = t.Text
+
 			select {
 			case s.finals <- t:
 			case <-s.done:
