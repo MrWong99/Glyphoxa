@@ -62,6 +62,7 @@ Written in Go for native concurrency and sub-2-second mouth-to-ear latency.
 - **Go 1.26+** with CGo enabled
 - **libopus** — `apt install libopus-dev` · `pacman -S opus` · `brew install opus`
 - **ONNX Runtime** — from [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases) (for Silero VAD)
+- **libdave** — `make dave-libs` (for Discord DAVE E2EE voice encryption)
 
 ### Build & Run
 

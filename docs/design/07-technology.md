@@ -15,9 +15,9 @@ Go was chosen as the primary language after evaluating TypeScript, Rust, Go, and
 |---|---|
 | Streaming concurrency | Goroutines (~2KB each) + channels are purpose-built for this workload. Each NPC agent is a goroutine. Each audio stream is a channel. Pipeline stages connect via channels. No callback hell, no async/await coloring. |
 | Compiled performance | Native compilation, no JIT warmup, no GC pause concern for I/O-bound streaming. Opus encoding/decoding has native Go bindings (hraban/opus). |
-| Ecosystem maturity | Official MCP Go SDK (`modelcontextprotocol/go-sdk`). `discordgo` with full voice support. `any-llm-go` (Mozilla, channel-based streaming over official provider SDKs). `coder/websocket` for Deepgram/ElevenLabs streaming clients. |
+| Ecosystem maturity | Official MCP Go SDK (`modelcontextprotocol/go-sdk`). `disgo` with full voice support. `any-llm-go` (Mozilla, channel-based streaming over official provider SDKs). `coder/websocket` for Deepgram/ElevenLabs streaming clients. |
 | Security | Go modules with `go.sum` for cryptographic dependency verification. Standard library covers HTTP, WebSocket, crypto, JSON, audio without external deps. Fraction of the dependency tree compared to npm. |
-| Deployment simplicity | Single binary with two native shared libraries (libopus, ONNX Runtime). Docker images stay small via multi-stage builds. Cross-compilation requires a C toolchain for the target platform due to CGo. |
+| Deployment simplicity | Single binary with three native libraries (libopus, ONNX Runtime, libdave). Docker images stay small via multi-stage builds. Cross-compilation requires a C toolchain for the target platform due to CGo. |
 
 **Escape hatch:** If profiling reveals that audio mixing of multiple simultaneous NPC outputs becomes a CPU bottleneck, a Rust native addon for the audio mixer can be integrated via CGO. This is unlikely to be needed but available.
 
@@ -29,7 +29,7 @@ Primary library choices with fallbacks. Every external service sits behind a Go 
 |---|---|---|---|
 | LLM (multi-provider) | `mozilla-ai/any-llm-go` | `openai/openai-go`, `anthropics/anthropic-sdk-go` directly | Yes |
 | MCP | `modelcontextprotocol/go-sdk` (official, v1.0.0) | `mark3labs/mcp-go` (8k+ stars, HTTP transport) | Yes |
-| Discord | `bwmarrin/discordgo` | — | Yes |
+| Discord | `disgoorg/disgo` | — | **No** — CGo, requires libdave |
 | WebSocket | `coder/websocket` | `gorilla/websocket` | Yes |
 | PostgreSQL | `jackc/pgx` v5 + `pgxpool` | `lib/pq` via database/sql | Yes |
 | pgvector | `pgvector/pgvector-go` + `pgxvec` | — | Yes |
@@ -42,16 +42,17 @@ Primary library choices with fallbacks. Every external service sits behind a Go 
 
 ### CGo and Native Dependencies
 
-Most of the stack is pure Go, but two components require CGo and system-level native libraries:
+Most of the stack is pure Go, but three components require CGo and system-level native libraries:
 
 | Native Library | Required By | System Package | Notes |
 |---|---|---|---|
 | **libopus** | `hraban/opus` (Opus encode/decode) | `libopus-dev` (Debian/Ubuntu), `opus` (Arch/macOS Homebrew) | Essential for Discord voice. No viable pure-Go Opus encoder exists (`pion/opus` is decode-only). |
 | **ONNX Runtime** | `streamer45/silero-vad-go` via `yalue/onnxruntime_go` | Shared library (`.so`/`.dylib`/`.dll`) from [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases) | Required for Silero VAD inference. Must ship alongside the binary or install system-wide. Available for Linux/macOS/Windows on x86_64 and ARM64. |
+| **libdave** | `disgoorg/godave/golibdave` | Shared library (`.so`/`.dylib`) via `make dave-libs` or [discord/libdave releases](https://github.com/discord/libdave/releases) | Required for Discord DAVE (Audio/Video E2EE). Prebuilt releases contain shared libraries only — no static `.a`. |
 
-**Build implications:** `CGO_ENABLED=1` is required. Cross-compilation needs a C toolchain for the target platform. Docker builds should use a multi-stage Dockerfile with the native libraries installed in the build stage and the shared libraries copied to the runtime image.
+**Build implications:** `CGO_ENABLED=1` is required. Cross-compilation needs a C toolchain for the target platform. Docker builds should use a multi-stage Dockerfile with the native libraries installed in the build stage and the shared libraries copied to the runtime image. Because libdave is only available as a shared library, the final binary is dynamically linked (the Docker image uses `distroless/cc` instead of `distroless/static`).
 
-**Why accept CGo:** Opus encoding is non-negotiable for Discord voice — there is no pure-Go alternative. Silero VAD is the only viable local VAD with language-agnostic, sub-millisecond inference. The CGo cost is limited to two well-isolated components (audio codec and voice detection) while the rest of the stack remains pure Go.
+**Why accept CGo:** Opus encoding is non-negotiable for Discord voice — there is no pure-Go alternative. Silero VAD is the only viable local VAD with language-agnostic, sub-millisecond inference. libdave is required for Discord's DAVE voice encryption protocol. The CGo cost is limited to three well-isolated components (audio codec, voice detection, and voice encryption) while the rest of the stack remains pure Go.
 
 ## Default Provider Stack
 
@@ -63,7 +64,7 @@ Most of the stack is pure Go, but two components require CGo and system-level na
 | TTS | ElevenLabs Flash v2.5 | Cartesia Sonic | Coqui XTTS (local) |
 | S2S | Gemini Live (`gemini-live-2.5-flash-native-audio`) | OpenAI Realtime (`gpt-realtime-mini`) | — |
 | Embeddings | OpenAI text-embedding-3-small | Voyage AI | nomic-embed-text (local) |
-| Audio Platform | Discord (discordgo) | — | WebRTC (custom, Pion) |
+| Audio Platform | Discord (disgo) | — | WebRTC (custom, Pion) |
 
 Gemini Live is the recommended S2S default: 128k context window (vs OpenAI's 32k), 24-hour session resumption, lower cost (~$3/$12 per 1M audio tokens vs $10/$20 for OpenAI mini), and a free tier for development.
 

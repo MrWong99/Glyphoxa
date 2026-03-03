@@ -18,7 +18,7 @@ Glyphoxa can be deployed in three ways:
 | **Binary from release** | Custom orchestration, systemd, bare-metal | Host-native (CUDA, Metal) | Medium |
 | **Build from source** | Development, customisation, non-Linux platforms | Host-native | High |
 
-All methods produce a single statically-linked binary with whisper.cpp baked in. The binary requires a PostgreSQL database with the pgvector extension and a YAML configuration file.
+All methods produce a binary with whisper.cpp statically linked and libdave dynamically linked. The binary requires a PostgreSQL database with the pgvector extension and a YAML configuration file.
 
 ---
 
@@ -73,6 +73,7 @@ For complete setup details -- GPU acceleration, model selection, endpoints, and 
 - **C/C++ toolchain**: `gcc`, `g++`, `cmake` (for whisper.cpp)
 - **System libraries**: `libopus-dev` (Debian/Ubuntu), `opus` (Arch/macOS)
 - **ONNX Runtime**: required for the Silero VAD provider
+- **libdave**: `make dave-libs` (for Discord DAVE E2EE voice encryption)
 
 Install build dependencies:
 
@@ -93,16 +94,21 @@ brew install cmake opus pkg-config
 # 1. Build whisper.cpp static library
 make whisper-libs
 
-# 2. Set environment for CGO linking
+# 2. Install libdave shared library
+make dave-libs
+
+# 3. Set environment for CGO linking
 export C_INCLUDE_PATH=/tmp/whisper-install/include
 export LIBRARY_PATH=/tmp/whisper-install/lib
+export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
 export CGO_ENABLED=1
 
-# 3. Build Glyphoxa
+# 4. Build Glyphoxa
 make build
 ```
 
-The binary is output to `./bin/glyphoxa`. It is statically linked and has no runtime library dependencies.
+The binary is output to `./bin/glyphoxa`. It requires `libdave.so` at runtime (installed via `make dave-libs`).
 
 ### Run the binary
 
@@ -141,7 +147,7 @@ The `main` branch builds a separate image via the multi-stage `Dockerfile` (used
 | `linux/amd64` | Yes | Yes |
 | `linux/arm64` | Yes | Yes |
 
-Both architectures cross-compile whisper.cpp and libopus as static libraries during the CI build. The release Docker image uses `gcr.io/distroless/static-debian12:nonroot` as its base -- no shell, no package manager, minimal attack surface.
+Both architectures cross-compile whisper.cpp and libopus as static libraries during the CI build. The release Docker image uses `gcr.io/distroless/cc-debian12:nonroot` as its base (includes glibc/libstdc++ required by libdave) -- no shell, no package manager, minimal attack surface.
 
 ---
 

@@ -108,7 +108,7 @@ Discord limits a single bot to one outbound audio stream per guild. The `AudioMi
 | `OnBargeIn(handler func(speakerID UserID))` | Registers a callback for when a player speaks during NPC output. The mixer truncates playback and invokes the handler so the orchestrator can route the player's speech. |
 | `SetGap(duration time.Duration)` | Configures the silence gap between consecutive NPC segments (default 300ms ± 50ms jitter). |
 
-**Go library:** `bwmarrin/discordgo` (v0.29.0, 5.6k stars) — full voice support with Opus send/receive and per-user audio streams. Build a custom audio pipeline on top of discordgo's voice connection primitives (`dgvoice` is a proof-of-concept reference only). **Future targets:** custom WebRTC server via `pion/webrtc`, Mumble, browser-based sessions.
+**Go library:** `disgoorg/disgo` (v0.19.2+) — full voice support with Opus send/receive, per-user audio streams, and DAVE (Discord Audio/Video E2EE) via `disgoorg/godave`. **Future targets:** custom WebRTC server via `pion/webrtc`, Mumble, browser-based sessions.
 
 ## VoiceEngine Interface
 

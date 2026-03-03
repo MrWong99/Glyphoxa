@@ -77,7 +77,7 @@ Build one concrete provider per interface to prove the pipeline works end-to-end
 - **LLM:** OpenAI GPT-4o-mini via `any-llm-go` (streaming with tool calling)
 - **TTS:** ElevenLabs Flash v2.5 (streaming WebSocket)
 - **VAD:** Silero via `silero-vad-go`
-- **Audio:** Discord via `discordgo`
+- **Audio:** Discord via `disgo`
 
 **End-to-end milestone:** Discord bot joins voice → captures audio → VAD → STT → LLM (single static persona) → TTS → plays back. Measure and log latency at every stage boundary.
 

@@ -1,10 +1,11 @@
-# Minimal Dockerfile for pre-built static binaries (used by release workflow).
+# Minimal Dockerfile for pre-built binaries (used by release workflow).
 # The full multi-stage Dockerfile is used for main-branch builds.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot
 
 ARG TARGETOS=linux
 ARG TARGETARCH
 
+COPY ${TARGETOS}/${TARGETARCH}/libdave.so /usr/lib/
 COPY ${TARGETOS}/${TARGETARCH}/glyphoxa /usr/local/bin/glyphoxa
 
 ENTRYPOINT ["glyphoxa"]
