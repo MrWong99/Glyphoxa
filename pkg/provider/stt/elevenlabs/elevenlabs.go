@@ -123,6 +123,7 @@ func (p *Provider) StartStream(ctx context.Context, cfg stt.StreamConfig) (stt.S
 		audio:      make(chan []byte, 256),
 		sampleRate: sr,
 		done:       make(chan struct{}),
+		writeDone:  make(chan struct{}),
 	}
 
 	sess.wg.Add(2)
@@ -229,6 +230,7 @@ type session struct {
 
 	sampleRate int
 	done       chan struct{}
+	writeDone  chan struct{} // closed when writeLoop exits
 	once       sync.Once
 	wg         sync.WaitGroup
 }
@@ -262,25 +264,31 @@ func (s *session) SetKeywords(_ []stt.KeywordBoost) error {
 	return fmt.Errorf("elevenlabs: %w", stt.ErrNotSupported)
 }
 
-// Close terminates the session cleanly. It signals the writeLoop to send a
-// final commit, waits for goroutines to finish (with a timeout), and closes
-// the WebSocket connection.
+// Close terminates the session cleanly. It signals writeLoop to drain
+// remaining audio and send a final commit, then closes the WebSocket so
+// readLoop's conn.Read unblocks and the goroutine exits promptly.
 func (s *session) Close() error {
 	s.once.Do(func() {
 		close(s.done)
-		// writeLoop will drain audio + send commit before exiting.
-		// readLoop will receive the committed transcript + exit on WebSocket close.
-		done := make(chan struct{})
-		go func() {
-			s.wg.Wait()
-			close(done)
-		}()
+
+		// Wait for writeLoop to drain remaining audio and send the final
+		// commit. This is normally fast (sub-millisecond for in-process work
+		// plus one network write), but we cap the wait to avoid hanging on a
+		// broken connection.
 		select {
-		case <-done:
+		case <-s.writeDone:
 		case <-time.After(closeTimeout):
-			slog.Warn("elevenlabs: close timed out waiting for goroutines")
+			slog.Warn("elevenlabs: timed out waiting for write loop commit")
 		}
+
+		// Close the WebSocket. The clean close handshake lets readLoop
+		// receive any pending committed_transcript before the peer
+		// acknowledges the close frame. Once the handshake completes (or
+		// the library's internal timeout fires), conn.Read returns an error
+		// and readLoop exits.
 		s.conn.Close(websocket.StatusNormalClosure, "session closed")
+
+		s.wg.Wait()
 	})
 	return nil
 }
@@ -290,6 +298,7 @@ func (s *session) Close() error {
 // and sends a commit message.
 func (s *session) writeLoop(ctx context.Context) {
 	defer s.wg.Done()
+	defer close(s.writeDone)
 	for {
 		select {
 		case chunk, ok := <-s.audio:
