@@ -5,39 +5,47 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 )
 
-// HandlerFunc is the signature for slash command handlers.
-type HandlerFunc func(s *discordgo.Session, i *discordgo.InteractionCreate)
+// CommandFunc is the signature for slash command handlers.
+type CommandFunc func(e *events.ApplicationCommandInteractionCreate)
 
-// AutocompleteFunc is the signature for autocomplete handlers.
-type AutocompleteFunc func(s *discordgo.Session, i *discordgo.InteractionCreate)
+// AutocompleteHandlerFunc is the signature for autocomplete handlers.
+type AutocompleteHandlerFunc func(e *events.AutocompleteInteractionCreate)
+
+// ComponentFunc is the signature for component interaction handlers (buttons, selects).
+type ComponentFunc func(e *events.ComponentInteractionCreate)
+
+// ModalFunc is the signature for modal submit handlers.
+type ModalFunc func(e *events.ModalSubmitInteractionCreate)
 
 // commandEntry stores a command definition along with its handler.
 type commandEntry struct {
-	command *discordgo.ApplicationCommand
-	handler HandlerFunc
+	command discord.SlashCommandCreate
+	handler CommandFunc
+	hasDef  bool // true if command definition was provided
 }
 
 // CommandRouter dispatches Discord interactions to registered handlers.
 type CommandRouter struct {
 	mu              sync.RWMutex
-	commands        map[string]commandEntry     // "command" or "command/subcommand" → entry
-	autocomplete    map[string]AutocompleteFunc // "command" or "command/subcommand" → handler
-	components      map[string]HandlerFunc      // custom_id → handler (for buttons)
-	componentPrefix map[string]HandlerFunc      // prefix → handler (for buttons with dynamic suffixes)
-	modals          map[string]HandlerFunc      // custom_id → handler (for modal submits)
+	commands        map[string]commandEntry            // "command" or "command/subcommand" → entry
+	autocomplete    map[string]AutocompleteHandlerFunc // "command" or "command/subcommand" → handler
+	components      map[string]ComponentFunc           // custom_id → handler
+	componentPrefix map[string]ComponentFunc           // prefix → handler (for dynamic suffixes)
+	modals          map[string]ModalFunc               // custom_id → handler
 }
 
 // NewCommandRouter creates an empty router.
 func NewCommandRouter() *CommandRouter {
 	return &CommandRouter{
 		commands:        make(map[string]commandEntry),
-		autocomplete:    make(map[string]AutocompleteFunc),
-		components:      make(map[string]HandlerFunc),
-		componentPrefix: make(map[string]HandlerFunc),
-		modals:          make(map[string]HandlerFunc),
+		autocomplete:    make(map[string]AutocompleteHandlerFunc),
+		components:      make(map[string]ComponentFunc),
+		componentPrefix: make(map[string]ComponentFunc),
+		modals:          make(map[string]ModalFunc),
 	}
 }
 
@@ -45,30 +53,30 @@ func NewCommandRouter() *CommandRouter {
 // "command" or "command/subcommand" (e.g., "npc/mute"). The cmd definition
 // is used when registering commands with Discord (only top-level commands are
 // registered; subcommands are nested inside).
-func (r *CommandRouter) RegisterCommand(key string, cmd *discordgo.ApplicationCommand, handler HandlerFunc) {
+func (r *CommandRouter) RegisterCommand(key string, cmd discord.SlashCommandCreate, handler CommandFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.commands[key] = commandEntry{command: cmd, handler: handler}
+	r.commands[key] = commandEntry{command: cmd, handler: handler, hasDef: true}
 }
 
 // RegisterHandler registers a handler for a slash command key without
 // providing a command definition. Use this for subcommand handlers when
 // the parent command is already registered.
-func (r *CommandRouter) RegisterHandler(key string, handler HandlerFunc) {
+func (r *CommandRouter) RegisterHandler(key string, handler CommandFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.commands[key] = commandEntry{handler: handler}
 }
 
 // RegisterAutocomplete registers an autocomplete handler.
-func (r *CommandRouter) RegisterAutocomplete(key string, handler AutocompleteFunc) {
+func (r *CommandRouter) RegisterAutocomplete(key string, handler AutocompleteHandlerFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.autocomplete[key] = handler
 }
 
 // RegisterComponent registers a handler for a message component interaction (buttons).
-func (r *CommandRouter) RegisterComponent(customID string, handler HandlerFunc) {
+func (r *CommandRouter) RegisterComponent(customID string, handler ComponentFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.components[customID] = handler
@@ -78,14 +86,14 @@ func (r *CommandRouter) RegisterComponent(customID string, handler HandlerFunc) 
 // whose custom_id starts with the given prefix. This is useful for buttons
 // with dynamic suffixes (e.g., "entity_remove_confirm:" matches
 // "entity_remove_confirm:some-id").
-func (r *CommandRouter) RegisterComponentPrefix(prefix string, handler HandlerFunc) {
+func (r *CommandRouter) RegisterComponentPrefix(prefix string, handler ComponentFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.componentPrefix[prefix] = handler
 }
 
 // RegisterModal registers a handler for a modal submit interaction.
-func (r *CommandRouter) RegisterModal(customID string, handler HandlerFunc) {
+func (r *CommandRouter) RegisterModal(customID string, handler ModalFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.modals[customID] = handler
@@ -93,14 +101,14 @@ func (r *CommandRouter) RegisterModal(customID string, handler HandlerFunc) {
 
 // ApplicationCommands returns the deduplicated list of top-level command
 // definitions for registration with the Discord API.
-func (r *CommandRouter) ApplicationCommands() []*discordgo.ApplicationCommand {
+func (r *CommandRouter) ApplicationCommands() []discord.ApplicationCommandCreate {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	seen := make(map[string]bool)
-	var cmds []*discordgo.ApplicationCommand
+	var cmds []discord.ApplicationCommandCreate
 	for _, entry := range r.commands {
-		if entry.command != nil && !seen[entry.command.Name] {
+		if entry.hasDef && !seen[entry.command.Name] {
 			seen[entry.command.Name] = true
 			cmds = append(cmds, entry.command)
 		}
@@ -108,78 +116,51 @@ func (r *CommandRouter) ApplicationCommands() []*discordgo.ApplicationCommand {
 	return cmds
 }
 
-// Handle dispatches an interaction to the appropriate handler.
-func (r *CommandRouter) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	switch i.Type {
-	case discordgo.InteractionApplicationCommand:
-		r.handleApplicationCommand(s, i)
-
-	case discordgo.InteractionApplicationCommandAutocomplete:
-		r.handleAutocomplete(s, i)
-
-	case discordgo.InteractionMessageComponent:
-		r.handleComponent(s, i)
-
-	case discordgo.InteractionModalSubmit:
-		r.handleModal(s, i)
-
-	default:
-		slog.Warn("discord: unhandled interaction type", "type", i.Type)
+// HandleCommand dispatches an application command interaction.
+func (r *CommandRouter) HandleCommand(e *events.ApplicationCommandInteractionCreate) {
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		slog.Warn("discord: non-slash command interaction", "type", e.Data.Type())
+		return
 	}
-}
-
-// interactionKey builds a router key from an ApplicationCommand interaction.
-func interactionKey(data discordgo.ApplicationCommandInteractionData) string {
-	key := data.Name
-	if len(data.Options) > 0 && data.Options[0].Type == discordgo.ApplicationCommandOptionSubCommand {
-		key += "/" + data.Options[0].Name
-	}
-	return key
-}
-
-func (r *CommandRouter) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	data := i.ApplicationCommandData()
-	key := interactionKey(data)
+	key := commandKey(data)
 
 	r.mu.RLock()
-	entry, ok := r.commands[key]
+	entry, found := r.commands[key]
 	r.mu.RUnlock()
 
-	if !ok {
+	if !found {
 		slog.Warn("discord: unknown command", "key", key)
-		RespondEphemeral(s, i, "Unknown command.")
+		RespondEphemeral(e, "Unknown command.")
 		return
 	}
-	entry.handler(s, i)
+	entry.handler(e)
 }
 
-func (r *CommandRouter) handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	data := i.ApplicationCommandData()
-	key := interactionKey(data)
+// HandleAutocomplete dispatches an autocomplete interaction.
+func (r *CommandRouter) HandleAutocomplete(e *events.AutocompleteInteractionCreate) {
+	data := e.Data
+	key := autocompleteKey(data)
 
 	r.mu.RLock()
-	handler, ok := r.autocomplete[key]
+	handler, found := r.autocomplete[key]
 	r.mu.RUnlock()
 
-	if !ok {
+	if !found {
 		slog.Debug("discord: no autocomplete handler", "key", key)
-		// Respond with empty choices.
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-			Data: &discordgo.InteractionResponseData{},
-		})
+		_ = e.AutocompleteResult(nil)
 		return
 	}
-	handler(s, i)
+	handler(e)
 }
 
-func (r *CommandRouter) handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	customID := i.MessageComponentData().CustomID
+// HandleComponent dispatches a component interaction.
+func (r *CommandRouter) HandleComponent(e *events.ComponentInteractionCreate) {
+	customID := e.Data.CustomID()
 
 	r.mu.RLock()
 	handler, ok := r.components[customID]
 	if !ok {
-		// Fall back to prefix matching.
 		for prefix, h := range r.componentPrefix {
 			if strings.HasPrefix(customID, prefix) {
 				handler = h
@@ -192,14 +173,15 @@ func (r *CommandRouter) handleComponent(s *discordgo.Session, i *discordgo.Inter
 
 	if !ok {
 		slog.Warn("discord: unknown component", "custom_id", customID)
-		RespondEphemeral(s, i, "Unknown component.")
+		RespondEphemeral(e, "Unknown component.")
 		return
 	}
-	handler(s, i)
+	handler(e)
 }
 
-func (r *CommandRouter) handleModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	customID := i.ModalSubmitData().CustomID
+// HandleModal dispatches a modal submit interaction.
+func (r *CommandRouter) HandleModal(e *events.ModalSubmitInteractionCreate) {
+	customID := e.Data.CustomID
 
 	r.mu.RLock()
 	handler, ok := r.modals[customID]
@@ -207,8 +189,26 @@ func (r *CommandRouter) handleModal(s *discordgo.Session, i *discordgo.Interacti
 
 	if !ok {
 		slog.Warn("discord: unknown modal", "custom_id", customID)
-		RespondEphemeral(s, i, "Unknown modal.")
+		RespondEphemeral(e, "Unknown modal.")
 		return
 	}
-	handler(s, i)
+	handler(e)
+}
+
+// commandKey builds a router key from a slash command interaction data.
+func commandKey(data discord.SlashCommandInteractionData) string {
+	key := data.CommandName()
+	if data.SubCommandName != nil {
+		key += "/" + *data.SubCommandName
+	}
+	return key
+}
+
+// autocompleteKey builds a router key from an autocomplete interaction data.
+func autocompleteKey(data discord.AutocompleteInteractionData) string {
+	key := data.CommandName
+	if data.SubCommandName != nil {
+		key += "/" + *data.SubCommandName
+	}
+	return key
 }

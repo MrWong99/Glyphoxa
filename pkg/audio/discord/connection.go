@@ -1,40 +1,54 @@
 package discord
 
 import (
-	"fmt"
+	"context"
+	"io"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/audio"
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
 )
 
-// Compile-time interface assertion.
-var _ audio.Connection = (*Connection)(nil)
+// Compile-time interface assertions.
+var (
+	_ audio.Connection        = (*Connection)(nil)
+	_ voice.OpusFrameProvider = (*Connection)(nil)
+	_ voice.OpusFrameReceiver = (*Connection)(nil)
+)
 
 const (
 	inputChannelBuffer  = 64
 	outputChannelBuffer = 64
 )
 
-// Connection wraps a discordgo.VoiceConnection and adapts it to the
-// [audio.Connection] interface. It demuxes incoming Opus packets by SSRC
-// into per-participant PCM input streams, and encodes outgoing PCM frames
-// to Opus for transmission.
+// Connection wraps a disgo voice.Conn and adapts it to the [audio.Connection]
+// interface. It implements [voice.OpusFrameReceiver] to demux incoming Opus
+// packets by user ID into per-participant PCM input streams, and
+// [voice.OpusFrameProvider] to encode outgoing PCM frames to Opus for
+// transmission.
 //
 // Connection is safe for concurrent use.
 type Connection struct {
-	vc      *discordgo.VoiceConnection
-	session *discordgo.Session
-	guildID string
+	conn    voice.Conn
+	guildID snowflake.ID
 
 	inputsMu sync.RWMutex
-	inputs   map[string]chan audio.AudioFrame // keyed by Discord user ID (falls back to SSRC string)
-	ssrcUser map[uint32]string                // SSRC -> Discord user ID mapping
+	inputs   map[snowflake.ID]chan audio.AudioFrame
 
 	output chan audio.AudioFrame
+
+	// decoders maintains a per-user Opus decoder so that decoder state is
+	// preserved across consecutive frames for the same user.
+	decodersMu sync.Mutex
+	decoders   map[snowflake.ID]*opusDecoder
+
+	// encoder is used by ProvideOpusFrame to encode outgoing PCM to Opus.
+	encoder *opusEncoder
+	conv    audio.FormatConverter
+	buf     []byte
 
 	changeCb func(audio.Event)
 	changeMu sync.Mutex
@@ -42,51 +56,189 @@ type Connection struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	removeHandlers []func() // removes registered event handlers (VoiceStateUpdate, VoiceSpeakingUpdate)
-
-	// disconnectVC is called during Disconnect to tear down the voice connection.
-	// Defaults to vc.Disconnect; overridden in tests.
-	disconnectVC func() error
+	// disconnectConn is called during Disconnect to tear down the voice
+	// connection. Defaults to conn.Close; overridden in tests.
+	disconnectConn func()
 }
 
 // newConnection initialises a Connection for an already-joined voice channel.
-// It starts background goroutines for receiving and sending audio.
-func newConnection(vc *discordgo.VoiceConnection, session *discordgo.Session, guildID string) (*Connection, error) {
+// It registers itself as the OpusFrameProvider and OpusFrameReceiver on the
+// disgo voice.Conn.
+func newConnection(conn voice.Conn, guildID snowflake.ID) *Connection {
 	c := &Connection{
-		vc:           vc,
-		session:      session,
-		guildID:      guildID,
-		inputs:       make(map[string]chan audio.AudioFrame),
-		ssrcUser:     make(map[uint32]string),
-		output:       make(chan audio.AudioFrame, outputChannelBuffer),
-		done:         make(chan struct{}),
-		disconnectVC: vc.Disconnect,
+		conn:    conn,
+		guildID: guildID,
+		inputs:  make(map[snowflake.ID]chan audio.AudioFrame),
+		output:  make(chan audio.AudioFrame, outputChannelBuffer),
+		decoders: make(map[snowflake.ID]*opusDecoder),
+		done:    make(chan struct{}),
+		conv:    audio.FormatConverter{Target: audio.Format{SampleRate: opusSampleRate, Channels: opusChannels}},
+		disconnectConn: func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn.Close(ctx)
+		},
 	}
 
-	// Register a VoiceStateUpdate handler to detect participant join/leave.
-	c.removeHandlers = append(c.removeHandlers, session.AddHandler(c.handleVoiceStateUpdate))
+	// Create the encoder for sending audio.
+	enc, err := newOpusEncoder()
+	if err != nil {
+		slog.Error("discord: failed to create opus encoder", "error", err)
+	}
+	c.encoder = enc
 
-	// Register a VoiceSpeakingUpdate handler to map SSRC → Discord user ID.
-	c.removeHandlers = append(c.removeHandlers, session.AddHandler(c.handleSpeakingUpdate))
+	// Wire ourselves up as both the frame provider and receiver.
+	conn.SetOpusFrameProvider(c)
+	conn.SetOpusFrameReceiver(c)
 
-	// Start the receive loop (reads Opus from Discord, demuxes by SSRC, decodes to PCM).
-	go c.recvLoop()
-
-	// Start the send loop (reads PCM from output channel, encodes to Opus, sends to Discord).
-	go c.sendLoop()
-
-	return c, nil
+	return c
 }
 
+// ── voice.OpusFrameReceiver implementation ──────────────────────────────────
+
+// ReceiveOpusFrame receives an Opus packet from a specific user, decodes it
+// to PCM, and delivers the resulting [audio.AudioFrame] on the per-user input
+// channel. If this is the first frame from a user, a new channel is created and
+// an [audio.EventJoin] is emitted.
+func (c *Connection) ReceiveOpusFrame(userID snowflake.ID, packet *voice.Packet) error {
+	if packet == nil {
+		return nil
+	}
+
+	// Get or create decoder for this user.
+	c.decodersMu.Lock()
+	dec, exists := c.decoders[userID]
+	if !exists {
+		var err error
+		dec, err = newOpusDecoder()
+		if err != nil {
+			c.decodersMu.Unlock()
+			slog.Error("discord: failed to create opus decoder", "userID", userID, "error", err)
+			return nil
+		}
+		c.decoders[userID] = dec
+	}
+	c.decodersMu.Unlock()
+
+	// Ensure an input channel exists for this user.
+	c.inputsMu.Lock()
+	ch, chExists := c.inputs[userID]
+	if !chExists {
+		ch = make(chan audio.AudioFrame, inputChannelBuffer)
+		c.inputs[userID] = ch
+	}
+	c.inputsMu.Unlock()
+
+	if !chExists {
+		slog.Debug("discord: new participant", "userID", userID)
+		c.emitEvent(audio.Event{
+			Type:   audio.EventJoin,
+			UserID: userID.String(),
+		})
+	}
+
+	pcm, err := dec.decode(packet.Opus)
+	if err != nil {
+		slog.Warn("discord: opus decode error", "userID", userID, "error", err)
+		return nil
+	}
+
+	frame := audio.AudioFrame{
+		Data:       pcm,
+		SampleRate: opusSampleRate,
+		Channels:   opusChannels,
+		Timestamp:  time.Duration(packet.Timestamp) * time.Second / time.Duration(opusSampleRate),
+	}
+
+	select {
+	case ch <- frame:
+	default:
+		// Channel full — drop frame rather than block.
+	}
+
+	return nil
+}
+
+// CleanupUser removes the input channel and decoder for the given user and
+// emits an [audio.EventLeave].
+func (c *Connection) CleanupUser(userID snowflake.ID) {
+	c.inputsMu.Lock()
+	ch, exists := c.inputs[userID]
+	if exists {
+		close(ch)
+		delete(c.inputs, userID)
+	}
+	c.inputsMu.Unlock()
+
+	c.decodersMu.Lock()
+	delete(c.decoders, userID)
+	c.decodersMu.Unlock()
+
+	if exists {
+		slog.Debug("discord: participant left", "userID", userID)
+		c.emitEvent(audio.Event{
+			Type:   audio.EventLeave,
+			UserID: userID.String(),
+		})
+	}
+}
+
+// ── voice.OpusFrameProvider implementation ──────────────────────────────────
+
+// ProvideOpusFrame reads PCM frames from the output channel, converts them to
+// Discord's target format (48 kHz stereo), buffers until a full Opus frame is
+// available, and encodes it. Returns io.EOF when the connection is closed.
+func (c *Connection) ProvideOpusFrame() ([]byte, error) {
+	// opusFrameBytes is the exact PCM input size for one Opus frame:
+	// 960 samples/channel * 2 channels * 2 bytes/sample = 3840 bytes.
+	const opusFrameBytes = opusFrameSize * opusChannels * 2
+
+	for {
+		// If we have enough buffered data, encode and return immediately.
+		if len(c.buf) >= opusFrameBytes {
+			if c.encoder == nil {
+				c.buf = c.buf[opusFrameBytes:]
+				return nil, nil
+			}
+			opus, err := c.encoder.encode(c.buf[:opusFrameBytes])
+			c.buf = c.buf[opusFrameBytes:]
+			if err != nil {
+				slog.Warn("discord: opus encode error", "error", err)
+				continue
+			}
+			return opus, nil
+		}
+
+		// Read the next frame from the output channel.
+		select {
+		case <-c.done:
+			return nil, io.EOF
+		case frame, ok := <-c.output:
+			if !ok {
+				return nil, io.EOF
+			}
+
+			// Convert to Discord's target format (48 kHz stereo).
+			frame = c.conv.Convert(frame)
+			if len(frame.Data) == 0 {
+				continue
+			}
+
+			c.buf = append(c.buf, frame.Data...)
+		}
+	}
+}
+
+// ── audio.Connection interface ─────────────────────────────────────────────
+
 // InputStreams returns a snapshot of the current per-participant audio channels.
-// The map key is the Discord user ID when known, or the SSRC string for participants
-// whose identity has not yet been resolved via a VoiceSpeakingUpdate event.
+// The map key is the Discord user ID as a string.
 func (c *Connection) InputStreams() map[string]<-chan audio.AudioFrame {
 	c.inputsMu.RLock()
 	defer c.inputsMu.RUnlock()
 	snap := make(map[string]<-chan audio.AudioFrame, len(c.inputs))
 	for id, ch := range c.inputs {
-		snap[id] = ch
+		snap[id.String()] = ch
 	}
 	return snap
 }
@@ -108,18 +260,11 @@ func (c *Connection) OnParticipantChange(cb func(audio.Event)) {
 // Disconnect cleanly tears down the voice connection and stops all background
 // goroutines. It is safe to call more than once; subsequent calls return nil.
 func (c *Connection) Disconnect() error {
-	var err error
 	c.closeOnce.Do(func() {
 		close(c.done)
 
-		for _, remove := range c.removeHandlers {
-			if remove != nil {
-				remove()
-			}
-		}
-
-		if c.disconnectVC != nil {
-			err = c.disconnectVC()
+		if c.disconnectConn != nil {
+			c.disconnectConn()
 		}
 
 		// Close all input channels so downstream consumers see EOF.
@@ -130,263 +275,16 @@ func (c *Connection) Disconnect() error {
 		}
 		c.inputsMu.Unlock()
 	})
-	return err
+	return nil
 }
 
-// recvLoop reads Opus packets from the Discord voice connection, demuxes them
-// by SSRC, decodes Opus to PCM, and delivers AudioFrames to per-participant channels.
-func (c *Connection) recvLoop() {
-	// Each SSRC gets its own decoder to maintain state across frames.
-	decoders := make(map[uint32]*opusDecoder)
-	packetsReceived := 0
-	framesDecoded := 0
-	framesDropped := 0
-
-	slog.Debug("discord: recvLoop started")
-
-	for {
-		select {
-		case <-c.done:
-			slog.Debug("discord: recvLoop stopped",
-				"packetsReceived", packetsReceived,
-				"framesDecoded", framesDecoded,
-				"framesDropped", framesDropped,
-			)
-			return
-		case pkt, ok := <-c.vc.OpusRecv:
-			if !ok {
-				slog.Debug("discord: recvLoop OpusRecv closed",
-					"packetsReceived", packetsReceived,
-					"framesDecoded", framesDecoded,
-				)
-				return
-			}
-			if pkt == nil {
-				continue
-			}
-
-			packetsReceived++
-			ssrc := pkt.SSRC
-			ssrcStr := strconv.FormatUint(uint64(ssrc), 10)
-
-			// Lazily create a decoder for this SSRC.
-			dec, exists := decoders[ssrc]
-			if !exists {
-				slog.Debug("discord: recvLoop new SSRC", "ssrc", ssrcStr)
-				var err error
-				dec, err = newOpusDecoder()
-				if err != nil {
-					slog.Error("discord: failed to create opus decoder", "ssrc", ssrcStr, "error", err)
-					continue
-				}
-				decoders[ssrc] = dec
-			}
-
-			// Ensure an input channel exists for this participant.
-			// Use the Discord user ID if already known; fall back to SSRC string.
-			c.inputsMu.Lock()
-			userID := ssrcStr
-			if knownID, ok := c.ssrcUser[ssrc]; ok && knownID != ssrcStr {
-				userID = knownID
-			}
-			ch, chExists := c.inputs[userID]
-			if !chExists {
-				ch = make(chan audio.AudioFrame, inputChannelBuffer)
-				c.inputs[userID] = ch
-			}
-			c.inputsMu.Unlock()
-
-			if !chExists {
-				slog.Debug("discord: recvLoop new participant channel", "ssrc", ssrcStr, "userID", userID)
-				// Notify about a new participant.
-				c.emitEvent(audio.Event{
-					Type:   audio.EventJoin,
-					UserID: userID,
-				})
-			}
-
-			pcm, err := dec.decode(pkt.Opus)
-			if err != nil {
-				slog.Warn("discord: opus decode error", "ssrc", ssrcStr, "error", err)
-				continue
-			}
-
-			framesDecoded++
-			frame := audio.AudioFrame{
-				Data:       pcm,
-				SampleRate: opusSampleRate,
-				Channels:   opusChannels,
-				Timestamp:  time.Duration(pkt.Timestamp) * time.Second / time.Duration(opusSampleRate),
-			}
-
-			select {
-			case ch <- frame:
-			default:
-				framesDropped++
-				// Channel full — drop frame rather than block.
-			}
-
-			if packetsReceived%500 == 0 {
-				slog.Debug("discord: recvLoop progress",
-					"packetsReceived", packetsReceived,
-					"framesDecoded", framesDecoded,
-					"framesDropped", framesDropped,
-					"activeSSRCs", len(decoders),
-				)
-			}
-		}
-	}
+// Close implements voice.OpusFrameProvider and voice.OpusFrameReceiver.
+// It delegates to Disconnect.
+func (c *Connection) Close() {
+	_ = c.Disconnect()
 }
 
-// sendLoop reads PCM AudioFrames from the output channel, converts them to
-// Discord's target format (48 kHz stereo), extracts exact Opus frame-sized
-// chunks, encodes them to Opus, and sends the encoded data via the Discord
-// voice connection.
-func (c *Connection) sendLoop() {
-	enc, err := newOpusEncoder()
-	if err != nil {
-		slog.Error("discord: failed to create opus encoder", "error", err)
-		return
-	}
-
-	conv := audio.FormatConverter{Target: audio.Format{SampleRate: opusSampleRate, Channels: opusChannels}}
-
-	// Signal speaking when we start sending audio.
-	speakingSet := false
-
-	// opusFrameBytes is the exact PCM input size for one Opus frame:
-	// 960 samples/channel × 2 channels × 2 bytes/sample = 3840 bytes.
-	const opusFrameBytes = opusFrameSize * opusChannels * 2
-
-	var buf []byte
-
-	framesReceived := 0
-	opusPacketsSent := 0
-
-	for {
-		select {
-		case <-c.done:
-			slog.Debug("discord: sendLoop stopped", "framesReceived", framesReceived, "opusPacketsSent", opusPacketsSent)
-			if speakingSet {
-				c.setSpeaking(false)
-			}
-			return
-		case frame, ok := <-c.output:
-			if !ok {
-				slog.Debug("discord: sendLoop output channel closed", "framesReceived", framesReceived, "opusPacketsSent", opusPacketsSent)
-				return
-			}
-
-			framesReceived++
-			if framesReceived == 1 {
-				slog.Debug("discord: sendLoop received first frame",
-					"dataLen", len(frame.Data), "sampleRate", frame.SampleRate, "channels", frame.Channels,
-				)
-			}
-
-			if !speakingSet {
-				c.setSpeaking(true)
-				speakingSet = true
-			}
-
-			// Convert to Discord's target format (48 kHz stereo).
-			frame = conv.Convert(frame)
-			data := frame.Data
-
-			if len(data) == 0 {
-				slog.Debug("discord: sendLoop frame converted to empty data", "frameNum", framesReceived)
-				continue
-			}
-
-			buf = append(buf, data...)
-
-			// Encode and send complete Opus frames.
-			for len(buf) >= opusFrameBytes {
-				opus, eErr := enc.encode(buf[:opusFrameBytes])
-				if eErr != nil {
-					slog.Warn("discord: opus encode error", "error", eErr)
-					buf = buf[opusFrameBytes:]
-					continue
-				}
-				buf = buf[opusFrameBytes:]
-				opusPacketsSent++
-
-				select {
-				case c.vc.OpusSend <- opus:
-				case <-c.done:
-					return
-				}
-			}
-
-			if framesReceived%50 == 0 {
-				slog.Debug("discord: sendLoop progress", "framesReceived", framesReceived, "opusPacketsSent", opusPacketsSent, "bufLen", len(buf))
-			}
-		}
-	}
-}
-
-// handleVoiceStateUpdate processes Discord VoiceStateUpdate events to detect
-// participant joins and leaves for the voice channel this connection is on.
-func (c *Connection) handleVoiceStateUpdate(_ *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
-	if vsu.GuildID != c.guildID {
-		return
-	}
-
-	channelID := c.vc.ChannelID
-
-	// Participant left our channel.
-	if vsu.BeforeUpdate != nil && vsu.BeforeUpdate.ChannelID == channelID && vsu.ChannelID != channelID {
-		username := ""
-		if vsu.Member != nil && vsu.Member.User != nil {
-			username = vsu.Member.User.Username
-		}
-		c.emitEvent(audio.Event{
-			Type:     audio.EventLeave,
-			UserID:   vsu.UserID,
-			Username: username,
-		})
-		return
-	}
-
-	// Participant joined our channel.
-	if vsu.ChannelID == channelID && (vsu.BeforeUpdate == nil || vsu.BeforeUpdate.ChannelID != channelID) {
-		username := ""
-		if vsu.Member != nil && vsu.Member.User != nil {
-			username = vsu.Member.User.Username
-		}
-		c.emitEvent(audio.Event{
-			Type:     audio.EventJoin,
-			UserID:   vsu.UserID,
-			Username: username,
-		})
-	}
-}
-
-// handleSpeakingUpdate processes Discord VoiceSpeakingUpdate events to build
-// the SSRC → Discord user ID mapping. When a speaking event arrives, the SSRC
-// is resolved to the real user ID and any existing channel keyed by the SSRC
-// string is re-keyed to the user ID.
-func (c *Connection) handleSpeakingUpdate(_ *discordgo.Session, vs *discordgo.VoiceSpeakingUpdate) {
-	c.inputsMu.Lock()
-	defer c.inputsMu.Unlock()
-
-	c.ssrcUser[uint32(vs.SSRC)] = vs.UserID
-
-	// If an input channel was already created under the SSRC string key,
-	// re-key it to the Discord user ID now that we know who it belongs to.
-	ssrcStr := strconv.FormatUint(uint64(vs.SSRC), 10)
-	if ch, ok := c.inputs[ssrcStr]; ok && vs.UserID != ssrcStr {
-		c.inputs[vs.UserID] = ch
-		delete(c.inputs, ssrcStr)
-	}
-}
-
-// setSpeaking sends a speaking notification to Discord, logging any errors.
-func (c *Connection) setSpeaking(b bool) {
-	if err := c.vc.Speaking(b); err != nil {
-		slog.Warn("discord: speaking notification error", "speaking", b, "error", err)
-	}
-}
+// ── internal helpers ───────────────────────────────────────────────────────
 
 // emitEvent safely invokes the registered participant change callback.
 func (c *Connection) emitEvent(ev audio.Event) {
@@ -396,18 +294,4 @@ func (c *Connection) emitEvent(ev audio.Event) {
 	if cb != nil {
 		go cb(ev)
 	}
-}
-
-// SSRCToUserID returns the user ID associated with the given SSRC, if known.
-// This mapping is populated as VoiceSpeakingUpdate events arrive and provide
-// the correlation between SSRC and Discord user ID. Returns the SSRC formatted
-// as a decimal string if the user ID is not yet known.
-func (c *Connection) SSRCToUserID(ssrc uint32) string {
-	c.inputsMu.RLock()
-	defer c.inputsMu.RUnlock()
-	userID, ok := c.ssrcUser[ssrc]
-	if !ok {
-		return fmt.Sprintf("%d", ssrc)
-	}
-	return userID
 }

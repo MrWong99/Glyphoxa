@@ -1,12 +1,12 @@
 // Package discord provides an [audio.Platform] implementation backed by
-// Discord voice channels via the bwmarrin/discordgo library. It bridges
+// Discord voice channels via the disgoorg/disgo library. It bridges
 // Discord's Opus-based voice transport with Glyphoxa's PCM [audio.AudioFrame]
 // pipeline.
 //
-// The platform requires an active *discordgo.Session (owned by the bot layer)
-// and a guild ID. Each call to [Platform.Connect] joins the specified voice
-// channel and returns a [Connection] that demuxes per-participant audio input
-// and muxes NPC audio output.
+// The platform requires a [voice.Manager] (owned by the bot layer) and a guild
+// ID. Each call to [Platform.Connect] joins the specified voice channel and
+// returns a [Connection] that demuxes per-participant audio input and muxes NPC
+// audio output.
 package discord
 
 import (
@@ -14,26 +14,27 @@ import (
 	"fmt"
 
 	"github.com/MrWong99/glyphoxa/pkg/audio"
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // Compile-time interface assertion.
 var _ audio.Platform = (*Platform)(nil)
 
-// Platform implements [audio.Platform] using a discordgo voice connection.
-// It requires an active *discordgo.Session (owned by the bot layer).
+// Platform implements [audio.Platform] using a disgo voice connection.
+// It requires a [voice.Manager] (owned by the bot layer).
 //
 // Platform is safe for concurrent use.
 type Platform struct {
-	session *discordgo.Session
-	guildID string
+	voiceMgr voice.Manager
+	guildID  snowflake.ID
 }
 
-// New creates a new Discord Platform for the given session and guild.
-func New(session *discordgo.Session, guildID string) *Platform {
+// New creates a new Discord Platform for the given voice manager and guild.
+func New(voiceMgr voice.Manager, guildID snowflake.ID) *Platform {
 	return &Platform{
-		session: session,
-		guildID: guildID,
+		voiceMgr: voiceMgr,
+		guildID:  guildID,
 	}
 }
 
@@ -41,22 +42,17 @@ func New(session *discordgo.Session, guildID string) *Platform {
 // [audio.Connection]. The supplied ctx governs the connection-setup phase only;
 // once the Connection is returned it lives until [Connection.Disconnect] is called.
 func (p *Platform) Connect(ctx context.Context, channelID string) (audio.Connection, error) {
-	// Join the voice channel: mute=false (we send audio), deaf=false (we receive audio).
-	vc, err := p.session.ChannelVoiceJoin(p.guildID, channelID, false, false)
+	chID, err := snowflake.Parse(channelID)
 	if err != nil {
-		// ChannelVoiceJoin may return a non-nil VoiceConnection even on
-		// error (e.g. timeout waiting for Ready). Disconnect it so the
-		// auto-reconnect goroutines stop and the bot leaves the channel.
-		if vc != nil {
-			_ = vc.Disconnect()
-		}
-		return nil, fmt.Errorf("discord: join voice channel %q: %w", channelID, err)
+		return nil, fmt.Errorf("discord: parse channel ID: %w", err)
 	}
 
-	conn, err := newConnection(vc, p.session, p.guildID)
-	if err != nil {
-		_ = vc.Disconnect()
-		return nil, fmt.Errorf("discord: create connection: %w", err)
+	conn := p.voiceMgr.CreateConn(p.guildID)
+	if err := conn.Open(ctx, chID, false, false); err != nil {
+		p.voiceMgr.RemoveConn(p.guildID)
+		return nil, fmt.Errorf("discord: open voice connection: %w", err)
 	}
-	return conn, nil
+
+	c := newConnection(conn, p.guildID)
+	return c, nil
 }
