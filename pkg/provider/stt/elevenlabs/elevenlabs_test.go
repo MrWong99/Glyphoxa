@@ -1,15 +1,20 @@
 package elevenlabs
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
+	"github.com/coder/websocket"
 )
 
 // ---- Constructor tests ----
@@ -411,6 +416,217 @@ func TestSetKeywords_ReturnsErrNotSupported(t *testing.T) {
 	if !errors.Is(err, stt.ErrNotSupported) {
 		t.Fatalf("expected errors.Is(err, stt.ErrNotSupported), got %v", err)
 	}
+}
+
+// ---- WebSocket integration tests ----
+
+// wsURL converts an httptest server HTTP URL to a WebSocket URL.
+func wsURL(srv *httptest.Server) string {
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// startElevenLabsServer launches a test WebSocket server that mimics the
+// ElevenLabs Scribe v2 API. The handler receives the accepted conn and can
+// read/write messages. The server is cleaned up when the test finishes.
+func startElevenLabsServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		handler(conn)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestSession_CloseDoesNotTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("EmptySession", func(t *testing.T) {
+		t.Parallel()
+
+		srv := startElevenLabsServer(t, func(conn *websocket.Conn) {
+			// Send session_started, then read until the client closes.
+			ctx := context.Background()
+			_ = conn.Write(ctx, websocket.MessageText,
+				[]byte(`{"message_type":"session_started"}`))
+			for {
+				_, _, err := conn.Read(ctx)
+				if err != nil {
+					return
+				}
+			}
+		})
+
+		p, err := New("test-key", WithBaseURL(wsURL(srv)))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		sess, err := p.StartStream(context.Background(), stt.StreamConfig{
+			SampleRate: 16000,
+			Language:   "en",
+		})
+		if err != nil {
+			t.Fatalf("StartStream: %v", err)
+		}
+
+		start := time.Now()
+		if err := sess.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		elapsed := time.Since(start)
+
+		// Before the fix, Close() always waited the full 5s timeout.
+		// With the fix it should complete well under 1s.
+		if elapsed > 2*time.Second {
+			t.Errorf("Close took %v, expected < 2s (was the timeout hit?)", elapsed)
+		}
+	})
+
+	t.Run("WithAudioAndCommit", func(t *testing.T) {
+		t.Parallel()
+
+		srv := startElevenLabsServer(t, func(conn *websocket.Conn) {
+			ctx := context.Background()
+			_ = conn.Write(ctx, websocket.MessageText,
+				[]byte(`{"message_type":"session_started"}`))
+
+			// Read audio chunks until we see a commit, then respond with
+			// a committed_transcript and keep reading until the client
+			// closes the connection.
+			for {
+				_, msg, err := conn.Read(ctx)
+				if err != nil {
+					return
+				}
+				var chunk audioChunkMessage
+				if err := json.Unmarshal(msg, &chunk); err != nil {
+					continue
+				}
+				if chunk.Commit {
+					resp := `{"message_type":"committed_transcript","text":"hello","language_code":"en"}`
+					_ = conn.Write(ctx, websocket.MessageText, []byte(resp))
+					// Keep reading until the client closes.
+					for {
+						if _, _, err := conn.Read(ctx); err != nil {
+							return
+						}
+					}
+				}
+			}
+		})
+
+		p, err := New("test-key", WithBaseURL(wsURL(srv)))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		sess, err := p.StartStream(context.Background(), stt.StreamConfig{
+			SampleRate: 16000,
+			Language:   "en",
+		})
+		if err != nil {
+			t.Fatalf("StartStream: %v", err)
+		}
+
+		// Send a few audio chunks.
+		for range 3 {
+			if err := sess.SendAudio(make([]byte, 320)); err != nil {
+				t.Fatalf("SendAudio: %v", err)
+			}
+		}
+
+		start := time.Now()
+		if err := sess.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		elapsed := time.Since(start)
+
+		if elapsed > 2*time.Second {
+			t.Errorf("Close took %v, expected < 2s (was the timeout hit?)", elapsed)
+		}
+	})
+
+	t.Run("FinalTranscriptDelivered", func(t *testing.T) {
+		t.Parallel()
+
+		srv := startElevenLabsServer(t, func(conn *websocket.Conn) {
+			ctx := context.Background()
+			_ = conn.Write(ctx, websocket.MessageText,
+				[]byte(`{"message_type":"session_started"}`))
+
+			for {
+				_, msg, err := conn.Read(ctx)
+				if err != nil {
+					return
+				}
+				var chunk audioChunkMessage
+				if err := json.Unmarshal(msg, &chunk); err != nil {
+					continue
+				}
+				if chunk.Commit {
+					resp := `{"message_type":"committed_transcript","text":"final result","language_code":"en"}`
+					_ = conn.Write(ctx, websocket.MessageText, []byte(resp))
+					// Keep reading until the client closes.
+					for {
+						if _, _, err := conn.Read(ctx); err != nil {
+							return
+						}
+					}
+				}
+			}
+		})
+
+		p, err := New("test-key", WithBaseURL(wsURL(srv)))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		sess, err := p.StartStream(context.Background(), stt.StreamConfig{
+			SampleRate: 16000,
+			Language:   "en",
+		})
+		if err != nil {
+			t.Fatalf("StartStream: %v", err)
+		}
+
+		if err := sess.SendAudio(make([]byte, 320)); err != nil {
+			t.Fatalf("SendAudio: %v", err)
+		}
+
+		// Start collecting finals before Close.
+		var got stt.Transcript
+		collected := make(chan struct{})
+		go func() {
+			defer close(collected)
+			for t := range sess.Finals() {
+				got = t
+			}
+		}()
+
+		if err := sess.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		select {
+		case <-collected:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for finals channel to close")
+		}
+
+		if got.Text != "final result" {
+			t.Errorf("expected final transcript %q, got %q", "final result", got.Text)
+		}
+		if !got.IsFinal {
+			t.Error("expected IsFinal=true on committed transcript")
+		}
+	})
 }
 
 // ---- helpers ----

@@ -29,6 +29,11 @@ const (
 	defaultSampleRate = 16000
 
 	closeTimeout = 5 * time.Second
+	// commitGrace is how long Close waits for the server to respond with
+	// a committed_transcript after writeLoop sends the final commit. If
+	// readLoop receives the final earlier it exits on its own and this
+	// timeout is never reached.
+	commitGrace = 500 * time.Millisecond
 )
 
 // Option is a functional option for configuring the ElevenLabs Provider.
@@ -123,6 +128,7 @@ func (p *Provider) StartStream(ctx context.Context, cfg stt.StreamConfig) (stt.S
 		audio:      make(chan []byte, 256),
 		sampleRate: sr,
 		done:       make(chan struct{}),
+		writeDone:  make(chan struct{}),
 	}
 
 	sess.wg.Add(2)
@@ -229,6 +235,7 @@ type session struct {
 
 	sampleRate int
 	done       chan struct{}
+	writeDone  chan struct{} // closed when writeLoop exits
 	once       sync.Once
 	wg         sync.WaitGroup
 }
@@ -262,25 +269,46 @@ func (s *session) SetKeywords(_ []stt.KeywordBoost) error {
 	return fmt.Errorf("elevenlabs: %w", stt.ErrNotSupported)
 }
 
-// Close terminates the session cleanly. It signals the writeLoop to send a
-// final commit, waits for goroutines to finish (with a timeout), and closes
-// the WebSocket connection.
+// Close terminates the session cleanly. It signals writeLoop to drain
+// remaining audio and send a final commit, gives readLoop a brief grace
+// period to receive the server's committed_transcript, then closes the
+// WebSocket so any still-blocked conn.Read unblocks.
 func (s *session) Close() error {
 	s.once.Do(func() {
 		close(s.done)
-		// writeLoop will drain audio + send commit before exiting.
-		// readLoop will receive the committed transcript + exit on WebSocket close.
-		done := make(chan struct{})
+
+		// Wait for writeLoop to drain remaining audio and send the final
+		// commit. This is normally fast (sub-millisecond for in-process work
+		// plus one network write), but we cap the wait to avoid hanging on a
+		// broken connection.
+		select {
+		case <-s.writeDone:
+		case <-time.After(closeTimeout):
+			slog.Warn("elevenlabs: timed out waiting for write loop commit")
+		}
+
+		// Give readLoop time to receive the committed_transcript that the
+		// server sends in response to the commit. readLoop exits on its own
+		// after forwarding a final when s.done is closed, so this typically
+		// resolves well before the grace period expires. If the server never
+		// responds the grace period keeps Close from hanging.
+		readDone := make(chan struct{})
 		go func() {
 			s.wg.Wait()
-			close(done)
+			close(readDone)
 		}()
 		select {
-		case <-done:
-		case <-time.After(closeTimeout):
-			slog.Warn("elevenlabs: close timed out waiting for goroutines")
+		case <-readDone:
+		case <-time.After(commitGrace):
 		}
+
+		// Close the WebSocket. For the happy path (readLoop already exited
+		// after receiving the committed transcript) this is just cleanup.
+		// Otherwise it unblocks a stuck conn.Read.
 		s.conn.Close(websocket.StatusNormalClosure, "session closed")
+
+		// Ensure readLoop has fully exited before returning.
+		<-readDone
 	})
 	return nil
 }
@@ -290,6 +318,7 @@ func (s *session) Close() error {
 // and sends a commit message.
 func (s *session) writeLoop(ctx context.Context) {
 	defer s.wg.Done()
+	defer close(s.writeDone)
 	for {
 		select {
 		case chunk, ok := <-s.audio:
@@ -355,6 +384,21 @@ func (s *session) readLoop(ctx context.Context) {
 			select {
 			case s.finals <- t:
 			case <-s.done:
+				// During shutdown the committed transcript from a manual
+				// commit may still arrive. Try a non-blocking send so the
+				// result is not silently dropped when buffer space exists.
+				select {
+				case s.finals <- t:
+				default:
+				}
+			}
+			// During shutdown the committed transcript was the last
+			// expected response. Exit so Close() can finish promptly
+			// without waiting for the full grace period.
+			select {
+			case <-s.done:
+				return
+			default:
 			}
 		} else {
 			select {

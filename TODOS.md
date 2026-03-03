@@ -56,7 +56,7 @@ whether the original text actually sounds like an NPC name).
   than treating "no data" as "all low confidence").
 - Consider making LLM correction opt-in via config.
 
-### 12. ElevenLabs STT session close always times out (goroutine lifecycle bug)
+### ~~12. ElevenLabs STT session close always times out (goroutine lifecycle bug)~~ ✅ Fixed
 
 **`pkg/provider/stt/elevenlabs/elevenlabs.go:268-286`**
 
