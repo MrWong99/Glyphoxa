@@ -289,7 +289,10 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 	}
 
 	// Bidirectional traversal: follow both outgoing (source→target) and
-	// incoming (target→source) edges via a UNION inside the recursive step.
+	// incoming (target→source) edges in a single recursive branch.
+	// Using a single UNION ALL avoids PostgreSQL SQLSTATE 42P19: the parser
+	// reads A UNION ALL B UNION ALL C as (A UNION ALL B) UNION ALL C,
+	// placing B in the non-recursive term — which must not reference the CTE.
 	q := fmt.Sprintf(`
 		WITH RECURSIVE reachable AS (
 		    SELECT id,
@@ -300,25 +303,17 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 
 		    UNION ALL
 
-		    -- Outgoing edges: source_id = current → follow to target_id
 		    SELECT e.id,
 		           r.visited || e.id,
 		           r.depth + 1
 		    FROM   reachable r
-		    JOIN   relationships rel ON rel.source_id = r.id
-		    JOIN   entities      e   ON e.id = rel.target_id
-		    WHERE  r.depth < %s
-		      AND  NOT (e.id = ANY(r.visited))%s%s
-
-		    UNION ALL
-
-		    -- Incoming edges: target_id = current → follow to source_id
-		    SELECT e.id,
-		           r.visited || e.id,
-		           r.depth + 1
-		    FROM   reachable r
-		    JOIN   relationships rel ON rel.target_id = r.id
-		    JOIN   entities      e   ON e.id = rel.source_id
+		    JOIN   relationships rel
+		           ON rel.source_id = r.id OR rel.target_id = r.id
+		    JOIN   entities e
+		           ON e.id = CASE
+		                WHEN rel.source_id = r.id THEN rel.target_id
+		                ELSE rel.source_id
+		              END
 		    WHERE  r.depth < %s
 		      AND  NOT (e.id = ANY(r.visited))%s%s
 		)
@@ -327,8 +322,7 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 		FROM   reachable rc
 		JOIN   entities  e  ON e.id = rc.id
 		WHERE  rc.id != %s
-		ORDER  BY e.id`, startArg, depthArg, relTypeFilter, nodeTypeFilter,
-		depthArg, relTypeFilter, nodeTypeFilter, startArg)
+		ORDER  BY e.id`, startArg, depthArg, relTypeFilter, nodeTypeFilter, startArg)
 
 	if maxNodes > 0 {
 		args = append(args, maxNodes)
@@ -353,7 +347,9 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 // Returns an empty (non-nil) slice when no path exists within maxDepth.
 func (s *Store) FindPath(ctx context.Context, fromID, toID string, maxDepth int) ([]memory.Entity, error) {
 	// The CTE tracks each candidate path as a TEXT[] array.
-	// Bidirectional: follows both outgoing and incoming edges.
+	// Bidirectional: follows both outgoing and incoming edges in a single
+	// recursive branch to avoid PostgreSQL SQLSTATE 42P19 (recursive
+	// reference in non-recursive term caused by multi-UNION ALL parsing).
 	const q = `
 		WITH RECURSIVE path_search AS (
 		    SELECT id,
@@ -364,25 +360,17 @@ func (s *Store) FindPath(ctx context.Context, fromID, toID string, maxDepth int)
 
 		    UNION ALL
 
-		    -- Outgoing edges
 		    SELECT e.id,
 		           ps.path || e.id,
 		           ps.depth + 1
 		    FROM   path_search ps
-		    JOIN   relationships rel ON rel.source_id = ps.id
-		    JOIN   entities      e   ON e.id = rel.target_id
-		    WHERE  ps.depth < $3
-		      AND  NOT (e.id = ANY(ps.path))
-
-		    UNION ALL
-
-		    -- Incoming edges
-		    SELECT e.id,
-		           ps.path || e.id,
-		           ps.depth + 1
-		    FROM   path_search ps
-		    JOIN   relationships rel ON rel.target_id = ps.id
-		    JOIN   entities      e   ON e.id = rel.source_id
+		    JOIN   relationships rel
+		           ON rel.source_id = ps.id OR rel.target_id = ps.id
+		    JOIN   entities e
+		           ON e.id = CASE
+		                WHEN rel.source_id = ps.id THEN rel.target_id
+		                ELSE rel.source_id
+		              END
 		    WHERE  ps.depth < $3
 		      AND  NOT (e.id = ANY(ps.path))
 		)
