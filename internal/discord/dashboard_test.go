@@ -118,8 +118,8 @@ func TestDashboard_StartStop(t *testing.T) {
 	}
 
 	cfg := DashboardConfig{
-		Session:   nil,
-		ChannelID: "test-channel",
+		Rest:      nil,
+		ChannelID: 123,
 		Interval:  50 * time.Millisecond,
 		GetData:   func() SessionData { return data },
 	}
@@ -129,12 +129,12 @@ func TestDashboard_StartStop(t *testing.T) {
 	if d.interval != 50*time.Millisecond {
 		t.Errorf("interval = %v, want 50ms", d.interval)
 	}
-	if d.channelID != "test-channel" {
-		t.Errorf("channelID = %q, want %q", d.channelID, "test-channel")
+	if d.channelID != 123 {
+		t.Errorf("channelID = %v, want 123", d.channelID)
 	}
 
 	d2 := NewDashboard(DashboardConfig{
-		ChannelID: "ch",
+		ChannelID: 456,
 		GetData:   func() SessionData { return data },
 	})
 	if d2.interval != defaultInterval {
