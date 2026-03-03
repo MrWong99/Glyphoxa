@@ -11,6 +11,7 @@ import (
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/cache"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
@@ -70,6 +71,9 @@ func New(ctx context.Context, cfg Config) (*Bot, error) {
 
 	opts := []bot.ConfigOpt{
 		bot.WithDefaultGateway(),
+		bot.WithCacheConfigOpts(
+			cache.WithCaches(cache.FlagVoiceStates, cache.FlagGuilds, cache.FlagChannels, cache.FlagMembers),
+		),
 		bot.WithGatewayConfigOpts(
 			gateway.WithIntents(
 				gateway.IntentGuildMessages,
