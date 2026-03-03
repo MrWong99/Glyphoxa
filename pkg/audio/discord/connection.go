@@ -66,13 +66,13 @@ type Connection struct {
 // disgo voice.Conn.
 func newConnection(conn voice.Conn, guildID snowflake.ID) *Connection {
 	c := &Connection{
-		conn:    conn,
-		guildID: guildID,
-		inputs:  make(map[snowflake.ID]chan audio.AudioFrame),
-		output:  make(chan audio.AudioFrame, outputChannelBuffer),
+		conn:     conn,
+		guildID:  guildID,
+		inputs:   make(map[snowflake.ID]chan audio.AudioFrame),
+		output:   make(chan audio.AudioFrame, outputChannelBuffer),
 		decoders: make(map[snowflake.ID]*opusDecoder),
-		done:    make(chan struct{}),
-		conv:    audio.FormatConverter{Target: audio.Format{SampleRate: opusSampleRate, Channels: opusChannels}},
+		done:     make(chan struct{}),
+		conv:     audio.FormatConverter{Target: audio.Format{SampleRate: opusSampleRate, Channels: opusChannels}},
 		disconnectConn: func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

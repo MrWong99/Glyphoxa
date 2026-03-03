@@ -263,4 +263,3 @@ func (rc *RecapCommands) buildRecapEmbeds(fields []discord.EmbedField, summary s
 	}
 	return embeds
 }
-
