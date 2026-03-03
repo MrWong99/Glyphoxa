@@ -1,7 +1,7 @@
 # Glyphoxa Makefile
 # Requires: Go 1.26+, CGO_ENABLED=1
 
-.PHONY: build test lint vet fmt check clean whisper-libs install-lint
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs install-lint
 
 # Build
 build:
@@ -75,6 +75,27 @@ whisper-libs:
 	@echo "  export C_INCLUDE_PATH=$(WHISPER_DEST)/include"
 	@echo "  export LIBRARY_PATH=$(WHISPER_DEST)/lib"
 	@echo "  export CGO_ENABLED=1"
+
+# Install libdave shared library for DAVE (Discord Audio Video Encryption).
+# Required by github.com/disgoorg/godave/golibdave (CGO bindings).
+# The install script downloads a pre-built binary or builds from source.
+DAVE_VERSION := v1.1.0
+DAVE_SRC     := /tmp/godave-src
+
+dave-libs:
+	@if pkg-config --exists dave 2>/dev/null; then \
+		echo "libdave already installed (found via pkg-config)"; \
+	else \
+		echo "Installing libdave $(DAVE_VERSION)..."; \
+		rm -rf $(DAVE_SRC); \
+		git clone --depth 1 https://github.com/disgoorg/godave.git $(DAVE_SRC); \
+		cd $(DAVE_SRC) && bash scripts/libdave_install.sh $(DAVE_VERSION); \
+		echo ""; \
+		echo "libdave installed. Add to your shell profile:"; \
+		echo "  export PKG_CONFIG_PATH=\"$$HOME/.local/lib/pkgconfig:\$$PKG_CONFIG_PATH\""; \
+		echo "  export LD_LIBRARY_PATH=\"$$HOME/.local/lib:\$$LD_LIBRARY_PATH\""; \
+		echo "  export CGO_ENABLED=1"; \
+	fi
 
 # Clean build artifacts
 clean:
