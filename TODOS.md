@@ -26,7 +26,7 @@ Log evidence: `audio format mismatch: converting from="22050Hz mono" to="48000Hz
 the `cascade.New()` call in `buildEngine()`. Requires threading the TTS provider
 config entry through.
 
-### 11. LLM transcript correction is overly aggressive / runs unconstrained
+### ~~11. LLM transcript correction is overly aggressive / runs unconstrained~~ ✅ Fixed (1cdbcfb)
 
 **`internal/transcript/corrector.go:129-131`, `internal/transcript/llmcorrect/`**
 
