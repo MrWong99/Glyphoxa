@@ -11,7 +11,7 @@ import (
 
 const (
 	defaultLLMConfidenceThreshold = 0.5
-	defaultMinWordsForLLM         = 3
+	defaultMinWordsForLLM         = 8
 )
 
 // PipelineOption is a functional option for configuring a [CorrectionPipeline].
@@ -50,7 +50,7 @@ func WithLLMOnLowConfidence(threshold float64) PipelineOption {
 // WithMinWordsForLLM sets the minimum number of words a transcript must
 // contain before the LLM correction stage is attempted. Transcripts with
 // fewer words than n are passed through without LLM correction because there
-// is too little context for meaningful entity-name correction. Default: 3.
+// is too little context for meaningful entity-name correction. Default: 8.
 func WithMinWordsForLLM(n int) PipelineOption {
 	return func(p *CorrectionPipeline) {
 		p.minWordsForLLM = n

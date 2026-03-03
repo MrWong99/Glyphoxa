@@ -102,33 +102,13 @@ func TestVerifyCorrectedText(t *testing.T) {
 			wantCorrections: 1,
 		},
 		{
-			name:      "implausible correction rejected — unrelated words replaced with entity",
+			name:      "span split by shared token rejects correction",
 			original:  "Wir sind heute in einer Story die befindet sich",
 			corrected: "Wir sind heute in Hildegard die Kräuterfrau befindet sich",
 			corrections: []Correction{
 				{Original: "einer Story die", Corrected: "Hildegard die Kräuterfrau", Confidence: 0.8},
 			},
 			wantText:        "Wir sind heute in einer Story die befindet sich",
-			wantCorrections: 0,
-		},
-		{
-			name:      "plausible correction accepted — phonetically similar",
-			original:  "elder nacks arrived",
-			corrected: "Eldrinax arrived",
-			corrections: []Correction{
-				{Original: "elder nacks", Corrected: "Eldrinax", Confidence: 0.9},
-			},
-			wantText:        "Eldrinax arrived",
-			wantCorrections: 1,
-		},
-		{
-			name:      "short utterance entirely replaced is rejected",
-			original:  "Ist die des",
-			corrected: "Hildegard die Kräuterfrau",
-			corrections: []Correction{
-				{Original: "Ist die des", Corrected: "Hildegard die Kräuterfrau", Confidence: 0.7},
-			},
-			wantText:        "Ist die des",
 			wantCorrections: 0,
 		},
 	}
@@ -143,31 +123,6 @@ func TestVerifyCorrectedText(t *testing.T) {
 			}
 			if len(gotCorr) != tt.wantCorrections {
 				t.Errorf("corrections count = %d, want %d", len(gotCorr), tt.wantCorrections)
-			}
-		})
-	}
-}
-
-func TestPlausible(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		original  string
-		corrected string
-		want      bool
-	}{
-		{"exact match", "Eldrinax", "Eldrinax", true},
-		{"close misspelling", "elder nacks", "Eldrinax", true},
-		{"similar single word", "Wispers", "Whispers", true},
-		{"unrelated words", "einer Story die", "Hildegard die Kräuterfrau", false},
-		{"short unrelated", "Ist die des", "Hildegard die Kräuterfrau", false},
-		{"pronoun replaced", "ich über die", "Hildegard die Kräuterfrau", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := plausible(tt.original, tt.corrected); got != tt.want {
-				t.Errorf("plausible(%q, %q) = %v, want %v", tt.original, tt.corrected, got, tt.want)
 			}
 		})
 	}

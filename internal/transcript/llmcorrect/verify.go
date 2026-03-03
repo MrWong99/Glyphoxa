@@ -1,57 +1,6 @@
 package llmcorrect
 
-import (
-	"strings"
-
-	"github.com/antzucaro/matchr"
-)
-
-// plausibilityThreshold is the minimum Jaro-Winkler score required for a
-// correction span to be accepted. Set at 0.70 to cleanly separate legitimate
-// phonetic corrections (typically ≥0.84) from hallucinated replacements where
-// the LLM substitutes unrelated words with entity names (typically ≤0.65).
-const plausibilityThreshold = 0.70
-
-// plausible returns true when the original span bears sufficient phonetic
-// resemblance to the corrected span to be a plausible entity-name correction.
-// This rejects hallucinated corrections where the LLM replaced unrelated
-// words with entity names.
-func plausible(original, corrected string) bool {
-	origLower := strings.ToLower(original)
-	corrLower := strings.ToLower(corrected)
-
-	// Strategy 1: full-string comparison.
-	best := matchr.JaroWinkler(origLower, corrLower, false)
-
-	// Strategy 2: space-stripped comparison (catches multi-word → single-word).
-	origConcat := strings.ReplaceAll(origLower, " ", "")
-	corrConcat := strings.ReplaceAll(corrLower, " ", "")
-	if s := matchr.JaroWinkler(origConcat, corrConcat, false); s > best {
-		best = s
-	}
-
-	// Strategy 3: best pairwise token comparison. Skip very short tokens
-	// (≤3 chars) because articles, pronouns, and prepositions like "die",
-	// "der", "the", "ich" produce false-positive matches across unrelated
-	// spans.
-	origTokens := strings.Fields(origLower)
-	corrTokens := strings.Fields(corrLower)
-	for _, ot := range origTokens {
-		if len(ot) <= 3 {
-			continue
-		}
-		for _, ct := range corrTokens {
-			if len(ct) <= 3 {
-				continue
-			}
-			if s := matchr.JaroWinkler(ot, ct, false); s > best {
-				best = s
-			}
-		}
-	}
-
-	return best >= plausibilityThreshold
-}
+import "strings"
 
 // indexPair maps a token index in the original sequence to the corresponding
 // index in the corrected sequence.
@@ -179,7 +128,7 @@ func verifyCorrectedText(original, corrected string, corrections []Correction) (
 				normalizeForLookup(strings.Join(span.origTokens, " ")),
 				normalizeForLookup(strings.Join(span.corrTokens, " ")),
 			}
-			if c, ok := lookup[key]; ok && plausible(strings.Join(span.origTokens, " "), strings.Join(span.corrTokens, " ")) {
+			if c, ok := lookup[key]; ok {
 				result = append(result, span.corrTokens...)
 				verified = append(verified, c)
 			} else {
@@ -197,7 +146,7 @@ func verifyCorrectedText(original, corrected string, corrections []Correction) (
 			normalizeForLookup(strings.Join(span.origTokens, " ")),
 			normalizeForLookup(strings.Join(span.corrTokens, " ")),
 		}
-		if c, ok := lookup[key]; ok && plausible(strings.Join(span.origTokens, " "), strings.Join(span.corrTokens, " ")) {
+		if c, ok := lookup[key]; ok {
 			result = append(result, span.corrTokens...)
 			verified = append(verified, c)
 		} else {
