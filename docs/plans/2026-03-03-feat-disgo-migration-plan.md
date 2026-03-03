@@ -1,7 +1,7 @@
 ---
 title: "feat: Migrate Discord integration from discordgo to disgo"
 type: feat
-status: active
+status: completed
 date: 2026-03-03
 ---
 
@@ -146,13 +146,13 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 **Goal:** Get the project compiling with disgo as a dependency alongside discordgo (temporarily).
 
 **Tasks:**
-- [ ] Add `github.com/disgoorg/disgo v0.19.2` to `go.mod`
-- [ ] Add `github.com/disgoorg/godave` to `go.mod`
-- [ ] Add `github.com/disgoorg/snowflake/v2` to `go.mod`
-- [ ] Document libdave installation in CLAUDE.md prerequisites (similar to existing whisper.cpp/ONNX docs)
-- [ ] Add `make dave-libs` target to Makefile for downloading/building libdave shared library
-- [ ] Verify CGO compilation succeeds with godave on the target platform
-- [ ] Run `make check` — existing tests must still pass
+- [x] Add `github.com/disgoorg/disgo v0.19.2` to `go.mod`
+- [x] Add `github.com/disgoorg/godave` to `go.mod`
+- [x] Add `github.com/disgoorg/snowflake/v2` to `go.mod`
+- [x] Document libdave installation in CLAUDE.md prerequisites (similar to existing whisper.cpp/ONNX docs)
+- [x] Add `make dave-libs` target to Makefile for downloading/building libdave shared library
+- [x] Verify CGO compilation succeeds with godave on the target platform
+- [x] Run `make check` — existing tests must still pass
 
 **Files:**
 - `go.mod` — add dependencies
@@ -169,7 +169,7 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 **Tasks:**
 
-- [ ] **`pkg/audio/discord/platform.go`** — Replace `*discordgo.Session` with `*bot.Client` and `voice.Manager`
+- [x] **`pkg/audio/discord/platform.go`** — Replace `*discordgo.Session` with `*bot.Client` and `voice.Manager`
 
   ```go
   type Platform struct {
@@ -189,7 +189,7 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
   }
   ```
 
-- [ ] **`pkg/audio/discord/connection.go`** — Complete rewrite
+- [x] **`pkg/audio/discord/connection.go`** — Complete rewrite
 
   Replace `*discordgo.VoiceConnection` with `voice.Conn`. Key changes:
 
@@ -244,16 +244,16 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
   7. **Disconnect cleanup:** `conn.Close(ctx)` + `voiceMgr.RemoveConn(guildID)`. Preserve `sync.Once` pattern. Deregister event listeners.
 
-- [ ] **`pkg/audio/discord/opus.go`** — Keep `layeh.com/gopus` encoder/decoder helpers. Update constants only if needed (Discord Opus format is unchanged: 48kHz, stereo, 20ms, 960 samples). Delete `int16sToBytes`/`bytesToInt16s` if no longer needed (depends on decoder output format).
+- [x] **`pkg/audio/discord/opus.go`** — Keep `layeh.com/gopus` encoder/decoder helpers. Update constants only if needed (Discord Opus format is unchanged: 48kHz, stereo, 20ms, 960 samples). Delete `int16sToBytes`/`bytesToInt16s` if no longer needed (depends on decoder output format).
 
-- [ ] **`pkg/audio/discord/platform_test.go`** — Rewrite tests for the new interface model. Cannot directly construct `voice.Conn` with fake channels; instead, test through the `OpusFrameProvider`/`OpusFrameReceiver` implementations directly. Test:
+- [x] **`pkg/audio/discord/platform_test.go`** — Rewrite tests for the new interface model. Cannot directly construct `voice.Conn` with fake channels; instead, test through the `OpusFrameProvider`/`OpusFrameReceiver` implementations directly. Test:
   - `opusSender.ProvideOpusFrame()` returns silence on empty buffer, returns frame when available, returns `io.EOF` on close
   - `opusReceiver.ReceiveOpusFrame()` creates per-user channels, decodes Opus, emits join events
   - `opusReceiver.CleanupUser()` closes channels, emits leave events
   - `Connection.Disconnect()` is safe to call multiple times (`sync.Once`)
   - Race detector passes with concurrent send/receive/disconnect
 
-- [ ] **Verify `audio.Connection` contract** — run `make test` for `internal/app/` and `pkg/audio/` to confirm the interface is preserved. No changes should be needed above the transport layer.
+- [x] **Verify `audio.Connection` contract** — run `make test` for `internal/app/` and `pkg/audio/` to confirm the interface is preserved. No changes should be needed above the transport layer.
 
 **Files changed:**
 - `pkg/audio/discord/platform.go` — rewrite
@@ -273,7 +273,7 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 **Tasks:**
 
-- [ ] **`internal/discord/bot.go`** — Rewrite `Bot` struct and lifecycle
+- [x] **`internal/discord/bot.go`** — Rewrite `Bot` struct and lifecycle
 
   ```go
   type Bot struct {
@@ -310,7 +310,7 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
   - `Session() *discordgo.Session` → `Client() *bot.Client`
   - `Platform()`, `GuildID()`, `Router()`, `Permissions()` — same concept, update types
 
-- [ ] **`internal/discord/bot_test.go`** — Update `PermissionChecker` tests to use disgo interaction types (member/roles).
+- [x] **`internal/discord/bot_test.go`** — Update `PermissionChecker` tests to use disgo interaction types (member/roles).
 
 **Files changed:**
 - `internal/discord/bot.go` — rewrite
@@ -326,7 +326,7 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 **Tasks:**
 
-- [ ] **`internal/discord/router.go`** — Redesign `CommandRouter`
+- [x] **`internal/discord/router.go`** — Redesign `CommandRouter`
 
   Replace the monolithic `Handle(s, i)` with four dispatch methods:
 
@@ -353,7 +353,7 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
   Registration methods stay the same names but accept new function types. `ApplicationCommands()` returns `[]discord.ApplicationCommandCreate` instead of `[]*discordgo.ApplicationCommand`.
 
-- [ ] **`internal/discord/respond.go`** — Simplify or eliminate helpers
+- [x] **`internal/discord/respond.go`** — Simplify or eliminate helpers
 
   Since disgo puts response methods directly on events, consider whether wrappers add value. Options:
 
@@ -408,48 +408,48 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 **Tasks (per module):**
 
-- [ ] **`commands/session.go`** (157 lines)
+- [x] **`commands/session.go`** (157 lines)
   - Replace `s.State.VoiceState(guildID, userID)` → `e.Client().Caches.VoiceState(guildID, userID)`
   - Replace `i.Member.User.ID` → `e.User().ID.String()`
   - Replace command definition to `discord.SlashCommandCreate`
   - Update `subcommandStringOption` helper to use disgo's `data.String("name")`
 
-- [ ] **`commands/session_test.go`** — Update test fixtures to use disgo types
+- [x] **`commands/session_test.go`** — Update test fixtures to use disgo types
 
-- [ ] **`commands/npc.go`** (339 lines)
+- [x] **`commands/npc.go`** (339 lines)
   - 6 subcommand handlers + 3 autocomplete handlers
   - Replace `*discordgo.ApplicationCommandInteractionDataOption` extraction → `data.String("name")`
   - Replace autocomplete result → `e.AutocompleteResult([]discord.AutocompleteChoice{...})`
 
-- [ ] **`commands/npc_test.go`** — Update fixtures
+- [x] **`commands/npc_test.go`** — Update fixtures
 
-- [ ] **`commands/entity.go`** (449 lines)
+- [x] **`commands/entity.go`** (449 lines)
   - Largest command module: CRUD + autocomplete + modal + component handlers
   - Replace modal creation → `discord.NewModalCreate(customID, title, components)`
   - Replace component creation → `discord.NewActionRow(discord.NewPrimaryButton(...))`
   - Replace `i.ModalSubmitData()` → `e.Data` (embedded on `ModalSubmitInteractionCreate`)
 
-- [ ] **`commands/entity_test.go`** — Update fixtures
+- [x] **`commands/entity_test.go`** — Update fixtures
 
-- [ ] **`commands/entity_modal.go`** (93 lines)
+- [x] **`commands/entity_modal.go`** (93 lines)
   - Modal handler: replace `i.ModalSubmitData().Components` → `e.Data.Text("customID")`
 
-- [ ] **`commands/campaign.go`** (261 lines)
+- [x] **`commands/campaign.go`** (261 lines)
   - Campaign CRUD + autocomplete
   - Replace component interactions for campaign selection
 
-- [ ] **`commands/campaign_test.go`** — Update fixtures
+- [x] **`commands/campaign_test.go`** — Update fixtures
 
-- [ ] **`commands/feedback.go`** (212 lines)
+- [x] **`commands/feedback.go`** (212 lines)
   - Modal-based feedback submission
 
-- [ ] **`commands/recap.go`** (276 lines)
+- [x] **`commands/recap.go`** (276 lines)
   - Embed-heavy: replace all `*discordgo.MessageEmbed` → `discord.Embed` or `discord.NewEmbedBuilder()`
 
-- [ ] **`commands/attachment.go`** (112 lines)
+- [x] **`commands/attachment.go`** (112 lines)
   - Replace `*discordgo.MessageAttachment` → `discord.Attachment`
 
-- [ ] **`commands/attachment_test.go`** — Update fixtures
+- [x] **`commands/attachment_test.go`** — Update fixtures
 
 **Files changed:** All 13 files in `internal/discord/commands/`
 
@@ -463,18 +463,18 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 **Tasks:**
 
-- [ ] **`internal/discord/dashboard.go`** — Replace `*discordgo.Session` with `*bot.Client`
+- [x] **`internal/discord/dashboard.go`** — Replace `*discordgo.Session` with `*bot.Client`
   - `session.ChannelMessageSendEmbed(ch, embed)` → `client.Rest.CreateMessage(ch, discord.MessageCreate{Embeds: []discord.Embed{embed}})`
   - `session.ChannelMessageEditEmbed(ch, msg, embed)` → `client.Rest.UpdateMessage(ch, msg, discord.MessageUpdate{Embeds: &[]discord.Embed{embed}})`
   - `*discordgo.MessageEmbed` → `discord.Embed`
 
-- [ ] **`internal/discord/dashboard_test.go`** — Update embed builder tests
+- [x] **`internal/discord/dashboard_test.go`** — Update embed builder tests
 
-- [ ] **`internal/discord/permissions.go`** — Update `IsDM()` to accept relevant disgo types
+- [x] **`internal/discord/permissions.go`** — Update `IsDM()` to accept relevant disgo types
   - `i.Member.Roles` → `e.Member().RoleIDs` (type changes from `[]string` to `[]snowflake.ID`)
   - Consider making `IsDM` accept `*discord.ResolvedMember` + the `dmRoleID snowflake.ID` for flexibility across event types
 
-- [ ] **`internal/discord/mock/session.go`** — Rewrite or remove
+- [x] **`internal/discord/mock/session.go`** — Rewrite or remove
   - Current mock wraps `InteractionRespond` and `FollowupMessageCreate` which no longer exist as session methods
   - If response helpers (Option B above) are used, mock the event types instead
   - Consider whether mock is still needed — disgo's event types may be constructible enough for direct use in tests
@@ -495,16 +495,16 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 **Tasks:**
 
-- [ ] **`cmd/glyphoxa/main.go`** — Update Discord audio factory
+- [x] **`cmd/glyphoxa/main.go`** — Update Discord audio factory
   - Replace `discordbot.New(ctx, Config{Token, GuildID, DMRoleID})` with updated constructor
   - Replace `bot.Session()` usages with `bot.Client()`
   - Update command module construction (same constructors, new types)
   - `guildID` becomes `snowflake.ID` throughout
 
-- [ ] **`go.mod`** — Remove `github.com/bwmarrin/discordgo`, run `go mod tidy` to clean indirect deps (`gorilla/websocket` if unused)
-- [ ] **Verify** no file imports `bwmarrin/discordgo`: `grep -r "bwmarrin/discordgo" --include="*.go"`
-- [ ] Run full `make check` (fmt + vet + test with race detector)
-- [ ] Run `make lint`
+- [x] **`go.mod`** — Remove `github.com/bwmarrin/discordgo`, run `go mod tidy` to clean indirect deps (`gorilla/websocket` if unused)
+- [x] **Verify** no file imports `bwmarrin/discordgo`: `grep -r "bwmarrin/discordgo" --include="*.go"`
+- [x] Run full `make check` (fmt + vet + test with race detector)
+- [x] Run `make lint`
 
 **Files changed:**
 - `cmd/glyphoxa/main.go` — update wiring
@@ -516,34 +516,34 @@ The `CommandRouter` is redesigned with four registration/dispatch methods instea
 
 ### Functional Requirements
 
-- [ ] Bot joins a DAVE-enabled Discord voice channel without close code 4017
-- [ ] Audio is received from participants and routed to per-user `InputStreams` channels
-- [ ] Audio from `OutputStream` channel is sent to the voice channel
-- [ ] Participant join/leave events fire correctly for `OnParticipantChange` callbacks
-- [ ] All slash commands (`/session`, `/npc`, `/entity`, `/campaign`, `/feedback`) work
-- [ ] Autocomplete works for NPC names, entity names, campaign names
-- [ ] Modal dialogs work for entity creation and feedback submission
-- [ ] Component interactions (buttons) work for entity/campaign selection
-- [ ] Dashboard embed updates display correctly
-- [ ] DM permission checks work for restricted commands
-- [ ] Graceful shutdown cleans up voice connections and deregisters commands
+- [x] Bot joins a DAVE-enabled Discord voice channel without close code 4017
+- [x] Audio is received from participants and routed to per-user `InputStreams` channels
+- [x] Audio from `OutputStream` channel is sent to the voice channel
+- [x] Participant join/leave events fire correctly for `OnParticipantChange` callbacks
+- [x] All slash commands (`/session`, `/npc`, `/entity`, `/campaign`, `/feedback`) work
+- [x] Autocomplete works for NPC names, entity names, campaign names
+- [x] Modal dialogs work for entity creation and feedback submission
+- [x] Component interactions (buttons) work for entity/campaign selection
+- [x] Dashboard embed updates display correctly
+- [x] DM permission checks work for restricted commands
+- [x] Graceful shutdown cleans up voice connections and deregisters commands
 
 ### Non-Functional Requirements
 
-- [ ] No race conditions: `make test` with `-race -count=1` passes
-- [ ] Latency budget preserved: voice round-trip stays under 2.0s hard limit
-- [ ] No goroutine leaks: disconnect and reconnection scenarios don't leak goroutines
-- [ ] `Disconnect()` is safe to call multiple times (`sync.Once`)
-- [ ] All tests use `t.Parallel()` and table-driven patterns per CLAUDE.md
-- [ ] All exported symbols have godoc comments
-- [ ] Error wrapping uses `%w` with package prefix
+- [x] No race conditions: `make test` with `-race -count=1` passes
+- [x] Latency budget preserved: voice round-trip stays under 2.0s hard limit
+- [x] No goroutine leaks: disconnect and reconnection scenarios don't leak goroutines
+- [x] `Disconnect()` is safe to call multiple times (`sync.Once`)
+- [x] All tests use `t.Parallel()` and table-driven patterns per CLAUDE.md
+- [x] All exported symbols have godoc comments
+- [x] Error wrapping uses `%w` with package prefix
 
 ### Quality Gates
 
-- [ ] `make check` passes (fmt + vet + test)
-- [ ] `make lint` passes
-- [ ] Zero imports of `bwmarrin/discordgo` remain
-- [ ] Compile-time interface assertions: `var _ audio.Platform = (*Platform)(nil)`, `var _ audio.Connection = (*Connection)(nil)`
+- [x] `make check` passes (fmt + vet + test)
+- [x] `make lint` passes
+- [x] Zero imports of `bwmarrin/discordgo` remain
+- [x] Compile-time interface assertions: `var _ audio.Platform = (*Platform)(nil)`, `var _ audio.Connection = (*Connection)(nil)`
 
 ## Dependencies & Prerequisites
 
