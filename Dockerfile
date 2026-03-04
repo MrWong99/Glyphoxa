@@ -7,16 +7,16 @@
 # via CGO. libdave (Discord DAVE E2EE) and ONNX Runtime (Silero VAD) are
 # downloaded as prebuilt shared libraries and dynamically linked.
 #
-# The final image is based on distroless/cc (includes glibc/libstdc++) because
-# libdave and libonnxruntime are dynamically linked. Whisper model files and
-# the Silero VAD ONNX model are NOT bundled — mount them at runtime via a
-# volume.
+# The final image is based on debian:trixie-slim (glibc 2.38+, libstdc++ with
+# GLIBCXX_3.4.32+) because libdave and libonnxruntime are dynamically linked
+# and require these library versions. Whisper model files and the Silero VAD
+# ONNX model are NOT bundled — mount them at runtime via a volume.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build whisper.cpp static library
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS whisper-build
+FROM debian:trixie-slim AS whisper-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake g++ make git ca-certificates \
@@ -41,7 +41,7 @@ RUN cmake -B build \
 # ---------------------------------------------------------------------------
 # Stage 2: Download ONNX Runtime shared library (for Silero VAD)
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS onnx-download
+FROM debian:trixie-slim AS onnx-download
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates \
@@ -58,10 +58,14 @@ RUN ONNX_ARCH="x64" \
     && tar xzf /tmp/onnxruntime.tgz -C /onnx --strip-components=1 \
     && rm -f /tmp/onnxruntime.tgz
 
+# Download Silero VAD v5 ONNX model (~2 MB).
+RUN curl -fsL "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
+       -o /onnx/silero_vad.onnx
+
 # ---------------------------------------------------------------------------
 # Stage 3: Download libdave prebuilt shared library
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS dave-download
+FROM debian:trixie-slim AS dave-download
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl unzip ca-certificates \
@@ -134,10 +138,23 @@ RUN CGO_ENABLED=1 go build \
 # ---------------------------------------------------------------------------
 # Stage 5: Final minimal image
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/cc-debian12:nonroot
+# Debian Trixie provides glibc 2.38+ and libstdc++ with GLIBCXX_3.4.32+,
+# required by the Go binary (built with golang:1.26/Trixie) and the
+# prebuilt libdave.so from Discord's releases.
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r glyphoxa && useradd -r -g glyphoxa -s /sbin/nologin glyphoxa
 
 COPY --from=dave-download /dave/lib/libdave.so /usr/lib/
 COPY --from=onnx-download /onnx/lib/libonnxruntime.so /usr/lib/
+COPY --from=onnx-download /onnx/silero_vad.onnx /models/silero_vad.onnx
 COPY --from=build /out/glyphoxa /usr/local/bin/glyphoxa
 
+# onnxruntime_go searches for "onnxruntime.so" (no lib prefix) by default.
+RUN ln -s libonnxruntime.so /usr/lib/onnxruntime.so && ldconfig
+
+USER glyphoxa
 ENTRYPOINT ["glyphoxa"]

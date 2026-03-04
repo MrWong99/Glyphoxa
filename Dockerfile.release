@@ -1,12 +1,33 @@
 # Minimal Dockerfile for pre-built binaries (used by release workflow).
 # The full multi-stage Dockerfile is used for main-branch builds.
-FROM gcr.io/distroless/cc-debian12:nonroot
+#
+# Debian Trixie provides glibc 2.38+ and libstdc++ with GLIBCXX_3.4.32+,
+# required by the Go binary and the prebuilt libdave.so.
+
+# Download Silero VAD v5 ONNX model (~2 MB).
+FROM debian:trixie-slim AS silero-download
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsL "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
+       -o /silero_vad.onnx
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r glyphoxa && useradd -r -g glyphoxa -s /sbin/nologin glyphoxa
 
 ARG TARGETOS=linux
 ARG TARGETARCH
 
 COPY ${TARGETOS}/${TARGETARCH}/libdave.so /usr/lib/
 COPY ${TARGETOS}/${TARGETARCH}/libonnxruntime.so /usr/lib/
+COPY --from=silero-download /silero_vad.onnx /models/silero_vad.onnx
 COPY ${TARGETOS}/${TARGETARCH}/glyphoxa /usr/local/bin/glyphoxa
 
+# onnxruntime_go searches for "onnxruntime.so" (no lib prefix) by default.
+RUN ln -s libonnxruntime.so /usr/lib/onnxruntime.so && ldconfig
+
+USER glyphoxa
 ENTRYPOINT ["glyphoxa"]

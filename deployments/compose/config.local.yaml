@@ -12,7 +12,7 @@ providers:
   llm:
     name: ollama
     base_url: "http://ollama:11434"
-    model: llama3.2
+    model: lfm2:24b
 
   stt:
     name: whisper-native
@@ -31,10 +31,11 @@ providers:
   embeddings:
     name: ollama
     base_url: "http://ollama:11434"
-    model: nomic-embed-text
+    model: qwen3-embedding:0.6b
 
   vad:
     name: silero
+    model: /models/silero_vad.onnx
     options:
       frame_size_ms: 30
       speech_threshold: 0.5
