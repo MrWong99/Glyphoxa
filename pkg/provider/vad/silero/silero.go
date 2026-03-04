@@ -25,14 +25,22 @@ import (
 // Compile-time interface assertion.
 var _ vad.Engine = (*Engine)(nil)
 
-// lstmStateSize is the flattened element count of the LSTM h/c state tensors
-// with shape [2, 1, 64].
-const lstmStateSize = 2 * 1 * 64
+// stateSize is the flattened element count of the LSTM state tensor
+// with shape [2, 1, 128].
+const stateSize = 2 * 1 * 128
 
 // supportedSampleRates lists the audio sample rates accepted by Silero VAD v5.
-var supportedSampleRates = map[int]bool{
-	8000:  true,
-	16000: true,
+var supportedSampleRates = map[int]struct{}{
+	8000:  {},
+	16000: {},
+}
+
+// validChunkSizes lists the accepted sample counts per frame for each sample
+// rate. Using an unsupported chunk size causes the model to produce near-zero
+// probabilities without returning an error.
+var validChunkSizes = map[int]map[int]struct{}{
+	8000:  {256: {}, 512: {}, 768: {}},
+	16000: {512: {}, 1024: {}, 1536: {}},
 }
 
 // initOnce guards the single ONNX Runtime environment initialisation.
@@ -47,8 +55,8 @@ var (
 // requiring an ONNX Runtime installation.
 type inferencer interface {
 	// infer takes audio samples and LSTM state, returns speech probability and
-	// the updated LSTM state for the next frame.
-	infer(samples []float32, sr int64, h, c []float32) (prob float32, hn, cn []float32, err error)
+	// the updated state for the next frame.
+	infer(samples []float32, sr int64, state []float32) (prob float32, stateN []float32, err error)
 	// close releases any resources held by the inferencer.
 	close() error
 }
@@ -134,7 +142,8 @@ func (e *Engine) NewSession(cfg vad.Config) (vad.SessionHandle, error) {
 		return nil, err
 	}
 
-	inf, err := newONNXInferencer(e.modelPath)
+	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
+	inf, err := newONNXInferencer(e.modelPath, cfg.SampleRate, chunkSize)
 	if err != nil {
 		return nil, fmt.Errorf("silero: create inferencer: %w", err)
 	}
@@ -147,11 +156,20 @@ func validateConfig(cfg vad.Config) error {
 	if cfg.SampleRate <= 0 {
 		return fmt.Errorf("silero: SampleRate must be > 0, got %d", cfg.SampleRate)
 	}
-	if !supportedSampleRates[cfg.SampleRate] {
+	if _, ok := supportedSampleRates[cfg.SampleRate]; !ok {
 		return fmt.Errorf("silero: unsupported SampleRate %d; Silero v5 supports 8000 and 16000 Hz only", cfg.SampleRate)
 	}
 	if cfg.FrameSizeMs <= 0 {
 		return fmt.Errorf("silero: FrameSizeMs must be > 0, got %d", cfg.FrameSizeMs)
+	}
+	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
+	if allowed, ok := validChunkSizes[cfg.SampleRate]; ok {
+		if _, valid := allowed[chunkSize]; !valid {
+			return fmt.Errorf(
+				"silero: chunk size %d samples (SampleRate=%d, FrameSizeMs=%d) is not supported; "+
+					"valid sizes for %d Hz: 512, 1024, 1536 (e.g. FrameSizeMs=32, 64, or 96)",
+				chunkSize, cfg.SampleRate, cfg.FrameSizeMs, cfg.SampleRate)
+		}
 	}
 	if cfg.SpeechThreshold < 0 || cfg.SpeechThreshold > 1 {
 		return fmt.Errorf("silero: SpeechThreshold %.3f out of range [0.0, 1.0]", cfg.SpeechThreshold)
@@ -166,104 +184,135 @@ func validateConfig(cfg vad.Config) error {
 	return nil
 }
 
-// onnxInferencer implements inferencer using onnxruntime_go. A single
-// DynamicAdvancedSession is reused across frames so that the ONNX session
-// overhead is paid once at construction.
+// contextSize returns the number of audio context samples the Silero VAD v5
+// model requires prepended to each chunk for proper detection.
+func contextSize(sampleRate int) int {
+	if sampleRate == 8000 {
+		return 32
+	}
+	return 64 // 16 kHz
+}
+
+// onnxInferencer implements inferencer using onnxruntime_go. All tensors are
+// pre-allocated once and reused across frames via AdvancedSession, matching
+// the approach used by known-working Silero VAD Go bindings.
 type onnxInferencer struct {
-	sess *ort.DynamicAdvancedSession
+	sess           *ort.AdvancedSession
+	inputTensor    *ort.Tensor[float32]
+	stateTensor    *ort.Tensor[float32]
+	srTensor       *ort.Tensor[int64]
+	outTensor      *ort.Tensor[float32]
+	stateNTensor   *ort.Tensor[float32]
+	context        []float32 // context from previous frame
+	effectiveSize  int       // chunkSize + contextSize
+	chunkSize      int
 }
 
 // newONNXInferencer creates an onnxInferencer from the given model file path.
-func newONNXInferencer(modelPath string) (*onnxInferencer, error) {
-	inputNames := []string{"input", "sr", "h", "c"}
-	outputNames := []string{"output", "hn", "cn"}
+// The sampleRate and chunkSize determine tensor shapes and context buffer size.
+func newONNXInferencer(modelPath string, sampleRate, chunkSize int) (*onnxInferencer, error) {
+	ctxSize := contextSize(sampleRate)
+	effectiveSize := chunkSize + ctxSize
 
-	sess, err := ort.NewDynamicAdvancedSession(modelPath, inputNames, outputNames, nil)
+	inputTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, int64(effectiveSize)))
 	if err != nil {
+		return nil, fmt.Errorf("create input tensor: %w", err)
+	}
+	stateTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 128))
+	if err != nil {
+		inputTensor.Destroy() //nolint:errcheck
+		return nil, fmt.Errorf("create state tensor: %w", err)
+	}
+	srTensor, err := ort.NewTensor(ort.NewShape(1), []int64{int64(sampleRate)})
+	if err != nil {
+		inputTensor.Destroy()  //nolint:errcheck
+		stateTensor.Destroy()  //nolint:errcheck
+		return nil, fmt.Errorf("create sr tensor: %w", err)
+	}
+	outTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, 1))
+	if err != nil {
+		inputTensor.Destroy()  //nolint:errcheck
+		stateTensor.Destroy()  //nolint:errcheck
+		srTensor.Destroy()     //nolint:errcheck
+		return nil, fmt.Errorf("create output tensor: %w", err)
+	}
+	stateNTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 128))
+	if err != nil {
+		inputTensor.Destroy()  //nolint:errcheck
+		stateTensor.Destroy()  //nolint:errcheck
+		srTensor.Destroy()     //nolint:errcheck
+		outTensor.Destroy()    //nolint:errcheck
+		return nil, fmt.Errorf("create stateN tensor: %w", err)
+	}
+
+	sess, err := ort.NewAdvancedSession(
+		modelPath,
+		[]string{"input", "state", "sr"},
+		[]string{"output", "stateN"},
+		[]ort.Value{inputTensor, stateTensor, srTensor},
+		[]ort.Value{outTensor, stateNTensor},
+		nil,
+	)
+	if err != nil {
+		inputTensor.Destroy()  //nolint:errcheck
+		stateTensor.Destroy()  //nolint:errcheck
+		srTensor.Destroy()     //nolint:errcheck
+		outTensor.Destroy()    //nolint:errcheck
+		stateNTensor.Destroy() //nolint:errcheck
 		return nil, fmt.Errorf("create ONNX session from %q: %w", modelPath, err)
 	}
-	return &onnxInferencer{sess: sess}, nil
+
+	return &onnxInferencer{
+		sess:          sess,
+		inputTensor:   inputTensor,
+		stateTensor:   stateTensor,
+		srTensor:      srTensor,
+		outTensor:     outTensor,
+		stateNTensor:  stateNTensor,
+		context:       make([]float32, ctxSize),
+		effectiveSize: effectiveSize,
+		chunkSize:     chunkSize,
+	}, nil
 }
 
 // infer runs a single audio frame through the Silero VAD v5 model.
-//
-// Inputs:
-//   - samples: normalised float32 audio, shape [1, chunkSize]
-//   - sr: sample rate as int64
-//   - h: LSTM hidden state, shape [2, 1, 64] (128 floats)
-//   - c: LSTM cell state, shape [2, 1, 64] (128 floats)
-//
-// Returns the speech probability, updated hidden state hn, and updated cell
-// state cn. All returned slices are freshly allocated and safe to hold.
-func (o *onnxInferencer) infer(samples []float32, sr int64, h, c []float32) (prob float32, hn, cn []float32, err error) {
-	chunkSize := int64(len(samples))
+// The samples slice must contain exactly chunkSize float32 values.
+// The state and stateN parameters are ignored — state is managed internally
+// via pre-bound tensors. They are kept for interface compatibility.
+func (o *onnxInferencer) infer(samples []float32, _ int64, _ []float32) (float32, []float32, error) {
+	// Fill the input tensor: [context | new samples].
+	data := o.inputTensor.GetData()
+	clear(data)
+	copy(data, o.context)
+	copy(data[len(o.context):], samples)
 
-	inputTensor, err := ort.NewTensor(ort.NewShape(1, chunkSize), samples)
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create input tensor: %w", err)
-	}
-	defer inputTensor.Destroy() //nolint:errcheck
-
-	srTensor, err := ort.NewTensor(ort.NewShape(1), []int64{sr})
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create sr tensor: %w", err)
-	}
-	defer srTensor.Destroy() //nolint:errcheck
-
-	hTensor, err := ort.NewTensor(ort.NewShape(2, 1, 64), h)
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create h tensor: %w", err)
-	}
-	defer hTensor.Destroy() //nolint:errcheck
-
-	cTensor, err := ort.NewTensor(ort.NewShape(2, 1, 64), c)
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create c tensor: %w", err)
-	}
-	defer cTensor.Destroy() //nolint:errcheck
-
-	outTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, 1))
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create output tensor: %w", err)
-	}
-	defer outTensor.Destroy() //nolint:errcheck
-
-	hnTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 64))
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create hn tensor: %w", err)
-	}
-	defer hnTensor.Destroy() //nolint:errcheck
-
-	cnTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 64))
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("create cn tensor: %w", err)
-	}
-	defer cnTensor.Destroy() //nolint:errcheck
-
-	inputs := []ort.Value{inputTensor, srTensor, hTensor, cTensor}
-	outputs := []ort.Value{outTensor, hnTensor, cnTensor}
-	if runErr := o.sess.Run(inputs, outputs); runErr != nil {
-		return 0, nil, nil, fmt.Errorf("run ONNX session: %w", runErr)
+	if err := o.sess.Run(); err != nil {
+		return 0, nil, fmt.Errorf("run ONNX session: %w", err)
 	}
 
-	// Copy output data before the deferred Destroy calls release the tensors.
-	prob = outTensor.GetData()[0]
+	prob := o.outTensor.GetData()[0]
 
-	hnData := hnTensor.GetData()
-	hnOut := make([]float32, len(hnData))
-	copy(hnOut, hnData)
+	// Copy stateN → state for the next frame.
+	copy(o.stateTensor.GetData(), o.stateNTensor.GetData())
 
-	cnData := cnTensor.GetData()
-	cnOut := make([]float32, len(cnData))
-	copy(cnOut, cnData)
+	// Save the last contextSize samples for the next frame.
+	copy(o.context, data[len(data)-len(o.context):])
 
-	return prob, hnOut, cnOut, nil
+	return prob, nil, nil
 }
 
-// close releases the underlying ONNX session.
+// close releases all ONNX resources.
 func (o *onnxInferencer) close() error {
-	if err := o.sess.Destroy(); err != nil {
-		return fmt.Errorf("destroy ONNX session: %w", err)
+	var firstErr error
+	for _, d := range []interface{ Destroy() error }{
+		o.sess, o.inputTensor, o.stateTensor, o.srTensor, o.outTensor, o.stateNTensor,
+	} {
+		if err := d.Destroy(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return fmt.Errorf("destroy ONNX resources: %w", firstErr)
 	}
 	return nil
 }
@@ -284,9 +333,8 @@ type session struct {
 	minSpeechFrames  int
 	minSilenceFrames int
 
-	// LSTM hidden and cell state, fed back into the model each frame.
-	h []float32
-	c []float32
+	// LSTM state, fed back into the model each frame. Shape [2, 1, 128].
+	lstmState []float32
 
 	// State machine.
 	state        vadState
@@ -304,8 +352,7 @@ func newSession(cfg vad.Config, inf inferencer, minSpeech, minSilence int) *sess
 		cfg:              cfg,
 		minSpeechFrames:  minSpeech,
 		minSilenceFrames: minSilence,
-		h:                make([]float32, lstmStateSize),
-		c:                make([]float32, lstmStateSize),
+		lstmState:        make([]float32, stateSize),
 	}
 }
 
@@ -331,14 +378,16 @@ func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
 
 	samples := pcmToFloat32(frame)
 
-	prob, hn, cn, err := s.inf.infer(samples, int64(s.cfg.SampleRate), s.h, s.c)
+	prob, stateN, err := s.inf.infer(samples, int64(s.cfg.SampleRate), s.lstmState)
 	if err != nil {
 		return vad.VADEvent{}, fmt.Errorf("silero: inference: %w", err)
 	}
 
-	// Carry LSTM state forward to the next frame.
-	s.h = hn
-	s.c = cn
+	// The real onnxInferencer manages state internally and returns nil.
+	// The mock inferencer returns a non-nil stateN for test verification.
+	if stateN != nil {
+		s.lstmState = stateN
+	}
 
 	return s.step(float64(prob)), nil
 }
@@ -378,18 +427,15 @@ func (s *session) step(prob float64) vad.VADEvent {
 	return vad.VADEvent{Type: vad.VADSilence, Probability: prob}
 }
 
-// Reset clears all accumulated detection state. The LSTM hidden and cell
-// states are zeroed and the speech/silence counters are reset. The session
-// remains open and ready for new frames.
+// Reset clears all accumulated detection state. The LSTM state is zeroed
+// and the speech/silence counters are reset. The session remains open and
+// ready for new frames.
 func (s *session) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for i := range s.h {
-		s.h[i] = 0
-	}
-	for i := range s.c {
-		s.c[i] = 0
+	for i := range s.lstmState {
+		s.lstmState[i] = 0
 	}
 	s.state = stateSilence
 	s.speechCount = 0
