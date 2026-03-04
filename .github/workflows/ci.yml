@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Cache whisper.cpp build
         id: cache-whisper
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/whisper-install
           key: whisper-cpp-${{ runner.os }}-${{ runner.arch }}-v1
@@ -61,7 +61,7 @@ jobs:
     steps:
       - name: Cache ONNX Runtime
         id: cache-onnx
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/onnx-install
           key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-v1.24.1
@@ -91,7 +91,7 @@ jobs:
     steps:
       - name: Cache libdave
         id: cache-dave
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/dave-install
           key: libdave-${{ runner.os }}-${{ runner.arch }}-v1.1.0
