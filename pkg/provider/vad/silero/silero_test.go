@@ -132,7 +132,6 @@ func TestNewSession_ValidConfig(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -167,7 +166,6 @@ func TestNewSession_InvalidSampleRate(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -197,7 +195,7 @@ func TestProcessFrame_SilenceWithMock(t *testing.T) {
 	t.Cleanup(func() { _ = sess.Close() })
 
 	frame := silenceFrame(cfg)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		evt, err := sess.ProcessFrame(frame)
 		if err != nil {
 			t.Fatalf("frame %d: ProcessFrame: %v", i, err)
@@ -223,7 +221,7 @@ func TestProcessFrame_SpeechWithMock(t *testing.T) {
 	frame := silenceFrame(cfg)
 
 	// Frames 0 and 1 should still be VADSilence (not enough consecutive speech).
-	for i := 0; i < minSpeech-1; i++ {
+	for i := range minSpeech - 1 {
 		evt, err := sess.ProcessFrame(frame)
 		if err != nil {
 			t.Fatalf("frame %d: %v", i, err)
@@ -243,7 +241,7 @@ func TestProcessFrame_SpeechWithMock(t *testing.T) {
 	}
 
 	// Subsequent frames should be VADSpeechContinue.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		evt, err := sess.ProcessFrame(frame)
 		if err != nil {
 			t.Fatalf("continue frame %d: %v", i, err)
@@ -351,7 +349,7 @@ func TestReset_ClearsState(t *testing.T) {
 	frame := silenceFrame(cfg)
 
 	// Drive the session into speech state.
-	for i := 0; i < minSpeech; i++ {
+	for i := range minSpeech {
 		if _, err := sess.ProcessFrame(frame); err != nil {
 			t.Fatalf("setup frame %d: %v", i, err)
 		}
@@ -469,7 +467,6 @@ func TestPCMConversion(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

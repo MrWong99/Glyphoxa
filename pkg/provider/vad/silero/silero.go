@@ -197,15 +197,15 @@ func contextSize(sampleRate int) int {
 // pre-allocated once and reused across frames via AdvancedSession, matching
 // the approach used by known-working Silero VAD Go bindings.
 type onnxInferencer struct {
-	sess           *ort.AdvancedSession
-	inputTensor    *ort.Tensor[float32]
-	stateTensor    *ort.Tensor[float32]
-	srTensor       *ort.Tensor[int64]
-	outTensor      *ort.Tensor[float32]
-	stateNTensor   *ort.Tensor[float32]
-	context        []float32 // context from previous frame
-	effectiveSize  int       // chunkSize + contextSize
-	chunkSize      int
+	sess          *ort.AdvancedSession
+	inputTensor   *ort.Tensor[float32]
+	stateTensor   *ort.Tensor[float32]
+	srTensor      *ort.Tensor[int64]
+	outTensor     *ort.Tensor[float32]
+	stateNTensor  *ort.Tensor[float32]
+	context       []float32 // context from previous frame
+	effectiveSize int       // chunkSize + contextSize
+	chunkSize     int
 }
 
 // newONNXInferencer creates an onnxInferencer from the given model file path.
@@ -225,23 +225,23 @@ func newONNXInferencer(modelPath string, sampleRate, chunkSize int) (*onnxInfere
 	}
 	srTensor, err := ort.NewTensor(ort.NewShape(1), []int64{int64(sampleRate)})
 	if err != nil {
-		inputTensor.Destroy()  //nolint:errcheck
-		stateTensor.Destroy()  //nolint:errcheck
+		inputTensor.Destroy() //nolint:errcheck
+		stateTensor.Destroy() //nolint:errcheck
 		return nil, fmt.Errorf("create sr tensor: %w", err)
 	}
 	outTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, 1))
 	if err != nil {
-		inputTensor.Destroy()  //nolint:errcheck
-		stateTensor.Destroy()  //nolint:errcheck
-		srTensor.Destroy()     //nolint:errcheck
+		inputTensor.Destroy() //nolint:errcheck
+		stateTensor.Destroy() //nolint:errcheck
+		srTensor.Destroy()    //nolint:errcheck
 		return nil, fmt.Errorf("create output tensor: %w", err)
 	}
 	stateNTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 128))
 	if err != nil {
-		inputTensor.Destroy()  //nolint:errcheck
-		stateTensor.Destroy()  //nolint:errcheck
-		srTensor.Destroy()     //nolint:errcheck
-		outTensor.Destroy()    //nolint:errcheck
+		inputTensor.Destroy() //nolint:errcheck
+		stateTensor.Destroy() //nolint:errcheck
+		srTensor.Destroy()    //nolint:errcheck
+		outTensor.Destroy()   //nolint:errcheck
 		return nil, fmt.Errorf("create stateN tensor: %w", err)
 	}
 
@@ -464,7 +464,7 @@ func pcmToFloat32(pcm []byte) []float32 {
 	n := len(pcm) / 2
 	out := make([]float32, n)
 	const scale = 1.0 / float32(math.MaxInt16+1) // 1.0 / 32768.0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sample := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
 		out[i] = float32(sample) * scale
 	}
