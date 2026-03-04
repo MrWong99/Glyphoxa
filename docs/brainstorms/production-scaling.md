@@ -13,7 +13,7 @@ discussion.
 ## Table of Contents
 
 1. [Current State Summary](#1-current-state-summary)
-2. [Multi-Tenancy & Guild Isolation](#2-multi-tenancy--guild-isolation)
+2. [Tenant Model & License Tiers](#2-tenant-model--license-tiers)
 3. [Deployment Topology](#3-deployment-topology)
 4. [Container Orchestration (Kubernetes)](#4-container-orchestration-kubernetes)
 5. [Database Scaling & Tenant Isolation](#5-database-scaling--tenant-isolation)
@@ -37,160 +37,285 @@ Glyphoxa today is a **single-process, single-guild** application:
 
 | Aspect | Current State | Production Gap |
 |--------|---------------|----------------|
-| Guild support | One `guild_id` per process | No multi-guild in one instance |
-| Sessions | One active session per process (`SessionManager.active` bool) | No concurrent sessions |
-| Discord bot | Single bot token, single gateway connection | No sharding |
-| Database | Shared PostgreSQL, no tenant columns | No data isolation |
-| Config | Flat YAML, no tenant concept | No per-tenant config |
-| Deployment | Docker Compose, single container | No orchestration |
-| Secrets | API keys in YAML or env vars | No vault integration |
-| MCP tools | All tools in-process or per-instance stdio subprocesses | No shared tool services |
+| **Tenant model** | No tenant concept | Need Tenant = Customer = License, deeply integrated into core |
+| **Campaign isolation** | Single campaign, no `campaign_id` in data | Need `campaign_id` on all data tables, per-campaign query scoping |
+| **Guild support** | One `guild_id` per process | Need multi-guild per tenant, license-controlled parallel sessions |
+| **Sessions** | One active session per process (`SessionManager.active` bool) | Need license-aware session constraints (per-tier limits) |
+| **Discord bot** | Single bot token, single gateway connection | Need multi-bot gateway (shared) and per-tenant gateway (dedicated) |
+| **Database** | Shared PostgreSQL, no tenant/campaign columns | Need per-tenant schema (shared) or per-tenant instance (dedicated) |
+| **Config** | Flat YAML, no tenant concept | Need per-tenant config stored in control plane |
+| **Deployment** | Docker Compose, single container | Need Kubernetes with gateway + worker split |
+| **Secrets** | API keys in YAML or env vars | Need Vault with per-tenant paths, BYOK support |
+| **MCP tools** | All tools in-process or per-instance stdio subprocesses | Need shared stateless tools + tenant-scoped DB tools |
 
 The roadmap (Phase 8) mentions Helm charts and managed cloud as future items
 but no concrete design exists.
 
 ---
 
-## 2. Multi-Tenancy & Guild Isolation
+## 2. Tenant Model & License Tiers
 
-### The Problem
+### Core Definitions
 
-A production Glyphoxa SaaS must serve many customers (tenants), each with
-their own Discord guild(s), API keys, NPC configs, campaigns, and memory. Data
-from tenant A must never leak to tenant B.
+**Tenant = Customer = License.** A tenant is a single paying customer who
+holds one Glyphoxa license. This is the central billing entity, the primary
+data isolation boundary, and the unit that owns Discord guilds, campaigns,
+NPCs, and memory.
 
-### What is a "tenant"?
+A tenant can connect Glyphoxa to **multiple Discord guilds** under a single
+license. Campaign data is shared across those guilds (the same campaign can be
+played in different guilds). What the license tier controls is how many
+sessions and campaigns can run concurrently.
 
-Needs definition. Candidates:
+**Campaign** is the data boundary within a tenant. Each campaign has its own
+NPCs, entities, knowledge graph, session transcripts, and memory. Campaigns
+within a tenant share nothing except the tenant-level config (provider keys,
+MCP servers, license metadata).
 
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **Tenant = Guild** | Each Discord guild is a tenant | Simple, 1:1 mapping with Discord | A customer with multiple guilds gets multiple tenants |
-| **Tenant = Customer** | A customer (person/org) owns N guilds | Flexible, natural for billing | Requires an account system beyond Discord |
-| **Tenant = Campaign** | Each campaign is isolated | Finer-grained, good for shared guilds | Over-isolation -- same guild NPCs can't interact cross-campaign |
+### License Tiers
 
-**Recommendation:** Start with **Tenant = Customer** (an account that owns
-1+ guilds). This allows a single billing entity while supporting multiple
-guilds per subscription. A lightweight account service (OAuth with Discord
-login) maps Discord user IDs to tenant IDs.
+| | Starter | Standard | Pro | Business |
+|---|---|---|---|---|
+| **Campaigns** | 1 (new campaign replaces old) | Multiple (parallel, DB-separated) | Multiple (parallel, DB-separated) | Multiple (parallel, DB-separated) |
+| **Sessions** | 1 at a time, any guild | 1 at a time, any guild | 1 per guild, parallel across guilds | 1+ per guild (multi-bot) |
+| **Campaign data on delete** | Wiped (export first) | Retained alongside new campaigns | Retained alongside new campaigns | Retained alongside new campaigns |
+| **Discord guilds** | Unlimited (but 1 session) | Unlimited (but 1 session) | Unlimited | Unlimited |
+| **Voice isolation** | Logical (shared process) | Logical (shared process) | Physical (dedicated instance) | Physical (dedicated instance) |
+| **Gateway isolation** | Logical (shared gateway) | Logical (shared gateway) | Physical (dedicated gateway per bot) | Physical (dedicated gateway per bot) |
+| **DB isolation** | Shared instance, per-tenant schema | Shared instance, per-tenant schema | Dedicated DB instance | Dedicated DB instance |
+| **MCP services** | Shared | Shared | Shared (stateless) + dedicated (DB-access) | Shared (stateless) + dedicated (DB-access) |
 
-### Isolation Approaches
+### Session Constraints in Detail
 
-#### Option A: Process-level isolation (one container per tenant)
-
-Each tenant gets their own Glyphoxa container(s). No code changes for tenant
-isolation -- data isolation is guaranteed by process boundary.
-
-```
-Tenant A pod: [glyphoxa-a] ---> shared PostgreSQL (schema: tenant_a)
-Tenant B pod: [glyphoxa-b] ---> shared PostgreSQL (schema: tenant_b)
-```
-
-- **Pros:** Strongest isolation, simplest code changes, blast radius per
-  tenant, independent scaling.
-- **Cons:** Higher resource baseline (one container per tenant even when idle),
-  more complex orchestration.
-
-#### Option B: Shared process, application-level isolation
-
-A single Glyphoxa process serves multiple guilds. Tenant context is threaded
-through every database query and memory operation.
+Sessions are **always scoped to a single campaign**. Parallel sessions (Pro
+and above) must be for **different campaigns** to avoid transcript merge
+conflicts and knowledge graph inconsistencies. The control plane enforces
+this:
 
 ```
-Shared pod: [glyphoxa] ---> shared PostgreSQL (tenant_id column on every table)
+Tenant (Starter): campaign A, guild 1 -> session OK
+                   campaign A, guild 2 -> REJECTED (session already active)
+
+Tenant (Standard): campaign A, guild 1 -> session OK
+                   campaign B, guild 2 -> REJECTED (only 1 session allowed)
+
+Tenant (Pro):      campaign A, guild 1 -> session OK
+                   campaign B, guild 2 -> session OK (different campaign, different guild)
+                   campaign A, guild 3 -> REJECTED (campaign A already has active session)
+                   campaign C, guild 1 -> REJECTED (guild 1 already has active session)
+
+Tenant (Business): campaign A, guild 1, bot 1 -> session OK
+                   campaign B, guild 1, bot 2 -> session OK (multi-bot)
+                   campaign A, guild 1, bot 2 -> REJECTED (campaign A already active)
 ```
 
-- **Pros:** Lower resource usage, simpler deployment.
-- **Cons:** Deep code changes (tenant context everywhere), risk of
-  cross-tenant data leaks, noisy-neighbor latency, harder to reason about.
+### Isolation Philosophy
 
-#### Option C: Hybrid -- shared process per shard, process-per-tenant for premium
+Discord voice transcripts are **highly sensitive data** -- real people's
+voices, conversations, and role-play content. Cross-tenant data leakage is
+unacceptable at any tier. The question is not *whether* to isolate, but *how
+strongly*:
 
-Small tenants share a Glyphoxa instance (with application-level isolation).
-Premium/large tenants get dedicated instances. The control plane decides
-placement.
+| Isolation Layer | Starter / Standard | Pro / Business |
+|-----------------|--------------------|--------------------|
+| **Voice processing** | Logical -- one Glyphoxa process may handle sessions from different tenants. Tenant context is threaded through the entire pipeline. Audio buffers, STT results, and LLM prompts are never mixed. | Physical -- dedicated Glyphoxa instance(s) per tenant. Process boundary guarantees isolation. |
+| **Discord gateway** | Logical -- one gateway process serves multiple Discord bots (from different tenants). Events are routed by bot token / guild ID. | Physical -- dedicated gateway per Discord bot. No other tenant's events touch the same process. |
+| **Database** | Shared PostgreSQL instance, but **per-tenant schema** or per-tenant partition. No shared tables. RLS as defense-in-depth. | Dedicated PostgreSQL instance per tenant. Contains all campaigns for that tenant. |
+| **MCP tools** | Shared stateless services (dice, rules, web search). Memory tools run in the worker and inherit the worker's tenant-scoped DB connection. | Same as Starter/Standard for stateless tools. DB-accessing MCP tools get a **dedicated instance** pointing at the tenant's DB. |
+| **Secrets** | Vault paths scoped by tenant ID. Shared Vault instance. | Same Vault instance, but tenant's secrets may include dedicated DB credentials, dedicated bot tokens, etc. |
 
-- **Pros:** Cost-efficient for small tenants, strong isolation for large ones.
-- **Cons:** Two code paths, complex control plane.
+### Why Tenant Must Be a Core Concept
 
-**Initial recommendation:** **Option A** (process-per-tenant). Glyphoxa's
-architecture is already single-guild. Running one container per guild avoids
-deep refactoring and provides the strongest isolation. Kubernetes makes this
-manageable.
+The tenant ID cannot be a bolted-on afterthought. It must be integrated
+deeply into the Glyphoxa core application because:
+
+1. **Every database query** must be scoped to a tenant (schema or connection).
+2. **Every log line and metric** must carry `tenant_id` for attribution.
+3. **Session orchestration** must enforce per-tenant license constraints
+   (max sessions, max campaigns, parallel rules).
+4. **Memory tools** must never return data from another tenant's campaigns.
+5. **Provider cost attribution** must be per-tenant for billing.
+6. **Config hot-reload** must respect tenant boundaries (changing tenant A's
+   NPC config must not affect tenant B).
+
+**Implementation:** Add a `TenantContext` that flows through the application:
+
+```go
+type TenantContext struct {
+    TenantID    string
+    LicenseTier LicenseTier  // Starter, Standard, Pro, Business
+    CampaignID  string       // active campaign for this session
+    GuildID     string       // Discord guild for this session
+}
+```
+
+This context is set at session creation time and propagated via `context.Value`
+to every subsystem. The `SessionStore`, `KnowledgeGraph`, and `SemanticIndex`
+interfaces gain a `TenantContext` parameter (or are constructed with one).
+
+### Campaign Lifecycle by Tier
+
+| Tier | Create Campaign | Delete Campaign | Data Retention |
+|------|----------------|----------------|----------------|
+| **Starter** | Creates new, **wipes previous** campaign data | Automatic on new campaign creation | Export before delete (JSON/YAML dump) |
+| **Standard+** | Creates alongside existing campaigns | Manual via dashboard/API | Retained until explicit deletion or tenant offboarding |
+
+The Starter tier's "wipe on new campaign" behaviour requires a **campaign
+export** feature before any data is deleted. The export should include:
+- All session transcripts (L1)
+- Knowledge graph entities and relationships (L3)
+- NPC definitions and personalities
+- Campaign metadata
+
+Export format: JSON archive or structured YAML, importable into a higher tier.
 
 ---
 
 ## 3. Deployment Topology
 
-### Option A: One container per active session
+The deployment model is **not one-size-fits-all** -- it varies by license tier.
+The core architecture is always **gateway + session worker**, but the degree
+of sharing changes.
 
-A container is created on `/session start` and torn down on `/session stop`.
-Between sessions, no Glyphoxa container runs for that tenant.
+### Architecture: Gateway + Session Workers
 
-```
-Discord command: /session start
-    --> Control plane receives webhook
-    --> Kubernetes Job/Deployment created
-    --> Glyphoxa boots, joins voice, runs session
-    --> /session stop --> container terminates
-```
+All tiers use a split architecture:
 
-- **Pros:** Zero cost when idle (scale to zero), strong isolation, resource
-  usage exactly matches active sessions.
-- **Cons:** Cold start latency (container pull + boot + Discord gateway connect
-  + provider init = 5-15s), need a persistent control plane to receive Discord
-  interactions before the session container is up.
-- **Cold start mitigation:** Pre-pull images on nodes, keep a warm pool of
-  standby containers, use `initContainers` for model downloads.
+- **Gateway:** Handles Discord gateway connections, slash command routing, and
+  session orchestration. Always running (Discord bots must be "online").
+- **Session Worker:** Runs the voice pipeline (VAD, STT, LLM, TTS, mixer).
+  Created on `/session start`, destroyed on `/session stop`.
 
-### Option B: One long-running container per tenant
+What differs per tier is whether gateways and workers are **shared** across
+tenants or **dedicated**.
 
-Each tenant has a persistent Glyphoxa deployment. The container stays up even
-between sessions, handling Discord interactions (slash commands for NPC CRUD,
-entity management, etc.).
+### Starter / Standard Tier: Shared Infrastructure
 
 ```
-Tenant A: always-on Deployment (1 replica)
-    --> handles slash commands + sessions
-    --> scales from idle (low CPU) to active (voice session)
-```
+Shared Gateway Pool (N replicas, sharded by guild range):
+    --> manages Discord bots for ALL Starter/Standard tenants
+    --> receives slash commands, routes /npc, /entity, /campaign
+    --> on /session start: enforces license limits, creates worker pod
 
-- **Pros:** No cold start, slash commands always work, simpler lifecycle.
-- **Cons:** Baseline resource cost per tenant (even idle containers consume
-  memory for Discord gateway + PostgreSQL connection).
-- **Idle footprint:** ~50-80 MB RAM (Go binary + Discord gateway WebSocket +
-  pgx pool). At 1000 tenants that's ~50-80 GB cluster memory just for idle.
-
-### Option C: Shared gateway + session workers
-
-A shared "gateway" service handles all Discord interactions (slash commands,
-interaction routing). When a session starts, it spawns a dedicated "session
-worker" container.
-
-```
-Shared gateway (1-N replicas, sharded by guild):
-    --> receives all Discord interactions
-    --> routes /npc, /entity, /campaign commands itself
-    --> on /session start: creates session worker pod
-
-Session worker (ephemeral, 1 per active session):
-    --> joins voice channel
-    --> runs the full voice pipeline
+Shared Worker Pool (ephemeral, 1 per active session):
+    --> may run sessions from different tenants on the same node
+    --> tenant isolation via TenantContext in application code
+    --> connects to shared PostgreSQL (per-tenant schema)
     --> terminates on /session stop
 ```
 
-- **Pros:** Minimal idle cost (gateway is lightweight), session workers scale
-  to zero, slash commands always respond instantly.
-- **Cons:** More complex architecture (two service types), need RPC between
-  gateway and worker, worker needs access to tenant config and secrets.
-- **Gateway resource:** ~10-20 MB per guild (just Discord gateway + command
-  routing). 1000 guilds in a single gateway instance is feasible.
+```
+┌─────────────────────────────────────────────────┐
+│         Shared Gateway (N replicas)              │
+│  Bot A (tenant 1) ──┐                           │
+│  Bot B (tenant 2) ──┼── Discord Gateway Conn    │
+│  Bot C (tenant 3) ──┘                           │
+│                                                  │
+│  Slash command router ── tenant lookup ──┐       │
+│                                          v       │
+│                              Session Scheduler   │
+└──────────────────────────────────┬───────────────┘
+                                   │ creates
+                    ┌──────────────┼──────────────┐
+                    v              v              v
+              Worker (T1)    Worker (T2)    Worker (T3)
+              campaign-a     campaign-x     campaign-m
+              guild-101      guild-202      guild-303
+```
 
-**Recommendation:** **Option C** is the sweet spot for a SaaS. The gateway
-handles Discord presence (always online, slash commands respond instantly)
-while session workers scale purely with active voice usage. This matches the
-usage pattern: most tenants are idle most of the time (TTRPG sessions are
-weekly, 2-4 hours).
+- **Gateway resource:** ~10-20 MB per bot (Discord WebSocket + command state).
+  A single gateway replica can manage hundreds of bots.
+- **Worker resource:** ~200-300 MB per session (VAD + audio + goroutines).
+  Workers from different tenants may be co-located on the same node.
+- **Isolation:** Application-level via `TenantContext`. Shared PostgreSQL
+  with per-tenant schemas. Shared MCP tools.
+
+### Pro / Business Tier: Dedicated Infrastructure
+
+```
+Dedicated Gateway (per tenant, 1+ replicas):
+    --> manages only this tenant's Discord bot(s)
+    --> one gateway per bot token (Business: multiple bots per guild)
+    --> on /session start: creates dedicated worker pod
+
+Dedicated Workers (per tenant, 1 per active session):
+    --> only this tenant's sessions
+    --> connects to dedicated PostgreSQL instance
+    --> dedicated DB-accessing MCP tool instances
+```
+
+```
+┌───────────────────────────────┐
+│  Dedicated Gateway (Tenant X) │
+│  Bot X ── Discord Gateway     │
+│  Slash command router         │
+│  Session Scheduler            │
+└──────────────┬────────────────┘
+               │ creates
+               v
+         Worker (Tenant X)
+         campaign-a, guild-501
+               │
+               v
+     Dedicated PostgreSQL (Tenant X)
+     ├── campaign_a schema
+     └── campaign_b schema
+```
+
+- **Pro tier:** One bot per tenant, one gateway Deployment per tenant,
+  parallel sessions across guilds (one per guild, different campaigns).
+- **Business tier:** Multiple bots per tenant (multi-bot per guild), one
+  gateway Deployment per bot, truly parallel voice streams.
+
+### Why the Split?
+
+The shared model keeps costs low for Starter/Standard tenants (TTRPG sessions
+are typically weekly, 2-4 hours -- most tenants are idle most of the time).
+The dedicated model gives Pro/Business tenants the strongest isolation
+guarantees and dedicated resources they're paying for.
+
+Both models use the **same Glyphoxa binary**. The difference is purely in
+orchestration: the control plane decides whether to schedule a worker onto
+a shared or dedicated node pool, and which database to connect it to.
+
+### Cold Start & Slash Command Responsiveness
+
+Since gateways are always running (shared or dedicated), slash commands always
+respond instantly. Only session workers have a cold start path:
+
+| Phase | Duration | Mitigation |
+|-------|----------|------------|
+| Pod scheduling | 1-3s | Pre-pull images, warm node pools |
+| Glyphoxa boot + config load | <1s | Binary startup is fast (Go) |
+| Discord voice channel join | 2-5s | Gateway pre-negotiates voice state |
+| Provider initialization | 1-2s | Lazy init (connect on first use) |
+| **Total cold start** | **4-10s** | User sees "Starting session..." in Discord |
+
+This is acceptable for TTRPG sessions (the DM types `/session start` and
+waits a few seconds). The gateway responds to the interaction immediately
+with a deferred message, then edits it when the worker is ready.
+
+### Business Tier: Multi-Bot Per Guild
+
+Discord limits one outbound audio stream per bot per guild. Business tenants
+that need multiple simultaneous NPC voices (true polyphony, not the priority
+queue) require multiple bot accounts in the same guild:
+
+```
+Guild 123:
+    Bot X (NPC: Greymantle) ── Worker A ── voice stream 1
+    Bot Y (NPC: Bartok)     ── Worker B ── voice stream 2
+```
+
+This requires:
+- Multiple bot tokens per tenant (registered separately with Discord)
+- One gateway Deployment per bot token
+- Coordination between workers for turn-taking and scene management
+  (orchestrator must span workers -- shared state via PostgreSQL or gRPC)
+- Each worker joins the same voice channel with a different bot
+
+This is a **rare, custom-contract** scenario. The architecture supports it
+(each bot is independent), but the orchestrator coordination adds complexity.
 
 ---
 
@@ -198,22 +323,49 @@ weekly, 2-4 hours).
 
 ### Why Kubernetes?
 
-- Native support for the gateway + worker topology
+- Native support for the gateway + worker topology across license tiers
 - Pod autoscaling, resource limits, health probes (Glyphoxa already has
   `/healthz` and `/readyz`)
+- Namespaces and node pools for tier-based physical isolation
 - Secret injection via Vault CSI or external-secrets-operator
 - Multi-cluster / multi-region for latency
 - Well-understood by platform teams
+
+### Kubernetes Resource Model by Tier
+
+The license tier maps to Kubernetes resource boundaries:
+
+```
+Namespace: glyphoxa-shared
+├── Deployment: glyphoxa-gateway-shared     (Starter/Standard bot gateway)
+├── Job: session-tenant-abc-20260304        (Starter worker)
+├── Job: session-tenant-def-20260304        (Standard worker)
+├── Deployment: mcp-gateway-shared          (shared stateless MCP tools)
+└── PgBouncer: pgbouncer-shared             (connection pooler)
+
+Namespace: glyphoxa-tenant-xyz              (Pro tenant)
+├── Deployment: glyphoxa-gateway-xyz        (dedicated gateway)
+├── Job: session-xyz-campaign-a-20260304    (dedicated worker)
+└── (PostgreSQL provisioned externally or via Crossplane)
+
+Namespace: glyphoxa-tenant-megacorp         (Business tenant)
+├── Deployment: glyphoxa-gateway-megacorp-bot1
+├── Deployment: glyphoxa-gateway-megacorp-bot2
+├── Job: session-megacorp-campaign-a-bot1
+├── Job: session-megacorp-campaign-b-bot2
+└── Deployment: mcp-memory-megacorp         (dedicated DB-access MCP)
+```
 
 ### Deployment Models
 
 #### Model 1: Plain Deployments + Jobs
 
 ```yaml
-# Gateway: long-running, handles Discord interactions
+# Shared gateway for Starter/Standard tenants
 kind: Deployment
 metadata:
-  name: glyphoxa-gateway
+  name: glyphoxa-gateway-shared
+  namespace: glyphoxa-shared
 spec:
   replicas: 3  # sharded by guild range
   ...
@@ -222,7 +374,13 @@ spec:
 kind: Job
 metadata:
   name: session-tenant-abc-20260304
+  namespace: glyphoxa-shared
+  labels:
+    glyphoxa.io/tenant: abc
+    glyphoxa.io/tier: starter
+    glyphoxa.io/campaign: curse-of-strahd
 spec:
+  ttlSecondsAfterFinished: 300
   template:
     spec:
       containers:
@@ -230,76 +388,79 @@ spec:
         resources:
           requests: { cpu: "500m", memory: "256Mi" }
           limits:   { cpu: "2",    memory: "1Gi"   }
+        env:
+        - name: GLYPHOXA_TENANT_ID
+          value: "abc"
+        - name: GLYPHOXA_CAMPAIGN_ID
+          value: "curse-of-strahd"
       restartPolicy: Never
 ```
 
-- **Pros:** Simple, standard Kubernetes primitives.
+- **Pros:** Simple, standard Kubernetes primitives, TTL controller handles
+  cleanup.
 - **Cons:** Gateway must programmatically create/delete Jobs via the Kubernetes
-  API. Job cleanup needs TTL controller or manual GC.
+  API. License constraint enforcement lives in gateway code.
 
 #### Model 2: Custom Operator (CRD: GlyphoxaSession)
 
 A custom operator watches a `GlyphoxaSession` CRD and manages worker pods.
+The operator is aware of license tiers and enforces constraints declaratively.
 
 ```yaml
 apiVersion: glyphoxa.io/v1alpha1
 kind: GlyphoxaSession
 metadata:
   name: session-guild-123
+  namespace: glyphoxa-shared        # or glyphoxa-tenant-xyz for Pro
 spec:
   tenantID: abc
+  licenseTier: standard             # operator enforces constraints
+  campaignID: curse-of-strahd
   guildID: "123456789"
+  channelID: "987654321"
   configRef:
     name: tenant-abc-config
   secretRef:
     name: tenant-abc-secrets
+status:
+  phase: Active                     # Provisioning -> Connecting -> Active -> Draining -> Completed
+  workerPod: session-abc-20260304-xxxxx
+  startedAt: "2026-03-04T19:00:00Z"
+  sessionDuration: "2h15m"
 ```
 
 The operator:
-- Creates the worker pod with injected config and secrets
+- **Enforces license constraints** before creating the worker:
+  - Starter: reject if any session active for this tenant
+  - Standard: reject if any session active for this tenant
+  - Pro: reject if this campaign already has a session OR this guild already
+    has a session
+  - Business: reject only if this campaign already has a session
+- Creates the worker pod in the correct namespace (shared or dedicated)
+- Injects the right DB connection (shared instance + schema, or dedicated)
 - Monitors health (restarts on crash, tracks session duration)
 - Cleans up on session end or timeout
-- Reports status back to the gateway
-- Enforces per-tenant resource quotas
+- Reports status back via CRD `.status`
 
-- **Pros:** Declarative, Kubernetes-native lifecycle, audit trail via CRD
-  status, can enforce policies (max sessions per tenant, resource limits).
+- **Pros:** Declarative, Kubernetes-native lifecycle, license enforcement is
+  auditable via CRD events, operator can manage both shared and dedicated
+  topologies.
 - **Cons:** Writing and maintaining an operator is significant effort.
-  Consider operator frameworks: `kubebuilder` or `operator-sdk`.
+  Use `kubebuilder` or `operator-sdk` to scaffold.
 
 #### Model 3: Knative / Cloud Run (Serverless)
 
-Use Knative Serving or a managed equivalent (Cloud Run, AWS App Runner) for
-session workers. Scale to zero when no sessions are active.
+Use Knative Serving for session workers with scale-to-zero.
 
-```yaml
-apiVersion: serving.knative.dev/v1
-kind: Service
-metadata:
-  name: glyphoxa-session
-spec:
-  template:
-    metadata:
-      annotations:
-        autoscaling.knative.dev/min-scale: "0"
-        autoscaling.knative.dev/max-scale: "100"
-    spec:
-      containers:
-      - image: ghcr.io/mrwong99/glyphoxa:latest
-        resources:
-          limits: { cpu: "2", memory: "1Gi" }
-```
+- **Verdict:** Poor fit. Glyphoxa sessions are long-running (hours), not
+  request/response. Knative's concurrency model and cold-start behaviour work
+  against the voice pipeline's requirements. **Not recommended.**
 
-- **Pros:** Managed scaling, zero idle cost, built-in revision management.
-- **Cons:** Knative is HTTP-oriented (Glyphoxa's session lifecycle is
-  long-running WebSocket/voice, not request/response). Serverless cold starts
-  (5-15s) may be problematic. May need to use Knative in "always allocated"
-  mode which defeats the purpose.
-
-**Recommendation:** Start with **Model 1** (Deployments + Jobs) for simplicity.
-If the number of tenants grows past ~100 and operational burden increases,
-invest in **Model 2** (custom operator) for declarative lifecycle management.
-Knative is a poor fit for long-running voice sessions.
+**Recommendation:** Start with **Model 1** (Deployments + Jobs) for the
+initial launch. Invest in **Model 2** (custom operator) as soon as the
+complexity of license constraint enforcement and multi-tier scheduling
+justifies it -- likely around 50+ tenants or when the first Pro tier customer
+onboards.
 
 ---
 
@@ -307,120 +468,191 @@ Knative is a poor fit for long-running voice sessions.
 
 ### The Problem
 
-All tenants share one PostgreSQL instance. Need:
-- Data isolation (tenant A can't read tenant B's memories)
-- Performance isolation (tenant A's heavy queries don't slow tenant B)
-- Scalable vector search (pgvector HNSW scales poorly past ~10M vectors on a
-  single instance)
+All tenants share one PostgreSQL instance today with no isolation. Voice
+transcripts are highly sensitive data -- cross-tenant leakage is unacceptable.
+The isolation strategy must match the license tier: shared-instance for
+cost-efficient lower tiers, dedicated-instance for premium tiers.
 
-### Isolation Strategies
+### Two-Tier Database Architecture
 
-#### Option A: Schema-per-tenant
+The license tier determines the database topology:
 
-Each tenant gets a PostgreSQL schema. Same database, separate namespaces.
+| Tier | DB Topology | Campaign Isolation | Rationale |
+|------|-------------|-------------------|-----------|
+| **Starter / Standard** | Shared PostgreSQL instance, **per-tenant schema** | Per-campaign tables within the tenant schema | Cost-efficient, strong logical isolation |
+| **Pro / Business** | **Dedicated PostgreSQL instance** per tenant | Per-campaign tables within the instance | Strongest isolation, independent scaling, no noisy neighbours |
+
+### Starter / Standard: Schema-Per-Tenant on Shared Instance
+
+Each tenant gets its own PostgreSQL schema within a shared database. Campaigns
+are separated by a `campaign_id` column within the tenant's schema.
 
 ```sql
+-- Tenant abc's schema
 CREATE SCHEMA tenant_abc;
-CREATE TABLE tenant_abc.session_entries (...);
-CREATE TABLE tenant_abc.chunks (...);
-CREATE TABLE tenant_abc.entities (...);
-CREATE TABLE tenant_abc.relationships (...);
-```
 
-Connection string includes `search_path=tenant_xxx` or the application
-qualifies table names.
+CREATE TABLE tenant_abc.session_entries (
+    id           BIGSERIAL    PRIMARY KEY,
+    campaign_id  TEXT         NOT NULL,
+    session_id   TEXT         NOT NULL,
+    speaker_id   TEXT         NOT NULL DEFAULT '',
+    speaker_name TEXT         NOT NULL DEFAULT '',
+    text         TEXT         NOT NULL,
+    raw_text     TEXT         NOT NULL DEFAULT '',
+    npc_id       TEXT         NOT NULL DEFAULT '',
+    timestamp    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    duration_ns  BIGINT       NOT NULL DEFAULT 0
+);
 
-- **Pros:** Strong logical isolation, PostgreSQL RBAC can enforce access,
-  independent schema migrations possible, `pg_dump` per-schema for backups.
-- **Cons:** Schema explosion at scale (10k tenants = 10k schemas), connection
-  pool management (one pool per schema or SET search_path per query), DDL
-  migrations must iterate all schemas.
-
-#### Option B: Shared tables with `tenant_id` column
-
-Add a `tenant_id TEXT NOT NULL` column to every table. All queries include
-`WHERE tenant_id = $1`.
-
-```sql
-CREATE TABLE session_entries (
-    id         BIGSERIAL PRIMARY KEY,
-    tenant_id  TEXT NOT NULL,
-    session_id TEXT NOT NULL,
+CREATE TABLE tenant_abc.chunks (
+    id          TEXT         PRIMARY KEY,
+    campaign_id TEXT         NOT NULL,
+    session_id  TEXT         NOT NULL,
+    content     TEXT         NOT NULL,
+    embedding   vector(1536),
     ...
 );
-CREATE INDEX idx_session_entries_tenant ON session_entries (tenant_id);
-```
 
-Use PostgreSQL Row-Level Security (RLS) as a safety net:
-
-```sql
-ALTER TABLE session_entries ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON session_entries
-    USING (tenant_id = current_setting('app.tenant_id'));
-```
-
-- **Pros:** Single schema, simple migrations, works at any tenant count,
-  RLS provides defense-in-depth.
-- **Cons:** Every query must filter by tenant_id (easy to forget = data leak),
-  index bloat (tenant_id in every index), noisy-neighbor on shared tables.
-
-#### Option C: Database-per-tenant
-
-Each tenant gets a fully separate PostgreSQL database (or even a separate
-instance via managed services like RDS).
-
-- **Pros:** Strongest isolation, independent scaling, per-tenant backups and
-  restores, can use different PostgreSQL versions/extensions.
-- **Cons:** Highest operational complexity, connection overhead, no cross-tenant
-  queries (fine for Glyphoxa), expensive at scale with managed databases.
-
-#### Option D: Shared instance with partitioning
-
-Use PostgreSQL declarative partitioning to split tables by tenant:
-
-```sql
-CREATE TABLE session_entries (
-    id         BIGSERIAL,
-    tenant_id  TEXT NOT NULL,
+CREATE TABLE tenant_abc.entities (
+    id          TEXT         PRIMARY KEY,
+    campaign_id TEXT         NOT NULL,
+    type        TEXT         NOT NULL,
+    name        TEXT         NOT NULL,
+    attributes  JSONB        NOT NULL DEFAULT '{}',
     ...
-) PARTITION BY LIST (tenant_id);
+);
 
-CREATE TABLE session_entries_tenant_abc PARTITION OF session_entries
-    FOR VALUES IN ('abc');
+CREATE TABLE tenant_abc.relationships (
+    source_id   TEXT  NOT NULL REFERENCES tenant_abc.entities (id) ON DELETE CASCADE,
+    target_id   TEXT  NOT NULL REFERENCES tenant_abc.entities (id) ON DELETE CASCADE,
+    campaign_id TEXT  NOT NULL,
+    rel_type    TEXT  NOT NULL,
+    ...
+);
+
+-- Indexes include campaign_id for query filtering
+CREATE INDEX idx_session_entries_campaign ON tenant_abc.session_entries (campaign_id);
+CREATE INDEX idx_chunks_campaign ON tenant_abc.chunks (campaign_id);
+CREATE INDEX idx_entities_campaign ON tenant_abc.entities (campaign_id);
 ```
 
-- **Pros:** Partition pruning gives per-tenant query performance, can
-  attach/detach partitions for data lifecycle, single schema.
-- **Cons:** Partition management overhead, DDL complexity, pgvector HNSW
-  indexes are per-partition (good for isolation, but each partition needs its
-  own index).
+**Defense-in-depth with RLS:**
 
-**Recommendation:** **Option B** (shared tables + `tenant_id` + RLS) for the
-initial launch (simplest, fewest moving parts). Migrate to **Option A**
-(schema-per-tenant) or **Option D** (partitioning) if specific tenants need
-performance isolation or if the total data volume makes shared indexes
-problematic.
+Even though schemas provide isolation, apply RLS as a safety net. Each worker
+sets `app.tenant_id` on its connection:
+
+```sql
+-- Applied to the shared database role used by workers
+ALTER TABLE tenant_abc.session_entries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON tenant_abc.session_entries
+    USING (current_setting('app.tenant_schema') = 'tenant_abc');
+```
+
+**Pros:**
+- Strong logical isolation (schema = namespace boundary)
+- PostgreSQL RBAC can grant per-schema access to dedicated DB roles
+- `pg_dump --schema=tenant_abc` for per-tenant backup/export
+- Dropping a schema cleanly removes all tenant data (offboarding)
+- Indexes are per-schema, so tenant A's 100k vectors don't bloat tenant B's
+  HNSW index
+
+**Cons:**
+- Schema creation/migration must iterate all tenants (automatable)
+- Connection pool management: `SET search_path = tenant_xxx` per query or
+  use a pool-per-schema (prefer the former to limit connections)
+- Shared instance means noisy-neighbour risk for CPU/IO (mitigated by
+  resource limits on the PostgreSQL side, e.g., `pg_cgroup` or cloud quotas)
+
+### Pro / Business: Dedicated PostgreSQL Instance
+
+Each Pro/Business tenant gets a fully separate PostgreSQL instance (managed
+service like RDS/Cloud SQL, or a dedicated pod in Kubernetes).
+
+```
+Tenant X (Pro):
+    PostgreSQL instance: db-tenant-x.internal
+    ├── public schema (or named schema, single tenant so no namespace needed)
+    │   ├── session_entries  (campaign_id column)
+    │   ├── chunks           (campaign_id column)
+    │   ├── entities         (campaign_id column)
+    │   └── relationships    (campaign_id column)
+    └── campaign isolation via campaign_id WHERE clause
+```
+
+**Pros:**
+- Strongest isolation (separate process, separate storage)
+- Independent scaling (tenant X can have a larger instance without affecting
+  the shared pool)
+- Independent backups, PITR, and maintenance windows
+- No noisy-neighbour risk
+- Simpler queries (no schema qualification needed)
+
+**Cons:**
+- Higher cost (~$15-50/month per managed PostgreSQL instance)
+- More infrastructure to manage (automatable via Terraform/Crossplane)
+- Connection routing: control plane must maintain a tenant -> DB endpoint map
+
+### Campaign Isolation Within a Tenant
+
+Regardless of DB topology, **campaign_id** is a mandatory column on all data
+tables. This serves two purposes:
+
+1. **Query scoping:** Every query includes `WHERE campaign_id = $1`. A session
+   worker is bound to a single campaign and never sees data from other
+   campaigns.
+2. **Starter tier cleanup:** When a Starter tenant creates a new campaign, the
+   old campaign's data is deleted:
+   ```sql
+   DELETE FROM tenant_abc.session_entries WHERE campaign_id = 'old-campaign';
+   DELETE FROM tenant_abc.chunks WHERE campaign_id = 'old-campaign';
+   DELETE FROM tenant_abc.entities WHERE campaign_id = 'old-campaign';
+   DELETE FROM tenant_abc.relationships WHERE campaign_id = 'old-campaign';
+   ```
+   The export feature must run **before** this deletion.
 
 ### Vector Index Scaling
 
 pgvector HNSW performance degrades around 5-10M vectors on a single index.
-Strategies:
+The schema-per-tenant model naturally helps (each tenant's `chunks` table has
+its own HNSW index). Additional strategies:
 
 | Approach | When | Trade-off |
 |----------|------|-----------|
-| Partition by tenant_id | Moderate scale | Each partition has its own HNSW index (smaller, faster) |
-| Partition by time | Log-like data | Old sessions in cold partitions, recent in hot |
-| Separate pgvector instance | Large scale | Dedicated vector DB (e.g., Qdrant, Weaviate) behind the `SemanticIndex` interface |
-| Dimensionality reduction | Cost savings | Use smaller embedding models (768d vs 3072d) to reduce index size |
+| Schema-per-tenant (already done) | Default | Each tenant has its own HNSW index (smaller, faster) |
+| Partition chunks by campaign_id | Large tenants with many campaigns | Per-campaign HNSW, prevents cross-campaign index bloat |
+| Partition by time | Log-like data in long-running campaigns | Old sessions in cold partitions, recent in hot |
+| Dedicated vector DB | Very large scale | Qdrant/Weaviate behind the `SemanticIndex` interface |
+| Dimensionality reduction | Cost savings | Smaller embedding models (768d vs 3072d) reduce index size |
 
 ### Connection Pooling
 
-At scale, each Glyphoxa worker pod opens a pgx connection pool. 100 workers
-with 10 connections each = 1000 PostgreSQL connections. Solutions:
+At scale, each Glyphoxa worker opens a pgx connection pool. Connection
+management differs by tier:
 
-- **PgBouncer** in transaction mode (sidecar or centralized)
-- **Supavisor** for Supabase-style pooling
-- **pgx pool with MaxConns=3** per worker (voice pipeline is not DB-bound)
+**Starter / Standard (shared instance):**
+- Centralised **PgBouncer** in transaction mode in front of the shared
+  PostgreSQL instance
+- Each worker uses 3-5 connections (voice pipeline is not DB-bound)
+- PgBouncer handles `SET search_path` via `server_reset_query`
+- 100 concurrent workers x 3 conns = 300 PgBouncer connections, mapped to
+  ~50 actual PostgreSQL connections
+
+**Pro / Business (dedicated instance):**
+- Direct pgx pool to the dedicated instance (no PgBouncer needed for a
+  single-tenant DB with few workers)
+- MaxConns=5 per worker is sufficient
+
+### Database Provisioning
+
+The control plane must automate DB lifecycle:
+
+| Event | Starter/Standard | Pro/Business |
+|-------|------------------|--------------|
+| Tenant created | `CREATE SCHEMA tenant_xxx; Migrate()` on shared instance | Provision new PostgreSQL instance (Terraform/Crossplane), run `Migrate()` |
+| Campaign created | Insert into `campaigns` table within tenant schema | Same |
+| Campaign deleted (Starter) | `DELETE FROM ... WHERE campaign_id = X` (after export) | N/A (Standard+) |
+| Tenant offboarded | `DROP SCHEMA tenant_xxx CASCADE` | Destroy PostgreSQL instance |
+| Schema migration | Iterate all tenant schemas on shared instance, run DDL | Run DDL on dedicated instance |
 
 ---
 
@@ -509,13 +741,28 @@ files).
 
 ### BYOK (Bring Your Own Key) Flow
 
-For tenants who want to use their own API keys:
+All tiers support BYOK for provider API keys. Pro/Business tenants are
+expected to BYOK (they control their own costs). Starter/Standard can
+optionally BYOK or use platform-provided keys.
 
 1. Tenant enters keys via a web dashboard or Discord DM to the bot
-2. Keys are encrypted and stored in the secrets backend under the tenant's path
-3. The session worker's pod spec references the tenant's secret
+2. Keys are encrypted and stored in the secrets backend under the tenant's
+   path: `secret/data/tenants/<tenant_id>/providers/<provider_name>`
+3. The session worker's pod spec references the tenant's secret (via ESO
+   ExternalSecret or Vault CSI)
 4. At startup, Glyphoxa reads keys from env vars / files
 5. Keys are never logged, never stored in the config YAML
+
+**Resolution order:** `tenant BYOK key > platform default key > env var`
+
+### Per-Tier Secret Scope
+
+| Secret | Starter / Standard | Pro / Business |
+|--------|--------------------|--------------------|
+| Discord bot token | Vault: `tenants/<id>/discord` | Vault: `tenants/<id>/discord` (+ additional bot tokens for Business) |
+| LLM/STT/TTS API keys | Vault: `tenants/<id>/providers/` (BYOK or platform) | Vault: `tenants/<id>/providers/` (BYOK expected) |
+| DB credentials | Shared DB role, schema-scoped | Dedicated DB credentials per tenant |
+| MCP tool auth | Shared MCP gateway token | Per-tenant MCP auth tokens |
 
 ---
 
@@ -524,147 +771,270 @@ For tenants who want to use their own API keys:
 ### The Problem
 
 MCP tools run as either in-process Go handlers (built-ins) or external
-processes (stdio/HTTP). In a multi-tenant deployment:
-- Built-in tools (dice roller, rules lookup) are stateless -- can be shared
-- Memory tools need tenant-scoped database access
-- External tools (image gen, web search) may have per-tenant API keys
-- Custom per-tenant MCP servers need lifecycle management
+processes (stdio/HTTP). The key distinction for multi-tenancy is whether a
+tool **accesses tenant data** (database, memory) or is **stateless** (dice,
+rules, web search). This distinction drives the isolation model.
 
-### Architecture Options
+### Tool Classification
 
-#### Option A: All tools in-process (current model, per worker)
+| Category | Examples | Tenant Data? | Shareable? |
+|----------|----------|-------------|------------|
+| **Stateless built-in** | `roll`, `roll_table`, `search_rules`, `get_rule` | No | Yes -- safe to share across all tenants |
+| **Stateless external** | Web search, image generation | No (but may use per-tenant API keys) | Yes -- shared service, per-tenant auth |
+| **DB-accessing built-in** | `search_sessions`, `query_entities`, `get_summary`, `search_facts` | Yes -- reads tenant memory | Depends on tier |
+| **DB-accessing external** | Custom MCP servers that query tenant data | Yes | Depends on tier |
+| **File I/O** | `read_file`, `write_file` | Yes -- tenant's sandboxed directory | No -- always per-worker |
 
-Each session worker runs all built-in tools in-process and spawns stdio MCP
-servers as subprocesses. No shared state.
+### Architecture by Tier
 
-- **Pros:** Simple, no network hop for built-in tools, tools die with the
-  session.
-- **Cons:** Duplicated processes (every worker spawns its own rules lookup,
-  dice roller), stdio MCP servers can't be shared.
+#### All Tiers: Shared Stateless MCP Gateway
 
-#### Option B: Shared MCP gateway service
-
-A centralized MCP gateway runs shared tool servers (rules lookup, dice roller,
-web search). Workers connect via streamable-http.
+A centralized MCP gateway runs stateless tool servers that are safe to share.
+All workers connect via streamable-http:
 
 ```
-Worker A ---> MCP Gateway (shared) ---> rules-lookup
-Worker B -/                         ---> dice-roller
-                                    ---> web-search
+Worker A (tenant 1) ──┐
+Worker B (tenant 2) ──┼──> Shared MCP Gateway ──> dice-roller
+Worker C (tenant 3) ──┘                       ──> rules-lookup
+                                               ──> web-search (per-tenant API key via auth header)
 ```
 
-Per-tenant tools still run in-process or as sidecar containers.
+- No tenant data touches these tools, so sharing is safe.
+- Web search and image gen tools use per-tenant API keys passed in the
+  request auth header (the gateway routes to the right upstream key based on
+  the tenant ID in the request).
+- The gateway is a Deployment with 2+ replicas for HA.
 
-- **Pros:** Resource-efficient (one rules lookup process serves all workers),
-  centralized tool health monitoring, can add new shared tools without
-  redeploying workers.
-- **Cons:** Network hop adds latency (~1-5ms), MCP gateway becomes a SPOF
-  (needs HA), auth between worker and gateway.
+#### All Tiers: In-Process Built-In Tools
 
-#### Option C: Sidecar MCP containers
+Stateless built-in tools (dice, rules) also run in-process in the worker.
+This is the **default** for latency-critical FAST-tier tools. The shared
+gateway is a fallback for tools that are too heavy or too numerous to embed
+in every worker.
 
-Each session worker pod includes sidecar containers for MCP tools that need
-isolation (per-tenant image gen, custom tool servers).
+Both paths coexist: in-process tools have zero network overhead, gateway tools
+add ~1-5ms but save per-worker resources.
+
+#### Starter / Standard: DB-Accessing Tools In-Process (Shared DB)
+
+Memory tools (`search_sessions`, `query_entities`, etc.) run **in-process** in
+the session worker. They inherit the worker's database connection, which is
+scoped to the tenant's schema:
+
+```go
+// Worker startup for Starter/Standard tenant
+pool := connectToSharedDB()
+pool.Exec(ctx, "SET search_path = tenant_abc")
+
+memoryTools := memorytool.NewTools(store.L1(), store.L2(), store)
+// These tools automatically query within tenant_abc schema
+```
+
+Since Starter/Standard workers already connect to the shared PostgreSQL
+instance with a tenant-scoped schema, the memory tools are isolated by
+construction. No separate MCP service needed.
+
+#### Pro / Business: Dedicated DB-Accessing MCP Instances
+
+Pro/Business tenants have a **dedicated PostgreSQL instance**. DB-accessing
+MCP tools must connect to this dedicated instance, not the shared one.
+
+Two options:
+
+**Option A: In-process (same as lower tiers)**
+
+Memory tools still run in-process in the worker. The worker's DB connection
+points to the dedicated instance. Simple, no extra infrastructure.
+
+```
+Worker (Tenant X) ──> dedicated PostgreSQL (Tenant X)
+    └── in-process memory tools query dedicated DB
+```
+
+**Option B: Dedicated MCP service per tenant**
+
+A separate MCP server pod per tenant runs the DB-accessing tools. This is
+useful when the tenant has custom MCP tools that need DB access, or when
+multiple workers (parallel sessions) should share a tool cache:
+
+```
+Worker A (Tenant X, campaign 1) ──┐
+Worker B (Tenant X, campaign 2) ──┼──> MCP-Memory-TenantX ──> dedicated PostgreSQL
+```
 
 ```yaml
+# Dedicated MCP service for tenant X
+kind: Deployment
+metadata:
+  name: mcp-memory-tenant-x
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: mcp-memory
+        image: ghcr.io/mrwong99/glyphoxa-mcp-memory:latest
+        env:
+        - name: POSTGRES_DSN
+          valueFrom:
+            secretKeyRef:
+              name: tenant-x-db-credentials
+              key: dsn
+```
+
+**Recommendation:** Start with **Option A** (in-process) for all tiers. Only
+move to **Option B** (dedicated MCP service) for Business tenants with
+custom tool requirements or multiple parallel sessions that benefit from
+shared tool state/caching.
+
+### Per-Tenant Custom MCP Servers
+
+Business tenants may bring their own MCP tool servers (custom game
+integrations, VTT connectors, etc.). These run as **sidecar containers** in
+the worker pod or as **tenant-managed external HTTP endpoints**:
+
+```yaml
+# Business tenant's custom MCP tool as sidecar
 spec:
   containers:
   - name: glyphoxa-worker
     ...
-  - name: mcp-image-gen      # sidecar, per-tenant API key
-    image: mcp-image-gen:latest
+  - name: mcp-custom-vtt
+    image: tenant-x/foundry-connector:latest
     env:
-    - name: API_KEY
+    - name: FOUNDRY_API_KEY
       valueFrom:
         secretKeyRef: ...
-  - name: mcp-custom-tools   # tenant's custom MCP server
-    image: tenant-abc/custom-tools:latest
 ```
 
-- **Pros:** Per-tenant isolation for sensitive tools, lifecycle tied to session,
-  localhost networking (fast).
-- **Cons:** Pod spec complexity, sidecar resource overhead.
+Alternatively, the tenant hosts the MCP server externally and provides the
+streamable-http URL in their Glyphoxa config. The worker connects to it via
+the standard MCP HTTP transport with tenant-provided auth.
 
-**Recommendation:** **Hybrid.** Built-in tools (dice, rules, memory) stay
-in-process in the worker. Shared stateless tools (web search) run as a shared
-MCP gateway service. Per-tenant custom tools run as sidecars or
-tenant-managed external HTTP servers.
+### Summary: MCP Isolation Matrix
 
-### Memory Tool Scoping
-
-Memory tools (`search_sessions`, `query_entities`, etc.) currently query the
-global database. In a multi-tenant setup:
-- In-process memory tools receive the tenant-scoped database connection (via
-  the worker's config)
-- If using shared tables with `tenant_id`, the memory tools must filter by
-  tenant -- enforced at the `SessionStore` / `KnowledgeGraph` interface level
-- RLS provides defense-in-depth
+| Tool Type | Starter / Standard | Pro / Business |
+|-----------|--------------------|--------------------|
+| Stateless (dice, rules) | In-process + shared gateway | In-process + shared gateway |
+| Web search, image gen | Shared gateway (per-tenant API key) | Shared gateway (per-tenant API key) |
+| Memory tools (DB-access) | In-process, shared DB (tenant schema) | In-process, dedicated DB |
+| File I/O | In-process, per-worker sandbox | In-process, per-worker sandbox |
+| Custom tenant tools | Not supported | Sidecar or external HTTP |
 
 ---
 
-## 8. Discord Gateway Sharding
+## 8. Discord Gateway & Bot Management
 
 ### The Problem
 
-At 2500 guilds, Discord mandates gateway sharding. Even below that, a single
-gateway connection handling 100+ guilds may hit rate limits or event
-processing bottlenecks.
+Each tenant brings their own Discord bot token (or Glyphoxa provides one).
+The gateway must manage potentially thousands of bot tokens, each maintaining
+a Discord gateway WebSocket connection. At scale, this intersects with
+Discord's sharding requirements.
 
-### Sharding Models
+### Bot Token Ownership Model
 
-#### Option A: One shard per gateway pod (manual sharding)
+Each tenant has **one Discord bot application** (Starter through Pro). The
+tenant registers the bot on Discord's developer portal and provides the token
+to Glyphoxa. Business tenants may have multiple bots (one per NPC voice
+stream).
 
-Deploy N gateway pods, each configured with a shard ID range. Discord's
-sharding protocol assigns guilds to shards deterministically
-(`guild_id >> 22 % num_shards`).
+| Tier | Bot Tokens | Registered By |
+|------|-----------|---------------|
+| **Starter** | 1 | Tenant (or Glyphoxa-managed) |
+| **Standard** | 1 | Tenant (or Glyphoxa-managed) |
+| **Pro** | 1 | Tenant |
+| **Business** | N (one per concurrent voice stream) | Tenant |
 
-```
-Gateway Pod 0: shard 0 (guilds 0-832)
-Gateway Pod 1: shard 1 (guilds 833-1665)
-Gateway Pod 2: shard 2 (guilds 1666-2499)
-```
+**Open question:** Should Glyphoxa offer a "managed bot" option where we
+provide the bot token (simpler onboarding) vs always requiring tenants to
+bring their own bot (BYOB)? Managed bots are simpler for users but create
+a SPOF (Glyphoxa's bot application gets rate-limited or banned, all tenants
+are affected). BYOB isolates blast radius.
 
-- **Pros:** Simple, well-understood, each pod is independent.
-- **Cons:** Manual shard assignment, rebalancing on scale-up requires
-  coordination.
+### Shared Gateway: Multi-Bot Process
 
-#### Option B: Shard manager (disgo's built-in sharding)
-
-disgo (the Discord library Glyphoxa uses) has built-in shard management. A
-single process can run multiple shards internally.
-
-- **Pros:** Less operational complexity, disgo handles shard lifecycle.
-- **Cons:** All shards in one process (single point of failure, resource
-  contention), doesn't scale past one node easily.
-
-#### Option C: External shard orchestrator
-
-A dedicated shard coordinator (like [Twilight
-Gateway](https://github.com/twilight-rs/twilight) or a custom one) handles
-Discord gateway connections. It forwards events to the gateway service via
-AMQP/NATS/Redis Streams.
+The shared gateway (Starter/Standard) manages **multiple bot tokens** in a
+single process. Each bot token opens its own Discord gateway WebSocket
+connection. disgo supports multiple client instances in the same process:
 
 ```
-Discord API <--> Shard Orchestrator <--> Message Queue <--> Gateway Pods
+Shared Gateway Pod:
+    Bot Client (tenant abc, token A) ── Discord WS ── guilds [101, 102]
+    Bot Client (tenant def, token B) ── Discord WS ── guilds [201]
+    Bot Client (tenant ghi, token C) ── Discord WS ── guilds [301, 302, 303]
 ```
 
-- **Pros:** Separates Discord protocol handling from application logic,
-  horizontal scaling, shard rebalancing without app restarts.
-- **Cons:** Significant infrastructure (message queue, orchestrator),
-  added latency for event delivery.
+Events are demultiplexed by bot client -> tenant lookup -> command routing.
 
-**Recommendation:** Start with **Option A** (one shard per pod) using disgo's
-shard ID configuration. This works well up to ~50 shards (~125k guilds). If
-Glyphoxa needs to scale beyond that, move to **Option C** with a message
-queue for event distribution.
+**Scaling the shared gateway:**
+- Each bot WebSocket uses ~5-10 MB memory + minimal CPU (event-driven).
+- A single gateway pod can handle ~200-500 bot connections.
+- Scale horizontally by assigning bot token ranges to gateway replicas.
+- Use a consistent hash or control plane assignment to map tokens to pods.
 
-### Bot Token Strategy
+### Dedicated Gateway: Per-Bot Process (Pro/Business)
+
+Pro/Business tenants get one gateway Deployment per bot token. This is
+the same Glyphoxa gateway binary, just configured with a single bot token:
+
+```yaml
+kind: Deployment
+metadata:
+  name: glyphoxa-gateway-tenant-xyz
+  namespace: glyphoxa-tenant-xyz
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: glyphoxa-gateway
+        env:
+        - name: GLYPHOXA_MODE
+          value: gateway
+        - name: GLYPHOXA_TENANT_ID
+          value: xyz
+        - name: DISCORD_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: tenant-xyz-secrets
+              key: discord_bot_token
+```
+
+### Discord Sharding (Per-Bot)
+
+Discord sharding applies **per bot token**, not per Glyphoxa instance. A
+single bot token needs sharding when it's in 2500+ guilds. This is unlikely
+for individual tenants (one customer rarely has 2500 Discord servers), but
+could apply to a Glyphoxa-managed shared bot.
+
+If sharding is needed:
 
 | Approach | Description | When |
 |----------|-------------|------|
-| **Single bot token** | All shards share one bot token (standard Discord bot) | < 2500 guilds, one bot application |
-| **Multiple bot tokens** | Separate bot applications for shard groups | Hitting per-token rate limits |
-| **Per-tenant bot tokens** | Each tenant registers their own bot (BYOB) | Self-hosted / enterprise deployments |
+| **disgo built-in sharding** | Single process, multiple shards internally | < 10 shards, simple |
+| **One shard per pod** | Deploy N pods, each with a shard ID range | 10-50 shards |
+| **External shard orchestrator** | Dedicated coordinator + message queue | 50+ shards |
+
+**Recommendation:** Don't build sharding support until a single bot token
+approaches 2500 guilds. For Starter/Standard, the shared gateway's multi-bot
+model means each bot token only serves one tenant's guilds (typically 1-5).
+Sharding is a non-issue until very large scale.
+
+### Gateway Responsibilities
+
+The gateway handles everything that does **not** require the voice pipeline:
+
+| Function | In Gateway | In Worker |
+|----------|-----------|-----------|
+| Discord gateway WebSocket | Yes | No |
+| Slash command handling (`/session`, `/npc`, `/entity`, `/campaign`) | Yes | No |
+| Session lifecycle (start, stop, status) | Yes (orchestrates) | Yes (executes) |
+| Voice channel join/leave | No | Yes |
+| VAD, STT, LLM, TTS pipeline | No | Yes |
+| NPC CRUD (create, update, delete) | Yes | No |
+| Campaign management | Yes | No |
+| License constraint enforcement | Yes | No |
 
 ---
 
@@ -680,16 +1050,19 @@ question is how to scale this for multi-tenant production.
 
 #### Tenant-scoped metrics
 
-Add a `tenant_id` label to key metrics:
+Add `tenant_id` and `license_tier` labels to key metrics. Add `campaign_id`
+where relevant (session and provider metrics):
 
 ```
-glyphoxa_active_sessions{tenant_id="abc"}
-glyphoxa_stt_duration_seconds{tenant_id="abc"}
+glyphoxa_active_sessions{tenant_id="abc", license_tier="standard", campaign_id="cos"}
+glyphoxa_stt_duration_seconds{tenant_id="abc", campaign_id="cos"}
 glyphoxa_provider_requests_total{tenant_id="abc", provider="openai", kind="llm"}
+glyphoxa_session_duration_seconds{tenant_id="abc", license_tier="standard"}
 ```
 
-**Cardinality concern:** At 1000 tenants with 6 metric families, this adds
-~6000 time series. Manageable for Prometheus, but monitor cardinality growth.
+**Cardinality concern:** At 1000 tenants x 3 campaigns avg x 6 metric
+families = ~18k time series. Manageable for Prometheus, but keep `campaign_id`
+off high-frequency metrics (e.g., per-frame VAD) to avoid explosion.
 
 #### Centralized log aggregation
 
@@ -720,12 +1093,16 @@ Either:
 Per-tenant alerts for:
 - Session failures (crash, disconnect without reconnect)
 - Provider error spikes (tenant's API keys may be exhausted/revoked)
-- Latency degradation
+- Latency degradation (mouth-to-ear > 2s threshold)
+- Quota approaching limit (session hours, token budget)
+- License expiry warning
 
 Global alerts for:
 - Cluster resource exhaustion
-- Database connection pool saturation
-- Shard disconnections
+- Shared PostgreSQL connection pool saturation
+- Shared gateway bot connection failures
+- Dedicated infrastructure health (Pro/Business PostgreSQL instances)
+- Control plane API latency
 
 ---
 
@@ -733,57 +1110,121 @@ Global alerts for:
 
 ### The Problem
 
-Today `SessionManager` is an in-process singleton. In a distributed
-deployment, session state must be managed across gateway and worker
-processes.
+Today `SessionManager` is an in-process singleton with a boolean `active`
+flag. In a distributed, multi-tenant deployment, session state must be:
+- Managed across gateway and worker processes
+- Queryable for license constraint enforcement (e.g., "does this tenant
+  already have an active session?")
+- Scoped by tenant, campaign, and guild
 
 ### Session State Machine
 
 ```
-[Idle] --/session start--> [Provisioning] --pod ready--> [Connecting]
-    --voice joined--> [Active] --/session stop--> [Draining] --drained--> [Idle]
+[Idle] --/session start--> [Validating] --license OK--> [Provisioning]
+    --pod ready--> [Connecting] --voice joined--> [Active]
+    --/session stop--> [Draining] --drained--> [Completed]
                            |
                            +--crash--> [Recovering] --reconnect--> [Active]
-                           +--timeout--> [Draining]
+                           +--idle timeout--> [Draining]
+                           +--max duration--> [Draining]
 ```
 
-### State Storage Options
+The **Validating** state is new -- this is where the gateway checks license
+constraints before provisioning a worker:
 
-| Option | Description | Pros | Cons |
-|--------|-------------|------|------|
-| **PostgreSQL** | `sessions` table with state, tenant, timestamps | Already have PostgreSQL, ACID, queryable | Polling for state changes, slightly higher latency |
-| **Redis** | Key-value with TTL, pub/sub for state changes | Fast, pub/sub for real-time updates | Another dependency |
-| **etcd / Kubernetes API** | CRD status field or etcd keys | Kubernetes-native, watches for changes | Coupling to Kubernetes, not suitable for high-frequency updates |
-| **In-memory (gateway)** | Gateway holds session state, workers report via gRPC | Lowest latency, simple | State lost on gateway restart, needs persistence backup |
+```
+/session start (tenant=abc, campaign=X, guild=101)
+    --> Query: active sessions WHERE tenant_id = 'abc'
+    --> Check license tier constraints:
+        Starter:  any active session? -> REJECT
+        Standard: any active session? -> REJECT
+        Pro:      active session for campaign X? -> REJECT
+                  active session on guild 101? -> REJECT
+        Business: active session for campaign X? -> REJECT
+    --> All checks pass -> Provisioning
+```
 
-**Recommendation:** **PostgreSQL** for durable session state (it's already a
-dependency). Use a `sessions` table:
+### Session State Table
+
+**Recommendation:** PostgreSQL for durable session state (already a
+dependency). The `sessions` table lives in a **shared control-plane database**
+(not in per-tenant schemas) because the gateway needs to query across all
+tenants for scheduling and monitoring.
 
 ```sql
 CREATE TABLE sessions (
-    id          TEXT PRIMARY KEY,
-    tenant_id   TEXT NOT NULL,
-    guild_id    TEXT NOT NULL,
-    state       TEXT NOT NULL DEFAULT 'provisioning',
-    worker_pod  TEXT,
-    channel_id  TEXT,
-    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    ended_at    TIMESTAMPTZ,
-    metadata    JSONB DEFAULT '{}'
+    id           TEXT         PRIMARY KEY,
+    tenant_id    TEXT         NOT NULL,
+    campaign_id  TEXT         NOT NULL,
+    guild_id     TEXT         NOT NULL,
+    channel_id   TEXT         NOT NULL DEFAULT '',
+    license_tier TEXT         NOT NULL,
+    state        TEXT         NOT NULL DEFAULT 'validating',
+    worker_pod   TEXT,
+    worker_node  TEXT,
+    started_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    ended_at     TIMESTAMPTZ,
+    last_voice   TIMESTAMPTZ,       -- last voice activity (for idle timeout)
+    metadata     JSONB        DEFAULT '{}',
+
+    -- Enforce: no two active sessions for the same campaign
+    CONSTRAINT unique_active_campaign
+        EXCLUDE USING gist (
+            campaign_id WITH =,
+            tstzrange(started_at, ended_at, '[)') WITH &&
+        ) WHERE (state NOT IN ('completed', 'failed'))
 );
+
+CREATE INDEX idx_sessions_tenant ON sessions (tenant_id);
+CREATE INDEX idx_sessions_state ON sessions (state) WHERE state NOT IN ('completed', 'failed');
+CREATE INDEX idx_sessions_guild ON sessions (guild_id);
 ```
 
-The gateway polls or uses PostgreSQL LISTEN/NOTIFY for state transitions.
+The exclusion constraint `unique_active_campaign` prevents two active sessions
+for the same campaign at the database level -- a safety net beyond the
+application-level check.
+
+### State Change Notification
+
+The gateway needs to know when a worker transitions state (e.g., Connecting ->
+Active). Options:
+
+| Option | Latency | Complexity |
+|--------|---------|------------|
+| PostgreSQL LISTEN/NOTIFY | ~10ms | Low (native, no extra deps) |
+| Worker -> gateway gRPC callback | ~1ms | Medium (gRPC service in gateway) |
+| Kubernetes CRD status (if using operator) | ~1s | Low (operator handles it) |
+
+**Recommendation:** PostgreSQL LISTEN/NOTIFY for the initial implementation.
+The worker updates the `sessions` row and issues `NOTIFY session_state_change`.
+The gateway listens and reacts. If using the custom operator (Model 2), CRD
+status is the natural notification mechanism.
 
 ### Session Timeouts
 
-Glyphoxa sessions can run for 4+ hours. Need:
-- **Idle timeout:** No voice activity for N minutes -> auto-stop (save
-  resources)
-- **Max duration:** Hard limit (e.g., 8 hours) to prevent runaway sessions
-- **Grace period on disconnect:** If voice drops, wait M minutes before
-  teardown (Discord voice disconnects are common)
-- **Billing integration:** Track session duration for usage-based pricing
+| Timeout | Default | Configurable? | Per-Tier Override? |
+|---------|---------|--------------|-------------------|
+| **Idle timeout** (no voice activity) | 15 min | Yes | Starter: 10min, Pro: 30min |
+| **Max duration** | 8 hours | Yes | Starter: 4h, Standard: 8h, Pro/Business: 12h |
+| **Disconnect grace period** | 5 min | Yes | Same across tiers |
+| **Cold start timeout** | 60s | Yes | If worker doesn't reach Active in 60s, fail |
+
+### Billing Integration
+
+The `sessions` table doubles as the billing source of truth:
+
+```sql
+-- Monthly session hours per tenant
+SELECT tenant_id,
+       SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)) / 3600)
+           AS total_hours
+FROM sessions
+WHERE started_at >= date_trunc('month', now())
+GROUP BY tenant_id;
+```
+
+Combined with provider cost metrics (`glyphoxa_provider_requests_total`),
+this gives per-tenant cost attribution for both compute and API usage.
 
 ---
 
@@ -859,9 +1300,35 @@ gateway and worker pods directly via the Kubernetes API.
   a tenant's gateway and worker on the same node for lower latency).
 - **Cons:** Reinventing autoscaler logic.
 
-**Recommendation:** **Option B** (KEDA) for gateway scaling. Session workers
-don't need autoscaling -- they're created on-demand and cleaned up on session
-end.
+**Recommendation:** **Option B** (KEDA) for shared gateway scaling. Session
+workers don't need autoscaling -- they're created on-demand and cleaned up on
+session end. Dedicated gateways (Pro/Business) are static Deployments with
+replicas=1 (or 2 for HA on Business tier).
+
+### Tier-Aware Node Scheduling
+
+Use Kubernetes node pools and scheduling constraints to separate shared and
+dedicated workloads:
+
+```yaml
+# Shared node pool: Starter/Standard workers + shared gateway
+nodePool: shared-workers
+  taints:
+  - key: glyphoxa.io/tier
+    value: shared
+    effect: NoSchedule
+
+# Dedicated node pool: Pro/Business workers
+nodePool: dedicated-workers
+  taints:
+  - key: glyphoxa.io/tier
+    value: dedicated
+    effect: NoSchedule
+```
+
+Worker pods include the matching tolerations and node affinity. This ensures
+Pro/Business tenants' workers never share nodes with Starter/Standard tenants,
+providing physical isolation at the compute layer.
 
 ### GPU Node Scheduling
 
@@ -870,6 +1337,7 @@ For tenants using local inference (whisper.cpp, Ollama, Coqui):
   GPU nodes
 - NVIDIA GPU Operator for GPU resource management
 - Consider time-sharing GPUs (MIG on A100, or MPS) for smaller models
+- GPU workers are likely Pro/Business only (local inference is expensive)
 
 ```yaml
 resources:
@@ -877,6 +1345,10 @@ resources:
     nvidia.com/gpu: 1
 nodeSelector:
   gpu-type: "t4"
+tolerations:
+- key: glyphoxa.io/tier
+  value: dedicated
+  effect: NoSchedule
 ```
 
 ---
@@ -907,13 +1379,15 @@ sum(rate(glyphoxa_provider_requests_total{provider="openai"}[1h])) by (tenant_id
 
 ### Rate Limiting & Quotas
 
-| Control | Description | Granularity |
-|---------|-------------|-------------|
-| **Session quota** | Max concurrent sessions per tenant | Tier-based (free: 1, pro: 3, enterprise: unlimited) |
-| **Session duration limit** | Max session length | Tier-based (free: 1h, pro: 4h, enterprise: 8h) |
-| **LLM token budget** | Max tokens per session or per month | Per-tenant, enforced at LLM provider wrapper |
-| **Provider rate limit** | Max API calls per minute | Per-tenant, prevents abuse |
-| **Overage handling** | What happens when quota is exhausted | Degrade (switch to cheaper model), throttle, or block |
+| Control | Starter | Standard | Pro | Business |
+|---------|---------|----------|-----|----------|
+| **Max concurrent sessions** | 1 | 1 | 1 per guild | Custom |
+| **Max session duration** | 4h | 8h | 12h | Custom |
+| **Max campaigns** | 1 (replace) | Unlimited | Unlimited | Unlimited |
+| **Monthly session hours** | 20h | 60h | Unlimited | Custom |
+| **LLM token budget** | Per-session cap | Monthly cap | Unlimited (BYOK) | Custom |
+| **Provider rate limit** | Shared pool | Shared pool | Per-tenant | Per-tenant |
+| **Overage handling** | Block new sessions | Warn, then degrade to cheaper model | N/A (BYOK) | Custom SLA |
 
 ### BYOK vs Platform Keys
 
@@ -951,13 +1425,16 @@ Kubernetes   PostgreSQL    Vault
 
 | Function | Description |
 |----------|-------------|
-| **Tenant management** | CRUD tenants, map Discord guilds, manage subscriptions |
+| **Tenant & license management** | CRUD tenants, map Discord guilds, manage licenses (tier, limits, expiry) |
 | **Config management** | Store per-tenant Glyphoxa configs (NPCs, campaigns, providers) |
-| **Session orchestration** | Create/monitor/destroy session worker pods |
+| **Campaign lifecycle** | Create/delete campaigns, enforce Starter single-campaign policy (export then wipe), manage campaign-level NPC definitions |
+| **Session orchestration** | Validate license constraints, create/monitor/destroy session worker pods, enforce concurrent-session limits |
+| **Infrastructure provisioning** | Provision dedicated resources for Pro/Business: gateway Deployments, PostgreSQL instances, MCP services |
 | **Discord interaction proxy** | Receive Discord webhooks, route to appropriate gateway/worker |
-| **Billing integration** | Track usage, enforce quotas, generate invoices |
-| **Secret management** | Store/rotate API keys in Vault, inject into worker pods |
-| **Health monitoring** | Track worker/gateway health, auto-recover crashed sessions |
+| **Billing integration** | Track session hours + provider API usage per tenant, enforce quotas, integrate with payment provider |
+| **Secret management** | Store/rotate API keys in Vault, inject into worker pods, manage BYOK key submission |
+| **Health monitoring** | Track worker/gateway health, auto-recover crashed sessions, report per-tenant SLA metrics |
+| **Data lifecycle** | Tenant offboarding (data export + deletion), campaign export, GDPR deletion requests |
 
 ### Build vs Buy
 
@@ -1060,76 +1537,140 @@ startup. For breaking changes (column renames, type changes):
 ### Architecture
 
 - [ ] Should the gateway be a new binary (`cmd/glyphoxa-gateway/`) or a mode
-  of the existing binary (`glyphoxa --mode=gateway`)?
+  of the existing binary (`glyphoxa --mode=gateway`)? Mode flag is simpler to
+  build and ship; separate binary is cleaner long-term.
 - [ ] How does the gateway communicate with session workers? gRPC? REST?
-  PostgreSQL LISTEN/NOTIFY?
+  PostgreSQL LISTEN/NOTIFY? (Recommendation: start with LISTEN/NOTIFY, move
+  to gRPC if latency matters.)
 - [ ] Should session workers pull their config from the control plane API or
-  from mounted ConfigMaps/Secrets?
-- [ ] Is one session per guild sufficient, or do we need multiple concurrent
-  sessions per guild (e.g., different voice channels)?
+  from mounted ConfigMaps/Secrets? ConfigMaps are simpler but less dynamic.
+- [ ] How should the shared gateway handle graceful restart without dropping
+  all bot connections? (Rolling update with connection draining? Blue-green?)
+- [ ] How does the multi-bot Business tier coordinate NPC orchestration across
+  workers? Shared state in PostgreSQL? Direct worker-to-worker gRPC?
 
-### Data
+### Tenant & Campaign Data
 
-- [ ] How do we handle tenant offboarding? Data retention policy? GDPR
-  deletion requests?
-- [ ] Should tenant data be exportable (campaign export, memory dump)?
-- [ ] How do we migrate existing single-tenant data to the multi-tenant
-  schema?
+- [ ] What does the campaign export format look like? JSON archive? YAML?
+  Should it be importable into a fresh campaign on a higher tier?
+- [ ] How do we handle tenant offboarding? Data retention period before
+  permanent deletion? GDPR right-to-deletion timelines?
+- [ ] How do we migrate existing single-tenant alpha data into the multi-tenant
+  schema? One-time migration script? Treat existing data as tenant #1?
+- [ ] Should campaign deletion (Starter tier) be synchronous (blocking) or
+  async (background job with progress)?
+- [ ] How granular is the campaign export? Full L1+L2+L3 dump, or just the
+  knowledge graph and NPC definitions (transcripts are large)?
 
 ### Discord
 
-- [ ] Can we use Discord's interaction endpoint (webhook-based) instead of
-  gateway for slash commands? This would eliminate the need for always-on
-  gateway pods for slash command handling.
-- [ ] How do we handle the 2500-guild sharding requirement? Do we need it
-  before launch?
+- [ ] Can we use Discord's interaction endpoint (HTTP webhook) instead of the
+  gateway WebSocket for slash commands? This eliminates always-on gateway
+  pods but adds latency and loses gateway event subscriptions (presence,
+  voice state updates). Likely need both.
+- [ ] Should Glyphoxa offer managed bot tokens (simpler onboarding) or
+  require BYOB (bring your own bot)? Managed bots create a shared-fate
+  SPOF; BYOB is more resilient but harder to onboard.
+- [ ] How do we handle a tenant's bot getting rate-limited or banned by
+  Discord? Auto-notify tenant? Auto-disable sessions?
 
-### Business
+### Business / Licensing
 
-- [ ] What's the pricing model? Per-session? Per-hour? Per-month? Tiered?
-- [ ] Is self-hosted (open-core) a priority alongside the managed SaaS?
-- [ ] What SLA do we offer? 99.9% (8.7h downtime/year)? 99.5%?
+- [ ] What's the pricing model? Monthly subscription + session-hour overage?
+  Flat per-tier? Usage-based?
+- [ ] Is self-hosted (open-core) a priority? If yes, the tenant model must
+  degrade gracefully to "single tenant, no control plane" for self-hosters.
+- [ ] What SLA per tier? Starter: best-effort? Standard: 99.5%? Pro: 99.9%?
+  Business: 99.95% with SLA credits?
+- [ ] How do we handle license upgrades mid-session? (e.g., tenant upgrades
+  from Standard to Pro -- do active sessions pick up the new limits
+  immediately, or only new sessions?)
+- [ ] Should there be a free/trial tier below Starter?
 
 ### Operations
 
 - [ ] Who is on-call? What's the incident response process?
-- [ ] What's the disaster recovery plan? Multi-region?
-- [ ] What's the backup strategy for tenant data?
-- [ ] Do we need PCI compliance (if handling payment data)?
+- [ ] What's the disaster recovery plan for shared PostgreSQL? For dedicated
+  instances?
+- [ ] Multi-region? Discord voice servers are regional -- should Glyphoxa
+  workers be deployed close to Discord's voice servers for latency?
+- [ ] Backup strategy: shared instance (pg_dump per-schema on schedule),
+  dedicated instances (managed PITR)?
+- [ ] Do we need SOC 2 or similar compliance for handling voice data?
 
 ---
 
 ## Summary: Recommended First Steps
 
-If I had to prioritize, here's the order I'd tackle these in:
+Prioritised implementation order, informed by the tenant/license model:
 
-1. **Add `tenant_id` to the data model** -- column on all tables, RLS
-   policies, filter in all queries. This is the foundation for everything else.
+### Phase 1: Core Tenant Model (prerequisite for everything else)
 
-2. **Split gateway and worker** -- refactor `cmd/glyphoxa/` into two modes.
-   Gateway handles Discord interactions; worker handles voice sessions. They
-   share the same binary but different startup paths.
+1. **Define `TenantContext` and `LicenseTier` in core** -- add to
+   `internal/config/`, thread through `context.Context`. Every subsystem
+   receives the tenant context: memory, MCP, providers, metrics.
 
-3. **Kubernetes deployment with Helm** -- gateway as a Deployment, workers as
-   Jobs created by the gateway. Basic health probes are already done.
+2. **Add `campaign_id` to the data model** -- new column on `session_entries`,
+   `chunks`, `entities`, `relationships`. All queries gain a `campaign_id`
+   filter. This is the data isolation boundary within a tenant.
 
-4. **External Secrets Operator + Vault** -- move API keys out of config files.
-   Support both platform keys and tenant BYOK.
+3. **Schema-per-tenant database migration** -- modify `postgres.Migrate()` to
+   create tables within a tenant schema (`SET search_path`). Add RLS policies
+   as defense-in-depth on shared instances.
 
-5. **Control plane API** -- tenant CRUD, config management, session
-   orchestration. Start minimal (just what's needed for the gateway to create
-   workers).
+4. **Campaign export feature** -- JSON/YAML dump of L1 transcripts, L3
+   knowledge graph, and NPC definitions. Required before Starter tier can
+   replace campaigns.
 
-6. **Per-tenant metrics and logging** -- add `tenant_id` label to Prometheus
-   metrics, structured log fields, and Grafana dashboards.
+### Phase 2: Gateway / Worker Split
 
-7. **Session state in PostgreSQL** -- replace in-process `SessionManager`
-   with a database-backed state machine.
+5. **Split gateway and worker** -- refactor `cmd/glyphoxa/` into two modes
+   (`--mode=gateway` and `--mode=worker`). Gateway handles Discord
+   interactions and session orchestration. Worker handles the voice pipeline.
+   Same binary, different startup paths.
 
-8. **Discord sharding** -- implement when approaching 2500 guilds.
+6. **Session state in PostgreSQL** -- replace in-process `SessionManager`
+   with the `sessions` table. License constraint enforcement in the gateway's
+   `/session start` handler.
 
-9. **Custom operator** -- implement when manual Job management becomes
-   unwieldy (100+ tenants).
+7. **Shared gateway multi-bot support** -- gateway manages multiple Discord
+   bot tokens (one per tenant). Events are demuxed by bot client. This is the
+   Starter/Standard deployment model.
 
-10. **Cost management** -- per-tenant usage tracking, quotas, billing
-    integration.
+### Phase 3: Kubernetes & Infrastructure
+
+8. **Helm chart** -- shared gateway Deployment, session worker Jobs,
+   PgBouncer, shared MCP gateway. Configurable for shared (Starter/Standard)
+   and dedicated (Pro/Business) topologies.
+
+9. **External Secrets Operator + Vault** -- move API keys and bot tokens out
+   of config files. Per-tenant Vault paths. Support BYOK submission flow.
+
+10. **Dedicated infrastructure provisioning** -- Terraform/Crossplane modules
+    for Pro/Business: dedicated PostgreSQL instance, dedicated gateway
+    Deployment, dedicated namespace.
+
+### Phase 4: Observability & Billing
+
+11. **Per-tenant metrics and logging** -- add `tenant_id`, `license_tier`,
+    `campaign_id` labels to Prometheus metrics and structured log fields.
+    Grafana dashboards with tenant filter.
+
+12. **Usage tracking and quotas** -- session hours, provider API calls per
+    tenant. Enforce limits based on license tier. Integrate with Stripe or
+    equivalent for billing.
+
+### Phase 5: Polish & Scale
+
+13. **Custom operator (CRD: GlyphoxaSession)** -- declarative session
+    lifecycle with license constraint enforcement at the Kubernetes level.
+    Implement when manual Job management becomes unwieldy.
+
+14. **KEDA autoscaling** -- scale shared gateway based on connected bot count.
+
+15. **Tier-aware node scheduling** -- separate node pools for shared and
+    dedicated workloads. GPU scheduling for local inference tenants.
+
+16. **Discord interaction endpoint (webhook)** -- supplement the gateway
+    WebSocket with HTTP interactions for lower-latency slash command
+    responses and reduced gateway load.
