@@ -58,14 +58,14 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        MODEL_FILE="/models/ggml-base.en.bin"
+        MODEL_FILE="/models/ggml-large-v3-turbo.bin"
         if [ -f "$${MODEL_FILE}" ]; then
           echo "Model already downloaded: $${MODEL_FILE}"
           exit 0
         fi
         echo "Downloading whisper model base.en..."
         curl -L -o "$${MODEL_FILE}" \
-          "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+          "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
         echo "Model downloaded: $(ls -lh $${MODEL_FILE})"
     restart: "no"
 
@@ -74,7 +74,7 @@ services:
   # Whisper.cpp is built into the binary — pass the model path via config.
   # ---------------------------------------------------------------------------
   glyphoxa:
-    image: ghcr.io/mrwong99/glyphoxa:main
+    image: ghcr.io/mrwong99/glyphoxa:latest
     ports:
       - "8080:8080"
     volumes:
@@ -133,9 +133,9 @@ services:
     command:
       - |
         echo "Pulling LLM model..."
-        ollama pull llama3.2
+        ollama pull lfm2:24b
         echo "Pulling embedding model..."
-        ollama pull nomic-embed-text
+        ollama pull qwen3-embedding:0.6b
         echo "Models ready."
     environment:
       OLLAMA_HOST: "http://ollama:11434"

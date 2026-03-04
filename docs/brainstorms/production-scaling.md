@@ -158,16 +158,16 @@ interfaces gain a `TenantContext` parameter (or are constructed with one).
 | Tier | Create Campaign | Delete Campaign | Data Retention |
 |------|----------------|----------------|----------------|
 | **Starter** | Creates new, **wipes previous** campaign data | Automatic on new campaign creation | Export before delete (JSON/YAML dump) |
-| **Standard+** | Creates alongside existing campaigns | Manual via dashboard/API | Retained until explicit deletion or tenant offboarding |
+| **Standard** | Creates alongside existing campaigns (maximum 3) | Manual via dashboard/API | Retained until explicit deletion or tenant offboarding |
+| **Pro/Business** | Creates alongside existing campaigns (no limit) | Manual via dashboard/API | Retained until explicit deletion or tenant offboarding |
 
-The Starter tier's "wipe on new campaign" behaviour requires a **campaign
-export** feature before any data is deleted. The export should include:
+All tiers should have a **campaign export** feature. The export should include:
 - All session transcripts (L1)
-- Knowledge graph entities and relationships (L3)
 - NPC definitions and personalities
 - Campaign metadata
+- PostgreSQL tenant data dump (**Pro/Buisiness only**)
 
-Export format: JSON archive or structured YAML, importable into a higher tier.
+Export format: JSON archive or structured YAML plus DB dump, importable into a higher tier.
 
 ---
 
