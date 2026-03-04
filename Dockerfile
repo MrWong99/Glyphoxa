@@ -58,6 +58,10 @@ RUN ONNX_ARCH="x64" \
     && tar xzf /tmp/onnxruntime.tgz -C /onnx --strip-components=1 \
     && rm -f /tmp/onnxruntime.tgz
 
+# Download Silero VAD v5 ONNX model (~2 MB).
+RUN curl -fsL "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
+       -o /onnx/silero_vad.onnx
+
 # ---------------------------------------------------------------------------
 # Stage 3: Download libdave prebuilt shared library
 # ---------------------------------------------------------------------------
@@ -140,15 +144,17 @@ RUN CGO_ENABLED=1 go build \
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r glyphoxa && useradd -r -g glyphoxa -s /sbin/nologin glyphoxa
 
 COPY --from=dave-download /dave/lib/libdave.so /usr/lib/
 COPY --from=onnx-download /onnx/lib/libonnxruntime.so /usr/lib/
+COPY --from=onnx-download /onnx/silero_vad.onnx /models/silero_vad.onnx
 COPY --from=build /out/glyphoxa /usr/local/bin/glyphoxa
 
-RUN ldconfig
+# onnxruntime_go searches for "onnxruntime.so" (no lib prefix) by default.
+RUN ln -s libonnxruntime.so /usr/lib/onnxruntime.so && ldconfig
 
 USER glyphoxa
 ENTRYPOINT ["glyphoxa"]

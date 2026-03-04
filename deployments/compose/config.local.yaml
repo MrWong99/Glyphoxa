@@ -35,6 +35,7 @@ providers:
 
   vad:
     name: silero
+    model: /models/silero_vad.onnx
     options:
       frame_size_ms: 30
       speech_threshold: 0.5
