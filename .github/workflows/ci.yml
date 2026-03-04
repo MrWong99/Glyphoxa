@@ -46,7 +46,7 @@ jobs:
           find build -name '*.a' -exec cp {} /tmp/whisper-install/lib/ \;
 
       - name: Upload whisper artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: whisper-libs
           path: /tmp/whisper-install
@@ -76,7 +76,7 @@ jobs:
           rm -f /tmp/onnxruntime.tgz
 
       - name: Upload ONNX Runtime artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: onnx-libs
           path: /tmp/onnx-install
@@ -120,7 +120,7 @@ jobs:
           rm -f /tmp/libdave.zip
 
       - name: Upload dave artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dave-libs
           path: /tmp/dave-install
