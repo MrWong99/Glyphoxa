@@ -16,7 +16,7 @@ require (
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/tiktoken-go/tokenizer v0.7.0
-	github.com/yalue/onnxruntime_go v1.26.0
+	github.com/yalue/onnxruntime_go v1.27.0
 	go.opentelemetry.io/otel v1.41.0
 	go.opentelemetry.io/otel/exporters/prometheus v0.63.0
 	go.opentelemetry.io/otel/metric v1.41.0
