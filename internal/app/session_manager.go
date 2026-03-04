@@ -577,12 +577,12 @@ func (n *noopSummariser) Summarise(_ context.Context, _ []llm.Message) (string, 
 }
 
 // vadConfigFromProvider extracts VAD session parameters from a provider config
-// entry. Defaults: 16000 Hz sample rate, 30ms frames, 0.5 speech threshold,
-// 0.35 silence threshold.
+// entry. Defaults: 16000 Hz sample rate, 32ms frames, 0.5 speech threshold,
+// 0.25 silence threshold.
 func vadConfigFromProvider(entry config.ProviderEntry) vad.Config {
 	cfg := vad.Config{
 		SampleRate:       16000,
-		FrameSizeMs:      30,
+		FrameSizeMs:      32,
 		SpeechThreshold:  0.5,
 		SilenceThreshold: 0.25, // lower threshold means more tolerance before cutting
 	}

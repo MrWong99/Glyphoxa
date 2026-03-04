@@ -316,7 +316,7 @@ func TestAudioPipeline_ConcurrentKeywordUpdate(t *testing.T) {
 		sttProvider: sttProv,
 		orch:        orch,
 		mixer:       mixer,
-		vadCfg:      vad.Config{SampleRate: 16000, FrameSizeMs: 30},
+		vadCfg:      vad.Config{SampleRate: 16000, FrameSizeMs: 32},
 		sttCfg:      stt.StreamConfig{SampleRate: 16000, Channels: 1},
 		ctx:         ctx,
 	})

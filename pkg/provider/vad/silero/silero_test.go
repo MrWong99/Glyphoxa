@@ -14,8 +14,7 @@ import (
 type inferCall struct {
 	samples []float32
 	sr      int64
-	h       []float32
-	c       []float32
+	state   []float32
 }
 
 // mockInferencer implements inferencer for unit tests. It returns a fixed
@@ -26,10 +25,8 @@ type mockInferencer struct {
 	// prob is the speech probability returned on every infer call.
 	prob float32
 
-	// hnVal and cnVal are the element values used to fill the returned hn/cn
-	// slices. Using distinct values lets tests verify LSTM state passthrough.
-	hnVal float32
-	cnVal float32
+	// stateVal is the element value used to fill the returned stateN slice.
+	stateVal float32
 
 	// calls records every infer invocation in order.
 	calls []inferCall
@@ -38,7 +35,7 @@ type mockInferencer struct {
 	closeErr error
 }
 
-func (m *mockInferencer) infer(samples []float32, sr int64, h, c []float32) (float32, []float32, []float32, error) {
+func (m *mockInferencer) infer(samples []float32, sr int64, state []float32) (float32, []float32, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -46,22 +43,18 @@ func (m *mockInferencer) infer(samples []float32, sr int64, h, c []float32) (flo
 	call := inferCall{
 		samples: make([]float32, len(samples)),
 		sr:      sr,
-		h:       make([]float32, len(h)),
-		c:       make([]float32, len(c)),
+		state:   make([]float32, len(state)),
 	}
 	copy(call.samples, samples)
-	copy(call.h, h)
-	copy(call.c, c)
+	copy(call.state, state)
 	m.calls = append(m.calls, call)
 
-	// Return fresh hn/cn slices filled with the configured values.
-	hn := make([]float32, lstmStateSize)
-	cn := make([]float32, lstmStateSize)
-	for i := range hn {
-		hn[i] = m.hnVal
-		cn[i] = m.cnVal
+	// Return a fresh stateN slice filled with the configured value.
+	stateN := make([]float32, stateSize)
+	for i := range stateN {
+		stateN[i] = m.stateVal
 	}
-	return m.prob, hn, cn, nil
+	return m.prob, stateN, nil
 }
 
 func (m *mockInferencer) close() error {
@@ -83,7 +76,7 @@ func (m *mockInferencer) callAt(i int) inferCall {
 func validConfig() vad.Config {
 	return vad.Config{
 		SampleRate:       16000,
-		FrameSizeMs:      30,
+		FrameSizeMs:      32,
 		SpeechThreshold:  0.5,
 		SilenceThreshold: 0.35,
 	}
@@ -115,23 +108,23 @@ func TestNewSession_ValidConfig(t *testing.T) {
 		cfg  vad.Config
 	}{
 		{
-			name: "16kHz_30ms",
+			name: "16kHz_32ms",
 			cfg:  validConfig(),
 		},
 		{
-			name: "8kHz_20ms",
+			name: "8kHz_32ms",
 			cfg: vad.Config{
 				SampleRate:       8000,
-				FrameSizeMs:      20,
+				FrameSizeMs:      32,
 				SpeechThreshold:  0.6,
 				SilenceThreshold: 0.4,
 			},
 		},
 		{
-			name: "equal_thresholds",
+			name: "16kHz_64ms",
 			cfg: vad.Config{
 				SampleRate:       16000,
-				FrameSizeMs:      10,
+				FrameSizeMs:      64,
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.5,
 			},
@@ -180,7 +173,7 @@ func TestNewSession_InvalidSampleRate(t *testing.T) {
 
 			cfg := vad.Config{
 				SampleRate:       tc.sampleRate,
-				FrameSizeMs:      30,
+				FrameSizeMs:      32,
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.35,
 			}
@@ -313,46 +306,35 @@ func TestProcessFrame_LSTMStatePassthrough(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfig()
-	// The mock returns hn filled with 0.42 and cn filled with 0.84.
+	// The mock returns stateN filled with 0.42.
 	m := &mockInferencer{
-		prob:  0.1, // below threshold — stays silent
-		hnVal: 0.42,
-		cnVal: 0.84,
+		prob:     0.1, // below threshold — stays silent
+		stateVal: 0.42,
 	}
 	sess := makeSession(t, cfg, m, 3, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
 	frame := silenceFrame(cfg)
 
-	// First frame: h and c should be all zeros (initial state).
+	// First frame: state should be all zeros (initial state).
 	if _, err := sess.ProcessFrame(frame); err != nil {
 		t.Fatalf("frame 1: %v", err)
 	}
 	call0 := m.callAt(0)
-	for i, v := range call0.h {
+	for i, v := range call0.state {
 		if v != 0 {
-			t.Errorf("frame 1: h[%d] = %v, want 0 (initial state)", i, v)
-		}
-	}
-	for i, v := range call0.c {
-		if v != 0 {
-			t.Errorf("frame 1: c[%d] = %v, want 0 (initial state)", i, v)
+			t.Errorf("frame 1: state[%d] = %v, want 0 (initial state)", i, v)
 		}
 	}
 
-	// Second frame: h and c must equal the hn/cn returned by the first call.
+	// Second frame: state must equal the stateN returned by the first call.
 	if _, err := sess.ProcessFrame(frame); err != nil {
 		t.Fatalf("frame 2: %v", err)
 	}
 	call1 := m.callAt(1)
-	for i, v := range call1.h {
-		if v != m.hnVal {
-			t.Errorf("frame 2: h[%d] = %v, want %v (hn from frame 1)", i, v, m.hnVal)
-		}
-	}
-	for i, v := range call1.c {
-		if v != m.cnVal {
-			t.Errorf("frame 2: c[%d] = %v, want %v (cn from frame 1)", i, v, m.cnVal)
+	for i, v := range call1.state {
+		if v != m.stateVal {
+			t.Errorf("frame 2: state[%d] = %v, want %v (stateN from frame 1)", i, v, m.stateVal)
 		}
 	}
 }
@@ -362,7 +344,7 @@ func TestReset_ClearsState(t *testing.T) {
 
 	cfg := validConfig()
 	const minSpeech = 2
-	m := &mockInferencer{prob: 0.9, hnVal: 0.5, cnVal: 0.7}
+	m := &mockInferencer{prob: 0.9, stateVal: 0.5}
 	sess := makeSession(t, cfg, m, minSpeech, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
@@ -379,8 +361,8 @@ func TestReset_ClearsState(t *testing.T) {
 		t.Fatalf("expected stateSpeaking before reset, got %v", sess.state)
 	}
 	// LSTM state should be non-zero after frames.
-	if sess.h[0] == 0 {
-		t.Error("expected non-zero h before reset")
+	if sess.lstmState[0] == 0 {
+		t.Error("expected non-zero lstmState before reset")
 	}
 
 	// Reset.
@@ -398,14 +380,9 @@ func TestReset_ClearsState(t *testing.T) {
 	}
 
 	// LSTM state must be zeroed.
-	for i, v := range sess.h {
+	for i, v := range sess.lstmState {
 		if v != 0 {
-			t.Errorf("h[%d] after Reset: %v, want 0", i, v)
-		}
-	}
-	for i, v := range sess.c {
-		if v != 0 {
-			t.Errorf("c[%d] after Reset: %v, want 0", i, v)
+			t.Errorf("lstmState[%d] after Reset: %v, want 0", i, v)
 		}
 	}
 
