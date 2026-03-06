@@ -18,7 +18,7 @@ deepened: 2026-03-05
 
 1. **Admin API auth model defined (P1-001)**: API key auth for admin API, mTLS for gateway-worker gRPC, RBAC roles (platform-admin, tenant-admin) documented in Phase 1.1
 2. **Schema name injection prevented (P1-003)**: `SchemaName` type with regex validation + `pgx.Identifier.Sanitize()` in Phase 1.3 — impossible to pass unvalidated string into SQL
-3. **campaign_id migration strategy explicit (P1-005)**: DEFAULT + backfill + composite PK for entities in Phase 1.2 — safe for existing alpha data
+3. **campaign_id column added (P1-005)**: `campaign_id TEXT NOT NULL` on all data tables + composite PK for entities in Phase 1.2 — no migration needed, DBs created fresh
 4. **Session states simplified (P1-004)**: 3 states (pending/active/ended) with `WHERE state != 'ended'` — no index coverage gaps possible
 5. **RLS removed (P1-002)**: Schema GRANT/REVOKE is the sole isolation boundary — no false security from `USING(true)`
 6. **PgBouncer deferred (P1-006)**: Direct pgxpool at launch; `QueryExecModeSimpleProtocol` documented for when PgBouncer is added
@@ -234,6 +234,7 @@ type TenantContext struct {
     LicenseTier LicenseTier
     CampaignID  string
     GuildID     string
+    SchemaName  SchemaName // postgres schema; directly corresponds to TenantID ("local" for full mode)
 }
 ```
 
@@ -241,8 +242,9 @@ Propagate via `context.Value` with a typed key. Add helper functions:
 `TenantFromContext(ctx)`, `WithTenant(ctx, tc)`.
 
 **Full-mode compatibility:** In `--mode=full`, `TenantContext` is populated
-at startup from config: `TenantID = "local"`, `CampaignID` from
-`cfg.Campaign.Name`, `LicenseTier = TierShared` (no enforcement).
+at startup from config: `TenantID = "local"`, `SchemaName = "local"`,
+`CampaignID` from `cfg.Campaign.Name`, `LicenseTier = TierShared` (no
+enforcement). The schema name directly corresponds to the tenant ID.
 
 **Admin API authentication (P1 prerequisite):** The gateway exposes an
 internal admin API on a separate port (e.g., `:8081`) for tenant CRUD,
@@ -292,36 +294,28 @@ type AdminAPI struct {
 Add `campaign_id TEXT NOT NULL` column to all data tables:
 `session_entries`, `chunks`, `entities`, `relationships`.
 
-**Migration strategy (P1 prerequisite):** Existing alpha data has no
-campaign_id. The migration must handle this:
+**No migration from alpha schema required.** Databases will be created fresh
+after this plan is implemented. There is no existing alpha data to migrate.
+The initial schema DDL includes `campaign_id` from the start:
 
 ```sql
--- Step 1: Add column with default (does not fail on existing rows)
-ALTER TABLE session_entries ADD COLUMN campaign_id TEXT NOT NULL DEFAULT 'migrated';
-ALTER TABLE chunks ADD COLUMN campaign_id TEXT NOT NULL DEFAULT 'migrated';
-ALTER TABLE entities ADD COLUMN campaign_id TEXT NOT NULL DEFAULT 'migrated';
-ALTER TABLE relationships ADD COLUMN campaign_id TEXT NOT NULL DEFAULT 'migrated';
+-- campaign_id is part of the initial schema, not a migration
+-- All tables include campaign_id TEXT NOT NULL in their CREATE TABLE DDL
 
--- Step 2: Backfill from config (run once, idempotent)
-UPDATE session_entries SET campaign_id = '<configured_campaign_name>' WHERE campaign_id = 'migrated';
-UPDATE chunks SET campaign_id = '<configured_campaign_name>' WHERE campaign_id = 'migrated';
-UPDATE entities SET campaign_id = '<configured_campaign_name>' WHERE campaign_id = 'migrated';
-UPDATE relationships SET campaign_id = '<configured_campaign_name>' WHERE campaign_id = 'migrated';
-
--- Step 3: Add indexes after backfill
+-- Indexes created alongside tables
 CREATE INDEX idx_session_entries_campaign ON session_entries (campaign_id);
 CREATE INDEX idx_chunks_campaign ON chunks (campaign_id);
 
--- Step 4: Add GIN full-text search index on chunks (required for FTS queries)
+-- GIN full-text search index on chunks (required for FTS queries)
 CREATE INDEX IF NOT EXISTS idx_chunks_fts
     ON chunks USING GIN (to_tsvector('english', content));
 ```
 
-**Entity primary key decision:** The `entities` table uses `id TEXT PRIMARY
-KEY`. Two campaigns may have entities with the same name (e.g., "Grimjaw").
-Change the primary key to `(campaign_id, id)`. This cascades to foreign keys
-in `relationships` (`source_id`, `target_id`), which must become composite
-references. Apply this change in the same migration.
+**Entity primary key decision:** The `entities` table uses a composite
+primary key `(campaign_id, id)` from the start. Two campaigns may have
+entities with the same name (e.g., "Grimjaw"). The composite PK cascades to
+foreign keys in `relationships` (`source_id`, `target_id`), which use
+composite references `(campaign_id, source_id)` and `(campaign_id, target_id)`.
 
 All queries gain a `WHERE campaign_id = $1` filter. The session worker is
 bound to a single campaign and never sees other campaigns' data.
@@ -347,16 +341,11 @@ type Store struct {
 }
 ```
 
-### Research Insights: campaign_id Migration
+### Research Insights: campaign_id Schema Design
 
-**Adding NOT NULL column to existing data will fail.** The current tables contain alpha data. `ALTER TABLE session_entries ADD COLUMN campaign_id TEXT NOT NULL` will error because existing rows have no value. The migration must use:
-```sql
-ALTER TABLE session_entries ADD COLUMN campaign_id TEXT NOT NULL DEFAULT 'migrated';
--- Backfill with actual campaign name from config
-UPDATE session_entries SET campaign_id = '<configured_campaign_name>';
-```
+**No alpha migration needed.** Databases will be created fresh after this plan is implemented. The `campaign_id` column is part of the initial schema DDL, eliminating migration complexity entirely.
 
-**Entity primary key conflict.** The `entities` table uses `id TEXT PRIMARY KEY`. Two campaigns could have entities with the same name (e.g., "Grimjaw"). Either the primary key must become `(campaign_id, id)` -- which cascades to all foreign keys in `relationships` -- or entity ID generation must be campaign-scoped (e.g., `campaign_id/entity_name`). Decide before implementation.
+**Entity primary key:** The composite primary key `(campaign_id, id)` on `entities` prevents name collisions across campaigns. This cascades to all foreign keys in `relationships`.
 
 **Transaction boundaries needed.** Current `knowledge_graph.go` performs multi-step reads without transactions (`VisibleSubgraph`, `IdentitySnapshot`). In multi-tenant production with concurrent sessions, this causes inconsistent snapshots. Wrap multi-query reads in `REPEATABLE READ` read-only transactions.
 
@@ -427,16 +416,25 @@ supports embedded migration files via `embed.FS`.
 - **Migration files:** `pkg/memory/postgres/migrations/` with numbered files
   (`000001_initial.up.sql`, etc.). Embedded via `//go:embed migrations/*.sql`.
 
-Modify `postgres.Migrate()` to support per-tenant schemas:
+Modify `postgres.Migrate()` to read the schema name from context via
+`TenantContext.SchemaName`. This ensures the schema is always consistent
+with the tenant identity propagated through the call chain:
 
 ```go
 // pkg/memory/postgres/schema.go
-func Migrate(ctx context.Context, pool *pgxpool.Pool, schema SchemaName) error {
-    // schema = "public" for full-mode, "tenant_xxx" for multi-tenant
+func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+    tc := config.TenantFromContext(ctx)
+    schema := tc.SchemaName // "local" for full-mode, "tenant_xxx" for multi-tenant
     // Use schema.TableRef("table") for fully-qualified table names in DDL
     // This avoids search_path issues
 }
 ```
+
+The `SchemaName` field on `TenantContext` directly corresponds to the tenant
+ID. In `--mode=full`, the schema name is `"local"` (matching
+`TenantID = "local"`). In multi-tenant mode, the schema name is derived from
+the tenant ID (e.g., `tenant_acme` for tenant `acme`). This derivation
+happens once at `TenantContext` construction time.
 
 **Critical design decision (from SpecFlow Q1):** Use **fully-qualified table
 names** (`tenant_xxx.session_entries`) in all queries rather than relying on
@@ -782,7 +780,91 @@ the admin API.
 
 3. **Discord ToS.** Using multiple bot tokens to circumvent rate limits violates Discord ToS. Each tenant should have their own bot token (one bot per tenant, not multiple bots to scale one tenant). Shard under a single token per tenant; use interactions (slash commands) which are exempt from the global rate limit.
 
-**Gateway sharding mechanism unspecified.** During rolling updates, a new pod must know which bot tokens to claim. Options: (a) leader election per bot token in the sessions table, (b) consistent hashing, (c) admin API assignment. This must be designed before Phase 3.
+**Gateway sharding mechanism:** See section 2.5 for the consistent hashing design.
+
+##### 2.5 Gateway Sharding via Consistent Hashing
+
+When running multiple gateway replicas, each bot token (one per tenant) must
+be owned by exactly one gateway pod. **Consistent hashing** is chosen over
+leader election because it is stateless, requires no external coordination
+infrastructure (no etcd/Zookeeper), and handles rolling updates with minimal
+bot reassignment.
+
+**Design:**
+
+Each gateway pod is identified by its `POD_NAME` (injected via the Kubernetes
+downward API). The set of active gateway pods is discovered via a headless
+Kubernetes Service (`glyphoxa-gateway-headless`). Gateway pods resolve the
+service DNS to enumerate peers.
+
+```go
+// internal/gateway/shard/ring.go
+package shard
+
+import "github.com/serialx/hashring"
+
+// Ring assigns tenant bot tokens to gateway pods using consistent hashing.
+type Ring struct {
+    mu      sync.RWMutex
+    ring    *hashring.HashRing
+    localID string // this pod's identity (POD_NAME)
+}
+
+// NewRing creates a ring with the initial set of gateway pod names.
+func NewRing(localID string, peers []string) *Ring { ... }
+
+// OwnsBot returns true if this gateway pod is responsible for the given
+// tenant's bot token. Called on startup and after membership changes.
+func (r *Ring) OwnsBot(tenantID string) bool {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    node, _ := r.ring.GetNode(tenantID)
+    return node == r.localID
+}
+
+// UpdatePeers recalculates the ring when gateway pods are added or removed.
+// Returns the list of tenant IDs that this pod should acquire or release.
+func (r *Ring) UpdatePeers(peers []string) (acquire, release []string) { ... }
+```
+
+**Peer discovery:** A background goroutine resolves the headless service DNS
+every 10 seconds (configurable). When the peer set changes, it calls
+`UpdatePeers` and the `BotManager` acquires or releases bot tokens
+accordingly. DNS-based discovery is simple and requires no additional
+dependencies.
+
+**Rolling update behavior:**
+
+1. New pod starts, resolves DNS, builds ring, connects bots it owns.
+2. Old pod's next DNS resolution detects the new peer, recalculates ring,
+   disconnects bots it no longer owns.
+3. Consistent hashing ensures only ~1/N bots are reassigned (where N is the
+   number of gateway pods), minimizing disruption during rolling updates.
+
+**Bot handoff protocol:**
+
+When a bot token moves from pod A to pod B:
+1. Pod A detects it no longer owns the tenant, calls `BotManager.RemoveBot`
+   (waits for inflight events, then disconnects).
+2. Pod B detects it now owns the tenant, calls `BotManager.AddBot`
+   (connects the bot's Discord gateway WebSocket).
+3. Brief overlap (~5s) is acceptable -- Discord tolerates a second gateway
+   connection and invalidates the older one.
+
+**Consistency guarantee:** The authoritative owner of a bot token is
+determined by the consistent hash ring. If two pods briefly disagree on
+membership (DNS propagation delay), Discord's gateway deduplication ensures
+only one connection is active. No split-brain risk for session state because
+session orchestration uses PostgreSQL constraints (section 2.3), not
+in-memory state.
+
+**Full-mode compatibility:** In `--mode=full`, gateway sharding is not used.
+The single process owns all bot tokens directly.
+
+**Files:**
+- `internal/gateway/shard/ring.go` (new -- consistent hash ring)
+- `internal/gateway/shard/discovery.go` (new -- DNS-based peer discovery)
+- `internal/gateway/botmanager.go` (integrate with Ring for acquire/release)
 
 **Acceptance criteria:**
 - [ ] Gateway starts with `--mode=gateway`, connects multiple bots
@@ -794,6 +876,9 @@ the admin API.
 - [ ] License constraints enforced atomically: two simultaneous `/session
   start` for a Shared tenant results in exactly one session
 - [ ] Worker heartbeat loss triggers session end with error after 90s
+- [ ] Gateway sharding distributes bot tokens across replicas; adding or
+  removing a gateway pod reassigns only ~1/N bots
+- [ ] Rolling update causes <10s bot reconnection per affected tenant
 
 ---
 
