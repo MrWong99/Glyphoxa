@@ -899,3 +899,16 @@ func containsEntity(entities []memory.Entity, id string) bool {
 func containsStr(slice []string, s string) bool {
 	return slices.Contains(slice, s)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Health — Ping
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestStore_Ping(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+
+	if err := store.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error: %v", err)
+	}
+}

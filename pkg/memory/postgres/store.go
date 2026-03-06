@@ -89,6 +89,12 @@ func (s *Store) L1() *SessionStoreImpl { return s.sessions }
 // L2 returns the L2 semantic index implementation which satisfies [memory.SemanticIndex].
 func (s *Store) L2() *SemanticIndexImpl { return s.semantic }
 
+// Ping verifies that the database is reachable. It is intended for use in
+// readiness probes.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 // Close releases all connections held by the underlying connection pool.
 // It should be called when the Store is no longer needed, typically via defer.
 func (s *Store) Close() {

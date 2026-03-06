@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
@@ -22,6 +25,8 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/discord/commands"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
+	"github.com/MrWong99/glyphoxa/internal/health"
+	"github.com/MrWong99/glyphoxa/internal/observe"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/audio/webrtc"
 	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
@@ -74,6 +79,20 @@ func run() int {
 		"log_level", cfg.Server.LogLevel,
 	)
 
+	// ── Observability ────────────────────────────────────────────────────────
+	otelShutdown, err := observe.InitProvider(context.Background(), observe.ProviderConfig{
+		ServiceName: "glyphoxa",
+	})
+	if err != nil {
+		slog.Error("failed to initialise observability", "err", err)
+		return 1
+	}
+	defer func() {
+		if err := otelShutdown(context.Background()); err != nil {
+			slog.Warn("otel shutdown error", "err", err)
+		}
+	}()
+
 	// ── Provider registry ─────────────────────────────────────────────────────
 	reg := config.NewRegistry()
 
@@ -102,6 +121,34 @@ func run() int {
 		slog.Error("failed to initialise application", "err", err)
 		return 1
 	}
+
+	// ── Diagnostics HTTP server (/healthz, /readyz, /metrics) ───────────────
+	diagAddr := cfg.Server.DiagnosticsAddr
+	if diagAddr == "" {
+		diagAddr = ":9090"
+	}
+	diagMux := http.NewServeMux()
+
+	healthHandler := health.New(application.ReadinessCheckers()...)
+	healthHandler.Register(diagMux)
+	diagMux.Handle("GET /metrics", promhttp.Handler())
+
+	diagServer := &http.Server{
+		Addr:              diagAddr,
+		Handler:           observe.Middleware(observe.DefaultMetrics())(diagMux),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	diagLn, err := net.Listen("tcp", diagAddr)
+	if err != nil {
+		slog.Error("failed to listen on diagnostics address", "addr", diagAddr, "err", err)
+		return 1
+	}
+	go func() {
+		slog.Info("diagnostics server listening", "addr", diagAddr)
+		if err := diagServer.Serve(diagLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("diagnostics server error", "err", err)
+		}
+	}()
 
 	// ── Discord commands (when audio provider is "discord") ──────────────────
 	if bot != nil {
@@ -171,6 +218,11 @@ func run() int {
 	defer cancel()
 
 	slog.Info("shutdown signal received, stopping…")
+
+	// Shut down the diagnostics server.
+	if err := diagServer.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("diagnostics server shutdown error", "err", err)
+	}
 
 	// Close the Discord bot first (unregister commands, disconnect).
 	if bot != nil {
@@ -540,6 +592,11 @@ func printStartupSummary(cfg *config.Config) {
 	if cfg.Server.ListenAddr != "" {
 		fmt.Printf("║  Listen addr     : %-19s ║\n", cfg.Server.ListenAddr)
 	}
+	diagDisplay := cfg.Server.DiagnosticsAddr
+	if diagDisplay == "" {
+		diagDisplay = ":9090"
+	}
+	fmt.Printf("║  Diagnostics     : %-19s ║\n", diagDisplay)
 	fmt.Println("╚═══════════════════════════════════════╝")
 }
 

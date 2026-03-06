@@ -138,6 +138,11 @@ type ServerConfig struct {
 	// ListenAddr is the TCP address the server listens on (e.g., ":8080").
 	ListenAddr string `yaml:"listen_addr"`
 
+	// DiagnosticsAddr is the TCP address for the diagnostics HTTP server
+	// that serves /healthz, /readyz, and /metrics endpoints. Defaults to
+	// ":9090" when empty.
+	DiagnosticsAddr string `yaml:"diagnostics_addr"`
+
 	// LogLevel controls verbosity.
 	LogLevel LogLevel `yaml:"log_level"`
 

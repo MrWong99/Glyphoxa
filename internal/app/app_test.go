@@ -225,6 +225,38 @@ func TestNew_RegistersNPCRelationships(t *testing.T) {
 	}
 }
 
+func TestApp_ReadinessCheckers_NoDBWhenInjected(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	providers := testProviders()
+	sessions := &memorymock.SessionStore{}
+	graph := &memorymock.KnowledgeGraph{}
+	mcpHost := &mcpmock.Host{}
+	mixer := &audiomock.Mixer{}
+
+	application, err := app.New(
+		context.Background(),
+		cfg,
+		providers,
+		app.WithSessionStore(sessions),
+		app.WithKnowledgeGraph(graph),
+		app.WithMCPHost(mcpHost),
+		app.WithMixer(mixer),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// When memory stores are injected, no database checker is registered.
+	checkers := application.ReadinessCheckers()
+	for _, c := range checkers {
+		if c.Name == "database" {
+			t.Error("expected no database checker when stores are injected")
+		}
+	}
+}
+
 func TestApp_RunAndShutdown(t *testing.T) {
 	t.Parallel()
 

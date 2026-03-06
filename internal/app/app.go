@@ -23,6 +23,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/engine/cascade"
 	s2sengine "github.com/MrWong99/glyphoxa/internal/engine/s2s"
 	"github.com/MrWong99/glyphoxa/internal/entity"
+	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
@@ -67,6 +68,10 @@ type App struct {
 	conn      audio.Connection
 	agents    []agent.NPCAgent
 	router    agent.Router
+
+	// readinessChecks are registered during init and exposed for the
+	// diagnostics HTTP server's /readyz probe.
+	readinessChecks []health.Checker
 
 	// closers are called in order during Shutdown.
 	closers []func() error
@@ -222,6 +227,13 @@ func (a *App) initMemory(ctx context.Context) error {
 		store.Close()
 		return nil
 	})
+
+	// Register a readiness check that pings the database pool.
+	a.readinessChecks = append(a.readinessChecks, health.Checker{
+		Name:  "database",
+		Check: store.Ping,
+	})
+
 	return nil
 }
 
@@ -513,6 +525,10 @@ func (a *App) MCPHost() mcp.Host { return a.mcpHost }
 
 // EntityStore returns the entity store.
 func (a *App) EntityStore() entity.Store { return a.entities }
+
+// ReadinessCheckers returns the health checkers registered during
+// initialisation. Pass these to [health.New] to build the /readyz handler.
+func (a *App) ReadinessCheckers() []health.Checker { return a.readinessChecks }
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 

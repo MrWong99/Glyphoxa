@@ -11,6 +11,10 @@ server:
   # TCP address to listen on. ":8080" binds on all interfaces.
   listen_addr: ":8080"
 
+  # TCP address for the diagnostics HTTP server (/healthz, /readyz, /metrics).
+  # Defaults to ":9090" when omitted.
+  diagnostics_addr: ":9090"
+
   # Logging verbosity. One of: debug | info | warn | error
   log_level: info
 
