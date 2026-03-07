@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package glyphoxa.v1;
+
+option go_package = "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1;glyphoxav1";
+
+import "google/protobuf/timestamp.proto";
+
+// SessionState represents the lifecycle state of a session.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_PENDING = 1;
+  SESSION_STATE_ACTIVE = 2;
+  SESSION_STATE_ENDED = 3;
+}
+
+// NPCConfig defines the configuration for an NPC within a session.
+message NPCConfig {
+  string name = 1;
+  string personality = 2;
+  string engine = 3;
+  string voice_id = 4;
+  repeated string knowledge_scope = 5;
+  string budget_tier = 6;
+}
+
+// StartSessionRequest is sent by the gateway to a worker to start a new voice session.
+message StartSessionRequest {
+  string tenant_id = 1;
+  string campaign_id = 2;
+  string guild_id = 3;
+  string channel_id = 4;
+  string license_tier = 5;
+  string session_id = 6;
+  repeated NPCConfig npc_configs = 7;
+}
+
+// StartSessionResponse is the worker's reply after attempting to start a session.
+message StartSessionResponse {
+  string session_id = 1;
+  string error = 2;
+}
+
+// StopSessionRequest asks a worker to stop a running session.
+message StopSessionRequest {
+  string session_id = 1;
+}
+
+// StopSessionResponse is the worker's reply after stopping a session.
+message StopSessionResponse {
+  string error = 1;
+}
+
+// GetStatusRequest queries the status of one or all sessions on a worker.
+// If session_id is empty, the worker returns the status of all sessions.
+message GetStatusRequest {
+  string session_id = 1;
+}
+
+// SessionStatus describes the current state of a single session.
+message SessionStatus {
+  string session_id = 1;
+  SessionState state = 2;
+  google.protobuf.Timestamp started_at = 3;
+  string error = 4;
+}
+
+// GetStatusResponse returns the status of one or more sessions.
+message GetStatusResponse {
+  repeated SessionStatus sessions = 1;
+}
+
+// ReportStateRequest is sent by a worker back to the gateway to report a state change.
+message ReportStateRequest {
+  string session_id = 1;
+  SessionState state = 2;
+}
+
+// ReportStateResponse is the gateway's acknowledgement of a state report.
+message ReportStateResponse {}
+
+// HeartbeatRequest is sent periodically by a worker to the gateway.
+message HeartbeatRequest {
+  string session_id = 1;
+  string worker_pod = 2;
+}
+
+// HeartbeatResponse is the gateway's acknowledgement of a heartbeat.
+message HeartbeatResponse {}
+
+// SessionWorkerService is the gRPC service exposed by workers, called by the gateway.
+service SessionWorkerService {
+  // StartSession tells the worker to begin a new voice session.
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  // StopSession tells the worker to end a running session.
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  // GetStatus returns the status of one or all sessions on this worker.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+// SessionGatewayService is the gRPC service exposed by the gateway, called by workers.
+service SessionGatewayService {
+  // ReportState is called by a worker to report a session state change.
+  rpc ReportState(ReportStateRequest) returns (ReportStateResponse);
+  // Heartbeat is called periodically by a worker to signal liveness.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}

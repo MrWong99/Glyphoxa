@@ -1,7 +1,7 @@
 # Glyphoxa Makefile
 # Requires: Go 1.26+, CGO_ENABLED=1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs onnx-libs install-lint
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs onnx-libs install-lint proto proto-check proto-lint
 
 # Build
 build:
@@ -121,6 +121,24 @@ dave-libs:
 		echo "  export LD_LIBRARY_PATH=\"$$HOME/.local/lib:\$$LD_LIBRARY_PATH\""; \
 		echo "  export CGO_ENABLED=1"; \
 	fi
+
+# Protobuf code generation via buf.
+# Install: go install github.com/bufbuild/buf/cmd/buf@latest
+proto:
+	buf generate
+
+# Check that generated protobuf code is up to date (CI target).
+proto-check:
+	buf generate
+	@if [ -n "$$(git diff --name-only gen/)" ]; then \
+		echo "ERROR: generated protobuf code is stale. Run 'make proto' and commit."; \
+		git diff --name-only gen/; \
+		exit 1; \
+	fi
+
+# Lint protobuf definitions.
+proto-lint:
+	buf lint
 
 # Clean build artifacts
 clean:

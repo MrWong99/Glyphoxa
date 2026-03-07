@@ -26,6 +26,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/discord/commands"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
+	gw "github.com/MrWong99/glyphoxa/internal/gateway"
 	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/observe"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
@@ -57,6 +58,7 @@ func main() {
 func run() int {
 	// ── CLI flags ──────────────────────────────────────────────────────────────
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
+	mode := flag.String("mode", "full", "run mode: full, gateway, worker")
 	flag.Parse()
 
 	// ── Load configuration ────────────────────────────────────────────────────
@@ -81,6 +83,7 @@ func run() int {
 
 	slog.Info("glyphoxa starting",
 		"config", *configPath,
+		"mode", *mode,
 		"listen_addr", cfg.Server.ListenAddr,
 		"log_level", cfg.Server.LogLevel,
 	)
@@ -101,6 +104,23 @@ func run() int {
 		}
 	}()
 
+	// ── Dispatch to mode-specific run function ───────────────────────────────
+	switch *mode {
+	case "full":
+		return runFull(cfg)
+	case "gateway":
+		return runGateway(cfg)
+	case "worker":
+		return runWorker(cfg)
+	default:
+		fmt.Fprintf(os.Stderr, "glyphoxa: unknown mode %q (valid: full, gateway, worker)\n", *mode)
+		return 1
+	}
+}
+
+// runFull runs the single-process mode (current alpha behaviour).
+// This is the open-source self-hosted deployment path.
+func runFull(cfg *config.Config) int {
 	// ── Tenant context (full mode) ────────────────────────────────────────────
 	tenant := config.LocalTenant(cfg.Campaign.Name)
 
@@ -125,7 +145,7 @@ func run() int {
 	defer stop()
 
 	// ── Startup summary ───────────────────────────────────────────────────────
-	printStartupSummary(cfg)
+	printStartupSummary(cfg, "full")
 
 	application, err := app.New(ctx, cfg, providers, app.WithTenant(tenant))
 	if err != nil {
@@ -134,34 +154,7 @@ func run() int {
 	}
 
 	// ── Observability HTTP server (/healthz, /readyz, /metrics) ───────────
-	observeAddr := cfg.Server.ObserveAddr
-	if observeAddr == "" {
-		observeAddr = ":9090"
-	}
-	observeMux := http.NewServeMux()
-
-	// Health and readiness probes.
-	healthHandler := health.New(application.ReadinessChecks()...)
-	healthHandler.Register(observeMux)
-
-	// Prometheus metrics endpoint.
-	observeMux.Handle("GET /metrics", promhttp.Handler())
-
-	observeSrv := &http.Server{
-		Addr:    observeAddr,
-		Handler: observeMux,
-	}
-	go func() {
-		ln, err := net.Listen("tcp", observeAddr)
-		if err != nil {
-			slog.Error("observe server listen failed", "addr", observeAddr, "err", err)
-			return
-		}
-		slog.Info("observe server started", "addr", ln.Addr().String())
-		if err := observeSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("observe server error", "err", err)
-		}
-	}()
+	observeSrv := startObserveServer(cfg, application.ReadinessChecks()...)
 
 	// ── Discord commands (when audio provider is "discord") ──────────────────
 	if bot != nil {
@@ -220,7 +213,7 @@ func run() int {
 		}()
 	}
 
-	slog.Info("server ready — press Ctrl+C to shut down")
+	slog.Info("server ready — press Ctrl+C to shut down", "mode", "full")
 
 	if err := application.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("run error", "err", err)
@@ -233,12 +226,10 @@ func run() int {
 
 	slog.Info("shutdown signal received, stopping…")
 
-	// Stop the observe server first.
 	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("observe server shutdown error", "err", err)
 	}
 
-	// Close the Discord bot (unregister commands, disconnect).
 	if bot != nil {
 		if err := bot.Close(); err != nil {
 			slog.Warn("discord bot close error", "err", err)
@@ -251,6 +242,157 @@ func run() int {
 	}
 	slog.Info("goodbye")
 	return 0
+}
+
+// runGateway runs the gateway mode: Discord gateway connections, slash command
+// routing, session orchestration, internal admin API, and gRPC server for
+// communicating with workers.
+func runGateway(cfg *config.Config) int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	printStartupSummary(cfg, "gateway")
+
+	// ── Admin API ─────────────────────────────────────────────────────────────
+	adminKey := os.Getenv("GLYPHOXA_ADMIN_KEY")
+	if adminKey == "" {
+		slog.Warn("GLYPHOXA_ADMIN_KEY not set — admin API will reject all requests")
+		adminKey = "__unset__"
+	}
+
+	adminStore := gw.NewMemAdminStore()
+	adminAPI := gw.NewAdminAPI(adminStore, adminKey)
+
+	adminAddr := cfg.Server.ListenAddr
+	if adminAddr == "" {
+		adminAddr = ":8081"
+	}
+	adminSrv := &http.Server{
+		Addr:    adminAddr,
+		Handler: adminAPI.Handler(),
+	}
+	go func() {
+		ln, err := net.Listen("tcp", adminAddr)
+		if err != nil {
+			slog.Error("admin API listen failed", "addr", adminAddr, "err", err)
+			return
+		}
+		slog.Info("admin API started", "addr", ln.Addr().String())
+		if err := adminSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("admin API error", "err", err)
+		}
+	}()
+
+	// ── Observability ─────────────────────────────────────────────────────────
+	observeSrv := startObserveServer(cfg)
+
+	// ── Bot Manager ───────────────────────────────────────────────────────────
+	botMgr := gw.NewBotManager()
+
+	slog.Info("gateway ready — press Ctrl+C to shut down",
+		"mode", "gateway",
+		"admin_addr", adminAddr,
+	)
+
+	<-ctx.Done()
+
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	slog.Info("shutdown signal received, stopping…")
+
+	if err := adminSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("admin API shutdown error", "err", err)
+	}
+	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("observe server shutdown error", "err", err)
+	}
+
+	botMgr.Close()
+
+	slog.Info("goodbye")
+	return 0
+}
+
+// runWorker runs the worker mode: voice pipeline execution, receiving
+// session commands via gRPC from the gateway.
+func runWorker(cfg *config.Config) int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	printStartupSummary(cfg, "worker")
+
+	// ── Provider registry + instantiation ─────────────────────────────────────
+	reg := config.NewRegistry()
+	var bot *discordbot.Bot
+	registerBuiltinProviders(reg, &bot)
+
+	providers, err := buildProviders(cfg, reg)
+	if err != nil {
+		slog.Error("failed to build providers", "err", err)
+		return 1
+	}
+
+	// ── Observability ─────────────────────────────────────────────────────────
+	observeSrv := startObserveServer(cfg)
+
+	slog.Info("worker ready — waiting for gRPC commands",
+		"mode", "worker",
+	)
+
+	// The worker's gRPC server will be wired in when SessionOrchestrator
+	// (Phase 2.3) is integrated. For now the worker starts up and waits
+	// for shutdown.
+	_ = providers
+
+	<-ctx.Done()
+
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	slog.Info("shutdown signal received, stopping…")
+
+	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("observe server shutdown error", "err", err)
+	}
+
+	slog.Info("goodbye")
+	return 0
+}
+
+// startObserveServer creates and starts the observability HTTP server
+// (/healthz, /readyz, /metrics) on a background goroutine. Returns the
+// server for graceful shutdown.
+func startObserveServer(cfg *config.Config, checks ...health.Checker) *http.Server {
+	observeAddr := cfg.Server.ObserveAddr
+	if observeAddr == "" {
+		observeAddr = ":9090"
+	}
+	observeMux := http.NewServeMux()
+
+	healthHandler := health.New(checks...)
+	healthHandler.Register(observeMux)
+
+	observeMux.Handle("GET /metrics", promhttp.Handler())
+
+	srv := &http.Server{
+		Addr:    observeAddr,
+		Handler: observeMux,
+	}
+	go func() {
+		ln, err := net.Listen("tcp", observeAddr)
+		if err != nil {
+			slog.Error("observe server listen failed", "addr", observeAddr, "err", err)
+			return
+		}
+		slog.Info("observe server started", "addr", ln.Addr().String())
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("observe server error", "err", err)
+		}
+	}()
+	return srv
 }
 
 // ── Provider wiring ───────────────────────────────────────────────────────────
@@ -590,10 +732,11 @@ func buildProviders(cfg *config.Config, reg *config.Registry) (*app.Providers, e
 
 // ── Startup summary ───────────────────────────────────────────────────────────
 
-func printStartupSummary(cfg *config.Config) {
+func printStartupSummary(cfg *config.Config, mode string) {
 	fmt.Println("╔═══════════════════════════════════════╗")
 	fmt.Println("║         Glyphoxa — startup summary    ║")
 	fmt.Println("╠═══════════════════════════════════════╣")
+	fmt.Printf("║  Mode           : %-19s ║\n", mode)
 	printProvider("LLM", cfg.Providers.LLM.Name, cfg.Providers.LLM.Model)
 	printProvider("STT", cfg.Providers.STT.Name, cfg.Providers.STT.Model)
 	printProvider("TTS", cfg.Providers.TTS.Name, cfg.Providers.TTS.Model)
