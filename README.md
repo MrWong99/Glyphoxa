@@ -31,6 +31,17 @@ Written in Go for native concurrency and sub-2-second mouth-to-ear latency.
 - 🧪 **Dual-Model Sentence Cascade** — Experimental: fast model opener + strong model continuation for perceived <600ms voice onset
 - 🗺️ **Entity Management** — Pre-session world-building with YAML campaign files and VTT imports (Foundry VTT, Roll20)
 
+## Deployment Modes
+
+Glyphoxa runs in four modes via `--mode`:
+
+| Mode | Description |
+|------|-------------|
+| `full` (default) | Single-process, self-hosted. No admin API, config from YAML. |
+| `gateway` | Multi-tenant orchestrator. Admin API, bot management, session routing via gRPC. |
+| `worker` | Voice pipeline executor. Receives sessions from gateway, connects to Discord voice. |
+| `mcp-gateway` | Shared MCP tool server for workers. Stateless tools over HTTP. |
+
 ## 🏗️ Architecture
 
 ```
@@ -114,20 +125,27 @@ make check
 
 ```
 glyphoxa/
-├── cmd/glyphoxa/          # Entry point
+├── cmd/glyphoxa/          # Entry point (--mode=full|gateway|worker|mcp-gateway)
 ├── internal/
 │   ├── agent/             # NPC agents, orchestrator, router, address detection
-│   ├── config/            # Configuration schema and loader
+│   ├── config/            # Configuration, tenant context, hot-reload
 │   ├── engine/            # Voice engines (S2S wrapper, sentence cascade)
 │   ├── entity/            # Entity management (CRUD, YAML, VTT import)
+│   ├── gateway/           # Admin API, bot manager, session orchestrator, gRPC
+│   ├── health/            # Health probes (/healthz, /readyz)
 │   ├── hotctx/            # Hot context assembly and formatting
 │   ├── mcp/               # MCP host, bridge, budget tiers, built-in tools
+│   ├── observe/           # Metrics, traces, structured logging (OTel)
+│   ├── resilience/        # Circuit breaker, retry patterns
+│   ├── session/           # Voice pipeline lifecycle (Runtime, WorkerHandler)
 │   └── transcript/        # Transcript correction pipeline
 ├── pkg/
 │   ├── audio/             # Platform + Connection interfaces, mixer, WebRTC
 │   ├── memory/            # Store interface, PostgreSQL + pgvector, knowledge graph
 │   └── provider/          # LLM, STT, TTS, S2S, VAD, Embeddings interfaces + impls
+├── deploy/helm/           # Kubernetes Helm chart (gateway, worker, MCP gateway)
 ├── docs/design/           # Architecture and design documents
+├── proto/                 # gRPC service definitions
 ├── research/              # Research notes
 └── configs/               # Example configuration files
 ```
@@ -147,7 +165,8 @@ Comprehensive guides for developers and contributors — see the [full documenta
 | [MCP Tools](docs/mcp-tools.md) | Tool system, building custom tools |
 | [Audio Pipeline](docs/audio-pipeline.md) | Audio flow, VAD, engine types |
 | [Commands](docs/commands.md) | Discord slash and voice commands |
-| [Deployment](docs/deployment.md) | Docker Compose, production setup |
+| [Deployment](docs/deployment.md) | Docker Compose, Kubernetes / Helm, production setup |
+| [Multi-Tenant](docs/multi-tenant.md) | Gateway, admin API, tenant model, usage tracking |
 | [Observability](docs/observability.md) | Metrics, Grafana, health endpoints |
 | [Testing](docs/testing.md) | Test conventions and patterns |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and debugging |

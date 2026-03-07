@@ -43,6 +43,8 @@ go test -race -count=1 -run TestFunctionName ./path/to/package/...
 
 Player speaks → **VAD** (voice activity detection) → **STT** (speech-to-text) → **Hot Context Assembly** (<50ms: NPC identity + transcript + scene) → **LLM** (with optional MCP tool calls) → **TTS** (sentence-by-sentence streaming) → **Mixer** (priority queue, barge-in) → **Transport** (Discord/WebRTC). Transcript correction and knowledge graph updates happen asynchronously.
 
+**Distributed mode** (`--mode=gateway` + `--mode=worker`): Discord events arrive at the gateway, which orchestrates sessions via gRPC. The worker runs the same voice pipeline (VAD→STT→LLM→TTS→Mixer) and connects directly to Discord voice. Control signals (start/stop/heartbeat) flow over gRPC; audio flows directly between worker and Discord.
+
 **Latency budget**: <1.2s mouth-to-ear target, 2.0s hard limit. End-to-end streaming via pipelined Go channels.
 
 ### Key Subsystems
@@ -53,6 +55,11 @@ Player speaks → **VAD** (voice activity detection) → **STT** (speech-to-text
 - **`internal/config/`** — YAML config loader with provider registry and hot-reload support.
 - **`internal/hotctx/`** — Concurrent assembly of NPC identity, recent transcript, and scene context in <50ms.
 - **`internal/mcp/`** — MCP host and tool registry with budget tiers (instant/fast/standard).
+- **`internal/gateway/`** — Multi-tenant gateway. `AdminAPI` serves tenant CRUD over HTTP. `BotManager` manages per-tenant Discord bots. `sessionorch/` orchestrates session lifecycle with PostgreSQL-backed state and license constraint enforcement. `usage/` tracks session hours and enforces quotas. `grpctransport/` implements the gateway↔worker gRPC contract; `local/` provides in-process equivalents for `--mode=full`.
+- **`internal/session/`** — Voice pipeline lifecycle. `Runtime` owns the full pipeline (VAD→STT→LLM→TTS→Mixer) for a single session. `WorkerHandler` receives gRPC commands from the gateway and manages `Runtime` instances. Shared by `--mode=full` and `--mode=worker`.
+- **`internal/observe/`** — Observability. Prometheus metrics, OTel distributed traces, structured logging via `slog`. Per-tenant labels (`tenant_id`, `campaign_id`) on all telemetry. HTTP middleware for automatic instrumentation.
+- **`internal/health/`** — Health probes. `/healthz` (liveness) and `/readyz` (readiness with pluggable checkers).
+- **`internal/resilience/`** — Resilience patterns. `CircuitBreaker` (closed→open→half-open) wraps gRPC clients and provider calls.
 - **`pkg/audio/`** — `Platform`/`Connection` interfaces. Adapters: `discord/`, `webrtc/`. `mixer/` handles priority queue with barge-in detection.
 - **`pkg/memory/`** — 3-layer memory: L1 (session log), L2 (semantic/vector via pgvector), L3 (knowledge graph with recursive CTEs). Backend: PostgreSQL + pgvector.
 - **`pkg/provider/`** — Provider interfaces and implementations for `llm/`, `stt/`, `tts/`, `s2s/`, `vad/`, `embeddings/`. Each has a `mock/` subdirectory.
