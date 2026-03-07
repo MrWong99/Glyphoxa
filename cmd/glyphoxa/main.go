@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/godave/libdave"
@@ -27,8 +30,11 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
 	gw "github.com/MrWong99/glyphoxa/internal/gateway"
+	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
+	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
 	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/observe"
+	"github.com/MrWong99/glyphoxa/internal/session"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/audio/webrtc"
 	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
@@ -289,9 +295,52 @@ func runGateway(cfg *config.Config) int {
 	// ── Bot Manager ───────────────────────────────────────────────────────────
 	botMgr := gw.NewBotManager()
 
+	// ── Session Orchestrator ─────────────────────────────────────────────────
+	orch := sessionorch.NewMemoryOrchestrator()
+	callbackBridge := sessionorch.NewCallbackBridge(orch)
+
+	// ── gRPC server (receives worker callbacks) ──────────────────────────────
+	grpcAddr := os.Getenv("GLYPHOXA_GRPC_ADDR")
+	if grpcAddr == "" {
+		grpcAddr = ":50051"
+	}
+	gwGRPCServer := grpc.NewServer()
+	grpctransport.NewGatewayServer(callbackBridge).Register(gwGRPCServer)
+
+	go func() {
+		ln, err := net.Listen("tcp", grpcAddr)
+		if err != nil {
+			slog.Error("gateway gRPC listen failed", "addr", grpcAddr, "err", err)
+			return
+		}
+		slog.Info("gateway gRPC server started", "addr", ln.Addr().String())
+		if err := gwGRPCServer.Serve(ln); err != nil {
+			slog.Error("gateway gRPC server error", "err", err)
+		}
+	}()
+
+	// ── Zombie session cleanup ───────────────────────────────────────────────
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, err := orch.CleanupZombies(ctx, 90*time.Second); err != nil {
+					slog.Warn("zombie cleanup error", "err", err)
+				} else if n > 0 {
+					slog.Info("cleaned up zombie sessions", "count", n)
+				}
+			}
+		}
+	}()
+
 	slog.Info("gateway ready — press Ctrl+C to shut down",
 		"mode", "gateway",
 		"admin_addr", adminAddr,
+		"grpc_addr", grpcAddr,
 	)
 
 	<-ctx.Done()
@@ -302,6 +351,7 @@ func runGateway(cfg *config.Config) int {
 
 	slog.Info("shutdown signal received, stopping…")
 
+	gwGRPCServer.GracefulStop()
 	if err := adminSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("admin API shutdown error", "err", err)
 	}
@@ -334,17 +384,83 @@ func runWorker(cfg *config.Config) int {
 		return 1
 	}
 
+	// ── GatewayCallback (worker → gateway heartbeats and state reports) ───────
+	gwAddr := os.Getenv("GLYPHOXA_GATEWAY_ADDR")
+	var callback gw.GatewayCallback
+	if gwAddr != "" {
+		gwConn, err := grpc.NewClient(gwAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			slog.Error("failed to connect to gateway", "addr", gwAddr, "err", err)
+			return 1
+		}
+		defer gwConn.Close()
+		callback = grpctransport.NewGatewayClient(gwConn)
+		slog.Info("connected to gateway", "addr", gwAddr)
+	} else {
+		slog.Warn("GLYPHOXA_GATEWAY_ADDR not set — worker will not send heartbeats")
+	}
+
+	// ── WorkerHandler ─────────────────────────────────────────────────────────
+	handler := session.NewWorkerHandler(
+		func(_ context.Context, req gw.StartSessionRequest) (*session.Runtime, error) {
+			// Placeholder factory: creates an empty runtime.
+			// Full wiring (providers → agents → engines → runtime) will be
+			// added when the session lifecycle is integrated end-to-end.
+			_ = providers
+			return session.NewRuntime(session.RuntimeConfig{
+				SessionID: req.SessionID,
+			}), nil
+		},
+		callback,
+	)
+
+	// ── gRPC server (receives gateway commands) ──────────────────────────────
+	grpcAddr := os.Getenv("GLYPHOXA_GRPC_ADDR")
+	if grpcAddr == "" {
+		grpcAddr = ":50051"
+	}
+	wkGRPCServer := grpc.NewServer()
+	grpctransport.NewWorkerServer(handler).Register(wkGRPCServer)
+
+	go func() {
+		ln, err := net.Listen("tcp", grpcAddr)
+		if err != nil {
+			slog.Error("worker gRPC listen failed", "addr", grpcAddr, "err", err)
+			return
+		}
+		slog.Info("worker gRPC server started", "addr", ln.Addr().String())
+		if err := wkGRPCServer.Serve(ln); err != nil {
+			slog.Error("worker gRPC server error", "err", err)
+		}
+	}()
+
+	// ── Heartbeat goroutine ──────────────────────────────────────────────────
+	if callback != nil {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					for _, id := range handler.ActiveSessionIDs() {
+						if err := callback.Heartbeat(ctx, id); err != nil {
+							slog.Warn("heartbeat failed", "session_id", id, "err", err)
+						}
+					}
+				}
+			}
+		}()
+	}
+
 	// ── Observability ─────────────────────────────────────────────────────────
 	observeSrv := startObserveServer(cfg)
 
 	slog.Info("worker ready — waiting for gRPC commands",
 		"mode", "worker",
+		"grpc_addr", grpcAddr,
 	)
-
-	// The worker's gRPC server will be wired in when SessionOrchestrator
-	// (Phase 2.3) is integrated. For now the worker starts up and waits
-	// for shutdown.
-	_ = providers
 
 	<-ctx.Done()
 
@@ -354,6 +470,9 @@ func runWorker(cfg *config.Config) int {
 
 	slog.Info("shutdown signal received, stopping…")
 
+	wkGRPCServer.GracefulStop()
+	handler.StopAll(shutdownCtx)
+
 	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("observe server shutdown error", "err", err)
 	}
@@ -361,6 +480,7 @@ func runWorker(cfg *config.Config) int {
 	slog.Info("goodbye")
 	return 0
 }
+
 
 // startObserveServer creates and starts the observability HTTP server
 // (/healthz, /readyz, /metrics) on a background goroutine. Returns the
