@@ -14,8 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/json"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
@@ -25,6 +29,8 @@ import (
 
 	"github.com/MrWong99/glyphoxa/internal/app"
 	"github.com/MrWong99/glyphoxa/internal/config"
+	"github.com/MrWong99/glyphoxa/internal/mcp"
+	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
 	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/discord/commands"
 	"github.com/MrWong99/glyphoxa/internal/entity"
@@ -64,7 +70,7 @@ func main() {
 func run() int {
 	// ── CLI flags ──────────────────────────────────────────────────────────────
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
-	mode := flag.String("mode", "full", "run mode: full, gateway, worker")
+	mode := flag.String("mode", "full", "run mode: full, gateway, worker, mcp-gateway")
 	flag.Parse()
 
 	// ── Load configuration ────────────────────────────────────────────────────
@@ -118,8 +124,10 @@ func run() int {
 		return runGateway(cfg)
 	case "worker":
 		return runWorker(cfg)
+	case "mcp-gateway":
+		return runMCPGateway(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "glyphoxa: unknown mode %q (valid: full, gateway, worker)\n", *mode)
+		fmt.Fprintf(os.Stderr, "glyphoxa: unknown mode %q (valid: full, gateway, worker, mcp-gateway)\n", *mode)
 		return 1
 	}
 }
@@ -475,6 +483,146 @@ func runWorker(cfg *config.Config) int {
 
 	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("observe server shutdown error", "err", err)
+	}
+
+	slog.Info("goodbye")
+	return 0
+}
+
+// runMCPGateway runs the MCP gateway mode: a shared MCP server over Streamable
+// HTTP that hosts stateless tools (dice, rules, external MCP servers) for all
+// worker pods.
+func runMCPGateway(cfg *config.Config) int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	printStartupSummary(cfg, "mcp-gateway")
+
+	// ── MCP Host with stateless tools ────────────────────────────────────────
+	host := mcphost.New()
+
+	if err := mcphost.RegisterStatelessTools(host); err != nil {
+		slog.Error("failed to register stateless tools", "err", err)
+		return 1
+	}
+
+	// Register external MCP servers from config.
+	for _, srv := range cfg.MCP.Servers {
+		serverCfg := mcp.ServerConfig{
+			Name:      srv.Name,
+			Transport: srv.Transport,
+			Command:   srv.Command,
+			URL:       srv.URL,
+			Env:       srv.Env,
+		}
+		if err := host.RegisterServer(ctx, serverCfg); err != nil {
+			slog.Error("failed to register MCP server", "name", srv.Name, "err", err)
+			return 1
+		}
+		slog.Info("registered MCP server", "name", srv.Name)
+	}
+
+	if err := host.Calibrate(ctx); err != nil {
+		slog.Warn("MCP calibration failed, using declared latencies", "err", err)
+	}
+
+	// ── MCP SDK Server ───────────────────────────────────────────────────────
+	mcpServer := mcpsdk.NewServer(
+		&mcpsdk.Implementation{Name: "glyphoxa-mcp-gateway", Version: "1.0.0"},
+		nil,
+	)
+
+	// Register each tool from the host on the MCP SDK server.
+	allTools := host.AvailableTools(mcp.BudgetDeep)
+	for _, toolDef := range allTools {
+		toolName := toolDef.Name
+		mcpTool := &mcpsdk.Tool{
+			Name:        toolDef.Name,
+			Description: toolDef.Description,
+			InputSchema: toolDef.Parameters,
+		}
+		if mcpTool.InputSchema == nil {
+			mcpTool.InputSchema = map[string]any{"type": "object"}
+		}
+
+		mcpServer.AddTool(mcpTool, func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+			argsJSON := "{}"
+			if req.Params.Arguments != nil {
+				data, err := json.Marshal(req.Params.Arguments)
+				if err != nil {
+					return nil, fmt.Errorf("mcp-gateway: marshal tool args: %w", err)
+				}
+				argsJSON = string(data)
+			}
+
+			result, err := host.ExecuteTool(ctx, toolName, argsJSON)
+			if err != nil {
+				return nil, err
+			}
+
+			callResult := &mcpsdk.CallToolResult{
+				Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: result.Content}},
+				IsError: result.IsError,
+			}
+			return callResult, nil
+		})
+	}
+
+	slog.Info("registered MCP tools on gateway", "count", len(allTools))
+
+	// ── HTTP Server (MCP Streamable HTTP) ────────────────────────────────────
+	mcpHandler := mcpsdk.NewStreamableHTTPHandler(func(_ *http.Request) *mcpsdk.Server {
+		return mcpServer
+	}, nil)
+
+	mcpAddr := os.Getenv("GLYPHOXA_MCP_ADDR")
+	if mcpAddr == "" {
+		mcpAddr = ":8080"
+	}
+
+	mcpMux := http.NewServeMux()
+	mcpMux.Handle("/mcp", mcpHandler)
+
+	mcpSrv := &http.Server{
+		Addr:    mcpAddr,
+		Handler: mcpMux,
+	}
+	go func() {
+		ln, err := net.Listen("tcp", mcpAddr)
+		if err != nil {
+			slog.Error("MCP HTTP listen failed", "addr", mcpAddr, "err", err)
+			return
+		}
+		slog.Info("MCP gateway started", "addr", ln.Addr().String())
+		if err := mcpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("MCP HTTP server error", "err", err)
+		}
+	}()
+
+	// ── Observability ────────────────────────────────────────────────────────
+	observeSrv := startObserveServer(cfg)
+
+	slog.Info("mcp-gateway ready — press Ctrl+C to shut down",
+		"mode", "mcp-gateway",
+		"mcp_addr", mcpAddr,
+	)
+
+	<-ctx.Done()
+
+	// ── Graceful shutdown ────────────────────────────────────────────────────
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	slog.Info("shutdown signal received, stopping…")
+
+	if err := mcpSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("MCP HTTP server shutdown error", "err", err)
+	}
+	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("observe server shutdown error", "err", err)
+	}
+	if err := host.Close(); err != nil {
+		slog.Warn("MCP host close error", "err", err)
 	}
 
 	slog.Info("goodbye")
