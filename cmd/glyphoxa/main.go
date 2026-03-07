@@ -29,8 +29,6 @@ import (
 
 	"github.com/MrWong99/glyphoxa/internal/app"
 	"github.com/MrWong99/glyphoxa/internal/config"
-	"github.com/MrWong99/glyphoxa/internal/mcp"
-	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
 	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 	"github.com/MrWong99/glyphoxa/internal/discord/commands"
 	"github.com/MrWong99/glyphoxa/internal/entity"
@@ -39,6 +37,8 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
 	"github.com/MrWong99/glyphoxa/internal/health"
+	"github.com/MrWong99/glyphoxa/internal/mcp"
+	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
 	"github.com/MrWong99/glyphoxa/internal/observe"
 	"github.com/MrWong99/glyphoxa/internal/session"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
