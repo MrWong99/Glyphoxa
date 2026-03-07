@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -265,6 +266,19 @@ func (a *App) initMCP(ctx context.Context) error {
 			return fmt.Errorf("register mcp server %q: %w", srv.Name, err)
 		}
 		slog.Info("registered MCP server", "name", srv.Name)
+	}
+
+	// Auto-register shared MCP gateway if URL is provided.
+	if mcpGatewayURL := os.Getenv("GLYPHOXA_MCP_GATEWAY_URL"); mcpGatewayURL != "" {
+		gwCfg := mcp.ServerConfig{
+			Name:      "mcp-gateway",
+			Transport: mcp.TransportStreamableHTTP,
+			URL:       mcpGatewayURL,
+		}
+		if err := a.mcpHost.RegisterServer(ctx, gwCfg); err != nil {
+			return fmt.Errorf("register mcp-gateway at %s: %w", mcpGatewayURL, err)
+		}
+		slog.Info("registered shared MCP gateway", "url", mcpGatewayURL)
 	}
 
 	if err := a.mcpHost.Calibrate(ctx); err != nil {
