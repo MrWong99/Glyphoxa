@@ -87,6 +87,28 @@ worker:
   nodeSelector: {}
   tolerations: []
 
+# -- MCP Gateway configuration (--mode=mcp-gateway)
+# Shared MCP tool server for all workers. Hosts stateless tools (dice, rules)
+# and proxies external MCP servers.
+mcpGateway:
+  enabled: true
+  replicaCount: 2
+
+  ports:
+    mcp: 8080
+    observe: 9090
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  nodeSelector: {}
+  tolerations: []
+
 # -- ConfigMap for Glyphoxa YAML configuration.
 # Mounted at /etc/glyphoxa/config.yaml inside both gateway and worker pods.
 config:

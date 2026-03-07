@@ -1,0 +1,23 @@
+{{- if .Values.mcpGateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-mcp-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    {{- include "glyphoxa.mcpGateway.selectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: mcp
+      port: {{ .Values.mcpGateway.ports.mcp }}
+      targetPort: mcp
+      protocol: TCP
+    - name: observe
+      port: {{ .Values.mcpGateway.ports.observe }}
+      targetPort: observe
+      protocol: TCP
+  selector:
+    {{- include "glyphoxa.mcpGateway.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,82 @@
+{{- if .Values.mcpGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-mcp-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    {{- include "glyphoxa.mcpGateway.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.mcpGateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.mcpGateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.labels" . | nindent 8 }}
+        {{- include "glyphoxa.mcpGateway.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcpGateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcpGateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mcp-gateway
+          image: {{ include "glyphoxa.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--mode=mcp-gateway"]
+          ports:
+            - name: mcp
+              containerPort: {{ .Values.mcpGateway.ports.mcp }}
+              protocol: TCP
+            - name: observe
+              containerPort: {{ .Values.mcpGateway.ports.observe }}
+              protocol: TCP
+          env:
+            - name: GLYPHOXA_MCP_ADDR
+              value: ":{{ .Values.mcpGateway.ports.mcp }}"
+          {{- if .Values.config.data }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/glyphoxa
+              readOnly: true
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            failureThreshold: 30
+            periodSeconds: 2
+          resources:
+            {{- toYaml .Values.mcpGateway.resources | nindent 12 }}
+      {{- if .Values.config.data }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "glyphoxa.fullname" . }}-config
+      {{- end }}
+{{- end }}

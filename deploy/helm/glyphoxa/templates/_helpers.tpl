@@ -56,6 +56,15 @@ app.kubernetes.io/component: worker
 {{- end }}
 
 {{/*
+Selector labels for MCP gateway.
+*/}}
+{{- define "glyphoxa.mcpGateway.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "glyphoxa.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: mcp-gateway
+{{- end }}
+
+{{/*
 Container image reference.
 */}}
 {{- define "glyphoxa.image" -}}
