@@ -55,6 +55,11 @@ type TenantContext struct {
 	LicenseTier LicenseTier
 	CampaignID  string
 	GuildID     string
+	// SchemaName is the PostgreSQL schema for this tenant's data.
+	// Directly corresponds to TenantID ("local" for full mode,
+	// "tenant_<id>" for multi-tenant). Validated and converted to
+	// postgres.SchemaName at the storage boundary.
+	SchemaName string
 }
 
 // Validate checks that the TenantContext has a valid TenantID.
@@ -92,5 +97,6 @@ func LocalTenant(campaignName string) TenantContext {
 		TenantID:    "local",
 		LicenseTier: TierShared,
 		CampaignID:  cid,
+		SchemaName:  "local",
 	}
 }

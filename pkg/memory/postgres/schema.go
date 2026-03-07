@@ -37,7 +37,7 @@ func ddlSessionEntries(s SchemaName) string {
 	return fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     id           BIGSERIAL    PRIMARY KEY,
-    campaign_id  TEXT         NOT NULL DEFAULT 'migrated',
+    campaign_id  TEXT         NOT NULL,
     session_id   TEXT         NOT NULL,
     speaker_id   TEXT         NOT NULL DEFAULT '',
     speaker_name TEXT         NOT NULL DEFAULT '',
@@ -73,7 +73,7 @@ func ddlKnowledgeGraph(s SchemaName) string {
 	relationships := s.TableRef("relationships")
 	return fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
-    campaign_id TEXT         NOT NULL DEFAULT 'migrated',
+    campaign_id TEXT         NOT NULL,
     id          TEXT         NOT NULL,
     type        TEXT         NOT NULL,
     name        TEXT         NOT NULL,
@@ -87,7 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_entities_type ON %s (type);
 CREATE INDEX IF NOT EXISTS idx_entities_name ON %s (name);
 
 CREATE TABLE IF NOT EXISTS %s (
-    campaign_id TEXT         NOT NULL DEFAULT 'migrated',
+    campaign_id TEXT         NOT NULL,
     source_id   TEXT         NOT NULL,
     target_id   TEXT         NOT NULL,
     rel_type    TEXT         NOT NULL,
@@ -124,7 +124,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS %s (
     id          TEXT         PRIMARY KEY,
-    campaign_id TEXT         NOT NULL DEFAULT 'migrated',
+    campaign_id TEXT         NOT NULL,
     session_id  TEXT         NOT NULL,
     content     TEXT         NOT NULL,
     embedding   vector(%d),

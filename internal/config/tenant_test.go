@@ -172,6 +172,9 @@ func TestLocalTenant(t *testing.T) {
 			if got.CampaignID != tc.wantCampID {
 				t.Errorf("CampaignID = %q, want %q", got.CampaignID, tc.wantCampID)
 			}
+			if got.SchemaName != "local" {
+				t.Errorf("SchemaName = %q, want %q", got.SchemaName, "local")
+			}
 		})
 	}
 }
