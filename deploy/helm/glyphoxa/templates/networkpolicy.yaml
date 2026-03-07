@@ -86,8 +86,61 @@ spec:
     - ports:
         - port: 5432
           protocol: TCP
+    # MCP Gateway.
+    {{- if .Values.mcpGateway.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: mcp-gateway
+      ports:
+        - port: {{ .Values.mcpGateway.ports.mcp }}
+          protocol: TCP
+    {{- end }}
     # External APIs (LLM, STT, TTS providers over HTTPS).
     - ports:
         - port: 443
           protocol: TCP
+{{- if .Values.mcpGateway.enabled }}
+---
+# MCP Gateway: can receive MCP HTTP from workers; can reach external APIs and DNS.
+# Cannot reach PostgreSQL (no tenant data).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-mcp-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "glyphoxa.mcpGateway.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow MCP HTTP from workers.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - port: {{ .Values.mcpGateway.ports.mcp }}
+          protocol: TCP
+    # Allow observe (metrics scraping) from any namespace (Prometheus).
+    - ports:
+        - port: {{ .Values.mcpGateway.ports.observe }}
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # External APIs (MCP servers over HTTPS).
+    - ports:
+        - port: 443
+          protocol: TCP
+{{- end }}
 {{- end }}

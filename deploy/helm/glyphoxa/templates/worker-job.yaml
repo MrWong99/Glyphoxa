@@ -62,6 +62,10 @@ data:
                   value: "{{ include "glyphoxa.fullname" . }}-gateway.{{ .Release.Namespace }}.svc:{{ .Values.gateway.ports.grpc }}"
                 - name: GLYPHOXA_GRPC_ADDR
                   value: ":{{ .Values.worker.ports.grpc }}"
+                {{- if .Values.mcpGateway.enabled }}
+                - name: GLYPHOXA_MCP_GATEWAY_URL
+                  value: "http://{{ include "glyphoxa.fullname" . }}-mcp-gateway.{{ .Release.Namespace }}.svc:{{ .Values.mcpGateway.ports.mcp }}/mcp"
+                {{- end }}
                 {{- $dsn := include "glyphoxa.databaseDSN" . }}
                 {{- if $dsn }}
                 - name: GLYPHOXA_DATABASE_DSN
