@@ -87,6 +87,16 @@ worker:
   nodeSelector: {}
   tolerations: []
 
+  # GPU node scheduling for local-llm profile.
+  # When resourceProfile is "local-llm", these are merged with worker
+  # nodeSelector/tolerations to schedule on GPU-equipped nodes.
+  gpu:
+    nodeSelector:
+      nvidia.com/gpu: "true"
+    tolerations:
+      - key: nvidia.com/gpu
+        effect: NoSchedule
+
 # -- MCP Gateway configuration (--mode=mcp-gateway)
 # Shared MCP tool server for all workers. Hosts stateless tools (dice, rules)
 # and proxies external MCP servers.

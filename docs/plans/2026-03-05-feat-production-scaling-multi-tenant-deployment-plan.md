@@ -1310,8 +1310,8 @@ nodePool: gpu-workers
 ```
 
 **Acceptance criteria:**
-- [ ] Dedicated workers scheduled on dedicated node pool
-- [ ] GPU workers scheduled on GPU nodes when local inference is configured
+- [x] Dedicated workers scheduled on dedicated node pool
+- [x] GPU workers scheduled on GPU nodes when local inference is configured
 
 ---
 

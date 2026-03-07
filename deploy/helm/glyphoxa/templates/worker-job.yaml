@@ -37,11 +37,19 @@ data:
           imagePullSecrets:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.worker.nodeSelector }}
+          {{- $workerNS := .Values.worker.nodeSelector | default dict }}
+          {{- if and (eq .Values.worker.resourceProfile "local-llm") .Values.worker.gpu }}
+          {{- $workerNS = merge ($workerNS) (.Values.worker.gpu.nodeSelector | default dict) }}
+          {{- end }}
+          {{- with $workerNS }}
           nodeSelector:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.worker.tolerations }}
+          {{- $workerTol := .Values.worker.tolerations | default list }}
+          {{- if and (eq .Values.worker.resourceProfile "local-llm") .Values.worker.gpu }}
+          {{- $workerTol = concat ($workerTol) (.Values.worker.gpu.tolerations | default list) }}
+          {{- end }}
+          {{- with $workerTol }}
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}

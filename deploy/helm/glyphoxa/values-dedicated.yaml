@@ -11,9 +11,21 @@ gateway:
   replicaCount: 1
   podAntiAffinity:
     enabled: false
+  nodeSelector:
+    glyphoxa.io/tier: dedicated
+  tolerations:
+    - key: glyphoxa.io/tier
+      value: dedicated
+      effect: NoSchedule
 
 worker:
   resourceProfile: cloud
+  nodeSelector:
+    glyphoxa.io/tier: dedicated
+  tolerations:
+    - key: glyphoxa.io/tier
+      value: dedicated
+      effect: NoSchedule
 
 networkPolicy:
   enabled: true
