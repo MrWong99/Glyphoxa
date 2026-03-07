@@ -17,6 +17,7 @@ Glyphoxa can be deployed in three ways:
 | **Docker Compose** (recommended) | Most deployments — local or cloud providers | NVIDIA (via container toolkit) | Low |
 | **Binary from release** | Custom orchestration, systemd, bare-metal | Host-native (CUDA, Metal) | Medium |
 | **Build from source** | Development, customisation, non-Linux platforms | Host-native | High |
+| **Kubernetes / Helm** (multi-tenant) | SaaS, multi-tenant production | NVIDIA (via device plugin) | Medium |
 
 All methods produce a binary with whisper.cpp statically linked and libdave dynamically linked. The binary requires a PostgreSQL database with the pgvector extension and a YAML configuration file.
 
@@ -62,6 +63,108 @@ docker compose up -d
 Profiles can be combined: `docker compose --profile local --profile alpha up` starts the full stack with monitoring.
 
 For complete setup details -- GPU acceleration, model selection, endpoints, and troubleshooting -- see [`deployments/compose/README.md`](https://github.com/MrWong99/glyphoxa/blob/main/deployments/compose/README.md).
+
+---
+
+## Kubernetes / Helm Deployment
+
+For multi-tenant SaaS deployments, Glyphoxa provides a Helm chart that deploys a gateway, worker job template, and optional MCP gateway.
+
+See [Multi-Tenant Architecture](multi-tenant.md) for the tenant model, admin API, and session orchestration details.
+
+### Prerequisites
+
+- Kubernetes 1.28+
+- Helm 3
+- PostgreSQL with pgvector (external or via the bundled Bitnami subchart)
+- Sealed Secrets controller (optional, for secret management)
+
+### Binary Modes
+
+The Glyphoxa binary supports four modes:
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Full | `--mode=full` | Single-process (default). Self-hosted, no admin API. |
+| Gateway | `--mode=gateway` | Session orchestrator with admin API. Manages bots and routes sessions. |
+| Worker | `--mode=worker` | Voice pipeline executor. Created as Kubernetes Jobs by the gateway. |
+| MCP Gateway | `--mode=mcp-gateway` | Shared tool server for all workers. |
+
+### Quick Start (Shared Topology)
+
+```bash
+# Build dependencies
+helm dependency build deploy/helm/glyphoxa/
+
+# Install with shared topology
+helm install glyphoxa deploy/helm/glyphoxa/ \
+  -f deploy/helm/glyphoxa/values-shared.yaml \
+  --set database.dsn="postgres://user:pass@db:5432/glyphoxa" \
+  --set gateway.adminKey="your-secret-key" \
+  -n glyphoxa --create-namespace
+```
+
+### Dedicated Tenant
+
+```bash
+helm install glyphoxa-tenant-abc deploy/helm/glyphoxa/ \
+  -f deploy/helm/glyphoxa/values-dedicated.yaml \
+  --set database.dsn="postgres://user:pass@dedicated-db:5432/glyphoxa" \
+  -n glyphoxa-tenant-abc --create-namespace
+```
+
+### Key Values
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `topology` | `shared` | `shared` or `dedicated` |
+| `gateway.replicaCount` | `3` | Gateway replicas (HA) |
+| `gateway.adminKey` | `""` | Admin API bearer token |
+| `gateway.ports.admin` | `8081` | Admin API port |
+| `gateway.ports.grpc` | `50051` | gRPC port |
+| `gateway.ports.observe` | `9090` | Metrics/health port |
+| `worker.resourceProfile` | `cloud` | `cloud`, `whisper-native`, or `local-llm` |
+| `worker.activeDeadlineSeconds` | `14400` | Max session duration (4h) |
+| `mcpGateway.enabled` | `true` | Deploy MCP gateway |
+| `networkPolicy.enabled` | `true` | Enable NetworkPolicies |
+| `autoscaling.enabled` | `false` | HPA for gateway |
+
+### Environment Variables
+
+Gateway and worker pods use these environment variables (set automatically by the Helm chart):
+
+| Variable | Mode | Description |
+|----------|------|-------------|
+| `GLYPHOXA_ADMIN_KEY` | gateway | Admin API bearer token |
+| `GLYPHOXA_GRPC_ADDR` | gateway, worker | gRPC listen address |
+| `GLYPHOXA_GATEWAY_ADDR` | worker | Gateway gRPC address for callbacks |
+| `GLYPHOXA_DATABASE_DSN` | gateway, worker | PostgreSQL connection string |
+| `GLYPHOXA_MCP_GATEWAY_URL` | worker | MCP gateway HTTP URL |
+
+### Tier-Aware Node Scheduling
+
+The Helm chart supports scheduling workloads onto tier-specific node pools:
+
+```yaml
+# values-shared.yaml sets:
+gateway.nodeSelector: { "glyphoxa.io/tier": "shared" }
+gateway.tolerations: [{ key: "glyphoxa.io/tier", value: "shared", effect: "NoSchedule" }]
+
+# values-dedicated.yaml sets:
+gateway.nodeSelector: { "glyphoxa.io/tier": "dedicated" }
+gateway.tolerations: [{ key: "glyphoxa.io/tier", value: "dedicated", effect: "NoSchedule" }]
+```
+
+When `worker.resourceProfile` is `local-llm`, GPU tolerations (`nvidia.com/gpu`) are automatically merged so workers land on GPU-equipped nodes.
+
+### NetworkPolicy
+
+When `networkPolicy.enabled=true`, the chart deploys policies that:
+
+- Allow gateway to receive admin API and gRPC traffic
+- Allow workers to connect to gateway gRPC and MCP gateway HTTP
+- Allow MCP gateway to receive traffic from workers only
+- Block all other inter-pod communication
 
 ---
 

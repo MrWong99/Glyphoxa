@@ -46,8 +46,9 @@ New to Glyphoxa? Follow this path:
 | Document | Description |
 |----------|-------------|
 | [Commands](commands.md) | Discord slash commands, voice commands, puppet mode, dashboard |
-| [Deployment](deployment.md) | Docker Compose, building from source, GPU setup, production checklist |
-| [Observability](observability.md) | Metrics, Prometheus, Grafana dashboards, health endpoints, alerting |
+| [Deployment](deployment.md) | Docker Compose, Kubernetes / Helm, binary modes, production checklist |
+| [Multi-Tenant](multi-tenant.md) | Gateway, admin API, tenant model, session orchestration, usage tracking |
+| [Observability](observability.md) | Metrics, Prometheus, Grafana dashboards, per-tenant labels, health endpoints, alerting |
 
 ### Quality
 

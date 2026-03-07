@@ -278,19 +278,19 @@ Add WebRTC support via Pion to validate the `AudioPlatform` interface:
 
 **Goal:** Make Glyphoxa reliable enough for multi-hour sessions with real play groups. Instrument everything, harden failure modes, and establish operational baselines.
 
-**Status:** Next up.
+**Status:** Mostly complete (see production scaling plan).
 
 ### Structured Observability
 
-- **OpenTelemetry integration:** Traces for the full voice pipeline (VAD → STT → LLM → TTS → playback) with span-per-stage latency
-- **Prometheus metrics:** Endpoint exposing p50/p95/p99 latency per stage, active NPC count, memory query duration, tool execution times, error rates by provider
-- **Structured logging:** Replace ad-hoc `log` calls with `slog` (structured, leveled). Correlation IDs linking a single utterance through the entire pipeline
-- **Health endpoint:** `/healthz` and `/readyz` for container orchestration. Include provider connectivity checks
+- **OpenTelemetry integration** ✅: Traces for the full voice pipeline (VAD → STT → LLM → TTS → playback) with span-per-stage latency
+- **Prometheus metrics** ✅: Endpoint exposing p50/p95/p99 latency per stage, active NPC count, memory query duration, tool execution times, error rates by provider
+- **Structured logging** ✅: Replace ad-hoc `log` calls with `slog` (structured, leveled). Correlation IDs linking a single utterance through the entire pipeline
+- **Health endpoint** ✅: `/healthz` and `/readyz` for container orchestration. Include provider connectivity checks
 
 ### Graceful Degradation
 
 - **Provider failover:** If an STT/TTS/LLM provider returns errors or exceeds latency hard limits, automatically fall back to a configured secondary (e.g., ElevenLabs → Coqui, Deepgram → whisper.cpp)
-- **Circuit breakers:** Per-provider circuit breaker (closed → open → half-open). Prevent cascading failures when a single external API goes down
+- **Circuit breakers** ✅: Per-provider circuit breaker (closed → open → half-open). Prevent cascading failures when a single external API goes down
 - **S2S → cascaded fallback:** If an S2S session fails mid-conversation, seamlessly restart the NPC on cascaded engine without losing context
 - **Memory layer isolation:** L1/L2/L3 failures should degrade gracefully (NPC continues without memory rather than crashing)
 
@@ -303,9 +303,11 @@ Add WebRTC support via Pion to validate the `AudioPlatform` interface:
 ### Configuration Validation
 
 - **Startup validation:** Fail fast with clear error messages if config references unknown providers, missing credentials, or invalid NPC definitions
-- **Config hot-reload:** Watch config file for changes and apply non-destructive updates (NPC personality, tool tiers, voice settings) without restarting the session
+- **Config hot-reload** ✅: Watch config file for changes and apply non-destructive updates (NPC personality, tool tiers, voice settings) without restarting the session
 
 ### Resolve Open Design Items
+
+✅ Resolved during implementation.
 
 Address the two items from [to-be-discussed.md](to-be-discussed.md):
 - **#6 — OpenAI Realtime error events:** Implement `OnError(func(error))` callback on `s2s.SessionHandle` (recommended Option B)
@@ -315,15 +317,18 @@ Address the two items from [to-be-discussed.md](to-be-discussed.md):
 
 **Goal:** Build the DM-facing control surface and run real play sessions to validate the product.
 
+**Status:** Discord interface complete. Closed alpha pending.
+
 ### Discord Bot Interface
 
-- **Slash commands:** `/npc list`, `/npc mute <name>`, `/npc unmute <name>`, `/npc speak <name> <text>` (puppet mode), `/session start`, `/session stop`, `/session recap`
-- **Entity management:** `/entity add`, `/entity list`, `/entity remove`, `/entity import <file>` (YAML or VTT JSON)
-- **Campaign management:** `/campaign load <file>`, `/campaign info`, `/campaign switch`
-- **Session dashboard:** Embed showing active NPCs, latency stats, memory usage, and session duration
+- **Slash commands** ✅: `/npc list`, `/npc mute <name>`, `/npc unmute <name>`, `/npc speak <name> <text>` (puppet mode), `/session start`, `/session stop`, `/session recap`
+- **Entity management** ✅: `/entity add`, `/entity list`, `/entity remove`, `/entity import <file>` (YAML or VTT JSON)
+- **Campaign management** ✅: `/campaign load <file>`, `/campaign info`, `/campaign switch`
+- **Session dashboard** ✅: Embed showing active NPCs, latency stats, memory usage, and session duration
 
 ### Voice Commands
 
+✅ Implemented.
 - DM voice shortcuts: "Grimjaw, be quiet" → mute, "Everyone, stop" → mute all, "Grimjaw, say..." → puppet
 - Keyword detection on STT partials with low-latency response
 
@@ -350,6 +355,8 @@ Address the two items from [to-be-discussed.md](to-be-discussed.md):
 
 **Goal:** Optimize based on alpha feedback, expand platform support, and prepare for public release.
 
+**Status:** Helm chart and container images complete. Performance and platform work pending.
+
 ### Performance Optimization
 
 - **Latency profiling:** Identify and eliminate bottlenecks from alpha telemetry. Target consistent sub-1.2s mouth-to-ear
@@ -372,8 +379,8 @@ Address the two items from [to-be-discussed.md](to-be-discussed.md):
 
 ### Deployment and Distribution
 
-- **Container images:** Multi-arch Docker images (amd64, arm64) published to GHCR
-- **Helm chart:** Kubernetes deployment with PostgreSQL, optional GPU node for local providers
+- **Container images** ✅: Multi-arch Docker images (amd64, arm64) published to GHCR
+- **Helm chart** ✅: Kubernetes deployment with PostgreSQL, optional GPU node for local providers
 - **Single-binary self-host:** `glyphoxa serve` with embedded migrations and SQLite fallback for memory (no PostgreSQL required for small deployments)
 - **Managed cloud offering:** Evaluate feasibility based on alpha usage patterns and cost data
 

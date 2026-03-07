@@ -28,6 +28,25 @@ glyphoxa -config /etc/glyphoxa/config.yaml
 
 The default is `config.yaml` in the working directory.
 
+### Binary mode
+
+Select the binary mode with the `--mode` flag:
+
+```bash
+glyphoxa --mode=gateway --config /etc/glyphoxa/config.yaml
+```
+
+| Mode | Description |
+|------|-------------|
+| `full` (default) | Single-process self-hosted deployment |
+| `gateway` | Multi-tenant session orchestrator with admin API |
+| `worker` | Voice pipeline executor (created by gateway) |
+| `mcp-gateway` | Shared MCP tool server |
+
+In `--mode=gateway` and `--mode=worker`, several environment variables configure
+the distributed system. See [Deployment: Environment Variables](deployment.md#environment-variables)
+for the full list.
+
 ### Environment variable fallbacks
 
 Glyphoxa itself does not read environment variables for configuration overrides.

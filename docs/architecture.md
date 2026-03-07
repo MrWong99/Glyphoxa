@@ -62,6 +62,28 @@ Written in Go for native concurrency, every pipeline stage runs as a goroutine c
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Distributed Topology (`--mode=gateway` + `--mode=worker`)
+
+In multi-tenant deployments, the system splits into separate processes:
+
+```
+┌─────────────────────────────────┐     ┌──────────────────────────────────┐
+│           Gateway               │     │            Worker                │
+│                                 │     │                                  │
+│  Admin API (tenant CRUD)        │     │  VAD → STT → LLM → TTS → Mixer  │
+│  Bot Manager (per-tenant bots)  │ gRPC│  Session Runtime                 │
+│  Session Orchestrator     ──────┼─────┤  Discord Voice (direct)          │
+│  Usage / Quota Tracking         │     │  MCP Tool Calls                  │
+│  Health + Metrics               │     │  Health + Metrics                │
+└─────────────────────────────────┘     └──────────────────────────────────┘
+         │                                          │
+         └──── PostgreSQL (session state) ──────────┘
+```
+
+The gateway manages tenant lifecycle and session orchestration. Workers run the voice pipeline and connect directly to Discord voice channels — audio never flows through the gateway. Control signals (start/stop/heartbeat) use gRPC. In `--mode=full`, both roles run in-process with direct function calls instead of gRPC.
+
+See [Multi-Tenant Architecture](multi-tenant.md) for details.
+
 ---
 
 ## 🔀 Data Flow
@@ -145,6 +167,11 @@ After both paths, the complete exchange (player utterance + NPC response) is wri
 | `internal/resilience` | `internal/resilience/` | Provider failover with circuit breakers. `LLMFallback`, `STTFallback`, `TTSFallback` — each wraps multiple backends and auto-switches on failure. |
 | `internal/health` | `internal/health/` | HTTP health endpoints. `/healthz` (liveness) and `/readyz` (readiness with pluggable checkers). |
 | `internal/feedback` | `internal/feedback/` | Closed-alpha feedback storage. Append-only JSON lines file store. |
+| `internal/gateway` | `internal/gateway/` | Multi-tenant gateway: admin API, bot management, session orchestration, usage tracking, gRPC transport |
+| `internal/session` | `internal/session/` | Voice pipeline lifecycle: Runtime, WorkerHandler, context management |
+| `internal/observe` | `internal/observe/` | Observability: Prometheus metrics, OTel traces, structured logging, HTTP middleware |
+| `internal/health` | `internal/health/` | Health probes: `/healthz`, `/readyz` with pluggable readiness checkers |
+| `internal/resilience` | `internal/resilience/` | Resilience: circuit breaker for gRPC clients and provider calls |
 
 ### Public Libraries (`pkg/`)
 
@@ -153,6 +180,7 @@ After both paths, the complete exchange (player utterance + NPC response) is wri
 | `pkg/audio` | `pkg/audio/` | `Platform` and `Connection` interfaces for voice channel connectivity. `AudioFrame` types, drain utilities. Sub-packages: `discord` (disgo voice adapter, Opus encode/decode), `webrtc` (Pion-based WebRTC platform, signaling, transport), `mixer` (priority queue with barge-in, natural pacing, heap-based scheduling), `mock`. |
 | `pkg/memory` | `pkg/memory/` | Three-layer memory interfaces: `SessionStore` (L1), `SemanticIndex` (L2), `KnowledgeGraph` / `GraphRAGQuerier` (L3). Query options, schema SQL. Sub-packages: `postgres` (pgx/pgvector implementation, knowledge graph with recursive CTEs, semantic index), `mock`. |
 | `pkg/provider` | `pkg/provider/` | Provider interfaces and implementations for all external AI services. Sub-packages by capability: `llm` (Provider interface + any-llm-go adapter), `stt` (Provider interface + Deepgram, whisper.cpp), `tts` (Provider interface + ElevenLabs, Coqui XTTS), `s2s` (Provider interface + Gemini Live, OpenAI Realtime), `vad` (Engine interface + Silero), `embeddings` (Provider interface + OpenAI, Ollama). Each has a `mock` sub-package. |
+| `pkg/memory/export` | `pkg/memory/export/` | Campaign export/import as `.tar.gz` archives |
 
 ---
 

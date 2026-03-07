@@ -104,6 +104,22 @@ Every stage of the cascaded pipeline must support streaming. The TTS starts synt
 
 S2S engines stream natively — audio chunks arrive as the model generates speech. The same channel-based playback applies.
 
+## Distributed Mode
+
+When deployed as `--mode=gateway` + `--mode=worker`, the architecture splits at the orchestration boundary:
+
+**Gateway** owns: tenant management (admin API), Discord bot connections (one per tenant), session lifecycle (PostgreSQL-backed state with constraint enforcement), usage/quota tracking, and health probes.
+
+**Worker** owns: the full voice pipeline (VAD→STT→LLM→TTS→Mixer), Discord voice connections (direct, not proxied), MCP tool calls (via the MCP gateway or local tools), memory queries, and health probes.
+
+**Communication:** Two gRPC services defined in `proto/glyphoxa/v1/session.proto`:
+- `SessionWorkerService` (gateway calls worker): `StartSession`, `StopSession`, `GetStatus`
+- `SessionGatewayService` (worker calls gateway): `ReportState`, `Heartbeat`
+
+The gRPC client wraps calls with a circuit breaker (`internal/resilience/`) to prevent cascading failures.
+
+**`--mode=full` equivalence:** In single-process mode, `internal/gateway/local/` provides in-process implementations of the same contracts via direct function calls. The voice pipeline code is identical in both modes.
+
 ---
 
 **See also:** [Overview](00-overview.md) · [Providers](02-providers.md) · [Memory](03-memory.md) · [MCP Tools](04-mcp-tools.md) · [Technology](07-technology.md)
