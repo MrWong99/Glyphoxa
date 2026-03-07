@@ -481,7 +481,6 @@ func runWorker(cfg *config.Config) int {
 	return 0
 }
 
-
 // startObserveServer creates and starts the observability HTTP server
 // (/healthz, /readyz, /metrics) on a background goroutine. Returns the
 // server for graceful shutdown.

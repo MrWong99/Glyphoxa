@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/disgoorg/disgo/bot"
@@ -107,9 +108,7 @@ func (bm *BotManager) RouteEvent(tenantID string, handler func(*bot.Client)) {
 func (bm *BotManager) Close() {
 	bm.mu.Lock()
 	snapshot := make(map[string]*botEntry, len(bm.bots))
-	for id, entry := range bm.bots {
-		snapshot[id] = entry
-	}
+	maps.Copy(snapshot, bm.bots)
 	bm.bots = make(map[string]*botEntry)
 	bm.mu.Unlock()
 

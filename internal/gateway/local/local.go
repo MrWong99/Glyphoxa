@@ -15,7 +15,7 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ gateway.WorkerClient   = (*Client)(nil)
+	_ gateway.WorkerClient    = (*Client)(nil)
 	_ gateway.GatewayCallback = (*Callback)(nil)
 )
 
@@ -29,10 +29,10 @@ type SessionStopFunc func(ctx context.Context, sessionID string) error
 // Client implements WorkerClient as direct in-process function calls.
 // Used by --mode=full where no gRPC boundary exists.
 type Client struct {
-	mu        sync.Mutex
-	startFn   SessionStartFunc
-	stopFn    SessionStopFunc
-	sessions  map[string]gateway.SessionStatus
+	mu       sync.Mutex
+	startFn  SessionStartFunc
+	stopFn   SessionStopFunc
+	sessions map[string]gateway.SessionStatus
 }
 
 // NewClient creates a local WorkerClient. The start and stop functions are called

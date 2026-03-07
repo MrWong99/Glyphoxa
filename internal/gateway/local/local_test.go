@@ -60,8 +60,8 @@ func TestClient_StopSession(t *testing.T) {
 			stopFn: func(_ context.Context, _ string) error { return nil },
 		},
 		{
-			name:   "stop error",
-			stopFn: func(_ context.Context, _ string) error { return fmt.Errorf("boom") },
+			name:    "stop error",
+			stopFn:  func(_ context.Context, _ string) error { return fmt.Errorf("boom") },
 			wantErr: true,
 		},
 	}
@@ -138,14 +138,12 @@ func TestClient_Concurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			sid := fmt.Sprintf("session-%d", i)
 			_ = c.StartSession(context.Background(), gateway.StartSessionRequest{SessionID: sid})
 			_ = c.StopSession(context.Background(), sid)
 			_, _ = c.GetStatus(context.Background())
-		}()
+		})
 	}
 	wg.Wait()
 }
