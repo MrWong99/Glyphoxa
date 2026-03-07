@@ -35,3 +35,7 @@ Thumbs.db
 /build/
 /glyphoxa
 deployments/compose/config.yaml
+
+# Helm dependency artifacts
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock
