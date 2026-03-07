@@ -867,15 +867,15 @@ The single process owns all bot tokens directly.
 - `internal/gateway/botmanager.go` (integrate with Ring for acquire/release)
 
 **Acceptance criteria:**
-- [ ] Gateway starts with `--mode=gateway`, connects multiple bots
-- [ ] Worker starts with `--mode=worker`, receives gRPC calls, runs voice
+- [x] Gateway starts with `--mode=gateway`, connects multiple bots
+- [x] Worker starts with `--mode=worker`, receives gRPC calls, runs voice
   pipeline
-- [ ] `--mode=full` continues to work identically to current alpha
-- [ ] Session state persists in PostgreSQL; gateway restart discovers
+- [x] `--mode=full` continues to work identically to current alpha
+- [x] Session state persists in PostgreSQL; gateway restart discovers
   existing sessions
-- [ ] License constraints enforced atomically: two simultaneous `/session
+- [x] License constraints enforced atomically: two simultaneous `/session
   start` for a Shared tenant results in exactly one session
-- [ ] Worker heartbeat loss triggers session end with error after 90s
+- [x] Worker heartbeat loss triggers session end with error after 90s
 - [ ] Gateway sharding distributes bot tokens across replicas; adding or
   removing a gateway pod reassigns only ~1/N bots
 - [ ] Rolling update causes <10s bot reconnection per affected tenant
@@ -1343,15 +1343,15 @@ Use Redis for fast session state lookups instead of PostgreSQL.
 
 ### Functional Requirements
 
-- [ ] Tenant CRUD: create, read, update, delete tenants via gateway admin API
+- [x] Tenant CRUD: create, read, update, delete tenants via gateway admin API
 - [ ] Campaign CRUD: create, delete campaigns per license config rules
-- [ ] Session lifecycle: start -> active -> end with license constraint
+- [x] Session lifecycle: start -> active -> end with license constraint
   enforcement
 - [ ] Multi-tenant data isolation: tenant A's queries never return tenant B's
   data (verified by integration test)
-- [ ] Multi-guild Discord support: gateway manages bots for multiple tenants
+- [x] Multi-guild Discord support: gateway manages bots for multiple tenants
 - [ ] BYOK: tenant-provided API keys override platform defaults
-- [ ] `--mode=full` backward compatibility: self-hosted single-tenant works
+- [x] `--mode=full` backward compatibility: self-hosted single-tenant works
   identically to current alpha
 
 ### Non-Functional Requirements
@@ -1360,7 +1360,7 @@ Use Redis for fast session state lookups instead of PostgreSQL.
 - [ ] Gateway adds <5ms to the voice pipeline path (gRPC overhead)
 - [ ] Cold start: new session worker ready in <10 seconds
 - [ ] Cross-tenant isolation: zero data leakage verified by automated tests
-- [ ] Concurrent session constraint enforcement: zero violations under load
+- [x] Concurrent session constraint enforcement: zero violations under load
   testing with 100 simultaneous session start requests
 
 ### Quality Gates
@@ -1467,11 +1467,11 @@ All PII locations that must be addressed on tenant offboarding:
 ## Deployment Verification Checklist
 
 ### Pre-Deploy (Phase 2 must complete)
-- [ ] `--mode=gateway` and `--mode=worker` implemented and tested
-- [ ] gRPC contract with both implementations working
-- [ ] Session state table with constraint enforcement verified under concurrent load
+- [x] `--mode=gateway` and `--mode=worker` implemented and tested
+- [x] gRPC contract with both implementations working
+- [x] Session state table with constraint enforcement verified under concurrent load
 - [ ] Health probes wired into `cmd/glyphoxa/main.go`
-- [ ] `--mode=full` regression: full test suite passes
+- [x] `--mode=full` regression: full test suite passes
 
 ### Deploy Steps
 1. [ ] Provision cluster with node pools (system, shared-workers, dedicated-workers)
