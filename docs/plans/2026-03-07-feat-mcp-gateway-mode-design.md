@@ -1,7 +1,7 @@
 ---
 title: "feat: MCP Gateway Mode"
 type: feat
-status: approved
+status: completed
 date: 2026-03-07
 ---
 
@@ -189,10 +189,10 @@ mcpGateway:
 
 ## Acceptance criteria
 
-- [ ] `--mode=mcp-gateway` starts and serves MCP Streamable HTTP on `:8080`
-- [ ] Built-in stateless tools (dice, rules) are callable via the MCP protocol
-- [ ] External MCP servers from config are proxied through the gateway
-- [ ] Workers connect to the gateway via `GLYPHOXA_MCP_GATEWAY_URL` and can execute tools
-- [ ] Health probes (`/healthz`, `/readyz`) and metrics (`/metrics`) are live
-- [ ] Helm chart deploys MCP gateway with Service and NetworkPolicy
-- [ ] Memory tool remains on the worker and is not exposed via the gateway
+- [x] `--mode=mcp-gateway` starts and serves MCP Streamable HTTP on `:8080`
+- [x] Built-in stateless tools (dice, rules) are callable via the MCP protocol
+- [x] External MCP servers from config are proxied through the gateway
+- [x] Workers connect to the gateway via `GLYPHOXA_MCP_GATEWAY_URL` and can execute tools
+- [x] Health probes (`/healthz`, `/readyz`) and metrics (`/metrics`) are live
+- [x] Helm chart deploys MCP gateway with Service and NetworkPolicy
+- [x] Memory tool remains on the worker and is not exposed via the gateway

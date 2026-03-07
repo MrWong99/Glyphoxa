@@ -1136,9 +1136,9 @@ to the Glyphoxa image. This prevents privilege escalation via the gateway's
 Job creation RBAC.
 
 **Acceptance criteria:**
-- [ ] MCP gateway deployment functional with `--mode=mcp-gateway`
-- [ ] Workers can reach MCP gateway for tool calls
-- [ ] Admission policy blocks Jobs with non-Glyphoxa images
+- [x] MCP gateway deployment functional with `--mode=mcp-gateway`
+- [x] Workers can reach MCP gateway for tool calls
+- [ ] Admission policy blocks Jobs with non-Glyphoxa images (deferred)
 
 ---
 
