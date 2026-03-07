@@ -210,7 +210,17 @@ func (a *App) initMemory(ctx context.Context) error {
 		dims = 1536 // sensible default for OpenAI text-embedding-3-small
 	}
 
-	store, err := postgres.NewStore(ctx, dsn, dims)
+	schema, err := postgres.NewSchemaName("public")
+	if err != nil {
+		return fmt.Errorf("memory schema name: %w", err)
+	}
+
+	campaignID := a.tenant.CampaignID
+	if campaignID == "" {
+		campaignID = "default"
+	}
+
+	store, err := postgres.NewStore(ctx, dsn, dims, schema, campaignID)
 	if err != nil {
 		return err
 	}

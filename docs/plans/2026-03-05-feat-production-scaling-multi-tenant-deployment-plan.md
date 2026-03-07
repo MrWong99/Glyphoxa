@@ -471,10 +471,10 @@ CREATE INDEX ... USING hnsw (embedding vector_cosine_ops)
 At 100+ schemas, autovacuum must track 400+ tables. Ensure `autovacuum_max_workers` is configured appropriately.
 
 **Acceptance criteria:**
-- [ ] Two tenants created with separate schemas; queries for tenant A never
+- [x] Two tenants created with separate schemas; queries for tenant A never
   return tenant B's data
-- [ ] All existing tests pass with `campaign_id` threaded through
-- [ ] `--mode=full` continues to work with `tenant_id=local`, `schema=public`
+- [x] All existing tests pass with `campaign_id` threaded through
+- [x] `--mode=full` continues to work with `tenant_id=local`, `schema=public`
 
 ---
 

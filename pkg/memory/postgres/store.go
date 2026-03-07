@@ -35,21 +35,31 @@ var (
 //   - Store itself implements [memory.KnowledgeGraph] and [memory.GraphRAGQuerier]
 //
 // All operations are safe for concurrent use.
+//
+// The store is scoped to a single campaign via campaignID (set at construction)
+// and uses fully-qualified table names via schema to support multi-tenant
+// schema-per-tenant isolation.
 type Store struct {
-	pool     *pgxpool.Pool
-	sessions *SessionStoreImpl
-	semantic *SemanticIndexImpl
+	pool       *pgxpool.Pool
+	schema     SchemaName
+	campaignID string
+	sessions   *SessionStoreImpl
+	semantic   *SemanticIndexImpl
 }
 
 // NewStore creates a new Store, establishes a connection pool to the PostgreSQL
 // database at dsn, registers pgvector types on every connection, and runs
 // [Migrate] to ensure all required tables and extensions exist.
 //
+// schema is the PostgreSQL schema to use ("public" for full-mode,
+// "tenant_xxx" for multi-tenant). campaignID scopes all queries to a single
+// campaign and is stored on the struct — callers never pass it per-method.
+//
 // embeddingDimensions must match the output dimension of the embedding model
 // used to produce [memory.Chunk.Embedding] values (e.g., 1536 for OpenAI
 // text-embedding-3-small). Changing this value after the first migration
 // requires a manual schema change.
-func NewStore(ctx context.Context, dsn string, embeddingDimensions int) (*Store, error) {
+func NewStore(ctx context.Context, dsn string, embeddingDimensions int, schema SchemaName, campaignID string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: parse dsn: %w", err)
@@ -71,15 +81,17 @@ func NewStore(ctx context.Context, dsn string, embeddingDimensions int) (*Store,
 		return nil, fmt.Errorf("postgres store: ping: %w", err)
 	}
 
-	if err := Migrate(ctx, pool, embeddingDimensions); err != nil {
+	if err := Migrate(ctx, pool, embeddingDimensions, schema); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("postgres store: migrate: %w", err)
 	}
 
 	return &Store{
-		pool:     pool,
-		sessions: &SessionStoreImpl{pool: pool},
-		semantic: &SemanticIndexImpl{pool: pool},
+		pool:       pool,
+		schema:     schema,
+		campaignID: campaignID,
+		sessions:   &SessionStoreImpl{pool: pool, schema: schema, campaignID: campaignID},
+		semantic:   &SemanticIndexImpl{pool: pool, schema: schema, campaignID: campaignID},
 	}, nil
 }
 

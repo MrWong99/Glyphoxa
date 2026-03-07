@@ -16,7 +16,10 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/memory/postgres"
 )
 
-const testEmbeddingDim = 4
+const (
+	testEmbeddingDim = 4
+	testCampaignID   = "test_campaign"
+)
 
 // testDSN returns the test database DSN from the environment, or skips the
 // test if GLYPHOXA_TEST_POSTGRES_DSN is not set.
@@ -41,7 +44,12 @@ func newTestStore(t *testing.T) *postgres.Store {
 	t.Cleanup(cleanPool.Close)
 	dropSchema(t, ctx, cleanPool)
 
-	store, err := postgres.NewStore(ctx, dsn, testEmbeddingDim)
+	schema, err := postgres.NewSchemaName("public")
+	if err != nil {
+		t.Fatalf("NewSchemaName: %v", err)
+	}
+
+	store, err := postgres.NewStore(ctx, dsn, testEmbeddingDim, schema, testCampaignID)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -550,9 +558,9 @@ func TestL3_RelationshipCRUD(t *testing.T) {
 	}
 
 	// Upsert: replace with new attribute value.
-	updated := rels[0]
-	updated.Attributes = map[string]any{"since": "year 1205"}
-	if err := store.AddRelationship(ctx, updated); err != nil {
+	updatedRel := rels[0]
+	updatedRel.Attributes = map[string]any{"since": "year 1205"}
+	if err := store.AddRelationship(ctx, updatedRel); err != nil {
 		t.Fatalf("AddRelationship upsert: %v", err)
 	}
 	got, _ := store.GetRelationships(ctx, grimjaw.ID, memory.WithRelTypes("LOCATED_AT"))
@@ -842,6 +850,104 @@ func TestGraphRAG_QueryWithContext(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Errorf("QueryWithContext no-match: expected 0, got %d", len(empty))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Campaign Isolation
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCampaignIsolation(t *testing.T) {
+	dsn := testDSN(t)
+	ctx := context.Background()
+
+	// Clean up.
+	cleanPool := mustPool(t, ctx, dsn)
+	t.Cleanup(cleanPool.Close)
+	dropSchema(t, ctx, cleanPool)
+
+	schema, err := postgres.NewSchemaName("public")
+	if err != nil {
+		t.Fatalf("NewSchemaName: %v", err)
+	}
+
+	// Create two stores with different campaign IDs.
+	storeA, err := postgres.NewStore(ctx, dsn, testEmbeddingDim, schema, "campaign_alpha")
+	if err != nil {
+		t.Fatalf("NewStore A: %v", err)
+	}
+	t.Cleanup(storeA.Close)
+
+	storeB, err := postgres.NewStore(ctx, dsn, testEmbeddingDim, schema, "campaign_beta")
+	if err != nil {
+		t.Fatalf("NewStore B: %v", err)
+	}
+	t.Cleanup(storeB.Close)
+
+	// Add an entity to campaign A.
+	entityA := memory.Entity{
+		ID:         "grimjaw",
+		Type:       "npc",
+		Name:       "Grimjaw",
+		Attributes: map[string]any{"campaign": "alpha"},
+	}
+	if err := storeA.AddEntity(ctx, entityA); err != nil {
+		t.Fatalf("AddEntity A: %v", err)
+	}
+
+	// Add an entity with the same ID to campaign B.
+	entityB := memory.Entity{
+		ID:         "grimjaw",
+		Type:       "npc",
+		Name:       "Grimjaw the Younger",
+		Attributes: map[string]any{"campaign": "beta"},
+	}
+	if err := storeB.AddEntity(ctx, entityB); err != nil {
+		t.Fatalf("AddEntity B: %v", err)
+	}
+
+	// Store A should see its own entity.
+	gotA, err := storeA.GetEntity(ctx, "grimjaw")
+	if err != nil {
+		t.Fatalf("GetEntity A: %v", err)
+	}
+	if gotA == nil || gotA.Name != "Grimjaw" {
+		t.Errorf("Store A: want Grimjaw, got %+v", gotA)
+	}
+
+	// Store B should see its own entity.
+	gotB, err := storeB.GetEntity(ctx, "grimjaw")
+	if err != nil {
+		t.Fatalf("GetEntity B: %v", err)
+	}
+	if gotB == nil || gotB.Name != "Grimjaw the Younger" {
+		t.Errorf("Store B: want Grimjaw the Younger, got %+v", gotB)
+	}
+
+	// Write an L1 entry to campaign A.
+	if err := storeA.L1().WriteEntry(ctx, "s1", memory.TranscriptEntry{
+		Text:      "Hello from campaign alpha.",
+		Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatalf("WriteEntry A: %v", err)
+	}
+
+	// Campaign B should see no L1 entries.
+	countB, err := storeB.L1().EntryCount(ctx, "s1")
+	if err != nil {
+		t.Fatalf("EntryCount B: %v", err)
+	}
+	if countB != 0 {
+		t.Errorf("Campaign B L1: want 0 entries, got %d", countB)
+	}
+
+	// Campaign A should see 1 L1 entry.
+	countA, err := storeA.L1().EntryCount(ctx, "s1")
+	if err != nil {
+		t.Fatalf("EntryCount A: %v", err)
+	}
+	if countA != 1 {
+		t.Errorf("Campaign A L1: want 1 entry, got %d", countA)
 	}
 }
 

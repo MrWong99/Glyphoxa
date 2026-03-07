@@ -18,24 +18,26 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // AddEntity implements [memory.KnowledgeGraph]. It upserts an entity into the
-// entities table. If an entity with the same ID already exists it is completely
-// replaced and its updated_at timestamp is refreshed.
+// entities table. If an entity with the same (campaign_id, id) already exists
+// it is completely replaced and its updated_at timestamp is refreshed.
 func (s *Store) AddEntity(ctx context.Context, entity memory.Entity) error {
 	attrsJSON, err := json.Marshal(entity.Attributes)
 	if err != nil {
 		return fmt.Errorf("knowledge graph: marshal attributes: %w", err)
 	}
 
-	const q = `
-		INSERT INTO entities (id, type, name, attributes, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, now(), now())
-		ON CONFLICT (id) DO UPDATE SET
+	q := fmt.Sprintf(`
+		INSERT INTO %s (campaign_id, id, type, name, attributes, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now())
+		ON CONFLICT (campaign_id, id) DO UPDATE SET
 		    type        = EXCLUDED.type,
 		    name        = EXCLUDED.name,
 		    attributes  = EXCLUDED.attributes,
-		    updated_at  = now()`
+		    updated_at  = now()`,
+		s.schema.TableRef("entities"))
 
 	_, err = s.pool.Exec(ctx, q,
+		s.campaignID,
 		entity.ID,
 		entity.Type,
 		entity.Name,
@@ -50,12 +52,13 @@ func (s *Store) AddEntity(ctx context.Context, entity memory.Entity) error {
 // GetEntity implements [memory.KnowledgeGraph]. It retrieves an entity by ID.
 // Returns (nil, nil) when the entity does not exist.
 func (s *Store) GetEntity(ctx context.Context, id string) (*memory.Entity, error) {
-	const q = `
+	q := fmt.Sprintf(`
 		SELECT id, type, name, attributes, created_at, updated_at
-		FROM   entities
-		WHERE  id = $1`
+		FROM   %s
+		WHERE  campaign_id = $1 AND id = $2`,
+		s.schema.TableRef("entities"))
 
-	rows, err := s.pool.Query(ctx, q, id)
+	rows, err := s.pool.Query(ctx, q, s.campaignID, id)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge graph: get entity: %w", err)
 	}
@@ -78,13 +81,14 @@ func (s *Store) UpdateEntity(ctx context.Context, id string, attrs map[string]an
 		return fmt.Errorf("knowledge graph: marshal update attrs: %w", err)
 	}
 
-	const q = `
-		UPDATE entities
-		SET    attributes = attributes || $2::jsonb,
+	q := fmt.Sprintf(`
+		UPDATE %s
+		SET    attributes = attributes || $3::jsonb,
 		       updated_at = now()
-		WHERE  id = $1`
+		WHERE  campaign_id = $1 AND id = $2`,
+		s.schema.TableRef("entities"))
 
-	tag, err := s.pool.Exec(ctx, q, id, attrsJSON)
+	tag, err := s.pool.Exec(ctx, q, s.campaignID, id, attrsJSON)
 	if err != nil {
 		return fmt.Errorf("knowledge graph: update entity: %w", err)
 	}
@@ -98,8 +102,9 @@ func (s *Store) UpdateEntity(ctx context.Context, id string, attrs map[string]an
 // all its associated relationships (via ON DELETE CASCADE). Deleting a
 // non-existent entity is not an error.
 func (s *Store) DeleteEntity(ctx context.Context, id string) error {
-	const q = `DELETE FROM entities WHERE id = $1`
-	if _, err := s.pool.Exec(ctx, q, id); err != nil {
+	q := fmt.Sprintf(`DELETE FROM %s WHERE campaign_id = $1 AND id = $2`,
+		s.schema.TableRef("entities"))
+	if _, err := s.pool.Exec(ctx, q, s.campaignID, id); err != nil {
 		return fmt.Errorf("knowledge graph: delete entity: %w", err)
 	}
 	return nil
@@ -108,13 +113,13 @@ func (s *Store) DeleteEntity(ctx context.Context, id string) error {
 // FindEntities implements [memory.KnowledgeGraph]. It returns all entities
 // matching filter. All non-zero filter fields are applied as AND conditions.
 func (s *Store) FindEntities(ctx context.Context, filter memory.EntityFilter) ([]memory.Entity, error) {
-	var args []any
+	args := []any{s.campaignID}
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
 
-	var conditions []string
+	conditions := []string{"campaign_id = $1"}
 	if filter.Type != "" {
 		conditions = append(conditions, "type = "+next(filter.Type))
 	}
@@ -129,11 +134,9 @@ func (s *Store) FindEntities(ctx context.Context, filter memory.EntityFilter) ([
 		conditions = append(conditions, "attributes @> "+next(string(attrJSON))+"::jsonb")
 	}
 
-	q := "SELECT id, type, name, attributes, created_at, updated_at\nFROM   entities"
-	if len(conditions) > 0 {
-		q += "\nWHERE " + strings.Join(conditions, "\n  AND ")
-	}
-	q += "\nORDER BY name"
+	q := fmt.Sprintf("SELECT id, type, name, attributes, created_at, updated_at\nFROM   %s\nWHERE %s\nORDER BY name",
+		s.schema.TableRef("entities"),
+		strings.Join(conditions, "\n  AND "))
 
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
@@ -147,8 +150,8 @@ func (s *Store) FindEntities(ctx context.Context, filter memory.EntityFilter) ([
 }
 
 // AddRelationship implements [memory.KnowledgeGraph]. It upserts a directed
-// edge between two entities. If the edge (SourceID, TargetID, RelType) already
-// exists it is completely replaced.
+// edge between two entities. If the edge (campaign_id, SourceID, TargetID,
+// RelType) already exists it is completely replaced.
 func (s *Store) AddRelationship(ctx context.Context, rel memory.Relationship) error {
 	attrsJSON, err := json.Marshal(rel.Attributes)
 	if err != nil {
@@ -159,15 +162,17 @@ func (s *Store) AddRelationship(ctx context.Context, rel memory.Relationship) er
 		return fmt.Errorf("knowledge graph: marshal relationship provenance: %w", err)
 	}
 
-	const q = `
-		INSERT INTO relationships
-		    (source_id, target_id, rel_type, attributes, provenance, created_at)
-		VALUES ($1, $2, $3, $4, $5, now())
-		ON CONFLICT (source_id, target_id, rel_type) DO UPDATE SET
+	q := fmt.Sprintf(`
+		INSERT INTO %s
+		    (campaign_id, source_id, target_id, rel_type, attributes, provenance, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now())
+		ON CONFLICT (campaign_id, source_id, target_id, rel_type) DO UPDATE SET
 		    attributes = EXCLUDED.attributes,
-		    provenance = EXCLUDED.provenance`
+		    provenance = EXCLUDED.provenance`,
+		s.schema.TableRef("relationships"))
 
 	_, err = s.pool.Exec(ctx, q,
+		s.campaignID,
 		rel.SourceID,
 		rel.TargetID,
 		rel.RelType,
@@ -196,7 +201,7 @@ func (s *Store) GetRelationships(ctx context.Context, entityID string, opts ...m
 		dirOut = true
 	}
 
-	var args []any
+	args := []any{s.campaignID} // $1 = campaign_id
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
@@ -210,16 +215,21 @@ func (s *Store) GetRelationships(ctx context.Context, entityID string, opts ...m
 	if dirIn {
 		dirParts = append(dirParts, "target_id = "+next(entityID))
 	}
-	conditions := []string{"(" + strings.Join(dirParts, " OR ") + ")"}
+	conditions := []string{
+		"campaign_id = $1",
+		"(" + strings.Join(dirParts, " OR ") + ")",
+	}
 
 	if len(relTypes) > 0 {
 		conditions = append(conditions, "rel_type = ANY("+next(relTypes)+"::text[])")
 	}
 
-	q := "SELECT source_id, target_id, rel_type, attributes, provenance, created_at\n" +
-		"FROM   relationships\n" +
-		"WHERE  " + strings.Join(conditions, "\n  AND ") + "\n" +
-		"ORDER  BY created_at"
+	q := fmt.Sprintf("SELECT source_id, target_id, rel_type, attributes, provenance, created_at\n"+
+		"FROM   %s\n"+
+		"WHERE  %s\n"+
+		"ORDER  BY created_at",
+		s.schema.TableRef("relationships"),
+		strings.Join(conditions, "\n  AND "))
 
 	if limit > 0 {
 		args = append(args, limit)
@@ -241,11 +251,12 @@ func (s *Store) GetRelationships(ctx context.Context, entityID string, opts ...m
 // directed edge identified by (sourceID, targetID, relType). Deleting a
 // non-existent edge is not an error.
 func (s *Store) DeleteRelationship(ctx context.Context, sourceID, targetID, relType string) error {
-	const q = `
-		DELETE FROM relationships
-		WHERE source_id = $1 AND target_id = $2 AND rel_type = $3`
+	q := fmt.Sprintf(`
+		DELETE FROM %s
+		WHERE campaign_id = $1 AND source_id = $2 AND target_id = $3 AND rel_type = $4`,
+		s.schema.TableRef("relationships"))
 
-	if _, err := s.pool.Exec(ctx, q, sourceID, targetID, relType); err != nil {
+	if _, err := s.pool.Exec(ctx, q, s.campaignID, sourceID, targetID, relType); err != nil {
 		return fmt.Errorf("knowledge graph: delete relationship: %w", err)
 	}
 	return nil
@@ -255,19 +266,14 @@ func (s *Store) DeleteRelationship(ctx context.Context, sourceID, targetID, relT
 // breadth-first traversal from entityID up to depth hops using a PostgreSQL
 // recursive CTE and returns all reachable entities (the start entity is
 // excluded).
-//
-// Bidirectional traversal follows both outgoing (source→target) and incoming
-// (target→source) edges, which is the natural mode for knowledge graph
-// exploration — e.g., "who knows Grimjaw?" requires incoming edges.
-//
-// Cycles are prevented by tracking visited node IDs in a PostgreSQL text array.
-// [memory.TraversalOpt] options can restrict which edge or node types are followed
-// and cap the result set size.
 func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts ...memory.TraversalOpt) ([]memory.Entity, error) {
 	tparams := memory.ApplyTraversalOpts(opts)
 	relTypes := tparams.RelTypes
 	nodeTypes := tparams.NodeTypes
 	maxNodes := tparams.MaxNodes
+
+	entitiesTable := s.schema.TableRef("entities")
+	relsTable := s.schema.TableRef("relationships")
 
 	var args []any
 	next := func(v any) string {
@@ -275,8 +281,9 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 		return fmt.Sprintf("$%d", len(args))
 	}
 
-	startArg := next(entityID) // $1
-	depthArg := next(depth)    // $2
+	campArg := next(s.campaignID) // $1
+	startArg := next(entityID)    // $2
+	depthArg := next(depth)       // $3
 
 	relTypeFilter := ""
 	if len(relTypes) > 0 {
@@ -288,18 +295,13 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 		nodeTypeFilter = "\n           AND e.type = ANY(" + next(nodeTypes) + "::text[])"
 	}
 
-	// Bidirectional traversal: follow both outgoing (source→target) and
-	// incoming (target→source) edges in a single recursive branch.
-	// Using a single UNION ALL avoids PostgreSQL SQLSTATE 42P19: the parser
-	// reads A UNION ALL B UNION ALL C as (A UNION ALL B) UNION ALL C,
-	// placing B in the non-recursive term — which must not reference the CTE.
 	q := fmt.Sprintf(`
 		WITH RECURSIVE reachable AS (
 		    SELECT id,
 		           ARRAY[id] AS visited,
 		           0          AS depth
-		    FROM   entities
-		    WHERE  id = %s
+		    FROM   %s
+		    WHERE  campaign_id = %s AND id = %s
 
 		    UNION ALL
 
@@ -307,10 +309,12 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 		           r.visited || e.id,
 		           r.depth + 1
 		    FROM   reachable r
-		    JOIN   relationships rel
-		           ON rel.source_id = r.id OR rel.target_id = r.id
-		    JOIN   entities e
-		           ON e.id = CASE
+		    JOIN   %s rel
+		           ON rel.campaign_id = %s
+		           AND (rel.source_id = r.id OR rel.target_id = r.id)
+		    JOIN   %s e
+		           ON e.campaign_id = %s
+		           AND e.id = CASE
 		                WHEN rel.source_id = r.id THEN rel.target_id
 		                ELSE rel.source_id
 		              END
@@ -320,9 +324,14 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 		SELECT DISTINCT ON (e.id)
 		       e.id, e.type, e.name, e.attributes, e.created_at, e.updated_at
 		FROM   reachable rc
-		JOIN   entities  e  ON e.id = rc.id
+		JOIN   %s  e  ON e.campaign_id = %s AND e.id = rc.id
 		WHERE  rc.id != %s
-		ORDER  BY e.id`, startArg, depthArg, relTypeFilter, nodeTypeFilter, startArg)
+		ORDER  BY e.id`,
+		entitiesTable, campArg, startArg,
+		relsTable, campArg,
+		entitiesTable, campArg,
+		depthArg, relTypeFilter, nodeTypeFilter,
+		entitiesTable, campArg, startArg)
 
 	if maxNodes > 0 {
 		args = append(args, maxNodes)
@@ -346,17 +355,16 @@ func (s *Store) Neighbors(ctx context.Context, entityID string, depth int, opts 
 //
 // Returns an empty (non-nil) slice when no path exists within maxDepth.
 func (s *Store) FindPath(ctx context.Context, fromID, toID string, maxDepth int) ([]memory.Entity, error) {
-	// The CTE tracks each candidate path as a TEXT[] array.
-	// Bidirectional: follows both outgoing and incoming edges in a single
-	// recursive branch to avoid PostgreSQL SQLSTATE 42P19 (recursive
-	// reference in non-recursive term caused by multi-UNION ALL parsing).
-	const q = `
+	entitiesTable := s.schema.TableRef("entities")
+	relsTable := s.schema.TableRef("relationships")
+
+	q := fmt.Sprintf(`
 		WITH RECURSIVE path_search AS (
 		    SELECT id,
 		           ARRAY[id] AS path,
 		           0          AS depth
-		    FROM   entities
-		    WHERE  id = $1
+		    FROM   %s
+		    WHERE  campaign_id = $1 AND id = $2
 
 		    UNION ALL
 
@@ -364,23 +372,26 @@ func (s *Store) FindPath(ctx context.Context, fromID, toID string, maxDepth int)
 		           ps.path || e.id,
 		           ps.depth + 1
 		    FROM   path_search ps
-		    JOIN   relationships rel
-		           ON rel.source_id = ps.id OR rel.target_id = ps.id
-		    JOIN   entities e
-		           ON e.id = CASE
+		    JOIN   %s rel
+		           ON rel.campaign_id = $1
+		           AND (rel.source_id = ps.id OR rel.target_id = ps.id)
+		    JOIN   %s e
+		           ON e.campaign_id = $1
+		           AND e.id = CASE
 		                WHEN rel.source_id = ps.id THEN rel.target_id
 		                ELSE rel.source_id
 		              END
-		    WHERE  ps.depth < $3
+		    WHERE  ps.depth < $4
 		      AND  NOT (e.id = ANY(ps.path))
 		)
 		SELECT path
 		FROM   path_search
-		WHERE  id = $2
+		WHERE  id = $3
 		ORDER  BY depth
-		LIMIT  1`
+		LIMIT  1`,
+		entitiesTable, relsTable, entitiesTable)
 
-	row := s.pool.QueryRow(ctx, q, fromID, toID, maxDepth)
+	row := s.pool.QueryRow(ctx, q, s.campaignID, fromID, toID, maxDepth)
 
 	var path []string
 	if err := row.Scan(&path); err != nil {
@@ -397,13 +408,14 @@ func (s *Store) FindPath(ctx context.Context, fromID, toID string, maxDepth int)
 // entity itself, all entities it has direct relationships with, and those
 // relationships (both outgoing and incoming edges).
 func (s *Store) VisibleSubgraph(ctx context.Context, npcID string) ([]memory.Entity, []memory.Relationship, error) {
-	const qRels = `
+	qRels := fmt.Sprintf(`
 		SELECT source_id, target_id, rel_type, attributes, provenance, created_at
-		FROM   relationships
-		WHERE  source_id = $1 OR target_id = $1
-		ORDER  BY created_at`
+		FROM   %s
+		WHERE  campaign_id = $1 AND (source_id = $2 OR target_id = $2)
+		ORDER  BY created_at`,
+		s.schema.TableRef("relationships"))
 
-	rows, err := s.pool.Query(ctx, qRels, npcID)
+	rows, err := s.pool.Query(ctx, qRels, s.campaignID, npcID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("knowledge graph: visible subgraph: query rels: %w", err)
 	}
@@ -484,19 +496,16 @@ func (s *Store) IdentitySnapshot(ctx context.Context, npcID string) (*memory.NPC
 
 // QueryWithContext implements [memory.GraphRAGQuerier]. It performs a
 // graph-augmented retrieval query combining L3 entity data with L2 chunk text
-// — both stored in the same PostgreSQL instance — in a single SQL round-trip.
-//
-// The query uses PostgreSQL full-text search (ts_rank) against chunk content,
-// scoped to chunks whose entity_id is in graphScope (or all chunks when graphScope
-// is empty). Results are returned ranked by descending relevance score.
+// in a single SQL round-trip using PostgreSQL full-text search.
 func (s *Store) QueryWithContext(ctx context.Context, query string, graphScope []string) ([]memory.ContextResult, error) {
-	var args []any
+	chunksTable := s.schema.TableRef("chunks")
+	entitiesTable := s.schema.TableRef("entities")
+
+	args := []any{s.campaignID, query} // $1 = campaign_id, $2 = FTS query
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
-
-	queryArg := next(query) // $1 = FTS query
 
 	scopeFilter := ""
 	if len(graphScope) > 0 {
@@ -507,12 +516,13 @@ func (s *Store) QueryWithContext(ctx context.Context, query string, graphScope [
 		SELECT e.id, e.type, e.name, e.attributes, e.created_at, e.updated_at,
 		       c.content,
 		       ts_rank(to_tsvector('english', c.content),
-		               plainto_tsquery('english', %s)) AS score
-		FROM   chunks  c
-		JOIN   entities e ON e.id = c.entity_id
-		WHERE  to_tsvector('english', c.content) @@ plainto_tsquery('english', %s)%s
+		               plainto_tsquery('english', $2)) AS score
+		FROM   %s  c
+		JOIN   %s e ON e.campaign_id = $1 AND e.id = c.entity_id
+		WHERE  c.campaign_id = $1
+		  AND  to_tsvector('english', c.content) @@ plainto_tsquery('english', $2)%s
 		ORDER  BY score DESC
-		LIMIT  20`, queryArg, queryArg, scopeFilter)
+		LIMIT  20`, chunksTable, entitiesTable, scopeFilter)
 
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
@@ -551,19 +561,14 @@ func (s *Store) QueryWithContext(ctx context.Context, query string, graphScope [
 }
 
 // QueryWithEmbedding implements [memory.GraphRAGQuerier]. It performs a
-// graph-augmented retrieval query using pgvector cosine similarity — the true
-// GraphRAG path. Chunks whose embeddings are closest (cosine distance) to the
-// query embedding are returned, optionally scoped to a set of entity IDs.
-//
-// Results are ranked by ascending cosine distance (most similar first). The
-// Score field is set to 1 - distance so higher scores indicate better matches,
-// consistent with [Store.QueryWithContext].
-//
-// topK limits the number of results. An empty graphScope searches all chunks.
+// graph-augmented retrieval query using pgvector cosine similarity.
 func (s *Store) QueryWithEmbedding(ctx context.Context, embedding []float32, topK int, graphScope []string) ([]memory.ContextResult, error) {
+	chunksTable := s.schema.TableRef("chunks")
+	entitiesTable := s.schema.TableRef("entities")
+
 	queryVec := pgvector.NewVector(embedding)
 
-	args := []any{queryVec} // $1 = query embedding vector
+	args := []any{queryVec, s.campaignID} // $1 = query vector, $2 = campaign_id
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
@@ -581,11 +586,12 @@ func (s *Store) QueryWithEmbedding(ctx context.Context, embedding []float32, top
 		SELECT e.id, e.type, e.name, e.attributes, e.created_at, e.updated_at,
 		       c.content,
 		       c.embedding <=> $1 AS distance
-		FROM   chunks  c
-		JOIN   entities e ON e.id = c.entity_id
-		WHERE  c.embedding IS NOT NULL%s
+		FROM   %s  c
+		JOIN   %s e ON e.campaign_id = $2 AND e.id = c.entity_id
+		WHERE  c.campaign_id = $2
+		  AND  c.embedding IS NOT NULL%s
 		ORDER  BY distance
-		LIMIT  %s`, scopeFilter, limitArg)
+		LIMIT  %s`, chunksTable, entitiesTable, scopeFilter, limitArg)
 
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
@@ -713,12 +719,13 @@ func (s *Store) fetchEntitiesIn(ctx context.Context, ids []string) ([]memory.Ent
 	if len(ids) == 0 {
 		return []memory.Entity{}, nil
 	}
-	const q = `
+	q := fmt.Sprintf(`
 		SELECT id, type, name, attributes, created_at, updated_at
-		FROM   entities
-		WHERE  id = ANY($1::text[])`
+		FROM   %s
+		WHERE  campaign_id = $1 AND id = ANY($2::text[])`,
+		s.schema.TableRef("entities"))
 
-	rows, err := s.pool.Query(ctx, q, ids)
+	rows, err := s.pool.Query(ctx, q, s.campaignID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("fetch entities in: %w", err)
 	}

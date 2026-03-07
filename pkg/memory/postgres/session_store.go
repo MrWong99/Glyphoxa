@@ -18,18 +18,22 @@ import (
 // Obtain one via [Store.L1] rather than constructing directly.
 // All methods are safe for concurrent use.
 type SessionStoreImpl struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	schema     SchemaName
+	campaignID string
 }
 
 // WriteEntry implements [memory.SessionStore]. It appends entry to the
 // session_entries table under sessionID.
 func (s *SessionStoreImpl) WriteEntry(ctx context.Context, sessionID string, entry memory.TranscriptEntry) error {
-	const q = `
-		INSERT INTO session_entries
-		    (session_id, speaker_id, speaker_name, text, raw_text, npc_id, timestamp, duration_ns)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+	q := fmt.Sprintf(`
+		INSERT INTO %s
+		    (campaign_id, session_id, speaker_id, speaker_name, text, raw_text, npc_id, timestamp, duration_ns)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		s.schema.TableRef("session_entries"))
 
 	_, err := s.pool.Exec(ctx, q,
+		s.campaignID,
 		sessionID,
 		entry.SpeakerID,
 		entry.SpeakerName,
@@ -49,14 +53,16 @@ func (s *SessionStoreImpl) WriteEntry(ctx context.Context, sessionID string, ent
 // sessionID whose timestamp is no earlier than time.Now()-duration, ordered
 // chronologically (oldest first).
 func (s *SessionStoreImpl) GetRecent(ctx context.Context, sessionID string, duration time.Duration) ([]memory.TranscriptEntry, error) {
-	const q = `
+	q := fmt.Sprintf(`
 		SELECT speaker_id, speaker_name, text, raw_text, npc_id, timestamp, duration_ns
-		FROM   session_entries
-		WHERE  session_id = $1
-		  AND  timestamp  >= now() - ($2::bigint * interval '1 microsecond')
-		ORDER  BY timestamp`
+		FROM   %s
+		WHERE  campaign_id = $1
+		  AND  session_id = $2
+		  AND  timestamp  >= now() - ($3::bigint * interval '1 microsecond')
+		ORDER  BY timestamp`,
+		s.schema.TableRef("session_entries"))
 
-	rows, err := s.pool.Query(ctx, q, sessionID, duration.Microseconds())
+	rows, err := s.pool.Query(ctx, q, s.campaignID, sessionID, duration.Microseconds())
 	if err != nil {
 		return nil, fmt.Errorf("session store: get recent: %w", err)
 	}
@@ -68,14 +74,15 @@ func (s *SessionStoreImpl) GetRecent(ctx context.Context, sessionID string, dura
 //
 // The query is passed to plainto_tsquery so no special operator syntax is required.
 func (s *SessionStoreImpl) Search(ctx context.Context, query string, opts memory.SearchOpts) ([]memory.TranscriptEntry, error) {
-	args := []any{query} // $1 = FTS query string
+	args := []any{s.campaignID, query} // $1 = campaign_id, $2 = FTS query string
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
 
 	conditions := []string{
-		"to_tsvector('english', text) @@ plainto_tsquery('english', $1)",
+		"campaign_id = $1",
+		"to_tsvector('english', text) @@ plainto_tsquery('english', $2)",
 	}
 	if opts.SessionID != "" {
 		conditions = append(conditions, "session_id = "+next(opts.SessionID))
@@ -90,10 +97,12 @@ func (s *SessionStoreImpl) Search(ctx context.Context, query string, opts memory
 		conditions = append(conditions, "speaker_id = "+next(opts.SpeakerID))
 	}
 
-	q := "SELECT speaker_id, speaker_name, text, raw_text, npc_id, timestamp, duration_ns\n" +
-		"FROM   session_entries\n" +
-		"WHERE  " + strings.Join(conditions, "\n  AND  ") + "\n" +
-		"ORDER  BY timestamp"
+	q := fmt.Sprintf("SELECT speaker_id, speaker_name, text, raw_text, npc_id, timestamp, duration_ns\n"+
+		"FROM   %s\n"+
+		"WHERE  %s\n"+
+		"ORDER  BY timestamp",
+		s.schema.TableRef("session_entries"),
+		strings.Join(conditions, "\n  AND  "))
 
 	if opts.Limit > 0 {
 		args = append(args, opts.Limit)
@@ -110,10 +119,11 @@ func (s *SessionStoreImpl) Search(ctx context.Context, query string, opts memory
 // EntryCount implements [memory.SessionStore]. It returns the total number of
 // transcript entries for sessionID.
 func (s *SessionStoreImpl) EntryCount(ctx context.Context, sessionID string) (int, error) {
-	const q = `SELECT count(*) FROM session_entries WHERE session_id = $1`
+	q := fmt.Sprintf(`SELECT count(*) FROM %s WHERE campaign_id = $1 AND session_id = $2`,
+		s.schema.TableRef("session_entries"))
 
 	var count int
-	if err := s.pool.QueryRow(ctx, q, sessionID).Scan(&count); err != nil {
+	if err := s.pool.QueryRow(ctx, q, s.campaignID, sessionID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("session store: entry count: %w", err)
 	}
 	return count, nil

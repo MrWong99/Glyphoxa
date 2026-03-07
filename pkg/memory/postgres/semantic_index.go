@@ -18,29 +18,34 @@ import (
 // Obtain one via [Store.L2] rather than constructing directly.
 // All methods are safe for concurrent use.
 type SemanticIndexImpl struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	schema     SchemaName
+	campaignID string
 }
 
 // IndexChunk implements [memory.SemanticIndex]. It upserts a pre-embedded
 // [memory.Chunk] into the chunks table. If a chunk with the same ID already
 // exists it is completely replaced.
 func (s *SemanticIndexImpl) IndexChunk(ctx context.Context, chunk memory.Chunk) error {
-	const q = `
-		INSERT INTO chunks
-		    (id, session_id, content, embedding, speaker_id, entity_id, topic, timestamp)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	q := fmt.Sprintf(`
+		INSERT INTO %s
+		    (id, campaign_id, session_id, content, embedding, speaker_id, entity_id, topic, timestamp)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (id) DO UPDATE SET
+		    campaign_id = EXCLUDED.campaign_id,
 		    session_id  = EXCLUDED.session_id,
 		    content     = EXCLUDED.content,
 		    embedding   = EXCLUDED.embedding,
 		    speaker_id  = EXCLUDED.speaker_id,
 		    entity_id   = EXCLUDED.entity_id,
 		    topic       = EXCLUDED.topic,
-		    timestamp   = EXCLUDED.timestamp`
+		    timestamp   = EXCLUDED.timestamp`,
+		s.schema.TableRef("chunks"))
 
 	vec := pgvector.NewVector(chunk.Embedding)
 	_, err := s.pool.Exec(ctx, q,
 		chunk.ID,
+		s.campaignID,
 		chunk.SessionID,
 		chunk.Content,
 		vec,
@@ -63,13 +68,13 @@ func (s *SemanticIndexImpl) IndexChunk(ctx context.Context, chunk memory.Chunk) 
 func (s *SemanticIndexImpl) Search(ctx context.Context, embedding []float32, topK int, filter memory.ChunkFilter) ([]memory.ChunkResult, error) {
 	queryVec := pgvector.NewVector(embedding)
 
-	args := []any{queryVec} // $1 = query vector
+	args := []any{queryVec, s.campaignID} // $1 = query vector, $2 = campaign_id
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
 
-	var conditions []string
+	conditions := []string{"campaign_id = $2"}
 	if filter.SessionID != "" {
 		conditions = append(conditions, "session_id = "+next(filter.SessionID))
 	}
@@ -86,10 +91,7 @@ func (s *SemanticIndexImpl) Search(ctx context.Context, embedding []float32, top
 		conditions = append(conditions, "timestamp < "+next(filter.Before))
 	}
 
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, "\n  AND ")
-	}
+	whereClause := "WHERE " + strings.Join(conditions, "\n  AND ")
 
 	args = append(args, topK)
 	limitArg := fmt.Sprintf("$%d", len(args))
@@ -97,10 +99,10 @@ func (s *SemanticIndexImpl) Search(ctx context.Context, embedding []float32, top
 	q := fmt.Sprintf(`
 		SELECT id, session_id, content, embedding, speaker_id, entity_id, topic, timestamp,
 		       embedding <=> $1 AS distance
-		FROM   chunks
+		FROM   %s
 		%s
 		ORDER  BY distance
-		LIMIT  %s`, whereClause, limitArg)
+		LIMIT  %s`, s.schema.TableRef("chunks"), whereClause, limitArg)
 
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
