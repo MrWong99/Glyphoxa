@@ -14,6 +14,7 @@ import (
 
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
+	"github.com/disgoorg/godave/libdave"
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
@@ -67,6 +68,11 @@ func run() int {
 	// ── Logger ────────────────────────────────────────────────────────────────
 	logger := newLogger(cfg.Server.LogLevel)
 	slog.SetDefault(logger)
+
+	if cfg.Server.LogLevel == config.LogDebug {
+		// Enable verbose libdave logging for DAVE protocol debugging.
+		libdave.SetDefaultLogLoggerLevel(slog.LevelDebug)
+	}
 
 	slog.Info("glyphoxa starting",
 		"config", *configPath,
