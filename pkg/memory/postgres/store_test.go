@@ -396,6 +396,7 @@ func TestL3_EntityCRUD(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("GetEntity: expected entity, got nil")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if got.Name != entity.Name {
 		t.Errorf("Name: want %q, got %q", entity.Name, got.Name)
@@ -758,6 +759,7 @@ func TestL3_IdentitySnapshot(t *testing.T) {
 	}
 	if snap == nil {
 		t.Fatal("IdentitySnapshot: expected non-nil")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if snap.Entity.ID != grimjaw.ID {
 		t.Errorf("Entity.ID: want %s, got %s", grimjaw.ID, snap.Entity.ID)

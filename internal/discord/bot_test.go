@@ -98,6 +98,7 @@ func TestNewCommandRouter(t *testing.T) {
 	r := NewCommandRouter()
 	if r == nil {
 		t.Fatal("NewCommandRouter() returned nil")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if len(r.commands) != 0 {
 		t.Errorf("expected empty commands map, got %d entries", len(r.commands))

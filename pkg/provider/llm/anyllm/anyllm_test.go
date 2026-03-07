@@ -351,6 +351,7 @@ func TestNew_OpenAI_WithAPIKey(t *testing.T) {
 	}
 	if p == nil {
 		t.Fatal("expected non-nil provider")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if p.model != "gpt-4o" {
 		t.Errorf("expected model gpt-4o, got %q", p.model)

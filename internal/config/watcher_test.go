@@ -67,6 +67,7 @@ func TestWatcher_InitialLoad(t *testing.T) {
 	cfg := w.Current()
 	if cfg == nil {
 		t.Fatal("Current() returned nil after initial load")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if cfg.Server.LogLevel != config.LogInfo {
 		t.Errorf("log_level: got %q, want %q", cfg.Server.LogLevel, config.LogInfo)

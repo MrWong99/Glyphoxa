@@ -64,6 +64,7 @@ func TestCorrectionPipeline_BothStages(t *testing.T) {
 
 	if result == nil {
 		t.Fatal("Correct returned nil result")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if result.Original.Text != tr.Text {
 		t.Errorf("Original.Text=%q, want %q", result.Original.Text, tr.Text)
@@ -130,6 +131,7 @@ func TestCorrectionPipeline_LLMOnly(t *testing.T) {
 
 	if result == nil {
 		t.Fatal("result is nil")
+		return // unreachable; silences staticcheck SA5011
 	}
 	// LLM should have been called.
 	if len(mockLLM.CompleteCalls) == 0 {

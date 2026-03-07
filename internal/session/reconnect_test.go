@@ -121,6 +121,7 @@ func TestReconnector_ReconnectOnDisconnect(t *testing.T) {
 	gotPtr := reconnected.Load()
 	if gotPtr == nil {
 		t.Fatal("expected OnReconnect to be called")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if *gotPtr != conn2 {
 		t.Error("expected OnReconnect to be called with conn2")

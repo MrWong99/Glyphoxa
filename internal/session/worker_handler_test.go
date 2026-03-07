@@ -107,8 +107,12 @@ func TestWorkerHandler_ActiveSessionIDs(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s1"})
-	handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s2"})
+	if err := handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s1"}); err != nil {
+		t.Fatalf("start s1: %v", err)
+	}
+	if err := handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s2"}); err != nil {
+		t.Fatalf("start s2: %v", err)
+	}
 	defer handler.StopAll(ctx)
 
 	ids := handler.ActiveSessionIDs()
@@ -128,8 +132,12 @@ func TestWorkerHandler_StopAll(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s1"})
-	handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s2"})
+	if err := handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s1"}); err != nil {
+		t.Fatalf("start s1: %v", err)
+	}
+	if err := handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s2"}); err != nil {
+		t.Fatalf("start s2: %v", err)
+	}
 
 	handler.StopAll(ctx)
 

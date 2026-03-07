@@ -165,6 +165,7 @@ func TestExecuteBuiltin(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if result.Content != `{"msg":"hello"}` {
 		t.Errorf("Content = %q, want %q", result.Content, `{"msg":"hello"}`)
@@ -200,6 +201,7 @@ func TestExecuteBuiltinError(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if !result.IsError {
 		t.Error("IsError = false, want true")

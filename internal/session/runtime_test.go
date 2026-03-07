@@ -36,7 +36,7 @@ func TestRuntime_DoubleStart(t *testing.T) {
 	if err := rt.Start(ctx, nil); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
-	defer rt.Stop(ctx)
+	defer func() { _ = rt.Stop(ctx) }()
 
 	if err := rt.Start(ctx, nil); err == nil {
 		t.Fatal("expected error on double start")

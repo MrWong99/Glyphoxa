@@ -107,6 +107,7 @@ func TestNewBridge_ToolCallRoutedThroughHost(t *testing.T) {
 	}
 	if execCall == nil {
 		t.Fatal("ExecuteTool call not recorded")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if execCall.Args[0] != "lookup_npc" {
 		t.Errorf("ExecuteTool name = %q, want %q", execCall.Args[0], "lookup_npc")

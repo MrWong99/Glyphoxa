@@ -52,6 +52,7 @@ func TestNewPlatform(t *testing.T) {
 	p := New(nil, guildID)
 	if p == nil {
 		t.Fatal("New returned nil")
+		return // unreachable; silences staticcheck SA5011
 	}
 	if p.guildID != guildID {
 		t.Errorf("guildID = %v, want %v", p.guildID, guildID)

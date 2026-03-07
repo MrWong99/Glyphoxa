@@ -564,6 +564,7 @@ func TestPostgresStore_Get(t *testing.T) {
 		}
 		if def == nil {
 			t.Fatal("Get() returned nil, want definition")
+			return // unreachable; silences staticcheck SA5011
 		}
 		if def.ID != "npc-1" {
 			t.Errorf("ID = %q, want 'npc-1'", def.ID)

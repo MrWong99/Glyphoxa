@@ -81,6 +81,7 @@ func TestHistogramObservation(t *testing.T) {
 			met := findMetric(rm, tc.name)
 			if met == nil {
 				t.Fatalf("metric %q not found", tc.name)
+				return // unreachable; silences staticcheck SA5011
 			}
 			hist, ok := met.Data.(metricdata.Histogram[float64])
 			if !ok {
@@ -117,6 +118,7 @@ func TestCounterIncrement(t *testing.T) {
 	met := findMetric(rm, "glyphoxa.provider.requests")
 	if met == nil {
 		t.Fatal("metric not found")
+		return // unreachable; silences staticcheck SA5011
 	}
 	sum, ok := met.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -148,6 +150,7 @@ func TestToolCallsCounter(t *testing.T) {
 	met := findMetric(rm, "glyphoxa.tool.calls")
 	if met == nil {
 		t.Fatal("metric not found")
+		return // unreachable; silences staticcheck SA5011
 	}
 	sum, ok := met.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -179,6 +182,7 @@ func TestNPCUtterancesCounter(t *testing.T) {
 	met := findMetric(rm, "glyphoxa.npc.utterances")
 	if met == nil {
 		t.Fatal("metric not found")
+		return // unreachable; silences staticcheck SA5011
 	}
 	sum, ok := met.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -208,6 +212,7 @@ func TestProviderErrorsCounter(t *testing.T) {
 	met := findMetric(rm, "glyphoxa.provider.errors")
 	if met == nil {
 		t.Fatal("metric not found")
+		return // unreachable; silences staticcheck SA5011
 	}
 	sum, ok := met.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -247,6 +252,7 @@ func TestGauges(t *testing.T) {
 			met := findMetric(rm, tc.name)
 			if met == nil {
 				t.Fatalf("metric %q not found", tc.name)
+				return // unreachable; silences staticcheck SA5011
 			}
 			sum, ok := met.Data.(metricdata.Sum[int64])
 			if !ok {
@@ -277,6 +283,7 @@ func TestHTTPRequestDuration(t *testing.T) {
 	met := findMetric(rm, "glyphoxa.http.request.duration")
 	if met == nil {
 		t.Fatal("metric not found")
+		return // unreachable; silences staticcheck SA5011
 	}
 	hist, ok := met.Data.(metricdata.Histogram[float64])
 	if !ok {

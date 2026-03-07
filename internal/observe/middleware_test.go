@@ -108,6 +108,7 @@ func TestMiddleware_RecordsDuration(t *testing.T) {
 	met := findMetric(rm, "glyphoxa.http.request.duration")
 	if met == nil {
 		t.Fatal("metric not found")
+		return // unreachable; silences staticcheck SA5011
 	}
 	hist, ok := met.Data.(metricdata.Histogram[float64])
 	if !ok {
