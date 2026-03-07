@@ -367,6 +367,13 @@ If you configured a `dm_role_id`, ensure your Discord user has that role to acce
 
 ---
 
+## 🔜 Next Steps
+
+The default `--mode=full` is the right choice for self-hosted, single-tenant deployments. For multi-tenant SaaS deployments on Kubernetes, see:
+
+- [Deployment: Kubernetes / Helm](deployment.md#kubernetes--helm-deployment) -- gateway + worker setup
+- [Multi-Tenant Architecture](multi-tenant.md) -- admin API, tenant model, usage tracking
+
 ## 📖 See Also
 
 - [Architecture](design/01-architecture.md) -- system layers and data flow

@@ -155,6 +155,30 @@ All latency histograms share the same bucket boundaries, optimised for voice-pip
 | `method` | `http.request.duration` | HTTP method (`GET`, `POST`, etc.) |
 | `path` | `http.request.duration` | Request path (e.g. `/healthz`, `/readyz`) |
 
+### Multi-Tenant Labels
+
+In `--mode=gateway` and `--mode=worker` deployments, all metrics and traces are automatically enriched with tenant context when a `TenantContext` is present:
+
+| Label | Description |
+|-------|-------------|
+| `tenant_id` | Tenant identifier (e.g. `acme-corp`) |
+| `campaign_id` | Active campaign identifier |
+
+These labels enable per-tenant filtering in Prometheus and Grafana. Example PromQL queries:
+
+```promql
+# P99 LLM latency for a specific tenant
+histogram_quantile(0.99, rate(glyphoxa_llm_duration_seconds_bucket{tenant_id="acme-corp"}[5m]))
+
+# Active sessions by tenant
+glyphoxa_active_sessions{} by (tenant_id)
+
+# Total provider errors for a campaign
+sum(rate(glyphoxa_provider_errors_total{tenant_id="acme-corp", campaign_id="curse-of-strahd"}[1h]))
+```
+
+The pre-built Grafana dashboard includes a `$tenant_id` template variable for filtering all panels by tenant. In single-process mode (`--mode=full`), these labels are omitted and all metrics are unscoped.
+
 ### Convenience Recording Methods
 
 The `Metrics` struct provides helper methods that apply the correct label sets automatically:
