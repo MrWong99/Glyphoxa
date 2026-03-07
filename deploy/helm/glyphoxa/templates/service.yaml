@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    {{- include "glyphoxa.gateway.selectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: admin
+      port: {{ .Values.gateway.ports.admin }}
+      targetPort: admin
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.gateway.ports.grpc }}
+      targetPort: grpc
+      protocol: TCP
+    - name: observe
+      port: {{ .Values.gateway.ports.observe }}
+      targetPort: observe
+      protocol: TCP
+  selector:
+    {{- include "glyphoxa.gateway.selectorLabels" . | nindent 4 }}

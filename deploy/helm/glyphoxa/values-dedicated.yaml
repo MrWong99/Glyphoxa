@@ -1,0 +1,22 @@
+# Values overlay for dedicated (single-tenant) topology.
+# Usage: helm install glyphoxa-tenant-abc ./deploy/helm/glyphoxa \
+#   -f deploy/helm/glyphoxa/values-dedicated.yaml \
+#   --set database.dsn="postgres://..." \
+#   -n glyphoxa-tenant-abc
+
+topology: dedicated
+
+gateway:
+  # Dedicated tenants run a single gateway (or 2 for HA).
+  replicaCount: 1
+  podAntiAffinity:
+    enabled: false
+
+worker:
+  resourceProfile: cloud
+
+networkPolicy:
+  enabled: true
+
+autoscaling:
+  enabled: false

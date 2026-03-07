@@ -1,0 +1,12 @@
+{{- if .Values.config.data }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- .Values.config.data | toYaml | nindent 4 }}
+{{- end }}

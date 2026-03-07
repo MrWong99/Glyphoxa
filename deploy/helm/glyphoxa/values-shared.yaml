@@ -1,0 +1,18 @@
+# Values overlay for shared topology.
+# Usage: helm install glyphoxa ./deploy/helm/glyphoxa -f deploy/helm/glyphoxa/values-shared.yaml
+
+topology: shared
+
+gateway:
+  replicaCount: 3
+  podAntiAffinity:
+    enabled: true
+
+worker:
+  resourceProfile: cloud
+
+networkPolicy:
+  enabled: true
+
+autoscaling:
+  enabled: false

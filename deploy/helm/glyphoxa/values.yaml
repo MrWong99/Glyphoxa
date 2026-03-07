@@ -1,0 +1,126 @@
+# Default values for Glyphoxa Helm chart.
+
+# -- Deployment topology: "shared" or "dedicated"
+topology: shared
+
+image:
+  repository: ghcr.io/mrwong99/glyphoxa
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# -- Gateway configuration (--mode=gateway)
+gateway:
+  replicaCount: 3
+
+  # Admin API key (env var GLYPHOXA_ADMIN_KEY).
+  # Set via sealed secret in production; this is a dev default.
+  adminKey: ""
+
+  ports:
+    admin: 8081
+    grpc: 50051
+    observe: 9090
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  nodeSelector: {}
+  tolerations: []
+
+  # Pod anti-affinity across nodes for HA.
+  podAntiAffinity:
+    enabled: true
+
+  serviceAccount:
+    # -- Create a ServiceAccount with Job management RBAC.
+    create: true
+    name: glyphoxa-gateway
+    annotations: {}
+
+# -- Worker configuration (--mode=worker)
+# Workers are created as Kubernetes Jobs by the gateway at session start.
+worker:
+  # Resource profile: "cloud", "whisper-native", or "local-llm".
+  resourceProfile: cloud
+
+  # Per-profile resource limits.
+  profiles:
+    cloud:
+      requests:
+        cpu: 500m
+        memory: 384Mi
+      limits:
+        cpu: "2"
+        memory: 768Mi
+    whisper-native:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        cpu: "4"
+        memory: 2Gi
+    local-llm:
+      requests:
+        cpu: "4"
+        memory: 4Gi
+      limits:
+        cpu: "8"
+        memory: 8Gi
+
+  # Safety deadline for worker Jobs (seconds). Kills zombie sessions.
+  activeDeadlineSeconds: 14400  # 4 hours
+
+  # Seconds to keep completed Job pods before cleanup.
+  ttlSecondsAfterFinished: 300
+
+  ports:
+    grpc: 50051
+    observe: 9090
+
+  nodeSelector: {}
+  tolerations: []
+
+# -- ConfigMap for Glyphoxa YAML configuration.
+# Mounted at /etc/glyphoxa/config.yaml inside both gateway and worker pods.
+config:
+  # Inline YAML config. Override per-environment in values-shared.yaml
+  # or values-dedicated.yaml.
+  data: {}
+
+# -- Database connection.
+database:
+  # DSN for the gateway/worker PostgreSQL connection.
+  # When postgresql.enabled=true, this is auto-generated from subchart values.
+  dsn: ""
+
+# -- Network policies
+networkPolicy:
+  enabled: true
+
+# -- Horizontal Pod Autoscaler for the gateway.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# -- Optional PostgreSQL subchart (Bitnami).
+postgresql:
+  enabled: false
+  auth:
+    postgresPassword: ""
+    database: glyphoxa
+  primary:
+    persistence:
+      size: 10Gi
+
+# -- Optional Sealed Secrets controller subchart.
+sealed-secrets:
+  enabled: false

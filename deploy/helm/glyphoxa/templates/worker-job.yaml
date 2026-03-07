@@ -1,0 +1,89 @@
+{{/*
+Worker Job template. This is NOT deployed directly by Helm.
+The gateway creates Jobs dynamically at session start using the Kubernetes API.
+This template is rendered as a ConfigMap so the gateway can read it.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-worker-job-template
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+data:
+  job-template.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      # The gateway replaces SESSION_ID at runtime.
+      name: {{ include "glyphoxa.fullname" . }}-worker-SESSION_ID
+      namespace: {{ .Release.Namespace }}
+      labels:
+        {{- include "glyphoxa.labels" . | nindent 8 }}
+        {{- include "glyphoxa.worker.selectorLabels" . | nindent 8 }}
+    spec:
+      parallelism: 1
+      completions: 1
+      activeDeadlineSeconds: {{ .Values.worker.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ .Values.worker.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "glyphoxa.labels" . | nindent 12 }}
+            {{- include "glyphoxa.worker.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.worker.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.worker.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: worker
+              image: {{ include "glyphoxa.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["--mode=worker"]
+              ports:
+                - name: grpc
+                  containerPort: {{ .Values.worker.ports.grpc }}
+                  protocol: TCP
+                - name: observe
+                  containerPort: {{ .Values.worker.ports.observe }}
+                  protocol: TCP
+              env:
+                - name: GLYPHOXA_GATEWAY_ADDR
+                  value: "{{ include "glyphoxa.fullname" . }}-gateway.{{ .Release.Namespace }}.svc:{{ .Values.gateway.ports.grpc }}"
+                - name: GLYPHOXA_GRPC_ADDR
+                  value: ":{{ .Values.worker.ports.grpc }}"
+                {{- $dsn := include "glyphoxa.databaseDSN" . }}
+                {{- if $dsn }}
+                - name: GLYPHOXA_DATABASE_DSN
+                  value: {{ $dsn | quote }}
+                {{- end }}
+              {{- if .Values.config.data }}
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/glyphoxa
+                  readOnly: true
+              {{- end }}
+              startupProbe:
+                httpGet:
+                  path: /healthz
+                  port: observe
+                failureThreshold: 30
+                periodSeconds: 2
+              resources:
+                {{- include "glyphoxa.worker.resources" . | nindent 16 }}
+          {{- if .Values.config.data }}
+          volumes:
+            - name: config
+              configMap:
+                name: {{ include "glyphoxa.fullname" . }}-config
+          {{- end }}

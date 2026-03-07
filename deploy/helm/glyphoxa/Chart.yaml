@@ -1,0 +1,18 @@
+apiVersion: v2
+name: glyphoxa
+description: AI-powered voice NPC framework for tabletop RPGs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: MrWong99
+
+dependencies:
+  - name: postgresql
+    version: "16.4.11"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+  - name: sealed-secrets
+    version: "2.17.1"
+    repository: https://bitnami-labs.github.io/sealed-secrets
+    condition: sealed-secrets.enabled

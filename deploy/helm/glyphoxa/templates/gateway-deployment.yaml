@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    {{- include "glyphoxa.gateway.selectorLabels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.gateway.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.labels" . | nindent 8 }}
+        {{- include "glyphoxa.gateway.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "glyphoxa.gateway.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.gateway.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "glyphoxa.gateway.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ include "glyphoxa.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--mode=gateway"]
+          ports:
+            - name: admin
+              containerPort: {{ .Values.gateway.ports.admin }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.gateway.ports.grpc }}
+              protocol: TCP
+            - name: observe
+              containerPort: {{ .Values.gateway.ports.observe }}
+              protocol: TCP
+          env:
+            - name: GLYPHOXA_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: admin-key
+                  optional: true
+            - name: GLYPHOXA_GRPC_ADDR
+              value: ":{{ .Values.gateway.ports.grpc }}"
+            {{- $dsn := include "glyphoxa.databaseDSN" . }}
+            {{- if $dsn }}
+            - name: GLYPHOXA_DATABASE_DSN
+              value: {{ $dsn | quote }}
+            {{- end }}
+          {{- if .Values.config.data }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/glyphoxa
+              readOnly: true
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            failureThreshold: 30
+            periodSeconds: 2
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+      {{- if .Values.config.data }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "glyphoxa.fullname" . }}-config
+      {{- end }}

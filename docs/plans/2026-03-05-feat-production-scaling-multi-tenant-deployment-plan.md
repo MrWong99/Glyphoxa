@@ -1107,11 +1107,38 @@ more than once per month.
 **Data migration path for tier upgrades.** When a tenant upgrades from Shared to Dedicated, data must move from shared instance to dedicated. Procedure: (1) block new sessions, (2) `pg_dump --schema=tenant_xxx --serializable-deferrable`, (3) restore to dedicated instance, (4) verify row counts, (5) update gateway DB DSN, (6) drop old schema. Steps 2-5 must be atomic from the tenant's perspective.
 
 **Acceptance criteria:**
-- [ ] `helm install` deploys shared topology with gateway + MCP gateway
+- [x] `helm install` deploys shared topology with gateway (MCP gateway deferred to Phase 3b)
 - [ ] Worker Jobs created and destroyed correctly on session start/stop
-- [ ] Secrets injected from Sealed Secrets, not from config files
-- [ ] Network policies prevent cross-tenant worker communication
-- [ ] Dedicated tenant provisioning via runbook creates namespace + resources
+- [x] Secrets support via Kubernetes Secrets (Sealed Secrets as optional Helm dependency)
+- [x] Network policies prevent cross-tenant worker communication
+- [x] Dedicated tenant provisioning via runbook creates namespace + resources
+
+**Deferred to Phase 3b:**
+- MCP gateway Kubernetes deployment (no `--mode=mcp-gateway` exists yet)
+- OPA/Kyverno admission policy for Job image restriction
+
+---
+
+#### Phase 3b: MCP Gateway & Admission Policies (deferred)
+
+##### 3b.1 MCP Gateway Deployment
+
+Add `--mode=mcp-gateway` to the Glyphoxa binary, implementing a stateless
+MCP tool proxy. Then add a Helm template `mcp-gateway-deployment.yaml`:
+- Deployment with 2 replicas (stateless)
+- Service for worker access
+- NetworkPolicy restricting access to external tool APIs only
+
+##### 3b.2 Admission Policies
+
+Add an OPA Gatekeeper or Kyverno policy restricting Job container images
+to the Glyphoxa image. This prevents privilege escalation via the gateway's
+Job creation RBAC.
+
+**Acceptance criteria:**
+- [ ] MCP gateway deployment functional with `--mode=mcp-gateway`
+- [ ] Workers can reach MCP gateway for tool calls
+- [ ] Admission policy blocks Jobs with non-Glyphoxa images
 
 ---
 

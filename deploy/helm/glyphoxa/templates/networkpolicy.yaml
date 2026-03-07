@@ -1,0 +1,93 @@
+{{- if .Values.networkPolicy.enabled }}
+# Gateway: can receive admin + gRPC traffic; can reach PostgreSQL, K8s API,
+# and external APIs (Discord).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "glyphoxa.gateway.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow admin API from within the namespace only.
+    - from:
+        - podSelector: {}
+      ports:
+        - port: {{ .Values.gateway.ports.admin }}
+          protocol: TCP
+    # Allow gRPC from workers.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - port: {{ .Values.gateway.ports.grpc }}
+          protocol: TCP
+    # Allow observe (metrics scraping) from any namespace (Prometheus).
+    - ports:
+        - port: {{ .Values.gateway.ports.observe }}
+          protocol: TCP
+  egress:
+    # Allow all egress (PostgreSQL, K8s API, Discord API, DNS).
+    - {}
+---
+# Workers: can reach gateway gRPC, PostgreSQL, and external APIs.
+# Cannot reach other workers or gateway admin port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "glyphoxa.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "glyphoxa.worker.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow gRPC from gateway.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: {{ .Values.worker.ports.grpc }}
+          protocol: TCP
+    # Allow observe (metrics scraping) from any namespace (Prometheus).
+    - ports:
+        - port: {{ .Values.worker.ports.observe }}
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Gateway gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: {{ .Values.gateway.ports.grpc }}
+          protocol: TCP
+    # PostgreSQL (default port).
+    - ports:
+        - port: 5432
+          protocol: TCP
+    # External APIs (LLM, STT, TTS providers over HTTPS).
+    - ports:
+        - port: 443
+          protocol: TCP
+{{- end }}
