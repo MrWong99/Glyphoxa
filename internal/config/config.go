@@ -138,6 +138,10 @@ type ServerConfig struct {
 	// ListenAddr is the TCP address the server listens on (e.g., ":8080").
 	ListenAddr string `yaml:"listen_addr"`
 
+	// ObserveAddr is the TCP address for the observability HTTP server
+	// serving /healthz, /readyz, and /metrics. Defaults to ":9090".
+	ObserveAddr string `yaml:"observe_addr"`
+
 	// LogLevel controls verbosity.
 	LogLevel LogLevel `yaml:"log_level"`
 

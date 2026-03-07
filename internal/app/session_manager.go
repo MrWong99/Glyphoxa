@@ -80,6 +80,7 @@ type SessionManager struct {
 	semantic     memory.SemanticIndex
 	mcpHost      mcp.Host
 	entities     entity.Store
+	tenant       config.TenantContext
 }
 
 // SessionManagerConfig holds all dependencies for a [SessionManager].
@@ -92,6 +93,7 @@ type SessionManagerConfig struct {
 	Semantic     memory.SemanticIndex
 	MCPHost      mcp.Host
 	Entities     entity.Store
+	Tenant       config.TenantContext
 }
 
 // NewSessionManager creates a SessionManager with the given dependencies.
@@ -105,6 +107,7 @@ func NewSessionManager(cfg SessionManagerConfig) *SessionManager {
 		semantic:     cfg.Semantic,
 		mcpHost:      cfg.MCPHost,
 		entities:     cfg.Entities,
+		tenant:       cfg.Tenant,
 	}
 }
 
@@ -173,8 +176,11 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 	// Create orchestrator with loaded agents.
 	orch := orchestrator.New(agents)
 
-	// Create a session-scoped context for background work.
-	sessionCtx, cancel := context.WithCancel(context.Background())
+	// Create a session-scoped context for background work, carrying
+	// the tenant identity for downstream subsystems.
+	sessionCtx, cancel := context.WithCancel(
+		config.WithTenant(context.Background(), sm.tenant),
+	)
 
 	// Start consolidator if we have a session store and a context manager.
 	// For the alpha, create a minimal consolidator that periodically writes

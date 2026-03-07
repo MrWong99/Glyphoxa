@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +18,7 @@ import (
 	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/godave/libdave"
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/MrWong99/glyphoxa/internal/app"
 	"github.com/MrWong99/glyphoxa/internal/config"
@@ -23,6 +26,8 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/discord/commands"
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
+	"github.com/MrWong99/glyphoxa/internal/health"
+	"github.com/MrWong99/glyphoxa/internal/observe"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/audio/webrtc"
 	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
@@ -80,6 +85,25 @@ func run() int {
 		"log_level", cfg.Server.LogLevel,
 	)
 
+	// ── Observability ─────────────────────────────────────────────────────────
+	otelShutdown, err := observe.InitProvider(context.Background(), observe.ProviderConfig{
+		ServiceName: "glyphoxa",
+	})
+	if err != nil {
+		slog.Error("failed to initialise observability provider", "err", err)
+		return 1
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := otelShutdown(shutCtx); err != nil {
+			slog.Warn("otel shutdown error", "err", err)
+		}
+	}()
+
+	// ── Tenant context (full mode) ────────────────────────────────────────────
+	tenant := config.LocalTenant(cfg.Campaign.Name)
+
 	// ── Provider registry ─────────────────────────────────────────────────────
 	reg := config.NewRegistry()
 
@@ -103,11 +127,41 @@ func run() int {
 	// ── Startup summary ───────────────────────────────────────────────────────
 	printStartupSummary(cfg)
 
-	application, err := app.New(ctx, cfg, providers)
+	application, err := app.New(ctx, cfg, providers, app.WithTenant(tenant))
 	if err != nil {
 		slog.Error("failed to initialise application", "err", err)
 		return 1
 	}
+
+	// ── Observability HTTP server (/healthz, /readyz, /metrics) ───────────
+	observeAddr := cfg.Server.ObserveAddr
+	if observeAddr == "" {
+		observeAddr = ":9090"
+	}
+	observeMux := http.NewServeMux()
+
+	// Health and readiness probes.
+	healthHandler := health.New(application.ReadinessChecks()...)
+	healthHandler.Register(observeMux)
+
+	// Prometheus metrics endpoint.
+	observeMux.Handle("GET /metrics", promhttp.Handler())
+
+	observeSrv := &http.Server{
+		Addr:    observeAddr,
+		Handler: observeMux,
+	}
+	go func() {
+		ln, err := net.Listen("tcp", observeAddr)
+		if err != nil {
+			slog.Error("observe server listen failed", "addr", observeAddr, "err", err)
+			return
+		}
+		slog.Info("observe server started", "addr", ln.Addr().String())
+		if err := observeSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("observe server error", "err", err)
+		}
+	}()
 
 	// ── Discord commands (when audio provider is "discord") ──────────────────
 	if bot != nil {
@@ -122,6 +176,7 @@ func run() int {
 			Semantic:     application.SemanticIndex(),
 			MCPHost:      application.MCPHost(),
 			Entities:     application.EntityStore(),
+			Tenant:       application.Tenant(),
 		})
 
 		// Session and recap register themselves in the constructor.
@@ -178,7 +233,12 @@ func run() int {
 
 	slog.Info("shutdown signal received, stopping…")
 
-	// Close the Discord bot first (unregister commands, disconnect).
+	// Stop the observe server first.
+	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("observe server shutdown error", "err", err)
+	}
+
+	// Close the Discord bot (unregister commands, disconnect).
 	if bot != nil {
 		if err := bot.Close(); err != nil {
 			slog.Warn("discord bot close error", "err", err)

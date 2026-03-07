@@ -23,6 +23,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/engine/cascade"
 	s2sengine "github.com/MrWong99/glyphoxa/internal/engine/s2s"
 	"github.com/MrWong99/glyphoxa/internal/entity"
+	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
@@ -55,6 +56,7 @@ type Providers struct {
 type App struct {
 	cfg       *config.Config
 	providers *Providers
+	tenant    config.TenantContext
 
 	// Subsystems — initialised in New, torn down in Shutdown.
 	mcpHost   mcp.Host
@@ -106,6 +108,11 @@ func WithSemanticIndex(s memory.SemanticIndex) Option {
 // WithMCPHost injects an MCP host instead of creating one from config.
 func WithMCPHost(h mcp.Host) Option {
 	return func(a *App) { a.mcpHost = h }
+}
+
+// WithTenant sets the tenant context for this application instance.
+func WithTenant(tc config.TenantContext) Option {
+	return func(a *App) { a.tenant = tc }
 }
 
 // sessionID returns the canonical session identifier derived from the campaign
@@ -513,6 +520,27 @@ func (a *App) MCPHost() mcp.Host { return a.mcpHost }
 
 // EntityStore returns the entity store.
 func (a *App) EntityStore() entity.Store { return a.entities }
+
+// Tenant returns the tenant context for this application instance.
+func (a *App) Tenant() config.TenantContext { return a.tenant }
+
+// ReadinessChecks returns the health checkers for the /readyz endpoint.
+// Checks include database connectivity (when a session store is configured).
+func (a *App) ReadinessChecks() []health.Checker {
+	var checks []health.Checker
+	if a.sessions != nil {
+		checks = append(checks, health.Checker{
+			Name: "database",
+			Check: func(ctx context.Context) error {
+				// GetRecent with a zero duration is a lightweight way to
+				// verify the DB connection is alive.
+				_, err := a.sessions.GetRecent(ctx, "__health_check__", 0)
+				return err
+			},
+		})
+	}
+	return checks
+}
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
