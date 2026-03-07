@@ -38,18 +38,26 @@ func NewPostgresOrchestrator(ctx context.Context, pool *pgxpool.Pool) (*Postgres
 	return &PostgresOrchestrator{pool: pool}, nil
 }
 
-// runMigrations applies the embedded SQL migration files.
-// For launch simplicity this executes the up migration directly;
+// migrationFiles lists the up-migration files in order.
+var migrationFiles = []string{
+	"migrations/000001_sessions.up.sql",
+	"migrations/000002_usage_records.up.sql",
+}
+
+// runMigrations applies the embedded SQL migration files in order.
+// For launch simplicity this executes the up migrations directly;
 // golang-migrate integration comes when per-schema version tracking is needed.
 func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	upSQL, err := migrationsFS.ReadFile("migrations/000001_sessions.up.sql")
-	if err != nil {
-		return fmt.Errorf("read migration: %w", err)
-	}
+	for _, f := range migrationFiles {
+		upSQL, err := migrationsFS.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", f, err)
+		}
 
-	_, err = pool.Exec(ctx, string(upSQL))
-	if err != nil {
-		return fmt.Errorf("exec migration: %w", err)
+		_, err = pool.Exec(ctx, string(upSQL))
+		if err != nil {
+			return fmt.Errorf("exec migration %s: %w", f, err)
+		}
 	}
 
 	slog.Info("sessionorch: migrations applied")

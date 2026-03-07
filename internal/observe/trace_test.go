@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/MrWong99/glyphoxa/internal/config"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -127,6 +129,81 @@ func TestLogger_NoSpan(t *testing.T) {
 	logged := buf.String()
 	if bytes.Contains([]byte(logged), []byte("trace_id")) {
 		t.Errorf("log output should not contain trace_id, got: %s", logged)
+	}
+}
+
+func TestStartSpan_AddsTenantAttribute(t *testing.T) {
+	t.Parallel()
+	tp, exp := newTestTracerProvider(t)
+	origTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
+
+	ctx := config.WithTenant(context.Background(), config.TenantContext{
+		TenantID:    "acme",
+		LicenseTier: config.TierShared,
+		CampaignID:  "cos",
+	})
+	_, span := StartSpan(ctx, "tenant-span")
+	span.End()
+
+	spans := exp.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("no spans recorded")
+	}
+	found := false
+	for _, a := range spans[0].Attributes {
+		if a.Key == attribute.Key("tenant_id") && a.Value.AsString() == "acme" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("span missing tenant_id=acme attribute")
+	}
+}
+
+func TestStartSpan_NoTenantContext(t *testing.T) {
+	t.Parallel()
+	tp, exp := newTestTracerProvider(t)
+	origTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
+
+	_, span := StartSpan(context.Background(), "no-tenant-span")
+	span.End()
+
+	spans := exp.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("no spans recorded")
+	}
+	for _, a := range spans[0].Attributes {
+		if a.Key == attribute.Key("tenant_id") {
+			t.Error("span should not have tenant_id attribute without tenant context")
+		}
+	}
+}
+
+func TestLogger_IncludesTenantContext(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(slog.Default()) })
+
+	ctx := config.WithTenant(context.Background(), config.TenantContext{
+		TenantID:   "acme",
+		CampaignID: "cos",
+	})
+	l := Logger(ctx)
+	l.Info("test message")
+
+	logged := buf.String()
+	if !bytes.Contains([]byte(logged), []byte("tenant_id=acme")) {
+		t.Errorf("log output missing tenant_id, got: %s", logged)
+	}
+	if !bytes.Contains([]byte(logged), []byte("campaign_id=cos")) {
+		t.Errorf("log output missing campaign_id, got: %s", logged)
 	}
 }
 

@@ -16,12 +16,13 @@ import (
 
 // Tenant represents a tenant record managed by the admin API.
 type Tenant struct {
-	ID          string             `json:"id"`
-	LicenseTier config.LicenseTier `json:"license_tier"`
-	BotToken    string             `json:"bot_token,omitempty"`
-	GuildIDs    []string           `json:"guild_ids,omitempty"`
-	CreatedAt   time.Time          `json:"created_at"`
-	UpdatedAt   time.Time          `json:"updated_at"`
+	ID                  string             `json:"id"`
+	LicenseTier         config.LicenseTier `json:"license_tier"`
+	BotToken            string             `json:"bot_token,omitempty"`
+	GuildIDs            []string           `json:"guild_ids,omitempty"`
+	MonthlySessionHours float64            `json:"monthly_session_hours,omitempty"` // 0 = unlimited
+	CreatedAt           time.Time          `json:"created_at"`
+	UpdatedAt           time.Time          `json:"updated_at"`
 }
 
 // MarshalJSON implements custom JSON marshalling to serialise LicenseTier as a string.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MrWong99/glyphoxa/internal/config"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -294,6 +295,114 @@ func TestHTTPRequestDuration(t *testing.T) {
 	}
 	if got := hist.DataPoints[0].Count; got != 1 {
 		t.Errorf("sample count = %d, want 1", got)
+	}
+}
+
+// hasAttr checks if a data point's attribute set contains the given key-value pair.
+func hasAttr(attrs attribute.Set, key, value string) bool {
+	for _, kv := range attrs.ToSlice() {
+		if string(kv.Key) == key && kv.Value.AsString() == value {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRecordProviderRequest_WithTenantContext(t *testing.T) {
+	t.Parallel()
+	m, reader := newTestMetrics(t)
+
+	ctx := config.WithTenant(context.Background(), config.TenantContext{
+		TenantID:    "acme",
+		LicenseTier: config.TierShared,
+		CampaignID:  "curse_of_strahd",
+	})
+	m.RecordProviderRequest(ctx, "openai", "llm", "ok")
+
+	rm := collect(t, reader)
+	met := findMetric(rm, "glyphoxa.provider.requests")
+	if met == nil {
+		t.Fatal("metric not found")
+		return
+	}
+	sum, ok := met.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatal("metric is not a sum")
+	}
+	if len(sum.DataPoints) == 0 {
+		t.Fatal("no data points")
+	}
+	dp := sum.DataPoints[0]
+	for _, check := range []struct{ key, value string }{
+		{"provider", "openai"},
+		{"kind", "llm"},
+		{"status", "ok"},
+		{"tenant_id", "acme"},
+		{"license_tier", "shared"},
+		{"campaign_id", "curse_of_strahd"},
+	} {
+		if !hasAttr(dp.Attributes, check.key, check.value) {
+			t.Errorf("missing attribute %s=%s", check.key, check.value)
+		}
+	}
+}
+
+func TestRecordToolCall_WithTenantContext(t *testing.T) {
+	t.Parallel()
+	m, reader := newTestMetrics(t)
+
+	ctx := config.WithTenant(context.Background(), config.TenantContext{
+		TenantID:    "guild_a",
+		LicenseTier: config.TierDedicated,
+		CampaignID:  "campaign_x",
+	})
+	m.RecordToolCall(ctx, "dice_roll", "ok")
+
+	rm := collect(t, reader)
+	met := findMetric(rm, "glyphoxa.tool.calls")
+	if met == nil {
+		t.Fatal("metric not found")
+		return
+	}
+	sum, ok := met.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatal("metric is not a sum")
+	}
+	if len(sum.DataPoints) == 0 {
+		t.Fatal("no data points")
+	}
+	dp := sum.DataPoints[0]
+	if !hasAttr(dp.Attributes, "tenant_id", "guild_a") {
+		t.Error("missing tenant_id attribute")
+	}
+	if !hasAttr(dp.Attributes, "license_tier", "dedicated") {
+		t.Error("missing license_tier attribute")
+	}
+}
+
+func TestRecordProviderRequest_WithoutTenantContext(t *testing.T) {
+	t.Parallel()
+	m, reader := newTestMetrics(t)
+
+	// No tenant context — should still work, just without tenant attrs.
+	m.RecordProviderRequest(context.Background(), "openai", "llm", "ok")
+
+	rm := collect(t, reader)
+	met := findMetric(rm, "glyphoxa.provider.requests")
+	if met == nil {
+		t.Fatal("metric not found")
+		return
+	}
+	sum, ok := met.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatal("metric is not a sum")
+	}
+	if len(sum.DataPoints) == 0 {
+		t.Fatal("no data points")
+	}
+	dp := sum.DataPoints[0]
+	if hasAttr(dp.Attributes, "tenant_id", "") {
+		t.Error("tenant_id should not be present without tenant context")
 	}
 }
 

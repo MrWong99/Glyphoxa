@@ -1279,12 +1279,12 @@ tx, err := pool.BeginTx(ctx, pgx.TxOptions{
 **Applied: Stripe simplified to Payment Links for launch.** Full billing integration (Subscriptions, Checkout, webhooks) is worth building when >20 paying customers make manual management painful.
 
 **Acceptance criteria:**
-- [ ] `/healthz`, `/readyz`, `/metrics` endpoints live and scrape-ready
-- [ ] Grafana dashboard with `$tenant_id` template variable shows per-tenant
+- [x] `/healthz`, `/readyz`, `/metrics` endpoints live and scrape-ready
+- [x] Grafana dashboard with `$tenant_id` template variable shows per-tenant
   metrics
-- [ ] Structured logs include `tenant_id` and `campaign_id`
-- [ ] Quota enforcement: tenant at session hour limit cannot start new session
-- [ ] Campaign export produces valid .tar.gz; import into fresh campaign
+- [x] Structured logs include `tenant_id` and `campaign_id`
+- [x] Quota enforcement: tenant at session hour limit cannot start new session
+- [x] Campaign export produces valid .tar.gz; import into fresh campaign
   restores all data
 
 ---

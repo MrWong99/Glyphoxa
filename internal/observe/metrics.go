@@ -14,6 +14,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/MrWong99/glyphoxa/internal/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -211,44 +212,67 @@ func Attr(key, value string) attribute.KeyValue {
 	return attribute.String(key, value)
 }
 
+// tenantAttrs returns OTel attributes for the tenant context in ctx.
+// Returns nil when no tenant is set. The includeCampaign parameter controls
+// whether campaign_id is included (omit on high-frequency metrics to bound
+// cardinality).
+func tenantAttrs(ctx context.Context, includeCampaign bool) []attribute.KeyValue {
+	tc, ok := config.TenantFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("tenant_id", tc.TenantID),
+		attribute.String("license_tier", tc.LicenseTier.String()),
+	}
+	if includeCampaign && tc.CampaignID != "" {
+		attrs = append(attrs, attribute.String("campaign_id", tc.CampaignID))
+	}
+	return attrs
+}
+
 // RecordProviderRequest is a convenience method that records a provider
-// request counter increment with the standard attribute set.
+// request counter increment with the standard attribute set, enriched with
+// tenant context from ctx.
 func (m *Metrics) RecordProviderRequest(ctx context.Context, provider, kind, status string) {
-	m.ProviderRequests.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("provider", provider),
-			attribute.String("kind", kind),
-			attribute.String("status", status),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String("provider", provider),
+		attribute.String("kind", kind),
+		attribute.String("status", status),
+	}
+	attrs = append(attrs, tenantAttrs(ctx, true)...)
+	m.ProviderRequests.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordToolCall is a convenience method that records a tool call counter
-// increment with the standard attribute set.
+// increment with the standard attribute set, enriched with tenant context
+// from ctx.
 func (m *Metrics) RecordToolCall(ctx context.Context, tool, status string) {
-	m.ToolCalls.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("tool", tool),
-			attribute.String("status", status),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String("tool", tool),
+		attribute.String("status", status),
+	}
+	attrs = append(attrs, tenantAttrs(ctx, true)...)
+	m.ToolCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordNPCUtterance is a convenience method that records an NPC utterance
-// counter increment.
+// counter increment, enriched with tenant context from ctx.
 func (m *Metrics) RecordNPCUtterance(ctx context.Context, npcID string) {
-	m.NPCUtterances.Add(ctx, 1,
-		metric.WithAttributes(attribute.String("npc_id", npcID)),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String("npc_id", npcID),
+	}
+	attrs = append(attrs, tenantAttrs(ctx, true)...)
+	m.NPCUtterances.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordProviderError is a convenience method that records a provider error
-// counter increment.
+// counter increment, enriched with tenant context from ctx.
 func (m *Metrics) RecordProviderError(ctx context.Context, provider, kind string) {
-	m.ProviderErrors.Add(ctx, 1,
-		metric.WithAttributes(
-			attribute.String("provider", provider),
-			attribute.String("kind", kind),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String("provider", provider),
+		attribute.String("kind", kind),
+	}
+	attrs = append(attrs, tenantAttrs(ctx, true)...)
+	m.ProviderErrors.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
