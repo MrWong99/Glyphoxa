@@ -781,6 +781,8 @@ zhi apply                  # App resources only (infra already running)
 - [ ] Plugin builds with `CGO_ENABLED=0` (no system dependencies)
 - [ ] Plugin binary size < 20MB
 - [ ] Template export completes in < 2s
+- [ ] A GitHub workflow builds the plugin 
+- [ ] a separate GitHub workflow releases both the plugin and the workspace to ghcr.io/mrwong99/glyphoxa/...
 
 ### Quality Gates
 
