@@ -1,0 +1,148 @@
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+{{- $repo := .GetOr "core/image-repository" "ghcr.io/mrwong99/glyphoxa" -}}
+{{- $tag := .GetOr "core/image-tag" "latest" -}}
+{{- $pullPolicy := .GetOr "core/image-pull-policy" "IfNotPresent" -}}
+{{- $pullSecrets := .Get "core/image-pull-secrets" -}}
+{{- $profile := .GetOr "worker/resource-profile" "cloud" -}}
+{{- $nodeSelector := .Get "worker/node-selector" -}}
+{{- $tolerations := .Get "worker/tolerations" -}}
+{{- $gpuEnabled := .GetOr "worker/gpu-enabled" "true" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $release }}-worker-job-template
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+data:
+  job-template.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: {{ $release }}-worker-SESSION_ID
+      namespace: {{ $ns }}
+      labels:
+        app.kubernetes.io/name: glyphoxa
+        app.kubernetes.io/instance: {{ $release }}
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: glyphoxa
+        app.kubernetes.io/managed-by: zhi
+    spec:
+      parallelism: 1
+      completions: 1
+      activeDeadlineSeconds: 14400
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: glyphoxa
+            app.kubernetes.io/instance: {{ $release }}
+            app.kubernetes.io/component: worker
+            app.kubernetes.io/part-of: glyphoxa
+            app.kubernetes.io/managed-by: zhi
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+{{- if $pullSecrets }}
+          imagePullSecrets:
+{{- range (split $pullSecrets ",") }}
+            - name: {{ . | trim }}
+{{- end }}
+{{- end }}
+{{- if or $nodeSelector (and (eq $profile "local-llm") (eq $gpuEnabled "true")) }}
+          nodeSelector:
+{{- if $nodeSelector }}
+            {{ $nodeSelector | nindent 12 | trim }}
+{{- end }}
+{{- if and (eq $profile "local-llm") (eq $gpuEnabled "true") }}
+            nvidia.com/gpu: "true"
+{{- end }}
+{{- end }}
+{{- if or $tolerations (and (eq $profile "local-llm") (eq $gpuEnabled "true")) }}
+          tolerations:
+{{- if $tolerations }}
+            {{ $tolerations | nindent 12 | trim }}
+{{- end }}
+{{- if and (eq $profile "local-llm") (eq $gpuEnabled "true") }}
+            - key: nvidia.com/gpu
+              effect: NoSchedule
+{{- end }}
+{{- end }}
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: worker
+              image: {{ $repo }}:{{ $tag }}
+              imagePullPolicy: {{ $pullPolicy }}
+              args: ["--mode=worker"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              ports:
+                - name: grpc
+                  containerPort: 50051
+                  protocol: TCP
+                - name: observe
+                  containerPort: 9090
+                  protocol: TCP
+              env:
+                - name: GLYPHOXA_GATEWAY_ADDR
+                  value: "{{ $release }}-gateway.{{ $ns }}.svc:50051"
+                - name: GLYPHOXA_GRPC_ADDR
+                  value: ":50051"
+{{- if .ComponentEnabled "mcp-gateway" }}
+                - name: GLYPHOXA_MCP_GATEWAY_URL
+                  value: "http://{{ $release }}-mcp-gateway.{{ $ns }}.svc:8080/mcp"
+{{- end }}
+{{- if .ComponentEnabled "postgresql" }}
+                - name: GLYPHOXA_DATABASE_DSN
+                  value: "postgres://postgres:{{ .Get "postgresql/postgres-password" }}@{{ $release }}-postgresql.{{ $ns }}.svc:5432/{{ .GetOr "postgresql/database" "glyphoxa" }}?sslmode=disable"
+{{- else if .Get "database/dsn" }}
+                - name: GLYPHOXA_DATABASE_DSN
+                  value: {{ .Get "database/dsn" | quote }}
+{{- end }}
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/glyphoxa
+                  readOnly: true
+              startupProbe:
+                httpGet:
+                  path: /healthz
+                  port: observe
+                failureThreshold: 30
+                periodSeconds: 2
+{{- if eq $profile "cloud" }}
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "384Mi"
+                limits:
+                  cpu: "2"
+                  memory: "768Mi"
+{{- else if eq $profile "whisper-native" }}
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "1Gi"
+                limits:
+                  cpu: "4"
+                  memory: "2Gi"
+{{- else if eq $profile "local-llm" }}
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "4Gi"
+                limits:
+                  cpu: "8"
+                  memory: "8Gi"
+{{- end }}
+          volumes:
+            - name: config
+              configMap:
+                name: {{ $release }}-config

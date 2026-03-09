@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Clean generated/ to prevent stale files from disabled components.
+rm -rf ./generated/*
+
+NAMESPACE="{{ .Get "core/namespace" }}"
+RELEASE="{{ .Get "core/release-name" }}"
+
+# Delete script files containing secrets on exit.
+trap 'rm -rf ./scripts/' EXIT
+
+# Persist namespace for non-export targets (stop, restart, status).
+mkdir -p .zhi
+echo "$NAMESPACE" > .zhi/namespace
+
+# Create namespace if it doesn't exist.
+kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || \
+  kubectl create namespace "$NAMESPACE"
+
+{{ if .ComponentEnabled "postgresql" -}}
+# Pre-flight: verify PostgreSQL is running (prevents confusing crash-loop).
+if ! kubectl get statefulset "${RELEASE}-postgresql" -n "$NAMESPACE" >/dev/null 2>&1; then
+  echo "ERROR: PostgreSQL not found. Run 'zhi apply infrastructure' first."
+  exit 1
+fi
+{{ end -}}
+
+# Create secret (avoids plaintext in generated/ directory).
+{{ if .Get "gateway/admin-key" -}}
+kubectl create secret generic "${RELEASE}-admin-key" \
+  --from-literal=admin-key="{{ .Get "gateway/admin-key" }}" \
+  --namespace "$NAMESPACE" \
+  --dry-run=client -o yaml | kubectl apply --server-side --field-manager=zhi-glyphoxa -f -
+{{ end -}}
+
+# Apply all generated manifests.
+kubectl apply --server-side --field-manager=zhi-glyphoxa -f ./generated/ -n "$NAMESPACE"
+
+# Wait for rollout.
+kubectl rollout status deployment "${RELEASE}-gateway" -n "$NAMESPACE" --timeout=120s
+{{ if .ComponentEnabled "mcp-gateway" -}}
+kubectl rollout status deployment "${RELEASE}-mcp-gateway" -n "$NAMESPACE" --timeout=120s
+{{ end -}}
+
+echo "Glyphoxa deployed to namespace ${NAMESPACE}"

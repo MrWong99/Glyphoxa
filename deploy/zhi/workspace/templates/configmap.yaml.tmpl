@@ -1,0 +1,167 @@
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+{{- $logLevel := .Get "config/server/log-level" -}}
+{{- $embDim := .Get "config/memory/embedding-dimensions" -}}
+{{- $campaignName := .Get "config/campaign/name" -}}
+{{- $campaignSystem := .Get "config/campaign/system" -}}
+{{- $transcriptCorr := .Get "config/transcript/llm-correction" -}}
+{{- $mcpServers := .Get "config/mcp-servers" -}}
+{{- $llmName := .Get "config/providers/llm/name" -}}
+{{- $sttName := .Get "config/providers/stt/name" -}}
+{{- $ttsName := .Get "config/providers/tts/name" -}}
+{{- $s2sName := .Get "config/providers/s2s/name" -}}
+{{- $embName := .Get "config/providers/embeddings/name" -}}
+{{- $vadName := .Get "config/providers/vad/name" -}}
+{{- $audioName := .Get "config/providers/audio/name" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $release }}-config
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+data:
+  config.yaml: |
+    server:
+      log_level: {{ $logLevel | default "info" }}
+    memory:
+      embedding_dimensions: {{ $embDim | default "1536" }}
+{{- if or $campaignName $campaignSystem }}
+    campaign:
+{{- if $campaignName }}
+      name: {{ $campaignName | quote }}
+{{- end }}
+{{- if $campaignSystem }}
+      system: {{ $campaignSystem | quote }}
+{{- end }}
+{{- end }}
+{{- if eq $transcriptCorr "true" }}
+    transcript:
+      llm_correction: true
+{{- end }}
+    providers:
+{{- if $llmName }}
+      llm:
+        name: {{ $llmName | quote }}
+{{- with .Get "config/providers/llm/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/llm/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/llm/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/llm/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $sttName }}
+      stt:
+        name: {{ $sttName | quote }}
+{{- with .Get "config/providers/stt/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/stt/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/stt/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/stt/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $ttsName }}
+      tts:
+        name: {{ $ttsName | quote }}
+{{- with .Get "config/providers/tts/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/tts/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/tts/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/tts/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $s2sName }}
+      s2s:
+        name: {{ $s2sName | quote }}
+{{- with .Get "config/providers/s2s/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/s2s/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/s2s/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/s2s/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $embName }}
+      embeddings:
+        name: {{ $embName | quote }}
+{{- with .Get "config/providers/embeddings/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/embeddings/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/embeddings/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/embeddings/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $vadName }}
+      vad:
+        name: {{ $vadName | quote }}
+{{- with .Get "config/providers/vad/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/vad/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/vad/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/vad/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $audioName }}
+      audio:
+        name: {{ $audioName | quote }}
+{{- with .Get "config/providers/audio/api-key" }}
+        api_key: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/audio/base-url" }}
+        base_url: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/audio/model" }}
+        model: {{ . | quote }}
+{{- end }}
+{{- with .Get "config/providers/audio/options" }}
+        options:
+          {{ . | nindent 10 | trim }}
+{{- end }}
+{{- end }}
+{{- if $mcpServers }}
+    mcp:
+      servers:
+        {{ $mcpServers | nindent 8 | trim }}
+{{- end }}

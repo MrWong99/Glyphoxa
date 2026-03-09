@@ -1,0 +1,112 @@
+{{- if .ComponentEnabled "mcp-gateway" -}}
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+{{- $repo := .GetOr "core/image-repository" "ghcr.io/mrwong99/glyphoxa" -}}
+{{- $tag := .GetOr "core/image-tag" "latest" -}}
+{{- $pullPolicy := .GetOr "core/image-pull-policy" "IfNotPresent" -}}
+{{- $pullSecrets := .Get "core/image-pull-secrets" -}}
+{{- $nodeSelector := .Get "mcp-gateway/node-selector" -}}
+{{- $tolerations := .Get "mcp-gateway/tolerations" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $release }}-mcp-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: glyphoxa
+    app.kubernetes.io/instance: {{ $release }}
+    app.kubernetes.io/component: mcp-gateway
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+    app.kubernetes.io/version: {{ $tag | quote }}
+spec:
+  replicas: {{ .GetOr "mcp-gateway/replica-count" "2" }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: glyphoxa
+      app.kubernetes.io/instance: {{ $release }}
+      app.kubernetes.io/component: mcp-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glyphoxa
+        app.kubernetes.io/instance: {{ $release }}
+        app.kubernetes.io/component: mcp-gateway
+        app.kubernetes.io/part-of: glyphoxa
+        app.kubernetes.io/managed-by: zhi
+      annotations:
+        checksum/config: {{ .ConfigChecksum | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+{{- if $pullSecrets }}
+      imagePullSecrets:
+{{- range (split $pullSecrets ",") }}
+        - name: {{ . | trim }}
+{{- end }}
+{{- end }}
+{{- if $nodeSelector }}
+      nodeSelector:
+        {{ $nodeSelector | nindent 8 | trim }}
+{{- end }}
+{{- if $tolerations }}
+      tolerations:
+        {{ $tolerations | nindent 8 | trim }}
+{{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp-gateway
+          image: {{ $repo }}:{{ $tag }}
+          imagePullPolicy: {{ $pullPolicy }}
+          args: ["--mode=mcp-gateway"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: mcp
+              containerPort: 8080
+              protocol: TCP
+            - name: observe
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: GLYPHOXA_MCP_ADDR
+              value: ":8080"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/glyphoxa
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            failureThreshold: 30
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: {{ .GetOr "mcp-gateway/requests/cpu" "250m" | quote }}
+              memory: {{ .GetOr "mcp-gateway/requests/memory" "256Mi" | quote }}
+            limits:
+              cpu: {{ .GetOr "mcp-gateway/limits/cpu" "1" | quote }}
+              memory: {{ .GetOr "mcp-gateway/limits/memory" "512Mi" | quote }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $release }}-config
+{{- end }}

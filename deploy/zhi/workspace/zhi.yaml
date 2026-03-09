@@ -1,0 +1,106 @@
+version: "1"
+
+config:
+  provider: glyphoxa
+
+store:
+  provider: json
+  options:
+    directory: ./.zhi/store
+
+components:
+  - name: core
+    description: "Core settings, gateway, worker, config, and database"
+    paths: ["core/", "gateway/", "worker/", "config/", "database/"]
+    mandatory: true
+
+  - name: mcp-gateway
+    description: "MCP tool server gateway"
+    paths: ["mcp-gateway/"]
+
+  - name: network-policy
+    description: "Kubernetes NetworkPolicies"
+    paths: ["network-policy/"]
+
+  - name: autoscaling
+    description: "Horizontal Pod Autoscaler for gateway"
+    paths: ["autoscaling/"]
+
+  - name: postgresql
+    description: "PostgreSQL via Helm (infrastructure target)"
+    paths: ["postgresql/"]
+
+export:
+  templates:
+    - name: namespace
+      template: ./templates/namespace.yaml.tmpl
+      output: ./generated/namespace.yaml
+    - name: serviceaccount
+      template: ./templates/serviceaccount.yaml.tmpl
+      output: ./generated/serviceaccount.yaml
+    - name: configmap
+      template: ./templates/configmap.yaml.tmpl
+      output: ./generated/configmap.yaml
+    - name: gateway-deployment
+      template: ./templates/gateway-deployment.yaml.tmpl
+      output: ./generated/gateway-deployment.yaml
+    - name: gateway-service
+      template: ./templates/gateway-service.yaml.tmpl
+      output: ./generated/gateway-service.yaml
+    - name: worker-job-template
+      template: ./templates/worker-job-template-configmap.yaml.tmpl
+      output: ./generated/worker-job-template.yaml
+    - name: mcp-gateway-deployment
+      template: ./templates/mcp-gateway-deployment.yaml.tmpl
+      output: ./generated/mcp-gateway-deployment.yaml
+    - name: mcp-gateway-service
+      template: ./templates/mcp-gateway-service.yaml.tmpl
+      output: ./generated/mcp-gateway-service.yaml
+    - name: networkpolicy
+      template: ./templates/networkpolicy.yaml.tmpl
+      output: ./generated/networkpolicy.yaml
+    - name: hpa
+      template: ./templates/hpa.yaml.tmpl
+      output: ./generated/hpa.yaml
+    - name: apply-script
+      template: ./templates/apply.sh.tmpl
+      output: ./scripts/apply.sh
+    - name: infra-script
+      template: ./templates/infra.sh.tmpl
+      output: ./scripts/infra.sh
+    - name: destroy-script
+      template: ./templates/destroy.sh.tmpl
+      output: ./scripts/destroy.sh
+
+apply:
+  targets:
+    default:
+      command: "bash ./scripts/apply.sh"
+      workdir: "."
+      pre-export: true
+      timeout: 300
+    infrastructure:
+      command: "bash ./scripts/infra.sh"
+      workdir: "."
+      pre-export: true
+      timeout: 300
+    stop:
+      command: "kubectl scale deployment -l app.kubernetes.io/part-of=glyphoxa --replicas=0 -n $(cat .zhi/namespace 2>/dev/null || echo glyphoxa)"
+      workdir: "."
+      pre-export: false
+      timeout: 120
+    destroy:
+      command: "bash ./scripts/destroy.sh"
+      workdir: "."
+      pre-export: true
+      timeout: 120
+    restart:
+      command: "kubectl rollout restart deployment -l app.kubernetes.io/part-of=glyphoxa -n $(cat .zhi/namespace 2>/dev/null || echo glyphoxa)"
+      workdir: "."
+      pre-export: false
+      timeout: 120
+    status:
+      command: "kubectl get all -l app.kubernetes.io/part-of=glyphoxa -n $(cat .zhi/namespace 2>/dev/null || echo glyphoxa)"
+      workdir: "."
+      pre-export: false
+      timeout: 30

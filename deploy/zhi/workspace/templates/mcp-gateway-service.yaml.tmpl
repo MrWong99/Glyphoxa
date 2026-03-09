@@ -1,0 +1,30 @@
+{{- if .ComponentEnabled "mcp-gateway" -}}
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $release }}-mcp-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: glyphoxa
+    app.kubernetes.io/instance: {{ $release }}
+    app.kubernetes.io/component: mcp-gateway
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+spec:
+  type: ClusterIP
+  ports:
+    - name: mcp
+      port: 8080
+      targetPort: mcp
+      protocol: TCP
+    - name: observe
+      port: 9090
+      targetPort: observe
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: glyphoxa
+    app.kubernetes.io/instance: {{ $release }}
+    app.kubernetes.io/component: mcp-gateway
+{{- end }}

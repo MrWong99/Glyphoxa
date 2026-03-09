@@ -1,0 +1,144 @@
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+{{- $repo := .GetOr "core/image-repository" "ghcr.io/mrwong99/glyphoxa" -}}
+{{- $tag := .GetOr "core/image-tag" "latest" -}}
+{{- $pullPolicy := .GetOr "core/image-pull-policy" "IfNotPresent" -}}
+{{- $pullSecrets := .Get "core/image-pull-secrets" -}}
+{{- $topology := .GetOr "core/topology" "shared" -}}
+{{- $saName := .GetOr "gateway/service-account-name" "glyphoxa-gateway" -}}
+{{- $antiAffinity := .GetOr "gateway/pod-anti-affinity" "true" -}}
+{{- $nodeSelector := .Get "gateway/node-selector" -}}
+{{- $tolerations := .Get "gateway/tolerations" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $release }}-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: glyphoxa
+    app.kubernetes.io/instance: {{ $release }}
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+    app.kubernetes.io/version: {{ $tag | quote }}
+spec:
+{{- if not (.ComponentEnabled "autoscaling") }}
+  replicas: {{ .GetOr "gateway/replica-count" "3" }}
+{{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: glyphoxa
+      app.kubernetes.io/instance: {{ $release }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glyphoxa
+        app.kubernetes.io/instance: {{ $release }}
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: glyphoxa
+        app.kubernetes.io/managed-by: zhi
+      annotations:
+        checksum/config: {{ .ConfigChecksum | sha256sum }}
+    spec:
+      serviceAccountName: {{ $saName }}
+{{- if $pullSecrets }}
+      imagePullSecrets:
+{{- range (split $pullSecrets ",") }}
+        - name: {{ . | trim }}
+{{- end }}
+{{- end }}
+{{- if eq $antiAffinity "true" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: glyphoxa
+                    app.kubernetes.io/instance: {{ $release }}
+                    app.kubernetes.io/component: gateway
+                topologyKey: kubernetes.io/hostname
+{{- end }}
+{{- if $nodeSelector }}
+      nodeSelector:
+        {{ $nodeSelector | nindent 8 | trim }}
+{{- end }}
+{{- if $tolerations }}
+      tolerations:
+        {{ $tolerations | nindent 8 | trim }}
+{{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ $repo }}:{{ $tag }}
+          imagePullPolicy: {{ $pullPolicy }}
+          args: ["--mode=gateway"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: admin
+              containerPort: 8081
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: observe
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: GLYPHOXA_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $release }}-admin-key
+                  key: admin-key
+                  optional: true
+            - name: GLYPHOXA_GRPC_ADDR
+              value: ":50051"
+{{- if .ComponentEnabled "postgresql" }}
+            - name: GLYPHOXA_DATABASE_DSN
+              value: "postgres://postgres:{{ .Get "postgresql/postgres-password" }}@{{ $release }}-postgresql.{{ $ns }}.svc:5432/{{ .GetOr "postgresql/database" "glyphoxa" }}?sslmode=disable"
+{{- else if .Get "database/dsn" }}
+            - name: GLYPHOXA_DATABASE_DSN
+              value: {{ .Get "database/dsn" | quote }}
+{{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/glyphoxa
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: observe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: observe
+            failureThreshold: 30
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: {{ .GetOr "gateway/requests/cpu" "250m" | quote }}
+              memory: {{ .GetOr "gateway/requests/memory" "256Mi" | quote }}
+            limits:
+              cpu: {{ .GetOr "gateway/limits/cpu" "1" | quote }}
+              memory: {{ .GetOr "gateway/limits/memory" "512Mi" | quote }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $release }}-config
