@@ -1,0 +1,18 @@
+schemaVersion: "1"
+name: glyphoxa
+type: config
+version: 0.1.0
+zhiProtocolVersion: "1"
+description: Configuration plugin for Glyphoxa Kubernetes deployment.
+author: MrWong99
+license: MIT
+homepage: https://github.com/MrWong99/glyphoxa
+keywords:
+  - config
+  - kubernetes
+  - glyphoxa
+binaries:
+  linux/amd64: dist/zhi-config-glyphoxa_linux_amd64
+  linux/arm64: dist/zhi-config-glyphoxa_linux_arm64
+  darwin/amd64: dist/zhi-config-glyphoxa_darwin_amd64
+  darwin/arm64: dist/zhi-config-glyphoxa_darwin_arm64

@@ -1,0 +1,21 @@
+name: glyphoxa-k8s
+version: 0.1.0
+description: Kubernetes deployment workspace for Glyphoxa voice NPC framework.
+author: MrWong99
+license: MIT
+dependencies:
+  - ref: oci://ghcr.io/mrwong99/glyphoxa/zhi-config-glyphoxa:latest
+    type: config
+    optional: false
+  - ref: oci://ghcr.io/mrwong99/zhi/zhi-store-vault:latest
+    type: store
+    optional: true
+tools:
+  - name: kubectl
+    version: "1.28"
+  - name: helm
+    version: "3.12"
+keywords:
+  - kubernetes
+  - glyphoxa
+  - voice-npc

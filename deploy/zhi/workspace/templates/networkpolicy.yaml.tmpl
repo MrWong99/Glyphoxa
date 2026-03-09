@@ -1,0 +1,193 @@
+{{- if .ComponentEnabled "network-policy" -}}
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+# Gateway: can receive admin + gRPC traffic; can reach PostgreSQL, K8s API,
+# and external APIs (Discord).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $release }}-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glyphoxa
+      app.kubernetes.io/instance: {{ $release }}
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow admin API from within the namespace only.
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 8081
+          protocol: TCP
+    # Allow gRPC from workers.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - port: 50051
+          protocol: TCP
+    # Allow observe (metrics scraping) from any namespace (Prometheus).
+    - ports:
+        - port: 9090
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL.
+{{- if .ComponentEnabled "postgresql" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+{{- else }}
+    - ports:
+        - port: 5432
+          protocol: TCP
+{{- end }}
+    # K8s API.
+    - ports:
+        - port: 6443
+          protocol: TCP
+    # HTTPS (external APIs, Discord).
+    - ports:
+        - port: 443
+          protocol: TCP
+---
+# Workers: can reach gateway gRPC, PostgreSQL, and external APIs.
+# Cannot reach other workers or gateway admin port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $release }}-worker
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glyphoxa
+      app.kubernetes.io/instance: {{ $release }}
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow gRPC from gateway.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: 50051
+          protocol: TCP
+    # Allow observe (metrics scraping) from any namespace (Prometheus).
+    - ports:
+        - port: 9090
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Gateway gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+      ports:
+        - port: 50051
+          protocol: TCP
+    # PostgreSQL.
+{{- if .ComponentEnabled "postgresql" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+{{- else }}
+    - ports:
+        - port: 5432
+          protocol: TCP
+{{- end }}
+    # MCP Gateway.
+{{- if .ComponentEnabled "mcp-gateway" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: mcp-gateway
+      ports:
+        - port: 8080
+          protocol: TCP
+{{- end }}
+    # External APIs (LLM, STT, TTS providers over HTTPS).
+    - ports:
+        - port: 443
+          protocol: TCP
+{{- if .ComponentEnabled "mcp-gateway" }}
+---
+# MCP Gateway: can receive MCP HTTP from workers; can reach external APIs and DNS.
+# Cannot reach PostgreSQL (no tenant data).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $release }}-mcp-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: glyphoxa
+      app.kubernetes.io/instance: {{ $release }}
+      app.kubernetes.io/component: mcp-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow MCP HTTP from workers.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: worker
+      ports:
+        - port: 8080
+          protocol: TCP
+    # Allow observe (metrics scraping) from any namespace (Prometheus).
+    - ports:
+        - port: 9090
+          protocol: TCP
+  egress:
+    # DNS.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # External APIs (MCP servers over HTTPS).
+    - ports:
+        - port: 443
+          protocol: TCP
+{{- end }}
+{{- end }}

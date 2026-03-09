@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAMESPACE="{{ .Get "core/namespace" }}"
+RELEASE="{{ .Get "core/release-name" }}"
+
+# Delete script files containing secrets on exit.
+trap 'rm -rf ./scripts/' EXIT
+
+echo "Destroying Glyphoxa resources in namespace ${NAMESPACE}..."
+
+# Delete zhi-managed resources.
+kubectl delete -f ./generated/ -n "$NAMESPACE" --ignore-not-found
+
+# Delete secret.
+kubectl delete secret "${RELEASE}-admin-key" -n "$NAMESPACE" --ignore-not-found
+
+{{ if .ComponentEnabled "postgresql" -}}
+echo "Uninstalling PostgreSQL Helm release..."
+helm uninstall "${RELEASE}-postgresql" -n "$NAMESPACE" 2>/dev/null || true
+# Note: PVCs are intentionally preserved. Delete manually if desired:
+# kubectl delete pvc -n "$NAMESPACE" -l app.kubernetes.io/instance=${RELEASE}-postgresql
+{{ end -}}
+
+# Clean local state.
+rm -f .zhi/namespace
+
+echo "Destruction complete. Namespace ${NAMESPACE} preserved (delete manually if desired)."

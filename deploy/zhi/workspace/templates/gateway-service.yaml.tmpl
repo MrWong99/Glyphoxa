@@ -1,0 +1,32 @@
+{{- $ns := .Get "core/namespace" -}}
+{{- $release := .Get "core/release-name" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $release }}-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: glyphoxa
+    app.kubernetes.io/instance: {{ $release }}
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: glyphoxa
+    app.kubernetes.io/managed-by: zhi
+spec:
+  type: ClusterIP
+  ports:
+    - name: admin
+      port: 8081
+      targetPort: admin
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    - name: observe
+      port: 9090
+      targetPort: observe
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: glyphoxa
+    app.kubernetes.io/instance: {{ $release }}
+    app.kubernetes.io/component: gateway

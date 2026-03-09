@@ -1,0 +1,158 @@
+name: Zhi Release
+
+on:
+  push:
+    tags:
+      - "zhi-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to use (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write # keyless cosign signing via Sigstore Fulcio/OIDC
+
+jobs:
+  release-plugin:
+    name: Publish zhi-config-glyphoxa
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/zhi/plugin
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "deploy/zhi/plugin/go.mod"
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            tag="${GITHUB_REF#refs/tags/zhi-}"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set plugin version in manifest
+        run: |
+          version="${{ steps.version.outputs.tag }}"
+          version="${version#v}"
+          sed -i "s/^version: .*/version: ${version}/" zhi-plugin.yaml
+
+      - name: Install zhi CLI
+        env:
+          CGO_ENABLED: "0"
+        run: go install github.com/MrWong99/zhi/cmd/zhi@latest
+
+      - name: Cross-compile plugin
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${pair%/*}"
+            arch="${pair#*/}"
+            echo "Building zhi-config-glyphoxa for ${os}/${arch}..."
+            GOOS="$os" GOARCH="$arch" go build -ldflags="-s -w" \
+              -o "dist/zhi-config-glyphoxa_${os}_${arch}" .
+          done
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            zhi registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Fetch OIDC token for Sigstore keyless signing
+        id: oidc
+        run: |
+          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" | jq -r '.value')
+          echo "::add-mask::$OIDC_TOKEN"
+          echo "token=$OIDC_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Publish plugin
+        env:
+          SIGSTORE_ID_TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          zhi plugin publish \
+            --registry ghcr.io/mrwong99/glyphoxa \
+            --tag "${{ steps.version.outputs.tag }}" \
+            --sign \
+            --verbose
+
+  release-workspace:
+    name: Publish glyphoxa-k8s workspace
+    runs-on: ubuntu-latest
+    needs: release-plugin
+    defaults:
+      run:
+        working-directory: deploy/zhi/workspace
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "deploy/zhi/plugin/go.mod"
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            tag="${GITHUB_REF#refs/tags/zhi-}"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set workspace version in manifest
+        run: |
+          version="${{ steps.version.outputs.tag }}"
+          version="${version#v}"
+          sed -i "s/^version: .*/version: ${version}/" zhi-workspace.yaml
+
+      - name: Update dependency refs to current tag
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          sed -i "s|\(ref: oci://ghcr.io/mrwong99/glyphoxa[^:]*\):[^ ]*|\1:${tag}|g" zhi-workspace.yaml
+
+      - name: Install zhi CLI
+        env:
+          CGO_ENABLED: "0"
+        working-directory: deploy/zhi/plugin
+        run: go install github.com/MrWong99/zhi/cmd/zhi@latest
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            zhi registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Fetch OIDC token for Sigstore keyless signing
+        id: oidc
+        run: |
+          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" | jq -r '.value')
+          echo "::add-mask::$OIDC_TOKEN"
+          echo "token=$OIDC_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Publish workspace
+        env:
+          SIGSTORE_ID_TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          zhi workspace publish \
+            --registry ghcr.io/mrwong99/glyphoxa \
+            --tag "${{ steps.version.outputs.tag }}" \
+            --sign \
+            --verbose

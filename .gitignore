@@ -39,3 +39,7 @@ deployments/compose/config.yaml
 # Helm dependency artifacts
 deploy/helm/*/charts/
 deploy/helm/*/Chart.lock
+
+# Zhi plugin build artifacts
+deploy/zhi/plugin/zhi-config-glyphoxa
+deploy/zhi/plugin/dist/

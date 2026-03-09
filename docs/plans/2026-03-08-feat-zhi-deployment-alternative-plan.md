@@ -38,6 +38,13 @@ date: 2026-03-08
 - P3: Drop sealed-secrets component (cluster-wide singleton, install independently)
 - P3: Scope NetworkPolicy egress rules (gateway and worker PostgreSQL)
 
+### Design Review Changes (post-deepening)
+
+- **Eliminated JSON string values**: Resources split into nested paths (`gateway/requests/cpu`, etc.). Node selectors, tolerations, and annotations use `core.type: map` / `core.type: yaml` (depends on zhi feature plans). Image pull secrets use `core.type: list`.
+- **Split `config/data` into individual paths**: Provider configs generated via `providerDefs()` helper (7 providers x 5 paths = 35 paths). Server, memory, campaign, and transcript fields are individual paths. MCP servers remain as a single YAML blob path. NPCs and campaign entities are omitted (managed via admin API / Discord in production).
+- **`image-tag` defaults to `latest`**: Matches the release workflow's `latest` tag on ghcr.io.
+- **No Helm migration path**: Users either deploy with Helm or with zhi. No migration tooling needed.
+
 ---
 
 # Add zhi-based Deployment Alternative
@@ -66,7 +73,7 @@ A config plugin + workspace following the established `zhi-home-server` pattern:
 deploy/zhi/
 ├── plugin/                              # Go config plugin (separate go.mod)
 │   ├── main.go                          # hashicorp/go-plugin entry point
-│   ├── metadata.go                      # ValueDef helper struct
+│   ├── metadata.go                      # ValueDef helper struct + providerDefs() helper
 │   ├── values.go                        # All config paths, defaults, metadata
 │   ├── validate.go                      # Validation rules
 │   ├── validate_test.go
@@ -98,17 +105,34 @@ deploy/zhi/
 
 ### Design Decisions
 
-**1. Complex structured values (tolerations, nodeSelector, resources) as JSON strings**
+**1. Nested paths instead of JSON strings for structured values**
 
-Zhi's config tree is flat scalar key-value. Structured values like tolerations and nodeSelector are stored as JSON strings in a single config path. Templates use Sprig's `fromJson` to reconstruct:
+Resources are split into individual nested paths instead of JSON blobs:
 
 ```
-Config path: gateway/node-selector
-Default: {}
-Template: {{ .GetOr "gateway/node-selector" "{}" | fromJson | toYaml | nindent 8 }}
+gateway/requests/cpu    = "250m"
+gateway/requests/memory = "256Mi"
+gateway/limits/cpu      = "1"
+gateway/limits/memory   = "512Mi"
 ```
 
-All JSON-typed config values must use `GetOr` with an explicit empty-object/array default to avoid `fromJson` panics on empty strings.
+Templates access them directly:
+```
+resources:
+  requests:
+    cpu: {{ .Get "gateway/requests/cpu" | quote }}
+    memory: {{ .Get "gateway/requests/memory" | quote }}
+  limits:
+    cpu: {{ .Get "gateway/limits/cpu" | quote }}
+    memory: {{ .Get "gateway/limits/memory" | quote }}
+```
+
+For dynamic key-value maps (nodeSelector, annotations) and complex structures (tolerations), this plan depends on two zhi feature additions:
+- **`core.type: map`** — interactive key-value editor for `map[string]string` values (nodeSelector, annotations). See `zhi/docs/plans/2026-03-08-feat-map-list-value-editors-plan.md`.
+- **`core.type: yaml`** — multiline YAML editor for complex structures (tolerations). See `zhi/docs/plans/2026-03-08-feat-yaml-multiline-type-plan.md`.
+- **`core.type: list`** — interactive list editor for `[]string` values (imagePullSecrets).
+
+Until these zhi features land, the config plugin can still define these paths with `core.type: string` and `ui.multiline: true` as a fallback — operators edit them as text. The zhi feature plans are companions to this work, not blockers.
 
 **2. Fixed resource naming prefix with configurable release name**
 
@@ -116,15 +140,15 @@ Config value `core/release-name` (default: `glyphoxa`) controls all resource nam
 - `{{ .Get "core/release-name" }}-gateway` (Deployment, Service)
 - `{{ .Get "core/release-name" }}-worker-SESSION_ID` (Job template)
 - `{{ .Get "core/release-name" }}-config` (ConfigMap)
-- `{{ .Get "core/release-name" }}-admin-key` (Secret — note: differs from Helm's `${RELEASE}-secrets`; migration guide documents rename)
+- `{{ .Get "core/release-name" }}-admin-key` (Secret)
 
 **3. Namespace as explicit config value**
 
 `core/namespace` (default: `glyphoxa`) is embedded in every resource's `metadata.namespace`. The apply script creates the namespace if it doesn't exist and persists it to `.zhi/namespace` for non-export targets.
 
-**4. Image tag is required (blocking validation)**
+**4. Image tag defaults to `latest`**
 
-No equivalent to Helm's `Chart.AppVersion` fallback. The config plugin requires `core/image-tag` to be set, with a blocking validation. This prevents generating manifests with empty image references.
+`core/image-tag` defaults to `"latest"`, matching the Glyphoxa release workflow's `latest` tag on ghcr.io. Operators deploying a specific version override this value. Unlike Helm's `Chart.AppVersion` fallback, this is a regular config value visible in `zhi edit`.
 
 **5. DSN auto-construction in template logic**
 
@@ -134,18 +158,42 @@ postgres://postgres:{{ .Get "postgresql/postgres-password" }}@{{ .Get "core/rele
 ```
 When disabled, uses `database/dsn` directly. Validation blocks if both the component is disabled AND `database/dsn` is empty.
 
-**6. Config data as a YAML string value**
+**6. Glyphoxa application config as individual paths with provider helper**
 
-`config/data` holds the Glyphoxa application YAML config as a string. Templates embed it in the ConfigMap. Validation warns if empty (Glyphoxa can run with defaults but likely needs provider config).
+Instead of a single `config/data` YAML blob, the Glyphoxa application config is decomposed into individual zhi paths. Provider configs (LLM, STT, TTS, S2S, Embeddings, VAD, Audio) share the same structure (`ProviderEntry`: name, api_key, base_url, model, options), so a `providerDefs()` helper generates the 5 paths per provider:
+
+```go
+func providerDefs(prefix, section, displayPrefix string) []ValueDef {
+    return []ValueDef{
+        {Path: prefix + "/name", Section: section, DisplayName: displayPrefix + " Provider",
+         Description: "Registered provider name (e.g., openai, deepgram)", Type: "string"},
+        {Path: prefix + "/api-key", Section: section, DisplayName: displayPrefix + " API Key",
+         Description: "Authentication key for the provider API", Type: "string", Password: true},
+        {Path: prefix + "/base-url", Section: section, DisplayName: displayPrefix + " Base URL",
+         Description: "Override the provider's default API endpoint", Type: "string"},
+        {Path: prefix + "/model", Section: section, DisplayName: displayPrefix + " Model",
+         Description: "Model selection (e.g., gpt-4o, nova-2)", Type: "string"},
+        {Path: prefix + "/options", Section: section, DisplayName: displayPrefix + " Options",
+         Description: "Provider-specific options as YAML", Type: "yaml",
+         Placeholder: "temperature: 0.7\ntop_p: 0.9"},
+    }
+}
+```
+
+The `options` field uses `core.type: yaml` (see zhi feature plan) for structured editing. Until that feature lands, it falls back to a multiline text input (`ui.multiline: true`).
+
+The template reconstructs a full `config.yaml` from all individual values, embedding them into the ConfigMap.
+
+**NPCs and campaign entities** are omitted from the zhi config — in production deployments these are managed via the admin API (PostgreSQL-backed npcstore) and end-user interfaces (web UI, Discord slash commands), not through deployment configuration.
 
 **7. ConfigMap-triggered restarts via checksum annotation**
 
-Pod templates include a `checksum/config` annotation computed from `config/data`:
+Pod templates include a `checksum/config` annotation computed from all config values that contribute to the ConfigMap:
 ```yaml
 annotations:
-  checksum/config: {{ .Get "config/data" | sha256sum }}
+  checksum/config: {{ .ConfigChecksum | sha256sum }}
 ```
-When the ConfigMap content changes, the annotation changes, which causes Kubernetes to see a new pod spec and trigger a rolling update. This is the same pattern used by the Helm chart and works with or without the apply script.
+The template constructs a deterministic string from all `config/*` paths for the checksum. When the ConfigMap content changes, the annotation changes, triggering a rolling update.
 
 **8. Stop scales to zero; destroy deletes resources**
 
@@ -156,7 +204,6 @@ When the ConfigMap content changes, the annotation changes, which causes Kuberne
 `core/topology` (`shared`|`dedicated`) is a config value. Validation enforces:
 - `dedicated` + `gateway/replica-count` > 2 → warning
 - `dedicated` + `gateway/pod-anti-affinity` enabled → warning
-- Topology sets sensible defaults for node-selector/tolerations labels via validation hints
 
 **10. Store provider: JSON file default, Vault recommended**
 
@@ -213,7 +260,7 @@ Start each template with a variable block to avoid repeated `.Get` calls:
 
 #### Phase 1: Config Plugin
 
-Create the Go plugin with all config paths matching the Helm chart's values surface.
+Create the Go plugin with all config paths.
 
 **Files to create:**
 
@@ -230,11 +277,13 @@ require (
 )
 ```
 
-`deploy/zhi/plugin/metadata.go`: Copy `ValueDef` pattern from `zhi-home-server/plugin/metadata.go` — same struct with `Path`, `Default`, `Section`, `DisplayName`, `Description`, `Type`, `Placeholder`, `Password`, `Required`, `SelectFrom` fields and `ToValue()` method.
+`deploy/zhi/plugin/metadata.go`: Copy `ValueDef` pattern from `zhi-home-server/plugin/metadata.go` — same struct with `Path`, `Default`, `Section`, `DisplayName`, `Description`, `Type`, `Placeholder`, `Password`, `Required`, `SelectFrom` fields and `ToValue()` method. Additionally, add the `providerDefs()` helper function that generates 5 `ValueDef` entries per provider (name, api-key, base-url, model, options).
 
 `deploy/zhi/plugin/main.go`: Standard zhi config plugin entry point (same boilerplate as `zhi-home-server/plugin/main.go`, name `zhi-config-glyphoxa`).
 
 `deploy/zhi/plugin/values.go`: Define all config paths organized by section. Full path list:
+
+**Deployment Config Paths:**
 
 | Section | Path | Default | Type | Notes |
 |---|---|---|---|---|
@@ -242,29 +291,33 @@ require (
 | Core | `core/namespace` | `glyphoxa` | string | K8s namespace; RFC 1123 validated |
 | Core | `core/topology` | `shared` | string | SelectFrom: shared, dedicated |
 | Core | `core/image-repository` | `ghcr.io/mrwong99/glyphoxa` | string | |
-| Core | `core/image-tag` | `` | string | Required, blocking |
+| Core | `core/image-tag` | `latest` | string | Defaults to release workflow's latest tag |
 | Core | `core/image-pull-policy` | `IfNotPresent` | string | SelectFrom: Always, IfNotPresent, Never |
-| Core | `core/image-pull-secrets` | `[]` | json | JSON array of secret names |
+| Core | `core/image-pull-secrets` | `[]string{}` | list | List of K8s secret names |
 | Gateway | `gateway/replica-count` | `3` | int | |
 | Gateway | `gateway/admin-key` | `` | string | Password field; shell metacharacters rejected |
-| Gateway | `gateway/resources` | `{"requests":{"cpu":"250m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}` | json | |
-| Gateway | `gateway/node-selector` | `{}` | json | |
-| Gateway | `gateway/tolerations` | `[]` | json | |
+| Gateway | `gateway/requests/cpu` | `250m` | string | |
+| Gateway | `gateway/requests/memory` | `256Mi` | string | |
+| Gateway | `gateway/limits/cpu` | `1` | string | |
+| Gateway | `gateway/limits/memory` | `512Mi` | string | |
+| Gateway | `gateway/node-selector` | `map[string]string{}` | map | Dynamic key-value pairs for pod scheduling |
+| Gateway | `gateway/tolerations` | `` | yaml | Kubernetes tolerations as YAML |
 | Gateway | `gateway/pod-anti-affinity` | `true` | bool | |
 | Gateway | `gateway/service-account-create` | `true` | bool | |
 | Gateway | `gateway/service-account-name` | `glyphoxa-gateway` | string | |
-| Gateway | `gateway/service-account-annotations` | `{}` | json | |
+| Gateway | `gateway/service-account-annotations` | `map[string]string{}` | map | Dynamic key-value pairs (e.g., IRSA) |
 | Worker | `worker/resource-profile` | `cloud` | string | SelectFrom: cloud, whisper-native, local-llm |
-| Worker | `worker/node-selector` | `{}` | json | |
-| Worker | `worker/tolerations` | `[]` | json | |
-| Worker | `worker/gpu-node-selector` | `{"nvidia.com/gpu":"true"}` | json | |
-| Worker | `worker/gpu-tolerations` | `[{"key":"nvidia.com/gpu","effect":"NoSchedule"}]` | json | |
+| Worker | `worker/node-selector` | `map[string]string{}` | map | |
+| Worker | `worker/tolerations` | `` | yaml | |
+| Worker | `worker/gpu-enabled` | `true` | bool | Enable GPU node scheduling for local-llm profile |
 | MCP Gateway | `mcp-gateway/replica-count` | `2` | int | |
-| MCP Gateway | `mcp-gateway/resources` | `{"requests":{"cpu":"250m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}` | json | |
-| MCP Gateway | `mcp-gateway/node-selector` | `{}` | json | |
-| MCP Gateway | `mcp-gateway/tolerations` | `[]` | json | |
-| Config | `config/data` | `` | string | Glyphoxa YAML config blob |
-| Database | `database/dsn` | `` | string | Password field |
+| MCP Gateway | `mcp-gateway/requests/cpu` | `250m` | string | |
+| MCP Gateway | `mcp-gateway/requests/memory` | `256Mi` | string | |
+| MCP Gateway | `mcp-gateway/limits/cpu` | `1` | string | |
+| MCP Gateway | `mcp-gateway/limits/memory` | `512Mi` | string | |
+| MCP Gateway | `mcp-gateway/node-selector` | `map[string]string{}` | map | |
+| MCP Gateway | `mcp-gateway/tolerations` | `` | yaml | |
+| Database | `database/dsn` | `` | string | Password field; used when postgresql component disabled |
 | Autoscaling | `autoscaling/min-replicas` | `2` | int | |
 | Autoscaling | `autoscaling/max-replicas` | `10` | int | |
 | Autoscaling | `autoscaling/target-cpu` | `70` | int | |
@@ -272,9 +325,40 @@ require (
 | PostgreSQL | `postgresql/database` | `glyphoxa` | string | |
 | PostgreSQL | `postgresql/persistence-size` | `10Gi` | string | |
 
-**Hardcoded in templates (not config paths):** Ports (8081, 50051, 9090, 8080), worker deadlines (14400s active, 300s TTL), chart versions (PostgreSQL 16.4.11). These are stable implementation details.
+**Glyphoxa Application Config Paths (generated into ConfigMap):**
+
+| Section | Path | Default | Type | Notes |
+|---|---|---|---|---|
+| Server | `config/server/log-level` | `info` | string | SelectFrom: debug, info, warn, error |
+| Memory | `config/memory/embedding-dimensions` | `1536` | int | Must match embeddings provider model |
+| Campaign | `config/campaign/name` | `` | string | Campaign display name |
+| Campaign | `config/campaign/system` | `` | string | Game system (e.g., dnd5e, pf2e) |
+| Transcript | `config/transcript/llm-correction` | `false` | bool | Enable LLM-based transcript correction |
+| MCP Servers | `config/mcp-servers` | `` | yaml | MCP server definitions as YAML |
+
+**Provider Config Paths (generated by `providerDefs()` helper):**
+
+7 providers x 5 paths = 35 paths, all under `config/providers/`:
+
+| Section | Path Pattern | Fields per Provider |
+|---|---|---|
+| Providers — LLM | `config/providers/llm/{name,api-key,base-url,model,options}` | name, api-key (password), base-url, model, options (yaml) |
+| Providers — STT | `config/providers/stt/{name,api-key,base-url,model,options}` | same |
+| Providers — TTS | `config/providers/tts/{name,api-key,base-url,model,options}` | same |
+| Providers — S2S | `config/providers/s2s/{name,api-key,base-url,model,options}` | same |
+| Providers — Embeddings | `config/providers/embeddings/{name,api-key,base-url,model,options}` | same |
+| Providers — VAD | `config/providers/vad/{name,api-key,base-url,model,options}` | same |
+| Providers — Audio | `config/providers/audio/{name,api-key,base-url,model,options}` | same |
+
+**Hardcoded in templates (not config paths):** Ports (8081, 50051, 9090, 8080), worker deadlines (14400s active, 300s TTL), chart versions (PostgreSQL 16.4.11), GPU node-selector (`nvidia.com/gpu: "true"`) and GPU tolerations (`[{key: nvidia.com/gpu, effect: NoSchedule}]`) when `worker/gpu-enabled` is true. These are stable implementation details.
 
 **Worker profiles hardcoded in template:** The three resource profiles (cloud, whisper-native, local-llm) are fixed resource specifications. Hardcoded in the worker job template with a `{{ if eq $profile "cloud" }}...{{ else if }}` chain. The operator only picks a profile name.
+
+**Omitted from zhi config (managed by end-users at runtime):**
+- NPCs — managed via admin API (PostgreSQL-backed npcstore) or Discord slash commands
+- Campaign entities / VTT imports — managed via web UI or Discord slash commands
+- Server listen/observe addresses — controlled by K8s deployment (hardcoded ports in templates)
+- Memory PostgreSQL DSN — same as `database/dsn` (already a deployment config path)
 
 `deploy/zhi/plugin/validate.go`: Validation functions:
 
@@ -282,15 +366,15 @@ require (
 // validateNamespace — blocking if not matching ^[a-z0-9][a-z0-9-]{0,62}$ (RFC 1123)
 // validateReleaseName — blocking if not matching ^[a-z0-9][a-z0-9-]{0,62}$ (RFC 1123)
 // validateTopology — blocking if not "shared" or "dedicated"
-// validateImageTag — blocking if empty
 // validateDSN — blocking if postgresql component disabled AND dsn empty
 // validateReplicaCountDedicated — warning if topology=dedicated AND replica-count > 2
 // validateAntiAffinityDedicated — warning if topology=dedicated AND pod-anti-affinity=true
 // validateResourceProfile — blocking if not cloud/whisper-native/local-llm
-// validateGPUTolerations — warning if resource-profile=local-llm AND gpu-tolerations empty
+// validateGPUEnabled — warning if resource-profile=local-llm AND gpu-enabled=false
 // validatePostgresPassword — blocking if postgresql component enabled AND password empty; blocking if contains newlines
 // validateAdminKey — warning if empty ("admin API will be unauthenticated"); blocking if contains shell metacharacters
-// validateJSON — blocking if value is not valid JSON (for json-typed fields)
+// validateYAML — warning if yaml-typed value is not valid YAML (for tolerations, mcp-servers, provider options)
+// validateLogLevel — blocking if not debug/info/warn/error
 ```
 
 `deploy/zhi/plugin/zhi-plugin.yaml`:
@@ -316,31 +400,33 @@ binaries:
 ```
 
 `deploy/zhi/plugin/values_test.go`: Test that:
-- `List()` returns all expected paths
+- `List()` returns all expected paths (deployment + config + provider paths)
 - `Get()` returns correct defaults and metadata for each path
 - `Set()` persists values
 - All paths have valid metadata (`ui.section`, `ui.displayName`, `core.description`, `core.type`)
+- `providerDefs()` generates exactly 5 paths per provider with correct naming
 - All tests use `t.Parallel()`
 
 `deploy/zhi/plugin/validate_test.go`: Test each validation function:
 - `validateNamespace` blocks on `"INVALID"`, `"a b"`, `"ns;rm -rf /"`, passes on `"glyphoxa"`, `"my-ns-123"`
 - `validateReleaseName` same pattern
 - `validateTopology` blocks on "invalid", passes on "shared"/"dedicated"
-- `validateImageTag` blocks on empty
 - `validateDSN` blocks when postgresql component disabled and DSN empty
 - `validateReplicaCountDedicated` warns when topology=dedicated and count=5
 - `validateAdminKey` blocks on values with backticks, `$(...)`, double quotes
 - `validatePostgresPassword` blocks on values containing newlines
-- `validateJSON` blocks on malformed JSON
+- `validateYAML` warns on malformed YAML, passes on valid YAML and empty strings
+- `validateLogLevel` blocks on "trace", passes on "debug"/"info"/"warn"/"error"
 - Cross-value validations use mock TreeReader
 - All tests use `t.Parallel()`
 
 **Success criteria:**
-- [ ] `cd deploy/zhi/plugin && go build` produces `zhi-config-glyphoxa` binary
-- [ ] `cd deploy/zhi/plugin && go test -race -count=1 ./...` passes
+- [x] `cd deploy/zhi/plugin && go build` produces `zhi-config-glyphoxa` binary
+- [x] `cd deploy/zhi/plugin && go test -race -count=1 ./...` passes
 - [ ] Plugin starts and responds to gRPC calls via `zhi list`, `zhi get`
-- [ ] All config paths are listed with correct defaults and metadata
-- [ ] Shell injection attempts are blocked by validators
+- [x] All config paths are listed with correct defaults and metadata
+- [x] `providerDefs()` helper correctly generates all 7 provider path groups
+- [x] Shell injection attempts are blocked by validators
 
 #### Phase 2: Workspace Configuration
 
@@ -493,13 +579,13 @@ scripts/
 ```
 
 **Success criteria:**
-- [ ] `zhi.yaml` is valid and loads in zhi
+- [x] `zhi.yaml` is valid and loads in zhi
 - [ ] Components list correctly with `zhi component list`
 - [ ] Component toggling works (enable/disable mcp-gateway, etc.)
 
 #### Phase 3: Kubernetes Manifest Templates
 
-Create all K8s YAML templates matching the Helm chart's output. Each template uses zhi's TreeData API (`.Get`, `.GetOr`, `.Has`, `.ComponentEnabled`) plus Sprig functions (`fromJson`, `toYaml`, `toJson`, `quote`, `nindent`, `sha256sum`).
+Create all K8s YAML templates matching the Helm chart's output. Each template uses zhi's TreeData API (`.Get`, `.GetOr`, `.Has`, `.ComponentEnabled`) plus Sprig functions (`toYaml`, `toJson`, `quote`, `nindent`, `sha256sum`, `fromYaml`).
 
 **Template-to-Helm mapping with key implementation details:**
 
@@ -510,12 +596,13 @@ Create all K8s YAML templates matching the Helm chart's output. Each template us
 `templates/gateway-deployment.yaml.tmpl`:
 - Reference: `deploy/helm/glyphoxa/templates/gateway-deployment.yaml`
 - Conditional `spec.replicas` — omit when autoscaling component enabled
-- `checksum/config` annotation: `{{ .Get "config/data" | sha256sum }}`
+- `checksum/config` annotation computed from all `config/*` path values
 - Pod anti-affinity block conditional on `gateway/pod-anti-affinity`
-- `nodeSelector` and `tolerations` via `GetOr ... "{}" | fromJson | toYaml`
-- `resources` via `GetOr ... "{}" | fromJson | toYaml`
+- `nodeSelector` from `gateway/node-selector` map value via `toYaml`
+- `tolerations` from `gateway/tolerations` yaml value (embed directly if non-empty)
+- `resources` from individual nested paths (`gateway/requests/cpu`, etc.)
 - Full restricted `securityContext` on pod and container
-- ConfigMap volume mount conditional on `config/data` being non-empty
+- ConfigMap volume mount conditional on any `config/*` values being set
 - Environment variables: `GLYPHOXA_ADMIN_KEY` from Secret (`${RELEASE}-admin-key`), `GLYPHOXA_GRPC_ADDR`, `GLYPHOXA_DATABASE_DSN`
 - DSN construction: if postgresql component enabled, build from postgresql values; else use `database/dsn`
 - Health probes: `/healthz`, `/readyz`, startup probe on observe port (9090)
@@ -530,6 +617,7 @@ Create all K8s YAML templates matching the Helm chart's output. Each template us
 - Entire file wrapped in `{{ if .ComponentEnabled "mcp-gateway" }}`
 - Same pattern as gateway: `checksum/config` annotation, restricted `securityContext`
 - `--mode=mcp-gateway`, `GLYPHOXA_MCP_ADDR` env var
+- Resources from nested paths (`mcp-gateway/requests/cpu`, etc.)
 
 `templates/mcp-gateway-service.yaml.tmpl`:
 - Reference: `deploy/helm/glyphoxa/templates/mcp-gateway-service.yaml`
@@ -540,15 +628,18 @@ Create all K8s YAML templates matching the Helm chart's output. Each template us
 - ConfigMap containing a Job YAML template with `SESSION_ID` placeholder
 - Worker resource profiles hardcoded in template with `{{ if eq $profile "cloud" }}...{{ else if }}` chain
 - Restricted `securityContext` on worker container
-- GPU merge logic: when profile=local-llm, merge gpu-node-selector and gpu-tolerations
+- GPU scheduling: when profile=local-llm AND `worker/gpu-enabled` is true, hardcoded nvidia nodeSelector and tolerations are added to the pod spec
 - `GLYPHOXA_GATEWAY_ADDR`: `{{ $release }}-gateway.{{ $ns }}.svc:50051`
 - `GLYPHOXA_MCP_GATEWAY_URL`: conditional on mcp-gateway component
 - Worker only has `startupProbe` (no liveness/readiness — correct for Job workloads)
 
 `templates/configmap.yaml.tmpl`:
 - Reference: `deploy/helm/glyphoxa/templates/configmap.yaml`
-- Conditional on `config/data` being non-empty
-- Embeds the YAML string directly
+- **Reconstructs full Glyphoxa config.yaml** from individual `config/*` paths
+- Template assembles the YAML structure from provider paths, server paths, memory, campaign, transcript, and mcp-servers
+- Conditional sections: only emits provider blocks where `config/providers/<type>/name` is non-empty
+- MCP servers YAML blob (`config/mcp-servers`) embedded directly under `mcp.servers`
+- Omits empty sections for clean output
 
 `templates/serviceaccount.yaml.tmpl`:
 - Reference: `deploy/helm/glyphoxa/templates/serviceaccount.yaml`
@@ -574,8 +665,9 @@ Create all K8s YAML templates matching the Helm chart's output. Each template us
 - [ ] `zhi export` generates all manifest files in `generated/`
 - [ ] Generated manifests pass `kubectl apply --dry-run=server`
 - [ ] Output matches Helm chart output for equivalent values (spot-check key resources)
-- [ ] Component toggling correctly includes/excludes optional resources
-- [ ] All pod specs include restricted securityContext
+- [x] Component toggling correctly includes/excludes optional resources
+- [x] All pod specs include restricted securityContext
+- [x] ConfigMap correctly reconstructs Glyphoxa config.yaml from individual paths
 
 #### Phase 4: Apply Scripts
 
@@ -712,14 +804,6 @@ zhi apply                  # Glyphoxa app resources
 zhi apply                  # App resources only (infra already running)
 ```
 
-**Helm-to-zhi migration path:** For operators migrating from the Helm chart:
-1. `helm get values glyphoxa -o yaml` to export current values
-2. Map Helm values to zhi config paths via `zhi edit`
-3. `zhi apply` — Server-Side Apply with `--field-manager=zhi-glyphoxa` handles ownership transfer from Helm to zhi
-4. Verify all resources healthy
-5. `helm uninstall glyphoxa --keep-history` to clean up Helm metadata (resources persist because SSA transferred ownership)
-6. Note: admin key secret name changes from `${RELEASE}-secrets` to `${RELEASE}-admin-key` — the old secret can be deleted after migration
-
 **Success criteria:**
 - [ ] `zhi apply` exports templates then runs `apply.sh` successfully against a cluster
 - [ ] `zhi apply infrastructure` deploys PostgreSQL via Helm
@@ -733,12 +817,12 @@ zhi apply                  # App resources only (infra already running)
 #### Phase 5: Tests and Documentation
 
 **Plugin tests** (already outlined in Phase 1):
-- `values_test.go`: All paths listed, defaults correct, metadata complete
+- `values_test.go`: All paths listed, defaults correct, metadata complete, providerDefs helper tested
 - `validate_test.go`: Each validator with positive and negative cases, including shell injection attempts
 - All tests use `t.Parallel()` and table-driven patterns
 
 **Template smoke tests**:
-- Add a CI step that builds the plugin, sets required values (`core/image-tag`), runs `zhi export`, and validates generated YAML with `kubectl apply --dry-run=client`
+- Add a CI step that builds the plugin, sets required values, runs `zhi export`, and validates generated YAML with `kubectl apply --dry-run=client`
 
 **Documentation**:
 - `deploy/zhi/README.md` with:
@@ -747,67 +831,74 @@ zhi apply                  # App resources only (infra already running)
   - Component reference table
   - Apply target reference table
   - Comparison with Helm approach
-  - Migration guide from Helm chart (including secret rename)
   - Production recommendations (Vault store, admin key, etc.)
   - Security notes: script files are auto-deleted, JSON store warning, restricted pod security
 
 **Success criteria:**
-- [ ] All tests pass with `t.Parallel()` and `-race -count=1`
-- [ ] README has quick start and migration instructions
+- [x] All tests pass with `t.Parallel()` and `-race -count=1`
+- [ ] README has quick start instructions
 - [ ] A fresh operator can deploy Glyphoxa using only the README instructions
 
 ## Acceptance Criteria
 
 ### Functional Requirements
 
-- [ ] Config plugin defines all operator-facing parameters from the Helm chart's `values.yaml`
-- [ ] `zhi edit` provides interactive configuration with sections, descriptions, and dropdowns
-- [ ] `zhi validate` catches configuration errors (missing image tag, invalid topology, shell injection in namespace/release-name, etc.)
-- [ ] `zhi export` generates valid Kubernetes manifests for all enabled components
+- [x] Config plugin defines all operator-facing parameters with nested paths (no JSON string values)
+- [x] `providerDefs()` helper generates correct paths for all 7 providers
+- [x] `zhi edit` provides interactive configuration with sections, descriptions, and dropdowns
+- [x] `zhi validate` catches configuration errors (invalid topology, shell injection in namespace/release-name, invalid YAML in tolerations, etc.)
+- [x] `zhi export` generates valid Kubernetes manifests for all enabled components
+- [x] ConfigMap template correctly reconstructs Glyphoxa config.yaml from individual `config/*` paths
 - [ ] `zhi apply` deploys Glyphoxa to a Kubernetes cluster
 - [ ] `zhi apply infrastructure` deploys PostgreSQL via Helm (password not exposed in `ps`)
-- [ ] Shared topology: 3 gateway replicas, anti-affinity, shared node selector/tolerations
-- [ ] Dedicated topology: 1 gateway replica, no anti-affinity, dedicated node selector/tolerations
-- [ ] Component toggling: disabling mcp-gateway removes its Deployment, Service, and NetworkPolicy
-- [ ] Worker resource profiles (cloud/whisper-native/local-llm) produce correct resource limits
-- [ ] GPU scheduling works when local-llm profile is selected
-- [ ] Secrets are created via `kubectl` (not written as plaintext YAML in `generated/`)
-- [ ] Script files containing secrets are deleted after execution
-- [ ] All pods run with restricted security context (runAsNonRoot, no privilege escalation, drop all caps)
-- [ ] Pre-flight check prevents deploying app before infrastructure
+- [x] Shared topology: 3 gateway replicas, anti-affinity
+- [x] Dedicated topology: 1 gateway replica, no anti-affinity
+- [x] Component toggling: disabling mcp-gateway removes its Deployment, Service, and NetworkPolicy
+- [x] Worker resource profiles (cloud/whisper-native/local-llm) produce correct resource limits
+- [x] GPU scheduling works when local-llm profile is selected and `worker/gpu-enabled` is true
+- [x] Secrets are created via `kubectl` (not written as plaintext YAML in `generated/`)
+- [x] Script files containing secrets are deleted after execution
+- [x] All pods run with restricted security context (runAsNonRoot, no privilege escalation, drop all caps)
+- [x] Pre-flight check prevents deploying app before infrastructure
 
 ### Non-Functional Requirements
 
-- [ ] Plugin builds with `CGO_ENABLED=0` (no system dependencies)
+- [x] Plugin builds with `CGO_ENABLED=0` (no system dependencies)
 - [ ] Plugin binary size < 20MB
 - [ ] Template export completes in < 2s
-- [ ] A GitHub workflow builds the plugin 
-- [ ] a separate GitHub workflow releases both the plugin and the workspace to ghcr.io/mrwong99/glyphoxa/...
+- [ ] A GitHub workflow builds the plugin
+- [ ] A separate GitHub workflow releases both the plugin and the workspace to ghcr.io/mrwong99/glyphoxa/...
 
 ### Quality Gates
 
-- [ ] `go test -race -count=1 ./...` passes in plugin directory (all tests use `t.Parallel()`)
+- [x] `go test -race -count=1 ./...` passes in plugin directory (all tests use `t.Parallel()`)
 - [ ] `golangci-lint run` passes in plugin directory
 - [ ] Generated manifests pass `kubectl apply --dry-run=server` against a test cluster
 
 ## Dependencies & Prerequisites
 
-- zhi v1.5.3+ installed
+- zhi v1.5.3+ installed (v1.6+ recommended for `core.type: map`, `list`, and `yaml` support)
 - kubectl configured with cluster access (K8s 1.22+ for Server-Side Apply)
 - Helm 3.12+ (only for infrastructure target)
 - Go 1.26+ (for building the plugin from source)
+
+### Companion zhi Feature Plans
+
+These zhi features enhance the editing experience for complex values. The Glyphoxa plugin can be built without them (falling back to `ui.multiline: true` for complex values), but they are recommended:
+
+- `zhi/docs/plans/2026-03-08-feat-map-list-value-editors-plan.md` — `core.type: map` and `core.type: list` for nodeSelector, annotations, imagePullSecrets
+- `zhi/docs/plans/2026-03-08-feat-yaml-multiline-type-plan.md` — `core.type: yaml` for tolerations, provider options, MCP server configs
 
 ## Risk Analysis & Mitigation
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| JSON string values are awkward in TUI | Medium | Medium | Add `core.type: json` metadata hint so UI can render a structured editor; fallback to multiline text |
+| zhi map/list/yaml features not yet available | High | Medium | Fall back to `ui.multiline: true` for complex values; upgrade types when features land |
+| Template logic for config.yaml reconstruction is complex | Medium | Medium | Thorough template smoke tests; compare output against Helm chart for equivalent values |
 | Template logic for worker profiles is complex | Low | Medium | Hardcode profiles in template with if/else chain; test with all three profiles |
 | PostgreSQL service name mismatch between infra.sh and DSN | Medium | High | Use consistent naming: `${RELEASE}-postgresql` in both infra.sh and DSN template logic |
 | Operators forget to run infrastructure target | Low | Low | Pre-flight check in apply.sh blocks deploy if PostgreSQL not found |
 | Plaintext secrets in JSON file store | Medium | High | Validation warning recommending Vault; document in README |
-| Helm-to-zhi migration breaks existing deployment | Low | High | Server-Side Apply with `--field-manager=zhi-glyphoxa` handles ownership transfer; `--keep-history` on uninstall; document migration path |
-| Secret name change (`-secrets` → `-admin-key`) during migration | Low | Medium | Document rename in migration guide |
 
 ## References & Research
 
@@ -818,6 +909,7 @@ zhi apply                  # App resources only (infra already running)
 - Helm values: `deploy/helm/glyphoxa/values.yaml`
 - Helm helpers: `deploy/helm/glyphoxa/templates/_helpers.tpl`
 - Tenant provisioning: `deploy/scripts/provision-dedicated-tenant.sh`
+- Glyphoxa config struct: `internal/config/config.go`
 
 ### Reference Implementations
 
@@ -825,6 +917,11 @@ zhi apply                  # App resources only (infra already running)
 - zhi-home-server workspace: `/home/luk/Desktop/git/zhi-home-server/workspace/`
 - zhi TreeData API: `/home/luk/Desktop/git/zhi/internal/core/export_data.go`
 - zhi export engine: `/home/luk/Desktop/git/zhi/internal/core/export.go`
+
+### Companion Plans
+
+- zhi map/list editors: `zhi/docs/plans/2026-03-08-feat-map-list-value-editors-plan.md`
+- zhi yaml type: `zhi/docs/plans/2026-03-08-feat-yaml-multiline-type-plan.md`
 
 ### Conventions
 
