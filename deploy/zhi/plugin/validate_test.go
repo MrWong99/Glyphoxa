@@ -95,9 +95,9 @@ func TestValidateTopology(t *testing.T) {
 func TestValidateAdminKey(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		val      any
-		severity config.Severity
+		name      string
+		val       any
+		severity  config.Severity
 		hasResult bool
 	}{
 		{"empty warns", "", config.Warning, true},
@@ -242,8 +242,12 @@ func TestValidateYAML(t *testing.T) {
 func TestValidateReplicaCountDedicated(t *testing.T) {
 	t.Parallel()
 	tree := config.NewTree()
-	tree.Set("core/topology", &config.Value{Val: "dedicated"})
-	tree.Set("gateway/replica-count", &config.Value{Val: 5})
+	if err := tree.Set("core/topology", &config.Value{Val: "dedicated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Set("gateway/replica-count", &config.Value{Val: 5}); err != nil {
+		t.Fatal(err)
+	}
 
 	results, err := validateReplicaCountDedicated(config.Value{Val: 5}, tree)
 	if err != nil {
@@ -260,8 +264,12 @@ func TestValidateReplicaCountDedicated(t *testing.T) {
 func TestValidateReplicaCountShared(t *testing.T) {
 	t.Parallel()
 	tree := config.NewTree()
-	tree.Set("core/topology", &config.Value{Val: "shared"})
-	tree.Set("gateway/replica-count", &config.Value{Val: 5})
+	if err := tree.Set("core/topology", &config.Value{Val: "shared"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Set("gateway/replica-count", &config.Value{Val: 5}); err != nil {
+		t.Fatal(err)
+	}
 
 	results, err := validateReplicaCountDedicated(config.Value{Val: 5}, tree)
 	if err != nil {
@@ -275,8 +283,12 @@ func TestValidateReplicaCountShared(t *testing.T) {
 func TestValidateGPUEnabled(t *testing.T) {
 	t.Parallel()
 	tree := config.NewTree()
-	tree.Set("worker/resource-profile", &config.Value{Val: "local-llm"})
-	tree.Set("worker/gpu-enabled", &config.Value{Val: false})
+	if err := tree.Set("worker/resource-profile", &config.Value{Val: "local-llm"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Set("worker/gpu-enabled", &config.Value{Val: false}); err != nil {
+		t.Fatal(err)
+	}
 
 	results, err := validateGPUEnabled(config.Value{Val: false}, tree)
 	if err != nil {
@@ -313,7 +325,9 @@ func TestPluginValidateDispatch(t *testing.T) {
 	for _, path := range paths {
 		v, ok, _ := p.Get(context.Background(), path)
 		if ok {
-			tree.Set(path, &v)
+			if err := tree.Set(path, &v); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 
