@@ -140,19 +140,19 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Download whisper artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: whisper-libs
           path: /tmp/whisper-install
 
       - name: Download ONNX Runtime artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onnx-libs
           path: /tmp/onnx-install
 
       - name: Download dave artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dave-libs
           path: /tmp/dave-install
@@ -196,19 +196,19 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Download whisper artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: whisper-libs
           path: /tmp/whisper-install
 
       - name: Download ONNX Runtime artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onnx-libs
           path: /tmp/onnx-install
 
       - name: Download dave artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dave-libs
           path: /tmp/dave-install
@@ -241,19 +241,19 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Download whisper artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: whisper-libs
           path: /tmp/whisper-install
 
       - name: Download ONNX Runtime artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onnx-libs
           path: /tmp/onnx-install
 
       - name: Download dave artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dave-libs
           path: /tmp/dave-install
@@ -294,19 +294,19 @@ jobs:
           go-version-file: "go.mod"
 
       - name: Download whisper artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: whisper-libs
           path: /tmp/whisper-install
 
       - name: Download ONNX Runtime artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onnx-libs
           path: /tmp/onnx-install
 
       - name: Download dave artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dave-libs
           path: /tmp/dave-install
