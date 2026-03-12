@@ -59,6 +59,13 @@ func (sc *SessionCommands) Definition() discord.SlashCommandCreate {
 			discord.ApplicationCommandOptionSubCommand{
 				Name:        "recap",
 				Description: "Show a recap of the current or most recent session",
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
+						Name:        "session_id",
+						Description: "Session ID (defaults to current or most recent)",
+						Required:    false,
+					},
+				},
 			},
 		},
 	}
