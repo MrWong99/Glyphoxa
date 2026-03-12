@@ -135,6 +135,15 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		now.Format("20060102T1504Z"),
 	)
 
+	// Record session in sessions metadata table if Postgres-backed.
+	if starter, ok := sm.sessionStore.(interface {
+		StartSession(ctx context.Context, sessionID string) error
+	}); ok {
+		if err := starter.StartSession(ctx, sessionID); err != nil {
+			slog.Warn("session: failed to record session start", "session_id", sessionID, "err", err)
+		}
+	}
+
 	// Connect to voice channel.
 	conn, err := sm.platform.Connect(ctx, channelID)
 	if err != nil {
@@ -319,6 +328,15 @@ func (sm *SessionManager) Stop(ctx context.Context) error {
 			slog.Warn("session: final consolidation error", "session_id", sessionID, "err", err)
 		}
 		sm.consolidator.Stop()
+	}
+
+	// Record session end in sessions metadata table.
+	if ender, ok := sm.sessionStore.(interface {
+		EndSession(ctx context.Context, sessionID string) error
+	}); ok {
+		if err := ender.EndSession(ctx, sessionID); err != nil {
+			slog.Warn("session: failed to record session end", "session_id", sessionID, "err", err)
+		}
 	}
 
 	// Cancel session context — stops pipeline workers, consolidator loop,
