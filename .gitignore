@@ -40,6 +40,9 @@ deployments/compose/config.yaml
 deploy/helm/*/charts/
 deploy/helm/*/Chart.lock
 
+# Worktrees
+.worktrees/
+
 # Zhi plugin build artifacts
 deploy/zhi/plugin/zhi-config-glyphoxa
 deploy/zhi/plugin/dist/
