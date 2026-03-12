@@ -164,6 +164,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_campaign_started
 `, t, t)
 }
 
+// ddlRecaps returns the DDL for the recaps table.
+func ddlRecaps(s SchemaName) string {
+	t := s.TableRef("recaps")
+	sessions := s.TableRef("sessions")
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s (
+    session_id   TEXT         PRIMARY KEY REFERENCES %s(session_id),
+    campaign_id  TEXT         NOT NULL,
+    text         TEXT         NOT NULL,
+    audio_data   BYTEA        NOT NULL,
+    sample_rate  INT          NOT NULL,
+    channels     INT          NOT NULL,
+    duration_ns  BIGINT       NOT NULL,
+    generated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+`, t, sessions)
+}
+
 // Migrate creates or ensures all required database tables and extensions exist
 // within the given schema. It is idempotent (CREATE TABLE IF NOT EXISTS /
 // CREATE INDEX IF NOT EXISTS) and safe to call on every application start.
@@ -182,6 +200,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, embeddingDimensions int, s
 
 	statements := []string{
 		ddlSessions(schema),
+		ddlRecaps(schema),
 		ddlSessionEntries(schema),
 		ddlL2(schema, embeddingDimensions),
 		ddlKnowledgeGraph(schema),
