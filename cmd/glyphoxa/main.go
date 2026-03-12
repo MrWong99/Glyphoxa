@@ -195,6 +195,20 @@ func runFull(cfg *config.Config) int {
 			SessionStore: application.SessionStore(),
 		})
 
+		// Voice recap — requires LLM + TTS.
+		if providers.LLM != nil && providers.TTS != nil && application.RecapStore() != nil {
+			recapGen := session.NewRecapGenerator(providers.LLM, providers.TTS, application.RecapStore())
+			commands.NewVoiceRecapCommands(commands.VoiceRecapConfig{
+				Bot:          bot,
+				SessionMgr:   sessionMgr,
+				Perms:        perms,
+				Generator:    recapGen,
+				RecapStore:   application.RecapStore(),
+				SessionStore: application.SessionStore(),
+				NPCs:         cfg.NPCs,
+			})
+		}
+
 		// Remaining commands need explicit Register() calls.
 		npcCmds := commands.NewNPCCommands(perms, sessionMgr.Orchestrator)
 		npcCmds.Register(bot.Router())
