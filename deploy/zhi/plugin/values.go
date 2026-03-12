@@ -53,6 +53,24 @@ var valueDefs = func() []ValueDef {
 			Description: "Comma-separated list of K8s secret names for pulling images",
 			Type:        "string",
 		},
+		{
+			Path: "core/run-as-user", Default: 999,
+			Section: "Core", DisplayName: "Run As User",
+			Description: "UID for the container security context (runAsUser)",
+			Type:        "int",
+		},
+		{
+			Path: "core/run-as-group", Default: 999,
+			Section: "Core", DisplayName: "Run As Group",
+			Description: "GID for the container security context (runAsGroup)",
+			Type:        "int",
+		},
+		{
+			Path: "core/fs-group", Default: 999,
+			Section: "Core", DisplayName: "FS Group",
+			Description: "GID for volume ownership (fsGroup)",
+			Type:        "int",
+		},
 
 		// ── gateway ──────────────────────────────────────────────────────────
 		{

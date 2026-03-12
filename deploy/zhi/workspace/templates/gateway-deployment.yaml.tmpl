@@ -71,9 +71,9 @@ spec:
 {{- end }}
       securityContext:
         runAsNonRoot: true
-        runAsUser: 999
-        runAsGroup: 999
-        fsGroup: 999
+        runAsUser: {{ .GetOr "core/run-as-user" "999" }}
+        runAsGroup: {{ .GetOr "core/run-as-group" "999" }}
+        fsGroup: {{ .GetOr "core/fs-group" "999" }}
         seccompProfile:
           type: RuntimeDefault
       containers:
