@@ -43,13 +43,15 @@ func InitProvider(ctx context.Context, cfg ProviderConfig) (shutdown func(contex
 	}
 
 	// Build the resource describing this service.
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+	// Use resource.New instead of merging with resource.Default() to avoid
+	// schema URL conflicts between semconv v1.26.0 and newer OTel defaults.
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
 			semconv.ServiceName(cfg.ServiceName),
 			semconv.ServiceVersion(cfg.ServiceVersion),
 		),
+		resource.WithProcessRuntimeDescription(),
+		resource.WithHost(),
 	)
 	if err != nil {
 		return nil, err

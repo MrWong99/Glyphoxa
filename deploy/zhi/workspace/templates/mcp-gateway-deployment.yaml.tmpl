@@ -35,7 +35,7 @@ spec:
         app.kubernetes.io/part-of: glyphoxa
         app.kubernetes.io/managed-by: zhi
       annotations:
-        checksum/config: {{ .ConfigChecksum | sha256sum }}
+        checksum/config: {{ .All | mustToPrettyJson | sha256sum }}
     spec:
       automountServiceAccountToken: false
 {{- if $pullSecrets }}
@@ -54,13 +54,16 @@ spec:
 {{- end }}
       securityContext:
         runAsNonRoot: true
+        runAsUser: {{ .GetOr "core/run-as-user" "999" }}
+        runAsGroup: {{ .GetOr "core/run-as-group" "999" }}
+        fsGroup: {{ .GetOr "core/fs-group" "999" }}
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: mcp-gateway
           image: {{ $repo }}:{{ $tag }}
           imagePullPolicy: {{ $pullPolicy }}
-          args: ["--mode=mcp-gateway"]
+          args: ["--mode=mcp-gateway", "--config=/etc/glyphoxa/config.yaml"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
