@@ -71,6 +71,9 @@ type App struct {
 	agents    []agent.NPCAgent
 	router    agent.Router
 
+	// recapStore persists voiced session recaps.
+	recapStore memory.RecapStore
+
 	// closers are called in order during Shutdown.
 	closers []func() error
 
@@ -238,6 +241,9 @@ func (a *App) initMemory(ctx context.Context) error {
 	}
 	if a.semantic == nil {
 		a.semantic = store.L2()
+	}
+	if a.recapStore == nil {
+		a.recapStore = store.RecapStore()
 	}
 
 	a.closers = append(a.closers, func() error {
@@ -542,6 +548,9 @@ func (a *App) KnowledgeGraph() memory.KnowledgeGraph { return a.graph }
 // SemanticIndex returns the L2 semantic index. May be nil if memory or
 // embeddings are not configured.
 func (a *App) SemanticIndex() memory.SemanticIndex { return a.semantic }
+
+// RecapStore returns the recap store. May be nil if memory is not configured.
+func (a *App) RecapStore() memory.RecapStore { return a.recapStore }
 
 // MCPHost returns the MCP host. May be nil if no MCP servers are configured.
 func (a *App) MCPHost() mcp.Host { return a.mcpHost }

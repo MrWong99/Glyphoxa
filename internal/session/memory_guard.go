@@ -94,6 +94,19 @@ func (mg *MemoryGuard) EntryCount(ctx context.Context, sessionID string) (int, e
 	return n, nil
 }
 
+// ListSessions delegates to the underlying store. On failure the error is
+// logged and an empty slice is returned; the store is marked as degraded.
+func (mg *MemoryGuard) ListSessions(ctx context.Context, limit int) ([]memory.SessionInfo, error) {
+	sessions, err := mg.store.ListSessions(ctx, limit)
+	if err != nil {
+		mg.degraded.Store(true)
+		slog.Warn("memory guard: ListSessions failed, returning empty", "limit", limit, "err", err)
+		return []memory.SessionInfo{}, nil
+	}
+	mg.degraded.Store(false)
+	return sessions, nil
+}
+
 // IsDegraded reports whether the store is currently operating in degraded
 // mode (i.e., the most recent operation on the underlying store failed).
 func (mg *MemoryGuard) IsDegraded() bool {

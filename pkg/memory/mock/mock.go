@@ -68,6 +68,12 @@ type SessionStore struct {
 
 	// EntryCountErr is returned by [SessionStore.EntryCount] when non-nil.
 	EntryCountErr error
+
+	// ListSessionsResult is returned by [SessionStore.ListSessions].
+	ListSessionsResult []memory.SessionInfo
+
+	// ListSessionsErr is returned by [SessionStore.ListSessions] when non-nil.
+	ListSessionsErr error
 }
 
 // Calls returns a copy of all recorded method invocations.
@@ -139,6 +145,19 @@ func (m *SessionStore) EntryCount(_ context.Context, sessionID string) (int, err
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, Call{Method: "EntryCount", Args: []any{sessionID}})
 	return m.EntryCountResult, m.EntryCountErr
+}
+
+// ListSessions implements [memory.SessionStore].
+func (m *SessionStore) ListSessions(_ context.Context, limit int) ([]memory.SessionInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, Call{Method: "ListSessions", Args: []any{limit}})
+	if m.ListSessionsResult == nil {
+		return []memory.SessionInfo{}, m.ListSessionsErr
+	}
+	out := make([]memory.SessionInfo, len(m.ListSessionsResult))
+	copy(out, m.ListSessionsResult)
+	return out, m.ListSessionsErr
 }
 
 // Ensure SessionStore satisfies the interface at compile time.
@@ -488,3 +507,71 @@ func (m *GraphRAGQuerier) QueryWithEmbedding(_ context.Context, embedding []floa
 
 // Ensure GraphRAGQuerier satisfies the interface at compile time.
 var _ memory.GraphRAGQuerier = (*GraphRAGQuerier)(nil)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RecapStore mock
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RecapStore is a configurable test double for [memory.RecapStore].
+type RecapStore struct {
+	mu sync.Mutex
+
+	calls []Call
+
+	// SaveRecapErr is returned by [RecapStore.SaveRecap] when non-nil.
+	SaveRecapErr error
+
+	// GetRecapResult is returned by [RecapStore.GetRecap].
+	GetRecapResult *memory.Recap
+
+	// GetRecapErr is returned by [RecapStore.GetRecap] when non-nil.
+	GetRecapErr error
+}
+
+// Calls returns a copy of all recorded method invocations.
+func (m *RecapStore) Calls() []Call {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Call, len(m.calls))
+	copy(out, m.calls)
+	return out
+}
+
+// CallCount returns how many times the named method was invoked.
+func (m *RecapStore) CallCount(method string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, c := range m.calls {
+		if c.Method == method {
+			n++
+		}
+	}
+	return n
+}
+
+// Reset clears all recorded calls without altering response configuration.
+func (m *RecapStore) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = nil
+}
+
+// SaveRecap implements [memory.RecapStore].
+func (m *RecapStore) SaveRecap(_ context.Context, recap memory.Recap) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, Call{Method: "SaveRecap", Args: []any{recap}})
+	return m.SaveRecapErr
+}
+
+// GetRecap implements [memory.RecapStore].
+func (m *RecapStore) GetRecap(_ context.Context, sessionID string) (*memory.Recap, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, Call{Method: "GetRecap", Args: []any{sessionID}})
+	return m.GetRecapResult, m.GetRecapErr
+}
+
+// Ensure RecapStore satisfies the interface at compile time.
+var _ memory.RecapStore = (*RecapStore)(nil)

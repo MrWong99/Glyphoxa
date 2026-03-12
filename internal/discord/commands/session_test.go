@@ -121,11 +121,11 @@ func TestDefinition(t *testing.T) {
 	if def.Name != "session" {
 		t.Errorf("Name = %q, want %q", def.Name, "session")
 	}
-	if len(def.Options) != 3 {
-		t.Fatalf("Options count = %d, want 3", len(def.Options))
+	if len(def.Options) != 4 {
+		t.Fatalf("Options count = %d, want 4", len(def.Options))
 	}
 
-	expectedSubs := []string{"start", "stop", "recap"}
+	expectedSubs := []string{"start", "stop", "recap", "voice-recap"}
 	for i, want := range expectedSubs {
 		if def.Options[i].OptionName() != want {
 			t.Errorf("subcommand[%d] = %q, want %q", i, def.Options[i].OptionName(), want)

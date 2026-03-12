@@ -45,6 +45,7 @@ type Store struct {
 	campaignID string
 	sessions   *SessionStoreImpl
 	semantic   *SemanticIndexImpl
+	recaps     *RecapStoreImpl
 }
 
 // NewStore creates a new Store, establishes a connection pool to the PostgreSQL
@@ -92,6 +93,7 @@ func NewStore(ctx context.Context, dsn string, embeddingDimensions int, schema S
 		campaignID: campaignID,
 		sessions:   &SessionStoreImpl{pool: pool, schema: schema, campaignID: campaignID},
 		semantic:   &SemanticIndexImpl{pool: pool, schema: schema, campaignID: campaignID},
+		recaps:     &RecapStoreImpl{pool: pool, schema: schema, campaignID: campaignID},
 	}, nil
 }
 
@@ -100,6 +102,9 @@ func (s *Store) L1() *SessionStoreImpl { return s.sessions }
 
 // L2 returns the L2 semantic index implementation which satisfies [memory.SemanticIndex].
 func (s *Store) L2() *SemanticIndexImpl { return s.semantic }
+
+// RecapStore returns the RecapStore implementation.
+func (s *Store) RecapStore() *RecapStoreImpl { return s.recaps }
 
 // Close releases all connections held by the underlying connection pool.
 // It should be called when the Store is no longer needed, typically via defer.

@@ -311,12 +311,14 @@ voice, engine mode, and tool access.
 | `cascade.fast_model` | `string` | `""` | Model for generating the opener sentence (fast, small model). Uses default LLM provider if empty. |
 | `cascade.strong_model` | `string` | `""` | Model for generating the substantive continuation (large model). Uses default LLM provider if empty. |
 | `cascade.opener_instruction` | `string` | `""` | Appended to the fast model's system prompt. Uses a built-in instruction if empty. |
+| `gm_helper` | `bool` | `false` | Designates this NPC as the GM helper. At most one NPC per campaign may be flagged -- config validation rejects duplicates. The GM helper's voice is used for voiced recaps (see [`commands.md`](commands.md#session-voice-recap)). If no NPC is flagged, voice-recap falls back to the first NPC in the list. |
 
 ```yaml
 npcs:
   - name: Greymantle the Sage
     personality: |
       You are Greymantle, an ancient and enigmatic wizard...
+    gm_helper: true
     voice:
       provider: elevenlabs
       voice_id: pNInz6obpgDQGcFmaJgB

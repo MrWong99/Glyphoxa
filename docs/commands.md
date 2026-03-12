@@ -94,16 +94,20 @@ Duration: 1h23m45s
 Show a recap of the current or most recent session, including an AI-generated summary of the transcript.
 
 ```
-/session recap
+/session recap [session_id:<id>]
 ```
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| *(none)* | -- | -- | -- |
+| `session_id` | String | No | Explicit session ID to recap. When omitted, falls back to the active session or the most recent session for the campaign (via `ListSessions`). |
 
 **Permissions:** DM role required.
 
 **Behaviour:**
+- Resolves the session to recap using this fallback chain:
+  1. Explicit `session_id` parameter (if provided)
+  2. Currently active session
+  3. Most recent past session for the campaign (via `ListSessions`)
 - If no session data is available, prompts you to start a session first.
 - Retrieves the session transcript and, if an LLM summariser is configured, generates a narrative summary. Falls back to a raw chronological transcript if summarisation is unavailable or fails.
 - Responds with a rich embed containing:
@@ -125,6 +129,46 @@ Transcript Entries: 127
 
 [AI-generated narrative summary of the session...]
 ```
+
+---
+
+#### `/session voice-recap`
+
+Generate and play a dramatic voiced "Previously on..." recap into the active voice channel. The recap is narrated using the GM helper NPC's TTS voice and posted as a text embed alongside the audio.
+
+```
+/session voice-recap [session_id:<id>]
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | String | No | Explicit session ID to recap. When omitted, uses the most recent session for the campaign. |
+
+**Permissions:** DM role required. A voice session must be active (the bot needs to be in a voice channel to play audio).
+
+**Behaviour:**
+- Resolves the session ID using the same fallback chain as `/session recap`.
+- Checks the recap cache (`RecapStore`). If a recap was previously generated for this session, the cached version is replayed immediately.
+- If no cached recap exists:
+  1. Fetches the session transcript from the L1 session store.
+  2. Sends the transcript to the LLM with a dramatic narrator prompt (temperature 0.7) to generate a 200--300 word cinematic recap.
+  3. Synthesises the recap text into audio using the GM helper NPC's TTS voice.
+  4. Caches both text and audio in PostgreSQL via `RecapStore`.
+- Plays the audio into the voice channel via the mixer at high priority (won't be interrupted by NPC speech).
+- Posts a purple-accented embed with the recap text, session ID, and duration.
+
+**Requirements:** Both LLM and TTS providers must be configured. The GM helper NPC's voice is used for narration (falls back to the first NPC if no GM helper is designated -- see [`configuration.md`](configuration.md#npcs----npc-definitions)).
+
+**Example output (embed):**
+```
+Previously, on your campaign...
+
+[Dramatic AI-generated narrative recap of the session...]
+
+Session: abc123-def456 | Duration: 2h15m30s
+```
+
+**Generation time:** First-time generation takes ~30--60 seconds (LLM + TTS). Subsequent plays of the same session are near-instant (cached).
 
 ---
 

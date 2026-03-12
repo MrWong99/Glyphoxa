@@ -1,6 +1,8 @@
 package memory
 
-import "time"
+import (
+	"time"
+)
 
 // TranscriptEntry is a complete exchange record written to the session log.
 // It captures both the speaker's utterance and optionally the NPC's response,
@@ -31,3 +33,45 @@ type TranscriptEntry struct {
 
 // IsNPC reports whether this entry was produced by an NPC agent.
 func (e TranscriptEntry) IsNPC() bool { return e.NPCID != "" }
+
+// SessionInfo holds metadata about a recorded session.
+type SessionInfo struct {
+	// SessionID is the unique session identifier.
+	SessionID string
+
+	// CampaignID identifies the campaign this session belongs to.
+	CampaignID string
+
+	// StartedAt is when the session was started.
+	StartedAt time.Time
+
+	// EndedAt is when the session ended. Zero value if still active.
+	EndedAt time.Time
+}
+
+// Recap is the generated "Previously On..." voiced summary for a session.
+type Recap struct {
+	// SessionID is the session this recap was generated from.
+	SessionID string
+
+	// CampaignID identifies the campaign.
+	CampaignID string
+
+	// Text is the dramatic narrative recap text.
+	Text string
+
+	// AudioData is the rendered PCM audio bytes.
+	AudioData []byte
+
+	// SampleRate is the audio sample rate in Hz.
+	SampleRate int
+
+	// Channels is the number of audio channels.
+	Channels int
+
+	// Duration is the estimated speech duration.
+	Duration time.Duration
+
+	// GeneratedAt is when this recap was created.
+	GeneratedAt time.Time
+}

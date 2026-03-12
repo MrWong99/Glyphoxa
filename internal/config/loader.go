@@ -146,6 +146,17 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	// GM helper uniqueness check
+	gmHelperCount := 0
+	for i, npc := range cfg.NPCs {
+		if npc.GMHelper {
+			gmHelperCount++
+			if gmHelperCount > 1 {
+				errs = append(errs, fmt.Errorf("npcs[%d].gm_helper: only one NPC may be designated as the GM helper", i))
+			}
+		}
+	}
+
 	// MCP servers
 	for i, srv := range cfg.MCP.Servers {
 		prefix := fmt.Sprintf("mcp.servers[%d]", i)

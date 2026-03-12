@@ -24,6 +24,8 @@ All three storage layers share a single PostgreSQL connection pool (`pgxpool.Poo
 | **L1** | Session Log | Timestamped transcript entries with speaker labels, raw + corrected text | Tables + GIN full-text index (`tsvector`) | `memory.SessionStore` |
 | **L2** | Semantic Index | Chunked, embedded transcript content with metadata tags | `pgvector` extension (HNSW index, cosine distance) | `memory.SemanticIndex` |
 | **L3** | Knowledge Graph | Entities, typed relationships, provenance, NPC identity snapshots | Adjacency tables + recursive CTEs + JSONB | `memory.KnowledgeGraph` / `memory.GraphRAGQuerier` |
+| -- | Session History | Session start/end times per campaign | `sessions` table | `memory.SessionStore` (via `ListSessions`) |
+| -- | Recap Cache | Generated voice recap text + PCM audio | `recaps` table (BYTEA) | `memory.RecapStore` |
 
 ---
 
@@ -241,6 +243,102 @@ CREATE INDEX idx_rel_provenance_confidence ON relationships ((provenance->>'conf
 
 ---
 
+## 📋 Session History
+
+The `sessions` table tracks session start/end times per campaign, enabling features like "most recent session" lookup for recaps.
+
+### Schema
+
+```sql
+CREATE TABLE sessions (
+    session_id   TEXT         PRIMARY KEY,
+    campaign_id  TEXT         NOT NULL,
+    started_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    ended_at     TIMESTAMPTZ
+);
+
+CREATE INDEX idx_sessions_campaign_started ON sessions (campaign_id, started_at DESC);
+```
+
+### Go Interface
+
+`SessionStore.ListSessions(ctx, limit)` returns the most recent sessions ordered by `started_at DESC`. Used by `/session recap` and `/session voice-recap` to resolve the default session when no explicit ID is provided.
+
+```go
+type SessionInfo struct {
+    SessionID  string
+    CampaignID string
+    StartedAt  time.Time
+    EndedAt    time.Time // zero if still active
+}
+```
+
+Rows are inserted on `/session start` and the `ended_at` column is updated on `/session stop`.
+
+---
+
+## 🎙️ Recap Store
+
+The recap store caches generated voice recaps (text + PCM audio) so that replaying a recap for the same session is near-instant.
+
+### Schema
+
+```sql
+CREATE TABLE recaps (
+    session_id   TEXT         PRIMARY KEY REFERENCES sessions(session_id),
+    campaign_id  TEXT         NOT NULL,
+    text         TEXT         NOT NULL,
+    audio_data   BYTEA        NOT NULL,
+    sample_rate  INT          NOT NULL,
+    channels     INT          NOT NULL,
+    duration_ns  BIGINT       NOT NULL,
+    generated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+```
+
+The table lives within the tenant schema (schema-per-tenant isolation), so no `tenant_id` column is needed.
+
+### Go Interface
+
+```go
+// RecapStore persists and retrieves generated voice recaps.
+type RecapStore interface {
+    SaveRecap(ctx context.Context, recap Recap) error
+    GetRecap(ctx context.Context, sessionID string) (*Recap, error)
+}
+```
+
+`SaveRecap` upserts a recap (re-generating overwrites the previous version). `GetRecap` returns `nil, nil` when no recap exists for the given session.
+
+### Recap Type
+
+```go
+type Recap struct {
+    SessionID   string
+    CampaignID  string
+    Text        string        // LLM-generated narrative recap
+    AudioData   []byte        // Raw PCM audio bytes
+    SampleRate  int           // e.g. 24000
+    Channels    int           // e.g. 1 (mono)
+    Duration    time.Duration // estimated from PCM byte count
+    GeneratedAt time.Time
+}
+```
+
+### How Recaps Are Generated
+
+See [`commands.md`](commands.md#session-voice-recap) for the full `/session voice-recap` command flow. In summary:
+
+1. Fetch transcript from L1 session store
+2. LLM generates a 200--300 word dramatic narrator recap (temperature 0.7)
+3. TTS synthesises the text using the GM helper NPC's voice
+4. Text + audio cached via `RecapStore.SaveRecap`
+5. Audio played into voice channel; text posted as Discord embed
+
+The `RecapGenerator` (`internal/session/recap_generator.go`) orchestrates steps 1--4.
+
+---
+
 ## 🐘 PostgreSQL Setup
 
 ### Required Extensions
@@ -249,11 +347,13 @@ The only required extension is **pgvector** (`CREATE EXTENSION IF NOT EXISTS vec
 
 ### Schema Creation
 
-`postgres.Migrate(ctx, pool, embeddingDimensions)` creates all tables, indexes, and extensions idempotently using `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`. It runs three DDL batches in order:
+`postgres.Migrate(ctx, pool, embeddingDimensions)` creates all tables, indexes, and extensions idempotently using `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`. It runs DDL batches in order:
 
-1. **L1** -- `session_entries` table + GIN full-text index
-2. **L2** -- `vector` extension + `chunks` table + HNSW index (dimension baked into column type)
-3. **L3** -- `entities` + `relationships` tables + all graph indexes
+1. **Sessions** -- `sessions` table + campaign/started index
+2. **Recaps** -- `recaps` table (FK to `sessions`)
+3. **L1** -- `session_entries` table + GIN full-text index
+4. **L2** -- `vector` extension + `chunks` table + HNSW index (dimension baked into column type)
+5. **L3** -- `entities` + `relationships` tables + all graph indexes
 
 ### Automatic vs Manual Migration
 
@@ -267,8 +367,9 @@ store, err := postgres.NewStore(ctx, dsn, 1536) // 1536 for OpenAI text-embeddin
 if err != nil { /* ... */ }
 defer store.Close()
 
-l1 := store.L1()  // memory.SessionStore
-l2 := store.L2()  // memory.SemanticIndex
+l1 := store.L1()           // memory.SessionStore
+l2 := store.L2()           // memory.SemanticIndex
+recaps := store.RecapStore() // memory.RecapStore
 // store itself implements memory.KnowledgeGraph + memory.GraphRAGQuerier
 ```
 

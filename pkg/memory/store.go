@@ -345,6 +345,11 @@ type SessionStore interface {
 	// EntryCount returns the total number of transcript entries stored for
 	// the given session. Returns 0 when the session has no entries.
 	EntryCount(ctx context.Context, sessionID string) (int, error)
+
+	// ListSessions returns sessions for the current campaign, newest first.
+	// limit caps the number of results (0 = implementation default).
+	// Returns an empty (non-nil) slice when no sessions exist.
+	ListSessions(ctx context.Context, limit int) ([]SessionInfo, error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

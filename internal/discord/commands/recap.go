@@ -67,9 +67,36 @@ func (rc *RecapCommands) handleRecap(e *events.ApplicationCommandInteractionCrea
 		return
 	}
 
+	// Resolve session ID: explicit param > active session > most recent.
+	var sessionID string
+	var campaignName string
+
+	data := e.SlashCommandInteractionData()
+	if opt, ok := data.OptString("session_id"); ok && opt != "" {
+		sessionID = opt
+	}
+
 	info := rc.sessionMgr.Info()
 
-	if info.SessionID == "" {
+	if sessionID == "" {
+		if info.SessionID != "" {
+			sessionID = info.SessionID
+			campaignName = info.CampaignName
+		}
+	} else if campaignName == "" {
+		campaignName = info.CampaignName
+	}
+
+	if sessionID == "" && rc.sessionStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		sessions, err := rc.sessionStore.ListSessions(ctx, 1)
+		if err == nil && len(sessions) > 0 {
+			sessionID = sessions[0].SessionID
+		}
+	}
+
+	if sessionID == "" {
 		discordbot.RespondEphemeral(e, "No session data available. Start a session first with `/session start`.")
 		return
 	}
@@ -82,13 +109,15 @@ func (rc *RecapCommands) handleRecap(e *events.ApplicationCommandInteractionCrea
 		status = "Active"
 	}
 
+	_ = campaignName // used for future enrichment
+
 	npcList := rc.buildNPCList()
-	summary := rc.buildSummary(info.SessionID)
+	summary := rc.buildSummary(sessionID)
 
 	fields := []discord.EmbedField{
 		{Name: "Campaign", Value: info.CampaignName, Inline: new(true)},
 		{Name: "Status", Value: status, Inline: new(true)},
-		{Name: "Session ID", Value: fmt.Sprintf("`%s`", info.SessionID), Inline: new(true)},
+		{Name: "Session ID", Value: fmt.Sprintf("`%s`", sessionID), Inline: new(true)},
 		{Name: "Started By", Value: fmt.Sprintf("<@%s>", info.StartedBy), Inline: new(true)},
 		{Name: "Duration", Value: duration.String(), Inline: new(true)},
 		{Name: "Channel", Value: fmt.Sprintf("<#%s>", info.ChannelID), Inline: new(true)},
@@ -98,9 +127,9 @@ func (rc *RecapCommands) handleRecap(e *events.ApplicationCommandInteractionCrea
 	if rc.sessionStore != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		count, err := rc.sessionStore.EntryCount(ctx, info.SessionID)
+		count, err := rc.sessionStore.EntryCount(ctx, sessionID)
 		if err != nil {
-			slog.Warn("recap: failed to get entry count", "session_id", info.SessionID, "err", err)
+			slog.Warn("recap: failed to get entry count", "session_id", sessionID, "err", err)
 		} else {
 			fields = append(fields, discord.EmbedField{
 				Name: "Transcript Entries", Value: fmt.Sprintf("%d", count), Inline: new(true),
