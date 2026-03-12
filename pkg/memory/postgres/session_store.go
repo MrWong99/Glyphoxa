@@ -129,6 +129,11 @@ func (s *SessionStoreImpl) EntryCount(ctx context.Context, sessionID string) (in
 	return count, nil
 }
 
+// ListSessions implements [memory.SessionStore].
+func (s *SessionStoreImpl) ListSessions(ctx context.Context, limit int) ([]memory.SessionInfo, error) {
+	return []memory.SessionInfo{}, nil // TODO: implement in Task 3
+}
+
 // collectEntries scans pgx rows into a slice of TranscriptEntry values.
 func collectEntries(rows pgx.Rows) ([]memory.TranscriptEntry, error) {
 	entries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (memory.TranscriptEntry, error) {

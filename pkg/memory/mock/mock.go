@@ -68,6 +68,12 @@ type SessionStore struct {
 
 	// EntryCountErr is returned by [SessionStore.EntryCount] when non-nil.
 	EntryCountErr error
+
+	// ListSessionsResult is returned by [SessionStore.ListSessions].
+	ListSessionsResult []memory.SessionInfo
+
+	// ListSessionsErr is returned by [SessionStore.ListSessions] when non-nil.
+	ListSessionsErr error
 }
 
 // Calls returns a copy of all recorded method invocations.
@@ -139,6 +145,19 @@ func (m *SessionStore) EntryCount(_ context.Context, sessionID string) (int, err
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, Call{Method: "EntryCount", Args: []any{sessionID}})
 	return m.EntryCountResult, m.EntryCountErr
+}
+
+// ListSessions implements [memory.SessionStore].
+func (m *SessionStore) ListSessions(_ context.Context, limit int) ([]memory.SessionInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, Call{Method: "ListSessions", Args: []any{limit}})
+	if m.ListSessionsResult == nil {
+		return []memory.SessionInfo{}, m.ListSessionsErr
+	}
+	out := make([]memory.SessionInfo, len(m.ListSessionsResult))
+	copy(out, m.ListSessionsResult)
+	return out, m.ListSessionsErr
 }
 
 // Ensure SessionStore satisfies the interface at compile time.
