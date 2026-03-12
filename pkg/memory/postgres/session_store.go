@@ -129,9 +129,67 @@ func (s *SessionStoreImpl) EntryCount(ctx context.Context, sessionID string) (in
 	return count, nil
 }
 
-// ListSessions implements [memory.SessionStore].
+// ListSessions implements [memory.SessionStore]. It returns sessions for the
+// store's campaign, ordered by started_at descending (newest first).
 func (s *SessionStoreImpl) ListSessions(ctx context.Context, limit int) ([]memory.SessionInfo, error) {
-	return []memory.SessionInfo{}, nil // TODO: implement in Task 3
+	if limit <= 0 {
+		limit = 50
+	}
+	q := fmt.Sprintf(`
+		SELECT session_id, campaign_id, started_at, COALESCE(ended_at, '0001-01-01T00:00:00Z')
+		FROM   %s
+		WHERE  campaign_id = $1
+		ORDER  BY started_at DESC
+		LIMIT  $2`,
+		s.schema.TableRef("sessions"))
+
+	rows, err := s.pool.Query(ctx, q, s.campaignID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("session store: list sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (memory.SessionInfo, error) {
+		var si memory.SessionInfo
+		if err := row.Scan(&si.SessionID, &si.CampaignID, &si.StartedAt, &si.EndedAt); err != nil {
+			return memory.SessionInfo{}, err
+		}
+		return si, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("session store: list sessions scan: %w", err)
+	}
+	if sessions == nil {
+		sessions = []memory.SessionInfo{}
+	}
+	return sessions, nil
+}
+
+// StartSession records a new session in the sessions metadata table.
+func (s *SessionStoreImpl) StartSession(ctx context.Context, sessionID string) error {
+	q := fmt.Sprintf(`
+		INSERT INTO %s (session_id, campaign_id, started_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (session_id) DO NOTHING`,
+		s.schema.TableRef("sessions"))
+
+	_, err := s.pool.Exec(ctx, q, sessionID, s.campaignID)
+	if err != nil {
+		return fmt.Errorf("session store: start session: %w", err)
+	}
+	return nil
+}
+
+// EndSession sets the ended_at timestamp for a session.
+func (s *SessionStoreImpl) EndSession(ctx context.Context, sessionID string) error {
+	q := fmt.Sprintf(`
+		UPDATE %s SET ended_at = now()
+		WHERE  session_id = $1 AND campaign_id = $2`,
+		s.schema.TableRef("sessions"))
+
+	_, err := s.pool.Exec(ctx, q, sessionID, s.campaignID)
+	if err != nil {
+		return fmt.Errorf("session store: end session: %w", err)
+	}
+	return nil
 }
 
 // collectEntries scans pgx rows into a slice of TranscriptEntry values.

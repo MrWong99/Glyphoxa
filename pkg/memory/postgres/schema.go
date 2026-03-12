@@ -148,6 +148,22 @@ CREATE INDEX IF NOT EXISTS idx_chunks_fts
 `, t, embeddingDimensions, t, t, t, t)
 }
 
+// ddlSessions returns the DDL for the sessions metadata table.
+func ddlSessions(s SchemaName) string {
+	t := s.TableRef("sessions")
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s (
+    session_id   TEXT         PRIMARY KEY,
+    campaign_id  TEXT         NOT NULL,
+    started_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    ended_at     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_campaign_started
+    ON %s (campaign_id, started_at DESC);
+`, t, t)
+}
+
 // Migrate creates or ensures all required database tables and extensions exist
 // within the given schema. It is idempotent (CREATE TABLE IF NOT EXISTS /
 // CREATE INDEX IF NOT EXISTS) and safe to call on every application start.
@@ -165,6 +181,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, embeddingDimensions int, s
 	}
 
 	statements := []string{
+		ddlSessions(schema),
 		ddlSessionEntries(schema),
 		ddlL2(schema, embeddingDimensions),
 		ddlKnowledgeGraph(schema),
