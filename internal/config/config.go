@@ -228,6 +228,11 @@ type NPCConfig struct {
 	// (e.g., "located_at", "knows", "member_of"). Optional — omit for NPCs
 	// without pre-configured relationships.
 	Relationships []RelationshipConfig `yaml:"relationships,omitempty"`
+
+	// GMHelper designates this NPC as the GM helper. At most one NPC per
+	// campaign may be flagged. The GM helper's voice is used for voiced recaps
+	// and (in future) GM-assistant features. See issue #37.
+	GMHelper bool `yaml:"gm_helper"`
 }
 
 // RelationshipConfig defines a relationship to another entity, used in NPC config.

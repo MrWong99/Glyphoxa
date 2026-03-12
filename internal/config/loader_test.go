@@ -141,6 +141,48 @@ npcs:
 	}
 }
 
+func TestValidate_DuplicateGMHelper(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			LLM: config.ProviderEntry{Name: "openai"},
+			TTS: config.ProviderEntry{Name: "elevenlabs"},
+		},
+		NPCs: []config.NPCConfig{
+			{Name: "NPC1", Engine: config.EngineCascaded, GMHelper: true},
+			{Name: "NPC2", Engine: config.EngineCascaded, GMHelper: true},
+		},
+	}
+
+	err := config.Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for duplicate gm_helper")
+	}
+	if !strings.Contains(err.Error(), "gm_helper") {
+		t.Errorf("expected error mentioning gm_helper, got: %s", err)
+	}
+}
+
+func TestValidate_SingleGMHelper(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			LLM: config.ProviderEntry{Name: "openai"},
+			TTS: config.ProviderEntry{Name: "elevenlabs"},
+		},
+		NPCs: []config.NPCConfig{
+			{Name: "NPC1", Engine: config.EngineCascaded, GMHelper: true},
+			{Name: "NPC2", Engine: config.EngineCascaded},
+		},
+	}
+
+	if err := config.Validate(cfg); err != nil {
+		t.Errorf("expected no error for single gm_helper, got: %s", err)
+	}
+}
+
 func TestValidProviderNames(t *testing.T) {
 	t.Parallel()
 	// Sanity-check that the map is populated.
