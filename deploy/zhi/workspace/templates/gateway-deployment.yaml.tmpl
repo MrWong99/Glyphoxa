@@ -39,7 +39,7 @@ spec:
         app.kubernetes.io/part-of: glyphoxa
         app.kubernetes.io/managed-by: zhi
       annotations:
-        checksum/config: {{ .ConfigChecksum | sha256sum }}
+        checksum/config: {{ .All | mustToPrettyJson | sha256sum }}
     spec:
       serviceAccountName: {{ $saName }}
 {{- if $pullSecrets }}
@@ -71,13 +71,16 @@ spec:
 {{- end }}
       securityContext:
         runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: gateway
           image: {{ $repo }}:{{ $tag }}
           imagePullPolicy: {{ $pullPolicy }}
-          args: ["--mode=gateway"]
+          args: ["--mode=gateway", "--config=/etc/glyphoxa/config.yaml"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

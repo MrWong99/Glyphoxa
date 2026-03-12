@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Clean generated/ to prevent stale files from disabled components.
-rm -rf ./generated/*
-
 NAMESPACE="{{ .Get "core/namespace" }}"
 RELEASE="{{ .Get "core/release-name" }}"
 
@@ -33,6 +30,10 @@ kubectl create secret generic "${RELEASE}-admin-key" \
   --namespace "$NAMESPACE" \
   --dry-run=client -o yaml | kubectl apply --server-side --field-manager=zhi-glyphoxa -f -
 {{ end -}}
+
+# Remove empty manifests from disabled components before applying.
+find ./generated/ -name '*.yaml' -empty -delete
+find ./generated/ -name '*.yaml' -size 1c -delete
 
 # Apply all generated manifests.
 kubectl apply --server-side --field-manager=zhi-glyphoxa -f ./generated/ -n "$NAMESPACE"
