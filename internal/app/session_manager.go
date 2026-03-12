@@ -389,6 +389,13 @@ func (sm *SessionManager) Orchestrator() *orchestrator.Orchestrator {
 	return sm.orch
 }
 
+// Mixer returns the active session's mixer. Returns nil if no session is active.
+func (sm *SessionManager) Mixer() audio.Mixer {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.mixer
+}
+
 // PropagateEntity persists a new entity and propagates it to the knowledge
 // graph for mid-session use. Steps:
 //  1. Add entity to the entity store.

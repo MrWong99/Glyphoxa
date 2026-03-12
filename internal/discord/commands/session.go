@@ -36,7 +36,7 @@ func NewSessionCommands(bot *discordbot.Bot, sessionMgr *app.SessionManager, per
 func (sc *SessionCommands) Register(router *discordbot.CommandRouter) {
 	def := sc.Definition()
 	router.RegisterCommand("session", def, func(e *events.ApplicationCommandInteractionCreate) {
-		discordbot.RespondEphemeral(e, "Please use a subcommand: `/session start` or `/session stop`.")
+		discordbot.RespondEphemeral(e, "Please use a subcommand: `/session start`, `/session stop`, `/session recap`, or `/session voice-recap`.")
 	})
 	router.RegisterHandler("session/start", sc.handleStart)
 	router.RegisterHandler("session/stop", sc.handleStop)
@@ -63,6 +63,17 @@ func (sc *SessionCommands) Definition() discord.SlashCommandCreate {
 					discord.ApplicationCommandOptionString{
 						Name:        "session_id",
 						Description: "Session ID (defaults to current or most recent)",
+						Required:    false,
+					},
+				},
+			},
+			discord.ApplicationCommandOptionSubCommand{
+				Name:        "voice-recap",
+				Description: "Generate and play a dramatic voiced recap of a session",
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
+						Name:        "session_id",
+						Description: "Session ID (defaults to most recent for this campaign)",
 						Required:    false,
 					},
 				},
