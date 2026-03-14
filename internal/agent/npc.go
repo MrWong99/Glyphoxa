@@ -56,7 +56,7 @@ type AgentConfig struct {
 	SessionID string
 
 	// BudgetTier controls which MCP tools are offered to the LLM based on
-	// latency constraints. Defaults to [mcp.BudgetFast] when zero-valued.
+	// latency constraints. [mcp.BudgetUnset] is resolved to [mcp.BudgetFast].
 	BudgetTier mcp.BudgetTier
 
 	// TTS is an optional TTS provider used by [liveAgent.SpeakText] for
@@ -227,7 +227,7 @@ func (a *liveAgent) HandleUtterance(ctx context.Context, speaker string, transcr
 	}
 
 	// 2. Format system prompt.
-	systemPrompt := hotctx.FormatSystemPrompt(hctx, a.identity.Personality)
+	systemPrompt := hotctx.FormatSystemPrompt(hctx, a.identity.Personality, a.identity.GMHelper)
 
 	// 3. Build prompt context with current messages + the user's new utterance.
 	userMsg := llm.Message{

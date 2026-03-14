@@ -15,6 +15,8 @@ type NPCDiff struct {
 	PersonalityChanged bool
 	VoiceChanged       bool
 	BudgetTierChanged  bool
+	GMHelperChanged    bool
+	AddressOnlyChanged bool
 	Added              bool
 	Removed            bool
 }
@@ -52,7 +54,7 @@ func Diff(old, new *Config) ConfigDiff {
 			continue
 		}
 		nd := diffNPC(name, oldNPC, newNPC)
-		if nd.PersonalityChanged || nd.VoiceChanged || nd.BudgetTierChanged {
+		if nd.PersonalityChanged || nd.VoiceChanged || nd.BudgetTierChanged || nd.GMHelperChanged || nd.AddressOnlyChanged {
 			d.NPCChanges = append(d.NPCChanges, nd)
 			d.NPCsChanged = true
 		}
@@ -86,6 +88,14 @@ func diffNPC(name string, old, new *NPCConfig) NPCDiff {
 
 	if old.BudgetTier != new.BudgetTier {
 		nd.BudgetTierChanged = true
+	}
+
+	if old.GMHelper != new.GMHelper {
+		nd.GMHelperChanged = true
+	}
+
+	if old.AddressOnly != new.AddressOnly {
+		nd.AddressOnlyChanged = true
 	}
 
 	return nd

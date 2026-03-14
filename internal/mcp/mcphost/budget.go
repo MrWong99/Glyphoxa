@@ -17,7 +17,9 @@ type BudgetEnforcer struct{}
 // FilterTools returns only the tool definitions whose tier is ≤ maxTier.
 // The returned slice is sorted by estimated latency ascending (fastest first).
 //
-// Tier comparison uses the integer ordering: BudgetFast(0) ≤ BudgetStandard(1) ≤ BudgetDeep(2).
+// Tier comparison uses the integer ordering: BudgetUnset(0) < BudgetFast(1) ≤ BudgetStandard(2) ≤ BudgetDeep(3).
+// Callers must resolve BudgetUnset before calling FilterTools; passing BudgetUnset as maxTier
+// would match no tools (defensive, should never happen in practice).
 func (e *BudgetEnforcer) FilterTools(tools []toolEntry, maxTier mcp.BudgetTier) []llm.ToolDefinition {
 	var result []toolEntry
 	for i := range tools {

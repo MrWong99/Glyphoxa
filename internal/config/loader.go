@@ -49,10 +49,24 @@ func LoadFromReader(r io.Reader) (*Config, error) {
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("config: decode yaml: %w", err)
 	}
+	ApplyDefaults(cfg)
 	if err := Validate(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// ApplyDefaults fills in zero-valued fields with sensible defaults.
+// It must be called before [Validate] so that validation sees the complete config.
+//
+// Current defaults:
+//   - NPCs with GMHelper=true get AddressOnly=true (prevents accidental activation).
+func ApplyDefaults(cfg *Config) {
+	for i := range cfg.NPCs {
+		if cfg.NPCs[i].GMHelper && !cfg.NPCs[i].AddressOnly {
+			cfg.NPCs[i].AddressOnly = true
+		}
+	}
 }
 
 // Validate checks that cfg contains a coherent set of values.

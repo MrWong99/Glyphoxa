@@ -309,6 +309,8 @@ func schemaToMap(schema any) map[string]any {
 // If [Host.Calibrate] has not been called, tools retain the tiers implied by
 // their declared EstimatedDurationMs and MaxDurationMs values.
 func (h *Host) AvailableTools(tier mcp.BudgetTier) []llm.ToolDefinition {
+	tier = tier.Resolve()
+
 	h.mu.RLock()
 	entries := make([]toolEntry, 0, len(h.tools))
 	for _, e := range h.tools {

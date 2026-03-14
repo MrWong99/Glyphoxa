@@ -348,12 +348,7 @@ func (a *App) initAgents(ctx context.Context) error {
 		}
 		a.closers = append(a.closers, eng.Close)
 
-		identity := agent.NPCIdentity{
-			Name:           npc.Name,
-			Personality:    npc.Personality,
-			Voice:          configVoiceProfile(npc.Voice),
-			KnowledgeScope: npc.KnowledgeScope,
-		}
+		identity := identityFromConfig(npc)
 
 		npcID := fmt.Sprintf("npc-%d-%s", i, npc.Name)
 		tier := configBudgetTier(npc.BudgetTier)
@@ -697,5 +692,19 @@ func configVoiceProfile(vc config.VoiceConfig) tts.VoiceProfile {
 		Provider:    vc.Provider,
 		PitchShift:  vc.PitchShift,
 		SpeedFactor: vc.SpeedFactor,
+	}
+}
+
+// identityFromConfig converts a config.NPCConfig to an agent.NPCIdentity.
+// This is the single conversion point — all NPC identity construction should
+// go through this function so that new fields are wired in one place.
+func identityFromConfig(npc config.NPCConfig) agent.NPCIdentity {
+	return agent.NPCIdentity{
+		Name:           npc.Name,
+		Personality:    npc.Personality,
+		Voice:          configVoiceProfile(npc.Voice),
+		KnowledgeScope: npc.KnowledgeScope,
+		GMHelper:       npc.GMHelper,
+		AddressOnly:    npc.AddressOnly,
 	}
 }

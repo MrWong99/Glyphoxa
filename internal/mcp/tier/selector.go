@@ -131,9 +131,9 @@ func NewSelector(opts ...Option) *Selector {
 // Select is goroutine-safe and executes in sub-millisecond time (pure string
 // operations, no I/O).
 func (s *Selector) Select(text string, dmOverride mcp.BudgetTier) mcp.BudgetTier {
-	// Priority 1: DM override wins unconditionally (non-zero means an explicit tier).
-	// BudgetFast == 0 is the zero value, so dmOverride == 0 means "no override set".
-	if dmOverride != 0 {
+	// Priority 1: DM override wins unconditionally.
+	// BudgetUnset (0) means "no override set"; any other value is an explicit tier.
+	if dmOverride != mcp.BudgetUnset {
 		return dmOverride
 	}
 

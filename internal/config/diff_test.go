@@ -182,6 +182,62 @@ func TestDiff_NPCRemoved(t *testing.T) {
 	}
 }
 
+func TestDiff_GMHelperChanged(t *testing.T) {
+	t.Parallel()
+	old := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Eve", GMHelper: false},
+		},
+	}
+	new := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Eve", GMHelper: true},
+		},
+	}
+
+	d := config.Diff(old, new)
+	if !d.NPCsChanged {
+		t.Error("expected NPCsChanged=true")
+	}
+	found := false
+	for _, nc := range d.NPCChanges {
+		if nc.Name == "Eve" && nc.GMHelperChanged {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected Eve's GMHelperChanged=true")
+	}
+}
+
+func TestDiff_AddressOnlyChanged(t *testing.T) {
+	t.Parallel()
+	old := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Frank", AddressOnly: false},
+		},
+	}
+	new := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Frank", AddressOnly: true},
+		},
+	}
+
+	d := config.Diff(old, new)
+	if !d.NPCsChanged {
+		t.Error("expected NPCsChanged=true")
+	}
+	found := false
+	for _, nc := range d.NPCChanges {
+		if nc.Name == "Frank" && nc.AddressOnlyChanged {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected Frank's AddressOnlyChanged=true")
+	}
+}
+
 func TestDiff_MultipleChanges(t *testing.T) {
 	t.Parallel()
 	old := &config.Config{

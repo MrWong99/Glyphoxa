@@ -183,6 +183,52 @@ func TestValidate_SingleGMHelper(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_GMHelperSetsAddressOnly(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Helper", GMHelper: true},
+			{Name: "Regular"},
+		},
+	}
+	config.ApplyDefaults(cfg)
+
+	if !cfg.NPCs[0].AddressOnly {
+		t.Error("expected GMHelper NPC to have AddressOnly=true after ApplyDefaults")
+	}
+	if cfg.NPCs[1].AddressOnly {
+		t.Error("expected regular NPC to remain AddressOnly=false")
+	}
+}
+
+func TestApplyDefaults_ExplicitAddressOnlyPreserved(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Helper", GMHelper: true, AddressOnly: true},
+		},
+	}
+	config.ApplyDefaults(cfg)
+
+	if !cfg.NPCs[0].AddressOnly {
+		t.Error("expected AddressOnly=true to remain true")
+	}
+}
+
+func TestApplyDefaults_NonGMHelperAddressOnly(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		NPCs: []config.NPCConfig{
+			{Name: "Background", AddressOnly: true},
+		},
+	}
+	config.ApplyDefaults(cfg)
+
+	if !cfg.NPCs[0].AddressOnly {
+		t.Error("expected non-GM-helper with explicit AddressOnly=true to be preserved")
+	}
+}
+
 func TestValidProviderNames(t *testing.T) {
 	t.Parallel()
 	// Sanity-check that the map is populated.

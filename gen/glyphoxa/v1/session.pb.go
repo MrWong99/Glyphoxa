@@ -84,6 +84,8 @@ type NPCConfig struct {
 	VoiceId        string                 `protobuf:"bytes,4,opt,name=voice_id,json=voiceId,proto3" json:"voice_id,omitempty"`
 	KnowledgeScope []string               `protobuf:"bytes,5,rep,name=knowledge_scope,json=knowledgeScope,proto3" json:"knowledge_scope,omitempty"`
 	BudgetTier     string                 `protobuf:"bytes,6,opt,name=budget_tier,json=budgetTier,proto3" json:"budget_tier,omitempty"`
+	GmHelper       bool                   `protobuf:"varint,7,opt,name=gm_helper,json=gmHelper,proto3" json:"gm_helper,omitempty"`
+	AddressOnly    bool                   `protobuf:"varint,8,opt,name=address_only,json=addressOnly,proto3" json:"address_only,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -158,6 +160,20 @@ func (x *NPCConfig) GetBudgetTier() string {
 		return x.BudgetTier
 	}
 	return ""
+}
+
+func (x *NPCConfig) GetGmHelper() bool {
+	if x != nil {
+		return x.GmHelper
+	}
+	return false
+}
+
+func (x *NPCConfig) GetAddressOnly() bool {
+	if x != nil {
+		return x.AddressOnly
+	}
+	return false
 }
 
 // StartSessionRequest is sent by the gateway to a worker to start a new voice session.
@@ -740,7 +756,7 @@ var File_glyphoxa_v1_session_proto protoreflect.FileDescriptor
 
 const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\n" +
-	"\x19glyphoxa/v1/session.proto\x12\vglyphoxa.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbe\x01\n" +
+	"\x19glyphoxa/v1/session.proto\x12\vglyphoxa.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfe\x01\n" +
 	"\tNPCConfig\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vpersonality\x18\x02 \x01(\tR\vpersonality\x12\x16\n" +
@@ -748,7 +764,9 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\bvoice_id\x18\x04 \x01(\tR\avoiceId\x12'\n" +
 	"\x0fknowledge_scope\x18\x05 \x03(\tR\x0eknowledgeScope\x12\x1f\n" +
 	"\vbudget_tier\x18\x06 \x01(\tR\n" +
-	"budgetTier\"\x88\x02\n" +
+	"budgetTier\x12\x1b\n" +
+	"\tgm_helper\x18\a \x01(\bR\bgmHelper\x12!\n" +
+	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\x88\x02\n" +
 	"\x13StartSessionRequest\x12\x1b\n" +
 	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12\x1f\n" +
 	"\vcampaign_id\x18\x02 \x01(\tR\n" +

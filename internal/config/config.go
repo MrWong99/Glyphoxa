@@ -233,6 +233,12 @@ type NPCConfig struct {
 	// campaign may be flagged. The GM helper's voice is used for voiced recaps
 	// and (in future) GM-assistant features. See issue #37.
 	GMHelper bool `yaml:"gm_helper"`
+
+	// AddressOnly restricts this NPC to respond only when explicitly addressed
+	// by name. It will not be selected by the last-speaker or single-NPC
+	// fallback heuristics in the address detector. Useful for background NPCs
+	// and the GM helper to avoid accidental activations.
+	AddressOnly bool `yaml:"address_only"`
 }
 
 // RelationshipConfig defines a relationship to another entity, used in NPC config.

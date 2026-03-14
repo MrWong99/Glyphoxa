@@ -49,6 +49,16 @@ type NPCIdentity struct {
 	// "Never break character", "Always speak in archaic English").
 	// Appended to the system prompt as a numbered list of rules.
 	BehaviorRules []string
+
+	// GMHelper indicates this NPC serves as the GM's AI assistant. When true,
+	// the system prompt receives a GM-assistant preamble and the NPC is treated
+	// as a meta-game entity rather than an in-world character.
+	GMHelper bool
+
+	// AddressOnly restricts this NPC to respond only when explicitly addressed
+	// by name. It will not be selected by the last-speaker or single-NPC
+	// fallback heuristics in the address detector.
+	AddressOnly bool
 }
 
 // SceneContext describes the current in-game situation passed to an NPC
