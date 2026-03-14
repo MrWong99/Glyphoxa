@@ -89,6 +89,7 @@ func fullHotContext() *hotctx.HotContext {
 // TestFormatSystemPrompt_Full verifies that a fully-populated HotContext
 // renders all sections correctly.
 func TestFormatSystemPrompt_Full(t *testing.T) {
+	t.Parallel()
 	hctx := fullHotContext()
 	personality := "You are gruff but fair, and speak in short sentences."
 
@@ -159,6 +160,7 @@ func TestFormatSystemPrompt_Full(t *testing.T) {
 // TestFormatSystemPrompt_Minimal verifies that a nil identity, empty scene,
 // and no transcript produce only the opening line — no empty section headers.
 func TestFormatSystemPrompt_Minimal(t *testing.T) {
+	t.Parallel()
 	hctx := &hotctx.HotContext{
 		// No Identity, no SceneContext, no RecentTranscript
 	}
@@ -189,6 +191,7 @@ func TestFormatSystemPrompt_Minimal(t *testing.T) {
 
 // TestFormatSystemPrompt_NilHotContext verifies graceful handling of nil input.
 func TestFormatSystemPrompt_NilHotContext(t *testing.T) {
+	t.Parallel()
 	result := hotctx.FormatSystemPrompt(nil, "brave hero", false)
 	if result == "" {
 		t.Error("FormatSystemPrompt(nil, ...) returned empty string")
@@ -198,9 +201,23 @@ func TestFormatSystemPrompt_NilHotContext(t *testing.T) {
 	}
 }
 
+// TestFormatSystemPrompt_NilHotContext_GMHelper verifies that the GM-assistant
+// preamble is included even when HotContext assembly fails (nil fallback).
+func TestFormatSystemPrompt_NilHotContext_GMHelper(t *testing.T) {
+	t.Parallel()
+	result := hotctx.FormatSystemPrompt(nil, "helpful assistant", true)
+	if !strings.Contains(result, "Game Master's AI assistant") {
+		t.Errorf("nil hctx with gmHelper=true should include GM preamble:\n%s", result)
+	}
+	if !strings.Contains(result, "helpful assistant") {
+		t.Errorf("nil hctx with gmHelper=true should still include personality:\n%s", result)
+	}
+}
+
 // TestFormatSystemPrompt_NoPersonality verifies that an empty personality
 // string is handled without leaving trailing spaces or double periods.
 func TestFormatSystemPrompt_NoPersonality(t *testing.T) {
+	t.Parallel()
 	hctx := fullHotContext()
 	result := hotctx.FormatSystemPrompt(hctx, "", false)
 
@@ -217,6 +234,7 @@ func TestFormatSystemPrompt_NoPersonality(t *testing.T) {
 // TestFormatSystemPrompt_EmptyRelationships verifies that the Relationships
 // section is omitted when there are no relationships.
 func TestFormatSystemPrompt_EmptyRelationships(t *testing.T) {
+	t.Parallel()
 	hctx := &hotctx.HotContext{
 		Identity: &memory.NPCIdentity{
 			Entity: memory.Entity{ID: "npc-1", Name: "Grimjaw", Type: "npc"},
@@ -234,6 +252,7 @@ func TestFormatSystemPrompt_EmptyRelationships(t *testing.T) {
 // TestFormatSystemPrompt_EmptyScene verifies that the Scene section is omitted
 // when SceneContext has no location, no NPCs, and no quests.
 func TestFormatSystemPrompt_EmptyScene(t *testing.T) {
+	t.Parallel()
 	hctx := &hotctx.HotContext{
 		Identity: &memory.NPCIdentity{
 			Entity: memory.Entity{ID: "npc-1", Name: "Grimjaw", Type: "npc"},
@@ -390,6 +409,7 @@ func TestFormatSystemPrompt_SpeakerRoleSuffix(t *testing.T) {
 // TestFormatSystemPrompt_IsPure verifies that calling FormatSystemPrompt twice
 // with the same input produces identical output (pure function).
 func TestFormatSystemPrompt_IsPure(t *testing.T) {
+	t.Parallel()
 	hctx := fullHotContext()
 	// FormatSystemPrompt uses relative timestamps — calling it twice
 	// in rapid succession should give the same structure (same sections present).

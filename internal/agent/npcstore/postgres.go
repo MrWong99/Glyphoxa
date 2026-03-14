@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS npc_definitions (
 );
 CREATE INDEX IF NOT EXISTS idx_npc_definitions_campaign ON npc_definitions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_npc_definitions_name ON npc_definitions(name);
+
+-- Migration: add columns for existing tables that predate the GM helper feature.
+ALTER TABLE npc_definitions ADD COLUMN IF NOT EXISTS gm_helper BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE npc_definitions ADD COLUMN IF NOT EXISTS address_only BOOLEAN NOT NULL DEFAULT false;
 `
 
 // DB is the database interface used by [PostgresStore]. Both *pgxpool.Pool

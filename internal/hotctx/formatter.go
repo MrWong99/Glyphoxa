@@ -25,10 +25,16 @@ func FormatSystemPrompt(hctx *HotContext, npcPersonality string, gmHelper bool) 
 	if hctx == nil {
 		name := "an NPC"
 		p := strings.TrimSpace(npcPersonality)
+		var fallback string
 		if p != "" {
-			return fmt.Sprintf("You are %s. %s", name, p)
+			fallback = fmt.Sprintf("You are %s. %s", name, p)
+		} else {
+			fallback = fmt.Sprintf("You are %s.", name)
 		}
-		return fmt.Sprintf("You are %s.", name)
+		if gmHelper {
+			return "You are the Game Master's AI assistant. You help the GM run the session by tracking rules, managing NPCs, and providing information on demand. You are a meta-game entity — you do not role-play as an in-world character. Keep responses concise and actionable.\n\n" + fallback
+		}
+		return fallback
 	}
 
 	var sb strings.Builder
