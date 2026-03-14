@@ -38,10 +38,11 @@ type Orchestrator struct {
 	dmOverrides map[string]string // speaker → forced NPC id (puppet mode)
 }
 
-// agentEntry pairs an [agent.NPCAgent] with its muted state.
+// agentEntry pairs an [agent.NPCAgent] with its muted and address-only state.
 type agentEntry struct {
-	agent agent.NPCAgent
-	muted bool
+	agent       agent.NPCAgent
+	muted       bool
+	addressOnly bool // when true, only reachable via explicit name match or DM puppet
 }
 
 // Option configures an [Orchestrator] during construction.
@@ -71,7 +72,7 @@ func WithBufferDuration(d time.Duration) Option {
 func New(agents []agent.NPCAgent, opts ...Option) *Orchestrator {
 	entries := make(map[string]*agentEntry, len(agents))
 	for _, a := range agents {
-		entries[a.ID()] = &agentEntry{agent: a}
+		entries[a.ID()] = &agentEntry{agent: a, addressOnly: a.Identity().AddressOnly}
 	}
 
 	o := &Orchestrator{
@@ -120,7 +121,12 @@ func (o *Orchestrator) Route(ctx context.Context, speaker string, transcript stt
 	}
 
 	// Update last speaker for conversational continuity.
-	o.lastSpeaker = targetID
+	// Skip address-only agents to avoid poisoning the lastSpeaker fallback —
+	// an address-only agent cannot be reached via step 3, so setting it here
+	// would break conversational continuity for subsequent utterances.
+	if !entry.addressOnly {
+		o.lastSpeaker = targetID
+	}
 
 	// Snapshot the buffer and capture the agent reference while holding the
 	// lock, then release before any I/O so that MuteAgent, AddAgent, etc.
@@ -226,7 +232,7 @@ func (o *Orchestrator) AddAgent(a agent.NPCAgent) error {
 		return fmt.Errorf("orchestrator: agent %q already registered", id)
 	}
 
-	o.agents[id] = &agentEntry{agent: a}
+	o.agents[id] = &agentEntry{agent: a, addressOnly: a.Identity().AddressOnly}
 	o.rebuildDetector()
 	return nil
 }

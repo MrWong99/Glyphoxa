@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS npc_definitions (
     behavior_rules   JSONB NOT NULL DEFAULT '[]',
     tools            JSONB NOT NULL DEFAULT '[]',
     budget_tier      TEXT NOT NULL DEFAULT 'fast',
+    gm_helper        BOOLEAN NOT NULL DEFAULT false,
+    address_only     BOOLEAN NOT NULL DEFAULT false,
     attributes       JSONB NOT NULL DEFAULT '{}',
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -103,14 +105,14 @@ func (s *PostgresStore) Create(ctx context.Context, def *NPCDefinition) error {
 		INSERT INTO npc_definitions (
 			id, campaign_id, name, personality, engine,
 			voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
-			budget_tier, attributes
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			budget_tier, gm_helper, address_only, attributes
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		RETURNING created_at, updated_at`
 
 	err = s.db.QueryRow(ctx, query,
 		def.ID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
 		voiceJSON, ksJSON, skJSON, brJSON, toolsJSON,
-		defaultBudgetTier(def.BudgetTier), attrJSON,
+		defaultBudgetTier(def.BudgetTier), def.GMHelper, def.AddressOnly, attrJSON,
 	).Scan(&def.CreatedAt, &def.UpdatedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {
@@ -127,7 +129,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*NPCDefinition, err
 	const query = `
 		SELECT id, campaign_id, name, personality, engine,
 		       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
-		       budget_tier, attributes, created_at, updated_at
+		       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 		FROM npc_definitions
 		WHERE id = $1`
 
@@ -137,7 +139,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*NPCDefinition, err
 	err := s.db.QueryRow(ctx, query, id).Scan(
 		&def.ID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
 		&voiceJSON, &ksJSON, &skJSON, &brJSON, &toolsJSON,
-		&def.BudgetTier, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
+		&def.BudgetTier, &def.GMHelper, &def.AddressOnly, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -189,14 +191,15 @@ func (s *PostgresStore) Update(ctx context.Context, def *NPCDefinition) error {
 			campaign_id = $2, name = $3, personality = $4, engine = $5,
 			voice = $6, knowledge_scope = $7, secret_knowledge = $8,
 			behavior_rules = $9, tools = $10, budget_tier = $11,
-			attributes = $12, updated_at = now()
+			gm_helper = $12, address_only = $13,
+			attributes = $14, updated_at = now()
 		WHERE id = $1
 		RETURNING updated_at`
 
 	err = s.db.QueryRow(ctx, query,
 		def.ID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
 		voiceJSON, ksJSON, skJSON, brJSON, toolsJSON,
-		defaultBudgetTier(def.BudgetTier), attrJSON,
+		defaultBudgetTier(def.BudgetTier), def.GMHelper, def.AddressOnly, attrJSON,
 	).Scan(&def.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -229,7 +232,7 @@ func (s *PostgresStore) List(ctx context.Context, campaignID string) ([]NPCDefin
 		const query = `
 			SELECT id, campaign_id, name, personality, engine,
 			       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
-			       budget_tier, attributes, created_at, updated_at
+			       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 			FROM npc_definitions
 			ORDER BY name`
 		rows, err = s.db.Query(ctx, query)
@@ -237,7 +240,7 @@ func (s *PostgresStore) List(ctx context.Context, campaignID string) ([]NPCDefin
 		const query = `
 			SELECT id, campaign_id, name, personality, engine,
 			       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
-			       budget_tier, attributes, created_at, updated_at
+			       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 			FROM npc_definitions
 			WHERE campaign_id = $1
 			ORDER BY name`
@@ -256,7 +259,7 @@ func (s *PostgresStore) List(ctx context.Context, campaignID string) ([]NPCDefin
 		if err := rows.Scan(
 			&def.ID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
 			&voiceJSON, &ksJSON, &skJSON, &brJSON, &toolsJSON,
-			&def.BudgetTier, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
+			&def.BudgetTier, &def.GMHelper, &def.AddressOnly, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("npcstore: list scan: %w", err)
 		}
@@ -309,8 +312,8 @@ func (s *PostgresStore) Upsert(ctx context.Context, def *NPCDefinition) error {
 		INSERT INTO npc_definitions (
 			id, campaign_id, name, personality, engine,
 			voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
-			budget_tier, attributes
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			budget_tier, gm_helper, address_only, attributes
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO UPDATE SET
 			campaign_id = EXCLUDED.campaign_id,
 			name = EXCLUDED.name,
@@ -322,6 +325,8 @@ func (s *PostgresStore) Upsert(ctx context.Context, def *NPCDefinition) error {
 			behavior_rules = EXCLUDED.behavior_rules,
 			tools = EXCLUDED.tools,
 			budget_tier = EXCLUDED.budget_tier,
+			gm_helper = EXCLUDED.gm_helper,
+			address_only = EXCLUDED.address_only,
 			attributes = EXCLUDED.attributes,
 			updated_at = now()
 		RETURNING created_at, updated_at`
@@ -329,7 +334,7 @@ func (s *PostgresStore) Upsert(ctx context.Context, def *NPCDefinition) error {
 	err = s.db.QueryRow(ctx, query,
 		def.ID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
 		voiceJSON, ksJSON, skJSON, brJSON, toolsJSON,
-		defaultBudgetTier(def.BudgetTier), attrJSON,
+		defaultBudgetTier(def.BudgetTier), def.GMHelper, def.AddressOnly, attrJSON,
 	).Scan(&def.CreatedAt, &def.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("npcstore: upsert: %w", err)

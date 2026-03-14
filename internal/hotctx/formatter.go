@@ -12,14 +12,16 @@ import (
 // suitable for direct injection into an NPC LLM call.
 //
 // npcPersonality is a free-text personality description that is appended to the
-// opening line. If hctx is nil, a minimal fallback prompt is returned.
+// opening line. When gmHelper is true, a GM-assistant preamble is prepended
+// that frames the NPC as a meta-game assistant rather than an in-world character.
+// If hctx is nil, a minimal fallback prompt is returned.
 //
 // The formatter is pure: it performs no I/O, has no side effects, and is safe
 // for concurrent use.
 //
 // Empty sections (nil identity, no relationships, no scene, no transcript) are
 // omitted entirely rather than rendering as empty headers.
-func FormatSystemPrompt(hctx *HotContext, npcPersonality string) string {
+func FormatSystemPrompt(hctx *HotContext, npcPersonality string, gmHelper bool) string {
 	if hctx == nil {
 		name := "an NPC"
 		p := strings.TrimSpace(npcPersonality)
@@ -30,6 +32,11 @@ func FormatSystemPrompt(hctx *HotContext, npcPersonality string) string {
 	}
 
 	var sb strings.Builder
+
+	// ── GM-assistant preamble (prepended before everything else) ─────────────
+	if gmHelper {
+		sb.WriteString("You are the Game Master's AI assistant. You help the GM run the session by tracking rules, managing NPCs, and providing information on demand. You are a meta-game entity — you do not role-play as an in-world character. Keep responses concise and actionable.\n\n")
+	}
 
 	// ── Opening line ──────────────────────────────────────────────────────────
 	npcName := npcNameFromContext(hctx)
@@ -267,7 +274,7 @@ func writeTranscriptSection(sb *strings.Builder, entries []memory.TranscriptEntr
 		}
 
 		relTime := formatRelativeTime(now.Sub(e.Timestamp))
-		fmt.Fprintf(sb, "[%s] %s: %s", relTime, speaker, e.Text)
+		fmt.Fprintf(sb, "[%s] %s%s: %s", relTime, speaker, e.SpeakerRole.DisplaySuffix(), e.Text)
 	}
 }
 

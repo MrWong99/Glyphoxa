@@ -22,6 +22,8 @@ message NPCConfig {
   string voice_id = 4;
   repeated string knowledge_scope = 5;
   string budget_tier = 6;
+  bool gm_helper = 7;
+  bool address_only = 8;
 }
 
 // StartSessionRequest is sent by the gateway to a worker to start a new voice session.

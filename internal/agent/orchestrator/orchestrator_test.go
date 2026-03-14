@@ -18,9 +18,20 @@ import (
 func newMockAgent(id, name string) (*agentmock.NPCAgent, *enginemock.VoiceEngine) {
 	eng := &enginemock.VoiceEngine{}
 	return &agentmock.NPCAgent{
-		IDResult:     id,
-		NameResult:   name,
-		EngineResult: eng,
+		IDResult:       id,
+		NameResult:     name,
+		IdentityResult: agent.NPCIdentity{Name: name},
+		EngineResult:   eng,
+	}, eng
+}
+
+func newAddressOnlyAgent(id, name string) (*agentmock.NPCAgent, *enginemock.VoiceEngine) {
+	eng := &enginemock.VoiceEngine{}
+	return &agentmock.NPCAgent{
+		IDResult:       id,
+		NameResult:     name,
+		IdentityResult: agent.NPCIdentity{Name: name, AddressOnly: true},
+		EngineResult:   eng,
 	}, eng
 }
 
@@ -633,6 +644,113 @@ func TestOptions(t *testing.T) {
 		entries := o.buffer.Entries()
 		if len(entries) != 1 {
 			t.Fatalf("want 1 entry after duration eviction, got %d", len(entries))
+		}
+	})
+}
+
+// ── Address-Only Routing ─────────────────────────────────────────────────────
+
+func TestAddressOnlyRouting(t *testing.T) {
+	t.Parallel()
+
+	t.Run("address-only agent reachable by explicit name", func(t *testing.T) {
+		t.Parallel()
+		helper, _ := newAddressOnlyAgent("h1", "Helper")
+		npc, _ := newMockAgent("n1", "Grimjaw")
+		o := New([]agent.NPCAgent{helper, npc})
+
+		got, err := o.Route(context.Background(), "player-1", transcript("Hey Helper, look up the rules"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.ID() != "h1" {
+			t.Fatalf("want h1, got %s", got.ID())
+		}
+	})
+
+	t.Run("address-only agent skipped by last-speaker fallback", func(t *testing.T) {
+		t.Parallel()
+		helper, _ := newAddressOnlyAgent("h1", "Helper")
+		npc1, _ := newMockAgent("n1", "Grimjaw")
+		npc2, _ := newMockAgent("n2", "Elara")
+
+		// Two normal agents plus one address-only: lastSpeaker=h1 should be
+		// skipped, and with two unmuted non-address-only agents neither
+		// single-NPC fallback applies → ErrNoTarget.
+		active := map[string]*agentEntry{
+			"h1": {agent: helper, addressOnly: true},
+			"n1": {agent: npc1},
+			"n2": {agent: npc2},
+		}
+		noOverrides := map[string]string{}
+		detector := NewAddressDetector([]agent.NPCAgent{helper, npc1, npc2})
+
+		_, err := detector.Detect("tell me more", "h1", active, noOverrides, "player-1")
+		if !errors.Is(err, ErrNoTarget) {
+			t.Fatalf("want ErrNoTarget when lastSpeaker is address-only, got %v", err)
+		}
+	})
+
+	t.Run("address-only agent skipped by single-NPC fallback", func(t *testing.T) {
+		t.Parallel()
+		helper, _ := newAddressOnlyAgent("h1", "Helper")
+
+		active := map[string]*agentEntry{
+			"h1": {agent: helper, addressOnly: true},
+		}
+		noOverrides := map[string]string{}
+		detector := NewAddressDetector([]agent.NPCAgent{helper})
+
+		_, err := detector.Detect("hello", "", active, noOverrides, "player-1")
+		if !errors.Is(err, ErrNoTarget) {
+			t.Fatalf("want ErrNoTarget when only agent is address-only, got %v", err)
+		}
+	})
+
+	t.Run("address-only agent does not poison lastSpeaker", func(t *testing.T) {
+		t.Parallel()
+		helper, _ := newAddressOnlyAgent("h1", "Helper")
+		npc, _ := newMockAgent("n1", "Grimjaw")
+		o := New([]agent.NPCAgent{helper, npc})
+
+		// Route to Grimjaw first (sets lastSpeaker to n1).
+		_, err := o.Route(context.Background(), "player-1", transcript("Hey Grimjaw"))
+		if err != nil {
+			t.Fatalf("route to grimjaw: %v", err)
+		}
+
+		// Route to Helper by name (address-only, should NOT update lastSpeaker).
+		_, err = o.Route(context.Background(), "player-1", transcript("Hey Helper"))
+		if err != nil {
+			t.Fatalf("route to helper: %v", err)
+		}
+
+		// Ambiguous text should fallback to lastSpeaker (n1), not h1.
+		got, err := o.Route(context.Background(), "player-1", transcript("tell me more"))
+		if err != nil {
+			t.Fatalf("route fallback: %v", err)
+		}
+		if got.ID() != "n1" {
+			t.Fatalf("want n1 (lastSpeaker preserved), got %s", got.ID())
+		}
+	})
+
+	t.Run("address-only still reachable via DM puppet", func(t *testing.T) {
+		t.Parallel()
+		helper, _ := newAddressOnlyAgent("h1", "Helper")
+		npc, _ := newMockAgent("n1", "Grimjaw")
+		o := New([]agent.NPCAgent{helper, npc})
+
+		if err := o.SetPuppet("player-1", "h1"); err != nil {
+			t.Fatalf("set puppet: %v", err)
+		}
+
+		got, err := o.Route(context.Background(), "player-1", transcript("some ambiguous text"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.ID() != "h1" {
+			t.Fatalf("want h1 (puppet), got %s", got.ID())
 		}
 	})
 }

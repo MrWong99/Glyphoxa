@@ -76,18 +76,19 @@ func (d *AddressDetector) Detect(
 		}
 	}
 
-	// 3. Last-speaker continuation.
+	// 3. Last-speaker continuation — skip address-only agents (they are only
+	// reachable via explicit name match or DM puppet).
 	if lastSpeaker != "" {
-		if entry, ok := activeAgents[lastSpeaker]; ok && !entry.muted {
+		if entry, ok := activeAgents[lastSpeaker]; ok && !entry.muted && !entry.addressOnly {
 			return lastSpeaker, nil
 		}
 	}
 
-	// 4. Single-NPC fallback.
+	// 4. Single-NPC fallback — only consider non-address-only agents.
 	var unmutedID string
 	unmutedCount := 0
 	for id, entry := range activeAgents {
-		if !entry.muted {
+		if !entry.muted && !entry.addressOnly {
 			unmutedID = id
 			unmutedCount++
 			if unmutedCount > 1 {

@@ -563,12 +563,7 @@ func (sm *SessionManager) loadAgents(ctx context.Context, assembler *hotctx.Asse
 		}
 		closers = append(closers, eng.Close)
 
-		identity := agent.NPCIdentity{
-			Name:           npc.Name,
-			Personality:    npc.Personality,
-			Voice:          configVoiceProfile(npc.Voice),
-			KnowledgeScope: npc.KnowledgeScope,
-		}
+		identity := identityFromConfig(npc)
 
 		npcID := fmt.Sprintf("npc-%d-%s", i, npc.Name)
 		tier := configBudgetTier(npc.BudgetTier)

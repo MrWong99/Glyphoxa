@@ -97,7 +97,7 @@ func NewLoader(assembler *hotctx.Assembler, sessionID string, opts ...LoaderOpti
 //
 // id is the stable NPC identifier; identity describes the NPC's persona; eng is
 // the engine instance dedicated to this NPC; budgetTier controls which MCP tools
-// are available. If budgetTier is zero-valued it defaults to [mcp.BudgetFast].
+// are available. [mcp.BudgetUnset] is resolved to [mcp.BudgetFast].
 //
 // The loader injects its shared assembler, session ID, MCP host, and mixer into
 // the new agent automatically.

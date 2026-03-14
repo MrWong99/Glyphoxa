@@ -59,6 +59,8 @@ func (r *mockRows) Scan(dest ...any) error {
 		switch d := dest[i].(type) {
 		case *string:
 			*d = v.(string)
+		case *bool:
+			*d = v.(bool)
 		case *[]byte:
 			*d = v.([]byte)
 		case *time.Time:
@@ -421,8 +423,8 @@ func TestPostgresStore_Create(t *testing.T) {
 		if !strings.Contains(capturedSQL, "INSERT INTO npc_definitions") {
 			t.Errorf("SQL should contain INSERT, got: %s", capturedSQL)
 		}
-		if len(capturedArgs) != 12 {
-			t.Errorf("expected 12 args, got %d", len(capturedArgs))
+		if len(capturedArgs) != 14 {
+			t.Errorf("expected 14 args, got %d", len(capturedArgs))
 		}
 		if capturedArgs[0] != "npc-1" {
 			t.Errorf("first arg = %v, want 'npc-1'", capturedArgs[0])
@@ -548,9 +550,11 @@ func TestPostgresStore_Get(t *testing.T) {
 						*(dest[8].(*[]byte)) = []byte(`["rule1"]`)
 						*(dest[9].(*[]byte)) = []byte(`["tool1"]`)
 						*(dest[10].(*string)) = "fast"
-						*(dest[11].(*[]byte)) = []byte(`{"race":"elf"}`)
-						*(dest[12].(*time.Time)) = fixedTime
-						*(dest[13].(*time.Time)) = fixedTime
+						*(dest[11].(*bool)) = false
+						*(dest[12].(*bool)) = false
+						*(dest[13].(*[]byte)) = []byte(`{"race":"elf"}`)
+						*(dest[14].(*time.Time)) = fixedTime
+						*(dest[15].(*time.Time)) = fixedTime
 						return nil
 					},
 				}
@@ -751,6 +755,8 @@ func TestPostgresStore_List(t *testing.T) {
 			[]byte(`[]`), // behavior_rules
 			[]byte(`[]`), // tools
 			"fast",       // budget_tier
+			false,        // gm_helper
+			false,        // address_only
 			[]byte(`{}`), // attributes
 			fixedTime,    // created_at
 			fixedTime,    // updated_at

@@ -61,6 +61,14 @@ type NPCDefinition struct {
 	// "deep". An empty value defaults to "fast".
 	BudgetTier string `yaml:"budget_tier" json:"budget_tier"`
 
+	// GMHelper designates this NPC as the GM helper. At most one NPC per
+	// campaign may have this flag.
+	GMHelper bool `yaml:"gm_helper" json:"gm_helper"`
+
+	// AddressOnly restricts this NPC to respond only when explicitly addressed
+	// by name.
+	AddressOnly bool `yaml:"address_only" json:"address_only"`
+
 	// Attributes holds arbitrary key-value metadata for the NPC.
 	Attributes map[string]any `yaml:"attributes" json:"attributes"`
 
@@ -148,5 +156,7 @@ func ToIdentity(def *NPCDefinition) agent.NPCIdentity {
 		KnowledgeScope:  def.KnowledgeScope,
 		SecretKnowledge: def.SecretKnowledge,
 		BehaviorRules:   def.BehaviorRules,
+		GMHelper:        def.GMHelper,
+		AddressOnly:     def.AddressOnly,
 	}
 }
