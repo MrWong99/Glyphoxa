@@ -1,6 +1,8 @@
 # Glyphoxa Makefile
 # Requires: Go 1.26+, CGO_ENABLED=1
 
+export CGO_ENABLED := 1
+
 .PHONY: build test lint vet fmt check clean whisper-libs dave-libs onnx-libs install-lint proto proto-check proto-lint
 
 # Build
