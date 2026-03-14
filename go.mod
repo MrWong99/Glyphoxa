@@ -12,20 +12,20 @@ require (
 	github.com/ggerganov/whisper.cpp/bindings/go v0.0.0-20260227185758-9453b4b9be9b
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
-	github.com/modelcontextprotocol/go-sdk v1.4.0
-	github.com/mozilla-ai/any-llm-go v0.8.0
+	github.com/modelcontextprotocol/go-sdk v1.4.1
+	github.com/mozilla-ai/any-llm-go v0.9.0
 	github.com/openai/openai-go v1.12.0
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/tiktoken-go/tokenizer v0.7.0
 	github.com/yalue/onnxruntime_go v1.27.0
 	go.opentelemetry.io/otel v1.42.0
-	go.opentelemetry.io/otel/exporters/prometheus v0.63.0
+	go.opentelemetry.io/otel/exporters/prometheus v0.64.0
 	go.opentelemetry.io/otel/metric v1.42.0
-	go.opentelemetry.io/otel/sdk v1.41.0
-	go.opentelemetry.io/otel/sdk/metric v1.41.0
+	go.opentelemetry.io/otel/sdk v1.42.0
+	go.opentelemetry.io/otel/sdk/metric v1.42.0
 	go.opentelemetry.io/otel/trace v1.42.0
-	golang.org/x/sync v0.19.0
+	golang.org/x/sync v0.20.0
 	google.golang.org/grpc v1.79.2
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -67,7 +67,7 @@ require (
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/sasha-s/go-csync v0.0.0-20240107134140-fcbab37b09ad // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
-	github.com/segmentio/encoding v0.5.3 // indirect
+	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -83,6 +83,6 @@ require (
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
-	google.golang.org/genai v1.48.0 // indirect
+	google.golang.org/genai v1.49.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
 )

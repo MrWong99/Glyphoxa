@@ -64,12 +64,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/onnx-install
-          key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-v1.24.1
+          key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-v1.24.3
 
       - name: Download ONNX Runtime
         if: steps.cache-onnx.outputs.cache-hit != 'true'
         run: |
-          curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-x64-1.24.1.tgz" \
+          curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/onnxruntime-linux-x64-1.24.3.tgz" \
             -o /tmp/onnxruntime.tgz
           mkdir -p /tmp/onnx-install
           tar xzf /tmp/onnxruntime.tgz -C /tmp/onnx-install --strip-components=1
@@ -94,12 +94,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/dave-install
-          key: libdave-${{ runner.os }}-${{ runner.arch }}-v1.1.0
+          key: libdave-${{ runner.os }}-${{ runner.arch }}-v1.1.1
 
       - name: Download libdave prebuilt
         if: steps.cache-dave.outputs.cache-hit != 'true'
         run: |
-          DAVE_VERSION="v1.1.0/cpp"
+          DAVE_VERSION="v1.1.1/cpp"
           DAVE_URL="https://github.com/discord/libdave/releases/download/${DAVE_VERSION}/libdave-Linux-X64-boringssl.zip"
           curl -fsL "$DAVE_URL" -o /tmp/libdave.zip
           mkdir -p /tmp/dave-install/include /tmp/dave-install/lib /tmp/dave-install/lib/pkgconfig
@@ -113,7 +113,7 @@ jobs:
 
           Name: dave
           Description: Discord Audio & Video End-to-End Encryption (DAVE) Protocol
-          Version: 1.1.0
+          Version: 1.1.1
           Libs: -L${libdir} -ldave -Wl,-rpath,${libdir}
           Cflags: -I${includedir}
           PCEOF

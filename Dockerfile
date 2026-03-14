@@ -48,7 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ARG TARGETARCH
-ARG ONNX_VERSION=1.24.1
+ARG ONNX_VERSION=1.24.3
 
 RUN ONNX_ARCH="x64" \
     && if [ "${TARGETARCH}" = "arm64" ]; then ONNX_ARCH="aarch64"; fi \
@@ -72,7 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ARG TARGETARCH
-ARG DAVE_VERSION=v1.1.0/cpp
+ARG DAVE_VERSION=v1.1.1/cpp
 
 RUN DAVE_ARCH="X64" \
     && if [ "${TARGETARCH}" = "arm64" ]; then DAVE_ARCH="ARM64"; fi \
@@ -91,7 +91,7 @@ includedir=${prefix}/include
 
 Name: dave
 Description: Discord Audio & Video End-to-End Encryption (DAVE) Protocol
-Version: 1.1.0
+Version: 1.1.1
 Libs: -L${libdir} -ldave -Wl,-rpath,${libdir}
 Cflags: -I${includedir}
 EOF
