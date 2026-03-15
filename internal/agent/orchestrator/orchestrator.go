@@ -10,6 +10,7 @@ import (
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	"github.com/MrWong99/glyphoxa/internal/engine"
+	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
 )
@@ -34,6 +35,7 @@ type Orchestrator struct {
 
 	detector *AddressDetector
 	buffer   *UtteranceBuffer
+	mixer    audio.Mixer // may be nil (text-only mode)
 
 	dmOverrides map[string]string // speaker → forced NPC id (puppet mode)
 }
@@ -53,6 +55,15 @@ type Option func(*Orchestrator)
 func WithBufferSize(n int) Option {
 	return func(o *Orchestrator) {
 		o.buffer = NewUtteranceBuffer(n, o.buffer.maxAge)
+	}
+}
+
+// WithMixer sets the audio mixer used to interrupt NPC playback when
+// mute commands are issued. When nil, mute commands only set the muted
+// flag without stopping current audio.
+func WithMixer(m audio.Mixer) Option {
+	return func(o *Orchestrator) {
+		o.mixer = m
 	}
 }
 
@@ -170,7 +181,8 @@ func (o *Orchestrator) ActiveAgents() []agent.NPCAgent {
 	return result
 }
 
-// MuteAgent prevents the agent identified by id from receiving new utterances.
+// MuteAgent prevents the agent identified by id from receiving new utterances
+// and interrupts any current speech for that NPC via the mixer (if set).
 // Returns an error if id does not correspond to a registered agent.
 func (o *Orchestrator) MuteAgent(id string) error {
 	o.mu.Lock()
@@ -181,6 +193,10 @@ func (o *Orchestrator) MuteAgent(id string) error {
 		return fmt.Errorf("orchestrator: agent %q not found", id)
 	}
 	entry.muted = true
+
+	if o.mixer != nil {
+		o.mixer.InterruptNPC(id, audio.DMOverride)
+	}
 	return nil
 }
 
@@ -310,7 +326,8 @@ func (o *Orchestrator) IsMuted(id string) (bool, error) {
 	return entry.muted, nil
 }
 
-// MuteAll mutes all agents atomically and returns the number of agents
+// MuteAll mutes all agents atomically, interrupts all current and queued
+// NPC audio via the mixer (if set), and returns the number of agents
 // whose mute state was changed (agents already muted are not counted).
 func (o *Orchestrator) MuteAll() int {
 	o.mu.Lock()
@@ -322,6 +339,10 @@ func (o *Orchestrator) MuteAll() int {
 			e.muted = true
 			changed++
 		}
+	}
+
+	if changed > 0 && o.mixer != nil {
+		o.mixer.Interrupt(audio.DMOverride)
 	}
 	return changed
 }

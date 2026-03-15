@@ -362,7 +362,7 @@ func (a *App) initAgents(ctx context.Context) error {
 	}
 
 	a.agents = agents
-	a.router = orchestrator.New(agents)
+	a.router = orchestrator.New(agents, orchestrator.WithMixer(a.mixer))
 
 	if a.graph != nil {
 		registerNPCEntities(ctx, a.graph, a.cfg.NPCs)
