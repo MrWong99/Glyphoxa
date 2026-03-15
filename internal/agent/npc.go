@@ -109,6 +109,10 @@ type liveAgent struct {
 	// mu is held by HandleUtterance.
 	toolCtxMu sync.Mutex
 	toolCtx   context.Context
+
+	// genMu guards genCancel, which cancels the in-flight generation context.
+	genMu     sync.Mutex
+	genCancel context.CancelFunc
 }
 
 // NewAgent creates a concrete [NPCAgent] from the given configuration.
@@ -153,6 +157,20 @@ func NewAgent(cfg AgentConfig) (NPCAgent, error) {
 		sessionID:     cfg.SessionID,
 		budgetTier:    cfg.BudgetTier,
 		onTranscript:  cfg.OnTranscript,
+	}
+
+	// Register barge-in handler to cancel in-flight generation when a player
+	// starts speaking. This prevents wasted LLM/TTS compute on responses
+	// that will never be heard.
+	if cfg.Mixer != nil {
+		cfg.Mixer.OnBargeIn(func(_ string) {
+			a.genMu.Lock()
+			cancel := a.genCancel
+			a.genMu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+		})
 	}
 
 	// Wire MCP tools into the engine when a host is provided.
@@ -270,14 +288,26 @@ func (a *liveAgent) HandleUtterance(ctx context.Context, speaker string, transcr
 		Timestamp:  0,
 	}
 
+	// Create a child context for this generation cycle. The barge-in handler
+	// cancels this context to abort in-flight LLM/TTS when a player speaks.
+	genCtx, genCancel := context.WithCancel(ctx)
+	a.genMu.Lock()
+	a.genCancel = genCancel
+	a.genMu.Unlock()
+
 	// Store the context for tool call handlers that may run in engine
 	// background goroutines (e.g., cascade strong-model stage).
 	a.toolCtxMu.Lock()
-	a.toolCtx = ctx
+	a.toolCtx = genCtx
 	a.toolCtxMu.Unlock()
 
-	resp, err := a.eng.Process(ctx, frame, promptCtx)
+	resp, err := a.eng.Process(genCtx, frame, promptCtx)
 	if err != nil {
+		genCancel()
+		// Clear genCancel to avoid holding a stale reference.
+		a.genMu.Lock()
+		a.genCancel = nil
+		a.genMu.Unlock()
 		return fmt.Errorf("agent: engine process: %w", err)
 	}
 

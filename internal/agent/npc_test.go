@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	"github.com/MrWong99/glyphoxa/internal/engine"
@@ -27,16 +28,21 @@ import (
 func TestBargeIn_CancelsInFlightGeneration(t *testing.T) {
 	t.Parallel()
 
-	// Create a blocking engine that waits on its context.
-	processStarted := make(chan struct{})
-	processCtx := make(chan context.Context, 1)
+	// cancelled is closed by the ProcessFunc once its context is cancelled.
+	cancelled := make(chan struct{})
+	processReady := make(chan struct{})
 
 	eng := &enginemock.VoiceEngine{
 		ProcessFunc: func(ctx context.Context, _ audio.AudioFrame, _ engine.PromptContext) (*engine.Response, error) {
-			processCtx <- ctx
-			close(processStarted)
+			close(processReady)
 			// Block until context is cancelled.
-			<-ctx.Done()
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				// Safety net so the test doesn't hang forever in CI.
+				return nil, errors.New("timed out waiting for context cancellation")
+			}
+			close(cancelled)
 			return &engine.Response{
 				Text:  "Partial.",
 				Audio: closedAudioCh(),
@@ -63,23 +69,27 @@ func TestBargeIn_CancelsInFlightGeneration(t *testing.T) {
 	}()
 
 	// Wait for Process to be called.
-	<-processStarted
+	<-processReady
 
 	// Simulate barge-in via the mixer.
 	mixer.TriggerBargeIn("player-2")
 
-	// The generation context should have been cancelled.
-	ctx := <-processCtx
+	// The generation context should have been cancelled promptly.
 	select {
-	case <-ctx.Done():
-		// Good — context was cancelled by barge-in.
-	default:
-		t.Error("generation context was not cancelled by barge-in")
+	case <-cancelled:
+		// Good — ProcessFunc observed cancellation.
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation context was not cancelled by barge-in within 5s")
 	}
 
 	// HandleUtterance should complete.
-	if err := <-done; err != nil {
-		t.Fatalf("HandleUtterance error: %v", err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("HandleUtterance error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleUtterance did not complete within 5s")
 	}
 }
 
