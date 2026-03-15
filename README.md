@@ -6,6 +6,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/MrWong99/glyphoxa)](https://goreportcard.com/report/github.com/MrWong99/glyphoxa)
+[![codecov](https://codecov.io/github/MrWong99/Glyphoxa/graph/badge.svg?token=NCVR87I8YK)](https://codecov.io/github/MrWong99/Glyphoxa)
 
 **AI-Powered Voice NPCs for Tabletop RPGs** — a platform-agnostic, provider-independent voice AI framework that brings your NPCs to life.
 
