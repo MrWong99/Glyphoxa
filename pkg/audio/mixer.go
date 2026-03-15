@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -62,6 +63,29 @@ type AudioSegment struct {
 	// streamErr stores the error that caused the Audio channel to close early.
 	// Access via Err and SetStreamErr.
 	streamErr atomic.Pointer[error]
+
+	// OnDone is called exactly once when the mixer finishes with this segment.
+	// interrupted is true if playback was cut short (barge-in, mute, or queue
+	// drain), false if the segment played to completion.
+	//
+	// Called on the mixer's dispatch goroutine; must not block.
+	// May be nil.
+	OnDone func(interrupted bool)
+
+	// doneOnce ensures OnDone fires at most once even if both natural
+	// completion and interrupt race.
+	doneOnce sync.Once
+}
+
+// FireDone invokes OnDone exactly once with the given interrupted flag.
+// It is safe to call multiple times; only the first call has any effect.
+// Callers (typically a [Mixer] implementation) should call FireDone(false)
+// on natural completion and FireDone(true) on interrupt or queue drain.
+func (s *AudioSegment) FireDone(interrupted bool) {
+	if s.OnDone == nil {
+		return
+	}
+	s.doneOnce.Do(func() { s.OnDone(interrupted) })
 }
 
 // Err returns the error that caused the Audio channel to close prematurely,
@@ -102,6 +126,20 @@ type Mixer interface {
 	// reason and advances to the next queued segment (if any). If nothing is
 	// playing, Interrupt is a no-op.
 	Interrupt(reason InterruptReason)
+
+	// BargeIn signals that a player started speaking while an NPC segment is
+	// playing. It interrupts the current segment with [PlayerBargeIn]
+	// semantics, clears the queue, and invokes the registered barge-in handler
+	// (if any) on a new goroutine. speakerID is the platform participant ID
+	// of the interrupting player.
+	BargeIn(speakerID string)
+
+	// InterruptNPC interrupts the currently playing segment only if it belongs
+	// to the NPC identified by npcID. Queued segments with matching npcID are
+	// also removed. If the currently playing segment belongs to a different NPC,
+	// InterruptNPC is a no-op. This enables NPC-scoped muting without
+	// disturbing other NPCs.
+	InterruptNPC(npcID string, reason InterruptReason)
 
 	// OnBargeIn registers handler as the callback to invoke when voice-activity
 	// detection determines that a player has started speaking while an NPC is

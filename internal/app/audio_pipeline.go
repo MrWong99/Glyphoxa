@@ -204,8 +204,9 @@ func (p *audioPipeline) processParticipant(ctx context.Context, speakerID string
 					slog.Debug("audio pipeline: speech start",
 						"speaker", speakerID, "prob", event.Probability)
 
-					// Barge-in: interrupt current NPC playback and clear queue.
-					p.mixer.Interrupt(audio.PlayerBargeIn)
+					// Barge-in: interrupt current NPC playback, clear queue,
+					// and fire the OnBargeIn callback.
+					p.mixer.BargeIn(speakerID)
 
 					// Snapshot STT config under lock — UpdateKeywords may be
 					// writing p.sttCfg.Keywords concurrently.
