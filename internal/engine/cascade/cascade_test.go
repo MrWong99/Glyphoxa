@@ -27,6 +27,14 @@ func drainAudio(ch <-chan []byte) {
 	}
 }
 
+// signalDone notifies the engine that playback completed naturally.
+// Must be called after drainAudio for tests that check transcript emission.
+func signalDone(resp *enginepkg.Response) {
+	if resp.NotifyDone != nil {
+		resp.NotifyDone <- false
+	}
+}
+
 // newTTS returns a TTS mock that emits a single "audio" chunk per call.
 func newTTS() *ttsmock.Provider {
 	return &ttsmock.Provider{
@@ -128,6 +136,7 @@ func TestProcess_FastModelOnly(t *testing.T) {
 		t.Fatalf("Process: unexpected error: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	// Fast model must have been called exactly once.
@@ -184,6 +193,7 @@ func TestProcess_DualModel(t *testing.T) {
 		t.Fatalf("Process: unexpected error: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	if len(fastLLM.StreamCalls) != 1 {
@@ -281,6 +291,7 @@ func TestProcess_OpenerSentenceDetection(t *testing.T) {
 				t.Fatalf("Process: %v", err)
 			}
 			drainAudio(resp.Audio)
+			signalDone(resp)
 			e.Wait()
 
 			// Verify opener text.
@@ -354,6 +365,7 @@ func TestProcess_ForcedPrefix(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	if len(strongLLM.StreamCalls) != 1 {
@@ -413,12 +425,14 @@ func TestProcess_FastModelInstructionAppended(t *testing.T) {
 	)
 	t.Cleanup(func() { _ = e.Close() })
 
-	_, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
 		SystemPrompt: "You are an NPC.",
 	})
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
+	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	if len(fastLLM.StreamCalls) == 0 {
@@ -477,6 +491,7 @@ func TestInjectContext_StoresUpdate(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	if len(fastLLM.StreamCalls) == 0 {
@@ -496,6 +511,7 @@ func TestInjectContext_StoresUpdate(t *testing.T) {
 		t.Fatalf("second Process: %v", err)
 	}
 	drainAudio(resp2.Audio)
+	signalDone(resp2)
 	e.Wait()
 
 	if len(fastLLM.StreamCalls) == 0 {
@@ -545,6 +561,7 @@ func TestSetTools_OnlyStrongModel(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	if len(fastLLM.StreamCalls) == 0 {
@@ -610,6 +627,7 @@ func TestOnToolCall_RegistersHandler(t *testing.T) {
 		t.Fatalf("Process after OnToolCall: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	// No tool calls were issued by the LLM in this test, so callCount stays 0.
@@ -693,6 +711,7 @@ func TestConcurrentProcess(t *testing.T) {
 				return
 			}
 			drainAudio(resp.Audio)
+			signalDone(resp)
 		}(i)
 	}
 
@@ -762,6 +781,7 @@ func TestWithTranscriptBuffer(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 }
 
@@ -793,6 +813,7 @@ func TestProcess_EmitsTranscriptEntries_SingleModel(t *testing.T) {
 		t.Fatalf("Process: unexpected error: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 	_ = e.Close()
 
@@ -857,6 +878,7 @@ func TestProcess_EmitsTranscriptEntries_DualModel(t *testing.T) {
 		t.Fatalf("Process: unexpected error: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 	_ = e.Close()
 
@@ -914,6 +936,7 @@ func TestProcess_EmitsTranscriptEntries_NoPlayerMessage(t *testing.T) {
 		t.Fatalf("Process: unexpected error: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 	_ = e.Close()
 
@@ -989,6 +1012,7 @@ func TestProcess_ToolCallSingleIteration(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	// Handler must have been called exactly once.
@@ -1068,6 +1092,7 @@ func TestProcess_ToolCallMultiIteration(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	callMu.Lock()
@@ -1128,6 +1153,7 @@ func TestProcess_ToolCallNilHandler(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	// Must not panic. Strong model should have been called only once (no retry).
@@ -1178,6 +1204,7 @@ func TestProcess_ToolCallHandlerError(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	// Strong model must have been called twice (tool request + after error result).
@@ -1245,6 +1272,7 @@ func TestProcess_ToolCallIterationCap(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	// Strong model should have been called exactly maxIters times.
@@ -1333,6 +1361,7 @@ func TestWithSTT_OptionStored(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 }
 
@@ -1371,6 +1400,7 @@ func TestInjectContext_SceneAndUtterances(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	drainAudio(resp.Audio)
+	signalDone(resp)
 	e.Wait()
 
 	if len(fastLLM.StreamCalls) == 0 {
@@ -1394,5 +1424,183 @@ func TestInjectContext_SceneAndUtterances(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("recent utterance not found in messages: %+v", req.Messages)
+	}
+}
+
+// ─── FinalText / Transcript Truncation ────────────────────────────────────────
+
+func TestFinalText_NaturalCompletion_SingleModel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Hello there.", FinishReason: "stop"},
+		},
+	}
+	e := cascade.New(fastLLM, &llmmock.Provider{}, newTTS(), tts.VoiceProfile{})
+	defer e.Close()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "NPC.",
+		Messages:     []llm.Message{{Role: "user", Content: "Hi", Name: "p1"}},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+
+	// Signal natural completion.
+	resp.NotifyDone <- false
+	<-resp.FinalText
+
+	if resp.FinalTextValue != "Hello there." {
+		t.Errorf("FinalTextValue = %q, want %q", resp.FinalTextValue, "Hello there.")
+	}
+}
+
+func TestFinalText_Interrupted_SingleModel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Hello there.", FinishReason: "stop"},
+		},
+	}
+	e := cascade.New(fastLLM, &llmmock.Provider{}, newTTS(), tts.VoiceProfile{})
+	defer e.Close()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "NPC.",
+		Messages:     []llm.Message{{Role: "user", Content: "Hi", Name: "p1"}},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+
+	// Signal interruption.
+	resp.NotifyDone <- true
+	<-resp.FinalText
+
+	if resp.FinalTextValue != "Hello there...." {
+		t.Errorf("FinalTextValue = %q, want %q", resp.FinalTextValue, "Hello there....")
+	}
+}
+
+func TestFinalText_NaturalCompletion_DualModel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Greetings! I have much to share.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "The ancient lore speaks of dragons.", FinishReason: "stop"},
+		},
+	}
+	e := cascade.New(fastLLM, strongLLM, newTTS(), tts.VoiceProfile{})
+	defer e.Close()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "NPC.",
+		Messages:     []llm.Message{{Role: "user", Content: "Tell me.", Name: "p1"}},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+
+	// Signal natural completion.
+	resp.NotifyDone <- false
+	<-resp.FinalText
+
+	// Should contain the full text.
+	if !strings.Contains(resp.FinalTextValue, "Greetings!") {
+		t.Errorf("FinalTextValue missing opener: %q", resp.FinalTextValue)
+	}
+	if strings.HasSuffix(resp.FinalTextValue, "...") {
+		t.Errorf("FinalTextValue should not have truncation marker: %q", resp.FinalTextValue)
+	}
+}
+
+func TestFinalText_Interrupted_DualModel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Greetings! I have much to share.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "The ancient lore speaks of dragons. And also of fire.", FinishReason: "stop"},
+		},
+	}
+	e := cascade.New(fastLLM, strongLLM, newTTS(), tts.VoiceProfile{})
+	defer e.Close()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "NPC.",
+		Messages:     []llm.Message{{Role: "user", Content: "Tell me.", Name: "p1"}},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+
+	// Signal interruption.
+	resp.NotifyDone <- true
+	<-resp.FinalText
+
+	// Should have truncation marker.
+	if !strings.HasSuffix(resp.FinalTextValue, "...") {
+		t.Errorf("FinalTextValue should end with '...': %q", resp.FinalTextValue)
+	}
+}
+
+func TestFinalText_TranscriptEmitsTruncatedText(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Well met.", FinishReason: "stop"},
+		},
+	}
+	e := cascade.New(fastLLM, &llmmock.Provider{}, newTTS(), tts.VoiceProfile{})
+	ch := e.Transcripts()
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "NPC.",
+		Messages:     []llm.Message{{Role: "user", Content: "Hi", Name: "p1"}},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+
+	// Signal interruption.
+	resp.NotifyDone <- true
+	e.Wait()
+	_ = e.Close()
+
+	var entries []memory.TranscriptEntry
+	for entry := range ch {
+		entries = append(entries, entry)
+	}
+
+	// Find the NPC transcript entry.
+	found := false
+	for _, entry := range entries {
+		if entry.SpeakerID == "" && strings.HasSuffix(entry.Text, "...") {
+			found = true
+			if entry.Text != "Well met...." {
+				t.Errorf("NPC transcript text = %q, want %q", entry.Text, "Well met....")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected truncated NPC transcript entry, got: %+v", entries)
 	}
 }

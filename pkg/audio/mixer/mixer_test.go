@@ -535,6 +535,244 @@ func TestMixer_OutputEmitsAudioFrame(t *testing.T) {
 	}
 }
 
+func TestInterruptNPC_MatchingNPC(t *testing.T) {
+	t.Parallel()
+
+	output, get := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	// Start playing an open segment from npc-A.
+	segA, sendChA := makeOpenSegment("npc-A", 1)
+	m.Enqueue(segA, 1)
+	sendChA <- []byte("a-audio")
+	time.Sleep(30 * time.Millisecond)
+
+	// Queue a segment from npc-A and one from npc-B.
+	segA2 := makeSegment("npc-A", 1, []byte("a-queued"))
+	segB := makeSegment("npc-B", 1, []byte("b-queued"))
+	m.Enqueue(segA2, 1)
+	m.Enqueue(segB, 1)
+
+	// InterruptNPC for npc-A — should stop current and remove npc-A from queue.
+	m.InterruptNPC("npc-A", audio.DMOverride)
+	close(sendChA)
+
+	time.Sleep(100 * time.Millisecond)
+
+	chunks := get()
+	// npc-B's queued segment should still play.
+	foundB := false
+	for _, c := range chunks {
+		if string(c) == "b-queued" {
+			foundB = true
+		}
+		if string(c) == "a-queued" {
+			t.Error("npc-A queued segment should have been removed")
+		}
+	}
+	if !foundB {
+		t.Error("npc-B queued segment should still play after InterruptNPC(npc-A)")
+	}
+}
+
+func TestInterruptNPC_DifferentNPC_NoOp(t *testing.T) {
+	t.Parallel()
+
+	output, get := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	// Start playing npc-A.
+	segA, sendChA := makeOpenSegment("npc-A", 1)
+	m.Enqueue(segA, 1)
+	sendChA <- []byte("a-audio")
+	time.Sleep(30 * time.Millisecond)
+
+	// InterruptNPC for npc-B — should be a no-op (npc-A keeps playing).
+	m.InterruptNPC("npc-B", audio.DMOverride)
+
+	sendChA <- []byte("a-continues")
+	time.Sleep(30 * time.Millisecond)
+	close(sendChA)
+
+	time.Sleep(50 * time.Millisecond)
+
+	chunks := get()
+	found := false
+	for _, c := range chunks {
+		if string(c) == "a-continues" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("npc-A should continue playing when InterruptNPC targets npc-B")
+	}
+}
+
+func TestBargeIn_FiresHandlerAndClearsQueue(t *testing.T) {
+	t.Parallel()
+
+	output, get := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	var handlerCalled atomic.Bool
+	var handlerSpeaker atomic.Value
+	m.OnBargeIn(func(speakerID string) {
+		handlerCalled.Store(true)
+		handlerSpeaker.Store(speakerID)
+	})
+
+	// Start playing.
+	seg, sendCh := makeOpenSegment("npc-1", 1)
+	m.Enqueue(seg, 1)
+	sendCh <- []byte("playing")
+	time.Sleep(30 * time.Millisecond)
+
+	// Queue another segment.
+	seg2 := makeSegment("npc-2", 1, []byte("queued"))
+	m.Enqueue(seg2, 1)
+
+	// BargeIn should stop current, clear queue, fire handler.
+	m.BargeIn("player-7")
+	close(sendCh)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if !handlerCalled.Load() {
+		t.Error("barge-in handler was not called")
+	}
+	if v, ok := handlerSpeaker.Load().(string); !ok || v != "player-7" {
+		t.Errorf("handler called with %q, want %q", v, "player-7")
+	}
+
+	// Queue should be cleared.
+	chunks := get()
+	for _, c := range chunks {
+		if string(c) == "queued" {
+			t.Error("queued segment should not play after BargeIn")
+		}
+	}
+}
+
+func TestOnDone_NaturalCompletion(t *testing.T) {
+	t.Parallel()
+
+	output, _ := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	var interrupted atomic.Bool
+	interrupted.Store(true) // default to true so we can detect false
+	done := make(chan struct{})
+
+	seg := makeSegment("npc-1", 1, []byte("hello"))
+	seg.OnDone = func(i bool) {
+		interrupted.Store(i)
+		close(done)
+	}
+	m.Enqueue(seg, 1)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("OnDone not called within timeout")
+	}
+
+	if interrupted.Load() {
+		t.Error("OnDone should be called with false on natural completion")
+	}
+}
+
+func TestOnDone_Interrupted(t *testing.T) {
+	t.Parallel()
+
+	output, _ := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	var interrupted atomic.Bool
+	done := make(chan struct{})
+
+	seg, sendCh := makeOpenSegment("npc-1", 1)
+	seg.OnDone = func(i bool) {
+		interrupted.Store(i)
+		close(done)
+	}
+	m.Enqueue(seg, 1)
+	sendCh <- []byte("audio")
+	time.Sleep(30 * time.Millisecond)
+
+	m.Interrupt(audio.PlayerBargeIn)
+	close(sendCh)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("OnDone not called within timeout")
+	}
+
+	if !interrupted.Load() {
+		t.Error("OnDone should be called with true on interrupt")
+	}
+}
+
+func TestOnDone_QueuedSegmentDrained(t *testing.T) {
+	t.Parallel()
+
+	output, _ := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	var queuedInterrupted atomic.Bool
+	queuedDone := make(chan struct{})
+
+	// Start a playing segment.
+	seg1, sendCh := makeOpenSegment("npc-1", 1)
+	m.Enqueue(seg1, 1)
+	sendCh <- []byte("playing")
+	time.Sleep(30 * time.Millisecond)
+
+	// Queue a segment with OnDone.
+	seg2 := makeSegment("npc-2", 1, []byte("queued"))
+	seg2.OnDone = func(i bool) {
+		queuedInterrupted.Store(i)
+		close(queuedDone)
+	}
+	m.Enqueue(seg2, 1)
+
+	// Barge-in clears queue — queued segment should get OnDone(true).
+	m.BargeIn("player-1")
+	close(sendCh)
+
+	select {
+	case <-queuedDone:
+	case <-time.After(time.Second):
+		t.Fatal("OnDone not called on queued segment within timeout")
+	}
+
+	if !queuedInterrupted.Load() {
+		t.Error("queued segment OnDone should be called with true")
+	}
+}
+
+func TestOnDone_NilIsNoop(t *testing.T) {
+	t.Parallel()
+
+	output, _ := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	// Segment with nil OnDone should not panic.
+	seg := makeSegment("npc-1", 1, []byte("hello"))
+	seg.OnDone = nil
+	m.Enqueue(seg, 1)
+
+	time.Sleep(50 * time.Millisecond)
+	// No panic = success.
+}
+
 func TestMixer_RejectsInvalidFormat(t *testing.T) {
 	output, _ := collectOutput()
 	m := mixer.New(output, mixer.WithGap(0))

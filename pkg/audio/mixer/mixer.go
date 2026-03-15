@@ -184,6 +184,34 @@ func (m *PriorityMixer) BargeIn(speakerID string) {
 	}
 }
 
+// InterruptNPC interrupts the currently playing segment only if its NPCID
+// matches npcID. Queued segments with matching NPCID are also removed and
+// their audio channels drained. If the currently playing segment belongs to
+// a different NPC, InterruptNPC is a no-op.
+func (m *PriorityMixer) InterruptNPC(npcID string, reason audio.InterruptReason) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Interrupt current playback only if it belongs to the target NPC.
+	if m.playing != nil && m.playing.NPCID == npcID {
+		m.interruptLocked(reason, false)
+	}
+
+	// Remove queued segments belonging to the target NPC.
+	kept := m.queue[:0]
+	for _, e := range m.queue {
+		if e.segment.NPCID == npcID {
+			e.segment.FireDone(true)
+			go audio.Drain(e.segment.Audio)
+		} else {
+			kept = append(kept, e)
+		}
+	}
+	m.queue = kept
+	// Re-establish heap invariant after filtering.
+	heap.Init(&m.queue)
+}
+
 // SetGap configures the base silence duration inserted between consecutive
 // segments. Jitter of ±1/6 of the gap is applied automatically. A gap of
 // zero disables inter-segment silence entirely. Changes take effect before
@@ -214,6 +242,7 @@ func (m *PriorityMixer) Close() error {
 	// Drain the queue.
 	for m.queue.Len() > 0 {
 		e := heap.Pop(&m.queue).(entry)
+		e.segment.FireDone(true)
 		go audio.Drain(e.segment.Audio)
 	}
 	m.mu.Unlock()
@@ -236,6 +265,7 @@ func (m *PriorityMixer) interruptLocked(reason audio.InterruptReason, clearQueue
 	if clearQueue {
 		for m.queue.Len() > 0 {
 			e := heap.Pop(&m.queue).(entry)
+			e.segment.FireDone(true)
 			go audio.Drain(e.segment.Audio)
 		}
 	}
@@ -280,6 +310,7 @@ func (m *PriorityMixer) dispatch() {
 							<-gapTimer.C
 						}
 						// Drain the segment we just dequeued.
+						seg.FireDone(true)
 						go audio.Drain(seg.Audio)
 						return
 					case <-cancel:
@@ -287,6 +318,7 @@ func (m *PriorityMixer) dispatch() {
 							<-gapTimer.C
 						}
 						// Interrupted during gap — segment was preempted.
+						seg.FireDone(true)
 						go audio.Drain(seg.Audio)
 						continue
 					case <-gapTimer.C:
@@ -336,15 +368,18 @@ func (m *PriorityMixer) play(seg *audio.AudioSegment, cancel chan struct{}) {
 		select {
 		case <-m.done:
 			slog.Debug("mixer: play interrupted by close", "npcID", seg.NPCID, "chunks", chunks, "totalBytes", totalBytes)
+			seg.FireDone(true)
 			go audio.Drain(seg.Audio)
 			return
 		case <-cancel:
 			slog.Debug("mixer: play interrupted by cancel", "npcID", seg.NPCID, "chunks", chunks, "totalBytes", totalBytes)
+			seg.FireDone(true)
 			go audio.Drain(seg.Audio)
 			return
 		case chunk, ok := <-seg.Audio:
 			if !ok {
 				slog.Debug("mixer: play finished", "npcID", seg.NPCID, "chunks", chunks, "totalBytes", totalBytes)
+				seg.FireDone(false)
 				return // segment finished naturally
 			}
 			chunks++

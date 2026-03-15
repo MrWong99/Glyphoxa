@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	"github.com/MrWong99/glyphoxa/internal/engine"
@@ -12,6 +13,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/hotctx"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	mcpmock "github.com/MrWong99/glyphoxa/internal/mcp/mock"
+	"github.com/MrWong99/glyphoxa/pkg/audio"
 	audiomock "github.com/MrWong99/glyphoxa/pkg/audio/mock"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	memorymock "github.com/MrWong99/glyphoxa/pkg/memory/mock"
@@ -20,6 +22,76 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
 	ttsmock "github.com/MrWong99/glyphoxa/pkg/provider/tts/mock"
 )
+
+// ─── Barge-In Cancellation ──────────────────────────────────────────────────
+
+func TestBargeIn_CancelsInFlightGeneration(t *testing.T) {
+	t.Parallel()
+
+	// cancelled is closed by the ProcessFunc once its context is cancelled.
+	cancelled := make(chan struct{})
+	processReady := make(chan struct{})
+
+	eng := &enginemock.VoiceEngine{
+		ProcessFunc: func(ctx context.Context, _ audio.AudioFrame, _ engine.PromptContext) (*engine.Response, error) {
+			close(processReady)
+			// Block until context is cancelled.
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				// Safety net so the test doesn't hang forever in CI.
+				return nil, errors.New("timed out waiting for context cancellation")
+			}
+			close(cancelled)
+			return &engine.Response{
+				Text:  "Partial.",
+				Audio: closedAudioCh(),
+			}, nil
+		},
+	}
+
+	mixer := &audiomock.Mixer{}
+	cfg := validConfig()
+	cfg.Engine = eng
+	cfg.Mixer = mixer
+
+	a, err := agent.NewAgent(cfg)
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+
+	// Start HandleUtterance in a goroutine.
+	done := make(chan error, 1)
+	go func() {
+		done <- a.HandleUtterance(context.Background(), "player-1", stt.Transcript{
+			Text: "Hello.", IsFinal: true,
+		})
+	}()
+
+	// Wait for Process to be called.
+	<-processReady
+
+	// Simulate barge-in via the mixer.
+	mixer.TriggerBargeIn("player-2")
+
+	// The generation context should have been cancelled promptly.
+	select {
+	case <-cancelled:
+		// Good — ProcessFunc observed cancellation.
+	case <-time.After(5 * time.Second):
+		t.Fatal("generation context was not cancelled by barge-in within 5s")
+	}
+
+	// HandleUtterance should complete.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("HandleUtterance error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleUtterance did not complete within 5s")
+	}
+}
 
 // testIdentity returns a standard NPCIdentity for use in tests.
 func testIdentity() agent.NPCIdentity {

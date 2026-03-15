@@ -169,6 +169,20 @@ type SetGapCall struct {
 	Duration time.Duration
 }
 
+// BargeInCall records the arguments of a single [Mixer.BargeIn] invocation.
+type BargeInCall struct {
+	// SpeakerID is the speaker ID passed to BargeIn.
+	SpeakerID string
+}
+
+// InterruptNPCCall records the arguments of a single [Mixer.InterruptNPC] invocation.
+type InterruptNPCCall struct {
+	// NPCID is the NPC ID passed to InterruptNPC.
+	NPCID string
+	// Reason is the interrupt reason passed to InterruptNPC.
+	Reason audio.InterruptReason
+}
+
 // Mixer is a mock implementation of [audio.Mixer].
 type Mixer struct {
 	mu sync.Mutex
@@ -178,6 +192,12 @@ type Mixer struct {
 
 	// InterruptCalls records all Interrupt invocations.
 	InterruptCalls []InterruptCall
+
+	// BargeInCalls records all BargeIn invocations.
+	BargeInCalls []BargeInCall
+
+	// InterruptNPCCalls records all InterruptNPC invocations.
+	InterruptNPCCalls []InterruptNPCCall
 
 	// SetGapCalls records all SetGap invocations.
 	SetGapCalls []SetGapCall
@@ -201,6 +221,25 @@ func (m *Mixer) Interrupt(reason audio.InterruptReason) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.InterruptCalls = append(m.InterruptCalls, InterruptCall{Reason: reason})
+}
+
+// BargeIn implements [audio.Mixer]. Records the call and invokes registered handlers.
+func (m *Mixer) BargeIn(speakerID string) {
+	m.mu.Lock()
+	m.BargeInCalls = append(m.BargeInCalls, BargeInCall{SpeakerID: speakerID})
+	handlers := make([]func(string), len(m.BargeInHandlers))
+	copy(handlers, m.BargeInHandlers)
+	m.mu.Unlock()
+	for _, h := range handlers {
+		h(speakerID)
+	}
+}
+
+// InterruptNPC implements [audio.Mixer]. Records the call arguments.
+func (m *Mixer) InterruptNPC(npcID string, reason audio.InterruptReason) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.InterruptNPCCalls = append(m.InterruptNPCCalls, InterruptNPCCall{NPCID: npcID, Reason: reason})
 }
 
 // OnBargeIn implements [audio.Mixer]. Appends handler to BargeInHandlers.

@@ -225,54 +225,123 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 			return nil, fmt.Errorf("cascade: TTS start failed: %w", err)
 		}
 
-		// Emit player input transcript entry.
-		if playerMsg, ok := lastUserMessage(prompt.Messages); ok {
-			e.emitTranscript(memory.TranscriptEntry{
-				SpeakerID:   playerMsg.Name,
-				SpeakerName: playerMsg.Name,
-				Text:        playerMsg.Content,
-				Timestamp:   time.Now(),
-			})
+		finalText := make(chan struct{})
+		notifyDone := make(chan bool, 1)
+		resp := &engine.Response{
+			Text:       opener,
+			Audio:      audioCh,
+			SampleRate: e.ttsSampleRate,
+			Channels:   e.ttsChannels,
+			FinalText:  finalText,
+			NotifyDone: notifyDone,
 		}
 
-		// Emit NPC response transcript entry.
-		e.emitTranscript(memory.TranscriptEntry{
-			Text:      opener,
-			Timestamp: time.Now(),
+		// Background goroutine: wait for playback outcome, then emit transcript.
+		e.wg.Go(func() {
+			interrupted := e.waitForDone(ctx, notifyDone)
+
+			if interrupted {
+				// Single sentence — if interrupted mid-playback, some audio
+				// was heard. Use the opener with truncation marker.
+				resp.FinalTextValue = opener + "..."
+			} else {
+				resp.FinalTextValue = opener
+			}
+			close(finalText)
+
+			// Emit player input transcript entry.
+			if playerMsg, ok := lastUserMessage(prompt.Messages); ok {
+				e.emitTranscript(memory.TranscriptEntry{
+					SpeakerID:   playerMsg.Name,
+					SpeakerName: playerMsg.Name,
+					Text:        playerMsg.Content,
+					Timestamp:   time.Now(),
+				})
+			}
+
+			// Emit NPC response transcript entry with the final text.
+			e.emitTranscript(memory.TranscriptEntry{
+				Text:      resp.FinalTextValue,
+				Timestamp: time.Now(),
+			})
 		})
 
-		return &engine.Response{Text: opener, Audio: audioCh, SampleRate: e.ttsSampleRate, Channels: e.ttsChannels}, nil
+		return resp, nil
 	}
 
 	// ── Stage 2b: Dual-model path ─────────────────────────────────────────────
 
 	// Create the shared text channel that feeds the TTS stream.
+	// We wrap it with a tracking channel that records committed text.
 	textCh := make(chan string, defaultTextBuf)
 	audioCh, err := e.ttsP.SynthesizeStream(ctx, textCh, e.voice)
 	if err != nil {
 		return nil, fmt.Errorf("cascade: TTS start failed: %w", err)
 	}
 
+	finalText := make(chan struct{})
+	notifyDone := make(chan bool, 1)
 	strongReq := e.buildStrongPrompt(prompt, tools, opener)
-	resp := &engine.Response{Text: opener, Audio: audioCh, SampleRate: e.ttsSampleRate, Channels: e.ttsChannels}
+	resp := &engine.Response{
+		Text:       opener,
+		Audio:      audioCh,
+		SampleRate: e.ttsSampleRate,
+		Channels:   e.ttsChannels,
+		FinalText:  finalText,
+		NotifyDone: notifyDone,
+	}
 
 	// Background goroutine: send opener → strong model (with tool loop) → close textCh.
 	e.wg.Go(func() {
 		defer close(textCh)
 
+		// committedText tracks sentences that have been sent to TTS.
+		// Protected by committedMu for concurrent access from the
+		// forwardStrongModel goroutine and the done-waiter below.
+		var committedMu sync.Mutex
+		var committedText strings.Builder
+
+		// commitSentence is called each time a sentence is delivered to TTS.
+		commitSentence := func(sentence string) {
+			committedMu.Lock()
+			if committedText.Len() > 0 {
+				committedText.WriteByte(' ')
+			}
+			committedText.WriteString(sentence)
+			committedMu.Unlock()
+		}
+
 		// Deliver the opener to TTS immediately so playback begins.
 		select {
 		case textCh <- opener:
+			commitSentence(opener)
 		case <-ctx.Done():
 			return
 		}
 
-		// Run the strong model with tool-call loop support.
-		continuation := e.forwardStrongModel(ctx, strongReq, textCh, resp)
+		// Run the strong model with tool-call loop support, tracking
+		// committed sentences.
+		continuation := e.forwardStrongModelTracked(ctx, strongReq, textCh, resp, commitSentence)
 		fullText := opener
 		if continuation != "" {
 			fullText = opener + " " + continuation
 		}
+		// Wait for playback outcome.
+		interrupted := e.waitForDone(ctx, notifyDone)
+
+		if interrupted {
+			committedMu.Lock()
+			committed := strings.TrimSpace(committedText.String())
+			committedMu.Unlock()
+			if committed == "" {
+				resp.FinalTextValue = "..."
+			} else {
+				resp.FinalTextValue = committed + "..."
+			}
+		} else {
+			resp.FinalTextValue = strings.TrimSpace(fullText)
+		}
+		close(finalText)
 
 		// Emit player input transcript entry.
 		if playerMsg, ok := lastUserMessage(prompt.Messages); ok {
@@ -284,9 +353,9 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 			})
 		}
 
-		// Emit NPC response transcript entry.
+		// Emit NPC response transcript entry with the final text.
 		e.emitTranscript(memory.TranscriptEntry{
-			Text:      strings.TrimSpace(fullText),
+			Text:      resp.FinalTextValue,
 			Timestamp: time.Now(),
 		})
 	})
@@ -363,6 +432,58 @@ func (e *Engine) Close() error {
 // mock call records.
 func (e *Engine) Wait() {
 	e.wg.Wait()
+}
+
+// waitForDone blocks until the playback outcome is signalled via notifyDone
+// or ctx is cancelled. Returns true if the segment was interrupted, false if
+// it played to completion.
+func (e *Engine) waitForDone(ctx context.Context, notifyDone <-chan bool) bool {
+	select {
+	case interrupted, ok := <-notifyDone:
+		if !ok {
+			// Channel closed without a value — treat as natural completion.
+			return false
+		}
+		return interrupted
+	case <-ctx.Done():
+		// Context cancelled — generation was aborted, treat as interrupted.
+		return true
+	case <-e.done:
+		// Engine closing — treat as interrupted.
+		return true
+	}
+}
+
+// forwardStrongModelTracked wraps [Engine.forwardStrongModel] and calls
+// commitSentence for each sentence delivered to textCh. This allows the
+// caller to track which text has actually been committed to TTS.
+func (e *Engine) forwardStrongModelTracked(
+	ctx context.Context,
+	strongReq llm.CompletionRequest,
+	textCh chan<- string,
+	resp *engine.Response,
+	commitSentence func(string),
+) string {
+	// Wrap textCh with a tracking channel.
+	trackCh := make(chan string, defaultTextBuf)
+	var trackWg sync.WaitGroup
+	trackWg.Add(1)
+	go func() {
+		defer trackWg.Done()
+		for sentence := range trackCh {
+			commitSentence(sentence)
+			select {
+			case textCh <- sentence:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	result := e.forwardStrongModel(ctx, strongReq, trackCh, resp)
+	close(trackCh)
+	trackWg.Wait()
+	return result
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

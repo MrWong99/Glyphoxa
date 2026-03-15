@@ -10,6 +10,8 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/agent"
 	agentmock "github.com/MrWong99/glyphoxa/internal/agent/mock"
 	enginemock "github.com/MrWong99/glyphoxa/internal/engine/mock"
+	"github.com/MrWong99/glyphoxa/pkg/audio"
+	audiomock "github.com/MrWong99/glyphoxa/pkg/audio/mock"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
 )
 
@@ -753,4 +755,75 @@ func TestAddressOnlyRouting(t *testing.T) {
 			t.Fatalf("want h1 (puppet), got %s", got.ID())
 		}
 	})
+}
+
+// ── Mute + Mixer Integration ─────────────────────────────────────────────
+
+func TestMuteAgent_InterruptsNPC(t *testing.T) {
+	t.Parallel()
+
+	grimjaw, _ := newMockAgent("g1", "Grimjaw")
+	mixer := &audiomock.Mixer{}
+	o := New([]agent.NPCAgent{grimjaw}, WithMixer(mixer))
+
+	if err := o.MuteAgent("g1"); err != nil {
+		t.Fatalf("mute: %v", err)
+	}
+
+	if len(mixer.InterruptNPCCalls) != 1 {
+		t.Fatalf("want 1 InterruptNPC call, got %d", len(mixer.InterruptNPCCalls))
+	}
+	call := mixer.InterruptNPCCalls[0]
+	if call.NPCID != "g1" {
+		t.Errorf("InterruptNPC NPCID = %q, want %q", call.NPCID, "g1")
+	}
+	if call.Reason != audio.DMOverride {
+		t.Errorf("InterruptNPC Reason = %v, want DMOverride", call.Reason)
+	}
+}
+
+func TestMuteAll_InterruptsAll(t *testing.T) {
+	t.Parallel()
+
+	grimjaw, _ := newMockAgent("g1", "Grimjaw")
+	elara, _ := newMockAgent("e1", "Elara")
+	mixer := &audiomock.Mixer{}
+	o := New([]agent.NPCAgent{grimjaw, elara}, WithMixer(mixer))
+
+	changed := o.MuteAll()
+	if changed != 2 {
+		t.Fatalf("MuteAll changed = %d, want 2", changed)
+	}
+
+	if len(mixer.InterruptCalls) != 1 {
+		t.Fatalf("want 1 Interrupt call, got %d", len(mixer.InterruptCalls))
+	}
+	if mixer.InterruptCalls[0].Reason != audio.DMOverride {
+		t.Errorf("Interrupt Reason = %v, want DMOverride", mixer.InterruptCalls[0].Reason)
+	}
+}
+
+func TestMuteAll_NilMixer_NoOp(t *testing.T) {
+	t.Parallel()
+
+	grimjaw, _ := newMockAgent("g1", "Grimjaw")
+	o := New([]agent.NPCAgent{grimjaw}) // no mixer
+
+	// Should not panic.
+	changed := o.MuteAll()
+	if changed != 1 {
+		t.Fatalf("MuteAll changed = %d, want 1", changed)
+	}
+}
+
+func TestMuteAgent_NilMixer_NoOp(t *testing.T) {
+	t.Parallel()
+
+	grimjaw, _ := newMockAgent("g1", "Grimjaw")
+	o := New([]agent.NPCAgent{grimjaw}) // no mixer
+
+	// Should not panic.
+	if err := o.MuteAgent("g1"); err != nil {
+		t.Fatalf("mute: %v", err)
+	}
 }

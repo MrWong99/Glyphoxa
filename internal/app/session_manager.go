@@ -182,8 +182,8 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 	}
 	closers = append(closers, agentClosers...)
 
-	// Create orchestrator with loaded agents.
-	orch := orchestrator.New(agents)
+	// Create orchestrator with loaded agents and wire the mixer for mute interrupts.
+	orch := orchestrator.New(agents, orchestrator.WithMixer(mixer))
 
 	// Create a session-scoped context for background work, carrying
 	// the tenant identity for downstream subsystems.

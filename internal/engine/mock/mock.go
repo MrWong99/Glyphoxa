@@ -56,6 +56,10 @@ type SetToolsCall struct {
 type VoiceEngine struct {
 	mu sync.Mutex
 
+	// ProcessFunc, when non-nil, is called instead of returning ProcessResult/ProcessError.
+	// Use this for tests that need to block or inspect the context.
+	ProcessFunc func(ctx context.Context, input audio.AudioFrame, prompt engine.PromptContext) (*engine.Response, error)
+
 	// ProcessResult is returned by [VoiceEngine.Process] (may be nil).
 	ProcessResult *engine.Response
 
@@ -95,10 +99,15 @@ type VoiceEngine struct {
 }
 
 // Process implements [engine.VoiceEngine].
-func (v *VoiceEngine) Process(_ context.Context, input audio.AudioFrame, prompt engine.PromptContext) (*engine.Response, error) {
+// If ProcessFunc is set, it is called instead of returning ProcessResult/ProcessError.
+func (v *VoiceEngine) Process(ctx context.Context, input audio.AudioFrame, prompt engine.PromptContext) (*engine.Response, error) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	v.ProcessCalls = append(v.ProcessCalls, ProcessCall{Input: input, Prompt: prompt})
+	fn := v.ProcessFunc
+	v.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, input, prompt)
+	}
 	return v.ProcessResult, v.ProcessError
 }
 
