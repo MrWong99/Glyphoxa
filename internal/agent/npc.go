@@ -290,8 +290,25 @@ func (a *liveAgent) HandleUtterance(ctx context.Context, speaker string, transcr
 			Channels:   resp.Channels,
 			Priority:   defaultAudioPriority,
 		}
+		// Wire the OnDone callback to signal the engine when playback
+		// finishes so it can determine the final (possibly truncated) text.
+		if resp.NotifyDone != nil {
+			seg.OnDone = func(interrupted bool) {
+				select {
+				case resp.NotifyDone <- interrupted:
+				default:
+				}
+			}
+		}
 		a.mixer.Enqueue(seg, defaultAudioPriority)
 	} else if resp.Audio != nil {
+		// No mixer — signal natural completion so the engine can resolve FinalText.
+		if resp.NotifyDone != nil {
+			select {
+			case resp.NotifyDone <- false:
+			default:
+			}
+		}
 		// Drain audio channel to avoid blocking the engine pipeline.
 		go func(ch <-chan []byte) {
 			for range ch {
@@ -300,8 +317,14 @@ func (a *liveAgent) HandleUtterance(ctx context.Context, speaker string, transcr
 	}
 
 	// 6. Record the exchange in conversation history.
+	//
+	// Optimistic recording: append the full text immediately so the next
+	// HandleUtterance always has context. A background goroutine corrects
+	// the last assistant message if FinalText reveals truncation.
 	a.messages = append(a.messages, userMsg)
+	assistantIdx := -1
 	if resp.Text != "" {
+		assistantIdx = len(a.messages)
 		a.messages = append(a.messages, llm.Message{
 			Role:    "assistant",
 			Content: resp.Text,
@@ -309,7 +332,37 @@ func (a *liveAgent) HandleUtterance(ctx context.Context, speaker string, transcr
 		})
 	}
 
+	// Launch correction goroutine if the engine supports FinalText.
+	if resp.FinalText != nil && assistantIdx >= 0 {
+		go a.correctMessageHistory(ctx, resp, assistantIdx)
+	}
+
 	return nil
+}
+
+// correctMessageHistory waits for the engine to resolve FinalText, then
+// replaces the assistant message at idx with the definitive (possibly
+// truncated) text. This runs in a background goroutine and acquires a.mu
+// briefly for the update.
+func (a *liveAgent) correctMessageHistory(ctx context.Context, resp *engine.Response, idx int) {
+	select {
+	case <-resp.FinalText:
+	case <-ctx.Done():
+		return
+	}
+
+	finalText := resp.FinalTextValue
+	if finalText == "" || finalText == resp.Text {
+		return // no correction needed
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Guard against out-of-bounds (defensive; should not happen in practice).
+	if idx < len(a.messages) && a.messages[idx].Role == "assistant" {
+		a.messages[idx].Content = finalText
+	}
 }
 
 // UpdateScene pushes a new scene context to the NPC. The scene is stored

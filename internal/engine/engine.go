@@ -100,6 +100,27 @@ type Response struct {
 	// streamErr stores the error that caused the Audio channel to close early.
 	// Access via Err and SetStreamErr.
 	streamErr atomic.Pointer[error]
+
+	// FinalText is closed when the definitive response text is available.
+	// Read FinalTextValue after <-FinalText returns.
+	//
+	// If playback completes naturally, FinalTextValue == Text.
+	// If interrupted (barge-in or mute), FinalTextValue is the truncated
+	// text with a "..." suffix reflecting only what was actually heard.
+	//
+	// May be nil for engines that do not support transcript truncation —
+	// callers must check before waiting.
+	FinalText chan struct{}
+
+	// FinalTextValue holds the definitive (possibly truncated) response text.
+	// Only valid after FinalText is closed.
+	FinalTextValue string
+
+	// NotifyDone is written to by the caller (agent) when the mixer
+	// finishes with the audio segment. interrupted=true means playback
+	// was cut short. The engine reads this to decide whether to truncate.
+	// May be nil if the engine does not support truncation.
+	NotifyDone chan bool
 }
 
 // Err returns the error that caused the Audio channel to close prematurely,
