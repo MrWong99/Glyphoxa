@@ -186,6 +186,7 @@ type StartSessionRequest struct {
 	LicenseTier   string                 `protobuf:"bytes,5,opt,name=license_tier,json=licenseTier,proto3" json:"license_tier,omitempty"`
 	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	NpcConfigs    []*NPCConfig           `protobuf:"bytes,7,rep,name=npc_configs,json=npcConfigs,proto3" json:"npc_configs,omitempty"`
+	BotToken      string                 `protobuf:"bytes,8,opt,name=bot_token,json=botToken,proto3" json:"bot_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -267,6 +268,13 @@ func (x *StartSessionRequest) GetNpcConfigs() []*NPCConfig {
 		return x.NpcConfigs
 	}
 	return nil
+}
+
+func (x *StartSessionRequest) GetBotToken() string {
+	if x != nil {
+		return x.BotToken
+	}
+	return ""
 }
 
 // StartSessionResponse is the worker's reply after attempting to start a session.
@@ -577,6 +585,7 @@ type ReportStateRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	State         SessionState           `protobuf:"varint,2,opt,name=state,proto3,enum=glyphoxa.v1.SessionState" json:"state,omitempty"`
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -623,6 +632,13 @@ func (x *ReportStateRequest) GetState() SessionState {
 		return x.State
 	}
 	return SessionState_SESSION_STATE_UNSPECIFIED
+}
+
+func (x *ReportStateRequest) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
 }
 
 // ReportStateResponse is the gateway's acknowledgement of a state report.
@@ -766,7 +782,7 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\vbudget_tier\x18\x06 \x01(\tR\n" +
 	"budgetTier\x12\x1b\n" +
 	"\tgm_helper\x18\a \x01(\bR\bgmHelper\x12!\n" +
-	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\x88\x02\n" +
+	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\xa5\x02\n" +
 	"\x13StartSessionRequest\x12\x1b\n" +
 	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12\x1f\n" +
 	"\vcampaign_id\x18\x02 \x01(\tR\n" +
@@ -778,7 +794,8 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x06 \x01(\tR\tsessionId\x127\n" +
 	"\vnpc_configs\x18\a \x03(\v2\x16.glyphoxa.v1.NPCConfigR\n" +
-	"npcConfigs\"K\n" +
+	"npcConfigs\x12\x1b\n" +
+	"\tbot_token\x18\b \x01(\tR\bbotToken\"K\n" +
 	"\x14StartSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -799,11 +816,12 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\"K\n" +
 	"\x11GetStatusResponse\x126\n" +
-	"\bsessions\x18\x01 \x03(\v2\x1a.glyphoxa.v1.SessionStatusR\bsessions\"d\n" +
+	"\bsessions\x18\x01 \x03(\v2\x1a.glyphoxa.v1.SessionStatusR\bsessions\"z\n" +
 	"\x12ReportStateRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12/\n" +
-	"\x05state\x18\x02 \x01(\x0e2\x19.glyphoxa.v1.SessionStateR\x05state\"\x15\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x19.glyphoxa.v1.SessionStateR\x05state\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\x15\n" +
 	"\x13ReportStateResponse\"P\n" +
 	"\x10HeartbeatRequest\x12\x1d\n" +
 	"\n" +

@@ -24,11 +24,7 @@ func NewCallbackBridge(orch Orchestrator) *CallbackBridge {
 }
 
 // ReportState transitions the session to the given state in the orchestrator.
-func (cb *CallbackBridge) ReportState(ctx context.Context, sessionID string, state gateway.SessionState) error {
-	var errMsg string
-	if state == gateway.SessionEnded {
-		errMsg = "worker reported ended"
-	}
+func (cb *CallbackBridge) ReportState(ctx context.Context, sessionID string, state gateway.SessionState, errMsg string) error {
 	if err := cb.orch.Transition(ctx, sessionID, state, errMsg); err != nil {
 		return fmt.Errorf("sessionorch: report state: %w", err)
 	}

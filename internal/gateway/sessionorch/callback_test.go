@@ -25,7 +25,7 @@ func TestCallbackBridge_ReportState(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	if err := cb.ReportState(ctx, id, gateway.SessionActive); err != nil {
+	if err := cb.ReportState(ctx, id, gateway.SessionActive, ""); err != nil {
 		t.Fatalf("report active: %v", err)
 	}
 
@@ -34,13 +34,16 @@ func TestCallbackBridge_ReportState(t *testing.T) {
 		t.Errorf("got state %v, want %v", s.State, gateway.SessionActive)
 	}
 
-	if err := cb.ReportState(ctx, id, gateway.SessionEnded); err != nil {
+	if err := cb.ReportState(ctx, id, gateway.SessionEnded, "something broke"); err != nil {
 		t.Fatalf("report ended: %v", err)
 	}
 
 	s, _ = orch.GetSession(ctx, id)
 	if s.State != gateway.SessionEnded {
 		t.Errorf("got state %v, want %v", s.State, gateway.SessionEnded)
+	}
+	if s.Error != "something broke" {
+		t.Errorf("got error %q, want %q", s.Error, "something broke")
 	}
 }
 

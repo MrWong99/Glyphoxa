@@ -114,7 +114,7 @@ func (c *Client) GetStatus(_ context.Context) ([]gateway.SessionStatus, error) {
 type Callback struct{}
 
 // ReportState is a no-op in full mode.
-func (c *Callback) ReportState(_ context.Context, sessionID string, state gateway.SessionState) error {
+func (c *Callback) ReportState(_ context.Context, sessionID string, state gateway.SessionState, _ string) error {
 	slog.Debug("local: state reported (no-op)", "session_id", sessionID, "state", state)
 	return nil
 }
