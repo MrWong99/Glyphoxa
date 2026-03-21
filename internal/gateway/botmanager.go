@@ -7,16 +7,18 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"sync"
 
 	"github.com/disgoorg/disgo/bot"
 )
 
-// botEntry wraps a disgo client with inflight tracking.
+// botEntry wraps a disgo client with inflight tracking and guild filtering.
 // Follows the serverConn pattern from internal/mcp/mcphost/host.go.
 type botEntry struct {
 	client   *bot.Client
+	guildIDs map[string]struct{} // allowed guilds (empty = all)
 	inflight sync.WaitGroup
 }
 
@@ -36,9 +38,12 @@ func NewBotManager() *BotManager {
 	}
 }
 
-// AddBot registers a bot client for the given tenant. It returns an error if
-// a bot is already registered for tenantID.
-func (bm *BotManager) AddBot(tenantID string, client *bot.Client) error {
+// AddBot registers a bot client for the given tenant with an optional guild
+// allowlist. If guildIDs is non-empty, only events from those guilds will be
+// dispatched via [RouteEventForGuild]. An empty allowlist means all guilds are
+// allowed (backward compatible). It returns an error if a bot is already
+// registered for tenantID.
+func (bm *BotManager) AddBot(tenantID string, client *bot.Client, guildIDs []string) error {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
@@ -46,7 +51,11 @@ func (bm *BotManager) AddBot(tenantID string, client *bot.Client) error {
 		return fmt.Errorf("gateway: bot already registered for tenant %q", tenantID)
 	}
 
-	bm.bots[tenantID] = &botEntry{client: client}
+	allowed := make(map[string]struct{}, len(guildIDs))
+	for _, id := range guildIDs {
+		allowed[id] = struct{}{}
+	}
+	bm.bots[tenantID] = &botEntry{client: client, guildIDs: allowed}
 	return nil
 }
 
@@ -94,6 +103,33 @@ func (bm *BotManager) RouteEvent(tenantID string, handler func(*bot.Client)) {
 	if !ok {
 		bm.mu.RUnlock()
 		return
+	}
+	entry.inflight.Add(1)
+	client := entry.client
+	bm.mu.RUnlock()
+
+	defer entry.inflight.Done()
+	handler(client)
+}
+
+// RouteEventForGuild dispatches handler only if guildID is in the tenant's
+// allowlist. An empty allowlist means all guilds are permitted (backward
+// compatible). If no bot is registered for tenantID, handler is not called.
+func (bm *BotManager) RouteEventForGuild(tenantID, guildID string, handler func(*bot.Client)) {
+	bm.mu.RLock()
+	entry, ok := bm.bots[tenantID]
+	if !ok {
+		bm.mu.RUnlock()
+		return
+	}
+	// If guild filtering is configured, check allowlist.
+	if len(entry.guildIDs) > 0 {
+		if _, allowed := entry.guildIDs[guildID]; !allowed {
+			bm.mu.RUnlock()
+			slog.Debug("gateway: filtered event for non-allowed guild",
+				"tenant_id", tenantID, "guild_id", guildID)
+			return
+		}
 	}
 	entry.inflight.Add(1)
 	client := entry.client
