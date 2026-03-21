@@ -153,7 +153,7 @@ func TestCallback_NoOp(t *testing.T) {
 
 	cb := &local.Callback{}
 
-	if err := cb.ReportState(context.Background(), "s1", gateway.SessionActive); err != nil {
+	if err := cb.ReportState(context.Background(), "s1", gateway.SessionActive, ""); err != nil {
 		t.Errorf("ReportState: %v", err)
 	}
 	if err := cb.Heartbeat(context.Background(), "s1"); err != nil {

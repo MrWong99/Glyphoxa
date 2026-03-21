@@ -54,6 +54,20 @@ func NewClient(addr string, opts ...grpc.DialOption) (*Client, error) {
 // StartSession sends a start request to the worker via gRPC, wrapped
 // in a circuit breaker.
 func (c *Client) StartSession(ctx context.Context, req gateway.StartSessionRequest) error {
+	pbNPCConfigs := make([]*pb.NPCConfig, len(req.NPCConfigs))
+	for i, nc := range req.NPCConfigs {
+		pbNPCConfigs[i] = &pb.NPCConfig{
+			Name:           nc.Name,
+			Personality:    nc.Personality,
+			Engine:         nc.Engine,
+			VoiceId:        nc.VoiceID,
+			KnowledgeScope: nc.KnowledgeScope,
+			BudgetTier:     nc.BudgetTier,
+			GmHelper:       nc.GMHelper,
+			AddressOnly:    nc.AddressOnly,
+		}
+	}
+
 	return c.breaker.Execute(func() error {
 		_, err := c.client.StartSession(ctx, &pb.StartSessionRequest{
 			SessionId:   req.SessionID,
@@ -62,6 +76,8 @@ func (c *Client) StartSession(ctx context.Context, req gateway.StartSessionReque
 			GuildId:     req.GuildID,
 			ChannelId:   req.ChannelID,
 			LicenseTier: req.LicenseTier,
+			NpcConfigs:  pbNPCConfigs,
+			BotToken:    req.BotToken,
 		})
 		if err != nil {
 			return fmt.Errorf("grpctransport: start session: %w", err)

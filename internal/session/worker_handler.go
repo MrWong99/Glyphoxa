@@ -83,7 +83,7 @@ func (h *WorkerHandler) StartSession(ctx context.Context, req gateway.StartSessi
 
 	// Report active state to gateway.
 	if h.callback != nil {
-		if err := h.callback.ReportState(ctx, req.SessionID, gateway.SessionActive); err != nil {
+		if err := h.callback.ReportState(ctx, req.SessionID, gateway.SessionActive, ""); err != nil {
 			slog.Warn("session: failed to report active state", "session_id", req.SessionID, "err", err)
 		}
 	}
@@ -105,13 +105,15 @@ func (h *WorkerHandler) StopSession(ctx context.Context, sessionID string) error
 	h.mu.Unlock()
 
 	ms.cancel()
+	var errMsg string
 	if err := ms.runtime.Stop(ctx); err != nil {
+		errMsg = err.Error()
 		slog.Warn("session: stop error", "session_id", sessionID, "err", err)
 	}
 
-	// Report ended state to gateway.
+	// Report ended state to gateway, forwarding any runtime error.
 	if h.callback != nil {
-		if err := h.callback.ReportState(ctx, sessionID, gateway.SessionEnded); err != nil {
+		if err := h.callback.ReportState(ctx, sessionID, gateway.SessionEnded, errMsg); err != nil {
 			slog.Warn("session: failed to report ended state", "session_id", sessionID, "err", err)
 		}
 	}

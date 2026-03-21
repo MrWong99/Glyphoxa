@@ -47,6 +47,18 @@ func ParseSessionState(s string) (SessionState, bool) {
 	}
 }
 
+// NPCConfigMsg carries an NPC definition over the gRPC boundary.
+type NPCConfigMsg struct {
+	Name           string
+	Personality    string
+	Engine         string
+	VoiceID        string
+	KnowledgeScope []string
+	BudgetTier     string
+	GMHelper       bool
+	AddressOnly    bool
+}
+
 // StartSessionRequest contains the parameters needed to start a session on a worker.
 type StartSessionRequest struct {
 	SessionID   string
@@ -55,6 +67,8 @@ type StartSessionRequest struct {
 	GuildID     string
 	ChannelID   string
 	LicenseTier string
+	NPCConfigs  []NPCConfigMsg
+	BotToken    string
 }
 
 // SessionStatus describes the current state of a session.
@@ -84,6 +98,6 @@ type WorkerClient interface {
 //   - grpc.GatewayServer implements a gRPC server (distributed mode)
 //   - local.GatewayCallback calls orchestrator functions directly (full mode)
 type GatewayCallback interface {
-	ReportState(ctx context.Context, sessionID string, state SessionState) error
+	ReportState(ctx context.Context, sessionID string, state SessionState, errMsg string) error
 	Heartbeat(ctx context.Context, sessionID string) error
 }

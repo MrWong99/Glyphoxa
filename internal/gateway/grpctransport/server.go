@@ -40,6 +40,20 @@ func (s *WorkerServer) Register(gs *grpc.Server) {
 
 // StartSession implements the gRPC StartSession RPC.
 func (s *WorkerServer) StartSession(ctx context.Context, req *pb.StartSessionRequest) (*pb.StartSessionResponse, error) {
+	npcConfigs := make([]gateway.NPCConfigMsg, len(req.GetNpcConfigs()))
+	for i, nc := range req.GetNpcConfigs() {
+		npcConfigs[i] = gateway.NPCConfigMsg{
+			Name:           nc.GetName(),
+			Personality:    nc.GetPersonality(),
+			Engine:         nc.GetEngine(),
+			VoiceID:        nc.GetVoiceId(),
+			KnowledgeScope: nc.GetKnowledgeScope(),
+			BudgetTier:     nc.GetBudgetTier(),
+			GMHelper:       nc.GetGmHelper(),
+			AddressOnly:    nc.GetAddressOnly(),
+		}
+	}
+
 	err := s.handler.StartSession(ctx, gateway.StartSessionRequest{
 		SessionID:   req.GetSessionId(),
 		TenantID:    req.GetTenantId(),
@@ -47,6 +61,8 @@ func (s *WorkerServer) StartSession(ctx context.Context, req *pb.StartSessionReq
 		GuildID:     req.GetGuildId(),
 		ChannelID:   req.GetChannelId(),
 		LicenseTier: req.GetLicenseTier(),
+		NPCConfigs:  npcConfigs,
+		BotToken:    req.GetBotToken(),
 	})
 	if err != nil {
 		slog.Warn("grpc: start session failed", "session_id", req.GetSessionId(), "err", err)
@@ -109,7 +125,7 @@ func (s *GatewayServer) ReportState(ctx context.Context, req *pb.ReportStateRequ
 		return nil, status.Errorf(codes.InvalidArgument, "unknown state: %v", req.GetState())
 	}
 
-	if err := s.callback.ReportState(ctx, req.GetSessionId(), state); err != nil {
+	if err := s.callback.ReportState(ctx, req.GetSessionId(), state, req.GetError()); err != nil {
 		return nil, status.Errorf(codes.Internal, "report state: %v", err)
 	}
 
@@ -144,10 +160,11 @@ func NewGatewayClient(conn *grpc.ClientConn) *GatewayClient {
 }
 
 // ReportState reports a session state change to the gateway via gRPC.
-func (c *GatewayClient) ReportState(ctx context.Context, sessionID string, state gateway.SessionState) error {
+func (c *GatewayClient) ReportState(ctx context.Context, sessionID string, state gateway.SessionState, errMsg string) error {
 	_, err := c.client.ReportState(ctx, &pb.ReportStateRequest{
 		SessionId: sessionID,
 		State:     stringToPBState(state),
+		Error:     errMsg,
 	})
 	return err
 }
