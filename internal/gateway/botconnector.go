@@ -50,7 +50,7 @@ func (c *DiscordBotConnector) ConnectBot(ctx context.Context, tenantID, botToken
 		return fmt.Errorf("gateway: open discord gateway for tenant %q: %w", tenantID, err)
 	}
 
-	if err := c.mgr.AddBot(tenantID, client); err != nil {
+	if err := c.mgr.AddBot(tenantID, client, guildIDs); err != nil {
 		client.Close(ctx)
 		return fmt.Errorf("gateway: register bot for tenant %q: %w", tenantID, err)
 	}

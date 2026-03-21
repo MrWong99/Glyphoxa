@@ -27,7 +27,7 @@ func TestAddBot(t *testing.T) {
 		{
 			name: "duplicate error",
 			setup: func(bm *BotManager) {
-				_ = bm.AddBot("tenant-1", nil)
+				_ = bm.AddBot("tenant-1", nil, nil)
 			},
 			tenantID:  "tenant-1",
 			wantErr:   true,
@@ -42,7 +42,7 @@ func TestAddBot(t *testing.T) {
 			bm := NewBotManager()
 			tt.setup(bm)
 
-			err := bm.AddBot(tt.tenantID, nil)
+			err := bm.AddBot(tt.tenantID, nil, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -72,7 +72,7 @@ func TestRemoveBot(t *testing.T) {
 		{
 			name: "success",
 			setup: func(bm *BotManager) {
-				_ = bm.AddBot("tenant-1", nil)
+				_ = bm.AddBot("tenant-1", nil, nil)
 			},
 			tenantID: "tenant-1",
 			wantErr:  false,
@@ -119,7 +119,7 @@ func TestGet(t *testing.T) {
 	t.Parallel()
 
 	bm := NewBotManager()
-	_ = bm.AddBot("tenant-1", nil)
+	_ = bm.AddBot("tenant-1", nil, nil)
 
 	t.Run("found", func(t *testing.T) {
 		t.Parallel()
@@ -149,7 +149,7 @@ func TestRouteEvent(t *testing.T) {
 		t.Parallel()
 
 		bm := NewBotManager()
-		_ = bm.AddBot("tenant-1", nil)
+		_ = bm.AddBot("tenant-1", nil, nil)
 
 		called := false
 		bm.RouteEvent("tenant-1", func(c *bot.Client) {
@@ -181,12 +181,79 @@ func TestRouteEvent(t *testing.T) {
 	})
 }
 
+func TestRouteEventForGuild(t *testing.T) {
+	t.Parallel()
+
+	t.Run("allowed guild", func(t *testing.T) {
+		t.Parallel()
+
+		bm := NewBotManager()
+		_ = bm.AddBot("tenant-1", nil, []string{"guild-a", "guild-b"})
+
+		called := false
+		bm.RouteEventForGuild("tenant-1", "guild-a", func(_ *bot.Client) {
+			called = true
+		})
+
+		if !called {
+			t.Error("handler was not called for allowed guild")
+		}
+	})
+
+	t.Run("blocked guild", func(t *testing.T) {
+		t.Parallel()
+
+		bm := NewBotManager()
+		_ = bm.AddBot("tenant-1", nil, []string{"guild-a", "guild-b"})
+
+		called := false
+		bm.RouteEventForGuild("tenant-1", "guild-c", func(_ *bot.Client) {
+			called = true
+		})
+
+		if called {
+			t.Error("handler should not have been called for blocked guild")
+		}
+	})
+
+	t.Run("empty allowlist allows all", func(t *testing.T) {
+		t.Parallel()
+
+		bm := NewBotManager()
+		_ = bm.AddBot("tenant-1", nil, nil)
+
+		called := false
+		bm.RouteEventForGuild("tenant-1", "any-guild", func(_ *bot.Client) {
+			called = true
+		})
+
+		if !called {
+			t.Error("handler was not called — empty allowlist should allow all guilds")
+		}
+	})
+
+	t.Run("not found tenant", func(t *testing.T) {
+		t.Parallel()
+
+		bm := NewBotManager()
+
+		called := false
+		bm.RouteEventForGuild("nonexistent", "guild-a", func(_ *bot.Client) {
+			called = true
+		})
+
+		if called {
+			t.Error("handler should not have been called for missing tenant")
+		}
+	})
+}
+
 func TestClose(t *testing.T) {
 	t.Parallel()
 
 	bm := NewBotManager()
-	_ = bm.AddBot("tenant-1", nil)
-	_ = bm.AddBot("tenant-2", nil)
+	_ = bm.AddBot("tenant-1", nil, nil)
+	_ = bm.AddBot("tenant-2", nil, nil)
 
 	bm.Close()
 
@@ -210,7 +277,7 @@ func TestConcurrentAccess(t *testing.T) {
 	// Pre-add half the tenants so RouteEvent and RemoveBot have targets.
 	for i := range numTenants / 2 {
 		tid := tenantID(i)
-		_ = bm.AddBot(tid, nil)
+		_ = bm.AddBot(tid, nil, nil)
 	}
 
 	var wg sync.WaitGroup
@@ -221,7 +288,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			_ = bm.AddBot(tenantID(id), nil)
+			_ = bm.AddBot(tenantID(id), nil, nil)
 		}(i)
 	}
 

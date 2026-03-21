@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -303,20 +304,21 @@ func runGateway(cfg *config.Config) int {
 		Addr:    adminAddr,
 		Handler: adminAPI.Handler(),
 	}
+	// Track server readiness with atomic flags for health checks.
+	var grpcReady, adminReady atomic.Bool
+
 	go func() {
 		ln, err := net.Listen("tcp", adminAddr)
 		if err != nil {
 			slog.Error("admin API listen failed", "addr", adminAddr, "err", err)
 			return
 		}
+		adminReady.Store(true)
 		slog.Info("admin API started", "addr", ln.Addr().String())
 		if err := adminSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("admin API error", "err", err)
 		}
 	}()
-
-	// ── Observability ─────────────────────────────────────────────────────────
-	observeSrv := startObserveServer(cfg)
 
 	// ── Session Orchestrator ─────────────────────────────────────────────────
 	orch := sessionorch.NewMemoryOrchestrator()
@@ -336,22 +338,45 @@ func runGateway(cfg *config.Config) int {
 			slog.Error("gateway gRPC listen failed", "addr", grpcAddr, "err", err)
 			return
 		}
+		grpcReady.Store(true)
 		slog.Info("gateway gRPC server started", "addr", ln.Addr().String())
 		if err := gwGRPCServer.Serve(ln); err != nil {
 			slog.Error("gateway gRPC server error", "err", err)
 		}
 	}()
 
+	// ── Observability ─────────────────────────────────────────────────────────
+	observeSrv := startObserveServer(cfg,
+		health.Checker{
+			Name: "grpc",
+			Check: func(_ context.Context) error {
+				if !grpcReady.Load() {
+					return fmt.Errorf("gRPC server not listening")
+				}
+				return nil
+			},
+		},
+		health.Checker{
+			Name: "admin_api",
+			Check: func(_ context.Context) error {
+				if !adminReady.Load() {
+					return fmt.Errorf("admin API not listening")
+				}
+				return nil
+			},
+		},
+	)
+
 	// ── Zombie session cleanup ───────────────────────────────────────────────
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if n, err := orch.CleanupZombies(ctx, 90*time.Second); err != nil {
+				if n, err := orch.CleanupZombies(ctx, 45*time.Second); err != nil {
 					slog.Warn("zombie cleanup error", "err", err)
 				} else if n > 0 {
 					slog.Info("cleaned up zombie sessions", "count", n)
@@ -442,6 +467,9 @@ func runWorker(cfg *config.Config) int {
 	if grpcAddr == "" {
 		grpcAddr = ":50051"
 	}
+	// Track server readiness with an atomic flag for health checks.
+	var workerGRPCReady atomic.Bool
+
 	wkGRPCServer := grpc.NewServer()
 	grpctransport.NewWorkerServer(handler).Register(wkGRPCServer)
 
@@ -451,6 +479,7 @@ func runWorker(cfg *config.Config) int {
 			slog.Error("worker gRPC listen failed", "addr", grpcAddr, "err", err)
 			return
 		}
+		workerGRPCReady.Store(true)
 		slog.Info("worker gRPC server started", "addr", ln.Addr().String())
 		if err := wkGRPCServer.Serve(ln); err != nil {
 			slog.Error("worker gRPC server error", "err", err)
@@ -478,7 +507,17 @@ func runWorker(cfg *config.Config) int {
 	}
 
 	// ── Observability ─────────────────────────────────────────────────────────
-	observeSrv := startObserveServer(cfg)
+	observeSrv := startObserveServer(cfg,
+		health.Checker{
+			Name: "grpc",
+			Check: func(_ context.Context) error {
+				if !workerGRPCReady.Load() {
+					return fmt.Errorf("gRPC server not listening")
+				}
+				return nil
+			},
+		},
+	)
 
 	slog.Info("worker ready — waiting for gRPC commands",
 		"mode", "worker",
