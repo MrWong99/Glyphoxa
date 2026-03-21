@@ -237,11 +237,14 @@ Tagged releases (`v*`) are built automatically by GitHub Actions using [GoReleas
 Each release produces the following tags:
 
 ```
-ghcr.io/mrwong99/glyphoxa:<version>       # e.g. 0.3.0
-ghcr.io/mrwong99/glyphoxa:<major>.<minor>  # e.g. 0.3
+ghcr.io/mrwong99/glyphoxa:v<version>       # e.g. v0.3.0
+ghcr.io/mrwong99/glyphoxa:v<major>.<minor>  # e.g. v0.3
+ghcr.io/mrwong99/glyphoxa:<version>         # e.g. 0.3.0
+ghcr.io/mrwong99/glyphoxa:<major>.<minor>   # e.g. 0.3
+ghcr.io/mrwong99/glyphoxa:latest            # latest release
 ```
 
-The `main` branch builds a separate image via the multi-stage `Dockerfile` (used in the Compose stack by default).
+The `main` branch builds a separate image tagged `main` via the multi-stage `Dockerfile`.
 
 ### Supported architectures
 
