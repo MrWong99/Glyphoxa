@@ -4,7 +4,7 @@ config:
   provider: glyphoxa
 
 store:
-  provider: json
+  provider: jsonfile
   options:
     directory: ./.zhi/store
 
