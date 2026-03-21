@@ -60,6 +60,19 @@ type AdminStore interface {
 	ListTenants(ctx context.Context) ([]Tenant, error)
 }
 
+// BotConnector manages Discord bot connections for tenants. Implementations
+// handle creating, replacing, and removing bot gateway sessions.
+type BotConnector interface {
+	// ConnectBot creates a Discord bot client for the tenant and opens
+	// the gateway connection. If a bot is already connected for this tenant,
+	// it is replaced (the old connection is closed gracefully).
+	ConnectBot(ctx context.Context, tenantID, botToken string, guildIDs []string) error
+
+	// DisconnectBot removes and closes the bot for the given tenant.
+	// It is a no-op if no bot is connected.
+	DisconnectBot(tenantID string)
+}
+
 // AdminAPI serves the internal admin HTTP API for tenant and session management.
 // It listens on a separate port behind a NetworkPolicy in production.
 //
@@ -68,15 +81,17 @@ type AdminAPI struct {
 	mux    *http.ServeMux
 	store  AdminStore
 	apiKey string
+	bots   BotConnector // nil = bot management disabled
 }
 
-// NewAdminAPI creates an AdminAPI with the given store and API key.
-// The API key is validated on every request via the authMiddleware.
-func NewAdminAPI(store AdminStore, apiKey string) *AdminAPI {
+// NewAdminAPI creates an AdminAPI with the given store, API key, and optional
+// BotConnector. If bots is nil, tenant bot tokens are stored but not connected.
+func NewAdminAPI(store AdminStore, apiKey string, bots BotConnector) *AdminAPI {
 	a := &AdminAPI{
 		mux:    http.NewServeMux(),
 		store:  store,
 		apiKey: apiKey,
+		bots:   bots,
 	}
 	a.registerRoutes()
 	return a
@@ -165,6 +180,13 @@ func (a *AdminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		"license_tier", tier.String(),
 	)
 
+	// Connect the Discord bot if a token was provided.
+	if a.bots != nil && req.BotToken != "" {
+		if err := a.bots.ConnectBot(r.Context(), tenant.ID, tenant.BotToken, tenant.GuildIDs); err != nil {
+			slog.Error("admin: failed to connect bot for tenant", "tenant_id", tenant.ID, "err", err)
+		}
+	}
+
 	// Omit bot token from response.
 	tenant.BotToken = ""
 	writeAdminJSON(w, http.StatusCreated, tenant)
@@ -246,6 +268,13 @@ func (a *AdminAPI) updateTenant(w http.ResponseWriter, r *http.Request) {
 		"tenant_id", id,
 	)
 
+	// Reconnect the bot if the token or guild IDs changed.
+	if a.bots != nil && existing.BotToken != "" && (req.BotToken != "" || req.GuildIDs != nil) {
+		if err := a.bots.ConnectBot(r.Context(), existing.ID, existing.BotToken, existing.GuildIDs); err != nil {
+			slog.Error("admin: failed to reconnect bot for tenant", "tenant_id", id, "err", err)
+		}
+	}
+
 	existing.BotToken = ""
 	writeAdminJSON(w, http.StatusOK, existing)
 }
@@ -257,6 +286,11 @@ func (a *AdminAPI) deleteTenant(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.DeleteTenant(r.Context(), id); err != nil {
 		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("tenant %q not found", id))
 		return
+	}
+
+	// Disconnect the bot gracefully.
+	if a.bots != nil {
+		a.bots.DisconnectBot(id)
 	}
 
 	slog.Info("admin: tenant deleted",

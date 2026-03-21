@@ -288,8 +288,12 @@ func runGateway(cfg *config.Config) int {
 		adminKey = "__unset__"
 	}
 
+	// ── Bot Manager ───────────────────────────────────────────────────────────
+	botMgr := gw.NewBotManager()
+	botConnector := gw.NewDiscordBotConnector(botMgr)
+
 	adminStore := gw.NewMemAdminStore()
-	adminAPI := gw.NewAdminAPI(adminStore, adminKey)
+	adminAPI := gw.NewAdminAPI(adminStore, adminKey, botConnector)
 
 	adminAddr := cfg.Server.ListenAddr
 	if adminAddr == "" {
@@ -313,9 +317,6 @@ func runGateway(cfg *config.Config) int {
 
 	// ── Observability ─────────────────────────────────────────────────────────
 	observeSrv := startObserveServer(cfg)
-
-	// ── Bot Manager ───────────────────────────────────────────────────────────
-	botMgr := gw.NewBotManager()
 
 	// ── Session Orchestrator ─────────────────────────────────────────────────
 	orch := sessionorch.NewMemoryOrchestrator()

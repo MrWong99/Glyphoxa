@@ -16,7 +16,7 @@ const testAPIKey = "test-secret-key"
 func newTestAdminAPI(t *testing.T) (*gateway.AdminAPI, *gateway.MemAdminStore) {
 	t.Helper()
 	store := gateway.NewMemAdminStore()
-	api := gateway.NewAdminAPI(store, testAPIKey)
+	api := gateway.NewAdminAPI(store, testAPIKey, nil)
 	return api, store
 }
 
