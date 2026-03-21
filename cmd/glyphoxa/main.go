@@ -25,6 +25,7 @@ import (
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/godave/libdave"
+	"github.com/jackc/pgx/v5/pgxpool"
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -282,6 +283,19 @@ func runGateway(cfg *config.Config) int {
 
 	printStartupSummary(cfg, "gateway")
 
+	// ── Database ──────────────────────────────────────────────────────────────
+	dsn := os.Getenv("GLYPHOXA_DATABASE_DSN")
+	if dsn == "" {
+		slog.Error("GLYPHOXA_DATABASE_DSN not set — database is required for gateway mode")
+		return 1
+	}
+	pool, err := openGatewayPool(ctx, dsn)
+	if err != nil {
+		slog.Error("failed to connect to database", "err", err)
+		return 1
+	}
+	defer pool.Close()
+
 	// ── Admin API ─────────────────────────────────────────────────────────────
 	adminKey := os.Getenv("GLYPHOXA_ADMIN_KEY")
 	if adminKey == "" {
@@ -293,7 +307,11 @@ func runGateway(cfg *config.Config) int {
 	botMgr := gw.NewBotManager()
 	botConnector := gw.NewDiscordBotConnector(botMgr)
 
-	adminStore := gw.NewMemAdminStore()
+	adminStore, err := gw.NewPostgresAdminStore(ctx, pool)
+	if err != nil {
+		slog.Error("failed to create postgres admin store", "err", err)
+		return 1
+	}
 	adminAPI := gw.NewAdminAPI(adminStore, adminKey, botConnector)
 
 	adminAddr := cfg.Server.ListenAddr
@@ -321,7 +339,11 @@ func runGateway(cfg *config.Config) int {
 	}()
 
 	// ── Session Orchestrator ─────────────────────────────────────────────────
-	orch := sessionorch.NewMemoryOrchestrator()
+	orch, err := sessionorch.NewPostgresOrchestrator(ctx, pool)
+	if err != nil {
+		slog.Error("failed to create postgres orchestrator", "err", err)
+		return 1
+	}
 	callbackBridge := sessionorch.NewCallbackBridge(orch)
 
 	// ── gRPC server (receives worker callbacks) ──────────────────────────────
@@ -411,6 +433,27 @@ func runGateway(cfg *config.Config) int {
 
 	slog.Info("goodbye")
 	return 0
+}
+
+// openGatewayPool creates a shared pgxpool.Pool for the gateway database.
+func openGatewayPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: parse database DSN: %w", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: create connection pool: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("gateway: ping database: %w", err)
+	}
+
+	slog.Info("database connection established")
+	return pool, nil
 }
 
 // runWorker runs the worker mode: voice pipeline execution, receiving
