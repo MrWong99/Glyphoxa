@@ -369,7 +369,12 @@ func (gc *GatewaySessionController) registerVoiceServerForwarder(sessionID, guil
 		if e.VoiceState.ChannelID == nil {
 			slog.Info("gateway: bot disconnected from voice externally",
 				"session_id", sessionID, "guild_id", guildID)
-			go gc.Stop(context.Background(), sessionID)
+			go func() {
+				if err := gc.Stop(context.Background(), sessionID); err != nil {
+					slog.Error("gateway: failed to stop session after voice disconnect",
+						"session_id", sessionID, "err", err)
+				}
+			}()
 		}
 	})
 
