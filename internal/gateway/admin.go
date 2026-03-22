@@ -116,7 +116,10 @@ func (a *AdminAPI) ReconnectAllBots(ctx context.Context) {
 		if tenant.BotToken == "" {
 			continue
 		}
-		a.connectBotForTenant(ctx, tenant)
+		if err := a.connectBotForTenant(ctx, tenant); err != nil {
+			slog.Error("admin: failed to connect bot for tenant", "tenant_id", tenant.ID, "err", err)
+			continue
+		}
 		connected++
 	}
 	slog.Info("admin: bot reconnection complete",
@@ -125,16 +128,11 @@ func (a *AdminAPI) ReconnectAllBots(ctx context.Context) {
 	)
 }
 
-func (a *AdminAPI) connectBotForTenant(ctx context.Context, tenant Tenant) {
+func (a *AdminAPI) connectBotForTenant(ctx context.Context, tenant Tenant) error {
 	if tbc, ok := a.bots.(TenantBotConnector); ok {
-		if err := tbc.ConnectBotForTenant(ctx, tenant); err != nil {
-			slog.Error("admin: failed to connect bot for tenant", "tenant_id", tenant.ID, "err", err)
-		}
-	} else {
-		if err := a.bots.ConnectBot(ctx, tenant.ID, tenant.BotToken, tenant.GuildIDs); err != nil {
-			slog.Error("admin: failed to connect bot for tenant", "tenant_id", tenant.ID, "err", err)
-		}
+		return tbc.ConnectBotForTenant(ctx, tenant)
 	}
+	return a.bots.ConnectBot(ctx, tenant.ID, tenant.BotToken, tenant.GuildIDs)
 }
 
 func (a *AdminAPI) registerRoutes() {
@@ -205,7 +203,9 @@ func (a *AdminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		"tenant_id", req.ID, "license_tier", tier.String(),
 	)
 	if a.bots != nil && req.BotToken != "" {
-		a.connectBotForTenant(r.Context(), tenant)
+		if err := a.connectBotForTenant(r.Context(), tenant); err != nil {
+			slog.Error("admin: failed to connect bot for new tenant", "tenant_id", tenant.ID, "err", err)
+		}
 	}
 	tenant.BotToken = ""
 	writeAdminJSON(w, http.StatusCreated, tenant)
@@ -278,7 +278,9 @@ func (a *AdminAPI) updateTenant(w http.ResponseWriter, r *http.Request) {
 	)
 	needsReconnect := req.BotToken != "" || req.GuildIDs != nil || req.DMRoleID != nil || req.CampaignID != nil
 	if a.bots != nil && existing.BotToken != "" && needsReconnect {
-		a.connectBotForTenant(r.Context(), existing)
+		if err := a.connectBotForTenant(r.Context(), existing); err != nil {
+			slog.Error("admin: failed to reconnect bot for tenant", "tenant_id", id, "err", err)
+		}
 	}
 	existing.BotToken = ""
 	writeAdminJSON(w, http.StatusOK, existing)
