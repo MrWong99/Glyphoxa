@@ -124,8 +124,14 @@ func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Te
 	return nil
 }
 
-// DisconnectBot removes and closes the bot for the given tenant.
+// DisconnectBot unregisters commands and then removes and closes the bot for
+// the given tenant. This should only be called when the tenant is being
+// permanently deleted — reconnects use [BotManager.RemoveBot] directly which
+// skips command unregistration.
 func (c *DiscordBotConnector) DisconnectBot(tenantID string) {
+	if gwBot, ok := c.mgr.GetBot(tenantID); ok {
+		gwBot.UnregisterCommands()
+	}
 	if err := c.mgr.RemoveBot(tenantID); err != nil {
 		slog.Debug("admin: disconnect bot (no-op)", "tenant_id", tenantID, "reason", err)
 	} else {
