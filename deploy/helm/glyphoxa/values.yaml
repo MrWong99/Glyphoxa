@@ -126,6 +126,25 @@ config:
   # or values-dedicated.yaml.
   data: {}
 
+# -- Vault integration (optional).
+# When enabled, bot tokens are encrypted at rest via Transit and gRPC certs
+# can be issued via PKI. Gracefully degrades if Vault is unreachable.
+vault:
+  enabled: false
+  addr: ""  # e.g. "https://vault.openclaw.lan"
+  # Token is stored in the Secret resource (see secrets.vaultToken below).
+
+# -- Sensitive values stored in Kubernetes Secrets.
+# These are injected as env vars via secretKeyRef. Set them here for dev/test,
+# or use SealedSecrets / external-secrets in production.
+secrets:
+  vaultToken: ""
+  databaseDSN: ""        # overrides database.dsn when set
+  elevenlabsApiKey: ""
+  geminiApiKey: ""
+  deepgramApiKey: ""
+  openaiApiKey: ""
+
 # -- Database connection.
 database:
   # DSN for the gateway/worker PostgreSQL connection.

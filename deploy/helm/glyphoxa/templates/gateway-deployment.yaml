@@ -69,10 +69,56 @@ spec:
                   optional: true
             - name: GLYPHOXA_GRPC_ADDR
               value: ":{{ .Values.gateway.ports.grpc }}"
+            {{- if .Values.secrets.databaseDSN }}
+            - name: GLYPHOXA_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: database-dsn
+            {{- else }}
             {{- $dsn := include "glyphoxa.databaseDSN" . }}
             {{- if $dsn }}
             - name: GLYPHOXA_DATABASE_DSN
               value: {{ $dsn | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.vault.enabled }}
+            - name: VAULT_ADDR
+              value: {{ .Values.vault.addr | quote }}
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: vault-token
+                  optional: true
+            {{- end }}
+            {{- if .Values.secrets.elevenlabsApiKey }}
+            - name: ELEVENLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: elevenlabs-api-key
+            {{- end }}
+            {{- if .Values.secrets.geminiApiKey }}
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: gemini-api-key
+            {{- end }}
+            {{- if .Values.secrets.deepgramApiKey }}
+            - name: DEEPGRAM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: deepgram-api-key
+            {{- end }}
+            {{- if .Values.secrets.openaiApiKey }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.fullname" . }}-secrets
+                  key: openai-api-key
             {{- end }}
           {{- if .Values.config.data }}
           volumeMounts:
