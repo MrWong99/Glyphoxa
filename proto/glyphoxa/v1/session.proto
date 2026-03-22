@@ -37,13 +37,10 @@ message StartSessionRequest {
   repeated NPCConfig npc_configs = 7;
   string bot_token = 8;
 
-  // Voice proxy credentials (populated by gateway in distributed mode).
-  // When set, the worker connects directly to the Discord voice server
-  // without opening its own bot gateway connection.
-  string voice_session_id = 9;  // from VOICE_STATE_UPDATE
-  string voice_token = 10;      // from VOICE_SERVER_UPDATE
-  string voice_endpoint = 11;   // from VOICE_SERVER_UPDATE
-  string bot_user_id = 12;      // bot's Discord user snowflake
+  // Fields 9-12 were voice proxy credentials, removed in favour of
+  // AudioBridgeService which streams opus frames over gRPC.
+  reserved 9, 10, 11, 12;
+  reserved "voice_session_id", "voice_token", "voice_endpoint", "bot_user_id";
 }
 
 // StartSessionResponse is the worker's reply after attempting to start a session.
@@ -165,16 +162,25 @@ message SpeakNPCRequest {
 // SpeakNPCResponse is the worker's reply after triggering NPC speech.
 message SpeakNPCResponse {}
 
-// UpdateVoiceServerRequest forwards a mid-session VOICE_SERVER_UPDATE from
-// the gateway to the worker so it can reconnect to a new voice server.
-message UpdateVoiceServerRequest {
+// AudioFrame carries a single opus-encoded audio packet between the gateway
+// and a worker over a bidirectional gRPC stream.
+message AudioFrame {
+  // session_id identifies the session this frame belongs to.
   string session_id = 1;
-  string token = 2;
-  string endpoint = 3;
-}
 
-// UpdateVoiceServerResponse is the worker's acknowledgement.
-message UpdateVoiceServerResponse {}
+  // opus_data is the raw Opus-encoded audio packet.
+  bytes opus_data = 2;
+
+  // ssrc identifies the speaker (incoming only, from Discord).
+  uint32 ssrc = 3;
+
+  // user_id is the Discord user ID of the speaker (incoming only).
+  string user_id = 4;
+
+  // is_silence marks a silence frame (used to signal Discord to start
+  // routing audio to the bot at connection startup).
+  bool is_silence = 5;
+}
 
 // SessionWorkerService is the gRPC service exposed by workers, called by the gateway.
 service SessionWorkerService {
@@ -196,8 +202,17 @@ service SessionWorkerService {
   rpc UnmuteAllNPCs(UnmuteAllNPCsRequest) returns (UnmuteAllNPCsResponse);
   // SpeakNPC forces an NPC to speak pre-written text.
   rpc SpeakNPC(SpeakNPCRequest) returns (SpeakNPCResponse);
-  // UpdateVoiceServer forwards a mid-session voice server change to the worker.
-  rpc UpdateVoiceServer(UpdateVoiceServerRequest) returns (UpdateVoiceServerResponse);
+}
+
+// AudioBridgeService streams opus audio frames between the gateway (which owns
+// the Discord voice connection) and a worker (which runs the voice pipeline).
+// The gateway joins voice normally via disgo's VoiceManager and bridges audio
+// over this bidirectional stream.
+service AudioBridgeService {
+  // StreamAudio opens a bidirectional stream of opus audio frames.
+  // Gateway → Worker: incoming Discord audio (one frame per speaking user).
+  // Worker → Gateway: outgoing NPC audio to be sent to Discord.
+  rpc StreamAudio(stream AudioFrame) returns (stream AudioFrame);
 }
 
 // SessionGatewayService is the gRPC service exposed by the gateway, called by workers.

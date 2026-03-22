@@ -96,12 +96,6 @@ func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Te
 		return fmt.Errorf("gateway: create discord client for tenant %q: %w", tenant.ID, err)
 	}
 
-	// The gateway bot captures voice credentials manually via event listeners
-	// rather than establishing voice connections through the VoiceManager.
-	// Disable the auto-created VoiceManager so disgo's voice_handlers skip
-	// VoiceManager processing and dispatch events directly to our listeners.
-	client.VoiceManager = nil
-
 	if err := client.OpenGateway(ctx); err != nil {
 		client.Close(ctx)
 		return fmt.Errorf("gateway: open discord gateway for tenant %q: %w", tenant.ID, err)

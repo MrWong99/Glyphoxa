@@ -19,16 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionWorkerService_StartSession_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/StartSession"
-	SessionWorkerService_StopSession_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/StopSession"
-	SessionWorkerService_GetStatus_FullMethodName         = "/glyphoxa.v1.SessionWorkerService/GetStatus"
-	SessionWorkerService_ListNPCs_FullMethodName          = "/glyphoxa.v1.SessionWorkerService/ListNPCs"
-	SessionWorkerService_MuteNPC_FullMethodName           = "/glyphoxa.v1.SessionWorkerService/MuteNPC"
-	SessionWorkerService_UnmuteNPC_FullMethodName         = "/glyphoxa.v1.SessionWorkerService/UnmuteNPC"
-	SessionWorkerService_MuteAllNPCs_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/MuteAllNPCs"
-	SessionWorkerService_UnmuteAllNPCs_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/UnmuteAllNPCs"
-	SessionWorkerService_SpeakNPC_FullMethodName          = "/glyphoxa.v1.SessionWorkerService/SpeakNPC"
-	SessionWorkerService_UpdateVoiceServer_FullMethodName = "/glyphoxa.v1.SessionWorkerService/UpdateVoiceServer"
+	SessionWorkerService_StartSession_FullMethodName  = "/glyphoxa.v1.SessionWorkerService/StartSession"
+	SessionWorkerService_StopSession_FullMethodName   = "/glyphoxa.v1.SessionWorkerService/StopSession"
+	SessionWorkerService_GetStatus_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/GetStatus"
+	SessionWorkerService_ListNPCs_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/ListNPCs"
+	SessionWorkerService_MuteNPC_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/MuteNPC"
+	SessionWorkerService_UnmuteNPC_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/UnmuteNPC"
+	SessionWorkerService_MuteAllNPCs_FullMethodName   = "/glyphoxa.v1.SessionWorkerService/MuteAllNPCs"
+	SessionWorkerService_UnmuteAllNPCs_FullMethodName = "/glyphoxa.v1.SessionWorkerService/UnmuteAllNPCs"
+	SessionWorkerService_SpeakNPC_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/SpeakNPC"
 )
 
 // SessionWorkerServiceClient is the client API for SessionWorkerService service.
@@ -55,8 +54,6 @@ type SessionWorkerServiceClient interface {
 	UnmuteAllNPCs(ctx context.Context, in *UnmuteAllNPCsRequest, opts ...grpc.CallOption) (*UnmuteAllNPCsResponse, error)
 	// SpeakNPC forces an NPC to speak pre-written text.
 	SpeakNPC(ctx context.Context, in *SpeakNPCRequest, opts ...grpc.CallOption) (*SpeakNPCResponse, error)
-	// UpdateVoiceServer forwards a mid-session voice server change to the worker.
-	UpdateVoiceServer(ctx context.Context, in *UpdateVoiceServerRequest, opts ...grpc.CallOption) (*UpdateVoiceServerResponse, error)
 }
 
 type sessionWorkerServiceClient struct {
@@ -157,16 +154,6 @@ func (c *sessionWorkerServiceClient) SpeakNPC(ctx context.Context, in *SpeakNPCR
 	return out, nil
 }
 
-func (c *sessionWorkerServiceClient) UpdateVoiceServer(ctx context.Context, in *UpdateVoiceServerRequest, opts ...grpc.CallOption) (*UpdateVoiceServerResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(UpdateVoiceServerResponse)
-	err := c.cc.Invoke(ctx, SessionWorkerService_UpdateVoiceServer_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // SessionWorkerServiceServer is the server API for SessionWorkerService service.
 // All implementations must embed UnimplementedSessionWorkerServiceServer
 // for forward compatibility.
@@ -191,8 +178,6 @@ type SessionWorkerServiceServer interface {
 	UnmuteAllNPCs(context.Context, *UnmuteAllNPCsRequest) (*UnmuteAllNPCsResponse, error)
 	// SpeakNPC forces an NPC to speak pre-written text.
 	SpeakNPC(context.Context, *SpeakNPCRequest) (*SpeakNPCResponse, error)
-	// UpdateVoiceServer forwards a mid-session voice server change to the worker.
-	UpdateVoiceServer(context.Context, *UpdateVoiceServerRequest) (*UpdateVoiceServerResponse, error)
 	mustEmbedUnimplementedSessionWorkerServiceServer()
 }
 
@@ -229,9 +214,6 @@ func (UnimplementedSessionWorkerServiceServer) UnmuteAllNPCs(context.Context, *U
 }
 func (UnimplementedSessionWorkerServiceServer) SpeakNPC(context.Context, *SpeakNPCRequest) (*SpeakNPCResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SpeakNPC not implemented")
-}
-func (UnimplementedSessionWorkerServiceServer) UpdateVoiceServer(context.Context, *UpdateVoiceServerRequest) (*UpdateVoiceServerResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method UpdateVoiceServer not implemented")
 }
 func (UnimplementedSessionWorkerServiceServer) mustEmbedUnimplementedSessionWorkerServiceServer() {}
 func (UnimplementedSessionWorkerServiceServer) testEmbeddedByValue()                              {}
@@ -416,24 +398,6 @@ func _SessionWorkerService_SpeakNPC_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SessionWorkerService_UpdateVoiceServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UpdateVoiceServerRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(SessionWorkerServiceServer).UpdateVoiceServer(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: SessionWorkerService_UpdateVoiceServer_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SessionWorkerServiceServer).UpdateVoiceServer(ctx, req.(*UpdateVoiceServerRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // SessionWorkerService_ServiceDesc is the grpc.ServiceDesc for SessionWorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -477,12 +441,120 @@ var SessionWorkerService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "SpeakNPC",
 			Handler:    _SessionWorkerService_SpeakNPC_Handler,
 		},
-		{
-			MethodName: "UpdateVoiceServer",
-			Handler:    _SessionWorkerService_UpdateVoiceServer_Handler,
-		},
 	},
 	Streams:  []grpc.StreamDesc{},
+	Metadata: "glyphoxa/v1/session.proto",
+}
+
+const (
+	AudioBridgeService_StreamAudio_FullMethodName = "/glyphoxa.v1.AudioBridgeService/StreamAudio"
+)
+
+// AudioBridgeServiceClient is the client API for AudioBridgeService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// AudioBridgeService streams opus audio frames between the gateway (which owns
+// the Discord voice connection) and a worker (which runs the voice pipeline).
+// The gateway joins voice normally via disgo's VoiceManager and bridges audio
+// over this bidirectional stream.
+type AudioBridgeServiceClient interface {
+	// StreamAudio opens a bidirectional stream of opus audio frames.
+	// Gateway → Worker: incoming Discord audio (one frame per speaking user).
+	// Worker → Gateway: outgoing NPC audio to be sent to Discord.
+	StreamAudio(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AudioFrame, AudioFrame], error)
+}
+
+type audioBridgeServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAudioBridgeServiceClient(cc grpc.ClientConnInterface) AudioBridgeServiceClient {
+	return &audioBridgeServiceClient{cc}
+}
+
+func (c *audioBridgeServiceClient) StreamAudio(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AudioFrame, AudioFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AudioBridgeService_ServiceDesc.Streams[0], AudioBridgeService_StreamAudio_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[AudioFrame, AudioFrame]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AudioBridgeService_StreamAudioClient = grpc.BidiStreamingClient[AudioFrame, AudioFrame]
+
+// AudioBridgeServiceServer is the server API for AudioBridgeService service.
+// All implementations must embed UnimplementedAudioBridgeServiceServer
+// for forward compatibility.
+//
+// AudioBridgeService streams opus audio frames between the gateway (which owns
+// the Discord voice connection) and a worker (which runs the voice pipeline).
+// The gateway joins voice normally via disgo's VoiceManager and bridges audio
+// over this bidirectional stream.
+type AudioBridgeServiceServer interface {
+	// StreamAudio opens a bidirectional stream of opus audio frames.
+	// Gateway → Worker: incoming Discord audio (one frame per speaking user).
+	// Worker → Gateway: outgoing NPC audio to be sent to Discord.
+	StreamAudio(grpc.BidiStreamingServer[AudioFrame, AudioFrame]) error
+	mustEmbedUnimplementedAudioBridgeServiceServer()
+}
+
+// UnimplementedAudioBridgeServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedAudioBridgeServiceServer struct{}
+
+func (UnimplementedAudioBridgeServiceServer) StreamAudio(grpc.BidiStreamingServer[AudioFrame, AudioFrame]) error {
+	return status.Error(codes.Unimplemented, "method StreamAudio not implemented")
+}
+func (UnimplementedAudioBridgeServiceServer) mustEmbedUnimplementedAudioBridgeServiceServer() {}
+func (UnimplementedAudioBridgeServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeAudioBridgeServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AudioBridgeServiceServer will
+// result in compilation errors.
+type UnsafeAudioBridgeServiceServer interface {
+	mustEmbedUnimplementedAudioBridgeServiceServer()
+}
+
+func RegisterAudioBridgeServiceServer(s grpc.ServiceRegistrar, srv AudioBridgeServiceServer) {
+	// If the following call panics, it indicates UnimplementedAudioBridgeServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&AudioBridgeService_ServiceDesc, srv)
+}
+
+func _AudioBridgeService_StreamAudio_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AudioBridgeServiceServer).StreamAudio(&grpc.GenericServerStream[AudioFrame, AudioFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AudioBridgeService_StreamAudioServer = grpc.BidiStreamingServer[AudioFrame, AudioFrame]
+
+// AudioBridgeService_ServiceDesc is the grpc.ServiceDesc for AudioBridgeService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AudioBridgeService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "glyphoxa.v1.AudioBridgeService",
+	HandlerType: (*AudioBridgeServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamAudio",
+			Handler:       _AudioBridgeService_StreamAudio_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "glyphoxa/v1/session.proto",
 }
 

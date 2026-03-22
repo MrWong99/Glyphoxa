@@ -43,7 +43,7 @@ go test -race -count=1 -run TestFunctionName ./path/to/package/...
 
 Player speaks → **VAD** (voice activity detection) → **STT** (speech-to-text) → **Hot Context Assembly** (<50ms: NPC identity + transcript + scene) → **LLM** (with optional MCP tool calls) → **TTS** (sentence-by-sentence streaming) → **Mixer** (priority queue, barge-in) → **Transport** (Discord/WebRTC). Transcript correction and knowledge graph updates happen asynchronously.
 
-**Distributed mode** (`--mode=gateway` + `--mode=worker`): Discord events arrive at the gateway, which orchestrates sessions via gRPC. The worker runs the same voice pipeline (VAD→STT→LLM→TTS→Mixer) and connects directly to Discord voice. Control signals (start/stop/heartbeat) flow over gRPC; audio flows directly between worker and Discord.
+**Distributed mode** (`--mode=gateway` + `--mode=worker`): Discord events arrive at the gateway, which orchestrates sessions via gRPC. The gateway owns the Discord voice connection (via disgo's VoiceManager) and bridges opus audio frames to/from workers over a bidirectional gRPC stream (`AudioBridgeService`). The worker runs the same voice pipeline (VAD→STT→LLM→TTS→Mixer) using a `grpcbridge.Connection` that implements `audio.Connection` over the gRPC stream instead of a direct Discord connection. Control signals (start/stop/heartbeat) flow over separate gRPC RPCs.
 
 **Latency budget**: <1.2s mouth-to-ear target, 2.0s hard limit. End-to-end streaming via pipelined Go channels.
 

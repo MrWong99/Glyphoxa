@@ -32,7 +32,6 @@ type WorkerHandler interface {
 	MuteAllNPCs(ctx context.Context, sessionID string) (int, error)
 	UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error)
 	SpeakNPC(ctx context.Context, sessionID, npcName, text string) error
-	UpdateVoiceServer(ctx context.Context, sessionID, token, endpoint string) error
 }
 
 // NewWorkerServer creates a gRPC server that delegates to the given handler.
@@ -62,18 +61,14 @@ func (s *WorkerServer) StartSession(ctx context.Context, req *pb.StartSessionReq
 	}
 
 	err := s.handler.StartSession(ctx, gateway.StartSessionRequest{
-		SessionID:      req.GetSessionId(),
-		TenantID:       req.GetTenantId(),
-		CampaignID:     req.GetCampaignId(),
-		GuildID:        req.GetGuildId(),
-		ChannelID:      req.GetChannelId(),
-		LicenseTier:    req.GetLicenseTier(),
-		NPCConfigs:     npcConfigs,
-		BotToken:       req.GetBotToken(),
-		VoiceSessionID: req.GetVoiceSessionId(),
-		VoiceToken:     req.GetVoiceToken(),
-		VoiceEndpoint:  req.GetVoiceEndpoint(),
-		BotUserID:      req.GetBotUserId(),
+		SessionID:   req.GetSessionId(),
+		TenantID:    req.GetTenantId(),
+		CampaignID:  req.GetCampaignId(),
+		GuildID:     req.GetGuildId(),
+		ChannelID:   req.GetChannelId(),
+		LicenseTier: req.GetLicenseTier(),
+		NPCConfigs:  npcConfigs,
+		BotToken:    req.GetBotToken(),
 	})
 	if err != nil {
 		slog.Warn("grpc: start session failed", "session_id", req.GetSessionId(), "err", err)
@@ -170,14 +165,6 @@ func (s *WorkerServer) SpeakNPC(ctx context.Context, req *pb.SpeakNPCRequest) (*
 		return nil, status.Errorf(codes.Internal, "speak npc: %v", err)
 	}
 	return &pb.SpeakNPCResponse{}, nil
-}
-
-// UpdateVoiceServer implements the gRPC UpdateVoiceServer RPC.
-func (s *WorkerServer) UpdateVoiceServer(ctx context.Context, req *pb.UpdateVoiceServerRequest) (*pb.UpdateVoiceServerResponse, error) {
-	if err := s.handler.UpdateVoiceServer(ctx, req.GetSessionId(), req.GetToken(), req.GetEndpoint()); err != nil {
-		return nil, status.Errorf(codes.Internal, "update voice server: %v", err)
-	}
-	return &pb.UpdateVoiceServerResponse{}, nil
 }
 
 // GatewayServer implements the SessionGateway gRPC service on the gateway side.
