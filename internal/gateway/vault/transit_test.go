@@ -32,7 +32,7 @@ func TestTransitClient_EncryptDecrypt(t *testing.T) {
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		case strings.HasSuffix(r.URL.Path, "/decrypt/test-key"):
 			var req transitDecryptRequest
@@ -48,11 +48,11 @@ func TestTransitClient_EncryptDecrypt(t *testing.T) {
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		case strings.HasSuffix(r.URL.Path, "/sys/health"):
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"initialized": true, "sealed": false}`))
+			_, _ = w.Write([]byte(`{"initialized": true, "sealed": false}`))
 
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
