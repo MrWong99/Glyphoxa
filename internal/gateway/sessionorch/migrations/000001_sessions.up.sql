@@ -19,11 +19,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 -- Prevent two active sessions for the same campaign.
-ALTER TABLE sessions ADD CONSTRAINT unique_active_campaign
-    EXCLUDE USING gist (
-        campaign_id WITH =,
-        tstzrange(started_at, COALESCE(ended_at, 'infinity'), '[)') WITH &&
-    ) WHERE (state != 'ended');
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'unique_active_campaign'
+    ) THEN
+        ALTER TABLE sessions ADD CONSTRAINT unique_active_campaign
+            EXCLUDE USING gist (
+                campaign_id WITH =,
+                tstzrange(started_at, COALESCE(ended_at, 'infinity'), '[)') WITH &&
+            ) WHERE (state != 'ended');
+    END IF;
+END$$;
 
 -- Shared tier: at most 1 active session per tenant.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_session_shared
