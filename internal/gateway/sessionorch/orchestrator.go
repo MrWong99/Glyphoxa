@@ -70,4 +70,8 @@ type Orchestrator interface {
 	// failed but the transition to 'ended' was missed (e.g., gateway crash
 	// during dispatch, context cancellation before DB write).
 	CleanupStalePending(ctx context.Context, maxAge time.Duration) (int, error)
+
+	// AllNonEndedSessions returns all sessions across all tenants that are
+	// not in the ended state. Used for orphaned job cleanup.
+	AllNonEndedSessions(ctx context.Context) ([]Session, error)
 }

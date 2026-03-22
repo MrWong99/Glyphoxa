@@ -188,3 +188,16 @@ func (m *MemoryOrchestrator) CleanupStalePending(_ context.Context, maxAge time.
 
 	return count, nil
 }
+
+// AllNonEndedSessions returns all non-ended sessions across all tenants.
+func (m *MemoryOrchestrator) AllNonEndedSessions(_ context.Context) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []Session
+	for _, s := range m.sessions {
+		if s.State != gateway.SessionEnded {
+			result = append(result, *s)
+		}
+	}
+	return result, nil
+}

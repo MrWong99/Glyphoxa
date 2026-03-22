@@ -79,3 +79,8 @@ func (g *QuotaGuard) CleanupZombies(ctx context.Context, timeout time.Duration) 
 func (g *QuotaGuard) CleanupStalePending(ctx context.Context, maxAge time.Duration) (int, error) {
 	return g.inner.CleanupStalePending(ctx, maxAge)
 }
+
+// AllNonEndedSessions delegates to the inner orchestrator.
+func (g *QuotaGuard) AllNonEndedSessions(ctx context.Context) ([]sessionorch.Session, error) {
+	return g.inner.AllNonEndedSessions(ctx)
+}

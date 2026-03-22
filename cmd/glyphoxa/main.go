@@ -440,7 +440,7 @@ func runGateway(cfg *config.Config) int {
 
 	// ── Orphaned job cleanup on startup ──────────────────────────────────────
 	if dispatcher != nil {
-		activeSessions, orchErr := orch.ActiveSessions(ctx, "")
+		activeSessions, orchErr := orch.AllNonEndedSessions(ctx)
 		if orchErr != nil {
 			slog.Warn("gateway: failed to get active sessions for orphan cleanup", "err", orchErr)
 		} else {
@@ -567,7 +567,7 @@ func runGateway(cfg *config.Config) int {
 				}
 				// Clean up orphaned K8s Jobs alongside zombie sessions.
 				if dispatcher != nil {
-					activeSessions, orchErr := orch.ActiveSessions(ctx, "")
+					activeSessions, orchErr := orch.AllNonEndedSessions(ctx)
 					if orchErr == nil {
 						activeSet := make(map[string]struct{}, len(activeSessions))
 						for _, s := range activeSessions {

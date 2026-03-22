@@ -240,3 +240,34 @@ func scanSessions(rows pgx.Rows) ([]Session, error) {
 	}
 	return sessions, rows.Err()
 }
+
+// AllNonEndedSessions returns all non-ended sessions across all tenants.
+func (p *PostgresOrchestrator) AllNonEndedSessions(ctx context.Context) ([]Session, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT id, tenant_id, campaign_id, guild_id, channel_id, license_tier,
+		       state, error, worker_pod, started_at, ended_at, last_heartbeat
+		FROM sessions
+		WHERE state != 'ended'
+		ORDER BY started_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("sessionorch: query all non-ended sessions: %w", err)
+	}
+	defer rows.Close()
+	var sessions []Session
+	for rows.Next() {
+		var s Session
+		var tierStr, stateStr string
+		if err := rows.Scan(
+			&s.ID, &s.TenantID, &s.CampaignID, &s.GuildID, &s.ChannelID,
+			&tierStr, &stateStr, &s.Error, &s.WorkerPod,
+			&s.StartedAt, &s.EndedAt, &s.LastHeartbeat,
+		); err != nil {
+			return nil, fmt.Errorf("sessionorch: scan session: %w", err)
+		}
+		s.LicenseTier, _ = config.ParseLicenseTier(tierStr)
+		s.State, _ = gateway.ParseSessionState(stateStr)
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
