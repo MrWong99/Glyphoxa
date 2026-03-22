@@ -355,10 +355,30 @@ func runGateway(cfg *config.Config) int {
 		router := gwBot.Router()
 		perms := gwBot.Permissions()
 
+		// Build NPC configs from the loaded config.
+		var npcMsgs []gw.NPCConfigMsg
+		for _, npc := range cfg.NPCs {
+			npcMsgs = append(npcMsgs, gw.NPCConfigMsg{
+				Name:           npc.Name,
+				Personality:    npc.Personality,
+				Engine:         npc.Engine,
+				VoiceID:        npc.Voice.VoiceID,
+				KnowledgeScope: npc.KnowledgeScope,
+				BudgetTier:     npc.BudgetTier,
+				GMHelper:       npc.GMHelper,
+				AddressOnly:    npc.AddressOnly,
+			})
+		}
+
 		// Per-tenant session controller.
 		sessionCtrl := gw.NewGatewaySessionController(
 			orchAdapter, dispatcher,
 			tenant.ID, tenant.CampaignID, tenant.LicenseTier,
+			gw.WithBotToken(tenant.BotToken),
+			gw.WithNPCConfigs(npcMsgs),
+			gw.WithWorkerDialer(func(addr string) (gw.WorkerClient, error) {
+				return grpctransport.NewClient(addr)
+			}),
 		)
 
 		// Session start/stop commands.

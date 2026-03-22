@@ -77,7 +77,7 @@ func TestDispatch_HappyPath(t *testing.T) {
 		podReady.Store(true)
 	}()
 
-	result, err := d.Dispatch(context.Background(), sessionID, "tenant-1")
+	result, err := d.Dispatch(context.Background(), sessionID, "tenant-1", nil)
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestDispatch_JobAlreadyExists(t *testing.T) {
 	}
 
 	d := NewDispatcher(client, ns, template, WithTimeout(time.Second))
-	_, err = d.Dispatch(context.Background(), sessionID, "t1")
+	_, err = d.Dispatch(context.Background(), sessionID, "t1", nil)
 	if err == nil {
 		t.Fatal("expected error for duplicate job")
 	}
@@ -148,7 +148,7 @@ func TestDispatch_PodTimeout(t *testing.T) {
 		WithTimeout(100*time.Millisecond),
 	)
 
-	_, err := d.Dispatch(context.Background(), "timeout-sess", "t1")
+	_, err := d.Dispatch(context.Background(), "timeout-sess", "t1", nil)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -182,7 +182,7 @@ func TestDispatch_PodFailed(t *testing.T) {
 		WithTimeout(5*time.Second),
 	)
 
-	_, err := d.Dispatch(context.Background(), "failsess", "t1")
+	_, err := d.Dispatch(context.Background(), "failsess", "t1", nil)
 	if err == nil {
 		t.Fatal("expected error for failed pod")
 	}
@@ -211,7 +211,7 @@ func TestStop(t *testing.T) {
 		WithTimeout(5*time.Second),
 	)
 
-	_, err := d.Dispatch(context.Background(), sessionID, "t1")
+	_, err := d.Dispatch(context.Background(), sessionID, "t1", nil)
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestCleanup(t *testing.T) {
 	)
 
 	for _, sid := range []string{"cleanup-a1234567", "cleanup-b1234567"} {
-		if _, err := d.Dispatch(context.Background(), sid, "t1"); err != nil {
+		if _, err := d.Dispatch(context.Background(), sid, "t1", nil); err != nil {
 			t.Fatalf("Dispatch(%s): %v", sid, err)
 		}
 	}
@@ -393,7 +393,7 @@ func TestDispatch_ConcurrentSessions(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, errs[idx] = d.Dispatch(context.Background(), sessions[idx].sid, "t1")
+			_, errs[idx] = d.Dispatch(context.Background(), sessions[idx].sid, "t1", nil)
 		}(i)
 	}
 
@@ -442,7 +442,7 @@ func TestDispatch_ContextCancelled(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := d.Dispatch(ctx, "cancel-test-1234", "t1")
+	_, err := d.Dispatch(ctx, "cancel-test-1234", "t1", nil)
 	if err == nil {
 		t.Fatal("expected error after context cancellation")
 	}
@@ -468,7 +468,7 @@ func TestDispatch_CustomGRPCPort(t *testing.T) {
 		WithGRPCPort(9090),
 	)
 
-	result, err := d.Dispatch(context.Background(), "customport-1234", "t1")
+	result, err := d.Dispatch(context.Background(), "customport-1234", "t1", nil)
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}

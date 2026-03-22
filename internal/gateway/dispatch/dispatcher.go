@@ -14,6 +14,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// WorkerStarter is a callback invoked after a worker pod is ready. It receives
+// the worker's gRPC address (host:port) and should call StartSession on the
+// worker. This avoids an import cycle between dispatch and gateway packages.
+type WorkerStarter func(ctx context.Context, addr string) error
+
 const (
 	// DefaultDispatchTimeout is the maximum time to wait for a worker pod
 	// to become ready after Job creation.
@@ -99,7 +104,7 @@ func WithLogger(l *slog.Logger) Option {
 // Dispatch creates a K8s Job for the given session and blocks until the
 // worker pod is ready. It returns the pod's gRPC address on success.
 // On any failure the Job is cleaned up automatically.
-func (d *Dispatcher) Dispatch(ctx context.Context, sessionID, tenantID string) (*DispatchResult, error) {
+func (d *Dispatcher) Dispatch(ctx context.Context, sessionID, tenantID string, starter WorkerStarter) (*DispatchResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 
 	job := StampJob(d.jobTemplate, sessionID, tenantID)
@@ -129,17 +134,33 @@ func (d *Dispatcher) Dispatch(ctx context.Context, sessionID, tenantID string) (
 		return nil, err
 	}
 
+	addr := fmt.Sprintf("%s:%d", podIP, d.grpcPort)
+
 	d.mu.Lock()
 	if s, ok := d.sessions[sessionID]; ok {
 		s.podName = podName
 	}
 	d.mu.Unlock()
 
+	// Call StartSession on the worker via the callback.
+	if starter != nil {
+		if callErr := starter(ctx, addr); callErr != nil {
+			d.capturePodLogs(context.Background(), created.Name)
+			_ = d.deleteJob(context.Background(), created.Name)
+			d.removeSession(sessionID)
+			cancel()
+			return nil, fmt.Errorf("dispatch: start session on worker: %w", callErr)
+		}
+		slog.Info("dispatch: worker session started",
+			"session_id", sessionID,
+			"address", addr,
+		)
+	}
 	return &DispatchResult{
 		JobName: created.Name,
 		PodName: podName,
 		PodIP:   podIP,
-		Address: fmt.Sprintf("%s:%d", podIP, d.grpcPort),
+		Address: addr,
 	}, nil
 }
 

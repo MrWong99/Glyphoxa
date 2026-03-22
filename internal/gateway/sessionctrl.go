@@ -34,6 +34,9 @@ type GatewaySessionController struct {
 	tenantID   string
 	campaignID string
 	tier       config.LicenseTier
+	botToken   string
+	npcConfigs []NPCConfigMsg
+	dialer     WorkerDialer
 
 	mu     sync.Mutex
 	active map[string]string // guildID -> sessionID
@@ -45,8 +48,9 @@ func NewGatewaySessionController(
 	dispatcher *dispatch.Dispatcher,
 	tenantID, campaignID string,
 	tier config.LicenseTier,
+	opts ...SessionControllerOption,
 ) *GatewaySessionController {
-	return &GatewaySessionController{
+	gc := &GatewaySessionController{
 		orch:       orch,
 		dispatcher: dispatcher,
 		tenantID:   tenantID,
@@ -54,6 +58,32 @@ func NewGatewaySessionController(
 		tier:       tier,
 		active:     make(map[string]string),
 	}
+	for _, opt := range opts {
+		opt(gc)
+	}
+	return gc
+}
+
+// SessionControllerOption configures a GatewaySessionController.
+type SessionControllerOption func(*GatewaySessionController)
+
+// WithBotToken sets the Discord bot token for worker voice connections.
+func WithBotToken(token string) SessionControllerOption {
+	return func(gc *GatewaySessionController) { gc.botToken = token }
+}
+
+// WithNPCConfigs sets the NPC configurations sent to workers.
+func WithNPCConfigs(configs []NPCConfigMsg) SessionControllerOption {
+	return func(gc *GatewaySessionController) { gc.npcConfigs = configs }
+}
+
+// WorkerDialer creates a WorkerClient connected to the given address.
+// It is injected from cmd/glyphoxa to avoid import cycles with grpctransport.
+type WorkerDialer func(addr string) (WorkerClient, error)
+
+// WithWorkerDialer sets the function used to create gRPC connections to workers.
+func WithWorkerDialer(d WorkerDialer) SessionControllerOption {
+	return func(gc *GatewaySessionController) { gc.dialer = d }
 }
 
 // Start begins a new voice session.
@@ -71,7 +101,30 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	}
 
 	if gc.dispatcher != nil {
-		result, dispErr := gc.dispatcher.Dispatch(ctx, sessionID, gc.tenantID)
+		startReq := StartSessionRequest{
+			SessionID:   sessionID,
+			TenantID:    gc.tenantID,
+			CampaignID:  gc.campaignID,
+			GuildID:     req.GuildID,
+			ChannelID:   req.ChannelID,
+			LicenseTier: gc.tier.String(),
+			BotToken:    gc.botToken,
+			NPCConfigs:  gc.npcConfigs,
+		}
+		starter := func(callCtx context.Context, addr string) error {
+			if gc.dialer == nil {
+				return fmt.Errorf("gateway: no worker dialer configured")
+			}
+			client, err := gc.dialer(addr)
+			if err != nil {
+				return fmt.Errorf("dial worker gRPC at %s: %w", addr, err)
+			}
+			if err := client.StartSession(callCtx, startReq); err != nil {
+				return fmt.Errorf("StartSession RPC: %w", err)
+			}
+			return nil
+		}
+		result, dispErr := gc.dispatcher.Dispatch(ctx, sessionID, gc.tenantID, starter)
 		if dispErr != nil {
 			if transErr := gc.orch.Transition(ctx, sessionID, SessionEnded, dispErr.Error()); transErr != nil {
 				slog.Error("gateway: failed to transition session after dispatch failure",
