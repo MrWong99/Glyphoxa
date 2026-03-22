@@ -17,6 +17,7 @@ import (
 var (
 	_ gateway.WorkerClient    = (*Client)(nil)
 	_ gateway.GatewayCallback = (*Callback)(nil)
+	_ gateway.NPCController   = (*NPCClient)(nil)
 )
 
 // SessionStartFunc is called by Client.StartSession to run the voice pipeline.
@@ -106,6 +107,46 @@ func (c *Client) GetStatus(_ context.Context) ([]gateway.SessionStatus, error) {
 		result = append(result, s)
 	}
 	return result, nil
+}
+
+// NPCClient implements NPCController via direct orchestrator calls for full mode.
+type NPCClient struct {
+	handler gateway.NPCController
+}
+
+// NewNPCClient creates a local NPCController that delegates to the given handler.
+func NewNPCClient(handler gateway.NPCController) *NPCClient {
+	return &NPCClient{handler: handler}
+}
+
+// ListNPCs delegates to the handler.
+func (n *NPCClient) ListNPCs(ctx context.Context, sessionID string) ([]gateway.NPCStatus, error) {
+	return n.handler.ListNPCs(ctx, sessionID)
+}
+
+// MuteNPC delegates to the handler.
+func (n *NPCClient) MuteNPC(ctx context.Context, sessionID, npcName string) error {
+	return n.handler.MuteNPC(ctx, sessionID, npcName)
+}
+
+// UnmuteNPC delegates to the handler.
+func (n *NPCClient) UnmuteNPC(ctx context.Context, sessionID, npcName string) error {
+	return n.handler.UnmuteNPC(ctx, sessionID, npcName)
+}
+
+// MuteAllNPCs delegates to the handler.
+func (n *NPCClient) MuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
+	return n.handler.MuteAllNPCs(ctx, sessionID)
+}
+
+// UnmuteAllNPCs delegates to the handler.
+func (n *NPCClient) UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
+	return n.handler.UnmuteAllNPCs(ctx, sessionID)
+}
+
+// SpeakNPC delegates to the handler.
+func (n *NPCClient) SpeakNPC(ctx context.Context, sessionID, npcName, text string) error {
+	return n.handler.SpeakNPC(ctx, sessionID, npcName, text)
 }
 
 // Callback implements GatewayCallback as no-ops for full mode.

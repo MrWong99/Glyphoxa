@@ -92,6 +92,71 @@ message HeartbeatRequest {
 // HeartbeatResponse is the gateway's acknowledgement of a heartbeat.
 message HeartbeatResponse {}
 
+// NPCInfo describes an NPC within a running session.
+message NPCInfo {
+  string id = 1;
+  string name = 2;
+  bool muted = 3;
+}
+
+// ListNPCsRequest asks a worker for the NPCs in a session.
+message ListNPCsRequest {
+  string session_id = 1;
+}
+
+// ListNPCsResponse returns the NPCs in a session.
+message ListNPCsResponse {
+  repeated NPCInfo npcs = 1;
+}
+
+// MuteNPCRequest asks a worker to mute a specific NPC.
+message MuteNPCRequest {
+  string session_id = 1;
+  string npc_name = 2;
+}
+
+// MuteNPCResponse is the worker's reply after muting an NPC.
+message MuteNPCResponse {}
+
+// UnmuteNPCRequest asks a worker to unmute a specific NPC.
+message UnmuteNPCRequest {
+  string session_id = 1;
+  string npc_name = 2;
+}
+
+// UnmuteNPCResponse is the worker's reply after unmuting an NPC.
+message UnmuteNPCResponse {}
+
+// MuteAllNPCsRequest asks a worker to mute all NPCs in a session.
+message MuteAllNPCsRequest {
+  string session_id = 1;
+}
+
+// MuteAllNPCsResponse returns how many NPCs were muted.
+message MuteAllNPCsResponse {
+  int32 count = 1;
+}
+
+// UnmuteAllNPCsRequest asks a worker to unmute all NPCs in a session.
+message UnmuteAllNPCsRequest {
+  string session_id = 1;
+}
+
+// UnmuteAllNPCsResponse returns how many NPCs were unmuted.
+message UnmuteAllNPCsResponse {
+  int32 count = 1;
+}
+
+// SpeakNPCRequest asks a worker to make an NPC speak pre-written text.
+message SpeakNPCRequest {
+  string session_id = 1;
+  string npc_name = 2;
+  string text = 3;
+}
+
+// SpeakNPCResponse is the worker's reply after triggering NPC speech.
+message SpeakNPCResponse {}
+
 // SessionWorkerService is the gRPC service exposed by workers, called by the gateway.
 service SessionWorkerService {
   // StartSession tells the worker to begin a new voice session.
@@ -100,6 +165,18 @@ service SessionWorkerService {
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
   // GetStatus returns the status of one or all sessions on this worker.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // ListNPCs returns the NPCs in a running session.
+  rpc ListNPCs(ListNPCsRequest) returns (ListNPCsResponse);
+  // MuteNPC mutes a specific NPC in a session.
+  rpc MuteNPC(MuteNPCRequest) returns (MuteNPCResponse);
+  // UnmuteNPC unmutes a specific NPC in a session.
+  rpc UnmuteNPC(UnmuteNPCRequest) returns (UnmuteNPCResponse);
+  // MuteAllNPCs mutes all NPCs in a session.
+  rpc MuteAllNPCs(MuteAllNPCsRequest) returns (MuteAllNPCsResponse);
+  // UnmuteAllNPCs unmutes all NPCs in a session.
+  rpc UnmuteAllNPCs(UnmuteAllNPCsRequest) returns (UnmuteAllNPCsResponse);
+  // SpeakNPC forces an NPC to speak pre-written text.
+  rpc SpeakNPC(SpeakNPCRequest) returns (SpeakNPCResponse);
 }
 
 // SessionGatewayService is the gRPC service exposed by the gateway, called by workers.
