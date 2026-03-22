@@ -88,18 +88,9 @@ func (cc *CampaignCommands) handleInfo(e *events.ApplicationCommandInteractionCr
 	}
 
 	cfg := cc.getCfg()
-	store := cc.getStore()
-	if cfg == nil || store == nil {
-		discordbot.RespondEphemeral(e, "Campaign commands are not available in gateway mode.")
+	if cfg == nil {
+		discordbot.RespondEphemeral(e, "No campaign configuration available.")
 		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	entities, err := store.List(ctx, entity.ListOptions{})
-	if err != nil {
-		slog.Warn("discord: failed to count entities for campaign info", "err", err)
 	}
 
 	name := cfg.Name
@@ -111,35 +102,51 @@ func (cc *CampaignCommands) handleInfo(e *events.ApplicationCommandInteractionCr
 		system = "(not set)"
 	}
 
-	typeCounts := make(map[entity.EntityType]int)
-	for _, ent := range entities {
-		typeCounts[ent.Type]++
-	}
-
-	var breakdown strings.Builder
-	for _, t := range []entity.EntityType{
-		entity.EntityNPC, entity.EntityLocation, entity.EntityItem,
-		entity.EntityFaction, entity.EntityQuest, entity.EntityLore,
-	} {
-		if c := typeCounts[t]; c > 0 {
-			fmt.Fprintf(&breakdown, "%s: %d\n", t, c)
-		}
-	}
-
 	embed := discord.Embed{
 		Title: "Campaign Info",
 		Fields: []discord.EmbedField{
 			{Name: "Name", Value: name, Inline: new(true)},
 			{Name: "System", Value: system, Inline: new(true)},
-			{Name: "Total Entities", Value: fmt.Sprintf("%d", len(entities)), Inline: new(true)},
 		},
 	}
 
-	if breakdown.Len() > 0 {
+	// Entity breakdown is only available when an entity store is present
+	// (full mode). In gateway mode the store runs on the worker.
+	store := cc.getStore()
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		entities, err := store.List(ctx, entity.ListOptions{})
+		if err != nil {
+			slog.Warn("discord: failed to count entities for campaign info", "err", err)
+		}
+
 		embed.Fields = append(embed.Fields, discord.EmbedField{
-			Name:  "Entity Breakdown",
-			Value: breakdown.String(),
+			Name: "Total Entities", Value: fmt.Sprintf("%d", len(entities)), Inline: new(true),
 		})
+
+		typeCounts := make(map[entity.EntityType]int)
+		for _, ent := range entities {
+			typeCounts[ent.Type]++
+		}
+
+		var breakdown strings.Builder
+		for _, t := range []entity.EntityType{
+			entity.EntityNPC, entity.EntityLocation, entity.EntityItem,
+			entity.EntityFaction, entity.EntityQuest, entity.EntityLore,
+		} {
+			if c := typeCounts[t]; c > 0 {
+				fmt.Fprintf(&breakdown, "%s: %d\n", t, c)
+			}
+		}
+
+		if breakdown.Len() > 0 {
+			embed.Fields = append(embed.Fields, discord.EmbedField{
+				Name:  "Entity Breakdown",
+				Value: breakdown.String(),
+			})
+		}
 	}
 
 	discordbot.RespondEmbed(e, embed)
