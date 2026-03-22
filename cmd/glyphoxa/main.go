@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,8 +15,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"encoding/json"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
