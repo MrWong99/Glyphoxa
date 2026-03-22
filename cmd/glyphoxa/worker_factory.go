@@ -287,7 +287,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	// ── 10. Consolidator ─────────────────────────────────────────────────────
 	var consolid *session.Consolidator
 	if sessionStore != nil {
-		var summariser session.Summariser = session.NoopSummariser()
+		summariser := session.NoopSummariser()
 		if wf.providers.LLM != nil {
 			summariser = session.NewLLMSummariser(wf.providers.LLM)
 		}
