@@ -57,7 +57,7 @@ data:
             - name: worker
               image: {{ include "glyphoxa.image" . }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
-              args: ["--mode=worker"]
+              args: ["--mode=worker", "--config=/etc/glyphoxa/config.yaml"]
               ports:
                 - name: grpc
                   containerPort: {{ .Values.worker.ports.grpc }}
