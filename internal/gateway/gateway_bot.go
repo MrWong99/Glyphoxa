@@ -80,16 +80,24 @@ func (g *GatewayBot) RegisterCommands(_ context.Context) error {
 	return nil
 }
 
-// Close unregisters commands and closes the Discord client.
-func (g *GatewayBot) Close(ctx context.Context) {
+// UnregisterCommands removes all slash commands from Discord for each guild.
+// Call this only when the tenant is being permanently deleted, not on
+// reconnect or restart — commands persist across bot restarts and the new
+// connection will overwrite them via [RegisterCommands].
+func (g *GatewayBot) UnregisterCommands() {
 	for _, guildID := range g.guildIDs {
 		if _, err := g.client.Rest.SetGuildCommands(g.client.ApplicationID, guildID, nil); err != nil {
-			slog.Debug("gateway: failed to unregister commands on close",
+			slog.Debug("gateway: failed to unregister commands",
 				"tenant_id", g.tenantID,
 				"guild_id", guildID,
 				"err", err,
 			)
 		}
 	}
+}
+
+// Close closes the Discord client without unregistering commands.
+// Commands are left in place so they remain available across restarts.
+func (g *GatewayBot) Close(ctx context.Context) {
 	g.client.Close(ctx)
 }
