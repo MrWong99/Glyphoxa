@@ -267,17 +267,48 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 	gID, _ := snowflake.Parse(guildID)
 	chID, _ := snowflake.Parse(channelID)
 
-	appID := gc.gwBot.Client().ApplicationID
+	client := gc.gwBot.Client()
 
-	slog.Debug("gateway: capturing voice credentials",
+	// Use the bot's actual user ID from the READY event cache. This is the
+	// authoritative ID that Discord uses in voice state events. Fall back to
+	// ApplicationID (extracted from the token) only if the cache is empty,
+	// which should never happen after OpenGateway returns.
+	selfID := client.ID()
+	if selfID == 0 {
+		selfID = client.ApplicationID
+		slog.Warn("gateway: self user not cached, falling back to ApplicationID",
+			"application_id", selfID,
+		)
+	}
+
+	slog.Info("gateway: capturing voice credentials",
 		"guild_id", guildID,
 		"channel_id", channelID,
-		"bot_app_id", appID,
+		"bot_user_id", selfID,
+		"application_id", client.ApplicationID,
 	)
 
 	// Verify the gateway connection is open before sending Op 4.
-	if !gc.gwBot.Client().HasGateway() {
+	if !client.HasGateway() {
 		return "", "", "", "", fmt.Errorf("gateway connection not available")
+	}
+
+	// If the bot is already in the target voice channel (e.g. from a previous
+	// failed capture that didn't clean up), Discord won't send fresh voice
+	// events for a join to the same channel. Leave first to force a clean join.
+	if vs, ok := client.Caches.VoiceState(gID, selfID); ok && vs.ChannelID != nil {
+		slog.Info("gateway: bot already in voice channel, leaving first to force fresh join",
+			"guild_id", guildID,
+			"current_channel", vs.ChannelID,
+			"target_channel", channelID,
+		)
+		_ = client.UpdateVoiceState(ctx, gID, nil, false, false)
+		// Brief pause to let Discord process the leave before we rejoin.
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return "", "", "", "", fmt.Errorf("context cancelled during voice channel leave: %w", ctx.Err())
+		}
 	}
 
 	type creds struct {
@@ -296,10 +327,10 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 
 	// Temporary event listeners — removed after capture.
 	stateListener := bot.NewListenerFunc(func(e *events.GuildVoiceStateUpdate) {
-		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != appID {
+		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != selfID {
 			return
 		}
-		slog.Debug("gateway: received VOICE_STATE_UPDATE",
+		slog.Info("gateway: received VOICE_STATE_UPDATE",
 			"guild_id", guildID,
 			"session_id", e.VoiceState.SessionID,
 			"channel_id", e.VoiceState.ChannelID,
@@ -320,12 +351,12 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 			return
 		}
 		if e.Endpoint == nil {
-			slog.Debug("gateway: received VOICE_SERVER_UPDATE with nil endpoint (server reallocating)",
+			slog.Info("gateway: received VOICE_SERVER_UPDATE with nil endpoint (server reallocating)",
 				"guild_id", guildID,
 			)
 			return
 		}
-		slog.Debug("gateway: received VOICE_SERVER_UPDATE",
+		slog.Info("gateway: received VOICE_SERVER_UPDATE",
 			"guild_id", guildID,
 			"endpoint", *e.Endpoint,
 		)
@@ -342,26 +373,30 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 		}
 	})
 
-	gc.gwBot.Client().AddEventListeners(stateListener, serverListener)
-	defer gc.gwBot.Client().RemoveEventListeners(stateListener, serverListener)
+	client.AddEventListeners(stateListener, serverListener)
+	defer client.RemoveEventListeners(stateListener, serverListener)
 
 	// Send Opcode 4 to join voice channel.
-	if err := gc.gwBot.Client().UpdateVoiceState(ctx, gID, &chID, false, false); err != nil {
+	if err := client.UpdateVoiceState(ctx, gID, &chID, false, false); err != nil {
 		return "", "", "", "", fmt.Errorf("send voice state update: %w", err)
 	}
-	slog.Debug("gateway: sent Op 4 voice state update", "guild_id", guildID, "channel_id", channelID)
+	slog.Info("gateway: sent Op 4 voice state update", "guild_id", guildID, "channel_id", channelID)
 
 	select {
 	case vc := <-credsCh:
-		slog.Debug("gateway: voice credentials captured",
+		slog.Info("gateway: voice credentials captured",
 			"guild_id", guildID,
 			"endpoint", vc.endpoint,
 		)
-		return vc.sessionID, vc.token, vc.endpoint, appID.String(), nil
+		return vc.sessionID, vc.token, vc.endpoint, selfID.String(), nil
 	case <-ctx.Done():
 		mu.Lock()
 		gs, gsr := gotState, gotServer
 		mu.Unlock()
+		// Leave voice channel on failure to avoid stale state on retry.
+		leaveCtx, leaveCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = client.UpdateVoiceState(leaveCtx, gID, nil, false, false)
+		leaveCancel()
 		slog.Error("gateway: voice credential capture timed out",
 			"guild_id", guildID,
 			"channel_id", channelID,
