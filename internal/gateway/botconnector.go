@@ -10,6 +10,8 @@ import (
 	"github.com/disgoorg/disgo/cache"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/snowflake/v2"
 
 	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
@@ -89,6 +91,9 @@ func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Te
 		bot.WithEventListenerFunc(func(e *events.ModalSubmitInteractionCreate) {
 			router.HandleModal(e)
 		}),
+		bot.WithVoiceManagerConfigOpts(
+			voice.WithDaveSessionCreateFunc(golibdave.NewSession),
+		),
 	}
 
 	client, err := disgo.New(tenant.BotToken, opts...)

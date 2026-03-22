@@ -157,6 +157,10 @@ func (ec *EntityCommands) handleList(e *events.ApplicationCommandInteractionCrea
 	}
 
 	store := ec.getStore()
+	if store == nil {
+		discordbot.RespondEphemeral(e, "Entity commands are not available in gateway mode.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -222,6 +226,10 @@ func (ec *EntityCommands) handleRemove(e *events.ApplicationCommandInteractionCr
 	}
 
 	store := ec.getStore()
+	if store == nil {
+		discordbot.RespondEphemeral(e, "Entity commands are not available in gateway mode.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -278,6 +286,10 @@ func (ec *EntityCommands) handleRemoveConfirm(e *events.ComponentInteractionCrea
 	}
 
 	store := ec.getStore()
+	if store == nil {
+		discordbot.RespondEphemeral(e, "Entity commands are not available in gateway mode.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -292,6 +304,10 @@ func (ec *EntityCommands) handleRemoveConfirm(e *events.ComponentInteractionCrea
 // autocompleteRemove provides name autocomplete for /entity remove.
 func (ec *EntityCommands) autocompleteRemove(e *events.AutocompleteInteractionCreate) {
 	store := ec.getStore()
+	if store == nil {
+		_ = e.AutocompleteResult(nil)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -359,6 +375,10 @@ func (ec *EntityCommands) handleImport(e *events.ApplicationCommandInteractionCr
 	defer dl.Body.Close()
 
 	store := ec.getStore()
+	if store == nil {
+		discordbot.FollowUp(e, "Entity commands are not available in gateway mode.")
+		return
+	}
 	var count int
 
 	switch format {
