@@ -19,15 +19,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionWorkerService_StartSession_FullMethodName  = "/glyphoxa.v1.SessionWorkerService/StartSession"
-	SessionWorkerService_StopSession_FullMethodName   = "/glyphoxa.v1.SessionWorkerService/StopSession"
-	SessionWorkerService_GetStatus_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/GetStatus"
-	SessionWorkerService_ListNPCs_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/ListNPCs"
-	SessionWorkerService_MuteNPC_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/MuteNPC"
-	SessionWorkerService_UnmuteNPC_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/UnmuteNPC"
-	SessionWorkerService_MuteAllNPCs_FullMethodName   = "/glyphoxa.v1.SessionWorkerService/MuteAllNPCs"
-	SessionWorkerService_UnmuteAllNPCs_FullMethodName = "/glyphoxa.v1.SessionWorkerService/UnmuteAllNPCs"
-	SessionWorkerService_SpeakNPC_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/SpeakNPC"
+	SessionWorkerService_StartSession_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/StartSession"
+	SessionWorkerService_StopSession_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/StopSession"
+	SessionWorkerService_GetStatus_FullMethodName         = "/glyphoxa.v1.SessionWorkerService/GetStatus"
+	SessionWorkerService_ListNPCs_FullMethodName          = "/glyphoxa.v1.SessionWorkerService/ListNPCs"
+	SessionWorkerService_MuteNPC_FullMethodName           = "/glyphoxa.v1.SessionWorkerService/MuteNPC"
+	SessionWorkerService_UnmuteNPC_FullMethodName         = "/glyphoxa.v1.SessionWorkerService/UnmuteNPC"
+	SessionWorkerService_MuteAllNPCs_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/MuteAllNPCs"
+	SessionWorkerService_UnmuteAllNPCs_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/UnmuteAllNPCs"
+	SessionWorkerService_SpeakNPC_FullMethodName          = "/glyphoxa.v1.SessionWorkerService/SpeakNPC"
+	SessionWorkerService_UpdateVoiceServer_FullMethodName = "/glyphoxa.v1.SessionWorkerService/UpdateVoiceServer"
 )
 
 // SessionWorkerServiceClient is the client API for SessionWorkerService service.
@@ -54,6 +55,8 @@ type SessionWorkerServiceClient interface {
 	UnmuteAllNPCs(ctx context.Context, in *UnmuteAllNPCsRequest, opts ...grpc.CallOption) (*UnmuteAllNPCsResponse, error)
 	// SpeakNPC forces an NPC to speak pre-written text.
 	SpeakNPC(ctx context.Context, in *SpeakNPCRequest, opts ...grpc.CallOption) (*SpeakNPCResponse, error)
+	// UpdateVoiceServer forwards a mid-session voice server change to the worker.
+	UpdateVoiceServer(ctx context.Context, in *UpdateVoiceServerRequest, opts ...grpc.CallOption) (*UpdateVoiceServerResponse, error)
 }
 
 type sessionWorkerServiceClient struct {
@@ -154,6 +157,16 @@ func (c *sessionWorkerServiceClient) SpeakNPC(ctx context.Context, in *SpeakNPCR
 	return out, nil
 }
 
+func (c *sessionWorkerServiceClient) UpdateVoiceServer(ctx context.Context, in *UpdateVoiceServerRequest, opts ...grpc.CallOption) (*UpdateVoiceServerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateVoiceServerResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_UpdateVoiceServer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionWorkerServiceServer is the server API for SessionWorkerService service.
 // All implementations must embed UnimplementedSessionWorkerServiceServer
 // for forward compatibility.
@@ -178,6 +191,8 @@ type SessionWorkerServiceServer interface {
 	UnmuteAllNPCs(context.Context, *UnmuteAllNPCsRequest) (*UnmuteAllNPCsResponse, error)
 	// SpeakNPC forces an NPC to speak pre-written text.
 	SpeakNPC(context.Context, *SpeakNPCRequest) (*SpeakNPCResponse, error)
+	// UpdateVoiceServer forwards a mid-session voice server change to the worker.
+	UpdateVoiceServer(context.Context, *UpdateVoiceServerRequest) (*UpdateVoiceServerResponse, error)
 	mustEmbedUnimplementedSessionWorkerServiceServer()
 }
 
@@ -214,6 +229,9 @@ func (UnimplementedSessionWorkerServiceServer) UnmuteAllNPCs(context.Context, *U
 }
 func (UnimplementedSessionWorkerServiceServer) SpeakNPC(context.Context, *SpeakNPCRequest) (*SpeakNPCResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SpeakNPC not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) UpdateVoiceServer(context.Context, *UpdateVoiceServerRequest) (*UpdateVoiceServerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateVoiceServer not implemented")
 }
 func (UnimplementedSessionWorkerServiceServer) mustEmbedUnimplementedSessionWorkerServiceServer() {}
 func (UnimplementedSessionWorkerServiceServer) testEmbeddedByValue()                              {}
@@ -398,6 +416,24 @@ func _SessionWorkerService_SpeakNPC_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionWorkerService_UpdateVoiceServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateVoiceServerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).UpdateVoiceServer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_UpdateVoiceServer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).UpdateVoiceServer(ctx, req.(*UpdateVoiceServerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionWorkerService_ServiceDesc is the grpc.ServiceDesc for SessionWorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -440,6 +476,10 @@ var SessionWorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SpeakNPC",
 			Handler:    _SessionWorkerService_SpeakNPC_Handler,
+		},
+		{
+			MethodName: "UpdateVoiceServer",
+			Handler:    _SessionWorkerService_UpdateVoiceServer_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

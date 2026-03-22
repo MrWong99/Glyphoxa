@@ -7,6 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
+
 	"github.com/MrWong99/glyphoxa/internal/config"
 	"github.com/MrWong99/glyphoxa/internal/gateway/dispatch"
 )
@@ -37,10 +41,14 @@ type GatewaySessionController struct {
 	botToken   string
 	npcConfigs []NPCConfigMsg
 	dialer     WorkerDialer
-	gwBot      *GatewayBot // for gateway handoff (suspend/resume)
+	gwBot      *GatewayBot // for voice credential capture and voice channel management
 
-	mu     sync.Mutex
-	active map[string]string // guildID -> sessionID
+	mu          sync.Mutex
+	active      map[string]string // guildID -> sessionID
+	workerAddrs map[string]string // sessionID -> worker gRPC address
+
+	voiceForwardersMu sync.Mutex
+	voiceForwarders   map[string]func() // sessionID -> unregister func
 }
 
 // NewGatewaySessionController creates a GatewaySessionController.
@@ -52,12 +60,14 @@ func NewGatewaySessionController(
 	opts ...SessionControllerOption,
 ) *GatewaySessionController {
 	gc := &GatewaySessionController{
-		orch:       orch,
-		dispatcher: dispatcher,
-		tenantID:   tenantID,
-		campaignID: campaignID,
-		tier:       tier,
-		active:     make(map[string]string),
+		orch:            orch,
+		dispatcher:      dispatcher,
+		tenantID:        tenantID,
+		campaignID:      campaignID,
+		tier:            tier,
+		active:          make(map[string]string),
+		workerAddrs:     make(map[string]string),
+		voiceForwarders: make(map[string]func()),
 	}
 	for _, opt := range opts {
 		opt(gc)
@@ -87,7 +97,8 @@ func WithWorkerDialer(d WorkerDialer) SessionControllerOption {
 	return func(gc *GatewaySessionController) { gc.dialer = d }
 }
 
-// WithGatewayBot sets the GatewayBot for gateway handoff during sessions.
+// WithGatewayBot sets the GatewayBot used for voice credential capture
+// and voice channel management.
 func WithGatewayBot(gwBot *GatewayBot) SessionControllerOption {
 	return func(gc *GatewaySessionController) { gc.gwBot = gwBot }
 }
@@ -107,12 +118,6 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	}
 
 	if gc.dispatcher != nil {
-		// Suspend the gateway bot so the worker can take over the Discord
-		// gateway connection (only one gateway per bot token is allowed).
-		if gc.gwBot != nil {
-			gc.gwBot.SuspendGateway(ctx)
-		}
-
 		startReq := StartSessionRequest{
 			SessionID:   sessionID,
 			TenantID:    gc.tenantID,
@@ -123,6 +128,26 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			BotToken:    gc.botToken,
 			NPCConfigs:  gc.npcConfigs,
 		}
+
+		// Capture voice credentials from the gateway bot if available.
+		// The gateway bot joins voice and stays connected for slash commands.
+		if gc.gwBot != nil {
+			voiceCtx, voiceCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer voiceCancel()
+
+			vsID, vToken, vEndpoint, botUserID, captureErr := gc.captureVoiceCredentials(
+				voiceCtx, req.GuildID, req.ChannelID)
+			if captureErr != nil {
+				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, captureErr.Error())
+				return fmt.Errorf("gateway: capture voice credentials: %w", captureErr)
+			}
+
+			startReq.VoiceSessionID = vsID
+			startReq.VoiceToken = vToken
+			startReq.VoiceEndpoint = vEndpoint
+			startReq.BotUserID = botUserID
+		}
+
 		starter := func(callCtx context.Context, addr string) error {
 			if gc.dialer == nil {
 				return fmt.Errorf("gateway: no worker dialer configured")
@@ -138,11 +163,10 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 		}
 		result, dispErr := gc.dispatcher.Dispatch(ctx, sessionID, gc.tenantID, starter)
 		if dispErr != nil {
-			// Resume gateway bot on dispatch failure.
+			// Leave voice on dispatch failure.
 			if gc.gwBot != nil {
-				if err := gc.gwBot.ResumeGateway(context.Background()); err != nil {
-					slog.Error("gateway: failed to resume gateway after dispatch failure", "err", err)
-				}
+				gID, _ := snowflake.Parse(req.GuildID)
+				_ = gc.gwBot.Client().UpdateVoiceState(ctx, gID, nil, false, false)
 			}
 			if transErr := gc.orch.Transition(ctx, sessionID, SessionEnded, dispErr.Error()); transErr != nil {
 				slog.Error("gateway: failed to transition session after dispatch failure",
@@ -150,6 +174,15 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			}
 			return fmt.Errorf("gateway: dispatch worker: %w", dispErr)
 		}
+
+		// Register listener for mid-session voice server changes.
+		if gc.gwBot != nil {
+			gc.mu.Lock()
+			gc.workerAddrs[sessionID] = result.Address
+			gc.mu.Unlock()
+			gc.registerVoiceServerForwarder(sessionID, req.GuildID)
+		}
+
 		slog.Info("gateway: worker dispatched",
 			"session_id", sessionID,
 			"tenant_id", gc.tenantID,
@@ -174,21 +207,23 @@ func (gc *GatewaySessionController) Stop(ctx context.Context, sessionID string) 
 	if err := gc.orch.Transition(ctx, sessionID, SessionEnded, ""); err != nil {
 		return fmt.Errorf("gateway: transition session to ended: %w", err)
 	}
+
+	// Leave the voice channel and clean up forwarders.
 	gc.mu.Lock()
+	delete(gc.workerAddrs, sessionID)
 	for guildID, sid := range gc.active {
 		if sid == sessionID {
 			delete(gc.active, guildID)
+			if gc.gwBot != nil {
+				gID, _ := snowflake.Parse(guildID)
+				_ = gc.gwBot.Client().UpdateVoiceState(ctx, gID, nil, false, false)
+			}
 			break
 		}
 	}
 	gc.mu.Unlock()
 
-	// Resume the gateway bot now that the worker is done.
-	if gc.gwBot != nil {
-		if err := gc.gwBot.ResumeGateway(context.Background()); err != nil {
-			slog.Error("gateway: failed to resume gateway after session stop", "err", err)
-		}
-	}
+	gc.unregisterVoiceServerForwarder(sessionID)
 	return nil
 }
 
@@ -221,4 +256,148 @@ func (gc *GatewaySessionController) Info(guildID string) (SessionInfo, bool) {
 		}, true
 	}
 	return info, true
+}
+
+// captureVoiceCredentials joins the voice channel via the gateway bot and
+// captures the voice server credentials (session_id, token, endpoint) from
+// the resulting VOICE_STATE_UPDATE and VOICE_SERVER_UPDATE dispatch events.
+func (gc *GatewaySessionController) captureVoiceCredentials(
+	ctx context.Context, guildID, channelID string,
+) (sessionID, token, endpoint, botUserID string, err error) {
+	gID, _ := snowflake.Parse(guildID)
+	chID, _ := snowflake.Parse(channelID)
+
+	type creds struct {
+		sessionID string
+		token     string
+		endpoint  string
+	}
+	credsCh := make(chan creds, 1)
+
+	var (
+		mu        sync.Mutex
+		c         creds
+		gotState  bool
+		gotServer bool
+	)
+
+	// Temporary event listeners — removed after capture.
+	stateListener := bot.NewListenerFunc(func(e *events.GuildVoiceStateUpdate) {
+		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != gc.gwBot.Client().ApplicationID {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		c.sessionID = e.VoiceState.SessionID
+		gotState = true
+		if gotServer {
+			select {
+			case credsCh <- c:
+			default:
+			}
+		}
+	})
+	serverListener := bot.NewListenerFunc(func(e *events.VoiceServerUpdate) {
+		if e.GuildID != gID || e.Endpoint == nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		c.token = e.Token
+		c.endpoint = *e.Endpoint
+		gotServer = true
+		if gotState {
+			select {
+			case credsCh <- c:
+			default:
+			}
+		}
+	})
+
+	gc.gwBot.Client().AddEventListeners(stateListener, serverListener)
+	defer gc.gwBot.Client().RemoveEventListeners(stateListener, serverListener)
+
+	// Send Opcode 4 to join voice channel.
+	if err := gc.gwBot.Client().UpdateVoiceState(ctx, gID, &chID, false, false); err != nil {
+		return "", "", "", "", fmt.Errorf("send voice state update: %w", err)
+	}
+
+	select {
+	case vc := <-credsCh:
+		return vc.sessionID, vc.token, vc.endpoint,
+			gc.gwBot.Client().ApplicationID.String(), nil
+	case <-ctx.Done():
+		return "", "", "", "", fmt.Errorf("capture voice credentials: %w", ctx.Err())
+	}
+}
+
+// registerVoiceServerForwarder listens for mid-session VOICE_SERVER_UPDATE
+// events and forwards them to the worker via gRPC.
+func (gc *GatewaySessionController) registerVoiceServerForwarder(sessionID, guildID string) {
+	gID, _ := snowflake.Parse(guildID)
+
+	listener := bot.NewListenerFunc(func(e *events.VoiceServerUpdate) {
+		if e.GuildID != gID || e.Endpoint == nil {
+			return
+		}
+		gc.mu.Lock()
+		addr := gc.workerAddrs[sessionID]
+		gc.mu.Unlock()
+
+		if addr == "" || gc.dialer == nil {
+			return
+		}
+		client, err := gc.dialer(addr)
+		if err != nil {
+			slog.Error("gateway: failed to dial worker for voice server forward",
+				"session_id", sessionID, "err", err)
+			return
+		}
+		fwdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := client.UpdateVoiceServer(fwdCtx, sessionID, e.Token, *e.Endpoint); err != nil {
+			slog.Error("gateway: failed to forward voice server update",
+				"session_id", sessionID, "err", err)
+		}
+	})
+
+	// Also listen for external disconnections (admin kicks the bot).
+	disconnectListener := bot.NewListenerFunc(func(e *events.GuildVoiceStateUpdate) {
+		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != gc.gwBot.Client().ApplicationID {
+			return
+		}
+		if e.VoiceState.ChannelID == nil {
+			slog.Info("gateway: bot disconnected from voice externally",
+				"session_id", sessionID, "guild_id", guildID)
+			go func() {
+				if err := gc.Stop(context.Background(), sessionID); err != nil {
+					slog.Error("gateway: failed to stop session after voice disconnect",
+						"session_id", sessionID, "err", err)
+				}
+			}()
+		}
+	})
+
+	gc.gwBot.Client().AddEventListeners(listener, disconnectListener)
+
+	gc.voiceForwardersMu.Lock()
+	gc.voiceForwarders[sessionID] = func() {
+		gc.gwBot.Client().RemoveEventListeners(listener, disconnectListener)
+	}
+	gc.voiceForwardersMu.Unlock()
+}
+
+// unregisterVoiceServerForwarder removes the VOICE_SERVER_UPDATE listener
+// for the given session.
+func (gc *GatewaySessionController) unregisterVoiceServerForwarder(sessionID string) {
+	gc.voiceForwardersMu.Lock()
+	unregister, ok := gc.voiceForwarders[sessionID]
+	if ok {
+		delete(gc.voiceForwarders, sessionID)
+	}
+	gc.voiceForwardersMu.Unlock()
+
+	if ok {
+		unregister()
+	}
 }
