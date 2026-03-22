@@ -40,6 +40,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
 	"github.com/MrWong99/glyphoxa/internal/gateway/usage"
+	gwvault "github.com/MrWong99/glyphoxa/internal/gateway/vault"
 
 	"k8s.io/client-go/kubernetes"
 	k8srest "k8s.io/client-go/rest"
@@ -315,7 +316,6 @@ func runGateway(cfg *config.Config) int {
 		slog.Error("failed to create postgres orchestrator", "err", err)
 		return 1
 	}
-	callbackBridge := sessionorch.NewCallbackBridge(orch)
 	orchAdapter := sessionorch.NewOrchestratorAdapter(orch)
 
 	// ── K8s Dispatcher (optional — only when GLYPHOXA_K8S_NAMESPACE is set) ─
@@ -345,10 +345,6 @@ func runGateway(cfg *config.Config) int {
 				"namespace", k8sNamespace, "configmap", cmName)
 		}
 	}
-
-	// ── Usage Store ──────────────────────────────────────────────────────────
-	usageStore := usage.NewPostgresStore(pool)
-	_ = usageStore // wired into quota enforcement in a future PR
 
 	// ── Bot Manager + Connector ──────────────────────────────────────────────
 	botMgr := gw.NewBotManager()
@@ -395,7 +391,24 @@ func runGateway(cfg *config.Config) int {
 		feedbackCmds.Register(router)
 	})
 
-	adminStore, err := gw.NewPostgresAdminStore(ctx, pool)
+	// ── Vault Transit encryption (optional) ─────────────────────────────────
+	var tokenEncryptor gwvault.TokenEncryptor
+	if vaultAddr := os.Getenv("VAULT_ADDR"); vaultAddr != "" {
+		vaultToken := os.Getenv("VAULT_TOKEN")
+		if vaultToken == "" {
+			slog.Warn("VAULT_ADDR set but VAULT_TOKEN missing — bot token encryption disabled")
+		} else {
+			tc := gwvault.NewTransitClient(vaultAddr, vaultToken, "glyphoxa-bot-tokens")
+			if err := tc.Ping(ctx); err != nil {
+				slog.Warn("vault: health check failed — bot token encryption disabled (graceful degradation)", "err", err)
+			} else {
+				slog.Info("vault: transit encryption enabled for bot tokens", "addr", vaultAddr)
+			}
+			tokenEncryptor = tc
+		}
+	}
+
+	adminStore, err := gw.NewPostgresAdminStore(ctx, pool, tokenEncryptor)
 	if err != nil {
 		slog.Error("failed to create postgres admin store", "err", err)
 		return 1
@@ -443,13 +456,6 @@ func runGateway(cfg *config.Config) int {
 			slog.Error("admin API error", "err", err)
 		}
 	}()
-
-	// ── Session Orchestrator ─────────────────────────────────────────────────
-	orch, err := sessionorch.NewPostgresOrchestrator(ctx, pool)
-	if err != nil {
-		slog.Error("failed to create postgres orchestrator", "err", err)
-		return 1
-	}
 
 	// ── Usage tracking + quota enforcement ────────────────────────────────────
 	usageStore := usage.NewPostgresStore(pool)
