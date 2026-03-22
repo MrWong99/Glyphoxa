@@ -178,24 +178,17 @@ func (x *NPCConfig) GetAddressOnly() bool {
 
 // StartSessionRequest is sent by the gateway to a worker to start a new voice session.
 type StartSessionRequest struct {
-	state       protoimpl.MessageState `protogen:"open.v1"`
-	TenantId    string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	CampaignId  string                 `protobuf:"bytes,2,opt,name=campaign_id,json=campaignId,proto3" json:"campaign_id,omitempty"`
-	GuildId     string                 `protobuf:"bytes,3,opt,name=guild_id,json=guildId,proto3" json:"guild_id,omitempty"`
-	ChannelId   string                 `protobuf:"bytes,4,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	LicenseTier string                 `protobuf:"bytes,5,opt,name=license_tier,json=licenseTier,proto3" json:"license_tier,omitempty"`
-	SessionId   string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	NpcConfigs  []*NPCConfig           `protobuf:"bytes,7,rep,name=npc_configs,json=npcConfigs,proto3" json:"npc_configs,omitempty"`
-	BotToken    string                 `protobuf:"bytes,8,opt,name=bot_token,json=botToken,proto3" json:"bot_token,omitempty"`
-	// Voice proxy credentials (populated by gateway in distributed mode).
-	// When set, the worker connects directly to the Discord voice server
-	// without opening its own bot gateway connection.
-	VoiceSessionId string `protobuf:"bytes,9,opt,name=voice_session_id,json=voiceSessionId,proto3" json:"voice_session_id,omitempty"` // from VOICE_STATE_UPDATE
-	VoiceToken     string `protobuf:"bytes,10,opt,name=voice_token,json=voiceToken,proto3" json:"voice_token,omitempty"`              // from VOICE_SERVER_UPDATE
-	VoiceEndpoint  string `protobuf:"bytes,11,opt,name=voice_endpoint,json=voiceEndpoint,proto3" json:"voice_endpoint,omitempty"`     // from VOICE_SERVER_UPDATE
-	BotUserId      string `protobuf:"bytes,12,opt,name=bot_user_id,json=botUserId,proto3" json:"bot_user_id,omitempty"`               // bot's Discord user snowflake
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TenantId      string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	CampaignId    string                 `protobuf:"bytes,2,opt,name=campaign_id,json=campaignId,proto3" json:"campaign_id,omitempty"`
+	GuildId       string                 `protobuf:"bytes,3,opt,name=guild_id,json=guildId,proto3" json:"guild_id,omitempty"`
+	ChannelId     string                 `protobuf:"bytes,4,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	LicenseTier   string                 `protobuf:"bytes,5,opt,name=license_tier,json=licenseTier,proto3" json:"license_tier,omitempty"`
+	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	NpcConfigs    []*NPCConfig           `protobuf:"bytes,7,rep,name=npc_configs,json=npcConfigs,proto3" json:"npc_configs,omitempty"`
+	BotToken      string                 `protobuf:"bytes,8,opt,name=bot_token,json=botToken,proto3" json:"bot_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StartSessionRequest) Reset() {
@@ -280,34 +273,6 @@ func (x *StartSessionRequest) GetNpcConfigs() []*NPCConfig {
 func (x *StartSessionRequest) GetBotToken() string {
 	if x != nil {
 		return x.BotToken
-	}
-	return ""
-}
-
-func (x *StartSessionRequest) GetVoiceSessionId() string {
-	if x != nil {
-		return x.VoiceSessionId
-	}
-	return ""
-}
-
-func (x *StartSessionRequest) GetVoiceToken() string {
-	if x != nil {
-		return x.VoiceToken
-	}
-	return ""
-}
-
-func (x *StartSessionRequest) GetVoiceEndpoint() string {
-	if x != nil {
-		return x.VoiceEndpoint
-	}
-	return ""
-}
-
-func (x *StartSessionRequest) GetBotUserId() string {
-	if x != nil {
-		return x.BotUserId
 	}
 	return ""
 }
@@ -1412,31 +1377,39 @@ func (*SpeakNPCResponse) Descriptor() ([]byte, []int) {
 	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{24}
 }
 
-// UpdateVoiceServerRequest forwards a mid-session VOICE_SERVER_UPDATE from
-// the gateway to the worker so it can reconnect to a new voice server.
-type UpdateVoiceServerRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
-	Endpoint      string                 `protobuf:"bytes,3,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+// AudioFrame carries a single opus-encoded audio packet between the gateway
+// and a worker over a bidirectional gRPC stream.
+type AudioFrame struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session_id identifies the session this frame belongs to.
+	SessionId string `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// opus_data is the raw Opus-encoded audio packet.
+	OpusData []byte `protobuf:"bytes,2,opt,name=opus_data,json=opusData,proto3" json:"opus_data,omitempty"`
+	// ssrc identifies the speaker (incoming only, from Discord).
+	Ssrc uint32 `protobuf:"varint,3,opt,name=ssrc,proto3" json:"ssrc,omitempty"`
+	// user_id is the Discord user ID of the speaker (incoming only).
+	UserId string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// is_silence marks a silence frame (used to signal Discord to start
+	// routing audio to the bot at connection startup).
+	IsSilence     bool `protobuf:"varint,5,opt,name=is_silence,json=isSilence,proto3" json:"is_silence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *UpdateVoiceServerRequest) Reset() {
-	*x = UpdateVoiceServerRequest{}
+func (x *AudioFrame) Reset() {
+	*x = AudioFrame{}
 	mi := &file_glyphoxa_v1_session_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *UpdateVoiceServerRequest) String() string {
+func (x *AudioFrame) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*UpdateVoiceServerRequest) ProtoMessage() {}
+func (*AudioFrame) ProtoMessage() {}
 
-func (x *UpdateVoiceServerRequest) ProtoReflect() protoreflect.Message {
+func (x *AudioFrame) ProtoReflect() protoreflect.Message {
 	mi := &file_glyphoxa_v1_session_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1448,67 +1421,44 @@ func (x *UpdateVoiceServerRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use UpdateVoiceServerRequest.ProtoReflect.Descriptor instead.
-func (*UpdateVoiceServerRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use AudioFrame.ProtoReflect.Descriptor instead.
+func (*AudioFrame) Descriptor() ([]byte, []int) {
 	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{25}
 }
 
-func (x *UpdateVoiceServerRequest) GetSessionId() string {
+func (x *AudioFrame) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
 	}
 	return ""
 }
 
-func (x *UpdateVoiceServerRequest) GetToken() string {
+func (x *AudioFrame) GetOpusData() []byte {
 	if x != nil {
-		return x.Token
+		return x.OpusData
+	}
+	return nil
+}
+
+func (x *AudioFrame) GetSsrc() uint32 {
+	if x != nil {
+		return x.Ssrc
+	}
+	return 0
+}
+
+func (x *AudioFrame) GetUserId() string {
+	if x != nil {
+		return x.UserId
 	}
 	return ""
 }
 
-func (x *UpdateVoiceServerRequest) GetEndpoint() string {
+func (x *AudioFrame) GetIsSilence() bool {
 	if x != nil {
-		return x.Endpoint
+		return x.IsSilence
 	}
-	return ""
-}
-
-// UpdateVoiceServerResponse is the worker's acknowledgement.
-type UpdateVoiceServerResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *UpdateVoiceServerResponse) Reset() {
-	*x = UpdateVoiceServerResponse{}
-	mi := &file_glyphoxa_v1_session_proto_msgTypes[26]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *UpdateVoiceServerResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*UpdateVoiceServerResponse) ProtoMessage() {}
-
-func (x *UpdateVoiceServerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_glyphoxa_v1_session_proto_msgTypes[26]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use UpdateVoiceServerResponse.ProtoReflect.Descriptor instead.
-func (*UpdateVoiceServerResponse) Descriptor() ([]byte, []int) {
-	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{26}
+	return false
 }
 
 var File_glyphoxa_v1_session_proto protoreflect.FileDescriptor
@@ -1525,7 +1475,7 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\vbudget_tier\x18\x06 \x01(\tR\n" +
 	"budgetTier\x12\x1b\n" +
 	"\tgm_helper\x18\a \x01(\bR\bgmHelper\x12!\n" +
-	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\xb7\x03\n" +
+	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\xf9\x02\n" +
 	"\x13StartSessionRequest\x12\x1b\n" +
 	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12\x1f\n" +
 	"\vcampaign_id\x18\x02 \x01(\tR\n" +
@@ -1538,13 +1488,9 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"session_id\x18\x06 \x01(\tR\tsessionId\x127\n" +
 	"\vnpc_configs\x18\a \x03(\v2\x16.glyphoxa.v1.NPCConfigR\n" +
 	"npcConfigs\x12\x1b\n" +
-	"\tbot_token\x18\b \x01(\tR\bbotToken\x12(\n" +
-	"\x10voice_session_id\x18\t \x01(\tR\x0evoiceSessionId\x12\x1f\n" +
-	"\vvoice_token\x18\n" +
-	" \x01(\tR\n" +
-	"voiceToken\x12%\n" +
-	"\x0evoice_endpoint\x18\v \x01(\tR\rvoiceEndpoint\x12\x1e\n" +
-	"\vbot_user_id\x18\f \x01(\tR\tbotUserId\"K\n" +
+	"\tbot_token\x18\b \x01(\tR\bbotTokenJ\x04\b\t\x10\n" +
+	"J\x04\b\n" +
+	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rR\x10voice_session_idR\vvoice_tokenR\x0evoice_endpointR\vbot_user_id\"K\n" +
 	"\x14StartSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -1612,18 +1558,21 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
 	"\bnpc_name\x18\x02 \x01(\tR\anpcName\x12\x12\n" +
 	"\x04text\x18\x03 \x01(\tR\x04text\"\x12\n" +
-	"\x10SpeakNPCResponse\"k\n" +
-	"\x18UpdateVoiceServerRequest\x12\x1d\n" +
+	"\x10SpeakNPCResponse\"\x94\x01\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\tR\x05token\x12\x1a\n" +
-	"\bendpoint\x18\x03 \x01(\tR\bendpoint\"\x1b\n" +
-	"\x19UpdateVoiceServerResponse*{\n" +
+	"AudioFrame\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1b\n" +
+	"\topus_data\x18\x02 \x01(\fR\bopusData\x12\x12\n" +
+	"\x04ssrc\x18\x03 \x01(\rR\x04ssrc\x12\x17\n" +
+	"\auser_id\x18\x04 \x01(\tR\x06userId\x12\x1d\n" +
+	"\n" +
+	"is_silence\x18\x05 \x01(\bR\tisSilence*{\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SESSION_STATE_PENDING\x10\x01\x12\x18\n" +
 	"\x14SESSION_STATE_ACTIVE\x10\x02\x12\x17\n" +
-	"\x13SESSION_STATE_ENDED\x10\x032\xbb\x06\n" +
+	"\x13SESSION_STATE_ENDED\x10\x032\xd7\x05\n" +
 	"\x14SessionWorkerService\x12S\n" +
 	"\fStartSession\x12 .glyphoxa.v1.StartSessionRequest\x1a!.glyphoxa.v1.StartSessionResponse\x12P\n" +
 	"\vStopSession\x12\x1f.glyphoxa.v1.StopSessionRequest\x1a .glyphoxa.v1.StopSessionResponse\x12J\n" +
@@ -1633,8 +1582,9 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\tUnmuteNPC\x12\x1d.glyphoxa.v1.UnmuteNPCRequest\x1a\x1e.glyphoxa.v1.UnmuteNPCResponse\x12P\n" +
 	"\vMuteAllNPCs\x12\x1f.glyphoxa.v1.MuteAllNPCsRequest\x1a .glyphoxa.v1.MuteAllNPCsResponse\x12V\n" +
 	"\rUnmuteAllNPCs\x12!.glyphoxa.v1.UnmuteAllNPCsRequest\x1a\".glyphoxa.v1.UnmuteAllNPCsResponse\x12G\n" +
-	"\bSpeakNPC\x12\x1c.glyphoxa.v1.SpeakNPCRequest\x1a\x1d.glyphoxa.v1.SpeakNPCResponse\x12b\n" +
-	"\x11UpdateVoiceServer\x12%.glyphoxa.v1.UpdateVoiceServerRequest\x1a&.glyphoxa.v1.UpdateVoiceServerResponse2\xb5\x01\n" +
+	"\bSpeakNPC\x12\x1c.glyphoxa.v1.SpeakNPCRequest\x1a\x1d.glyphoxa.v1.SpeakNPCResponse2Y\n" +
+	"\x12AudioBridgeService\x12C\n" +
+	"\vStreamAudio\x12\x17.glyphoxa.v1.AudioFrame\x1a\x17.glyphoxa.v1.AudioFrame(\x010\x012\xb5\x01\n" +
 	"\x15SessionGatewayService\x12P\n" +
 	"\vReportState\x12\x1f.glyphoxa.v1.ReportStateRequest\x1a .glyphoxa.v1.ReportStateResponse\x12J\n" +
 	"\tHeartbeat\x12\x1d.glyphoxa.v1.HeartbeatRequest\x1a\x1e.glyphoxa.v1.HeartbeatResponseB9Z7github.com/MrWong99/glyphoxa/gen/glyphoxa/v1;glyphoxav1b\x06proto3"
@@ -1652,42 +1602,41 @@ func file_glyphoxa_v1_session_proto_rawDescGZIP() []byte {
 }
 
 var file_glyphoxa_v1_session_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_glyphoxa_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_glyphoxa_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_glyphoxa_v1_session_proto_goTypes = []any{
-	(SessionState)(0),                 // 0: glyphoxa.v1.SessionState
-	(*NPCConfig)(nil),                 // 1: glyphoxa.v1.NPCConfig
-	(*StartSessionRequest)(nil),       // 2: glyphoxa.v1.StartSessionRequest
-	(*StartSessionResponse)(nil),      // 3: glyphoxa.v1.StartSessionResponse
-	(*StopSessionRequest)(nil),        // 4: glyphoxa.v1.StopSessionRequest
-	(*StopSessionResponse)(nil),       // 5: glyphoxa.v1.StopSessionResponse
-	(*GetStatusRequest)(nil),          // 6: glyphoxa.v1.GetStatusRequest
-	(*SessionStatus)(nil),             // 7: glyphoxa.v1.SessionStatus
-	(*GetStatusResponse)(nil),         // 8: glyphoxa.v1.GetStatusResponse
-	(*ReportStateRequest)(nil),        // 9: glyphoxa.v1.ReportStateRequest
-	(*ReportStateResponse)(nil),       // 10: glyphoxa.v1.ReportStateResponse
-	(*HeartbeatRequest)(nil),          // 11: glyphoxa.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),         // 12: glyphoxa.v1.HeartbeatResponse
-	(*NPCInfo)(nil),                   // 13: glyphoxa.v1.NPCInfo
-	(*ListNPCsRequest)(nil),           // 14: glyphoxa.v1.ListNPCsRequest
-	(*ListNPCsResponse)(nil),          // 15: glyphoxa.v1.ListNPCsResponse
-	(*MuteNPCRequest)(nil),            // 16: glyphoxa.v1.MuteNPCRequest
-	(*MuteNPCResponse)(nil),           // 17: glyphoxa.v1.MuteNPCResponse
-	(*UnmuteNPCRequest)(nil),          // 18: glyphoxa.v1.UnmuteNPCRequest
-	(*UnmuteNPCResponse)(nil),         // 19: glyphoxa.v1.UnmuteNPCResponse
-	(*MuteAllNPCsRequest)(nil),        // 20: glyphoxa.v1.MuteAllNPCsRequest
-	(*MuteAllNPCsResponse)(nil),       // 21: glyphoxa.v1.MuteAllNPCsResponse
-	(*UnmuteAllNPCsRequest)(nil),      // 22: glyphoxa.v1.UnmuteAllNPCsRequest
-	(*UnmuteAllNPCsResponse)(nil),     // 23: glyphoxa.v1.UnmuteAllNPCsResponse
-	(*SpeakNPCRequest)(nil),           // 24: glyphoxa.v1.SpeakNPCRequest
-	(*SpeakNPCResponse)(nil),          // 25: glyphoxa.v1.SpeakNPCResponse
-	(*UpdateVoiceServerRequest)(nil),  // 26: glyphoxa.v1.UpdateVoiceServerRequest
-	(*UpdateVoiceServerResponse)(nil), // 27: glyphoxa.v1.UpdateVoiceServerResponse
-	(*timestamppb.Timestamp)(nil),     // 28: google.protobuf.Timestamp
+	(SessionState)(0),             // 0: glyphoxa.v1.SessionState
+	(*NPCConfig)(nil),             // 1: glyphoxa.v1.NPCConfig
+	(*StartSessionRequest)(nil),   // 2: glyphoxa.v1.StartSessionRequest
+	(*StartSessionResponse)(nil),  // 3: glyphoxa.v1.StartSessionResponse
+	(*StopSessionRequest)(nil),    // 4: glyphoxa.v1.StopSessionRequest
+	(*StopSessionResponse)(nil),   // 5: glyphoxa.v1.StopSessionResponse
+	(*GetStatusRequest)(nil),      // 6: glyphoxa.v1.GetStatusRequest
+	(*SessionStatus)(nil),         // 7: glyphoxa.v1.SessionStatus
+	(*GetStatusResponse)(nil),     // 8: glyphoxa.v1.GetStatusResponse
+	(*ReportStateRequest)(nil),    // 9: glyphoxa.v1.ReportStateRequest
+	(*ReportStateResponse)(nil),   // 10: glyphoxa.v1.ReportStateResponse
+	(*HeartbeatRequest)(nil),      // 11: glyphoxa.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),     // 12: glyphoxa.v1.HeartbeatResponse
+	(*NPCInfo)(nil),               // 13: glyphoxa.v1.NPCInfo
+	(*ListNPCsRequest)(nil),       // 14: glyphoxa.v1.ListNPCsRequest
+	(*ListNPCsResponse)(nil),      // 15: glyphoxa.v1.ListNPCsResponse
+	(*MuteNPCRequest)(nil),        // 16: glyphoxa.v1.MuteNPCRequest
+	(*MuteNPCResponse)(nil),       // 17: glyphoxa.v1.MuteNPCResponse
+	(*UnmuteNPCRequest)(nil),      // 18: glyphoxa.v1.UnmuteNPCRequest
+	(*UnmuteNPCResponse)(nil),     // 19: glyphoxa.v1.UnmuteNPCResponse
+	(*MuteAllNPCsRequest)(nil),    // 20: glyphoxa.v1.MuteAllNPCsRequest
+	(*MuteAllNPCsResponse)(nil),   // 21: glyphoxa.v1.MuteAllNPCsResponse
+	(*UnmuteAllNPCsRequest)(nil),  // 22: glyphoxa.v1.UnmuteAllNPCsRequest
+	(*UnmuteAllNPCsResponse)(nil), // 23: glyphoxa.v1.UnmuteAllNPCsResponse
+	(*SpeakNPCRequest)(nil),       // 24: glyphoxa.v1.SpeakNPCRequest
+	(*SpeakNPCResponse)(nil),      // 25: glyphoxa.v1.SpeakNPCResponse
+	(*AudioFrame)(nil),            // 26: glyphoxa.v1.AudioFrame
+	(*timestamppb.Timestamp)(nil), // 27: google.protobuf.Timestamp
 }
 var file_glyphoxa_v1_session_proto_depIdxs = []int32{
 	1,  // 0: glyphoxa.v1.StartSessionRequest.npc_configs:type_name -> glyphoxa.v1.NPCConfig
 	0,  // 1: glyphoxa.v1.SessionStatus.state:type_name -> glyphoxa.v1.SessionState
-	28, // 2: glyphoxa.v1.SessionStatus.started_at:type_name -> google.protobuf.Timestamp
+	27, // 2: glyphoxa.v1.SessionStatus.started_at:type_name -> google.protobuf.Timestamp
 	7,  // 3: glyphoxa.v1.GetStatusResponse.sessions:type_name -> glyphoxa.v1.SessionStatus
 	0,  // 4: glyphoxa.v1.ReportStateRequest.state:type_name -> glyphoxa.v1.SessionState
 	13, // 5: glyphoxa.v1.ListNPCsResponse.npcs:type_name -> glyphoxa.v1.NPCInfo
@@ -1700,7 +1649,7 @@ var file_glyphoxa_v1_session_proto_depIdxs = []int32{
 	20, // 12: glyphoxa.v1.SessionWorkerService.MuteAllNPCs:input_type -> glyphoxa.v1.MuteAllNPCsRequest
 	22, // 13: glyphoxa.v1.SessionWorkerService.UnmuteAllNPCs:input_type -> glyphoxa.v1.UnmuteAllNPCsRequest
 	24, // 14: glyphoxa.v1.SessionWorkerService.SpeakNPC:input_type -> glyphoxa.v1.SpeakNPCRequest
-	26, // 15: glyphoxa.v1.SessionWorkerService.UpdateVoiceServer:input_type -> glyphoxa.v1.UpdateVoiceServerRequest
+	26, // 15: glyphoxa.v1.AudioBridgeService.StreamAudio:input_type -> glyphoxa.v1.AudioFrame
 	9,  // 16: glyphoxa.v1.SessionGatewayService.ReportState:input_type -> glyphoxa.v1.ReportStateRequest
 	11, // 17: glyphoxa.v1.SessionGatewayService.Heartbeat:input_type -> glyphoxa.v1.HeartbeatRequest
 	3,  // 18: glyphoxa.v1.SessionWorkerService.StartSession:output_type -> glyphoxa.v1.StartSessionResponse
@@ -1712,7 +1661,7 @@ var file_glyphoxa_v1_session_proto_depIdxs = []int32{
 	21, // 24: glyphoxa.v1.SessionWorkerService.MuteAllNPCs:output_type -> glyphoxa.v1.MuteAllNPCsResponse
 	23, // 25: glyphoxa.v1.SessionWorkerService.UnmuteAllNPCs:output_type -> glyphoxa.v1.UnmuteAllNPCsResponse
 	25, // 26: glyphoxa.v1.SessionWorkerService.SpeakNPC:output_type -> glyphoxa.v1.SpeakNPCResponse
-	27, // 27: glyphoxa.v1.SessionWorkerService.UpdateVoiceServer:output_type -> glyphoxa.v1.UpdateVoiceServerResponse
+	26, // 27: glyphoxa.v1.AudioBridgeService.StreamAudio:output_type -> glyphoxa.v1.AudioFrame
 	10, // 28: glyphoxa.v1.SessionGatewayService.ReportState:output_type -> glyphoxa.v1.ReportStateResponse
 	12, // 29: glyphoxa.v1.SessionGatewayService.Heartbeat:output_type -> glyphoxa.v1.HeartbeatResponse
 	18, // [18:30] is the sub-list for method output_type
@@ -1733,9 +1682,9 @@ func file_glyphoxa_v1_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_glyphoxa_v1_session_proto_rawDesc), len(file_glyphoxa_v1_session_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   27,
+			NumMessages:   26,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_glyphoxa_v1_session_proto_goTypes,
 		DependencyIndexes: file_glyphoxa_v1_session_proto_depIdxs,

@@ -36,6 +36,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
 	gw "github.com/MrWong99/glyphoxa/internal/gateway"
+	"github.com/MrWong99/glyphoxa/internal/gateway/audiobridge"
 	"github.com/MrWong99/glyphoxa/internal/gateway/dispatch"
 	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
@@ -350,6 +351,10 @@ func runGateway(cfg *config.Config) int {
 	botMgr := gw.NewBotManager()
 	botConnector := gw.NewDiscordBotConnector(botMgr)
 
+	// Audio bridge server — streams opus frames between gateway voice.Conn
+	// and workers over gRPC bidirectional streaming.
+	audioBridgeSrv := audiobridge.NewServer()
+
 	// Configure per-tenant slash command wiring.
 	botConnector.SetCommandSetup(func(gwBot *gw.GatewayBot, tenant gw.Tenant) {
 		router := gwBot.Router()
@@ -377,6 +382,7 @@ func runGateway(cfg *config.Config) int {
 			gw.WithBotToken(tenant.BotToken),
 			gw.WithNPCConfigs(npcMsgs),
 			gw.WithGatewayBot(gwBot),
+			gw.WithAudioBridgeServer(audioBridgeSrv),
 			gw.WithWorkerDialer(func(addr string) (gw.WorkerClient, error) {
 				return grpctransport.NewClient(addr)
 			}),
@@ -508,6 +514,7 @@ func runGateway(cfg *config.Config) int {
 
 	gwGRPCServer := grpc.NewServer(grpcOpts...)
 	grpctransport.NewGatewayServer(recordingBridge).Register(gwGRPCServer)
+	audioBridgeSrv.Register(gwGRPCServer)
 
 	go func() {
 		ln, err := net.Listen("tcp", grpcAddr)
@@ -694,9 +701,10 @@ func runWorker(cfg *config.Config) int {
 
 	// ── WorkerHandler ─────────────────────────────────────────────────────────
 	wf := &workerFactory{
-		cfg:       cfg,
-		providers: providers,
-		mcpHost:   mcpHost,
+		cfg:             cfg,
+		providers:       providers,
+		mcpHost:         mcpHost,
+		audioBridgeAddr: gwAddr, // same address as the gateway callback — audio bridge is on the gateway gRPC server
 	}
 
 	handler := session.NewWorkerHandler(wf.CreateRuntime, callback)

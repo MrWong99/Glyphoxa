@@ -21,12 +21,16 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/transcript/phonetic"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/audio/discord"
+	"github.com/MrWong99/glyphoxa/pkg/audio/grpcbridge"
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
 
+	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/memory/postgres"
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // workerConsolidationInterval is the consolidation period for worker sessions.
@@ -36,9 +40,10 @@ const workerConsolidationInterval = 5 * time.Minute
 // It holds shared, long-lived dependencies (providers, config, MCP host)
 // that are initialised once at worker startup and reused across sessions.
 type workerFactory struct {
-	cfg       *config.Config
-	providers *app.Providers
-	mcpHost   mcp.Host
+	cfg             *config.Config
+	providers       *app.Providers
+	mcpHost         mcp.Host
+	audioBridgeAddr string // gateway AudioBridgeService address (empty in full mode)
 }
 
 // CreateRuntime builds a fully wired session.Runtime from a StartSessionRequest.
@@ -106,42 +111,32 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 		}
 	}
 
-	// ── 3. Discord voice connection ──────────────────────────────────────────
-	if req.BotToken == "" && req.VoiceSessionID == "" {
+	// ── 3. Voice connection ─────────────────────────────────────────────────
+	// In distributed mode the gateway owns the Discord voice connection and
+	// streams opus frames via the AudioBridgeService gRPC stream. The worker
+	// connects to that stream as its audio.Connection. In full mode the worker
+	// opens its own Discord gateway for voice.
+	if req.BotToken == "" {
 		if storeCloser != nil {
 			_ = storeCloser()
 		}
-		return nil, fmt.Errorf("worker: bot_token or voice proxy credentials required in StartSessionRequest")
+		return nil, fmt.Errorf("worker: bot_token required in StartSessionRequest")
 	}
 
 	var voicePlatformCloser func() error
-	var voiceProxy *discord.VoiceProxyPlatform
 	var conn audio.Connection
 
-	if req.VoiceSessionID != "" && req.VoiceToken != "" && req.VoiceEndpoint != "" {
-		// Distributed mode with voice proxy: use pre-captured credentials.
-		proxyPlatform, err := discord.NewVoiceProxyPlatform(
-			req.GuildID, req.BotUserID,
-			voice.WithConnDaveSessionCreateFunc(golibdave.NewSession),
-		)
+	if wf.audioBridgeAddr != "" {
+		// Distributed mode: connect to the gateway's AudioBridgeService.
+		bridgeConn, err := wf.connectAudioBridge(sessionCtx, req.SessionID)
 		if err != nil {
 			if storeCloser != nil {
 				_ = storeCloser()
 			}
-			return nil, fmt.Errorf("worker: create voice proxy platform: %w", err)
+			return nil, fmt.Errorf("worker: connect audio bridge: %w", err)
 		}
-
-		conn, err = proxyPlatform.Connect(sessionCtx,
-			req.ChannelID, req.VoiceSessionID, req.VoiceToken, req.VoiceEndpoint)
-		if err != nil {
-			_ = proxyPlatform.Close()
-			if storeCloser != nil {
-				_ = storeCloser()
-			}
-			return nil, fmt.Errorf("worker: voice proxy connect to %s: %w", req.ChannelID, err)
-		}
-		voicePlatformCloser = proxyPlatform.Close
-		voiceProxy = proxyPlatform
+		conn = bridgeConn
+		voicePlatformCloser = func() error { return nil }
 	} else {
 		// Full mode: open own gateway (existing code path).
 		platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID,
@@ -156,7 +151,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 
 		conn, err = platform.Connect(sessionCtx, req.ChannelID)
 		if err != nil {
-			_ = voicePlatformCloser()
+			_ = platform.Close()
 			if storeCloser != nil {
 				_ = storeCloser()
 			}
@@ -353,7 +348,6 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 		Mixer:        pm,
 		Connection:   conn,
 		SessionStore: sessionStore,
-		VoiceProxy:   voiceProxy,
 	})
 
 	// Register closers in correct teardown order:
@@ -397,6 +391,36 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	)
 
 	return rt, nil
+}
+
+// connectAudioBridge dials the gateway's AudioBridgeService and returns a
+// grpcbridge.Connection for the given session.
+func (wf *workerFactory) connectAudioBridge(ctx context.Context, sessionID string) (*grpcbridge.Connection, error) {
+	conn, err := grpc.NewClient(wf.audioBridgeAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("worker: dial audio bridge at %s: %w", wf.audioBridgeAddr, err)
+	}
+
+	bridgeClient := pb.NewAudioBridgeServiceClient(conn)
+	stream, err := bridgeClient.StreamAudio(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("worker: open audio stream: %w", err)
+	}
+
+	bridgeConn, err := grpcbridge.New(sessionID, stream)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("worker: create grpc bridge connection: %w", err)
+	}
+
+	slog.Info("worker: connected to audio bridge",
+		"session_id", sessionID,
+		"bridge_addr", wf.audioBridgeAddr,
+	)
+	return bridgeConn, nil
 }
 
 // npcConfigsFromRequest converts gRPC NPCConfigMsg entries to config.NPCConfig.

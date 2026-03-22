@@ -69,14 +69,6 @@ type StartSessionRequest struct {
 	LicenseTier string
 	NPCConfigs  []NPCConfigMsg
 	BotToken    string
-
-	// Voice proxy credentials (populated by gateway in distributed mode).
-	// When set, the worker connects directly to the Discord voice server
-	// without opening its own bot gateway connection.
-	VoiceSessionID string // from VOICE_STATE_UPDATE
-	VoiceToken     string // from VOICE_SERVER_UPDATE
-	VoiceEndpoint  string // from VOICE_SERVER_UPDATE
-	BotUserID      string // bot's Discord user snowflake
 }
 
 // SessionStatus describes the current state of a session.
@@ -104,7 +96,6 @@ type WorkerClient interface {
 	StartSession(ctx context.Context, req StartSessionRequest) error
 	StopSession(ctx context.Context, sessionID string) error
 	GetStatus(ctx context.Context) ([]SessionStatus, error)
-	UpdateVoiceServer(ctx context.Context, sessionID, token, endpoint string) error
 }
 
 // NPCController is the interface for gateway-to-worker NPC management.

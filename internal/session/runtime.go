@@ -31,9 +31,6 @@ type Runtime struct {
 	mixer     audio.Mixer
 	conn      audio.Connection
 
-	// voiceProxy forwards voice server updates in distributed mode.
-	voiceProxy VoiceServerUpdater
-
 	// closers are called in reverse order during Stop.
 	closers []func() error
 
@@ -46,12 +43,6 @@ type Runtime struct {
 	running bool
 }
 
-// VoiceServerUpdater can forward mid-session voice server changes
-// to the underlying voice connection.
-type VoiceServerUpdater interface {
-	UpdateVoiceServer(token, endpoint string)
-}
-
 // RuntimeConfig holds the dependencies for creating a Runtime.
 type RuntimeConfig struct {
 	SessionID    string
@@ -61,19 +52,17 @@ type RuntimeConfig struct {
 	Mixer        audio.Mixer
 	Connection   audio.Connection
 	SessionStore memory.SessionStore
-	VoiceProxy   VoiceServerUpdater // nil in full mode
 }
 
 // NewRuntime creates a Runtime. Call Start to begin processing, Stop to tear down.
 func NewRuntime(cfg RuntimeConfig) *Runtime {
 	return &Runtime{
-		sessionID:  cfg.SessionID,
-		agents:     cfg.Agents,
-		engines:    cfg.Engines,
-		orch:       cfg.Orchestrator,
-		mixer:      cfg.Mixer,
-		conn:       cfg.Connection,
-		voiceProxy: cfg.VoiceProxy,
+		sessionID: cfg.SessionID,
+		agents:    cfg.Agents,
+		engines:   cfg.Engines,
+		orch:      cfg.Orchestrator,
+		mixer:     cfg.Mixer,
+		conn:      cfg.Connection,
 	}
 }
 
@@ -167,14 +156,6 @@ func (rt *Runtime) Orchestrator() *orchestrator.Orchestrator {
 // Agents returns the loaded NPC agents.
 func (rt *Runtime) Agents() []agent.NPCAgent {
 	return rt.agents
-}
-
-// UpdateVoiceServer forwards a mid-session voice server change to the
-// underlying voice connection. No-op if the runtime has no voice proxy.
-func (rt *Runtime) UpdateVoiceServer(token, endpoint string) {
-	if rt.voiceProxy != nil {
-		rt.voiceProxy.UpdateVoiceServer(token, endpoint)
-	}
 }
 
 // recordTranscripts drains an agent's transcript channel and writes entries
