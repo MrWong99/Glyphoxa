@@ -76,9 +76,6 @@ func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Te
 				gateway.IntentGuildVoiceStates,
 				gateway.IntentGuilds,
 			),
-			// Use shard 0 of 2 so the worker (shard 1) can coexist.
-			gateway.WithShardID(0),
-			gateway.WithShardCount(2),
 		),
 		bot.WithEventListenerFunc(func(e *events.ApplicationCommandInteractionCreate) {
 			router.HandleCommand(e)

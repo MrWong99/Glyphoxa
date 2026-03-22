@@ -80,10 +80,6 @@ func NewVoiceOnlyPlatform(ctx context.Context, token, guildID string, opts ...Vo
 			gateway.WithIntents(
 				gateway.IntentGuildVoiceStates,
 			),
-			// Use shard 1 of 2 to coexist with the gateway bot (shard 0).
-			// Without sharding, the second gateway connection invalidates the first.
-			gateway.WithShardID(1),
-			gateway.WithShardCount(2),
 		),
 	}
 	if len(cfg.voiceOpts) > 0 {
