@@ -42,8 +42,6 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
 	"github.com/MrWong99/glyphoxa/internal/gateway/usage"
 
-	"k8s.io/client-go/kubernetes"
-	k8srest "k8s.io/client-go/rest"
 	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
@@ -69,6 +67,8 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
 	energyvad "github.com/MrWong99/glyphoxa/pkg/provider/vad/energy"
 	silerovad "github.com/MrWong99/glyphoxa/pkg/provider/vad/silero"
+	"k8s.io/client-go/kubernetes"
+	k8srest "k8s.io/client-go/rest"
 )
 
 func main() {
