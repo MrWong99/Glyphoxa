@@ -361,10 +361,10 @@ func runGateway(cfg *config.Config) int {
 			npcMsgs = append(npcMsgs, gw.NPCConfigMsg{
 				Name:           npc.Name,
 				Personality:    npc.Personality,
-				Engine:         npc.Engine,
+				Engine:         string(npc.Engine),
 				VoiceID:        npc.Voice.VoiceID,
 				KnowledgeScope: npc.KnowledgeScope,
-				BudgetTier:     npc.BudgetTier,
+				BudgetTier:     string(npc.BudgetTier),
 				GMHelper:       npc.GMHelper,
 				AddressOnly:    npc.AddressOnly,
 			})
