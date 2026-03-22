@@ -79,6 +79,13 @@ type SessionStatus struct {
 	Error     string
 }
 
+// NPCStatus describes an NPC within a running session.
+type NPCStatus struct {
+	ID    string
+	Name  string
+	Muted bool
+}
+
 // WorkerClient is the interface for gateway-to-worker communication.
 // The gateway uses this to start/stop sessions and query worker status.
 //
@@ -89,6 +96,21 @@ type WorkerClient interface {
 	StartSession(ctx context.Context, req StartSessionRequest) error
 	StopSession(ctx context.Context, sessionID string) error
 	GetStatus(ctx context.Context) ([]SessionStatus, error)
+}
+
+// NPCController is the interface for gateway-to-worker NPC management.
+// It extends the base WorkerClient with per-session NPC operations.
+//
+// Two implementations exist:
+//   - grpctransport.Client implements via gRPC (distributed mode)
+//   - local.NPCClient calls the orchestrator directly (full mode)
+type NPCController interface {
+	ListNPCs(ctx context.Context, sessionID string) ([]NPCStatus, error)
+	MuteNPC(ctx context.Context, sessionID, npcName string) error
+	UnmuteNPC(ctx context.Context, sessionID, npcName string) error
+	MuteAllNPCs(ctx context.Context, sessionID string) (int, error)
+	UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error)
+	SpeakNPC(ctx context.Context, sessionID, npcName, text string) error
 }
 
 // GatewayCallback is the interface for worker-to-gateway communication.

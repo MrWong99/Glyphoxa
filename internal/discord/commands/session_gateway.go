@@ -40,10 +40,21 @@ func (sc *GatewaySessionCommands) Register(router *discordbot.CommandRouter) {
 				Name:        "stop",
 				Description: "Stop the active voice session",
 			},
+			discord.ApplicationCommandOptionSubCommand{
+				Name:        "recap",
+				Description: "Show a recap of the current or most recent session",
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
+						Name:        "session_id",
+						Description: "Session ID (defaults to current or most recent)",
+						Required:    false,
+					},
+				},
+			},
 		},
 	}
 	router.RegisterCommand("session", def, func(e *events.ApplicationCommandInteractionCreate) {
-		discordbot.RespondEphemeral(e, "Please use a subcommand: /session start, /session stop.")
+		discordbot.RespondEphemeral(e, "Please use a subcommand: /session start, /session stop, /session recap.")
 	})
 	router.RegisterHandler("session/start", sc.handleStart)
 	router.RegisterHandler("session/stop", sc.handleStop)

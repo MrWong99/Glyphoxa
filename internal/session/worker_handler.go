@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
 	"github.com/MrWong99/glyphoxa/internal/gateway"
 	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 )
@@ -149,6 +150,111 @@ func (h *WorkerHandler) ActiveSessionIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// ListNPCs returns the NPCs in a running session with their mute state.
+func (h *WorkerHandler) ListNPCs(_ context.Context, sessionID string) ([]gateway.NPCStatus, error) {
+	h.mu.Lock()
+	ms, ok := h.sessions[sessionID]
+	h.mu.Unlock()
+
+	if !ok {
+		return nil, fmt.Errorf("session: %q not found", sessionID)
+	}
+
+	orch := ms.runtime.Orchestrator()
+	if orch == nil {
+		return nil, fmt.Errorf("session: %q has no orchestrator", sessionID)
+	}
+
+	agents := orch.ActiveAgents()
+	result := make([]gateway.NPCStatus, len(agents))
+	for i, a := range agents {
+		muted, _ := orch.IsMuted(a.ID())
+		result[i] = gateway.NPCStatus{
+			ID:    a.ID(),
+			Name:  a.Name(),
+			Muted: muted,
+		}
+	}
+	return result, nil
+}
+
+// MuteNPC mutes a named NPC in a running session.
+func (h *WorkerHandler) MuteNPC(_ context.Context, sessionID, npcName string) error {
+	orch, err := h.sessionOrch(sessionID)
+	if err != nil {
+		return err
+	}
+
+	a := orch.AgentByName(npcName)
+	if a == nil {
+		return fmt.Errorf("session: npc %q not found in session %q", npcName, sessionID)
+	}
+	return orch.MuteAgent(a.ID())
+}
+
+// UnmuteNPC unmutes a named NPC in a running session.
+func (h *WorkerHandler) UnmuteNPC(_ context.Context, sessionID, npcName string) error {
+	orch, err := h.sessionOrch(sessionID)
+	if err != nil {
+		return err
+	}
+
+	a := orch.AgentByName(npcName)
+	if a == nil {
+		return fmt.Errorf("session: npc %q not found in session %q", npcName, sessionID)
+	}
+	return orch.UnmuteAgent(a.ID())
+}
+
+// MuteAllNPCs mutes all NPCs in a running session and returns the count.
+func (h *WorkerHandler) MuteAllNPCs(_ context.Context, sessionID string) (int, error) {
+	orch, err := h.sessionOrch(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return orch.MuteAll(), nil
+}
+
+// UnmuteAllNPCs unmutes all NPCs in a running session and returns the count.
+func (h *WorkerHandler) UnmuteAllNPCs(_ context.Context, sessionID string) (int, error) {
+	orch, err := h.sessionOrch(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return orch.UnmuteAll(), nil
+}
+
+// SpeakNPC forces a named NPC in a running session to speak pre-written text.
+func (h *WorkerHandler) SpeakNPC(ctx context.Context, sessionID, npcName, text string) error {
+	orch, err := h.sessionOrch(sessionID)
+	if err != nil {
+		return err
+	}
+
+	a := orch.AgentByName(npcName)
+	if a == nil {
+		return fmt.Errorf("session: npc %q not found in session %q", npcName, sessionID)
+	}
+	return a.SpeakText(ctx, text)
+}
+
+// sessionOrch returns the orchestrator for a running session.
+func (h *WorkerHandler) sessionOrch(sessionID string) (*orchestrator.Orchestrator, error) {
+	h.mu.Lock()
+	ms, ok := h.sessions[sessionID]
+	h.mu.Unlock()
+
+	if !ok {
+		return nil, fmt.Errorf("session: %q not found", sessionID)
+	}
+
+	orch := ms.runtime.Orchestrator()
+	if orch == nil {
+		return nil, fmt.Errorf("session: %q has no orchestrator", sessionID)
+	}
+	return orch, nil
 }
 
 // StopAll stops all running sessions. Used during graceful shutdown.

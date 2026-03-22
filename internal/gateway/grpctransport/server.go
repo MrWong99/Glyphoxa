@@ -26,6 +26,12 @@ type WorkerHandler interface {
 	StartSession(ctx context.Context, req gateway.StartSessionRequest) error
 	StopSession(ctx context.Context, sessionID string) error
 	GetStatus(ctx context.Context) ([]gateway.SessionStatus, error)
+	ListNPCs(ctx context.Context, sessionID string) ([]gateway.NPCStatus, error)
+	MuteNPC(ctx context.Context, sessionID, npcName string) error
+	UnmuteNPC(ctx context.Context, sessionID, npcName string) error
+	MuteAllNPCs(ctx context.Context, sessionID string) (int, error)
+	UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error)
+	SpeakNPC(ctx context.Context, sessionID, npcName, text string) error
 }
 
 // NewWorkerServer creates a gRPC server that delegates to the given handler.
@@ -99,6 +105,66 @@ func (s *WorkerServer) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*
 	}
 
 	return &pb.GetStatusResponse{Sessions: pbStatuses}, nil
+}
+
+// ListNPCs implements the gRPC ListNPCs RPC.
+func (s *WorkerServer) ListNPCs(ctx context.Context, req *pb.ListNPCsRequest) (*pb.ListNPCsResponse, error) {
+	npcs, err := s.handler.ListNPCs(ctx, req.GetSessionId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list npcs: %v", err)
+	}
+
+	pbNPCs := make([]*pb.NPCInfo, len(npcs))
+	for i, n := range npcs {
+		pbNPCs[i] = &pb.NPCInfo{
+			Id:    n.ID,
+			Name:  n.Name,
+			Muted: n.Muted,
+		}
+	}
+	return &pb.ListNPCsResponse{Npcs: pbNPCs}, nil
+}
+
+// MuteNPC implements the gRPC MuteNPC RPC.
+func (s *WorkerServer) MuteNPC(ctx context.Context, req *pb.MuteNPCRequest) (*pb.MuteNPCResponse, error) {
+	if err := s.handler.MuteNPC(ctx, req.GetSessionId(), req.GetNpcName()); err != nil {
+		return nil, status.Errorf(codes.Internal, "mute npc: %v", err)
+	}
+	return &pb.MuteNPCResponse{}, nil
+}
+
+// UnmuteNPC implements the gRPC UnmuteNPC RPC.
+func (s *WorkerServer) UnmuteNPC(ctx context.Context, req *pb.UnmuteNPCRequest) (*pb.UnmuteNPCResponse, error) {
+	if err := s.handler.UnmuteNPC(ctx, req.GetSessionId(), req.GetNpcName()); err != nil {
+		return nil, status.Errorf(codes.Internal, "unmute npc: %v", err)
+	}
+	return &pb.UnmuteNPCResponse{}, nil
+}
+
+// MuteAllNPCs implements the gRPC MuteAllNPCs RPC.
+func (s *WorkerServer) MuteAllNPCs(ctx context.Context, req *pb.MuteAllNPCsRequest) (*pb.MuteAllNPCsResponse, error) {
+	count, err := s.handler.MuteAllNPCs(ctx, req.GetSessionId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "mute all npcs: %v", err)
+	}
+	return &pb.MuteAllNPCsResponse{Count: int32(count)}, nil
+}
+
+// UnmuteAllNPCs implements the gRPC UnmuteAllNPCs RPC.
+func (s *WorkerServer) UnmuteAllNPCs(ctx context.Context, req *pb.UnmuteAllNPCsRequest) (*pb.UnmuteAllNPCsResponse, error) {
+	count, err := s.handler.UnmuteAllNPCs(ctx, req.GetSessionId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "unmute all npcs: %v", err)
+	}
+	return &pb.UnmuteAllNPCsResponse{Count: int32(count)}, nil
+}
+
+// SpeakNPC implements the gRPC SpeakNPC RPC.
+func (s *WorkerServer) SpeakNPC(ctx context.Context, req *pb.SpeakNPCRequest) (*pb.SpeakNPCResponse, error) {
+	if err := s.handler.SpeakNPC(ctx, req.GetSessionId(), req.GetNpcName(), req.GetText()); err != nil {
+		return nil, status.Errorf(codes.Internal, "speak npc: %v", err)
+	}
+	return &pb.SpeakNPCResponse{}, nil
 }
 
 // GatewayServer implements the SessionGateway gRPC service on the gateway side.
