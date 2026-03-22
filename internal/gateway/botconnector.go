@@ -8,12 +8,24 @@ import (
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/cache"
+	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/snowflake/v2"
+
+	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 )
 
-// DiscordBotConnector implements BotConnector using the BotManager and disgo.
+// Compile-time interface assertion.
+var _ TenantBotConnector = (*DiscordBotConnector)(nil)
+
+// CommandSetupFunc is called after a [GatewayBot] is created to register
+// slash command handlers.
+type CommandSetupFunc func(gwBot *GatewayBot, tenant Tenant)
+
+// DiscordBotConnector implements [BotConnector] and [TenantBotConnector].
 type DiscordBotConnector struct {
-	mgr *BotManager
+	mgr          *BotManager
+	commandSetup CommandSetupFunc
 }
 
 // NewDiscordBotConnector creates a BotConnector backed by the given BotManager.
@@ -21,17 +33,42 @@ func NewDiscordBotConnector(mgr *BotManager) *DiscordBotConnector {
 	return &DiscordBotConnector{mgr: mgr}
 }
 
-// ConnectBot creates a disgo client, opens the Discord gateway, and registers
-// it with the BotManager. If a bot is already connected for this tenant, the
-// old one is replaced.
-func (c *DiscordBotConnector) ConnectBot(ctx context.Context, tenantID, botToken string, guildIDs []string) error {
-	// Remove any existing bot for this tenant (replace semantics).
-	_ = c.mgr.RemoveBot(tenantID)
+// SetCommandSetup configures the callback that wires slash command handlers.
+func (c *DiscordBotConnector) SetCommandSetup(fn CommandSetupFunc) {
+	c.commandSetup = fn
+}
 
-	client, err := disgo.New(botToken,
+// ConnectBot implements [BotConnector].
+func (c *DiscordBotConnector) ConnectBot(ctx context.Context, tenantID, botToken string, guildIDs []string) error {
+	return c.ConnectBotForTenant(ctx, Tenant{
+		ID:       tenantID,
+		BotToken: botToken,
+		GuildIDs: guildIDs,
+	})
+}
+
+// ConnectBotForTenant creates a fully wired [GatewayBot] for the given tenant.
+func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Tenant) error {
+	_ = c.mgr.RemoveBot(tenant.ID)
+
+	parsedGuildIDs := make([]snowflake.ID, 0, len(tenant.GuildIDs))
+	for _, gid := range tenant.GuildIDs {
+		id, err := snowflake.Parse(gid)
+		if err != nil {
+			slog.Warn("gateway: invalid guild ID, skipping",
+				"tenant_id", tenant.ID, "guild_id", gid, "err", err)
+			continue
+		}
+		parsedGuildIDs = append(parsedGuildIDs, id)
+	}
+
+	router := discordbot.NewCommandRouter()
+	perms := discordbot.NewPermissionChecker(tenant.DMRoleID)
+
+	opts := []bot.ConfigOpt{
 		bot.WithDefaultGateway(),
 		bot.WithCacheConfigOpts(
-			cache.WithCaches(cache.FlagVoiceStates, cache.FlagGuilds, cache.FlagChannels),
+			cache.WithCaches(cache.FlagVoiceStates, cache.FlagGuilds, cache.FlagChannels, cache.FlagMembers),
 		),
 		bot.WithGatewayConfigOpts(
 			gateway.WithIntents(
@@ -40,24 +77,49 @@ func (c *DiscordBotConnector) ConnectBot(ctx context.Context, tenantID, botToken
 				gateway.IntentGuilds,
 			),
 		),
-	)
+		bot.WithEventListenerFunc(func(e *events.ApplicationCommandInteractionCreate) {
+			router.HandleCommand(e)
+		}),
+		bot.WithEventListenerFunc(func(e *events.AutocompleteInteractionCreate) {
+			router.HandleAutocomplete(e)
+		}),
+		bot.WithEventListenerFunc(func(e *events.ComponentInteractionCreate) {
+			router.HandleComponent(e)
+		}),
+		bot.WithEventListenerFunc(func(e *events.ModalSubmitInteractionCreate) {
+			router.HandleModal(e)
+		}),
+	}
+
+	client, err := disgo.New(tenant.BotToken, opts...)
 	if err != nil {
-		return fmt.Errorf("gateway: create discord client for tenant %q: %w", tenantID, err)
+		return fmt.Errorf("gateway: create discord client for tenant %q: %w", tenant.ID, err)
 	}
 
 	if err := client.OpenGateway(ctx); err != nil {
 		client.Close(ctx)
-		return fmt.Errorf("gateway: open discord gateway for tenant %q: %w", tenantID, err)
+		return fmt.Errorf("gateway: open discord gateway for tenant %q: %w", tenant.ID, err)
 	}
 
-	if err := c.mgr.AddBot(tenantID, client, guildIDs); err != nil {
-		client.Close(ctx)
-		return fmt.Errorf("gateway: register bot for tenant %q: %w", tenantID, err)
+	gwBot := NewGatewayBot(client, router, perms, tenant.ID, parsedGuildIDs)
+
+	if c.commandSetup != nil {
+		c.commandSetup(gwBot, tenant)
+		if err := gwBot.RegisterCommands(ctx); err != nil {
+			slog.Error("gateway: failed to register slash commands",
+				"tenant_id", tenant.ID, "err", err)
+		}
+	}
+
+	if err := c.mgr.AddGatewayBot(tenant.ID, gwBot); err != nil {
+		gwBot.Close(ctx)
+		return fmt.Errorf("gateway: register bot for tenant %q: %w", tenant.ID, err)
 	}
 
 	slog.Info("admin: discord bot connected",
-		"tenant_id", tenantID,
-		"guild_ids", guildIDs,
+		"tenant_id", tenant.ID,
+		"guild_ids", tenant.GuildIDs,
+		"has_commands", c.commandSetup != nil,
 	)
 	return nil
 }

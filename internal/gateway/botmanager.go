@@ -1,7 +1,3 @@
-// Package gateway manages shared Discord bot connections for multi-tenant
-// operation. The BotManager multiplexes multiple bot tokens (one per tenant)
-// within a single process, tracking in-flight event handlers so that bot
-// removal never closes a client with outstanding work.
 package gateway
 
 import (
@@ -14,11 +10,10 @@ import (
 	"github.com/disgoorg/disgo/bot"
 )
 
-// botEntry wraps a disgo client with inflight tracking and guild filtering.
-// Follows the serverConn pattern from internal/mcp/mcphost/host.go.
 type botEntry struct {
 	client   *bot.Client
-	guildIDs map[string]struct{} // allowed guilds (empty = all)
+	gwBot    *GatewayBot
+	guildIDs map[string]struct{}
 	inflight sync.WaitGroup
 }
 
@@ -28,7 +23,7 @@ type botEntry struct {
 // The zero value is NOT usable; create instances with [NewBotManager].
 type BotManager struct {
 	mu   sync.RWMutex
-	bots map[string]*botEntry // tenant_id -> bot entry
+	bots map[string]*botEntry
 }
 
 // NewBotManager creates a ready-to-use BotManager.
@@ -39,10 +34,7 @@ func NewBotManager() *BotManager {
 }
 
 // AddBot registers a bot client for the given tenant with an optional guild
-// allowlist. If guildIDs is non-empty, only events from those guilds will be
-// dispatched via [RouteEventForGuild]. An empty allowlist means all guilds are
-// allowed (backward compatible). It returns an error if a bot is already
-// registered for tenantID.
+// allowlist.
 func (bm *BotManager) AddBot(tenantID string, client *bot.Client, guildIDs []string) error {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
@@ -59,10 +51,28 @@ func (bm *BotManager) AddBot(tenantID string, client *bot.Client, guildIDs []str
 	return nil
 }
 
-// RemoveBot removes the bot for tenantID. The entry is deleted from the map
-// under the write lock, then inflight handlers are awaited and the client is
-// closed outside the lock. This ensures the lock is never held during
-// blocking I/O.
+// AddGatewayBot registers a [GatewayBot] for the given tenant.
+func (bm *BotManager) AddGatewayBot(tenantID string, gwBot *GatewayBot) error {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	if _, ok := bm.bots[tenantID]; ok {
+		return fmt.Errorf("gateway: bot already registered for tenant %q", tenantID)
+	}
+
+	allowed := make(map[string]struct{}, len(gwBot.guildIDs))
+	for _, id := range gwBot.guildIDs {
+		allowed[id.String()] = struct{}{}
+	}
+	bm.bots[tenantID] = &botEntry{
+		client:   gwBot.Client(),
+		gwBot:    gwBot,
+		guildIDs: allowed,
+	}
+	return nil
+}
+
+// RemoveBot removes and closes the bot for tenantID.
 func (bm *BotManager) RemoveBot(tenantID string) error {
 	bm.mu.Lock()
 	entry, ok := bm.bots[tenantID]
@@ -73,15 +83,17 @@ func (bm *BotManager) RemoveBot(tenantID string) error {
 	delete(bm.bots, tenantID)
 	bm.mu.Unlock()
 
-	// Wait for in-flight handlers and close outside the lock.
 	entry.inflight.Wait()
-	if entry.client != nil {
-		entry.client.Close(context.Background())
+	ctx := context.Background()
+	if entry.gwBot != nil {
+		entry.gwBot.Close(ctx)
+	} else if entry.client != nil {
+		entry.client.Close(ctx)
 	}
 	return nil
 }
 
-// Get returns the bot client for tenantID, or false if none is registered.
+// Get returns the bot client for tenantID.
 func (bm *BotManager) Get(tenantID string) (*bot.Client, bool) {
 	bm.mu.RLock()
 	defer bm.mu.RUnlock()
@@ -93,10 +105,19 @@ func (bm *BotManager) Get(tenantID string) (*bot.Client, bool) {
 	return entry.client, true
 }
 
-// RouteEvent dispatches handler with the bot client for tenantID. The client
-// reference is copied and the inflight WaitGroup incremented under a read
-// lock; the lock is released before calling handler. If no bot is registered
-// for tenantID, handler is not called.
+// GetBot returns the [GatewayBot] for tenantID.
+func (bm *BotManager) GetBot(tenantID string) (*GatewayBot, bool) {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	entry, ok := bm.bots[tenantID]
+	if !ok || entry.gwBot == nil {
+		return nil, false
+	}
+	return entry.gwBot, true
+}
+
+// RouteEvent dispatches handler with the bot client for tenantID.
 func (bm *BotManager) RouteEvent(tenantID string, handler func(*bot.Client)) {
 	bm.mu.RLock()
 	entry, ok := bm.bots[tenantID]
@@ -112,9 +133,7 @@ func (bm *BotManager) RouteEvent(tenantID string, handler func(*bot.Client)) {
 	handler(client)
 }
 
-// RouteEventForGuild dispatches handler only if guildID is in the tenant's
-// allowlist. An empty allowlist means all guilds are permitted (backward
-// compatible). If no bot is registered for tenantID, handler is not called.
+// RouteEventForGuild dispatches handler only if guildID is in the allowlist.
 func (bm *BotManager) RouteEventForGuild(tenantID, guildID string, handler func(*bot.Client)) {
 	bm.mu.RLock()
 	entry, ok := bm.bots[tenantID]
@@ -122,7 +141,6 @@ func (bm *BotManager) RouteEventForGuild(tenantID, guildID string, handler func(
 		bm.mu.RUnlock()
 		return
 	}
-	// If guild filtering is configured, check allowlist.
 	if len(entry.guildIDs) > 0 {
 		if _, allowed := entry.guildIDs[guildID]; !allowed {
 			bm.mu.RUnlock()
@@ -139,8 +157,7 @@ func (bm *BotManager) RouteEventForGuild(tenantID, guildID string, handler func(
 	handler(client)
 }
 
-// Close removes and shuts down all registered bots gracefully. Each bot's
-// inflight handlers are awaited and its client closed outside the lock.
+// Close removes and shuts down all registered bots gracefully.
 func (bm *BotManager) Close() {
 	bm.mu.Lock()
 	snapshot := make(map[string]*botEntry, len(bm.bots))
@@ -148,10 +165,13 @@ func (bm *BotManager) Close() {
 	bm.bots = make(map[string]*botEntry)
 	bm.mu.Unlock()
 
+	ctx := context.Background()
 	for _, entry := range snapshot {
 		entry.inflight.Wait()
-		if entry.client != nil {
-			entry.client.Close(context.Background())
+		if entry.gwBot != nil {
+			entry.gwBot.Close(ctx)
+		} else if entry.client != nil {
+			entry.client.Close(ctx)
 		}
 	}
 }
