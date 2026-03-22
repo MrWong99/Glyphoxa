@@ -76,6 +76,9 @@ func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Te
 				gateway.IntentGuildVoiceStates,
 				gateway.IntentGuilds,
 			),
+			// Enable raw events so voice credential capture can use them as
+			// a fallback when typed event listeners don't fire.
+			gateway.WithEnableRawEvents(true),
 		),
 		bot.WithEventListenerFunc(func(e *events.ApplicationCommandInteractionCreate) {
 			router.HandleCommand(e)
