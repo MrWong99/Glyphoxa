@@ -198,7 +198,7 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		// Create a context manager for the consolidator.
 		// Use LLMSummariser when an LLM provider is available; fall back to
 		// noopSummariser (no compression) in offline / test modes.
-		var summariser session.Summariser = session.NoopSummariser()
+		var summariser = session.NoopSummariser()
 		if sm.providers.LLM != nil {
 			summariser = session.NewLLMSummariser(sm.providers.LLM)
 		}
