@@ -28,6 +28,7 @@ import (
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
 	"github.com/MrWong99/glyphoxa/internal/app"
 	"github.com/MrWong99/glyphoxa/internal/config"
 	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
@@ -35,9 +36,14 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/entity"
 	"github.com/MrWong99/glyphoxa/internal/feedback"
 	gw "github.com/MrWong99/glyphoxa/internal/gateway"
+	"github.com/MrWong99/glyphoxa/internal/gateway/dispatch"
 	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
 	"github.com/MrWong99/glyphoxa/internal/gateway/usage"
+
+	"k8s.io/client-go/kubernetes"
+	k8srest "k8s.io/client-go/rest"
+
 	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
@@ -303,9 +309,91 @@ func runGateway(cfg *config.Config) int {
 		adminKey = "__unset__"
 	}
 
-	// ── Bot Manager ───────────────────────────────────────────────────────────
+	// ── Session Orchestrator ─────────────────────────────────────────────────
+	orch, err := sessionorch.NewPostgresOrchestrator(ctx, pool)
+	if err != nil {
+		slog.Error("failed to create postgres orchestrator", "err", err)
+		return 1
+	}
+	callbackBridge := sessionorch.NewCallbackBridge(orch)
+	orchAdapter := sessionorch.NewOrchestratorAdapter(orch)
+
+	// ── K8s Dispatcher (optional — only when GLYPHOXA_K8S_NAMESPACE is set) ─
+	var dispatcher *dispatch.Dispatcher
+	k8sNamespace := os.Getenv("GLYPHOXA_K8S_NAMESPACE")
+	if k8sNamespace != "" {
+		k8sCfg, k8sErr := k8srest.InClusterConfig()
+		if k8sErr != nil {
+			slog.Warn("gateway: K8s in-cluster config not available, dispatcher disabled", "err", k8sErr)
+		} else {
+			clientset, csErr := kubernetes.NewForConfig(k8sCfg)
+			if csErr != nil {
+				slog.Error("gateway: failed to create K8s clientset", "err", csErr)
+				return 1
+			}
+			cmName := os.Getenv("GLYPHOXA_JOB_TEMPLATE_CM")
+			if cmName == "" {
+				cmName = "glyphoxa-worker-job"
+			}
+			jobTemplate, tmplErr := dispatch.LoadJobTemplate(ctx, clientset, k8sNamespace, cmName)
+			if tmplErr != nil {
+				slog.Error("gateway: failed to load job template", "err", tmplErr)
+				return 1
+			}
+			dispatcher = dispatch.NewDispatcher(clientset, k8sNamespace, jobTemplate)
+			slog.Info("gateway: K8s dispatcher initialized",
+				"namespace", k8sNamespace, "configmap", cmName)
+		}
+	}
+
+	// ── Usage Store ──────────────────────────────────────────────────────────
+	usageStore := usage.NewPostgresStore(pool)
+	_ = usageStore // wired into quota enforcement in a future PR
+
+	// ── Bot Manager + Connector ──────────────────────────────────────────────
 	botMgr := gw.NewBotManager()
 	botConnector := gw.NewDiscordBotConnector(botMgr)
+
+	// Configure per-tenant slash command wiring.
+	botConnector.SetCommandSetup(func(gwBot *gw.GatewayBot, tenant gw.Tenant) {
+		router := gwBot.Router()
+		perms := gwBot.Permissions()
+
+		// Per-tenant session controller.
+		sessionCtrl := gw.NewGatewaySessionController(
+			orchAdapter, dispatcher,
+			tenant.ID, tenant.CampaignID, tenant.LicenseTier,
+		)
+
+		// Session start/stop commands.
+		commands.NewGatewaySessionCommands(gwBot, sessionCtrl, perms)
+
+		// NPC commands — not yet available in gateway mode (requires gRPC
+		// extensions); handlers return "no active session" gracefully.
+		npcCmds := commands.NewNPCCommands(perms, func() *orchestrator.Orchestrator { return nil })
+		npcCmds.Register(router)
+
+		// Entity commands.
+		entityCmds := commands.NewEntityCommands(perms, func() entity.Store { return nil })
+		entityCmds.Register(router)
+
+		// Campaign commands.
+		campaignCmds := commands.NewCampaignCommands(
+			perms,
+			func() entity.Store { return nil },
+			func() *config.CampaignConfig { return nil },
+			func() bool { return sessionCtrl.IsActive("") },
+		)
+		campaignCmds.Register(router)
+
+		// Feedback commands.
+		feedbackCmds := commands.NewFeedbackCommands(
+			perms,
+			feedback.NewFileStore("feedback.jsonl"),
+			func() string { return "" },
+		)
+		feedbackCmds.Register(router)
+	})
 
 	adminStore, err := gw.NewPostgresAdminStore(ctx, pool)
 	if err != nil {
@@ -313,6 +401,25 @@ func runGateway(cfg *config.Config) int {
 		return 1
 	}
 	adminAPI := gw.NewAdminAPI(adminStore, adminKey, botConnector)
+
+	// ── Reconnect bots for existing tenants ──────────────────────────────────
+	adminAPI.ReconnectAllBots(ctx)
+
+	// ── Orphaned job cleanup on startup ──────────────────────────────────────
+	if dispatcher != nil {
+		activeSessions, orchErr := orch.ActiveSessions(ctx, "")
+		if orchErr != nil {
+			slog.Warn("gateway: failed to get active sessions for orphan cleanup", "err", orchErr)
+		} else {
+			activeSet := make(map[string]struct{}, len(activeSessions))
+			for _, s := range activeSessions {
+				activeSet[s.ID] = struct{}{}
+			}
+			if orphanErr := dispatcher.CleanupOrphanedJobs(ctx, activeSet); orphanErr != nil {
+				slog.Warn("gateway: orphaned job cleanup error", "err", orphanErr)
+			}
+		}
+	}
 
 	adminAddr := cfg.Server.ListenAddr
 	if adminAddr == "" {
@@ -322,7 +429,6 @@ func runGateway(cfg *config.Config) int {
 		Addr:    adminAddr,
 		Handler: adminAPI.Handler(),
 	}
-	// Track server readiness with atomic flags for health checks.
 	var grpcReady, adminReady atomic.Bool
 
 	go func() {
@@ -411,7 +517,7 @@ func runGateway(cfg *config.Config) int {
 		},
 	)
 
-	// ── Zombie session cleanup ───────────────────────────────────────────────
+	// ── Zombie session + orphan job cleanup ──────────────────────────────────
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -425,6 +531,19 @@ func runGateway(cfg *config.Config) int {
 				} else if n > 0 {
 					slog.Info("cleaned up zombie sessions", "count", n)
 				}
+				// Clean up orphaned K8s Jobs alongside zombie sessions.
+				if dispatcher != nil {
+					activeSessions, orchErr := orch.ActiveSessions(ctx, "")
+					if orchErr == nil {
+						activeSet := make(map[string]struct{}, len(activeSessions))
+						for _, s := range activeSessions {
+							activeSet[s.ID] = struct{}{}
+						}
+						if orphanErr := dispatcher.CleanupOrphanedJobs(ctx, activeSet); orphanErr != nil {
+							slog.Warn("orphaned job cleanup error", "err", orphanErr)
+						}
+					}
+				}
 			}
 		}
 	}()
@@ -433,6 +552,7 @@ func runGateway(cfg *config.Config) int {
 		"mode", "gateway",
 		"admin_addr", adminAddr,
 		"grpc_addr", grpcAddr,
+		"dispatcher", dispatcher != nil,
 	)
 
 	<-ctx.Done()
@@ -442,6 +562,12 @@ func runGateway(cfg *config.Config) int {
 	defer cancel()
 
 	slog.Info("shutdown signal received, stopping…")
+
+	if dispatcher != nil {
+		if err := dispatcher.Cleanup(shutdownCtx); err != nil {
+			slog.Warn("dispatcher cleanup error", "err", err)
+		}
+	}
 
 	gwGRPCServer.GracefulStop()
 	if err := adminSrv.Shutdown(shutdownCtx); err != nil {
