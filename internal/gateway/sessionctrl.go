@@ -37,6 +37,7 @@ type GatewaySessionController struct {
 	botToken   string
 	npcConfigs []NPCConfigMsg
 	dialer     WorkerDialer
+	gwBot      *GatewayBot // for gateway handoff (suspend/resume)
 
 	mu     sync.Mutex
 	active map[string]string // guildID -> sessionID
@@ -86,6 +87,11 @@ func WithWorkerDialer(d WorkerDialer) SessionControllerOption {
 	return func(gc *GatewaySessionController) { gc.dialer = d }
 }
 
+// WithGatewayBot sets the GatewayBot for gateway handoff during sessions.
+func WithGatewayBot(gwBot *GatewayBot) SessionControllerOption {
+	return func(gc *GatewaySessionController) { gc.gwBot = gwBot }
+}
+
 // Start begins a new voice session.
 func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartRequest) error {
 	gc.mu.Lock()
@@ -101,6 +107,12 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	}
 
 	if gc.dispatcher != nil {
+		// Suspend the gateway bot so the worker can take over the Discord
+		// gateway connection (only one gateway per bot token is allowed).
+		if gc.gwBot != nil {
+			gc.gwBot.SuspendGateway(ctx)
+		}
+
 		startReq := StartSessionRequest{
 			SessionID:   sessionID,
 			TenantID:    gc.tenantID,
@@ -126,6 +138,12 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 		}
 		result, dispErr := gc.dispatcher.Dispatch(ctx, sessionID, gc.tenantID, starter)
 		if dispErr != nil {
+			// Resume gateway bot on dispatch failure.
+			if gc.gwBot != nil {
+				if err := gc.gwBot.ResumeGateway(context.Background()); err != nil {
+					slog.Error("gateway: failed to resume gateway after dispatch failure", "err", err)
+				}
+			}
 			if transErr := gc.orch.Transition(ctx, sessionID, SessionEnded, dispErr.Error()); transErr != nil {
 				slog.Error("gateway: failed to transition session after dispatch failure",
 					"session_id", sessionID, "err", transErr)
@@ -164,6 +182,13 @@ func (gc *GatewaySessionController) Stop(ctx context.Context, sessionID string) 
 		}
 	}
 	gc.mu.Unlock()
+
+	// Resume the gateway bot now that the worker is done.
+	if gc.gwBot != nil {
+		if err := gc.gwBot.ResumeGateway(context.Background()); err != nil {
+			slog.Error("gateway: failed to resume gateway after session stop", "err", err)
+		}
+	}
 	return nil
 }
 

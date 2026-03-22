@@ -376,6 +376,7 @@ func runGateway(cfg *config.Config) int {
 			tenant.ID, tenant.CampaignID, tenant.LicenseTier,
 			gw.WithBotToken(tenant.BotToken),
 			gw.WithNPCConfigs(npcMsgs),
+			gw.WithGatewayBot(gwBot),
 			gw.WithWorkerDialer(func(addr string) (gw.WorkerClient, error) {
 				return grpctransport.NewClient(addr)
 			}),

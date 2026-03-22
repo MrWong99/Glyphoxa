@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/disgoorg/disgo/bot"
@@ -21,6 +22,27 @@ type GatewayBot struct {
 	perms    *discordbot.PermissionChecker
 	tenantID string
 	guildIDs []snowflake.ID
+}
+
+// SuspendGateway closes the Discord gateway connection so a worker can take
+// over using the same bot token. Call ResumeGateway to reconnect.
+func (g *GatewayBot) SuspendGateway(ctx context.Context) {
+	if g.client != nil && g.client.Gateway != nil {
+		g.client.Gateway.Close(ctx)
+		slog.Info("gateway: suspended Discord gateway for worker handoff", "tenant_id", g.tenantID)
+	}
+}
+
+// ResumeGateway reopens the Discord gateway connection after a worker session ends.
+func (g *GatewayBot) ResumeGateway(ctx context.Context) error {
+	if g.client == nil {
+		return nil
+	}
+	if err := g.client.OpenGateway(ctx); err != nil {
+		return fmt.Errorf("gateway: resume gateway: %w", err)
+	}
+	slog.Info("gateway: resumed Discord gateway after worker session", "tenant_id", g.tenantID)
+	return nil
 }
 
 // NewGatewayBot creates a GatewayBot with the given dependencies.
