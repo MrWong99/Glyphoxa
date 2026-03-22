@@ -89,6 +89,10 @@ func (cc *CampaignCommands) handleInfo(e *events.ApplicationCommandInteractionCr
 
 	cfg := cc.getCfg()
 	store := cc.getStore()
+	if cfg == nil || store == nil {
+		discordbot.RespondEphemeral(e, "Campaign commands are not available in gateway mode.")
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -189,6 +193,10 @@ func (cc *CampaignCommands) handleLoad(e *events.ApplicationCommandInteractionCr
 	}
 
 	store := cc.getStore()
+	if store == nil {
+		discordbot.FollowUp(e, "Campaign commands are not available in gateway mode.")
+		return
+	}
 	count, importErr := entity.ImportCampaign(ctx, store, cf)
 	if importErr != nil {
 		discordbot.FollowUp(e, fmt.Sprintf("Import error: %v (imported %d entities before error)", importErr, count))

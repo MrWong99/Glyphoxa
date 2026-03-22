@@ -56,6 +56,10 @@ func (ec *EntityCommands) handleAddModal(e *events.ModalSubmitInteractionCreate)
 	}
 
 	store := ec.getStore()
+	if store == nil {
+		discordbot.RespondEphemeral(e, "Entity commands are not available in gateway mode.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
