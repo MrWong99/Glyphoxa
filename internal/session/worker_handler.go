@@ -257,6 +257,19 @@ func (h *WorkerHandler) sessionOrch(sessionID string) (*orchestrator.Orchestrato
 	return orch, nil
 }
 
+// UpdateVoiceServer forwards a mid-session voice server change to the
+// running session's voice proxy.
+func (h *WorkerHandler) UpdateVoiceServer(_ context.Context, sessionID, token, endpoint string) error {
+	h.mu.Lock()
+	ms, ok := h.sessions[sessionID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session: %q not found", sessionID)
+	}
+	ms.runtime.UpdateVoiceServer(token, endpoint)
+	return nil
+}
+
 // StopAll stops all running sessions. Used during graceful shutdown.
 func (h *WorkerHandler) StopAll(ctx context.Context) {
 	h.mu.Lock()

@@ -97,6 +97,12 @@ func (c *Client) StopSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// UpdateVoiceServer is a no-op in full mode — the local client owns the
+// voice connection directly and does not receive proxied credentials.
+func (c *Client) UpdateVoiceServer(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
 // GetStatus returns the status of all tracked sessions.
 func (c *Client) GetStatus(_ context.Context) ([]gateway.SessionStatus, error) {
 	c.mu.Lock()

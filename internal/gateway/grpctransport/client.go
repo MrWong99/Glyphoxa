@@ -73,17 +73,36 @@ func (c *Client) StartSession(ctx context.Context, req gateway.StartSessionReque
 
 	return c.breaker.Execute(func() error {
 		_, err := c.client.StartSession(ctx, &pb.StartSessionRequest{
-			SessionId:   req.SessionID,
-			TenantId:    req.TenantID,
-			CampaignId:  req.CampaignID,
-			GuildId:     req.GuildID,
-			ChannelId:   req.ChannelID,
-			LicenseTier: req.LicenseTier,
-			NpcConfigs:  pbNPCConfigs,
-			BotToken:    req.BotToken,
+			SessionId:      req.SessionID,
+			TenantId:       req.TenantID,
+			CampaignId:     req.CampaignID,
+			GuildId:        req.GuildID,
+			ChannelId:      req.ChannelID,
+			LicenseTier:    req.LicenseTier,
+			NpcConfigs:     pbNPCConfigs,
+			BotToken:       req.BotToken,
+			VoiceSessionId: req.VoiceSessionID,
+			VoiceToken:     req.VoiceToken,
+			VoiceEndpoint:  req.VoiceEndpoint,
+			BotUserId:      req.BotUserID,
 		})
 		if err != nil {
 			return fmt.Errorf("grpctransport: start session: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdateVoiceServer forwards a mid-session voice server change to the worker.
+func (c *Client) UpdateVoiceServer(ctx context.Context, sessionID, token, endpoint string) error {
+	return c.breaker.Execute(func() error {
+		_, err := c.client.UpdateVoiceServer(ctx, &pb.UpdateVoiceServerRequest{
+			SessionId: sessionID,
+			Token:     token,
+			Endpoint:  endpoint,
+		})
+		if err != nil {
+			return fmt.Errorf("grpctransport: update voice server: %w", err)
 		}
 		return nil
 	})

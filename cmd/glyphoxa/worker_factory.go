@@ -107,30 +107,62 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	}
 
 	// ── 3. Discord voice connection ──────────────────────────────────────────
-	if req.BotToken == "" {
+	if req.BotToken == "" && req.VoiceSessionID == "" {
 		if storeCloser != nil {
 			_ = storeCloser()
 		}
-		return nil, fmt.Errorf("worker: bot_token is required in StartSessionRequest")
+		return nil, fmt.Errorf("worker: bot_token or voice proxy credentials required in StartSessionRequest")
 	}
 
-	platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID,
-		discord.WithVoiceManagerOpts(voice.WithDaveSessionCreateFunc(golibdave.NewSession)),
-	)
-	if err != nil {
-		if storeCloser != nil {
-			_ = storeCloser()
-		}
-		return nil, fmt.Errorf("worker: create voice platform: %w", err)
-	}
+	var voicePlatformCloser func() error
+	var voiceProxy *discord.VoiceProxyPlatform
+	var conn audio.Connection
 
-	conn, err := platform.Connect(sessionCtx, req.ChannelID)
-	if err != nil {
-		_ = platform.Close()
-		if storeCloser != nil {
-			_ = storeCloser()
+	if req.VoiceSessionID != "" && req.VoiceToken != "" && req.VoiceEndpoint != "" {
+		// Distributed mode with voice proxy: use pre-captured credentials.
+		proxyPlatform, err := discord.NewVoiceProxyPlatform(
+			req.GuildID, req.BotUserID,
+			voice.WithConnDaveSessionCreateFunc(golibdave.NewSession),
+		)
+		if err != nil {
+			if storeCloser != nil {
+				_ = storeCloser()
+			}
+			return nil, fmt.Errorf("worker: create voice proxy platform: %w", err)
 		}
-		return nil, fmt.Errorf("worker: connect to voice channel %s: %w", req.ChannelID, err)
+
+		conn, err = proxyPlatform.Connect(sessionCtx,
+			req.ChannelID, req.VoiceSessionID, req.VoiceToken, req.VoiceEndpoint)
+		if err != nil {
+			_ = proxyPlatform.Close()
+			if storeCloser != nil {
+				_ = storeCloser()
+			}
+			return nil, fmt.Errorf("worker: voice proxy connect to %s: %w", req.ChannelID, err)
+		}
+		voicePlatformCloser = proxyPlatform.Close
+		voiceProxy = proxyPlatform
+	} else {
+		// Full mode: open own gateway (existing code path).
+		platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID,
+			discord.WithVoiceManagerOpts(voice.WithDaveSessionCreateFunc(golibdave.NewSession)),
+		)
+		if err != nil {
+			if storeCloser != nil {
+				_ = storeCloser()
+			}
+			return nil, fmt.Errorf("worker: create voice platform: %w", err)
+		}
+
+		conn, err = platform.Connect(sessionCtx, req.ChannelID)
+		if err != nil {
+			_ = voicePlatformCloser()
+			if storeCloser != nil {
+				_ = storeCloser()
+			}
+			return nil, fmt.Errorf("worker: connect to voice channel %s: %w", req.ChannelID, err)
+		}
+		voicePlatformCloser = platform.Close
 	}
 
 	// ── 4. Mixer ─────────────────────────────────────────────────────────────
@@ -145,7 +177,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	if len(npcs) == 0 {
 		_ = pm.Close()
 		_ = conn.Disconnect()
-		_ = platform.Close()
+		_ = voicePlatformCloser()
 		if storeCloser != nil {
 			_ = storeCloser()
 		}
@@ -192,7 +224,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	if err != nil {
 		_ = pm.Close()
 		_ = conn.Disconnect()
-		_ = platform.Close()
+		_ = voicePlatformCloser()
 		if storeCloser != nil {
 			_ = storeCloser()
 		}
@@ -210,7 +242,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 			}
 			_ = pm.Close()
 			_ = conn.Disconnect()
-			_ = platform.Close()
+			_ = voicePlatformCloser()
 			if storeCloser != nil {
 				_ = storeCloser()
 			}
@@ -229,7 +261,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 			}
 			_ = pm.Close()
 			_ = conn.Disconnect()
-			_ = platform.Close()
+			_ = voicePlatformCloser()
 			if storeCloser != nil {
 				_ = storeCloser()
 			}
@@ -321,6 +353,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 		Mixer:        pm,
 		Connection:   conn,
 		SessionStore: sessionStore,
+		VoiceProxy:   voiceProxy,
 	})
 
 	// Register closers in correct teardown order:
@@ -350,9 +383,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 		return conn.Disconnect()
 	})
 
-	rt.AddCloser(func() error {
-		return platform.Close()
-	})
+	rt.AddCloser(voicePlatformCloser)
 
 	if storeCloser != nil {
 		rt.AddCloser(storeCloser)

@@ -36,6 +36,14 @@ message StartSessionRequest {
   string session_id = 6;
   repeated NPCConfig npc_configs = 7;
   string bot_token = 8;
+
+  // Voice proxy credentials (populated by gateway in distributed mode).
+  // When set, the worker connects directly to the Discord voice server
+  // without opening its own bot gateway connection.
+  string voice_session_id = 9;  // from VOICE_STATE_UPDATE
+  string voice_token = 10;      // from VOICE_SERVER_UPDATE
+  string voice_endpoint = 11;   // from VOICE_SERVER_UPDATE
+  string bot_user_id = 12;      // bot's Discord user snowflake
 }
 
 // StartSessionResponse is the worker's reply after attempting to start a session.
@@ -157,6 +165,17 @@ message SpeakNPCRequest {
 // SpeakNPCResponse is the worker's reply after triggering NPC speech.
 message SpeakNPCResponse {}
 
+// UpdateVoiceServerRequest forwards a mid-session VOICE_SERVER_UPDATE from
+// the gateway to the worker so it can reconnect to a new voice server.
+message UpdateVoiceServerRequest {
+  string session_id = 1;
+  string token = 2;
+  string endpoint = 3;
+}
+
+// UpdateVoiceServerResponse is the worker's acknowledgement.
+message UpdateVoiceServerResponse {}
+
 // SessionWorkerService is the gRPC service exposed by workers, called by the gateway.
 service SessionWorkerService {
   // StartSession tells the worker to begin a new voice session.
@@ -177,6 +196,8 @@ service SessionWorkerService {
   rpc UnmuteAllNPCs(UnmuteAllNPCsRequest) returns (UnmuteAllNPCsResponse);
   // SpeakNPC forces an NPC to speak pre-written text.
   rpc SpeakNPC(SpeakNPCRequest) returns (SpeakNPCResponse);
+  // UpdateVoiceServer forwards a mid-session voice server change to the worker.
+  rpc UpdateVoiceServer(UpdateVoiceServerRequest) returns (UpdateVoiceServerResponse);
 }
 
 // SessionGatewayService is the gRPC service exposed by the gateway, called by workers.
