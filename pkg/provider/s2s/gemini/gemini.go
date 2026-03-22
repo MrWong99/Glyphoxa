@@ -280,6 +280,11 @@ type session struct {
 	// receiveLoop (which starts on Connect) and handler registration.
 	pendingToolCalls []*toolCallMsg
 
+	// pendingErrors buffers error events that arrive before a handler is
+	// registered via OnError. When OnError is called, any buffered errors
+	// are replayed immediately.
+	pendingErrors []*geminiError
+
 	mu     sync.Mutex
 	errVal error
 	done   chan struct{}
@@ -379,11 +384,13 @@ func (s *session) handleServerMessage(msg *serverMessage) {
 func (s *session) handleError(ge *geminiError) {
 	s.mu.Lock()
 	handler := s.errorHandler
-	s.mu.Unlock()
-
 	if handler == nil {
+		// Buffer the error for replay when a handler is registered.
+		s.pendingErrors = append(s.pendingErrors, ge)
+		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
 
 	msg := "unknown error"
 	if ge.Message != "" {
@@ -569,10 +576,23 @@ func (s *session) Err() error {
 func (s *session) Transcripts() <-chan memory.TranscriptEntry { return s.transcripts }
 
 // OnError registers a callback for non-fatal error events from the provider.
+// Any errors that arrived before the handler was registered are replayed
+// immediately in a background goroutine.
 func (s *session) OnError(handler func(error)) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.errorHandler = handler
+	pending := s.pendingErrors
+	s.pendingErrors = nil
+	s.mu.Unlock()
+
+	// Replay buffered errors outside the lock.
+	if len(pending) > 0 {
+		go func() {
+			for _, ge := range pending {
+				s.handleError(ge)
+			}
+		}()
+	}
 }
 
 // OnToolCall registers a callback for tool invocations from the model.
