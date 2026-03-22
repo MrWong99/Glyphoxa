@@ -404,7 +404,11 @@ func (wf *workerFactory) connectAudioBridge(ctx context.Context, sessionID strin
 	}
 
 	bridgeClient := pb.NewAudioBridgeServiceClient(conn)
-	stream, err := bridgeClient.StreamAudio(ctx)
+	// Use context.Background() because the stream must outlive the
+	// StartSession RPC whose server-side context is canceled when the
+	// handler returns. Passing the RPC context here would kill the stream
+	// within milliseconds of StartSession completing.
+	stream, err := bridgeClient.StreamAudio(context.Background())
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("worker: open audio stream: %w", err)

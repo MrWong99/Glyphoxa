@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -92,6 +93,34 @@ func (p *voiceBridgeProvider) Close() {
 	p.closeOnce.Do(func() {
 		close(p.done)
 	})
+}
+
+// daveReadyTimeout is the maximum time to wait for the DAVE E2EE handshake
+// to complete after the voice connection is opened.
+const daveReadyTimeout = 10 * time.Second
+
+// waitForDAVEReady registers an event handler on the voice connection and
+// blocks until an OpcodeDaveExecuteTransition event is received, signaling
+// that the DAVE MLS key exchange has completed and packets can be
+// encrypted/decrypted. Returns an error if ctx is canceled first.
+func waitForDAVEReady(ctx context.Context, voiceConn voice.Conn, sessionID string) error {
+	ready := make(chan struct{}, 1)
+	voiceConn.SetEventHandlerFunc(func(_ voice.Gateway, op voice.Opcode, _ int, _ voice.GatewayMessageData) {
+		if op == voice.OpcodeDaveExecuteTransition {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	select {
+	case <-ready:
+		slog.Info("voicebridge: DAVE handshake complete", "session_id", sessionID)
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("voicebridge: DAVE ready timeout for session %s: %w", sessionID, ctx.Err())
+	}
 }
 
 // setupVoiceBridge configures a voice.Conn to bridge audio to/from a
