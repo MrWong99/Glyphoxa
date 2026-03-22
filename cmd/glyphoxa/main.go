@@ -315,7 +315,20 @@ func runGateway(cfg *config.Config) int {
 		slog.Error("failed to create postgres orchestrator", "err", err)
 		return 1
 	}
-	callbackBridge := sessionorch.NewCallbackBridge(orch)
+
+	// ── Usage tracking + quota enforcement ────────────────────────────────────
+	usageStore := usage.NewPostgresStore(pool)
+	quotaLookup := func(ctx context.Context, tenantID string) (float64, error) {
+		t, err := adminStore.GetTenant(ctx, tenantID)
+		if err != nil {
+			return 0, err
+		}
+		return t.MonthlySessionHours, nil
+	}
+	guardedOrch := usage.NewQuotaGuard(orch, usageStore, quotaLookup)
+
+	callbackBridge := sessionorch.NewCallbackBridge(guardedOrch)
+	recordingBridge := usage.NewRecordingBridge(callbackBridge, guardedOrch, usageStore)
 	orchAdapter := sessionorch.NewOrchestratorAdapter(orch)
 
 	// ── K8s Dispatcher (optional — only when GLYPHOXA_K8S_NAMESPACE is set) ─
@@ -345,10 +358,6 @@ func runGateway(cfg *config.Config) int {
 				"namespace", k8sNamespace, "configmap", cmName)
 		}
 	}
-
-	// ── Usage Store ──────────────────────────────────────────────────────────
-	usageStore := usage.NewPostgresStore(pool)
-	_ = usageStore // wired into quota enforcement in a future PR
 
 	// ── Bot Manager + Connector ──────────────────────────────────────────────
 	botMgr := gw.NewBotManager()
@@ -443,27 +452,6 @@ func runGateway(cfg *config.Config) int {
 			slog.Error("admin API error", "err", err)
 		}
 	}()
-
-	// ── Session Orchestrator ─────────────────────────────────────────────────
-	orch, err := sessionorch.NewPostgresOrchestrator(ctx, pool)
-	if err != nil {
-		slog.Error("failed to create postgres orchestrator", "err", err)
-		return 1
-	}
-
-	// ── Usage tracking + quota enforcement ────────────────────────────────────
-	usageStore := usage.NewPostgresStore(pool)
-	quotaLookup := func(ctx context.Context, tenantID string) (float64, error) {
-		t, err := adminStore.GetTenant(ctx, tenantID)
-		if err != nil {
-			return 0, err
-		}
-		return t.MonthlySessionHours, nil
-	}
-	guardedOrch := usage.NewQuotaGuard(orch, usageStore, quotaLookup)
-
-	callbackBridge := sessionorch.NewCallbackBridge(guardedOrch)
-	recordingBridge := usage.NewRecordingBridge(callbackBridge, guardedOrch, usageStore)
 
 	// ── gRPC server (receives worker callbacks) ──────────────────────────────
 	grpcAddr := os.Getenv("GLYPHOXA_GRPC_ADDR")
