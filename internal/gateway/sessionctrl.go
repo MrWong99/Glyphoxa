@@ -267,6 +267,19 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 	gID, _ := snowflake.Parse(guildID)
 	chID, _ := snowflake.Parse(channelID)
 
+	appID := gc.gwBot.Client().ApplicationID
+
+	slog.Debug("gateway: capturing voice credentials",
+		"guild_id", guildID,
+		"channel_id", channelID,
+		"bot_app_id", appID,
+	)
+
+	// Verify the gateway connection is open before sending Op 4.
+	if !gc.gwBot.Client().HasGateway() {
+		return "", "", "", "", fmt.Errorf("gateway connection not available")
+	}
+
 	type creds struct {
 		sessionID string
 		token     string
@@ -283,9 +296,14 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 
 	// Temporary event listeners — removed after capture.
 	stateListener := bot.NewListenerFunc(func(e *events.GuildVoiceStateUpdate) {
-		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != gc.gwBot.Client().ApplicationID {
+		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != appID {
 			return
 		}
+		slog.Debug("gateway: received VOICE_STATE_UPDATE",
+			"guild_id", guildID,
+			"session_id", e.VoiceState.SessionID,
+			"channel_id", e.VoiceState.ChannelID,
+		)
 		mu.Lock()
 		defer mu.Unlock()
 		c.sessionID = e.VoiceState.SessionID
@@ -298,9 +316,19 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 		}
 	})
 	serverListener := bot.NewListenerFunc(func(e *events.VoiceServerUpdate) {
-		if e.GuildID != gID || e.Endpoint == nil {
+		if e.GuildID != gID {
 			return
 		}
+		if e.Endpoint == nil {
+			slog.Debug("gateway: received VOICE_SERVER_UPDATE with nil endpoint (server reallocating)",
+				"guild_id", guildID,
+			)
+			return
+		}
+		slog.Debug("gateway: received VOICE_SERVER_UPDATE",
+			"guild_id", guildID,
+			"endpoint", *e.Endpoint,
+		)
 		mu.Lock()
 		defer mu.Unlock()
 		c.token = e.Token
@@ -321,13 +349,27 @@ func (gc *GatewaySessionController) captureVoiceCredentials(
 	if err := gc.gwBot.Client().UpdateVoiceState(ctx, gID, &chID, false, false); err != nil {
 		return "", "", "", "", fmt.Errorf("send voice state update: %w", err)
 	}
+	slog.Debug("gateway: sent Op 4 voice state update", "guild_id", guildID, "channel_id", channelID)
 
 	select {
 	case vc := <-credsCh:
-		return vc.sessionID, vc.token, vc.endpoint,
-			gc.gwBot.Client().ApplicationID.String(), nil
+		slog.Debug("gateway: voice credentials captured",
+			"guild_id", guildID,
+			"endpoint", vc.endpoint,
+		)
+		return vc.sessionID, vc.token, vc.endpoint, appID.String(), nil
 	case <-ctx.Done():
-		return "", "", "", "", fmt.Errorf("capture voice credentials: %w", ctx.Err())
+		mu.Lock()
+		gs, gsr := gotState, gotServer
+		mu.Unlock()
+		slog.Error("gateway: voice credential capture timed out",
+			"guild_id", guildID,
+			"channel_id", channelID,
+			"got_voice_state", gs,
+			"got_voice_server", gsr,
+		)
+		return "", "", "", "", fmt.Errorf("capture voice credentials (got_state=%t, got_server=%t): %w",
+			gs, gsr, ctx.Err())
 	}
 }
 
