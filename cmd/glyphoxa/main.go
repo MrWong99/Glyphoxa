@@ -316,6 +316,13 @@ func runGateway(cfg *config.Config) int {
 		return 1
 	}
 
+	// ── Admin Store (declared early for quota closure) ────────────────────────
+	adminStore, err := gw.NewPostgresAdminStore(ctx, pool)
+	if err != nil {
+		slog.Error("failed to create postgres admin store", "err", err)
+		return 1
+	}
+
 	// ── Usage tracking + quota enforcement ────────────────────────────────────
 	usageStore := usage.NewPostgresStore(pool)
 	quotaLookup := func(ctx context.Context, tenantID string) (float64, error) {
@@ -404,11 +411,6 @@ func runGateway(cfg *config.Config) int {
 		feedbackCmds.Register(router)
 	})
 
-	adminStore, err := gw.NewPostgresAdminStore(ctx, pool)
-	if err != nil {
-		slog.Error("failed to create postgres admin store", "err", err)
-		return 1
-	}
 	adminAPI := gw.NewAdminAPI(adminStore, adminKey, botConnector)
 
 	// ── Reconnect bots for existing tenants ──────────────────────────────────
