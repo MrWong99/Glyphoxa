@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -38,6 +37,7 @@ import (
 	gw "github.com/MrWong99/glyphoxa/internal/gateway"
 	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 	"github.com/MrWong99/glyphoxa/internal/gateway/sessionorch"
+	"github.com/MrWong99/glyphoxa/internal/gateway/usage"
 	"github.com/MrWong99/glyphoxa/internal/health"
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/internal/mcp/mcphost"
@@ -344,15 +344,37 @@ func runGateway(cfg *config.Config) int {
 		slog.Error("failed to create postgres orchestrator", "err", err)
 		return 1
 	}
-	callbackBridge := sessionorch.NewCallbackBridge(orch)
+
+	// ── Usage tracking + quota enforcement ────────────────────────────────────
+	usageStore := usage.NewPostgresStore(pool)
+	quotaLookup := func(ctx context.Context, tenantID string) (float64, error) {
+		t, err := adminStore.GetTenant(ctx, tenantID)
+		if err != nil {
+			return 0, err
+		}
+		return t.MonthlySessionHours, nil
+	}
+	guardedOrch := usage.NewQuotaGuard(orch, usageStore, quotaLookup)
+
+	callbackBridge := sessionorch.NewCallbackBridge(guardedOrch)
+	recordingBridge := usage.NewRecordingBridge(callbackBridge, guardedOrch, usageStore)
 
 	// ── gRPC server (receives worker callbacks) ──────────────────────────────
 	grpcAddr := os.Getenv("GLYPHOXA_GRPC_ADDR")
 	if grpcAddr == "" {
 		grpcAddr = ":50051"
 	}
-	gwGRPCServer := grpc.NewServer()
-	grpctransport.NewGatewayServer(callbackBridge).Register(gwGRPCServer)
+
+	grpcOpts := observe.GRPCServerOptions()
+	if tlsCred, err := observe.GRPCServerCredentials(); err != nil {
+		slog.Error("failed to load gRPC TLS credentials", "err", err)
+		return 1
+	} else if tlsCred != nil {
+		grpcOpts = append(grpcOpts, tlsCred)
+	}
+
+	gwGRPCServer := grpc.NewServer(grpcOpts...)
+	grpctransport.NewGatewayServer(recordingBridge).Register(gwGRPCServer)
 
 	go func() {
 		ln, err := net.Listen("tcp", grpcAddr)
@@ -479,7 +501,13 @@ func runWorker(cfg *config.Config) int {
 	gwAddr := os.Getenv("GLYPHOXA_GATEWAY_ADDR")
 	var callback gw.GatewayCallback
 	if gwAddr != "" {
-		gwConn, err := grpc.NewClient(gwAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		clientCred, err := observe.GRPCClientCredentials()
+		if err != nil {
+			slog.Error("failed to load gRPC client TLS credentials", "err", err)
+			return 1
+		}
+		dialOpts := append(observe.GRPCDialOptions(), clientCred)
+		gwConn, err := grpc.NewClient(gwAddr, dialOpts...)
 		if err != nil {
 			slog.Error("failed to connect to gateway", "addr", gwAddr, "err", err)
 			return 1
@@ -513,7 +541,15 @@ func runWorker(cfg *config.Config) int {
 	// Track server readiness with an atomic flag for health checks.
 	var workerGRPCReady atomic.Bool
 
-	wkGRPCServer := grpc.NewServer()
+	wkGRPCOpts := observe.GRPCServerOptions()
+	if tlsCred, err := observe.GRPCServerCredentials(); err != nil {
+		slog.Error("failed to load gRPC TLS credentials", "err", err)
+		return 1
+	} else if tlsCred != nil {
+		wkGRPCOpts = append(wkGRPCOpts, tlsCred)
+	}
+
+	wkGRPCServer := grpc.NewServer(wkGRPCOpts...)
 	grpctransport.NewWorkerServer(handler).Register(wkGRPCServer)
 
 	go func() {
