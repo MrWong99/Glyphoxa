@@ -22,8 +22,11 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/audio/discord"
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
+
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/memory/postgres"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/godave/golibdave"
 )
 
 // workerConsolidationInterval is the consolidation period for worker sessions.
@@ -111,7 +114,9 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 		return nil, fmt.Errorf("worker: bot_token is required in StartSessionRequest")
 	}
 
-	platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID)
+	platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID,
+		discord.WithVoiceManagerOpts(voice.WithDaveSessionCreateFunc(golibdave.NewSession)),
+	)
 	if err != nil {
 		if storeCloser != nil {
 			_ = storeCloser()
