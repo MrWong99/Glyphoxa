@@ -16,8 +16,11 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/gateway/dispatch"
 )
 
-// Compile-time interface assertion.
-var _ SessionController = (*GatewaySessionController)(nil)
+// Compile-time interface assertions.
+var (
+	_ SessionController = (*GatewaySessionController)(nil)
+	_ NPCController     = (*GatewaySessionController)(nil)
+)
 
 // SessionOrchestrator is the subset of sessionorch.Orchestrator needed by
 // GatewaySessionController. Defined here to avoid an import cycle between
@@ -325,4 +328,86 @@ func (gc *GatewaySessionController) registerDisconnectListener(sessionID, guildI
 		}
 	}
 	gc.voiceCleanupsMu.Unlock()
+}
+
+// ── NPCController implementation ────────────────────────────────────────────
+// GatewaySessionController proxies NPC operations to the worker that owns the
+// session. It dials the worker on each call; connections are lightweight and
+// NPC commands are infrequent (slash command interactions).
+
+// dialNPCController dials the worker for the given session and returns an
+// NPCController. The caller should not cache the returned controller.
+func (gc *GatewaySessionController) dialNPCController(sessionID string) (NPCController, error) {
+	gc.mu.Lock()
+	addr, ok := gc.workerAddrs[sessionID]
+	gc.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("gateway: no worker address for session %s", sessionID)
+	}
+	if gc.dialer == nil {
+		return nil, fmt.Errorf("gateway: no worker dialer configured")
+	}
+	client, err := gc.dialer(addr)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: dial worker at %s: %w", addr, err)
+	}
+	npcCtrl, ok := client.(NPCController)
+	if !ok {
+		return nil, fmt.Errorf("gateway: worker client does not implement NPCController")
+	}
+	return npcCtrl, nil
+}
+
+// ListNPCs implements [NPCController].
+func (gc *GatewaySessionController) ListNPCs(ctx context.Context, sessionID string) ([]NPCStatus, error) {
+	ctrl, err := gc.dialNPCController(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return ctrl.ListNPCs(ctx, sessionID)
+}
+
+// MuteNPC implements [NPCController].
+func (gc *GatewaySessionController) MuteNPC(ctx context.Context, sessionID, npcName string) error {
+	ctrl, err := gc.dialNPCController(sessionID)
+	if err != nil {
+		return err
+	}
+	return ctrl.MuteNPC(ctx, sessionID, npcName)
+}
+
+// UnmuteNPC implements [NPCController].
+func (gc *GatewaySessionController) UnmuteNPC(ctx context.Context, sessionID, npcName string) error {
+	ctrl, err := gc.dialNPCController(sessionID)
+	if err != nil {
+		return err
+	}
+	return ctrl.UnmuteNPC(ctx, sessionID, npcName)
+}
+
+// MuteAllNPCs implements [NPCController].
+func (gc *GatewaySessionController) MuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
+	ctrl, err := gc.dialNPCController(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return ctrl.MuteAllNPCs(ctx, sessionID)
+}
+
+// UnmuteAllNPCs implements [NPCController].
+func (gc *GatewaySessionController) UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
+	ctrl, err := gc.dialNPCController(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return ctrl.UnmuteAllNPCs(ctx, sessionID)
+}
+
+// SpeakNPC implements [NPCController].
+func (gc *GatewaySessionController) SpeakNPC(ctx context.Context, sessionID, npcName, text string) error {
+	ctrl, err := gc.dialNPCController(sessionID)
+	if err != nil {
+		return err
+	}
+	return ctrl.SpeakNPC(ctx, sessionID, npcName, text)
 }

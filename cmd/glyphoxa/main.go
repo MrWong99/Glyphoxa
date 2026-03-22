@@ -28,7 +28,6 @@ import (
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/MrWong99/glyphoxa/internal/agent/orchestrator"
 	"github.com/MrWong99/glyphoxa/internal/app"
 	"github.com/MrWong99/glyphoxa/internal/config"
 	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
@@ -391,23 +390,32 @@ func runGateway(cfg *config.Config) int {
 		// Session start/stop commands.
 		commands.NewGatewaySessionCommands(gwBot, sessionCtrl, perms)
 
-		// NPC commands — not yet available in gateway mode (requires gRPC
-		// extensions); handlers return "no active session" gracefully.
-		npcCmds := commands.NewNPCCommands(perms, func() *orchestrator.Orchestrator { return nil })
-		npcCmds.Register(router)
+		// NPC commands — proxied to the worker via gRPC NPCController.
+		commands.NewGatewayNPCCommands(gwBot, sessionCtrl, sessionCtrl, perms)
 
 		// Entity commands.
 		entityCmds := commands.NewEntityCommands(perms, func() entity.Store { return nil })
 		entityCmds.Register(router)
 
-		// Campaign commands.
+		// Campaign commands — config is available on the gateway; entity
+		// store is nil because entities live on the worker.
 		campaignCmds := commands.NewCampaignCommands(
 			perms,
 			func() entity.Store { return nil },
-			func() *config.CampaignConfig { return nil },
+			func() *config.CampaignConfig { return &cfg.Campaign },
 			func() bool { return sessionCtrl.IsActive("") },
 		)
 		campaignCmds.Register(router)
+
+		// Recap commands — text-only for gateway mode (no TTS providers on
+		// gateway). Session store is nil for now; transcript reading can be
+		// added once schema-per-tenant is wired.
+		commands.NewGatewayRecapCommands(commands.GatewayRecapConfig{
+			GatewayBot: gwBot,
+			Ctrl:       sessionCtrl,
+			NPCCtrl:    sessionCtrl,
+			Perms:      perms,
+		})
 
 		// Feedback commands.
 		feedbackCmds := commands.NewFeedbackCommands(
