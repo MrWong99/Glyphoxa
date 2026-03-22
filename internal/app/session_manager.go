@@ -21,7 +21,6 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	audiomixer "github.com/MrWong99/glyphoxa/pkg/audio/mixer"
 	"github.com/MrWong99/glyphoxa/pkg/memory"
-	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
 	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
 )
@@ -199,7 +198,7 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		// Create a context manager for the consolidator.
 		// Use LLMSummariser when an LLM provider is available; fall back to
 		// noopSummariser (no compression) in offline / test modes.
-		var summariser session.Summariser = &noopSummariser{}
+		var summariser session.Summariser = session.NoopSummariser()
 		if sm.providers.LLM != nil {
 			summariser = session.NewLLMSummariser(sm.providers.LLM)
 		}
@@ -591,15 +590,6 @@ func sanitizeName(name string) string {
 	name = strings.ToLower(name)
 	name = strings.ReplaceAll(name, " ", "-")
 	return name
-}
-
-// noopSummariser is a placeholder summariser that returns an empty string.
-// Used during alpha to satisfy the ContextManager's Summariser requirement
-// without needing an LLM provider.
-type noopSummariser struct{}
-
-func (n *noopSummariser) Summarise(_ context.Context, _ []llm.Message) (string, error) {
-	return "", nil
 }
 
 // vadConfigFromProvider extracts VAD session parameters from a provider config

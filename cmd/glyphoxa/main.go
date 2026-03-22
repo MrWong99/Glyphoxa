@@ -491,19 +491,26 @@ func runWorker(cfg *config.Config) int {
 		slog.Warn("GLYPHOXA_GATEWAY_ADDR not set — worker will not send heartbeats")
 	}
 
+	// ── MCP Host (shared across sessions) ─────────────────────────────────────
+	mcpHost, err := initWorkerMCPHost(ctx, cfg)
+	if err != nil {
+		slog.Error("failed to initialise MCP host", "err", err)
+		return 1
+	}
+	defer func() {
+		if err := mcpHost.Close(); err != nil {
+			slog.Warn("MCP host close error", "err", err)
+		}
+	}()
+
 	// ── WorkerHandler ─────────────────────────────────────────────────────────
-	handler := session.NewWorkerHandler(
-		func(_ context.Context, req gw.StartSessionRequest) (*session.Runtime, error) {
-			// Placeholder factory: creates an empty runtime.
-			// Full wiring (providers → agents → engines → runtime) will be
-			// added when the session lifecycle is integrated end-to-end.
-			_ = providers
-			return session.NewRuntime(session.RuntimeConfig{
-				SessionID: req.SessionID,
-			}), nil
-		},
-		callback,
-	)
+	wf := &workerFactory{
+		cfg:       cfg,
+		providers: providers,
+		mcpHost:   mcpHost,
+	}
+
+	handler := session.NewWorkerHandler(wf.CreateRuntime, callback)
 
 	// ── gRPC server (receives gateway commands) ──────────────────────────────
 	grpcAddr := os.Getenv("GLYPHOXA_GRPC_ADDR")

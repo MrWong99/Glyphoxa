@@ -29,6 +29,18 @@ type Summariser interface {
 	Summarise(ctx context.Context, messages []llm.Message) (string, error)
 }
 
+// NoopSummariser returns a [Summariser] that always returns an empty string.
+// Use this when no LLM provider is available for summarisation.
+func NoopSummariser() Summariser {
+	return noopSumm{}
+}
+
+type noopSumm struct{}
+
+func (noopSumm) Summarise(_ context.Context, _ []llm.Message) (string, error) {
+	return "", nil
+}
+
 // LLMSummariser uses an LLM provider to summarise conversations.
 type LLMSummariser struct {
 	llm llm.Provider
