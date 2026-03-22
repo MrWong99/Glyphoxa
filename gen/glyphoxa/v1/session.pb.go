@@ -768,6 +768,615 @@ func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
 	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{11}
 }
 
+// NPCInfo describes an NPC within a running session.
+type NPCInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Muted         bool                   `protobuf:"varint,3,opt,name=muted,proto3" json:"muted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NPCInfo) Reset() {
+	*x = NPCInfo{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NPCInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NPCInfo) ProtoMessage() {}
+
+func (x *NPCInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NPCInfo.ProtoReflect.Descriptor instead.
+func (*NPCInfo) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *NPCInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *NPCInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NPCInfo) GetMuted() bool {
+	if x != nil {
+		return x.Muted
+	}
+	return false
+}
+
+// ListNPCsRequest asks a worker for the NPCs in a session.
+type ListNPCsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListNPCsRequest) Reset() {
+	*x = ListNPCsRequest{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListNPCsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListNPCsRequest) ProtoMessage() {}
+
+func (x *ListNPCsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListNPCsRequest.ProtoReflect.Descriptor instead.
+func (*ListNPCsRequest) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ListNPCsRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+// ListNPCsResponse returns the NPCs in a session.
+type ListNPCsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Npcs          []*NPCInfo             `protobuf:"bytes,1,rep,name=npcs,proto3" json:"npcs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListNPCsResponse) Reset() {
+	*x = ListNPCsResponse{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListNPCsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListNPCsResponse) ProtoMessage() {}
+
+func (x *ListNPCsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListNPCsResponse.ProtoReflect.Descriptor instead.
+func (*ListNPCsResponse) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ListNPCsResponse) GetNpcs() []*NPCInfo {
+	if x != nil {
+		return x.Npcs
+	}
+	return nil
+}
+
+// MuteNPCRequest asks a worker to mute a specific NPC.
+type MuteNPCRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	NpcName       string                 `protobuf:"bytes,2,opt,name=npc_name,json=npcName,proto3" json:"npc_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MuteNPCRequest) Reset() {
+	*x = MuteNPCRequest{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MuteNPCRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MuteNPCRequest) ProtoMessage() {}
+
+func (x *MuteNPCRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MuteNPCRequest.ProtoReflect.Descriptor instead.
+func (*MuteNPCRequest) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *MuteNPCRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *MuteNPCRequest) GetNpcName() string {
+	if x != nil {
+		return x.NpcName
+	}
+	return ""
+}
+
+// MuteNPCResponse is the worker's reply after muting an NPC.
+type MuteNPCResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MuteNPCResponse) Reset() {
+	*x = MuteNPCResponse{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MuteNPCResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MuteNPCResponse) ProtoMessage() {}
+
+func (x *MuteNPCResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MuteNPCResponse.ProtoReflect.Descriptor instead.
+func (*MuteNPCResponse) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{16}
+}
+
+// UnmuteNPCRequest asks a worker to unmute a specific NPC.
+type UnmuteNPCRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	NpcName       string                 `protobuf:"bytes,2,opt,name=npc_name,json=npcName,proto3" json:"npc_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnmuteNPCRequest) Reset() {
+	*x = UnmuteNPCRequest{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnmuteNPCRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnmuteNPCRequest) ProtoMessage() {}
+
+func (x *UnmuteNPCRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnmuteNPCRequest.ProtoReflect.Descriptor instead.
+func (*UnmuteNPCRequest) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *UnmuteNPCRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *UnmuteNPCRequest) GetNpcName() string {
+	if x != nil {
+		return x.NpcName
+	}
+	return ""
+}
+
+// UnmuteNPCResponse is the worker's reply after unmuting an NPC.
+type UnmuteNPCResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnmuteNPCResponse) Reset() {
+	*x = UnmuteNPCResponse{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnmuteNPCResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnmuteNPCResponse) ProtoMessage() {}
+
+func (x *UnmuteNPCResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnmuteNPCResponse.ProtoReflect.Descriptor instead.
+func (*UnmuteNPCResponse) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{18}
+}
+
+// MuteAllNPCsRequest asks a worker to mute all NPCs in a session.
+type MuteAllNPCsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MuteAllNPCsRequest) Reset() {
+	*x = MuteAllNPCsRequest{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MuteAllNPCsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MuteAllNPCsRequest) ProtoMessage() {}
+
+func (x *MuteAllNPCsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MuteAllNPCsRequest.ProtoReflect.Descriptor instead.
+func (*MuteAllNPCsRequest) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *MuteAllNPCsRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+// MuteAllNPCsResponse returns how many NPCs were muted.
+type MuteAllNPCsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Count         int32                  `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MuteAllNPCsResponse) Reset() {
+	*x = MuteAllNPCsResponse{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MuteAllNPCsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MuteAllNPCsResponse) ProtoMessage() {}
+
+func (x *MuteAllNPCsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MuteAllNPCsResponse.ProtoReflect.Descriptor instead.
+func (*MuteAllNPCsResponse) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *MuteAllNPCsResponse) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+// UnmuteAllNPCsRequest asks a worker to unmute all NPCs in a session.
+type UnmuteAllNPCsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnmuteAllNPCsRequest) Reset() {
+	*x = UnmuteAllNPCsRequest{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnmuteAllNPCsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnmuteAllNPCsRequest) ProtoMessage() {}
+
+func (x *UnmuteAllNPCsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnmuteAllNPCsRequest.ProtoReflect.Descriptor instead.
+func (*UnmuteAllNPCsRequest) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *UnmuteAllNPCsRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+// UnmuteAllNPCsResponse returns how many NPCs were unmuted.
+type UnmuteAllNPCsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Count         int32                  `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnmuteAllNPCsResponse) Reset() {
+	*x = UnmuteAllNPCsResponse{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnmuteAllNPCsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnmuteAllNPCsResponse) ProtoMessage() {}
+
+func (x *UnmuteAllNPCsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnmuteAllNPCsResponse.ProtoReflect.Descriptor instead.
+func (*UnmuteAllNPCsResponse) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *UnmuteAllNPCsResponse) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+// SpeakNPCRequest asks a worker to make an NPC speak pre-written text.
+type SpeakNPCRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	NpcName       string                 `protobuf:"bytes,2,opt,name=npc_name,json=npcName,proto3" json:"npc_name,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SpeakNPCRequest) Reset() {
+	*x = SpeakNPCRequest{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SpeakNPCRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SpeakNPCRequest) ProtoMessage() {}
+
+func (x *SpeakNPCRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SpeakNPCRequest.ProtoReflect.Descriptor instead.
+func (*SpeakNPCRequest) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *SpeakNPCRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SpeakNPCRequest) GetNpcName() string {
+	if x != nil {
+		return x.NpcName
+	}
+	return ""
+}
+
+func (x *SpeakNPCRequest) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// SpeakNPCResponse is the worker's reply after triggering NPC speech.
+type SpeakNPCResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SpeakNPCResponse) Reset() {
+	*x = SpeakNPCResponse{}
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SpeakNPCResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SpeakNPCResponse) ProtoMessage() {}
+
+func (x *SpeakNPCResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_glyphoxa_v1_session_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SpeakNPCResponse.ProtoReflect.Descriptor instead.
+func (*SpeakNPCResponse) Descriptor() ([]byte, []int) {
+	return file_glyphoxa_v1_session_proto_rawDescGZIP(), []int{24}
+}
+
 var File_glyphoxa_v1_session_proto protoreflect.FileDescriptor
 
 const file_glyphoxa_v1_session_proto_rawDesc = "" +
@@ -828,16 +1437,57 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1d\n" +
 	"\n" +
 	"worker_pod\x18\x02 \x01(\tR\tworkerPod\"\x13\n" +
-	"\x11HeartbeatResponse*{\n" +
+	"\x11HeartbeatResponse\"C\n" +
+	"\aNPCInfo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
+	"\x05muted\x18\x03 \x01(\bR\x05muted\"0\n" +
+	"\x0fListNPCsRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"<\n" +
+	"\x10ListNPCsResponse\x12(\n" +
+	"\x04npcs\x18\x01 \x03(\v2\x14.glyphoxa.v1.NPCInfoR\x04npcs\"J\n" +
+	"\x0eMuteNPCRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
+	"\bnpc_name\x18\x02 \x01(\tR\anpcName\"\x11\n" +
+	"\x0fMuteNPCResponse\"L\n" +
+	"\x10UnmuteNPCRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
+	"\bnpc_name\x18\x02 \x01(\tR\anpcName\"\x13\n" +
+	"\x11UnmuteNPCResponse\"3\n" +
+	"\x12MuteAllNPCsRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"+\n" +
+	"\x13MuteAllNPCsResponse\x12\x14\n" +
+	"\x05count\x18\x01 \x01(\x05R\x05count\"5\n" +
+	"\x14UnmuteAllNPCsRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"-\n" +
+	"\x15UnmuteAllNPCsResponse\x12\x14\n" +
+	"\x05count\x18\x01 \x01(\x05R\x05count\"_\n" +
+	"\x0fSpeakNPCRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
+	"\bnpc_name\x18\x02 \x01(\tR\anpcName\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"\x12\n" +
+	"\x10SpeakNPCResponse*{\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SESSION_STATE_PENDING\x10\x01\x12\x18\n" +
 	"\x14SESSION_STATE_ACTIVE\x10\x02\x12\x17\n" +
-	"\x13SESSION_STATE_ENDED\x10\x032\x89\x02\n" +
+	"\x13SESSION_STATE_ENDED\x10\x032\xd7\x05\n" +
 	"\x14SessionWorkerService\x12S\n" +
 	"\fStartSession\x12 .glyphoxa.v1.StartSessionRequest\x1a!.glyphoxa.v1.StartSessionResponse\x12P\n" +
 	"\vStopSession\x12\x1f.glyphoxa.v1.StopSessionRequest\x1a .glyphoxa.v1.StopSessionResponse\x12J\n" +
-	"\tGetStatus\x12\x1d.glyphoxa.v1.GetStatusRequest\x1a\x1e.glyphoxa.v1.GetStatusResponse2\xb5\x01\n" +
+	"\tGetStatus\x12\x1d.glyphoxa.v1.GetStatusRequest\x1a\x1e.glyphoxa.v1.GetStatusResponse\x12G\n" +
+	"\bListNPCs\x12\x1c.glyphoxa.v1.ListNPCsRequest\x1a\x1d.glyphoxa.v1.ListNPCsResponse\x12D\n" +
+	"\aMuteNPC\x12\x1b.glyphoxa.v1.MuteNPCRequest\x1a\x1c.glyphoxa.v1.MuteNPCResponse\x12J\n" +
+	"\tUnmuteNPC\x12\x1d.glyphoxa.v1.UnmuteNPCRequest\x1a\x1e.glyphoxa.v1.UnmuteNPCResponse\x12P\n" +
+	"\vMuteAllNPCs\x12\x1f.glyphoxa.v1.MuteAllNPCsRequest\x1a .glyphoxa.v1.MuteAllNPCsResponse\x12V\n" +
+	"\rUnmuteAllNPCs\x12!.glyphoxa.v1.UnmuteAllNPCsRequest\x1a\".glyphoxa.v1.UnmuteAllNPCsResponse\x12G\n" +
+	"\bSpeakNPC\x12\x1c.glyphoxa.v1.SpeakNPCRequest\x1a\x1d.glyphoxa.v1.SpeakNPCResponse2\xb5\x01\n" +
 	"\x15SessionGatewayService\x12P\n" +
 	"\vReportState\x12\x1f.glyphoxa.v1.ReportStateRequest\x1a .glyphoxa.v1.ReportStateResponse\x12J\n" +
 	"\tHeartbeat\x12\x1d.glyphoxa.v1.HeartbeatRequest\x1a\x1e.glyphoxa.v1.HeartbeatResponseB9Z7github.com/MrWong99/glyphoxa/gen/glyphoxa/v1;glyphoxav1b\x06proto3"
@@ -855,7 +1505,7 @@ func file_glyphoxa_v1_session_proto_rawDescGZIP() []byte {
 }
 
 var file_glyphoxa_v1_session_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_glyphoxa_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_glyphoxa_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_glyphoxa_v1_session_proto_goTypes = []any{
 	(SessionState)(0),             // 0: glyphoxa.v1.SessionState
 	(*NPCConfig)(nil),             // 1: glyphoxa.v1.NPCConfig
@@ -870,29 +1520,55 @@ var file_glyphoxa_v1_session_proto_goTypes = []any{
 	(*ReportStateResponse)(nil),   // 10: glyphoxa.v1.ReportStateResponse
 	(*HeartbeatRequest)(nil),      // 11: glyphoxa.v1.HeartbeatRequest
 	(*HeartbeatResponse)(nil),     // 12: glyphoxa.v1.HeartbeatResponse
-	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
+	(*NPCInfo)(nil),               // 13: glyphoxa.v1.NPCInfo
+	(*ListNPCsRequest)(nil),       // 14: glyphoxa.v1.ListNPCsRequest
+	(*ListNPCsResponse)(nil),      // 15: glyphoxa.v1.ListNPCsResponse
+	(*MuteNPCRequest)(nil),        // 16: glyphoxa.v1.MuteNPCRequest
+	(*MuteNPCResponse)(nil),       // 17: glyphoxa.v1.MuteNPCResponse
+	(*UnmuteNPCRequest)(nil),      // 18: glyphoxa.v1.UnmuteNPCRequest
+	(*UnmuteNPCResponse)(nil),     // 19: glyphoxa.v1.UnmuteNPCResponse
+	(*MuteAllNPCsRequest)(nil),    // 20: glyphoxa.v1.MuteAllNPCsRequest
+	(*MuteAllNPCsResponse)(nil),   // 21: glyphoxa.v1.MuteAllNPCsResponse
+	(*UnmuteAllNPCsRequest)(nil),  // 22: glyphoxa.v1.UnmuteAllNPCsRequest
+	(*UnmuteAllNPCsResponse)(nil), // 23: glyphoxa.v1.UnmuteAllNPCsResponse
+	(*SpeakNPCRequest)(nil),       // 24: glyphoxa.v1.SpeakNPCRequest
+	(*SpeakNPCResponse)(nil),      // 25: glyphoxa.v1.SpeakNPCResponse
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
 }
 var file_glyphoxa_v1_session_proto_depIdxs = []int32{
 	1,  // 0: glyphoxa.v1.StartSessionRequest.npc_configs:type_name -> glyphoxa.v1.NPCConfig
 	0,  // 1: glyphoxa.v1.SessionStatus.state:type_name -> glyphoxa.v1.SessionState
-	13, // 2: glyphoxa.v1.SessionStatus.started_at:type_name -> google.protobuf.Timestamp
+	26, // 2: glyphoxa.v1.SessionStatus.started_at:type_name -> google.protobuf.Timestamp
 	7,  // 3: glyphoxa.v1.GetStatusResponse.sessions:type_name -> glyphoxa.v1.SessionStatus
 	0,  // 4: glyphoxa.v1.ReportStateRequest.state:type_name -> glyphoxa.v1.SessionState
-	2,  // 5: glyphoxa.v1.SessionWorkerService.StartSession:input_type -> glyphoxa.v1.StartSessionRequest
-	4,  // 6: glyphoxa.v1.SessionWorkerService.StopSession:input_type -> glyphoxa.v1.StopSessionRequest
-	6,  // 7: glyphoxa.v1.SessionWorkerService.GetStatus:input_type -> glyphoxa.v1.GetStatusRequest
-	9,  // 8: glyphoxa.v1.SessionGatewayService.ReportState:input_type -> glyphoxa.v1.ReportStateRequest
-	11, // 9: glyphoxa.v1.SessionGatewayService.Heartbeat:input_type -> glyphoxa.v1.HeartbeatRequest
-	3,  // 10: glyphoxa.v1.SessionWorkerService.StartSession:output_type -> glyphoxa.v1.StartSessionResponse
-	5,  // 11: glyphoxa.v1.SessionWorkerService.StopSession:output_type -> glyphoxa.v1.StopSessionResponse
-	8,  // 12: glyphoxa.v1.SessionWorkerService.GetStatus:output_type -> glyphoxa.v1.GetStatusResponse
-	10, // 13: glyphoxa.v1.SessionGatewayService.ReportState:output_type -> glyphoxa.v1.ReportStateResponse
-	12, // 14: glyphoxa.v1.SessionGatewayService.Heartbeat:output_type -> glyphoxa.v1.HeartbeatResponse
-	10, // [10:15] is the sub-list for method output_type
-	5,  // [5:10] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	13, // 5: glyphoxa.v1.ListNPCsResponse.npcs:type_name -> glyphoxa.v1.NPCInfo
+	2,  // 6: glyphoxa.v1.SessionWorkerService.StartSession:input_type -> glyphoxa.v1.StartSessionRequest
+	4,  // 7: glyphoxa.v1.SessionWorkerService.StopSession:input_type -> glyphoxa.v1.StopSessionRequest
+	6,  // 8: glyphoxa.v1.SessionWorkerService.GetStatus:input_type -> glyphoxa.v1.GetStatusRequest
+	14, // 9: glyphoxa.v1.SessionWorkerService.ListNPCs:input_type -> glyphoxa.v1.ListNPCsRequest
+	16, // 10: glyphoxa.v1.SessionWorkerService.MuteNPC:input_type -> glyphoxa.v1.MuteNPCRequest
+	18, // 11: glyphoxa.v1.SessionWorkerService.UnmuteNPC:input_type -> glyphoxa.v1.UnmuteNPCRequest
+	20, // 12: glyphoxa.v1.SessionWorkerService.MuteAllNPCs:input_type -> glyphoxa.v1.MuteAllNPCsRequest
+	22, // 13: glyphoxa.v1.SessionWorkerService.UnmuteAllNPCs:input_type -> glyphoxa.v1.UnmuteAllNPCsRequest
+	24, // 14: glyphoxa.v1.SessionWorkerService.SpeakNPC:input_type -> glyphoxa.v1.SpeakNPCRequest
+	9,  // 15: glyphoxa.v1.SessionGatewayService.ReportState:input_type -> glyphoxa.v1.ReportStateRequest
+	11, // 16: glyphoxa.v1.SessionGatewayService.Heartbeat:input_type -> glyphoxa.v1.HeartbeatRequest
+	3,  // 17: glyphoxa.v1.SessionWorkerService.StartSession:output_type -> glyphoxa.v1.StartSessionResponse
+	5,  // 18: glyphoxa.v1.SessionWorkerService.StopSession:output_type -> glyphoxa.v1.StopSessionResponse
+	8,  // 19: glyphoxa.v1.SessionWorkerService.GetStatus:output_type -> glyphoxa.v1.GetStatusResponse
+	15, // 20: glyphoxa.v1.SessionWorkerService.ListNPCs:output_type -> glyphoxa.v1.ListNPCsResponse
+	17, // 21: glyphoxa.v1.SessionWorkerService.MuteNPC:output_type -> glyphoxa.v1.MuteNPCResponse
+	19, // 22: glyphoxa.v1.SessionWorkerService.UnmuteNPC:output_type -> glyphoxa.v1.UnmuteNPCResponse
+	21, // 23: glyphoxa.v1.SessionWorkerService.MuteAllNPCs:output_type -> glyphoxa.v1.MuteAllNPCsResponse
+	23, // 24: glyphoxa.v1.SessionWorkerService.UnmuteAllNPCs:output_type -> glyphoxa.v1.UnmuteAllNPCsResponse
+	25, // 25: glyphoxa.v1.SessionWorkerService.SpeakNPC:output_type -> glyphoxa.v1.SpeakNPCResponse
+	10, // 26: glyphoxa.v1.SessionGatewayService.ReportState:output_type -> glyphoxa.v1.ReportStateResponse
+	12, // 27: glyphoxa.v1.SessionGatewayService.Heartbeat:output_type -> glyphoxa.v1.HeartbeatResponse
+	17, // [17:28] is the sub-list for method output_type
+	6,  // [6:17] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_glyphoxa_v1_session_proto_init() }
@@ -906,7 +1582,7 @@ func file_glyphoxa_v1_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_glyphoxa_v1_session_proto_rawDesc), len(file_glyphoxa_v1_session_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

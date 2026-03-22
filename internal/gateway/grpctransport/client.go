@@ -16,8 +16,11 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/resilience"
 )
 
-// Compile-time interface assertion.
-var _ gateway.WorkerClient = (*Client)(nil)
+// Compile-time interface assertions.
+var (
+	_ gateway.WorkerClient  = (*Client)(nil)
+	_ gateway.NPCController = (*Client)(nil)
+)
 
 // Client implements WorkerClient by wrapping a gRPC connection to a worker.
 // Each connection is protected by a circuit breaker that fast-fails on
@@ -122,6 +125,88 @@ func (c *Client) GetStatus(ctx context.Context) ([]gateway.SessionStatus, error)
 		return nil
 	})
 	return result, err
+}
+
+// ListNPCs queries the worker for NPCs in a session.
+func (c *Client) ListNPCs(ctx context.Context, sessionID string) ([]gateway.NPCStatus, error) {
+	var result []gateway.NPCStatus
+	err := c.breaker.Execute(func() error {
+		resp, err := c.client.ListNPCs(ctx, &pb.ListNPCsRequest{SessionId: sessionID})
+		if err != nil {
+			return fmt.Errorf("grpctransport: list npcs: %w", err)
+		}
+		result = make([]gateway.NPCStatus, len(resp.GetNpcs()))
+		for i, n := range resp.GetNpcs() {
+			result[i] = gateway.NPCStatus{
+				ID:    n.GetId(),
+				Name:  n.GetName(),
+				Muted: n.GetMuted(),
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// MuteNPC mutes a named NPC on the worker.
+func (c *Client) MuteNPC(ctx context.Context, sessionID, npcName string) error {
+	return c.breaker.Execute(func() error {
+		_, err := c.client.MuteNPC(ctx, &pb.MuteNPCRequest{SessionId: sessionID, NpcName: npcName})
+		if err != nil {
+			return fmt.Errorf("grpctransport: mute npc: %w", err)
+		}
+		return nil
+	})
+}
+
+// UnmuteNPC unmutes a named NPC on the worker.
+func (c *Client) UnmuteNPC(ctx context.Context, sessionID, npcName string) error {
+	return c.breaker.Execute(func() error {
+		_, err := c.client.UnmuteNPC(ctx, &pb.UnmuteNPCRequest{SessionId: sessionID, NpcName: npcName})
+		if err != nil {
+			return fmt.Errorf("grpctransport: unmute npc: %w", err)
+		}
+		return nil
+	})
+}
+
+// MuteAllNPCs mutes all NPCs in a session on the worker.
+func (c *Client) MuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
+	var count int
+	err := c.breaker.Execute(func() error {
+		resp, err := c.client.MuteAllNPCs(ctx, &pb.MuteAllNPCsRequest{SessionId: sessionID})
+		if err != nil {
+			return fmt.Errorf("grpctransport: mute all npcs: %w", err)
+		}
+		count = int(resp.GetCount())
+		return nil
+	})
+	return count, err
+}
+
+// UnmuteAllNPCs unmutes all NPCs in a session on the worker.
+func (c *Client) UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
+	var count int
+	err := c.breaker.Execute(func() error {
+		resp, err := c.client.UnmuteAllNPCs(ctx, &pb.UnmuteAllNPCsRequest{SessionId: sessionID})
+		if err != nil {
+			return fmt.Errorf("grpctransport: unmute all npcs: %w", err)
+		}
+		count = int(resp.GetCount())
+		return nil
+	})
+	return count, err
+}
+
+// SpeakNPC forces an NPC to speak on the worker.
+func (c *Client) SpeakNPC(ctx context.Context, sessionID, npcName, text string) error {
+	return c.breaker.Execute(func() error {
+		_, err := c.client.SpeakNPC(ctx, &pb.SpeakNPCRequest{SessionId: sessionID, NpcName: npcName, Text: text})
+		if err != nil {
+			return fmt.Errorf("grpctransport: speak npc: %w", err)
+		}
+		return nil
+	})
 }
 
 // Close closes the underlying gRPC connection.

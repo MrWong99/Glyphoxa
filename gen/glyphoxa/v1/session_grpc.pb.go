@@ -19,9 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionWorkerService_StartSession_FullMethodName = "/glyphoxa.v1.SessionWorkerService/StartSession"
-	SessionWorkerService_StopSession_FullMethodName  = "/glyphoxa.v1.SessionWorkerService/StopSession"
-	SessionWorkerService_GetStatus_FullMethodName    = "/glyphoxa.v1.SessionWorkerService/GetStatus"
+	SessionWorkerService_StartSession_FullMethodName  = "/glyphoxa.v1.SessionWorkerService/StartSession"
+	SessionWorkerService_StopSession_FullMethodName   = "/glyphoxa.v1.SessionWorkerService/StopSession"
+	SessionWorkerService_GetStatus_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/GetStatus"
+	SessionWorkerService_ListNPCs_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/ListNPCs"
+	SessionWorkerService_MuteNPC_FullMethodName       = "/glyphoxa.v1.SessionWorkerService/MuteNPC"
+	SessionWorkerService_UnmuteNPC_FullMethodName     = "/glyphoxa.v1.SessionWorkerService/UnmuteNPC"
+	SessionWorkerService_MuteAllNPCs_FullMethodName   = "/glyphoxa.v1.SessionWorkerService/MuteAllNPCs"
+	SessionWorkerService_UnmuteAllNPCs_FullMethodName = "/glyphoxa.v1.SessionWorkerService/UnmuteAllNPCs"
+	SessionWorkerService_SpeakNPC_FullMethodName      = "/glyphoxa.v1.SessionWorkerService/SpeakNPC"
 )
 
 // SessionWorkerServiceClient is the client API for SessionWorkerService service.
@@ -36,6 +42,18 @@ type SessionWorkerServiceClient interface {
 	StopSession(ctx context.Context, in *StopSessionRequest, opts ...grpc.CallOption) (*StopSessionResponse, error)
 	// GetStatus returns the status of one or all sessions on this worker.
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
+	// ListNPCs returns the NPCs in a running session.
+	ListNPCs(ctx context.Context, in *ListNPCsRequest, opts ...grpc.CallOption) (*ListNPCsResponse, error)
+	// MuteNPC mutes a specific NPC in a session.
+	MuteNPC(ctx context.Context, in *MuteNPCRequest, opts ...grpc.CallOption) (*MuteNPCResponse, error)
+	// UnmuteNPC unmutes a specific NPC in a session.
+	UnmuteNPC(ctx context.Context, in *UnmuteNPCRequest, opts ...grpc.CallOption) (*UnmuteNPCResponse, error)
+	// MuteAllNPCs mutes all NPCs in a session.
+	MuteAllNPCs(ctx context.Context, in *MuteAllNPCsRequest, opts ...grpc.CallOption) (*MuteAllNPCsResponse, error)
+	// UnmuteAllNPCs unmutes all NPCs in a session.
+	UnmuteAllNPCs(ctx context.Context, in *UnmuteAllNPCsRequest, opts ...grpc.CallOption) (*UnmuteAllNPCsResponse, error)
+	// SpeakNPC forces an NPC to speak pre-written text.
+	SpeakNPC(ctx context.Context, in *SpeakNPCRequest, opts ...grpc.CallOption) (*SpeakNPCResponse, error)
 }
 
 type sessionWorkerServiceClient struct {
@@ -76,6 +94,66 @@ func (c *sessionWorkerServiceClient) GetStatus(ctx context.Context, in *GetStatu
 	return out, nil
 }
 
+func (c *sessionWorkerServiceClient) ListNPCs(ctx context.Context, in *ListNPCsRequest, opts ...grpc.CallOption) (*ListNPCsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListNPCsResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_ListNPCs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionWorkerServiceClient) MuteNPC(ctx context.Context, in *MuteNPCRequest, opts ...grpc.CallOption) (*MuteNPCResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MuteNPCResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_MuteNPC_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionWorkerServiceClient) UnmuteNPC(ctx context.Context, in *UnmuteNPCRequest, opts ...grpc.CallOption) (*UnmuteNPCResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnmuteNPCResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_UnmuteNPC_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionWorkerServiceClient) MuteAllNPCs(ctx context.Context, in *MuteAllNPCsRequest, opts ...grpc.CallOption) (*MuteAllNPCsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MuteAllNPCsResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_MuteAllNPCs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionWorkerServiceClient) UnmuteAllNPCs(ctx context.Context, in *UnmuteAllNPCsRequest, opts ...grpc.CallOption) (*UnmuteAllNPCsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnmuteAllNPCsResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_UnmuteAllNPCs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionWorkerServiceClient) SpeakNPC(ctx context.Context, in *SpeakNPCRequest, opts ...grpc.CallOption) (*SpeakNPCResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SpeakNPCResponse)
+	err := c.cc.Invoke(ctx, SessionWorkerService_SpeakNPC_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionWorkerServiceServer is the server API for SessionWorkerService service.
 // All implementations must embed UnimplementedSessionWorkerServiceServer
 // for forward compatibility.
@@ -88,6 +166,18 @@ type SessionWorkerServiceServer interface {
 	StopSession(context.Context, *StopSessionRequest) (*StopSessionResponse, error)
 	// GetStatus returns the status of one or all sessions on this worker.
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
+	// ListNPCs returns the NPCs in a running session.
+	ListNPCs(context.Context, *ListNPCsRequest) (*ListNPCsResponse, error)
+	// MuteNPC mutes a specific NPC in a session.
+	MuteNPC(context.Context, *MuteNPCRequest) (*MuteNPCResponse, error)
+	// UnmuteNPC unmutes a specific NPC in a session.
+	UnmuteNPC(context.Context, *UnmuteNPCRequest) (*UnmuteNPCResponse, error)
+	// MuteAllNPCs mutes all NPCs in a session.
+	MuteAllNPCs(context.Context, *MuteAllNPCsRequest) (*MuteAllNPCsResponse, error)
+	// UnmuteAllNPCs unmutes all NPCs in a session.
+	UnmuteAllNPCs(context.Context, *UnmuteAllNPCsRequest) (*UnmuteAllNPCsResponse, error)
+	// SpeakNPC forces an NPC to speak pre-written text.
+	SpeakNPC(context.Context, *SpeakNPCRequest) (*SpeakNPCResponse, error)
 	mustEmbedUnimplementedSessionWorkerServiceServer()
 }
 
@@ -106,6 +196,24 @@ func (UnimplementedSessionWorkerServiceServer) StopSession(context.Context, *Sto
 }
 func (UnimplementedSessionWorkerServiceServer) GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStatus not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) ListNPCs(context.Context, *ListNPCsRequest) (*ListNPCsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListNPCs not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) MuteNPC(context.Context, *MuteNPCRequest) (*MuteNPCResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MuteNPC not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) UnmuteNPC(context.Context, *UnmuteNPCRequest) (*UnmuteNPCResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnmuteNPC not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) MuteAllNPCs(context.Context, *MuteAllNPCsRequest) (*MuteAllNPCsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MuteAllNPCs not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) UnmuteAllNPCs(context.Context, *UnmuteAllNPCsRequest) (*UnmuteAllNPCsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnmuteAllNPCs not implemented")
+}
+func (UnimplementedSessionWorkerServiceServer) SpeakNPC(context.Context, *SpeakNPCRequest) (*SpeakNPCResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SpeakNPC not implemented")
 }
 func (UnimplementedSessionWorkerServiceServer) mustEmbedUnimplementedSessionWorkerServiceServer() {}
 func (UnimplementedSessionWorkerServiceServer) testEmbeddedByValue()                              {}
@@ -182,6 +290,114 @@ func _SessionWorkerService_GetStatus_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionWorkerService_ListNPCs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListNPCsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).ListNPCs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_ListNPCs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).ListNPCs(ctx, req.(*ListNPCsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionWorkerService_MuteNPC_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MuteNPCRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).MuteNPC(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_MuteNPC_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).MuteNPC(ctx, req.(*MuteNPCRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionWorkerService_UnmuteNPC_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnmuteNPCRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).UnmuteNPC(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_UnmuteNPC_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).UnmuteNPC(ctx, req.(*UnmuteNPCRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionWorkerService_MuteAllNPCs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MuteAllNPCsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).MuteAllNPCs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_MuteAllNPCs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).MuteAllNPCs(ctx, req.(*MuteAllNPCsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionWorkerService_UnmuteAllNPCs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnmuteAllNPCsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).UnmuteAllNPCs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_UnmuteAllNPCs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).UnmuteAllNPCs(ctx, req.(*UnmuteAllNPCsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionWorkerService_SpeakNPC_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SpeakNPCRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionWorkerServiceServer).SpeakNPC(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionWorkerService_SpeakNPC_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionWorkerServiceServer).SpeakNPC(ctx, req.(*SpeakNPCRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionWorkerService_ServiceDesc is the grpc.ServiceDesc for SessionWorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -200,6 +416,30 @@ var SessionWorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetStatus",
 			Handler:    _SessionWorkerService_GetStatus_Handler,
+		},
+		{
+			MethodName: "ListNPCs",
+			Handler:    _SessionWorkerService_ListNPCs_Handler,
+		},
+		{
+			MethodName: "MuteNPC",
+			Handler:    _SessionWorkerService_MuteNPC_Handler,
+		},
+		{
+			MethodName: "UnmuteNPC",
+			Handler:    _SessionWorkerService_UnmuteNPC_Handler,
+		},
+		{
+			MethodName: "MuteAllNPCs",
+			Handler:    _SessionWorkerService_MuteAllNPCs_Handler,
+		},
+		{
+			MethodName: "UnmuteAllNPCs",
+			Handler:    _SessionWorkerService_UnmuteAllNPCs_Handler,
+		},
+		{
+			MethodName: "SpeakNPC",
+			Handler:    _SessionWorkerService_SpeakNPC_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
