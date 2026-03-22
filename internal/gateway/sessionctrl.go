@@ -168,6 +168,19 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 				"channel_id", req.ChannelID,
 			)
 
+			// Wait for DAVE E2EE handshake to complete before wiring the
+			// audio bridge. Without this, the receiver reads encrypted
+			// packets before keys are exchanged, causing decryption failures.
+			daveCtx, daveCancel := context.WithTimeout(context.Background(), daveReadyTimeout)
+			if daveErr := waitForDAVEReady(daveCtx, voiceConn, sessionID); daveErr != nil {
+				daveCancel()
+				voiceMgr.RemoveConn(gID)
+				gc.bridgeSrv.RemoveBridge(sessionID)
+				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, daveErr.Error())
+				return fmt.Errorf("gateway: DAVE handshake: %w", daveErr)
+			}
+			daveCancel()
+
 			cleanup := setupVoiceBridge(voiceConn, bridge, sessionID)
 			gc.voiceCleanupsMu.Lock()
 			gc.voiceCleanups[sessionID] = func() {
@@ -336,78 +349,93 @@ func (gc *GatewaySessionController) registerDisconnectListener(sessionID, guildI
 // NPC commands are infrequent (slash command interactions).
 
 // dialNPCController dials the worker for the given session and returns an
-// NPCController. The caller should not cache the returned controller.
-func (gc *GatewaySessionController) dialNPCController(sessionID string) (NPCController, error) {
+// NPCController plus a cleanup function that closes the underlying connection.
+// The caller must call the returned cleanup function when done.
+func (gc *GatewaySessionController) dialNPCController(sessionID string) (NPCController, func(), error) {
 	gc.mu.Lock()
 	addr, ok := gc.workerAddrs[sessionID]
 	gc.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("gateway: no worker address for session %s", sessionID)
+		return nil, nil, fmt.Errorf("gateway: no worker address for session %s", sessionID)
 	}
 	if gc.dialer == nil {
-		return nil, fmt.Errorf("gateway: no worker dialer configured")
+		return nil, nil, fmt.Errorf("gateway: no worker dialer configured")
 	}
 	client, err := gc.dialer(addr)
 	if err != nil {
-		return nil, fmt.Errorf("gateway: dial worker at %s: %w", addr, err)
+		return nil, nil, fmt.Errorf("gateway: dial worker at %s: %w", addr, err)
 	}
 	npcCtrl, ok := client.(NPCController)
 	if !ok {
-		return nil, fmt.Errorf("gateway: worker client does not implement NPCController")
+		if c, ok := client.(interface{ Close() error }); ok {
+			c.Close()
+		}
+		return nil, nil, fmt.Errorf("gateway: worker client does not implement NPCController")
 	}
-	return npcCtrl, nil
+	cleanup := func() {
+		if c, ok := client.(interface{ Close() error }); ok {
+			c.Close()
+		}
+	}
+	return npcCtrl, cleanup, nil
 }
 
 // ListNPCs implements [NPCController].
 func (gc *GatewaySessionController) ListNPCs(ctx context.Context, sessionID string) ([]NPCStatus, error) {
-	ctrl, err := gc.dialNPCController(sessionID)
+	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	return ctrl.ListNPCs(ctx, sessionID)
 }
 
 // MuteNPC implements [NPCController].
 func (gc *GatewaySessionController) MuteNPC(ctx context.Context, sessionID, npcName string) error {
-	ctrl, err := gc.dialNPCController(sessionID)
+	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	return ctrl.MuteNPC(ctx, sessionID, npcName)
 }
 
 // UnmuteNPC implements [NPCController].
 func (gc *GatewaySessionController) UnmuteNPC(ctx context.Context, sessionID, npcName string) error {
-	ctrl, err := gc.dialNPCController(sessionID)
+	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	return ctrl.UnmuteNPC(ctx, sessionID, npcName)
 }
 
 // MuteAllNPCs implements [NPCController].
 func (gc *GatewaySessionController) MuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
-	ctrl, err := gc.dialNPCController(sessionID)
+	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
 		return 0, err
 	}
+	defer cleanup()
 	return ctrl.MuteAllNPCs(ctx, sessionID)
 }
 
 // UnmuteAllNPCs implements [NPCController].
 func (gc *GatewaySessionController) UnmuteAllNPCs(ctx context.Context, sessionID string) (int, error) {
-	ctrl, err := gc.dialNPCController(sessionID)
+	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
 		return 0, err
 	}
+	defer cleanup()
 	return ctrl.UnmuteAllNPCs(ctx, sessionID)
 }
 
 // SpeakNPC implements [NPCController].
 func (gc *GatewaySessionController) SpeakNPC(ctx context.Context, sessionID, npcName, text string) error {
-	ctrl, err := gc.dialNPCController(sessionID)
+	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	return ctrl.SpeakNPC(ctx, sessionID, npcName, text)
 }
