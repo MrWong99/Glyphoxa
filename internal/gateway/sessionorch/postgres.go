@@ -180,6 +180,26 @@ func (p *PostgresOrchestrator) CleanupZombies(ctx context.Context, timeout time.
 	return count, nil
 }
 
+// CleanupStalePending transitions sessions stuck in 'pending' state
+// older than maxAge to ended.
+func (p *PostgresOrchestrator) CleanupStalePending(ctx context.Context, maxAge time.Duration) (int, error) {
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE sessions
+		SET state = 'ended', error = 'stale pending: dispatch timeout', ended_at = now()
+		WHERE state = 'pending'
+		  AND started_at < now() - $1::interval
+	`, maxAge.String())
+	if err != nil {
+		return 0, fmt.Errorf("sessionorch: cleanup stale pending: %w", err)
+	}
+
+	count := int(tag.RowsAffected())
+	if count > 0 {
+		slog.Warn("sessionorch: cleaned up stale pending sessions", "count", count)
+	}
+	return count, nil
+}
+
 // scanSessions reads session rows into a slice.
 func scanSessions(rows pgx.Rows) ([]Session, error) {
 	var sessions []Session

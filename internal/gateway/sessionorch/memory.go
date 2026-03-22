@@ -163,3 +163,28 @@ func (m *MemoryOrchestrator) CleanupZombies(_ context.Context, timeout time.Dura
 
 	return count, nil
 }
+
+// CleanupStalePending transitions sessions stuck in 'pending' state
+// older than maxAge to ended.
+func (m *MemoryOrchestrator) CleanupStalePending(_ context.Context, maxAge time.Duration) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	count := 0
+
+	for _, s := range m.sessions {
+		if s.State != gateway.SessionPending {
+			continue
+		}
+		if s.StartedAt.Before(cutoff) {
+			s.State = gateway.SessionEnded
+			now := time.Now().UTC()
+			s.EndedAt = &now
+			s.Error = "stale pending: dispatch timeout"
+			count++
+		}
+	}
+
+	return count, nil
+}

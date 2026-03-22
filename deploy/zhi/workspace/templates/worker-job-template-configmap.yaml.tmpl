@@ -72,13 +72,16 @@ data:
 {{- end }}
           securityContext:
             runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
             seccompProfile:
               type: RuntimeDefault
           containers:
             - name: worker
               image: {{ $repo }}:{{ $tag }}
               imagePullPolicy: {{ $pullPolicy }}
-              args: ["--mode=worker"]
+              args: ["--mode=worker", "--config=/etc/glyphoxa/config.yaml"]
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

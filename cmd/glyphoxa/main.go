@@ -537,6 +537,14 @@ func runGateway(cfg *config.Config) int {
 				} else if n > 0 {
 					slog.Info("cleaned up zombie sessions", "count", n)
 				}
+				// Clean up sessions stuck in 'pending' beyond the dispatch
+				// timeout + buffer. These are sessions where dispatch failed
+				// but the transition to 'ended' was missed.
+				if n, err := orch.CleanupStalePending(ctx, 3*time.Minute); err != nil {
+					slog.Warn("stale pending cleanup error", "err", err)
+				} else if n > 0 {
+					slog.Info("cleaned up stale pending sessions", "count", n)
+				}
 				// Clean up orphaned K8s Jobs alongside zombie sessions.
 				if dispatcher != nil {
 					activeSessions, orchErr := orch.ActiveSessions(ctx, "")

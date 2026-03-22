@@ -358,3 +358,145 @@ func TestMemoryOrchestrator_CleanupZombies(t *testing.T) {
 		t.Errorf("got error %q, want %q", s.Error, "heartbeat timeout")
 	}
 }
+
+func TestMemoryOrchestrator_CleanupStalePending(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cleans up old pending sessions", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		id, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c1",
+			GuildID:     "g1",
+			LicenseTier: config.TierShared,
+		})
+
+		// Backdate the session's StartedAt to simulate an old pending session.
+		m.mu.Lock()
+		m.sessions[id].StartedAt = time.Now().UTC().Add(-5 * time.Minute)
+		m.mu.Unlock()
+
+		count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("got %d cleaned up, want 1", count)
+		}
+
+		s, _ := m.GetSession(ctx, id)
+		if s.State != gateway.SessionEnded {
+			t.Errorf("got state %v, want %v", s.State, gateway.SessionEnded)
+		}
+		if s.Error != "stale pending: dispatch timeout" {
+			t.Errorf("got error %q, want %q", s.Error, "stale pending: dispatch timeout")
+		}
+	})
+
+	t.Run("ignores recent pending sessions", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		_, _ = m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c1",
+			GuildID:     "g1",
+			LicenseTier: config.TierShared,
+		})
+
+		// Session was just created — should not be cleaned up.
+		count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("got %d cleaned up, want 0", count)
+		}
+	})
+
+	t.Run("ignores active and ended sessions", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		id1, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c1",
+			GuildID:     "g1",
+			LicenseTier: config.TierDedicated,
+		})
+		id2, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c2",
+			GuildID:     "g2",
+			LicenseTier: config.TierDedicated,
+		})
+
+		// Transition one to active, one to ended.
+		_ = m.Transition(ctx, id1, gateway.SessionActive, "")
+		_ = m.Transition(ctx, id2, gateway.SessionEnded, "done")
+
+		// Backdate both to be old.
+		m.mu.Lock()
+		old := time.Now().UTC().Add(-10 * time.Minute)
+		m.sessions[id1].StartedAt = old
+		m.sessions[id2].StartedAt = old
+		m.mu.Unlock()
+
+		count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("got %d cleaned up, want 0 (neither is pending)", count)
+		}
+	})
+
+	t.Run("frees tenant slot after cleanup", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		_, _ = m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c1",
+			GuildID:     "g1",
+			LicenseTier: config.TierShared,
+		})
+
+		// Second session for same shared tenant should fail.
+		_, err := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c2",
+			GuildID:     "g2",
+			LicenseTier: config.TierShared,
+		})
+		if err == nil {
+			t.Fatal("expected constraint error")
+		}
+
+		// Backdate and clean up the stale pending session.
+		m.mu.Lock()
+		for _, s := range m.sessions {
+			s.StartedAt = time.Now().UTC().Add(-5 * time.Minute)
+		}
+		m.mu.Unlock()
+
+		_, _ = m.CleanupStalePending(ctx, 2*time.Minute)
+
+		// Now the tenant slot should be free.
+		_, err = m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID:    "t1",
+			CampaignID:  "c2",
+			GuildID:     "g2",
+			LicenseTier: config.TierShared,
+		})
+		if err != nil {
+			t.Fatalf("expected slot freed after cleanup, got: %v", err)
+		}
+	})
+}
