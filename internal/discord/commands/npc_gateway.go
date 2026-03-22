@@ -45,14 +45,19 @@ func (nc *GatewayNPCCommands) Register(router *discordbot.CommandRouter) {
 	router.RegisterHandler("npc/speak", nc.handleSpeak)
 	router.RegisterHandler("npc/muteall", nc.handleMuteAll)
 	router.RegisterHandler("npc/unmuteall", nc.handleUnmuteAll)
+
+	router.RegisterAutocomplete("npc/mute", nc.handleAutocomplete)
+	router.RegisterAutocomplete("npc/unmute", nc.handleAutocomplete)
+	router.RegisterAutocomplete("npc/speak", nc.handleAutocomplete)
 }
 
 // Definition returns the /npc SlashCommandCreate for Discord registration.
 func (nc *GatewayNPCCommands) Definition() discord.SlashCommandCreate {
 	npcNameOption := discord.ApplicationCommandOptionString{
-		Name:        "name",
-		Description: "NPC name",
-		Required:    true,
+		Name:         "name",
+		Description:  "NPC name",
+		Required:     true,
+		Autocomplete: true,
 	}
 	return discord.SlashCommandCreate{
 		Name:        "npc",
@@ -272,4 +277,41 @@ func (nc *GatewayNPCCommands) handleUnmuteAll(e *events.ApplicationCommandIntera
 		return
 	}
 	discordbot.RespondEphemeral(e, fmt.Sprintf("Unmuted %d NPC(s).", count))
+}
+
+// handleAutocomplete provides autocomplete for the "name" option across
+// /npc mute, /npc unmute, and /npc speak in gateway mode.
+func (nc *GatewayNPCCommands) handleAutocomplete(e *events.AutocompleteInteractionCreate) {
+	guildStr := e.GuildID().String()
+	if !nc.ctrl.IsActive(guildStr) {
+		_ = e.AutocompleteResult(nil)
+		return
+	}
+	info, _ := nc.ctrl.Info(guildStr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	npcs, err := nc.npcCtrl.ListNPCs(ctx, info.SessionID)
+	if err != nil {
+		_ = e.AutocompleteResult(nil)
+		return
+	}
+
+	partial := strings.ToLower(e.Data.String("name"))
+
+	var choices []discord.AutocompleteChoice
+	for _, n := range npcs {
+		if partial == "" || strings.HasPrefix(strings.ToLower(n.Name), partial) {
+			choices = append(choices, discord.AutocompleteChoiceString{
+				Name:  n.Name,
+				Value: n.Name,
+			})
+		}
+		if len(choices) >= 25 {
+			break
+		}
+	}
+
+	_ = e.AutocompleteResult(choices)
 }
