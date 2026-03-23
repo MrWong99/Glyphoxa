@@ -24,12 +24,13 @@ import (
 type Runtime struct {
 	mu sync.Mutex
 
-	sessionID string
-	agents    []agent.NPCAgent
-	engines   []engine.VoiceEngine
-	orch      *orchestrator.Orchestrator
-	mixer     audio.Mixer
-	conn      audio.Connection
+	sessionID    string
+	agents       []agent.NPCAgent
+	engines      []engine.VoiceEngine
+	orch         *orchestrator.Orchestrator
+	mixer        audio.Mixer
+	conn         audio.Connection
+	sessionStore memory.SessionStore
 
 	// closers are called in reverse order during Stop.
 	closers []func() error
@@ -57,12 +58,13 @@ type RuntimeConfig struct {
 // NewRuntime creates a Runtime. Call Start to begin processing, Stop to tear down.
 func NewRuntime(cfg RuntimeConfig) *Runtime {
 	return &Runtime{
-		sessionID: cfg.SessionID,
-		agents:    cfg.Agents,
-		engines:   cfg.Engines,
-		orch:      cfg.Orchestrator,
-		mixer:     cfg.Mixer,
-		conn:      cfg.Connection,
+		sessionID:    cfg.SessionID,
+		agents:       cfg.Agents,
+		engines:      cfg.Engines,
+		orch:         cfg.Orchestrator,
+		mixer:        cfg.Mixer,
+		conn:         cfg.Connection,
+		sessionStore: cfg.SessionStore,
 	}
 }
 
@@ -86,6 +88,13 @@ func (rt *Runtime) Start(ctx context.Context, sessionStore memory.SessionStore) 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	rt.cancel = cancel
 	rt.running = true
+
+	// Fall back to the Runtime's own session store when the caller does not
+	// pass one explicitly. This covers worker mode where the factory sets
+	// SessionStore on RuntimeConfig but WorkerHandler calls Start(ctx, nil).
+	if sessionStore == nil {
+		sessionStore = rt.sessionStore
+	}
 
 	// Start transcript recorders for each NPC agent.
 	if sessionStore != nil {

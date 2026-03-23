@@ -26,6 +26,17 @@ const (
 	// handshakeTimeout is how long the server waits for the worker to send
 	// its initial handshake frame before disconnecting.
 	handshakeTimeout = 10 * time.Second
+
+	// toWorkerBuffer is the channel capacity for Discord→worker frames.
+	// Discord sends at realtime pace (50 fps), so a small buffer suffices.
+	toWorkerBuffer = 128
+
+	// fromWorkerBuffer is the channel capacity for worker→Discord frames.
+	// TTS generates audio faster than realtime, so the worker sends bursts
+	// of opus frames that arrive well ahead of the 20 ms playback rate.
+	// A buffer of 1500 frames holds 30 seconds of audio, which covers long
+	// NPC monologues without dropping frames.
+	fromWorkerBuffer = 1500
 )
 
 // StreamDetachFunc is called when a worker's audio stream disconnects.
@@ -92,8 +103,8 @@ func (s *Server) Register(gs *grpc.Server) {
 func (s *Server) NewSessionBridge(sessionID string) *SessionBridge {
 	bridge := &SessionBridge{
 		sessionID:  sessionID,
-		toWorker:   make(chan *pb.AudioFrame, 128),
-		fromWorker: make(chan *pb.AudioFrame, 128),
+		toWorker:   make(chan *pb.AudioFrame, toWorkerBuffer),
+		fromWorker: make(chan *pb.AudioFrame, fromWorkerBuffer),
 		done:       make(chan struct{}),
 	}
 
