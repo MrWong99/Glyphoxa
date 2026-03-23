@@ -729,6 +729,11 @@ func runWorker(cfg *config.Config) int {
 	printStartupSummary(cfg, "worker")
 
 	// ── Provider registry + instantiation ─────────────────────────────────────
+	// Workers get audio through the gRPC AudioBridgeService (or create their
+	// own voice-only platform in full mode), so the top-level audio provider
+	// from config is not needed and would fail without a bot token.
+	cfg.Providers.Audio = config.ProviderEntry{}
+
 	reg := config.NewRegistry()
 	var bot *discordbot.Bot
 	registerBuiltinProviders(reg, &bot)
