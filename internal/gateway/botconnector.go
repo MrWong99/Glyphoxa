@@ -11,8 +11,9 @@ import (
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/disgo/voice"
-	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/snowflake/v2"
+
+	safedave "github.com/MrWong99/glyphoxa/internal/dave"
 
 	discordbot "github.com/MrWong99/glyphoxa/internal/discord"
 )
@@ -92,7 +93,7 @@ func (c *DiscordBotConnector) ConnectBotForTenant(ctx context.Context, tenant Te
 			router.HandleModal(e)
 		}),
 		bot.WithVoiceManagerConfigOpts(
-			voice.WithDaveSessionCreateFunc(golibdave.NewSession),
+			voice.WithDaveSessionCreateFunc(safedave.NewSession),
 		),
 	}
 

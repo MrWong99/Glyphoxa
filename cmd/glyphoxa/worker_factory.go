@@ -28,7 +28,8 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/memory/postgres"
 	"github.com/disgoorg/disgo/voice"
-	"github.com/disgoorg/godave/golibdave"
+
+	safedave "github.com/MrWong99/glyphoxa/internal/dave"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure" // used in fallback when no dial opts are configured
 )
@@ -144,7 +145,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	} else {
 		// Full mode: open own gateway (existing code path).
 		platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID,
-			discord.WithVoiceManagerOpts(voice.WithDaveSessionCreateFunc(golibdave.NewSession)),
+			discord.WithVoiceManagerOpts(voice.WithDaveSessionCreateFunc(safedave.NewSession)),
 		)
 		if err != nil {
 			if storeCloser != nil {
