@@ -38,6 +38,10 @@ const (
 	opusFrameBytes = opusFrameSize * opusChannels * 2
 )
 
+// frameLogInterval controls how often periodic frame-flow log messages are
+// emitted. One log line per this many frames (~5 s at 50 fps).
+const frameLogInterval = 250
+
 // Connection implements [audio.Connection] by streaming opus frames over a
 // gRPC AudioBridgeService bidirectional stream. Incoming frames from the
 // gateway (Discord audio) are decoded from opus to PCM and demuxed by user_id
@@ -61,6 +65,9 @@ type Connection struct {
 
 	changeCb func(audio.Event)
 	changeMu sync.Mutex
+
+	recvFrames uint64
+	sendFrames uint64
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -176,6 +183,15 @@ func (c *Connection) recvLoop() {
 			Timestamp:  time.Duration(frame.GetSsrc()) * time.Second / time.Duration(opusSampleRate),
 		}
 
+		c.recvFrames++
+		if c.recvFrames%frameLogInterval == 1 {
+			slog.Info("grpcbridge: receiving gateway→worker audio",
+				"session_id", c.sessionID,
+				"frames_total", c.recvFrames,
+				"participants", len(c.inputs),
+			)
+		}
+
 		select {
 		case ch <- af:
 		default:
@@ -211,6 +227,19 @@ func (c *Connection) sendLoop() {
 				if encErr != nil {
 					slog.Warn("grpcbridge: opus encode error", "err", encErr)
 					continue
+				}
+
+				c.sendFrames++
+				if c.sendFrames == 1 {
+					slog.Info("grpcbridge: first NPC audio frame sent to gateway",
+						"session_id", c.sessionID,
+					)
+				}
+				if c.sendFrames%frameLogInterval == 0 {
+					slog.Info("grpcbridge: sending worker→gateway audio",
+						"session_id", c.sessionID,
+						"frames_total", c.sendFrames,
+					)
 				}
 
 				err := c.stream.Send(&pb.AudioFrame{

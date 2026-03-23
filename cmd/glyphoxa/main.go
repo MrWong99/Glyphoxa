@@ -583,6 +583,12 @@ func runGateway(cfg *config.Config) int {
 				return nil
 			},
 		},
+		health.Checker{
+			Name: "database",
+			Check: func(ctx context.Context) error {
+				return pool.Ping(ctx)
+			},
+		},
 	)
 
 	// ── Zombie session + orphan job cleanup ──────────────────────────────────

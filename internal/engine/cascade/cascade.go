@@ -220,6 +220,11 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 		textCh <- opener
 		close(textCh)
 
+		slog.Info("cascade: TTS starting (single-model path)",
+			"voice", e.voice.Name,
+			"text_preview", truncate(opener, 80),
+		)
+		ttsStart := time.Now()
 		audioCh, err := e.ttsP.SynthesizeStream(ctx, textCh, e.voice)
 		if err != nil {
 			return nil, fmt.Errorf("cascade: TTS start failed: %w", err)
@@ -239,6 +244,12 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 		// Background goroutine: wait for playback outcome, then emit transcript.
 		e.wg.Go(func() {
 			interrupted := e.waitForDone(ctx, notifyDone)
+
+			slog.Info("cascade: TTS finished (single-model path)",
+				"voice", e.voice.Name,
+				"interrupted", interrupted,
+				"duration", time.Since(ttsStart).Round(time.Millisecond),
+			)
 
 			if interrupted {
 				// Single sentence — if interrupted mid-playback, some audio
@@ -274,6 +285,11 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 	// Create the shared text channel that feeds the TTS stream.
 	// We wrap it with a tracking channel that records committed text.
 	textCh := make(chan string, defaultTextBuf)
+	slog.Info("cascade: TTS starting (dual-model path)",
+		"voice", e.voice.Name,
+		"opener_preview", truncate(opener, 80),
+	)
+	ttsStart := time.Now()
 	audioCh, err := e.ttsP.SynthesizeStream(ctx, textCh, e.voice)
 	if err != nil {
 		return nil, fmt.Errorf("cascade: TTS start failed: %w", err)
@@ -328,6 +344,12 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 		}
 		// Wait for playback outcome.
 		interrupted := e.waitForDone(ctx, notifyDone)
+
+		slog.Info("cascade: TTS finished (dual-model path)",
+			"voice", e.voice.Name,
+			"interrupted", interrupted,
+			"duration", time.Since(ttsStart).Round(time.Millisecond),
+		)
 
 		if interrupted {
 			committedMu.Lock()
@@ -887,6 +909,14 @@ func lastUserMessage(msgs []llm.Message) (llm.Message, bool) {
 		}
 	}
 	return llm.Message{}, false
+}
+
+// truncate returns s truncated to maxLen runes, with "…" appended if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
 }
 
 // mergeContextUpdate applies a [engine.ContextUpdate] onto a [engine.PromptContext],
