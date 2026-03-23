@@ -61,12 +61,17 @@ func (h *WorkerHandler) StartSession(ctx context.Context, req gateway.StartSessi
 	}
 	h.mu.Unlock()
 
-	rt, err := h.factory(ctx, req)
+	// Use a session-scoped context derived from context.Background() instead
+	// of the gRPC RPC context. The RPC context is canceled when the
+	// StartSession handler returns, which would kill long-lived resources
+	// (audio pipeline, consolidator) created by the factory.
+	sessionCtx, cancel := context.WithCancel(context.Background())
+
+	rt, err := h.factory(sessionCtx, req)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("session: create runtime for %q: %w", req.SessionID, err)
 	}
-
-	sessionCtx, cancel := context.WithCancel(context.Background())
 
 	if err := rt.Start(sessionCtx, nil); err != nil {
 		cancel()
