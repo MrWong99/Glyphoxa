@@ -67,19 +67,49 @@ func WithBaseURL(baseURL string) Option {
 	}
 }
 
+// WithPoolSize sets the maximum number of idle pre-warmed connections per
+// unique URL configuration. Default is 2. Setting to 0 effectively disables
+// pooling (every StartStream dials fresh).
+func WithPoolSize(n int) Option {
+	return func(p *Provider) {
+		p.maxIdle = n
+	}
+}
+
+// WithPoolIdleTTL sets how long idle pooled connections live before being
+// evicted. Default is 30s. Shorter values reduce the chance of using a
+// server-side-closed connection; longer values keep connections warm across
+// longer pauses in speech.
+func WithPoolIdleTTL(d time.Duration) Option {
+	return func(p *Provider) {
+		p.idleTTL = d
+	}
+}
+
 // Provider implements stt.Provider backed by the ElevenLabs Scribe v2 Realtime
 // streaming API.
+//
+// Call [Provider.Close] when the Provider is no longer needed to release pooled
+// connections and stop background goroutines.
 type Provider struct {
 	apiKey     string
 	model      string
 	language   string
 	sampleRate int
 	baseURL    string
+
+	// Connection pool fields.
+	pool    *connPool
+	maxIdle int
+	idleTTL time.Duration
 }
 
 var _ stt.Provider = (*Provider)(nil)
 
 // New creates a new ElevenLabs STT Provider. apiKey must be non-empty.
+//
+// The Provider maintains a pool of pre-warmed WebSocket connections to reduce
+// dial latency. Call [Provider.Close] when the Provider is no longer needed.
 func New(apiKey string, opts ...Option) (*Provider, error) {
 	if apiKey == "" {
 		return nil, errors.New("elevenlabs: apiKey must not be empty")
@@ -90,31 +120,39 @@ func New(apiKey string, opts ...Option) (*Provider, error) {
 		language:   defaultLanguage,
 		sampleRate: defaultSampleRate,
 		baseURL:    defaultBaseURL,
+		maxIdle:    defaultMaxIdleConns,
+		idleTTL:    defaultIdleTTL,
 	}
 	for _, o := range opts {
 		o(p)
 	}
+	p.pool = newConnPool(p.maxIdle, p.idleTTL, p.dialWS)
 	return p, nil
+}
+
+// Close releases all pooled connections and stops background goroutines.
+// It is safe to call Close multiple times.
+func (p *Provider) Close() error {
+	p.pool.close()
+	return nil
 }
 
 // StartStream opens a streaming transcription session with ElevenLabs.
 // It respects cfg.SampleRate and cfg.Language.
+//
+// If a pre-warmed connection is available in the pool it is used immediately,
+// avoiding the WebSocket dial latency. After acquiring a connection the pool
+// begins warming a replacement in the background.
 func (p *Provider) StartStream(ctx context.Context, cfg stt.StreamConfig) (stt.SessionHandle, error) {
 	wsURL, err := p.buildURL(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("elevenlabs: build URL: %w", err)
 	}
 
-	headers := http.Header{}
-	headers.Set("xi-api-key", p.apiKey)
-
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
-		HTTPHeader: headers,
-	})
+	conn, err := p.pool.get(ctx, wsURL)
 	if err != nil {
-		return nil, fmt.Errorf("elevenlabs: dial: %w", err)
+		return nil, err
 	}
-	conn.SetReadLimit(1 << 20) // 1 MiB
 
 	sr := cfg.SampleRate
 	if sr == 0 {
@@ -135,7 +173,26 @@ func (p *Provider) StartStream(ctx context.Context, cfg stt.StreamConfig) (stt.S
 	go sess.readLoop(ctx)
 	go sess.writeLoop(ctx)
 
+	// Pre-warm the next connection so subsequent calls avoid dial latency.
+	p.pool.warm(wsURL)
+
 	return sess, nil
+}
+
+// dialWS establishes a new WebSocket connection to the ElevenLabs endpoint.
+// It is used as the dial function for the connection pool.
+func (p *Provider) dialWS(ctx context.Context, wsURL string) (*websocket.Conn, error) {
+	headers := http.Header{}
+	headers.Set("xi-api-key", p.apiKey)
+
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: headers,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("elevenlabs: dial: %w", err)
+	}
+	conn.SetReadLimit(1 << 20) // 1 MiB
+	return conn, nil
 }
 
 // buildURL constructs the ElevenLabs streaming endpoint URL for the given config.
