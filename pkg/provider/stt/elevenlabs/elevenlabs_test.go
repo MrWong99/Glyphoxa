@@ -36,6 +36,7 @@ func TestNew(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 		assertEqual(t, "model", defaultModel, p.model)
 		assertEqual(t, "language", defaultLanguage, p.language)
 		if p.sampleRate != defaultSampleRate {
@@ -55,6 +56,7 @@ func TestNew(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 		assertEqual(t, "model", "custom-model", p.model)
 		assertEqual(t, "language", "de", p.language)
 		if p.sampleRate != 48000 {
@@ -75,6 +77,7 @@ func TestBuildURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		rawURL, err := p.buildURL(stt.StreamConfig{
 			SampleRate: 16000,
@@ -103,6 +106,7 @@ func TestBuildURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		rawURL, err := p.buildURL(stt.StreamConfig{Language: "fr", SampleRate: 16000})
 		if err != nil {
@@ -119,6 +123,7 @@ func TestBuildURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		rawURL, err := p.buildURL(stt.StreamConfig{})
 		if err != nil {
@@ -137,6 +142,7 @@ func TestBuildURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		rawURL, err := p.buildURL(stt.StreamConfig{Language: "en-US", SampleRate: 16000})
 		if err != nil {
@@ -153,6 +159,7 @@ func TestBuildURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		rawURL, err := p.buildURL(stt.StreamConfig{SampleRate: 16000})
 		if err != nil {
@@ -467,6 +474,7 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		sess, err := p.StartStream(context.Background(), stt.StreamConfig{
 			SampleRate: 16000,
@@ -526,6 +534,7 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		sess, err := p.StartStream(context.Background(), stt.StreamConfig{
 			SampleRate: 16000,
@@ -587,6 +596,7 @@ func TestSession_CloseDoesNotTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		t.Cleanup(func() { _ = p.Close() })
 
 		sess, err := p.StartStream(context.Background(), stt.StreamConfig{
 			SampleRate: 16000,
@@ -666,6 +676,7 @@ func TestSession_DuplicateCommittedTranscriptDeduplicated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(func() { _ = p.Close() })
 
 	sess, err := p.StartStream(context.Background(), stt.StreamConfig{
 		SampleRate: 16000,
