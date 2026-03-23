@@ -2,12 +2,18 @@ package elevenlabs
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
+	"github.com/coder/websocket"
 )
 
 // ---- WebSocket message construction ----
@@ -414,4 +420,415 @@ func newProviderWithServer(t *testing.T, apiKey string, srv *httptest.Server) *P
 	}
 	p.addVoiceURL = srv.URL + "/v1/voices/add"
 	return p
+}
+
+// ---- Connection pool tests ----
+
+// newWSEchoServer creates an httptest.Server that upgrades to WebSocket,
+// reads BOI + text messages, and responds with a single audio chunk followed
+// by an isFinal marker. Suitable for pool and synthesis integration tests.
+func newWSEchoServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		conn.SetReadLimit(1 << 20)
+
+		ctx := r.Context()
+		for {
+			_, msg, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			var tm textMessage
+			if err := json.Unmarshal(msg, &tm); err != nil {
+				continue
+			}
+			// Flush command (empty text) → send audio + isFinal, then return.
+			if tm.Text == "" {
+				pcm := []byte("fake-pcm-data")
+				resp, _ := json.Marshal(audioResponse{
+					Audio: base64.StdEncoding.EncodeToString(pcm),
+				})
+				_ = conn.Write(ctx, websocket.MessageText, resp)
+				final, _ := json.Marshal(audioResponse{IsFinal: true})
+				_ = conn.Write(ctx, websocket.MessageText, final)
+				return
+			}
+		}
+	}))
+}
+
+// newIdleWSServer creates an httptest.Server that accepts WebSocket connections
+// and holds them open until the peer closes. Useful for pool-only tests where
+// no actual synthesis traffic is needed.
+func newIdleWSServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Block until the peer closes the connection.
+		for {
+			_, _, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+		}
+	}))
+}
+
+// testDialFunc returns a dialFunc that connects to srv and an atomic counter
+// that records how many times it was called.
+func testDialFunc(t *testing.T, srv *httptest.Server) (func(ctx context.Context, url string) (*websocket.Conn, error), *atomic.Int64) {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	var count atomic.Int64
+	return func(ctx context.Context, _ string) (*websocket.Conn, error) {
+		count.Add(1)
+		conn, _, err := websocket.Dial(ctx, wsURL, nil)
+		return conn, err
+	}, &count
+}
+
+func TestPoolTakeWarm_EmptyPool(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if conn := p.takeWarm("voice-1"); conn != nil {
+		t.Error("expected nil from empty pool")
+	}
+}
+
+func TestPoolPutAndTake(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, _ := testDialFunc(t, srv)
+	conn, err := dial(context.Background(), "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	if !p.putWarm("voice-1", conn) {
+		t.Fatal("putWarm returned false on empty pool")
+	}
+
+	got := p.takeWarm("voice-1")
+	if got == nil {
+		t.Fatal("expected non-nil connection from pool")
+	}
+
+	// Pool should now be empty.
+	if second := p.takeWarm("voice-1"); second != nil {
+		t.Error("expected nil after taking the only connection")
+	}
+}
+
+func TestPoolPutWarm_RejectsWhenFull(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key", WithPoolSize(1))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, _ := testDialFunc(t, srv)
+
+	c1, _ := dial(context.Background(), "")
+	c2, _ := dial(context.Background(), "")
+
+	if !p.putWarm("v1", c1) {
+		t.Fatal("first putWarm should succeed")
+	}
+	if p.putWarm("v1", c2) {
+		t.Error("second putWarm should fail when pool is full")
+	}
+	c2.Close(websocket.StatusNormalClosure, "test")
+}
+
+func TestPoolTakeWarm_EvictsStale(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key", WithMaxIdleTime(1*time.Millisecond))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, _ := testDialFunc(t, srv)
+	conn, _ := dial(context.Background(), "")
+	p.putWarm("v1", conn)
+
+	// Wait for the connection to become stale.
+	time.Sleep(5 * time.Millisecond)
+
+	if got := p.takeWarm("v1"); got != nil {
+		t.Error("expected nil for stale connection")
+		got.Close(websocket.StatusNormalClosure, "test")
+	}
+}
+
+func TestPoolClose(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key", WithPoolSize(2))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	dial, _ := testDialFunc(t, srv)
+	c1, _ := dial(context.Background(), "")
+	c2, _ := dial(context.Background(), "")
+	p.putWarm("v1", c1)
+	p.putWarm("v1", c2)
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Pool should be empty and closed.
+	if got := p.takeWarm("v1"); got != nil {
+		t.Error("expected nil from closed pool")
+	}
+
+	// Double close is safe.
+	if err := p.Close(); err != nil {
+		t.Fatalf("double Close: %v", err)
+	}
+}
+
+func TestWarm(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, count := testDialFunc(t, srv)
+	p.dialFunc = dial
+
+	voices := []tts.VoiceProfile{
+		{ID: "voice-a", Name: "A"},
+		{ID: "voice-b", Name: "B"},
+		{ID: "", Name: "Empty"}, // should be skipped
+	}
+
+	if err := p.Warm(context.Background(), voices...); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+
+	if got := count.Load(); got != 2 {
+		t.Errorf("expected 2 dials (skipping empty ID), got %d", got)
+	}
+
+	// Both voices should have warm connections.
+	if c := p.takeWarm("voice-a"); c == nil {
+		t.Error("expected warm connection for voice-a")
+	}
+	if c := p.takeWarm("voice-b"); c == nil {
+		t.Error("expected warm connection for voice-b")
+	}
+}
+
+func TestDialAhead(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, count := testDialFunc(t, srv)
+	p.dialFunc = dial
+
+	p.dialAhead("voice-1")
+	p.wg.Wait() // wait for the background goroutine
+
+	if got := count.Load(); got != 1 {
+		t.Errorf("expected 1 dial-ahead call, got %d", got)
+	}
+
+	if c := p.takeWarm("voice-1"); c == nil {
+		t.Error("expected warm connection from dial-ahead")
+	}
+}
+
+func TestDialAhead_SkipsWhenPoolDisabled(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("test-key", WithPoolSize(0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var count atomic.Int64
+	p.dialFunc = func(_ context.Context, _ string) (*websocket.Conn, error) {
+		count.Add(1)
+		return nil, fmt.Errorf("should not be called")
+	}
+
+	p.dialAhead("voice-1")
+	p.wg.Wait()
+
+	if got := count.Load(); got != 0 {
+		t.Errorf("expected 0 dials when pool disabled, got %d", got)
+	}
+}
+
+func TestSynthesizeStream_UsesWarmConnection(t *testing.T) {
+	t.Parallel()
+	srv := newWSEchoServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, count := testDialFunc(t, srv)
+	p.dialFunc = dial
+
+	// Pre-warm a connection.
+	if err := p.Warm(context.Background(), tts.VoiceProfile{ID: "voice-1"}); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+	warmDials := count.Load()
+
+	// SynthesizeStream should use the warm connection, not dial a new one.
+	textCh := make(chan string, 1)
+	textCh <- "Hello world."
+	close(textCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	audioCh, err := p.SynthesizeStream(ctx, textCh, tts.VoiceProfile{ID: "voice-1"})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+
+	// Drain audio.
+	var chunks int
+	for range audioCh {
+		chunks++
+	}
+	if chunks == 0 {
+		t.Error("expected at least one audio chunk")
+	}
+
+	// Wait for dial-ahead to complete.
+	p.wg.Wait()
+
+	// The warm dial + the dial-ahead = warmDials + 1.
+	// SynthesizeStream itself should NOT have triggered a fresh dial.
+	finalDials := count.Load()
+	dialsDuringSynth := finalDials - warmDials
+	if dialsDuringSynth != 1 {
+		// 1 dial = the dial-ahead only (not a fresh dial for the synthesis itself)
+		t.Errorf("expected 1 dial during synthesis (dial-ahead only), got %d", dialsDuringSynth)
+	}
+}
+
+func TestSynthesizeStream_FallsBackOnFreshDial(t *testing.T) {
+	t.Parallel()
+	srv := newWSEchoServer(t)
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, count := testDialFunc(t, srv)
+	p.dialFunc = dial
+
+	// No warm connection — should dial fresh.
+	textCh := make(chan string, 1)
+	textCh <- "Hello."
+	close(textCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	audioCh, err := p.SynthesizeStream(ctx, textCh, tts.VoiceProfile{ID: "voice-1"})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+
+	// Drain audio.
+	for range audioCh {
+	}
+
+	p.wg.Wait()
+
+	// 1 fresh dial + 1 dial-ahead = 2 total.
+	if got := count.Load(); got != 2 {
+		t.Errorf("expected 2 dials (fresh + dial-ahead), got %d", got)
+	}
+}
+
+func TestWithPoolSize(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key", WithPoolSize(3))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.poolSize != 3 {
+		t.Errorf("expected poolSize 3, got %d", p.poolSize)
+	}
+}
+
+func TestWithMaxIdleTime(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key", WithMaxIdleTime(10*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.maxIdle != 10*time.Second {
+		t.Errorf("expected maxIdle 10s, got %v", p.maxIdle)
+	}
+}
+
+func TestWarmerInterfaceAssertion(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Provider should satisfy tts.Warmer.
+	var provider tts.Provider = p
+	if _, ok := provider.(tts.Warmer); !ok {
+		t.Error("Provider does not implement tts.Warmer")
+	}
 }

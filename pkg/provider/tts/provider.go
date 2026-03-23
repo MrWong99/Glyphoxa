@@ -56,3 +56,19 @@ type Provider interface {
 	// return an error rather than panic.
 	CloneVoice(ctx context.Context, samples [][]byte) (*VoiceProfile, error)
 }
+
+// Warmer is an optional interface that TTS providers may implement to support
+// connection pre-warming. Pre-warming establishes backend connections ahead of
+// time so that subsequent SynthesizeStream calls avoid dial latency.
+//
+// Callers that wish to use pre-warming should type-assert their tts.Provider:
+//
+//	if w, ok := ttsProvider.(Warmer); ok {
+//	    _ = w.Warm(ctx, voice)
+//	}
+type Warmer interface {
+	// Warm pre-dials backend connections for the given voice profiles. After a
+	// successful Warm call, the next SynthesizeStream for a warmed voice will
+	// reuse the pre-dialed connection instead of dialing from scratch.
+	Warm(ctx context.Context, voices ...VoiceProfile) error
+}
