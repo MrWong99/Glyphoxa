@@ -19,6 +19,11 @@ type Transcript struct {
 	// May be nil for providers that don't support word-level output.
 	Words []WordDetail
 
+	// RawText preserves the original uncorrected STT output when transcript
+	// correction is applied. Set by the audio pipeline before correction
+	// overwrites Text. Empty when no correction was applied.
+	RawText string
+
 	// SpeakerID identifies the speaker when speaker diarization is active.
 	SpeakerID string
 

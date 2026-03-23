@@ -303,6 +303,7 @@ func (p *audioPipeline) collectAndRoute(ctx context.Context, speakerID string, s
 							"corrected", corrected.Corrected,
 							"corrections", len(corrected.Corrections),
 						)
+						t.RawText = t.Text
 						t.Text = corrected.Corrected
 					}
 				}

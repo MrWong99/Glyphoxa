@@ -20,6 +20,7 @@ package engine
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
@@ -51,6 +52,16 @@ type PromptContext struct {
 	// BudgetTier controls which tools are offered to the LLM based on latency
 	// constraints. See [mcp.BudgetTier] for tier definitions.
 	BudgetTier mcp.BudgetTier
+
+	// UtteranceRawText is the original uncorrected STT output for the current
+	// player utterance. Empty when no transcript correction was applied.
+	// Used by the engine to populate TranscriptEntry.RawText.
+	UtteranceRawText string
+
+	// UtteranceDuration is the length of the current player utterance as
+	// reported by the STT provider. Zero if unavailable.
+	// Used by the engine to populate TranscriptEntry.Duration.
+	UtteranceDuration time.Duration
 }
 
 // ContextUpdate carries a mid-session context refresh pushed via

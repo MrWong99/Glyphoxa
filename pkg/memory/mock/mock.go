@@ -74,6 +74,12 @@ type SessionStore struct {
 
 	// ListSessionsErr is returned by [SessionStore.ListSessions] when non-nil.
 	ListSessionsErr error
+
+	// StartSessionErr is returned by [SessionStore.StartSession] when non-nil.
+	StartSessionErr error
+
+	// EndSessionErr is returned by [SessionStore.EndSession] when non-nil.
+	EndSessionErr error
 }
 
 // Calls returns a copy of all recorded method invocations.
@@ -158,6 +164,22 @@ func (m *SessionStore) ListSessions(_ context.Context, limit int) ([]memory.Sess
 	out := make([]memory.SessionInfo, len(m.ListSessionsResult))
 	copy(out, m.ListSessionsResult)
 	return out, m.ListSessionsErr
+}
+
+// StartSession implements [memory.SessionStore].
+func (m *SessionStore) StartSession(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, Call{Method: "StartSession", Args: []any{sessionID}})
+	return m.StartSessionErr
+}
+
+// EndSession implements [memory.SessionStore].
+func (m *SessionStore) EndSession(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, Call{Method: "EndSession", Args: []any{sessionID}})
+	return m.EndSessionErr
 }
 
 // Ensure SessionStore satisfies the interface at compile time.

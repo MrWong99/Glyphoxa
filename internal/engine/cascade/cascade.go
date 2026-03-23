@@ -266,6 +266,8 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 					SpeakerID:   playerMsg.Name,
 					SpeakerName: playerMsg.Name,
 					Text:        playerMsg.Content,
+					RawText:     prompt.UtteranceRawText,
+					Duration:    prompt.UtteranceDuration,
 					Timestamp:   time.Now(),
 				})
 			}
@@ -371,6 +373,8 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 				SpeakerID:   playerMsg.Name,
 				SpeakerName: playerMsg.Name,
 				Text:        playerMsg.Content,
+				RawText:     prompt.UtteranceRawText,
+				Duration:    prompt.UtteranceDuration,
 				Timestamp:   time.Now(),
 			})
 		}

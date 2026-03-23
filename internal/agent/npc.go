@@ -274,10 +274,12 @@ func (a *liveAgent) HandleUtterance(ctx context.Context, speaker string, transcr
 	}
 
 	promptCtx := engine.PromptContext{
-		SystemPrompt: systemPrompt,
-		HotContext:   hotContextStr,
-		Messages:     msgs,
-		BudgetTier:   a.budgetTier,
+		SystemPrompt:      systemPrompt,
+		HotContext:        hotContextStr,
+		Messages:          msgs,
+		BudgetTier:        a.budgetTier,
+		UtteranceRawText:  transcript.RawText,
+		UtteranceDuration: transcript.Duration,
 	}
 
 	// 4. Create a synthetic audio frame (cascaded mode: STT already ran).

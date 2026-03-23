@@ -134,11 +134,9 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 		now.Format("20060102T1504Z"),
 	)
 
-	// Record session in sessions metadata table if Postgres-backed.
-	if starter, ok := sm.sessionStore.(interface {
-		StartSession(ctx context.Context, sessionID string) error
-	}); ok {
-		if err := starter.StartSession(ctx, sessionID); err != nil {
+	// Record session in sessions metadata table.
+	if sm.sessionStore != nil {
+		if err := sm.sessionStore.StartSession(ctx, sessionID); err != nil {
 			slog.Warn("session: failed to record session start", "session_id", sessionID, "err", err)
 		}
 	}
@@ -330,10 +328,8 @@ func (sm *SessionManager) Stop(ctx context.Context) error {
 	}
 
 	// Record session end in sessions metadata table.
-	if ender, ok := sm.sessionStore.(interface {
-		EndSession(ctx context.Context, sessionID string) error
-	}); ok {
-		if err := ender.EndSession(ctx, sessionID); err != nil {
+	if sm.sessionStore != nil {
+		if err := sm.sessionStore.EndSession(ctx, sessionID); err != nil {
 			slog.Warn("session: failed to record session end", "session_id", sessionID, "err", err)
 		}
 	}
