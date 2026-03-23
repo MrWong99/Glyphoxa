@@ -21,8 +21,11 @@ import (
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 )
 
-// Compile-time interface assertion.
-var _ audio.Connection = (*Connection)(nil)
+// Compile-time interface assertions.
+var (
+	_ audio.Connection = (*Connection)(nil)
+	_ audio.Flusher    = (*Connection)(nil)
+)
 
 const (
 	inputChannelBuffer  = 64
@@ -66,6 +69,10 @@ type Connection struct {
 	changeCb func(audio.Event)
 	changeMu sync.Mutex
 
+	// flushCh signals sendLoop to clear its partial buffer and send a flush
+	// frame. Buffered so Flush() never blocks.
+	flushCh chan struct{}
+
 	recvFrames uint64
 	sendFrames uint64
 
@@ -92,6 +99,7 @@ func New(sessionID string, stream grpc.BidiStreamingClient[pb.AudioFrame, pb.Aud
 		output:    make(chan audio.AudioFrame, outputChannelBuffer),
 		encoder:   enc,
 		conv:      audio.FormatConverter{Target: audio.Format{SampleRate: opusSampleRate, Channels: opusChannels}},
+		flushCh:   make(chan struct{}, 1),
 		done:      make(chan struct{}),
 	}
 
@@ -207,6 +215,19 @@ func (c *Connection) sendLoop() {
 		select {
 		case <-c.done:
 			return
+
+		case <-c.flushCh:
+			// Barge-in or mute: discard partial opus buffer and tell the
+			// gateway to flush its own buffer. This runs on the sendLoop
+			// goroutine so there is no data race with buf access.
+			c.buf = c.buf[:0]
+			if err := c.stream.Send(&pb.AudioFrame{
+				SessionId: c.sessionID,
+				Flush:     true,
+			}); err != nil {
+				slog.Debug("grpcbridge: flush send failed", "session_id", c.sessionID, "err", err)
+			}
+
 		case frame, ok := <-c.output:
 			if !ok {
 				return
@@ -280,6 +301,41 @@ func (c *Connection) OnParticipantChange(cb func(audio.Event)) {
 	c.changeMu.Lock()
 	defer c.changeMu.Unlock()
 	c.changeCb = cb
+}
+
+// Flush drains any unsent frames from the local output channel and signals
+// sendLoop to clear its partial opus buffer and send a flush control frame
+// to the gateway. This ensures that after a barge-in or mute, stale NPC
+// audio stops playing immediately on both the worker and gateway sides.
+//
+// Safe for concurrent use — the output channel drain is lock-free, and
+// sendLoop handles buf clearing and the gRPC send to avoid data races.
+func (c *Connection) Flush() {
+	// Drain local output channel so sendLoop doesn't transmit stale frames.
+	// Channel receives are safe from multiple goroutines.
+	drained := 0
+	for {
+		select {
+		case <-c.output:
+			drained++
+		default:
+			goto drainDone
+		}
+	}
+drainDone:
+	if drained > 0 {
+		slog.Info("grpcbridge: flushed local output buffer",
+			"session_id", c.sessionID,
+			"drained_frames", drained,
+		)
+	}
+
+	// Signal sendLoop to clear its partial buf and send a flush frame.
+	select {
+	case c.flushCh <- struct{}{}:
+	default:
+		// Already signalled.
+	}
 }
 
 // Disconnect cleanly tears down the gRPC stream. Input channels are closed by

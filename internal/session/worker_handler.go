@@ -187,16 +187,24 @@ func (h *WorkerHandler) ListNPCs(_ context.Context, sessionID string) ([]gateway
 
 // MuteNPC mutes a named NPC in a running session.
 func (h *WorkerHandler) MuteNPC(_ context.Context, sessionID, npcName string) error {
-	orch, err := h.sessionOrch(sessionID)
+	ms, err := h.managedSession(sessionID)
 	if err != nil {
 		return err
+	}
+	orch := ms.runtime.Orchestrator()
+	if orch == nil {
+		return fmt.Errorf("session: %q has no orchestrator", sessionID)
 	}
 
 	a := orch.AgentByName(npcName)
 	if a == nil {
 		return fmt.Errorf("session: npc %q not found in session %q", npcName, sessionID)
 	}
-	return orch.MuteAgent(a.ID())
+	if err := orch.MuteAgent(a.ID()); err != nil {
+		return err
+	}
+	ms.runtime.Flush()
+	return nil
 }
 
 // UnmuteNPC unmutes a named NPC in a running session.
@@ -215,11 +223,17 @@ func (h *WorkerHandler) UnmuteNPC(_ context.Context, sessionID, npcName string) 
 
 // MuteAllNPCs mutes all NPCs in a running session and returns the count.
 func (h *WorkerHandler) MuteAllNPCs(_ context.Context, sessionID string) (int, error) {
-	orch, err := h.sessionOrch(sessionID)
+	ms, err := h.managedSession(sessionID)
 	if err != nil {
 		return 0, err
 	}
-	return orch.MuteAll(), nil
+	orch := ms.runtime.Orchestrator()
+	if orch == nil {
+		return 0, fmt.Errorf("session: %q has no orchestrator", sessionID)
+	}
+	count := orch.MuteAll()
+	ms.runtime.Flush()
+	return count, nil
 }
 
 // UnmuteAllNPCs unmutes all NPCs in a running session and returns the count.
@@ -245,14 +259,23 @@ func (h *WorkerHandler) SpeakNPC(ctx context.Context, sessionID, npcName, text s
 	return a.SpeakText(ctx, text)
 }
 
-// sessionOrch returns the orchestrator for a running session.
-func (h *WorkerHandler) sessionOrch(sessionID string) (*orchestrator.Orchestrator, error) {
+// managedSession returns the managedSession for a running session.
+func (h *WorkerHandler) managedSession(sessionID string) (*managedSession, error) {
 	h.mu.Lock()
 	ms, ok := h.sessions[sessionID]
 	h.mu.Unlock()
 
 	if !ok {
 		return nil, fmt.Errorf("session: %q not found", sessionID)
+	}
+	return ms, nil
+}
+
+// sessionOrch returns the orchestrator for a running session.
+func (h *WorkerHandler) sessionOrch(sessionID string) (*orchestrator.Orchestrator, error) {
+	ms, err := h.managedSession(sessionID)
+	if err != nil {
+		return nil, err
 	}
 
 	orch := ms.runtime.Orchestrator()

@@ -221,6 +221,21 @@ func (s *Server) StreamAudio(stream grpc.BidiStreamingServer[pb.AudioFrame, pb.A
 				errCh <- err
 				return
 			}
+
+			// Flush signal: the worker interrupted playback (barge-in
+			// or mute). Drain any buffered frames so the gateway does
+			// not continue playing stale audio.
+			if frame.GetFlush() {
+				drained := bridge.Flush()
+				if drained > 0 {
+					slog.Info("audiobridge: flushed buffered audio",
+						"session_id", sessionID,
+						"drained_frames", drained,
+					)
+				}
+				continue
+			}
+
 			select {
 			case bridge.fromWorker <- frame:
 			case <-bridge.done:
@@ -274,6 +289,22 @@ func (b *SessionBridge) ReceiveFromWorker() <-chan *pb.AudioFrame {
 // Done returns a channel that is closed when the bridge is torn down.
 func (b *SessionBridge) Done() <-chan struct{} {
 	return b.done
+}
+
+// Flush drains all buffered frames from the fromWorker channel and returns
+// the number of frames discarded. This is called when the worker signals
+// that playback was interrupted (barge-in or mute), so the gateway stops
+// playing stale pre-buffered audio immediately.
+func (b *SessionBridge) Flush() int {
+	drained := 0
+	for {
+		select {
+		case <-b.fromWorker:
+			drained++
+		default:
+			return drained
+		}
+	}
 }
 
 // Close tears down the bridge. Safe to call multiple times.
