@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -61,8 +62,8 @@ type PriorityMixer struct {
 	gap            time.Duration       // base silence gap between segments
 	playing        *audio.AudioSegment // currently playing segment, or nil
 	playingPri     int                 // priority of the currently playing segment
-	cancelPlaying  chan struct{}       // closed to interrupt the current segment
-	bargeInHandler func(string)        // last-writer-wins barge-in callback
+	cancelPlaying   chan struct{}   // closed to interrupt the current segment
+	bargeInHandlers []func(string) // all registered barge-in callbacks
 
 	notify chan struct{} // signalled when a new segment is enqueued or interrupt fires
 	done   chan struct{} // closed by Close to stop the dispatch goroutine
@@ -155,15 +156,14 @@ func (m *PriorityMixer) Interrupt(reason audio.InterruptReason) {
 	m.interruptLocked(reason, reason == audio.PlayerBargeIn)
 }
 
-// OnBargeIn registers handler as the callback to invoke when [BargeIn] is
-// called. Only one handler may be active at a time; subsequent calls replace
-// the previous registration. The handler is invoked on a new goroutine and
-// must not block.
+// OnBargeIn appends handler to the list of callbacks invoked when [BargeIn]
+// is called. Multiple handlers may be registered (e.g., one per NPC agent);
+// each is invoked on its own goroutine and must not block.
 func (m *PriorityMixer) OnBargeIn(handler func(speakerID string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.bargeInHandler = handler
+	m.bargeInHandlers = append(m.bargeInHandlers, handler)
 }
 
 // BargeIn signals that a player started speaking while an NPC segment is
@@ -175,12 +175,12 @@ func (m *PriorityMixer) OnBargeIn(handler func(speakerID string)) {
 // activity detection fires during NPC playback.
 func (m *PriorityMixer) BargeIn(speakerID string) {
 	m.mu.Lock()
-	handler := m.bargeInHandler
+	handlers := slices.Clone(m.bargeInHandlers)
 	m.interruptLocked(audio.PlayerBargeIn, true)
 	m.mu.Unlock()
 
-	if handler != nil {
-		go handler(speakerID)
+	for _, h := range handlers {
+		go h(speakerID)
 	}
 }
 

@@ -277,6 +277,35 @@ func TestBargeInHandler(t *testing.T) {
 	}
 }
 
+func TestBargeInHandler_MultipleHandlers(t *testing.T) {
+	t.Parallel()
+
+	output, _ := collectOutput()
+	m := mixer.New(output, mixer.WithGap(0))
+	defer m.Close()
+
+	var called1, called2 atomic.Bool
+	m.OnBargeIn(func(_ string) { called1.Store(true) })
+	m.OnBargeIn(func(_ string) { called2.Store(true) })
+
+	// Start playing so barge-in has something to interrupt.
+	seg, sendCh := makeOpenSegment("npc-1", 1)
+	m.Enqueue(seg, 1)
+	sendCh <- []byte("audio")
+	time.Sleep(30 * time.Millisecond)
+
+	m.BargeIn("player-1")
+	close(sendCh)
+	time.Sleep(50 * time.Millisecond)
+
+	if !called1.Load() {
+		t.Error("first barge-in handler was not called")
+	}
+	if !called2.Load() {
+		t.Error("second barge-in handler was not called")
+	}
+}
+
 func TestGapInsertion(t *testing.T) {
 	t.Parallel()
 
