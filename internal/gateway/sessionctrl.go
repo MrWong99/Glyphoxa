@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
@@ -176,6 +178,14 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 				gc.bridgeSrv.RemoveBridge(sessionID)
 				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, "VoiceManager not available")
 				return fmt.Errorf("gateway: VoiceManager not available on gateway bot")
+			}
+
+			// Check bot has CONNECT + SPEAK permissions before attempting to join.
+			// Discord silently ignores Op 4 without CONNECT, causing a confusing timeout.
+			if permErr := checkVoicePermissions(ctx, gc.gwBot.Client().Rest, gID, chID, gc.gwBot.Client().ApplicationID); permErr != nil {
+				gc.bridgeSrv.RemoveBridge(sessionID)
+				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, permErr.Error())
+				return fmt.Errorf("gateway: voice permission check: %w", permErr)
 			}
 
 			voiceConn := voiceMgr.CreateConn(gID)
@@ -506,4 +516,135 @@ func (gc *GatewaySessionController) SpeakNPC(ctx context.Context, sessionID, npc
 	}
 	defer cleanup()
 	return ctrl.SpeakNPC(ctx, sessionID, npcName, text)
+}
+
+// ── Voice permission check ──────────────────────────────────────────────────
+
+// requiredVoicePerms are the Discord permissions the bot needs to join and
+// speak in a voice channel.
+var requiredVoicePerms = discord.PermissionConnect | discord.PermissionSpeak
+
+// checkVoicePermissions verifies via the Discord REST API that the bot has
+// CONNECT and SPEAK permissions on the target voice channel. Discord silently
+// ignores the voice connect opcode when CONNECT is missing, so failing fast
+// here prevents a confusing timeout.
+func checkVoicePermissions(ctx context.Context, restClient rest.Rest, guildID, channelID, botID snowflake.ID) error {
+	// Fetch the channel to get permission overwrites.
+	ch, err := restClient.GetChannel(channelID, rest.WithCtx(ctx))
+	if err != nil {
+		return fmt.Errorf("fetch channel %s: %w", channelID, err)
+	}
+	guildCh, ok := ch.(discord.GuildChannel)
+	if !ok {
+		return fmt.Errorf("channel %s is not a guild channel", channelID)
+	}
+
+	// Fetch guild to get roles (needed for base permission computation).
+	guild, err := restClient.GetGuild(guildID, false, rest.WithCtx(ctx))
+	if err != nil {
+		return fmt.Errorf("fetch guild %s: %w", guildID, err)
+	}
+
+	// Fetch the bot's member to get its role list.
+	member, err := restClient.GetMember(guildID, botID, rest.WithCtx(ctx))
+	if err != nil {
+		return fmt.Errorf("fetch bot member in guild %s: %w", guildID, err)
+	}
+
+	perms := computeChannelPerms(guild, member, guildCh)
+
+	if perms.Has(discord.PermissionAdministrator) {
+		return nil
+	}
+	if perms.Missing(requiredVoicePerms) {
+		missing := requiredVoicePerms.Remove(perms)
+		slog.Error("gateway: bot missing voice channel permissions",
+			"guild_id", guildID,
+			"channel_id", channelID,
+			"missing", missing,
+			"required", requiredVoicePerms,
+		)
+		return fmt.Errorf("bot missing permissions on channel %s: need CONNECT+SPEAK, missing %s", channelID, missing)
+	}
+	return nil
+}
+
+// computeChannelPerms computes the effective permissions for a member in a
+// guild channel following Discord's permission algorithm:
+//  1. Start with @everyone role permissions.
+//  2. OR in permissions from all member roles.
+//  3. Apply channel-level role permission overwrites.
+//  4. Apply channel-level member permission overwrite.
+func computeChannelPerms(guild *discord.RestGuild, member *discord.Member, ch discord.GuildChannel) discord.Permissions {
+	// Owner has all permissions.
+	if guild.OwnerID == member.User.ID {
+		return discord.PermissionsAll
+	}
+
+	// 1. Base: @everyone role (same ID as guild).
+	var base discord.Permissions
+	for _, role := range guild.Roles {
+		if role.ID == guild.ID {
+			base = role.Permissions
+			break
+		}
+	}
+
+	// 2. Accumulate role permissions.
+	memberRoles := make(map[snowflake.ID]struct{}, len(member.RoleIDs))
+	for _, rid := range member.RoleIDs {
+		memberRoles[rid] = struct{}{}
+		for _, role := range guild.Roles {
+			if role.ID == rid {
+				base = base.Add(role.Permissions)
+				break
+			}
+		}
+	}
+
+	// Administrator bypasses channel overwrites.
+	if base.Has(discord.PermissionAdministrator) {
+		return discord.PermissionsAll
+	}
+
+	// 3. Apply channel role overwrites.
+	var allow, deny discord.Permissions
+	overwrites := ch.PermissionOverwrites()
+	for _, ow := range overwrites {
+		roleOW, ok := ow.(discord.RolePermissionOverwrite)
+		if !ok {
+			continue
+		}
+		if roleOW.RoleID == guild.ID {
+			// @everyone overwrite.
+			deny = deny.Add(roleOW.Deny)
+			allow = allow.Add(roleOW.Allow)
+		}
+	}
+	base = base.Remove(deny).Add(allow)
+
+	// Other role overwrites.
+	deny = 0
+	allow = 0
+	for _, ow := range overwrites {
+		roleOW, ok := ow.(discord.RolePermissionOverwrite)
+		if !ok {
+			continue
+		}
+		if roleOW.RoleID == guild.ID {
+			continue // already handled above
+		}
+		if _, isMember := memberRoles[roleOW.RoleID]; isMember {
+			deny = deny.Add(roleOW.Deny)
+			allow = allow.Add(roleOW.Allow)
+		}
+	}
+	base = base.Remove(deny).Add(allow)
+
+	// 4. Apply member-specific overwrite.
+	if memberOW, ok := overwrites.Member(member.User.ID); ok {
+		base = base.Remove(memberOW.Deny).Add(memberOW.Allow)
+	}
+
+	return base
 }

@@ -20,6 +20,10 @@ var (
 	_ voice.OpusFrameProvider = (*voiceBridgeProvider)(nil)
 )
 
+// frameLogInterval controls how often periodic frame-flow log messages are
+// emitted. One log line per this many frames (~5 s at 50 fps).
+const frameLogInterval = 250
+
 // voiceBridgeReceiver implements [voice.OpusFrameReceiver] by forwarding raw
 // opus frames to a [audiobridge.SessionBridge]. This is set on the gateway's
 // voice.Conn so incoming Discord audio is bridged to the worker.
@@ -27,8 +31,9 @@ type voiceBridgeReceiver struct {
 	bridge    *audiobridge.SessionBridge
 	sessionID string
 
-	done      chan struct{}
-	closeOnce sync.Once
+	frameCount uint64
+	done       chan struct{}
+	closeOnce  sync.Once
 }
 
 // ReceiveOpusFrame receives a raw opus packet from Discord and forwards it to
@@ -36,6 +41,15 @@ type voiceBridgeReceiver struct {
 func (r *voiceBridgeReceiver) ReceiveOpusFrame(userID snowflake.ID, packet *voice.Packet) error {
 	if packet == nil || len(packet.Opus) == 0 {
 		return nil
+	}
+
+	r.frameCount++
+	if r.frameCount%frameLogInterval == 1 {
+		slog.Info("voicebridge: forwarding Discord→worker audio",
+			"session_id", r.sessionID,
+			"frames_total", r.frameCount,
+			"user_id", userID,
+		)
 	}
 
 	r.bridge.SendToWorker(&pb.AudioFrame{
@@ -66,8 +80,10 @@ type voiceBridgeProvider struct {
 	bridge    *audiobridge.SessionBridge
 	sessionID string
 
-	done      chan struct{}
-	closeOnce sync.Once
+	frameCount uint64
+	gotFirst   bool
+	done       chan struct{}
+	closeOnce  sync.Once
 }
 
 // ProvideOpusFrame returns the next opus frame to send to Discord. It reads
@@ -80,6 +96,19 @@ func (p *voiceBridgeProvider) ProvideOpusFrame() ([]byte, error) {
 	case frame := <-p.bridge.ReceiveFromWorker():
 		if frame == nil {
 			return nil, nil
+		}
+		p.frameCount++
+		if !p.gotFirst {
+			p.gotFirst = true
+			slog.Info("voicebridge: first worker audio frame received",
+				"session_id", p.sessionID,
+			)
+		}
+		if p.frameCount%frameLogInterval == 0 {
+			slog.Info("voicebridge: forwarding worker→Discord audio",
+				"session_id", p.sessionID,
+				"frames_total", p.frameCount,
+			)
 		}
 		return frame.GetOpusData(), nil
 	default:
@@ -151,6 +180,11 @@ func setupVoiceBridge(
 	)
 
 	return func() {
+		slog.Info("voicebridge: stopping audio bridge",
+			"session_id", sessionID,
+			"discord_to_worker_frames", receiver.frameCount,
+			"worker_to_discord_frames", provider.frameCount,
+		)
 		receiver.Close()
 		provider.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
