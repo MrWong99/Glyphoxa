@@ -150,6 +150,146 @@ func TestAddressDetector(t *testing.T) {
 	})
 }
 
+// ── German Name Routing ──────────────────────────────────────────────────────
+
+func TestAddressDetector_GermanNames(t *testing.T) {
+	t.Parallel()
+
+	heinrich, _ := newMockAgent("heinrich-1", "Heinrich der Schmied")
+	mathilde, _ := newMockAgent("mathilde-1", "Mathilde die Kräuterfrau")
+
+	active := map[string]*agentEntry{
+		"heinrich-1": {agent: heinrich},
+		"mathilde-1": {agent: mathilde},
+	}
+	noOverrides := map[string]string{}
+
+	detector := NewAddressDetector([]agent.NPCAgent{heinrich, mathilde})
+
+	t.Run("explicit name routes correctly", func(t *testing.T) {
+		t.Parallel()
+		id, err := detector.Detect("Mathilde, was verkaufst du?", "", active, noOverrides, "player-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "mathilde-1" {
+			t.Fatalf("want mathilde-1, got %s", id)
+		}
+	})
+
+	t.Run("article 'der' does not falsely match Heinrich", func(t *testing.T) {
+		t.Parallel()
+		// "der" is a common German article — should NOT route to Heinrich.
+		_, err := detector.Detect("Was kostet der Trank?", "", active, noOverrides, "player-1")
+		if !errors.Is(err, ErrNoTarget) {
+			t.Fatalf("want ErrNoTarget (article 'der' must not match), got %v", err)
+		}
+	})
+
+	t.Run("article 'die' does not falsely match Mathilde", func(t *testing.T) {
+		t.Parallel()
+		_, err := detector.Detect("Wo ist die Taverne?", "", active, noOverrides, "player-1")
+		if !errors.Is(err, ErrNoTarget) {
+			t.Fatalf("want ErrNoTarget (article 'die' must not match), got %v", err)
+		}
+	})
+
+	t.Run("compound word containing 'der' does not match", func(t *testing.T) {
+		t.Parallel()
+		// "wieder" contains "der" as substring — must not match.
+		_, err := detector.Detect("Ich komme wieder zurück", "", active, noOverrides, "player-1")
+		if !errors.Is(err, ErrNoTarget) {
+			t.Fatalf("want ErrNoTarget ('wieder' must not trigger 'der' match), got %v", err)
+		}
+	})
+
+	t.Run("full German name with article matches", func(t *testing.T) {
+		t.Parallel()
+		id, err := detector.Detect("Hey Heinrich der Schmied, reparier mein Schwert!", "", active, noOverrides, "player-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "heinrich-1" {
+			t.Fatalf("want heinrich-1, got %s", id)
+		}
+	})
+
+	t.Run("unique name fragment routes correctly", func(t *testing.T) {
+		t.Parallel()
+		// "Schmied" (7 runes ≥ 4) is indexed and unique to Heinrich.
+		id, err := detector.Detect("Hey Schmied!", "", active, noOverrides, "player-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "heinrich-1" {
+			t.Fatalf("want heinrich-1, got %s", id)
+		}
+	})
+
+	t.Run("Kräuterfrau fragment routes to Mathilde", func(t *testing.T) {
+		t.Parallel()
+		id, err := detector.Detect("Wo ist die Kräuterfrau?", "", active, noOverrides, "player-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "mathilde-1" {
+			t.Fatalf("want mathilde-1, got %s", id)
+		}
+	})
+
+	t.Run("ambiguous text falls back to lastSpeaker", func(t *testing.T) {
+		t.Parallel()
+		// No NPC name in text, lastSpeaker is Mathilde.
+		id, err := detector.Detect("Erzähl mir mehr darüber", "mathilde-1", active, noOverrides, "player-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "mathilde-1" {
+			t.Fatalf("want mathilde-1, got %s", id)
+		}
+	})
+}
+
+// ── Word Boundary Matching ───────────────────────────────────────────────────
+
+func TestContainsWord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		word string
+		want bool
+	}{
+		{"exact match", "grimjaw", "grimjaw", true},
+		{"word at start", "grimjaw is here", "grimjaw", true},
+		{"word at end", "hello grimjaw", "grimjaw", true},
+		{"word in middle", "hey grimjaw how", "grimjaw", true},
+		{"word with punctuation", "hello, grimjaw!", "grimjaw", true},
+		{"word with comma before", "hey,grimjaw!", "grimjaw", true},
+		{"substring not at boundary", "wiedergrimjaw", "grimjaw", false},
+		{"substring at start of compound", "grimjawson", "grimjaw", false},
+		{"der in wieder", "wieder", "der", false},
+		{"der standalone", "der Schmied", "der", true},
+		{"die in Studie", "Studie zeigt", "die", false},
+		{"die standalone", "die Kräuterfrau", "die", true},
+		{"multi-word key", "hey heinrich der schmied!", "heinrich der schmied", true},
+		{"multi-word not present", "hey schmied!", "heinrich der schmied", false},
+		{"empty text", "", "grimjaw", false},
+		{"unicode boundary", "für grimjaw hier", "grimjaw", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := containsWord(tt.text, tt.word)
+			if got != tt.want {
+				t.Fatalf("containsWord(%q, %q) = %v, want %v", tt.text, tt.word, got, tt.want)
+			}
+		})
+	}
+}
+
 // ── Orchestrator Routing ─────────────────────────────────────────────────────
 
 func TestOrchestratorRoute(t *testing.T) {

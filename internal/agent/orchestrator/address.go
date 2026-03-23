@@ -8,9 +8,17 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/MrWong99/glyphoxa/internal/agent"
 )
+
+// minWordRunes is the minimum number of runes a single word must have to be
+// indexed as an NPC name fragment. This excludes common short articles and
+// prepositions (e.g., "der", "die", "das", "the") that cause false-positive
+// matches in German and English text.
+const minWordRunes = 4
 
 // ErrNoTarget is returned when address detection cannot determine which NPC
 // was addressed by a player's utterance.
@@ -38,9 +46,12 @@ type AddressDetector struct {
 // NewAddressDetector builds a name index from the given agents.
 //
 // The index includes the full lowercase name of each NPC and every individual
-// word of length ≥ 3 from that name. For example, "Grimjaw the Blacksmith"
-// produces entries for "grimjaw the blacksmith", "grimjaw", and "blacksmith"
-// (the word "the" is too short).
+// word of ≥ [minWordRunes] runes from that name. For example, "Grimjaw the
+// Blacksmith" produces entries for "grimjaw the blacksmith", "grimjaw", and
+// "blacksmith" (the word "the" has only 3 runes, below the minimum of 4).
+//
+// Matching uses word-boundary semantics to prevent false positives from
+// substrings inside compound words or common articles.
 func NewAddressDetector(agents []agent.NPCAgent) *AddressDetector {
 	d := &AddressDetector{
 		nameIndex: make(map[string]string),
@@ -121,9 +132,9 @@ func (d *AddressDetector) buildIndex(agents []agent.NPCAgent) {
 		// Index the full name.
 		d.nameIndex[lower] = id
 
-		// Index individual words ≥ 3 characters.
+		// Index individual words with enough runes to avoid common stop words.
 		for word := range strings.FieldsSeq(lower) {
-			if len(word) >= 3 {
+			if utf8.RuneCountInString(word) >= minWordRunes {
 				d.nameIndex[word] = id
 			}
 		}
@@ -144,17 +155,59 @@ func (d *AddressDetector) buildIndex(agents []agent.NPCAgent) {
 // It checks longer keys first so that "grimjaw the blacksmith" is preferred
 // over "grimjaw" when both appear in the text. Only unmuted agents are matched.
 //
+// Keys are matched using word-boundary semantics: each occurrence must be
+// preceded and followed by a non-letter (or string edge) to prevent false
+// positives from partial matches inside compound words (e.g., "der" inside
+// "wieder") or common articles in German text.
+//
 // The pre-sorted candidate list is built once in buildIndex, so this method
 // performs zero allocations and no sorting per call.
 func (d *AddressDetector) matchName(text string, activeAgents map[string]*agentEntry) string {
 	lower := strings.ToLower(text)
 
 	for _, c := range d.sorted {
-		if strings.Contains(lower, c.key) {
+		if containsWord(lower, c.key) {
 			if entry, ok := activeAgents[c.id]; ok && !entry.muted {
 				return c.id
 			}
 		}
 	}
 	return ""
+}
+
+// containsWord reports whether text contains word at a word boundary — that is,
+// the match must be preceded and followed by a non-letter character (or a string
+// edge). This prevents false positives from matching fragments inside compound
+// words or unrelated substrings.
+func containsWord(text, word string) bool {
+	for offset := 0; offset <= len(text)-len(word); {
+		idx := strings.Index(text[offset:], word)
+		if idx < 0 {
+			return false
+		}
+		absStart := offset + idx
+		absEnd := absStart + len(word)
+
+		// Check left boundary.
+		leftOK := absStart == 0
+		if !leftOK {
+			r, _ := utf8.DecodeLastRuneInString(text[:absStart])
+			leftOK = !unicode.IsLetter(r)
+		}
+
+		// Check right boundary.
+		rightOK := absEnd >= len(text)
+		if !rightOK {
+			r, _ := utf8.DecodeRuneInString(text[absEnd:])
+			rightOK = !unicode.IsLetter(r)
+		}
+
+		if leftOK && rightOK {
+			return true
+		}
+
+		// Advance past this match to look for the next occurrence.
+		offset = absStart + 1
+	}
+	return false
 }
