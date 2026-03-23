@@ -127,6 +127,18 @@ data:
                   port: observe
                 failureThreshold: 30
                 periodSeconds: 2
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: observe
+                periodSeconds: 10
+                failureThreshold: 3
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: observe
+                periodSeconds: 5
+                failureThreshold: 2
               resources:
                 {{- include "glyphoxa.worker.resources" . | nindent 16 }}
           {{- if .Values.config.data }}
