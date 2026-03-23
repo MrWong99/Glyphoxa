@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -52,6 +53,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/session"
 	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/audio/webrtc"
+	"github.com/MrWong99/glyphoxa/pkg/memory/postgres"
 	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
 	ollamaembed "github.com/MrWong99/glyphoxa/pkg/provider/embeddings/ollama"
 	oaembed "github.com/MrWong99/glyphoxa/pkg/provider/embeddings/openai"
@@ -354,6 +356,11 @@ func runGateway(cfg *config.Config) int {
 	// and workers over gRPC bidirectional streaming.
 	audioBridgeSrv := audiobridge.NewServer()
 
+	// sessionCtrls collects per-tenant session controllers so they can be
+	// drained during graceful shutdown.
+	var sessionCtrlsMu sync.Mutex
+	var sessionCtrls []*gw.GatewaySessionController
+
 	// Configure per-tenant slash command wiring.
 	botConnector.SetCommandSetup(func(gwBot *gw.GatewayBot, tenant gw.Tenant) {
 		router := gwBot.Router()
@@ -387,6 +394,11 @@ func runGateway(cfg *config.Config) int {
 			}),
 		)
 
+		// Track session controller for graceful shutdown.
+		sessionCtrlsMu.Lock()
+		sessionCtrls = append(sessionCtrls, sessionCtrl)
+		sessionCtrlsMu.Unlock()
+
 		// Session start/stop commands.
 		commands.NewGatewaySessionCommands(gwBot, sessionCtrl, perms)
 
@@ -408,13 +420,27 @@ func runGateway(cfg *config.Config) int {
 		campaignCmds.Register(router)
 
 		// Recap commands — text-only for gateway mode (no TTS providers on
-		// gateway). Session store is nil for now; transcript reading can be
-		// added once schema-per-tenant is wired.
+		// gateway). Session store reads transcripts from the worker's
+		// tenant-scoped schema via the shared pgxpool.
+		var recapSessionStore *postgres.SessionStoreImpl
+		schemaName := fmt.Sprintf("tenant_%s", tenant.ID)
+		recapSchema, schemaErr := postgres.NewSchemaName(schemaName)
+		if schemaErr != nil {
+			slog.Warn("gateway: invalid schema name for recap, transcripts unavailable",
+				"tenant_id", tenant.ID, "schema", schemaName, "err", schemaErr)
+		} else {
+			campaignID := tenant.CampaignID
+			if campaignID == "" {
+				campaignID = "default"
+			}
+			recapSessionStore = postgres.NewSessionStore(pool, recapSchema, campaignID)
+		}
 		commands.NewGatewayRecapCommands(commands.GatewayRecapConfig{
-			GatewayBot: gwBot,
-			Ctrl:       sessionCtrl,
-			NPCCtrl:    sessionCtrl,
-			Perms:      perms,
+			GatewayBot:   gwBot,
+			Ctrl:         sessionCtrl,
+			NPCCtrl:      sessionCtrl,
+			Perms:        perms,
+			SessionStore: recapSessionStore,
 		})
 
 		// Feedback commands.
@@ -612,6 +638,15 @@ func runGateway(cfg *config.Config) int {
 	defer cancel()
 
 	slog.Info("shutdown signal received, stopping…")
+
+	// Drain active sessions — sends StopSession RPC to workers, tears down
+	// voice bridges, and transitions sessions to ended in the DB.
+	sessionCtrlsMu.Lock()
+	ctrls := append([]*gw.GatewaySessionController(nil), sessionCtrls...)
+	sessionCtrlsMu.Unlock()
+	for _, ctrl := range ctrls {
+		ctrl.StopAll(shutdownCtx)
+	}
 
 	if dispatcher != nil {
 		if err := dispatcher.Cleanup(shutdownCtx); err != nil {

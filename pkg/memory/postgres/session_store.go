@@ -15,12 +15,20 @@ import (
 // SessionStoreImpl is the L1 memory layer backed by a PostgreSQL
 // session_entries table with a GIN full-text search index.
 //
-// Obtain one via [Store.L1] rather than constructing directly.
-// All methods are safe for concurrent use.
+// Obtain one via [Store.L1] or [NewSessionStore] rather than constructing
+// directly. All methods are safe for concurrent use.
 type SessionStoreImpl struct {
 	pool       *pgxpool.Pool
 	schema     SchemaName
 	campaignID string
+}
+
+// NewSessionStore creates a read-only SessionStoreImpl that shares an existing
+// [pgxpool.Pool]. This is intended for components that only need L1 transcript
+// access (e.g. the gateway recap command) without standing up the full
+// three-layer [Store].
+func NewSessionStore(pool *pgxpool.Pool, schema SchemaName, campaignID string) *SessionStoreImpl {
+	return &SessionStoreImpl{pool: pool, schema: schema, campaignID: campaignID}
 }
 
 // WriteEntry implements [memory.SessionStore]. It appends entry to the

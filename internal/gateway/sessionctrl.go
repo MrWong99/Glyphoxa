@@ -78,6 +78,30 @@ func NewGatewaySessionController(
 	for _, opt := range opts {
 		opt(gc)
 	}
+
+	// Register audio bridge detach callback so worker death triggers
+	// immediate session cleanup instead of waiting for heartbeat timeout.
+	if gc.bridgeSrv != nil {
+		gc.bridgeSrv.SetOnStreamDetach(func(sessionID string, err error) {
+			gc.mu.Lock()
+			_, owns := gc.workerAddrs[sessionID]
+			gc.mu.Unlock()
+			if !owns {
+				return
+			}
+			slog.Warn("gateway: audio stream lost, stopping session",
+				"session_id", sessionID, "err", err)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if stopErr := gc.Stop(ctx, sessionID); stopErr != nil {
+					slog.Error("gateway: failed to stop session after stream loss",
+						"session_id", sessionID, "err", stopErr)
+				}
+			}()
+		})
+	}
+
 	return gc
 }
 
@@ -233,18 +257,43 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	return nil
 }
 
-// Stop gracefully ends the session.
+// Stop gracefully ends the session. It first sends a StopSession RPC to the
+// worker so it can flush transcripts and cleanly shut down before the K8s Job
+// is deleted.
 func (gc *GatewaySessionController) Stop(ctx context.Context, sessionID string) error {
+	// 1. Tell the worker to stop gracefully (flush transcripts, etc.).
+	gc.mu.Lock()
+	addr := gc.workerAddrs[sessionID]
+	gc.mu.Unlock()
+	if addr != "" && gc.dialer != nil {
+		rpcCtx, rpcCancel := context.WithTimeout(ctx, 5*time.Second)
+		client, dialErr := gc.dialer(addr)
+		if dialErr == nil {
+			if stopErr := client.StopSession(rpcCtx, sessionID); stopErr != nil {
+				slog.Warn("gateway: worker StopSession RPC failed (may already be dead)",
+					"session_id", sessionID, "err", stopErr)
+			}
+			if c, ok := client.(interface{ Close() error }); ok {
+				c.Close()
+			}
+		}
+		rpcCancel()
+	}
+
+	// 2. Delete the K8s Job.
 	if gc.dispatcher != nil {
 		if err := gc.dispatcher.Stop(ctx, sessionID); err != nil {
 			slog.Warn("gateway: dispatcher stop error",
 				"session_id", sessionID, "err", err)
 		}
 	}
+
+	// 3. Transition session state in the DB.
 	if err := gc.orch.Transition(ctx, sessionID, SessionEnded, ""); err != nil {
 		return fmt.Errorf("gateway: transition session to ended: %w", err)
 	}
 
+	// 4. Clean up in-memory state and voice bridge.
 	gc.mu.Lock()
 	delete(gc.workerAddrs, sessionID)
 	for guildID, sid := range gc.active {
@@ -288,6 +337,25 @@ func (gc *GatewaySessionController) Info(guildID string) (SessionInfo, bool) {
 		}, true
 	}
 	return info, true
+}
+
+// StopAll gracefully stops all active sessions. Used during gateway shutdown
+// to drain sessions before the process exits.
+func (gc *GatewaySessionController) StopAll(ctx context.Context) {
+	gc.mu.Lock()
+	// Snapshot session IDs so we don't hold the lock while stopping.
+	sessionIDs := make([]string, 0, len(gc.active))
+	for _, sid := range gc.active {
+		sessionIDs = append(sessionIDs, sid)
+	}
+	gc.mu.Unlock()
+
+	for _, sid := range sessionIDs {
+		if err := gc.Stop(ctx, sid); err != nil {
+			slog.Warn("gateway: failed to stop session during shutdown",
+				"session_id", sid, "err", err)
+		}
+	}
 }
 
 // cleanupVoiceBridge tears down the voice bridge and audio bridge for a session.

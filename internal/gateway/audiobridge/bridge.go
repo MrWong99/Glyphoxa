@@ -28,6 +28,12 @@ const (
 	handshakeTimeout = 10 * time.Second
 )
 
+// StreamDetachFunc is called when a worker's audio stream disconnects.
+// The sessionID identifies which session lost its audio connection.
+// Implementations must not block; long-running work should be spawned
+// as a goroutine.
+type StreamDetachFunc func(sessionID string, err error)
+
 // Server implements the AudioBridgeService gRPC service on the gateway side.
 // It manages per-session bridges and handles the bidirectional opus stream.
 //
@@ -37,6 +43,8 @@ type Server struct {
 
 	mu      sync.RWMutex
 	bridges map[string]*SessionBridge // sessionID -> bridge
+
+	onDetach StreamDetachFunc
 }
 
 // SessionBridge bridges audio for a single session between the gateway's
@@ -62,6 +70,16 @@ func NewServer() *Server {
 	return &Server{
 		bridges: make(map[string]*SessionBridge),
 	}
+}
+
+// SetOnStreamDetach registers a callback that fires when a worker's audio
+// stream disconnects (gRPC stream error or clean shutdown). This lets the
+// gateway detect worker death and trigger session cleanup immediately rather
+// than waiting for heartbeat timeout.
+func (s *Server) SetOnStreamDetach(fn StreamDetachFunc) {
+	s.mu.Lock()
+	s.onDetach = fn
+	s.mu.Unlock()
 }
 
 // Register adds the Server to a gRPC server.
@@ -214,6 +232,16 @@ func (s *Server) StreamAudio(stream grpc.BidiStreamingServer[pb.AudioFrame, pb.A
 		"session_id", sessionID,
 		"err", streamErr,
 	)
+
+	// Notify the gateway that this session's audio stream is gone so it can
+	// trigger cleanup (voice disconnect, DB state, K8s job) immediately.
+	s.mu.RLock()
+	fn := s.onDetach
+	s.mu.RUnlock()
+	if fn != nil && streamErr != nil {
+		fn(sessionID, streamErr)
+	}
+
 	return streamErr
 }
 
