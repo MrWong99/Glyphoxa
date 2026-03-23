@@ -41,7 +41,7 @@ func (s *sequenceVADSession) ProcessFrame(_ []byte) (vad.VADEvent, error) {
 	return ev, nil
 }
 
-func (s *sequenceVADSession) Reset() {}
+func (s *sequenceVADSession) Reset()       {}
 func (s *sequenceVADSession) Close() error { return nil }
 
 // sequenceVADEngine wraps a sequenceVADSession and returns it on NewSession.
@@ -92,9 +92,9 @@ func newEchoSTTSession(text string) *echoSTTSession {
 }
 
 func (s *echoSTTSession) SendAudio(_ []byte) error               { return nil }
-func (s *echoSTTSession) Finals() <-chan stt.Transcript           { return s.finals }
-func (s *echoSTTSession) Partials() <-chan stt.Transcript         { return s.partials }
-func (s *echoSTTSession) SetKeywords(_ []stt.KeywordBoost) error  { return nil }
+func (s *echoSTTSession) Finals() <-chan stt.Transcript          { return s.finals }
+func (s *echoSTTSession) Partials() <-chan stt.Transcript        { return s.partials }
+func (s *echoSTTSession) SetKeywords(_ []stt.KeywordBoost) error { return nil }
 func (s *echoSTTSession) Close() error {
 	s.once.Do(func() { close(s.finals) })
 	return nil
@@ -107,7 +107,7 @@ func (s *echoSTTSession) Close() error {
 // of running LLM → TTS → enqueue to mixer.
 type respondingNPCAgent struct {
 	*agentmock.NPCAgent
-	mixer         audio.Mixer
+	mixer          audio.Mixer
 	responseFrames int // number of PCM frames to produce per response
 }
 
@@ -156,9 +156,9 @@ func TestPipelineLoopback_EndToEnd(t *testing.T) {
 		vadSampleRate = 16000
 		vadFrameMs    = 30
 		vadFrameBytes = vadSampleRate * vadFrameMs / 1000 * 2 // 960 bytes per 30ms mono PCM frame
-		numFrames     = 20                                     // total frames to feed
-		speechStart   = 2                                      // frame index where speech starts
-		speechEnd     = 15                                     // frame index where speech ends
+		numFrames     = 20                                    // total frames to feed
+		speechStart   = 2                                     // frame index where speech starts
+		speechEnd     = 15                                    // frame index where speech ends
 		responseText  = "Greetings, adventurer!"
 	)
 

@@ -79,11 +79,11 @@ func (m *mockStream) Close() {
 // grpc.ClientStream methods:
 
 func (m *mockStream) Header() (metadata.MD, error) { return nil, nil }
-func (m *mockStream) Trailer() metadata.MD          { return nil }
-func (m *mockStream) CloseSend() error              { m.cancel(); return nil }
-func (m *mockStream) Context() context.Context      { return m.ctx }
-func (m *mockStream) SendMsg(any) error             { return nil }
-func (m *mockStream) RecvMsg(any) error             { return nil }
+func (m *mockStream) Trailer() metadata.MD         { return nil }
+func (m *mockStream) CloseSend() error             { m.cancel(); return nil }
+func (m *mockStream) Context() context.Context     { return m.ctx }
+func (m *mockStream) SendMsg(any) error            { return nil }
+func (m *mockStream) RecvMsg(any) error            { return nil }
 
 // ---------------------------------------------------------------------------
 // Helper: encode silence as a valid opus packet.
