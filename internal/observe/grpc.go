@@ -3,10 +3,12 @@ package observe
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -14,11 +16,29 @@ import (
 // for automatic trace propagation and RPC duration metrics. Append these to
 // any other server options (e.g. TLS credentials) when creating a
 // [grpc.Server].
+//
+// Keepalive parameters are configured to keep long-lived bidirectional streams
+// (e.g. AudioBridgeService.StreamAudio) alive across infrastructure boundaries
+// (load balancers, K8s service proxies, NAT devices) that may terminate idle
+// HTTP/2 connections.
 func GRPCServerOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(TenantUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(TenantStreamServerInterceptor()),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			// Send pings every 30s when there is no activity on the stream.
+			Time: 30 * time.Second,
+			// Wait 10s for a ping ack before considering the connection dead.
+			Timeout: 10 * time.Second,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			// Allow clients to send pings as often as every 10s.
+			MinTime: 10 * time.Second,
+			// Allow pings even when there are no active streams, so the
+			// transport stays alive between session starts.
+			PermitWithoutStream: true,
+		}),
 	}
 }
 
@@ -26,9 +46,21 @@ func GRPCServerOptions() []grpc.ServerOption {
 // for automatic trace propagation and RPC duration metrics on the client
 // side. Append these to any other dial options (e.g. TLS credentials)
 // when creating a [grpc.ClientConn].
+//
+// Client-side keepalive pings keep long-lived streams alive across
+// infrastructure that may terminate idle HTTP/2 connections.
 func GRPCDialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			// Send pings every 30s when there is no activity.
+			Time: 30 * time.Second,
+			// Wait 10s for a ping ack before considering the connection dead.
+			Timeout: 10 * time.Second,
+			// Send pings even when there are no active RPCs, so the
+			// transport stays alive between sessions.
+			PermitWithoutStream: true,
+		}),
 	}
 }
 
