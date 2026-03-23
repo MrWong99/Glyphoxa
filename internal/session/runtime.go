@@ -167,6 +167,16 @@ func (rt *Runtime) Agents() []agent.NPCAgent {
 	return rt.agents
 }
 
+// Flush discards any buffered outgoing audio in the connection. This is
+// called after mute or interrupt operations so the gateway stops playing
+// stale pre-buffered NPC audio immediately. No-op if the connection does
+// not implement [audio.Flusher].
+func (rt *Runtime) Flush() {
+	if f, ok := rt.conn.(audio.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // recordTranscripts drains an agent's transcript channel and writes entries
 // to the session store. On context cancellation it drains remaining buffered
 // entries before returning.

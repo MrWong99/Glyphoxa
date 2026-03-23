@@ -180,6 +180,11 @@ message AudioFrame {
   // is_silence marks a silence frame (used to signal Discord to start
   // routing audio to the bot at connection startup).
   bool is_silence = 5;
+
+  // flush signals the gateway to discard all buffered audio for this session.
+  // Sent by the worker when barge-in or mute interrupts playback, so the
+  // gateway does not continue playing stale pre-buffered frames.
+  bool flush = 6;
 }
 
 // SessionWorkerService is the gRPC service exposed by workers, called by the gateway.

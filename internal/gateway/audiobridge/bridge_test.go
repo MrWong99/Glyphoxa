@@ -419,6 +419,150 @@ func TestStreamAudio_SendGoroutineExitsOnStreamEnd(t *testing.T) {
 	bridge.Close()
 }
 
+// ---------------------------------------------------------------------------
+// Tests: flush
+// ---------------------------------------------------------------------------
+
+func TestSessionBridge_Flush_DrainsBufferedFrames(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer()
+	bridge := srv.NewSessionBridge("sess-flush")
+	defer bridge.Close()
+
+	// Pre-fill the fromWorker buffer with 10 frames.
+	for i := range 10 {
+		bridge.fromWorker <- &pb.AudioFrame{
+			SessionId: "sess-flush",
+			OpusData:  []byte{byte(i)},
+		}
+	}
+
+	// Flush should drain all buffered frames.
+	drained := bridge.Flush()
+	if drained != 10 {
+		t.Errorf("Flush drained %d frames, want 10", drained)
+	}
+
+	// Channel should be empty now.
+	select {
+	case <-bridge.ReceiveFromWorker():
+		t.Fatal("channel should be empty after Flush")
+	default:
+		// OK — channel is empty.
+	}
+}
+
+func TestSessionBridge_Flush_EmptyChannel(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer()
+	bridge := srv.NewSessionBridge("sess-flush-empty")
+	defer bridge.Close()
+
+	// Flushing an empty channel should return 0 immediately.
+	drained := bridge.Flush()
+	if drained != 0 {
+		t.Errorf("Flush drained %d frames from empty channel, want 0", drained)
+	}
+}
+
+func TestStreamAudio_FlushFrame_DrainsBuffer(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer()
+	bridge := srv.NewSessionBridge("sess-flush-stream")
+	defer srv.RemoveBridge("sess-flush-stream")
+
+	ms := newMockServerStream()
+
+	// Handshake.
+	ms.recvCh <- &pb.AudioFrame{SessionId: "sess-flush-stream"}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.StreamAudio(ms)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Pre-fill some audio frames in the fromWorker buffer.
+	for i := range 5 {
+		bridge.fromWorker <- &pb.AudioFrame{
+			SessionId: "sess-flush-stream",
+			OpusData:  []byte{byte(i)},
+		}
+	}
+
+	// Send a flush frame from the worker.
+	ms.recvCh <- &pb.AudioFrame{
+		SessionId: "sess-flush-stream",
+		Flush:     true,
+	}
+
+	// Give time for flush processing.
+	time.Sleep(50 * time.Millisecond)
+
+	// The fromWorker channel should be empty now — flush drained it.
+	select {
+	case <-bridge.ReceiveFromWorker():
+		t.Fatal("fromWorker should be empty after flush frame")
+	default:
+		// OK — drained.
+	}
+
+	ms.cancel()
+	<-errCh
+}
+
+func TestStreamAudio_FlushFrame_NotForwarded(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer()
+	bridge := srv.NewSessionBridge("sess-flush-nofwd")
+	defer srv.RemoveBridge("sess-flush-nofwd")
+
+	ms := newMockServerStream()
+
+	// Handshake.
+	ms.recvCh <- &pb.AudioFrame{SessionId: "sess-flush-nofwd"}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.StreamAudio(ms)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a flush frame — should NOT be forwarded to fromWorker.
+	ms.recvCh <- &pb.AudioFrame{
+		SessionId: "sess-flush-nofwd",
+		Flush:     true,
+	}
+
+	// Send a real audio frame after the flush.
+	ms.recvCh <- &pb.AudioFrame{
+		SessionId: "sess-flush-nofwd",
+		OpusData:  []byte{42},
+	}
+
+	// The only frame on fromWorker should be the audio frame, not the flush.
+	select {
+	case frame := <-bridge.ReceiveFromWorker():
+		if frame.GetFlush() {
+			t.Fatal("flush frame should not be forwarded to fromWorker")
+		}
+		if frame.GetOpusData()[0] != 42 {
+			t.Errorf("expected audio frame data 42, got %d", frame.GetOpusData()[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for audio frame after flush")
+	}
+
+	ms.cancel()
+	<-errCh
+}
+
 func TestStreamAudio_BridgeCloseEndsStream(t *testing.T) {
 	t.Parallel()
 

@@ -208,6 +208,12 @@ func (p *audioPipeline) processParticipant(ctx context.Context, speakerID string
 					// and fire the OnBargeIn callback.
 					p.mixer.BargeIn(speakerID)
 
+					// Flush any pre-buffered audio in the connection so the
+					// gateway stops playing stale NPC audio immediately.
+					if f, ok := p.conn.(audio.Flusher); ok {
+						f.Flush()
+					}
+
 					// Snapshot STT config under lock — UpdateKeywords may be
 					// writing p.sttCfg.Keywords concurrently.
 					p.mu.Lock()

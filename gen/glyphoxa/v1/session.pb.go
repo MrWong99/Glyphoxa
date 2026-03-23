@@ -1391,7 +1391,11 @@ type AudioFrame struct {
 	UserId string `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	// is_silence marks a silence frame (used to signal Discord to start
 	// routing audio to the bot at connection startup).
-	IsSilence     bool `protobuf:"varint,5,opt,name=is_silence,json=isSilence,proto3" json:"is_silence,omitempty"`
+	IsSilence bool `protobuf:"varint,5,opt,name=is_silence,json=isSilence,proto3" json:"is_silence,omitempty"`
+	// flush signals the gateway to discard all buffered audio for this session.
+	// Sent by the worker when barge-in or mute interrupts playback, so the
+	// gateway does not continue playing stale pre-buffered frames.
+	Flush         bool `protobuf:"varint,6,opt,name=flush,proto3" json:"flush,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1457,6 +1461,13 @@ func (x *AudioFrame) GetUserId() string {
 func (x *AudioFrame) GetIsSilence() bool {
 	if x != nil {
 		return x.IsSilence
+	}
+	return false
+}
+
+func (x *AudioFrame) GetFlush() bool {
+	if x != nil {
+		return x.Flush
 	}
 	return false
 }
@@ -1558,7 +1569,7 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
 	"\bnpc_name\x18\x02 \x01(\tR\anpcName\x12\x12\n" +
 	"\x04text\x18\x03 \x01(\tR\x04text\"\x12\n" +
-	"\x10SpeakNPCResponse\"\x94\x01\n" +
+	"\x10SpeakNPCResponse\"\xaa\x01\n" +
 	"\n" +
 	"AudioFrame\x12\x1d\n" +
 	"\n" +
@@ -1567,7 +1578,8 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\x04ssrc\x18\x03 \x01(\rR\x04ssrc\x12\x17\n" +
 	"\auser_id\x18\x04 \x01(\tR\x06userId\x12\x1d\n" +
 	"\n" +
-	"is_silence\x18\x05 \x01(\bR\tisSilence*{\n" +
+	"is_silence\x18\x05 \x01(\bR\tisSilence\x12\x14\n" +
+	"\x05flush\x18\x06 \x01(\bR\x05flush*{\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SESSION_STATE_PENDING\x10\x01\x12\x18\n" +
