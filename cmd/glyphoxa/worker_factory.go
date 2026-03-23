@@ -30,7 +30,7 @@ import (
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials/insecure" // used in fallback when no dial opts are configured
 )
 
 // workerConsolidationInterval is the consolidation period for worker sessions.
@@ -43,7 +43,8 @@ type workerFactory struct {
 	cfg             *config.Config
 	providers       *app.Providers
 	mcpHost         mcp.Host
-	audioBridgeAddr string // gateway AudioBridgeService address (empty in full mode)
+	audioBridgeAddr string            // gateway AudioBridgeService address (empty in full mode)
+	grpcDialOpts    []grpc.DialOption // shared dial options (TLS, interceptors) for gateway connections
 }
 
 // CreateRuntime builds a fully wired session.Runtime from a StartSessionRequest.
@@ -128,7 +129,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 
 	if wf.audioBridgeAddr != "" {
 		// Distributed mode: connect to the gateway's AudioBridgeService.
-		bridgeConn, err := wf.connectAudioBridge(sessionCtx, req.SessionID)
+		bridgeConn, bridgeConnCloser, err := wf.connectAudioBridge(sessionCtx, req.SessionID)
 		if err != nil {
 			if storeCloser != nil {
 				_ = storeCloser()
@@ -136,7 +137,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 			return nil, fmt.Errorf("worker: connect audio bridge: %w", err)
 		}
 		conn = bridgeConn
-		voicePlatformCloser = func() error { return nil }
+		voicePlatformCloser = bridgeConnCloser
 	} else {
 		// Full mode: open own gateway (existing code path).
 		platform, err := discord.NewVoiceOnlyPlatform(sessionCtx, req.BotToken, req.GuildID,
@@ -394,13 +395,21 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 }
 
 // connectAudioBridge dials the gateway's AudioBridgeService and returns a
-// grpcbridge.Connection for the given session.
-func (wf *workerFactory) connectAudioBridge(ctx context.Context, sessionID string) (*grpcbridge.Connection, error) {
-	conn, err := grpc.NewClient(wf.audioBridgeAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+// grpcbridge.Connection for the given session plus a closer that releases the
+// underlying gRPC client connection. The caller must arrange for the closer to
+// be called when the session ends (typically via Runtime.AddCloser).
+func (wf *workerFactory) connectAudioBridge(ctx context.Context, sessionID string) (*grpcbridge.Connection, func() error, error) {
+	// Use the same dial options (TLS, interceptors) as the gateway callback
+	// connection. Falling back to insecure when no options are configured
+	// keeps the existing behaviour for non-TLS deployments.
+	dialOpts := wf.grpcDialOpts
+	if len(dialOpts) == 0 {
+		dialOpts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	}
+
+	conn, err := grpc.NewClient(wf.audioBridgeAddr, dialOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("worker: dial audio bridge at %s: %w", wf.audioBridgeAddr, err)
+		return nil, nil, fmt.Errorf("worker: dial audio bridge at %s: %w", wf.audioBridgeAddr, err)
 	}
 
 	bridgeClient := pb.NewAudioBridgeServiceClient(conn)
@@ -411,20 +420,20 @@ func (wf *workerFactory) connectAudioBridge(ctx context.Context, sessionID strin
 	stream, err := bridgeClient.StreamAudio(context.Background())
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("worker: open audio stream: %w", err)
+		return nil, nil, fmt.Errorf("worker: open audio stream: %w", err)
 	}
 
 	bridgeConn, err := grpcbridge.New(sessionID, stream)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("worker: create grpc bridge connection: %w", err)
+		return nil, nil, fmt.Errorf("worker: create grpc bridge connection: %w", err)
 	}
 
 	slog.Info("worker: connected to audio bridge",
 		"session_id", sessionID,
 		"bridge_addr", wf.audioBridgeAddr,
 	)
-	return bridgeConn, nil
+	return bridgeConn, conn.Close, nil
 }
 
 // npcConfigsFromRequest converts gRPC NPCConfigMsg entries to config.NPCConfig.
