@@ -101,8 +101,18 @@ func New(sessionID string, stream grpc.BidiStreamingClient[pb.AudioFrame, pb.Aud
 }
 
 // recvLoop reads opus frames from the gRPC stream, decodes them to PCM, and
-// demuxes by user_id into per-participant input channels.
+// demuxes by user_id into per-participant input channels. On exit it closes
+// all input channels so that consumers ranging over them terminate.
 func (c *Connection) recvLoop() {
+	defer func() {
+		c.inputsMu.Lock()
+		for id, ch := range c.inputs {
+			close(ch)
+			delete(c.inputs, id)
+		}
+		c.inputsMu.Unlock()
+	}()
+
 	for {
 		frame, err := c.stream.Recv()
 		if err != nil {
@@ -243,20 +253,13 @@ func (c *Connection) OnParticipantChange(cb func(audio.Event)) {
 	c.changeCb = cb
 }
 
-// Disconnect cleanly tears down the gRPC stream and closes all channels.
+// Disconnect cleanly tears down the gRPC stream. Input channels are closed by
+// the recv loop when it exits (triggered by CloseSend unblocking Recv).
 // Safe to call more than once.
 func (c *Connection) Disconnect() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
 		_ = c.stream.CloseSend()
-
-		c.inputsMu.Lock()
-		for id, ch := range c.inputs {
-			close(ch)
-			delete(c.inputs, id)
-		}
-		c.inputsMu.Unlock()
-
 		slog.Info("grpcbridge: disconnected", "session_id", c.sessionID)
 	})
 	return nil

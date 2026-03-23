@@ -15,10 +15,17 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 
 	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
+)
+
+const (
+	// handshakeTimeout is how long the server waits for the worker to send
+	// its initial handshake frame before disconnecting.
+	handshakeTimeout = 10 * time.Second
 )
 
 // Server implements the AudioBridgeService gRPC service on the gateway side.
@@ -98,13 +105,33 @@ func (s *Server) RemoveBridge(sessionID string) {
 // StreamAudio implements the gRPC AudioBridgeService.StreamAudio RPC.
 // The worker connects to this stream after receiving a StartSession command.
 // The first frame from the worker must include a session_id to identify which
-// bridge to attach to.
+// bridge to attach to. The worker must send the handshake frame within
+// [handshakeTimeout] or the stream is closed.
 func (s *Server) StreamAudio(stream grpc.BidiStreamingServer[pb.AudioFrame, pb.AudioFrame]) error {
-	// Read the first frame to identify the session.
-	first, err := stream.Recv()
-	if err != nil {
-		return err
+	// Read the first frame to identify the session, with a timeout so that
+	// a misbehaving worker that connects but never sends cannot hold the
+	// stream open indefinitely.
+	type recvResult struct {
+		frame *pb.AudioFrame
+		err   error
 	}
+	handshakeCh := make(chan recvResult, 1)
+	go func() {
+		f, e := stream.Recv()
+		handshakeCh <- recvResult{f, e}
+	}()
+
+	var first *pb.AudioFrame
+	select {
+	case res := <-handshakeCh:
+		if res.err != nil {
+			return res.err
+		}
+		first = res.frame
+	case <-time.After(handshakeTimeout):
+		return fmt.Errorf("audiobridge: handshake timeout — worker did not send initial frame within %s", handshakeTimeout)
+	}
+
 	sessionID := first.GetSessionId()
 	if sessionID == "" {
 		return fmt.Errorf("audiobridge: first frame must include session_id")
@@ -128,12 +155,19 @@ func (s *Server) StreamAudio(stream grpc.BidiStreamingServer[pb.AudioFrame, pb.A
 		}
 	}
 
+	// streamDone is closed when the first forwarding goroutine exits, so
+	// that the send goroutine is guaranteed to stop even if bridge.done has
+	// not been closed yet. Without this, the send goroutine leaks when the
+	// recv direction fails first and RemoveBridge has not yet been called.
+	streamDone := make(chan struct{})
 	errCh := make(chan error, 2)
 
 	// Gateway → Worker: forward frames from the Discord voice connection.
 	go func() {
 		for {
 			select {
+			case <-streamDone:
+				return
 			case <-bridge.done:
 				errCh <- nil
 				return
@@ -171,6 +205,10 @@ func (s *Server) StreamAudio(stream grpc.BidiStreamingServer[pb.AudioFrame, pb.A
 
 	// Wait for either direction to finish.
 	streamErr := <-errCh
+
+	// Signal the send goroutine to exit. The recv goroutine exits once the
+	// gRPC framework closes the server-side stream after this method returns.
+	close(streamDone)
 
 	slog.Info("audiobridge: worker stream detached",
 		"session_id", sessionID,
