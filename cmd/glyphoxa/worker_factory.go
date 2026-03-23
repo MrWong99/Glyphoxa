@@ -280,6 +280,31 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	orch := orchestrator.New(agents, orchestrator.WithMixer(pm))
 
 	// ── 9. Audio pipeline (VAD → STT → routing) ─────────────────────────────
+	// Cascade engines require the audio pipeline (VAD → STT) to detect
+	// and transcribe player speech. Fail early with a clear error instead
+	// of silently running a dead session that receives audio but never
+	// processes it.
+	needsPipeline := false
+	for _, npc := range npcs {
+		if npc.Engine == config.EngineCascaded || npc.Engine == config.EngineSentenceCascade {
+			needsPipeline = true
+			break
+		}
+	}
+	if needsPipeline && (wf.providers.VAD == nil || wf.providers.STT == nil) {
+		for j := len(engineClosers) - 1; j >= 0; j-- {
+			_ = engineClosers[j]()
+		}
+		_ = pm.Close()
+		_ = conn.Disconnect()
+		_ = voicePlatformCloser()
+		if storeCloser != nil {
+			_ = storeCloser()
+		}
+		return nil, fmt.Errorf("worker: cascade engine requires VAD and STT providers — configure providers.vad and providers.stt in worker config (vad=%v, stt=%v)",
+			wf.providers.VAD != nil, wf.providers.STT != nil)
+	}
+
 	var pipelineCloser func() error
 	if wf.providers.VAD != nil && wf.providers.STT != nil {
 		var correctionPipeline transcript.Pipeline
