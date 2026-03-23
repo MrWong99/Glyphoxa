@@ -76,7 +76,7 @@ func TestConnection_OutputCapture(t *testing.T) {
 		}
 	}
 
-	conn.Disconnect()
+	_ = conn.Disconnect()
 }
 
 func TestConnection_Disconnect_Idempotent(t *testing.T) {

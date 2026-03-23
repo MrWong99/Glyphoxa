@@ -149,7 +149,7 @@ func TestNew_SendsHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	sent := ms.Sent()
 	if len(sent) == 0 {
@@ -192,7 +192,7 @@ func TestConnection_RecvDemuxByUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	opus := encodeOpusSilence(t)
 
@@ -254,7 +254,7 @@ func TestConnection_RecvSkipsEmptyFrames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	// Frame with no user_id should be silently skipped.
 	ms.recvCh <- &pb.AudioFrame{SessionId: "sess-1", OpusData: []byte{1, 2, 3}}
@@ -282,7 +282,7 @@ func TestConnection_SendEncodesOpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	// Write a full opus frame worth of PCM (48kHz stereo = 3840 bytes per 20ms).
 	pcm := make([]byte, opusFrameBytes)
@@ -326,7 +326,7 @@ func TestConnection_ParticipantJoinEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	var (
 		eventsMu sync.Mutex
@@ -375,7 +375,7 @@ func TestConnection_NoDuplicateJoinEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	var (
 		eventsMu sync.Mutex
@@ -415,7 +415,7 @@ func TestConnection_InputStreamsSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	// Initially empty.
 	streams := conn.InputStreams()
@@ -457,7 +457,7 @@ func TestConnection_OutputStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	out := conn.OutputStream()
 	if out == nil {

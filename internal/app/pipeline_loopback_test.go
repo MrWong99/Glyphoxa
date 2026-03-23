@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,7 +73,6 @@ func (p *echoSTTProvider) StartStream(_ context.Context, _ stt.StreamConfig) (st
 type echoSTTSession struct {
 	finals   chan stt.Transcript
 	partials chan stt.Transcript
-	fired    atomic.Bool
 	once     sync.Once
 }
 
