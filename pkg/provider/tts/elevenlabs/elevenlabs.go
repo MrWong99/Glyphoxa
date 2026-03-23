@@ -13,6 +13,7 @@ import (
 	"maps"
 	"mime/multipart"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
@@ -25,6 +26,9 @@ const (
 	addVoiceEndpoint = "https://api.elevenlabs.io/v1/voices/add"
 	defaultModel     = "eleven_flash_v2_5"
 	defaultOutputFmt = "pcm_16000"
+	defaultPoolSize  = 1
+	defaultMaxIdle   = 30 * time.Second
+	dialAheadTimeout = 10 * time.Second
 )
 
 // Option is a functional option for configuring the ElevenLabs Provider.
@@ -44,7 +48,36 @@ func WithOutputFormat(format string) Option {
 	}
 }
 
+// WithPoolSize sets the maximum number of pre-warmed WebSocket connections to
+// maintain per voice ID. Default is 1. Setting to 0 disables pooling.
+func WithPoolSize(n int) Option {
+	return func(p *Provider) {
+		p.poolSize = n
+	}
+}
+
+// WithMaxIdleTime sets the maximum time a pre-warmed connection can sit idle
+// in the pool before being evicted. Default is 30 seconds.
+func WithMaxIdleTime(d time.Duration) Option {
+	return func(p *Provider) {
+		if d > 0 {
+			p.maxIdle = d
+		}
+	}
+}
+
+// warmConn is a pre-dialed WebSocket connection waiting in the pool.
+type warmConn struct {
+	conn     *websocket.Conn
+	dialedAt time.Time
+}
+
 // Provider implements tts.Provider backed by the ElevenLabs streaming API.
+//
+// Provider maintains a pool of pre-dialed WebSocket connections to reduce
+// per-synthesis dial latency. After each SynthesizeStream call, a replacement
+// connection is dialed in the background so the next call can skip the
+// TCP+TLS+WebSocket handshake.
 type Provider struct {
 	apiKey       string
 	model        string
@@ -53,7 +86,23 @@ type Provider struct {
 	// addVoiceURL is the endpoint for POST /v1/voices/add.
 	// It defaults to addVoiceEndpoint and can be overridden in tests.
 	addVoiceURL string
+
+	// dialFunc overrides websocket.Dial for testing. nil means use the default.
+	dialFunc func(ctx context.Context, url string) (*websocket.Conn, error)
+
+	// Pool configuration.
+	poolSize int           // max pre-warmed connections per voice (default: 1)
+	maxIdle  time.Duration // max time a connection can sit idle before eviction
+
+	// Pool state — protected by mu.
+	mu     sync.Mutex
+	pool   map[string][]*warmConn // voiceID → stack of pre-dialed connections
+	closed bool
+	wg     sync.WaitGroup // tracks in-flight dial-ahead goroutines
 }
+
+// Compile-time interface assertions.
+var _ tts.Warmer = (*Provider)(nil)
 
 // New creates a new ElevenLabs Provider. apiKey must be non-empty.
 func New(apiKey string, opts ...Option) (*Provider, error) {
@@ -66,6 +115,9 @@ func New(apiKey string, opts ...Option) (*Provider, error) {
 		outputFormat: defaultOutputFmt,
 		httpClient:   &http.Client{},
 		addVoiceURL:  addVoiceEndpoint,
+		poolSize:     defaultPoolSize,
+		maxIdle:      defaultMaxIdle,
+		pool:         make(map[string][]*warmConn),
 	}
 	for _, o := range opts {
 		o(p)
@@ -105,36 +157,24 @@ type boiMessage struct {
 // SynthesizeStream opens a WebSocket to ElevenLabs, pipes text fragments from
 // the text channel, and returns a channel emitting raw PCM audio chunks.
 //
+// If a pre-warmed connection is available for the requested voice it is used
+// instead of dialing a new one, saving 50-150 ms of TCP+TLS+WS handshake
+// latency. After acquiring a connection a replacement is dialed in the
+// background so the next call for the same voice is also fast.
+//
 // The returned audio channel is closed when synthesis is complete or ctx is cancelled.
 func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voice tts.VoiceProfile) (<-chan []byte, error) {
 	if voice.ID == "" {
 		return nil, errors.New("elevenlabs: voice.ID must not be empty")
 	}
 
-	wsURL := fmt.Sprintf(wsEndpointFmt, voice.ID, p.model)
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	conn, err := p.acquireAndInit(ctx, voice.ID)
 	if err != nil {
-		return nil, fmt.Errorf("elevenlabs: dial: %w", err)
+		return nil, err
 	}
 
-	// ElevenLabs audio chunks can exceed the default 32 KB read limit.
-	conn.SetReadLimit(1 << 20) // 1 MiB
-
-	// Send the initial BOI message to authenticate and configure the stream.
-	boi := boiMessage{
-		Text: " ", // ElevenLabs requires a non-empty first text value
-		VoiceSettings: &voiceSettings{
-			Stability:       0.5,
-			SimilarityBoost: 0.75,
-		},
-		XiAPIKey:     p.apiKey,
-		OutputFormat: p.outputFormat,
-	}
-	boiBytes, _ := json.Marshal(boi)
-	if err := conn.Write(ctx, websocket.MessageText, boiBytes); err != nil {
-		conn.Close(websocket.StatusInternalError, "failed to send BOI")
-		return nil, fmt.Errorf("elevenlabs: send BOI: %w", err)
-	}
+	// Pre-dial a replacement connection in the background for the next call.
+	p.dialAhead(voice.ID)
 
 	audioCh := make(chan []byte, 256)
 
@@ -222,6 +262,178 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 	}()
 
 	return audioCh, nil
+}
+
+// ---- Connection pool ----
+
+// dialWS dials a new WebSocket connection for the given voice ID.
+func (p *Provider) dialWS(ctx context.Context, voiceID string) (*websocket.Conn, error) {
+	wsURL := fmt.Sprintf(wsEndpointFmt, voiceID, p.model)
+	if p.dialFunc != nil {
+		return p.dialFunc(ctx, wsURL)
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	return conn, err
+}
+
+// acquireAndInit returns a WebSocket connection with the BOI message already
+// sent, ready for text streaming. It first tries a pre-warmed connection from
+// the pool; if the warm connection is stale (BOI write fails), it falls back
+// to a fresh dial.
+func (p *Provider) acquireAndInit(ctx context.Context, voiceID string) (*websocket.Conn, error) {
+	boi := boiMessage{
+		Text: " ", // ElevenLabs requires a non-empty first text value
+		VoiceSettings: &voiceSettings{
+			Stability:       0.5,
+			SimilarityBoost: 0.75,
+		},
+		XiAPIKey:     p.apiKey,
+		OutputFormat: p.outputFormat,
+	}
+	boiBytes, _ := json.Marshal(boi)
+
+	// Try a pre-warmed connection first.
+	if conn := p.takeWarm(voiceID); conn != nil {
+		conn.SetReadLimit(1 << 20) // 1 MiB
+		if err := conn.Write(ctx, websocket.MessageText, boiBytes); err == nil {
+			slog.Debug("elevenlabs: using pre-warmed connection", "voiceID", voiceID)
+			return conn, nil
+		}
+		// Warm connection went stale — close and fall through to fresh dial.
+		conn.Close(websocket.StatusInternalError, "stale")
+		slog.Debug("elevenlabs: warm connection stale, redialing", "voiceID", voiceID)
+	}
+
+	// No warm connection or it was stale — dial fresh.
+	conn, err := p.dialWS(ctx, voiceID)
+	if err != nil {
+		return nil, fmt.Errorf("elevenlabs: dial: %w", err)
+	}
+	conn.SetReadLimit(1 << 20) // 1 MiB
+	if err := conn.Write(ctx, websocket.MessageText, boiBytes); err != nil {
+		conn.Close(websocket.StatusInternalError, "failed to send BOI")
+		return nil, fmt.Errorf("elevenlabs: send BOI: %w", err)
+	}
+	return conn, nil
+}
+
+// takeWarm removes and returns a fresh pre-warmed connection for voiceID, or
+// nil if none is available. Stale connections (older than maxIdle) are closed
+// and discarded.
+func (p *Provider) takeWarm(voiceID string) *websocket.Conn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed || p.pool == nil {
+		return nil
+	}
+
+	conns := p.pool[voiceID]
+	for len(conns) > 0 {
+		// Pop from the end (LIFO — most recently dialed is freshest).
+		wc := conns[len(conns)-1]
+		conns = conns[:len(conns)-1]
+		p.pool[voiceID] = conns
+
+		if time.Since(wc.dialedAt) < p.maxIdle {
+			return wc.conn
+		}
+		// Stale — close it.
+		wc.conn.Close(websocket.StatusNormalClosure, "idle timeout")
+		slog.Debug("elevenlabs: evicted stale connection", "voiceID", voiceID,
+			"age", time.Since(wc.dialedAt).Round(time.Millisecond))
+	}
+	return nil
+}
+
+// putWarm stores a pre-dialed connection in the pool. Returns false (and does
+// NOT close the connection) if the pool is full or the provider is closed.
+func (p *Provider) putWarm(voiceID string, conn *websocket.Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return false
+	}
+	if p.pool == nil {
+		p.pool = make(map[string][]*warmConn)
+	}
+
+	conns := p.pool[voiceID]
+	if len(conns) >= p.poolSize {
+		return false
+	}
+	p.pool[voiceID] = append(conns, &warmConn{
+		conn:     conn,
+		dialedAt: time.Now(),
+	})
+	return true
+}
+
+// dialAhead starts a background goroutine that dials a replacement WebSocket
+// connection for voiceID and stores it in the pool.
+func (p *Provider) dialAhead(voiceID string) {
+	if p.poolSize <= 0 {
+		return
+	}
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+
+		ctx, cancel := context.WithTimeout(context.Background(), dialAheadTimeout)
+		defer cancel()
+
+		conn, err := p.dialWS(ctx, voiceID)
+		if err != nil {
+			slog.Debug("elevenlabs: dial-ahead failed", "voiceID", voiceID, "error", err)
+			return
+		}
+
+		if !p.putWarm(voiceID, conn) {
+			conn.Close(websocket.StatusNormalClosure, "pool full or closed")
+			return
+		}
+		slog.Debug("elevenlabs: dial-ahead connection ready", "voiceID", voiceID)
+	}()
+}
+
+// Warm pre-dials WebSocket connections for the given voices so that subsequent
+// SynthesizeStream calls can skip the dial latency.
+func (p *Provider) Warm(ctx context.Context, voices ...tts.VoiceProfile) error {
+	for _, v := range voices {
+		if v.ID == "" {
+			continue
+		}
+		conn, err := p.dialWS(ctx, v.ID)
+		if err != nil {
+			return fmt.Errorf("elevenlabs: warm %s: %w", v.ID, err)
+		}
+		if !p.putWarm(v.ID, conn) {
+			conn.Close(websocket.StatusNormalClosure, "pool full or closed")
+		}
+	}
+	return nil
+}
+
+// Close releases all pre-warmed connections and waits for in-flight dial-ahead
+// goroutines to finish. Safe to call multiple times.
+func (p *Provider) Close() error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	for voiceID, conns := range p.pool {
+		for _, wc := range conns {
+			wc.conn.Close(websocket.StatusNormalClosure, "provider closed")
+		}
+		delete(p.pool, voiceID)
+	}
+	p.mu.Unlock()
+
+	p.wg.Wait()
+	return nil
 }
 
 // ---- ListVoices ----
