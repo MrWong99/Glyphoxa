@@ -24,8 +24,9 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/disgoorg/disgo/voice"
-	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/godave/libdave"
+
+	safedave "github.com/MrWong99/glyphoxa/internal/dave"
 	"github.com/jackc/pgx/v5/pgxpool"
 	anyllmlib "github.com/mozilla-ai/any-llm-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -1259,7 +1260,7 @@ func registerBuiltinProviders(reg *config.Registry, bot **discordbot.Bot) {
 			GuildID:  guildID,
 			DMRoleID: dmRoleID,
 			VoiceOpts: []voice.ManagerConfigOpt{
-				voice.WithDaveSessionCreateFunc(golibdave.NewSession),
+				voice.WithDaveSessionCreateFunc(safedave.NewSession),
 			},
 		})
 		if err != nil {
