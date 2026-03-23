@@ -676,14 +676,15 @@ func runWorker(cfg *config.Config) int {
 	// ── GatewayCallback (worker → gateway heartbeats and state reports) ───────
 	gwAddr := os.Getenv("GLYPHOXA_GATEWAY_ADDR")
 	var callback gw.GatewayCallback
+	var gwDialOpts []grpc.DialOption // shared dial options for all gateway connections (callback + audio bridge)
 	if gwAddr != "" {
 		clientCred, err := observe.GRPCClientCredentials()
 		if err != nil {
 			slog.Error("failed to load gRPC client TLS credentials", "err", err)
 			return 1
 		}
-		dialOpts := append(observe.GRPCDialOptions(), clientCred)
-		gwConn, err := grpc.NewClient(gwAddr, dialOpts...)
+		gwDialOpts = append(observe.GRPCDialOptions(), clientCred)
+		gwConn, err := grpc.NewClient(gwAddr, gwDialOpts...)
 		if err != nil {
 			slog.Error("failed to connect to gateway", "addr", gwAddr, "err", err)
 			return 1
@@ -712,7 +713,8 @@ func runWorker(cfg *config.Config) int {
 		cfg:             cfg,
 		providers:       providers,
 		mcpHost:         mcpHost,
-		audioBridgeAddr: gwAddr, // same address as the gateway callback — audio bridge is on the gateway gRPC server
+		audioBridgeAddr: gwAddr,       // same address as the gateway callback — audio bridge is on the gateway gRPC server
+		grpcDialOpts:    gwDialOpts,   // reuse TLS + interceptor options so the audio bridge matches the callback connection
 	}
 
 	handler := session.NewWorkerHandler(wf.CreateRuntime, callback)
