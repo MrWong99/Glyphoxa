@@ -6,7 +6,7 @@ import (
 )
 
 func TestApplySSLMode(t *testing.T) {
-	t.Parallel()
+	// Not parallel: subtests use t.Setenv which mutates process environment.
 
 	tests := []struct {
 		name    string
