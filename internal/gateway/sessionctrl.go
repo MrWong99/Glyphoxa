@@ -190,6 +190,9 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 
 			voiceConn := voiceMgr.CreateConn(gID)
 			if joinErr := voiceConn.Open(ctx, chID, false, false); joinErr != nil {
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				voiceConn.Close(closeCtx)
+				closeCancel()
 				voiceMgr.RemoveConn(gID)
 				gc.bridgeSrv.RemoveBridge(sessionID)
 				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, joinErr.Error())
@@ -202,19 +205,12 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 				"channel_id", req.ChannelID,
 			)
 
-			// Wait for DAVE E2EE handshake to complete before wiring the
-			// audio bridge. Without this, the receiver reads encrypted
-			// packets before keys are exchanged, causing decryption failures.
-			daveCtx, daveCancel := context.WithTimeout(context.Background(), daveReadyTimeout)
-			if daveErr := waitForDAVEReady(daveCtx, voiceConn, sessionID); daveErr != nil {
-				daveCancel()
-				voiceMgr.RemoveConn(gID)
-				gc.bridgeSrv.RemoveBridge(sessionID)
-				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, daveErr.Error())
-				return fmt.Errorf("gateway: DAVE handshake: %w", daveErr)
-			}
-			daveCancel()
-
+			// Wire the audio bridge immediately. DAVE E2EE handshake
+			// completes asynchronously inside disgo — the
+			// OpusFrameReceiver callback receives already-decrypted
+			// packets, so there is no need to block here waiting for a
+			// DAVE event. This matches the full-mode code path which
+			// also starts flowing audio right after Open().
 			cleanup := setupVoiceBridge(voiceConn, bridge, sessionID)
 			gc.voiceCleanupsMu.Lock()
 			gc.voiceCleanups[sessionID] = func() {
