@@ -80,6 +80,9 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 	if dsn == "" {
 		dsn = wf.cfg.Memory.PostgresDSN
 	}
+	if dsn != "" {
+		dsn = applySSLMode(dsn)
+	}
 
 	var sessionStore memory.SessionStore
 	var semanticIndex memory.SemanticIndex

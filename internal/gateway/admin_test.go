@@ -49,14 +49,17 @@ func TestAdminAPI_AuthMiddleware(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		authHeader string
+		header     string // header name
+		value      string // header value
 		wantStatus int
 	}{
-		{"no auth header", "", http.StatusUnauthorized},
-		{"wrong key", "Bearer wrong-key", http.StatusForbidden},
-		{"bare wrong key", "wrong-key", http.StatusForbidden},
-		{"valid bearer", "Bearer " + testAPIKey, http.StatusOK},
-		{"valid bare", testAPIKey, http.StatusOK},
+		{"no auth header", "", "", http.StatusUnauthorized},
+		{"wrong key", "Authorization", "Bearer wrong-key", http.StatusForbidden},
+		{"bare wrong key", "Authorization", "wrong-key", http.StatusForbidden},
+		{"valid bearer", "Authorization", "Bearer " + testAPIKey, http.StatusOK},
+		{"valid bare", "Authorization", testAPIKey, http.StatusOK},
+		{"valid X-API-Key", "X-API-Key", testAPIKey, http.StatusOK},
+		{"wrong X-API-Key", "X-API-Key", "wrong-key", http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
@@ -64,8 +67,8 @@ func TestAdminAPI_AuthMiddleware(t *testing.T) {
 			t.Parallel()
 
 			req := httptest.NewRequest("GET", "/api/v1/tenants", nil)
-			if tt.authHeader != "" {
-				req.Header.Set("Authorization", tt.authHeader)
+			if tt.header != "" {
+				req.Header.Set(tt.header, tt.value)
 			}
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
@@ -74,6 +77,23 @@ func TestAdminAPI_AuthMiddleware(t *testing.T) {
 				t.Errorf("got status %d, want %d", rr.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestAdminAPI_AuthMiddleware_NoKey(t *testing.T) {
+	t.Parallel()
+
+	store := gateway.NewMemAdminStore()
+	api := gateway.NewAdminAPI(store, "", nil) // no API key configured
+	handler := api.Handler()
+
+	// Without an API key configured, all requests should pass through.
+	req := httptest.NewRequest("GET", "/api/v1/tenants", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("got status %d, want %d — unauthenticated request should succeed when no key is set", rr.Code, http.StatusOK)
 	}
 }
 

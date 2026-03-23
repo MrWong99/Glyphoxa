@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -298,6 +299,7 @@ func runGateway(cfg *config.Config) int {
 		slog.Error("GLYPHOXA_DATABASE_DSN not set — database is required for gateway mode")
 		return 1
 	}
+	dsn = applySSLMode(dsn)
 	pool, err := openGatewayPool(ctx, dsn)
 	if err != nil {
 		slog.Error("failed to connect to database", "err", err)
@@ -306,10 +308,9 @@ func runGateway(cfg *config.Config) int {
 	defer pool.Close()
 
 	// ── Admin API ─────────────────────────────────────────────────────────────
-	adminKey := os.Getenv("GLYPHOXA_ADMIN_KEY")
+	adminKey := os.Getenv("GLYPHOXA_ADMIN_API_KEY")
 	if adminKey == "" {
-		slog.Warn("GLYPHOXA_ADMIN_KEY not set — admin API will reject all requests")
-		adminKey = "__unset__"
+		slog.Warn("GLYPHOXA_ADMIN_API_KEY not set — admin API has no authentication")
 	}
 
 	// ── Session Orchestrator ─────────────────────────────────────────────────
@@ -693,6 +694,29 @@ func openGatewayPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 
 	slog.Info("database connection established")
 	return pool, nil
+}
+
+// applySSLMode appends an sslmode parameter to dsn if one is not already
+// present. The mode is read from GLYPHOXA_DATABASE_SSLMODE, defaulting to
+// "prefer" so connections work with both SSL and non-SSL databases.
+func applySSLMode(dsn string) string {
+	if strings.Contains(dsn, "sslmode") {
+		return dsn
+	}
+	mode := os.Getenv("GLYPHOXA_DATABASE_SSLMODE")
+	if mode == "" {
+		mode = "prefer"
+	}
+	// URL-style DSN: postgres://...
+	if strings.Contains(dsn, "://") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		return dsn + sep + "sslmode=" + mode
+	}
+	// Key-value DSN: host=... port=...
+	return dsn + " sslmode=" + mode
 }
 
 // runWorker runs the worker mode: voice pipeline execution, receiving

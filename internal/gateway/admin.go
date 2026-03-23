@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
@@ -145,9 +147,19 @@ func (a *AdminAPI) registerRoutes() {
 
 func (a *AdminAPI) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// When no API key is configured, allow all requests (backward compat).
+		if a.apiKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check Authorization header first, then X-API-Key.
 		key := r.Header.Get("Authorization")
 		if key == "" {
-			writeAdminError(w, http.StatusUnauthorized, "missing Authorization header")
+			key = r.Header.Get("X-API-Key")
+		}
+		if key == "" {
+			writeAdminError(w, http.StatusUnauthorized, "missing API key — set Authorization or X-API-Key header")
 			return
 		}
 		const bearerPrefix = "Bearer "
@@ -199,8 +211,9 @@ func (a *AdminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("admin: tenant created",
-		"admin_id", "api_key", "action", "create_tenant",
+		"action", "create_tenant",
 		"tenant_id", req.ID, "license_tier", tier.String(),
+		"source_ip", clientIP(r),
 	)
 	if a.bots != nil && req.BotToken != "" {
 		if err := a.connectBotForTenant(r.Context(), tenant); err != nil {
@@ -274,7 +287,8 @@ func (a *AdminAPI) updateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("admin: tenant updated",
-		"admin_id", "api_key", "action", "update_tenant", "tenant_id", id,
+		"action", "update_tenant", "tenant_id", id,
+		"source_ip", clientIP(r),
 	)
 	needsReconnect := req.BotToken != "" || req.GuildIDs != nil || req.DMRoleID != nil || req.CampaignID != nil
 	if a.bots != nil && existing.BotToken != "" && needsReconnect {
@@ -296,9 +310,27 @@ func (a *AdminAPI) deleteTenant(w http.ResponseWriter, r *http.Request) {
 		a.bots.DisconnectBot(id)
 	}
 	slog.Info("admin: tenant deleted",
-		"admin_id", "api_key", "action", "delete_tenant", "tenant_id", id,
+		"action", "delete_tenant", "tenant_id", id,
+		"source_ip", clientIP(r),
 	)
 	writeAdminJSON(w, http.StatusNoContent, nil)
+}
+
+// clientIP extracts the client IP address from the request, checking
+// X-Forwarded-For for reverse-proxy setups before falling back to RemoteAddr.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For can contain a chain: "client, proxy1, proxy2".
+		if ip, _, ok := strings.Cut(xff, ","); ok {
+			return strings.TrimSpace(ip)
+		}
+		return strings.TrimSpace(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func writeAdminJSON(w http.ResponseWriter, status int, v any) {
