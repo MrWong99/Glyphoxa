@@ -148,9 +148,8 @@ func TestNewSession_ReturnsSessionInterface(t *testing.T) {
 	// without the C library, so we only check the type assertion on a manually
 	// constructed safeSession.
 	var s godave.Session = &safeSession{inner: newStubSession()}
-	if s == nil {
-		t.Fatal("safeSession should satisfy godave.Session")
-	}
+	// Compile-time type check is the point; use the variable to avoid unused lint.
+	_ = s
 }
 
 func TestNewSession_CreateFuncSignature(t *testing.T) {
@@ -162,7 +161,7 @@ func TestNewSession_CreateFuncSignature(t *testing.T) {
 		return &safeSession{inner: stub}
 	}
 	session := fn(slog.Default(), "test-user", nil)
-	if session == nil {
-		t.Fatal("create func should return non-nil session")
-	}
+	// Use the variable; the compile-time assignment to godave.SessionCreateFunc
+	// is the actual assertion under test.
+	_ = session
 }
