@@ -18,7 +18,7 @@ func TestConnection_InputStreams(t *testing.T) {
 	conn := New([]Participant{
 		{UserID: "player-1", Username: "Alice", Frames: frames},
 	})
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	streams := conn.InputStreams()
 	if len(streams) != 1 {
@@ -96,7 +96,7 @@ func TestConnection_AddParticipant(t *testing.T) {
 	t.Parallel()
 
 	conn := New(nil) // start with no participants
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	var joined []audio.Event
 	conn.OnParticipantChange(func(ev audio.Event) {
@@ -138,7 +138,7 @@ func TestConnection_WaitForOutput_Timeout(t *testing.T) {
 	t.Parallel()
 
 	conn := New(nil)
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	// Wait for 10 frames but never write any — should timeout.
 	if conn.WaitForOutput(10, 50*time.Millisecond) {
@@ -150,7 +150,7 @@ func TestConnection_EmptyParticipants(t *testing.T) {
 	t.Parallel()
 
 	conn := New([]Participant{})
-	defer conn.Disconnect()
+	defer func() { _ = conn.Disconnect() }()
 
 	streams := conn.InputStreams()
 	if len(streams) != 0 {
