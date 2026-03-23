@@ -713,8 +713,8 @@ func runWorker(cfg *config.Config) int {
 		cfg:             cfg,
 		providers:       providers,
 		mcpHost:         mcpHost,
-		audioBridgeAddr: gwAddr,       // same address as the gateway callback — audio bridge is on the gateway gRPC server
-		grpcDialOpts:    gwDialOpts,   // reuse TLS + interceptor options so the audio bridge matches the callback connection
+		audioBridgeAddr: gwAddr,     // same address as the gateway callback — audio bridge is on the gateway gRPC server
+		grpcDialOpts:    gwDialOpts, // reuse TLS + interceptor options so the audio bridge matches the callback connection
 	}
 
 	handler := session.NewWorkerHandler(wf.CreateRuntime, callback)
