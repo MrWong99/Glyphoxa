@@ -107,6 +107,34 @@ func (mg *MemoryGuard) ListSessions(ctx context.Context, limit int) ([]memory.Se
 	return sessions, nil
 }
 
+// StartSession delegates to the underlying store. On failure the error is
+// logged and swallowed; the store is marked as degraded.
+func (mg *MemoryGuard) StartSession(ctx context.Context, sessionID string) error {
+	err := mg.store.StartSession(ctx, sessionID)
+	if err != nil {
+		mg.degraded.Store(true)
+		slog.Warn("memory guard: StartSession failed, swallowing error",
+			"session_id", sessionID, "error", err)
+		return nil
+	}
+	mg.degraded.Store(false)
+	return nil
+}
+
+// EndSession delegates to the underlying store. On failure the error is
+// logged and swallowed; the store is marked as degraded.
+func (mg *MemoryGuard) EndSession(ctx context.Context, sessionID string) error {
+	err := mg.store.EndSession(ctx, sessionID)
+	if err != nil {
+		mg.degraded.Store(true)
+		slog.Warn("memory guard: EndSession failed, swallowing error",
+			"session_id", sessionID, "error", err)
+		return nil
+	}
+	mg.degraded.Store(false)
+	return nil
+}
+
 // IsDegraded reports whether the store is currently operating in degraded
 // mode (i.e., the most recent operation on the underlying store failed).
 func (mg *MemoryGuard) IsDegraded() bool {

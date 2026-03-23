@@ -350,6 +350,14 @@ type SessionStore interface {
 	// limit caps the number of results (0 = implementation default).
 	// Returns an empty (non-nil) slice when no sessions exist.
 	ListSessions(ctx context.Context, limit int) ([]SessionInfo, error)
+
+	// StartSession records a new session in the sessions metadata table.
+	// Implementations should use ON CONFLICT DO NOTHING to tolerate duplicate
+	// calls for the same sessionID.
+	StartSession(ctx context.Context, sessionID string) error
+
+	// EndSession sets the ended_at timestamp for a session.
+	EndSession(ctx context.Context, sessionID string) error
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -96,6 +96,18 @@ func (rt *Runtime) Start(ctx context.Context, sessionStore memory.SessionStore) 
 		sessionStore = rt.sessionStore
 	}
 
+	// Record the session store for use during Stop.
+	rt.sessionStore = sessionStore
+
+	// Register the session in the sessions metadata table so we can track
+	// start/end times.
+	if sessionStore != nil {
+		if err := sessionStore.StartSession(ctx, rt.sessionID); err != nil {
+			slog.Warn("session: failed to record session start",
+				"session_id", rt.sessionID, "err", err)
+		}
+	}
+
 	// Start transcript recorders for each NPC agent.
 	if sessionStore != nil {
 		for _, ag := range rt.agents {
@@ -138,6 +150,14 @@ func (rt *Runtime) Stop(ctx context.Context) error {
 
 	// Wait for transcript recorders to finish draining.
 	rt.recorderWG.Wait()
+
+	// Record the session end in the sessions metadata table.
+	if rt.sessionStore != nil {
+		if err := rt.sessionStore.EndSession(ctx, rt.sessionID); err != nil {
+			slog.Warn("session: failed to record session end",
+				"session_id", rt.sessionID, "err", err)
+		}
+	}
 
 	// Disconnect audio.
 	if rt.conn != nil {
