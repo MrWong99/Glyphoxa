@@ -75,14 +75,18 @@ func (m *mockNPCStore) Upsert(_ context.Context, def *npcstore.NPCDefinition) er
 
 // mockWebStore is a simple in-memory implementation of WebStore for tests.
 type mockWebStore struct {
-	users     map[string]*User
-	campaigns map[string]*Campaign
+	users       map[string]*User
+	campaigns   map[string]*Campaign
+	sessions    []SessionSummary
+	transcripts map[string][]TranscriptEntry
+	usage       []UsageRecord
 }
 
 func newMockWebStore() *mockWebStore {
 	return &mockWebStore{
-		users:     make(map[string]*User),
-		campaigns: make(map[string]*Campaign),
+		users:       make(map[string]*User),
+		campaigns:   make(map[string]*Campaign),
+		transcripts: make(map[string][]TranscriptEntry),
 	}
 }
 
@@ -139,20 +143,50 @@ func (m *mockWebStore) DeleteCampaign(_ context.Context, tenantID, id string) er
 	return nil
 }
 
-func (m *mockWebStore) ListSessions(_ context.Context, _ string, _, _ int) ([]SessionSummary, error) {
-	return nil, nil
+func (m *mockWebStore) ListSessions(_ context.Context, tenantID string, limit, offset int) ([]SessionSummary, error) {
+	var filtered []SessionSummary
+	for _, s := range m.sessions {
+		if s.TenantID == tenantID {
+			filtered = append(filtered, s)
+		}
+	}
+	if offset >= len(filtered) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[offset:end], nil
 }
 
-func (m *mockWebStore) GetTranscript(_ context.Context, _, _ string) ([]TranscriptEntry, error) {
-	return nil, nil
+func (m *mockWebStore) GetTranscript(_ context.Context, _, sessionID string) ([]TranscriptEntry, error) {
+	entries, ok := m.transcripts[sessionID]
+	if !ok {
+		return nil, nil
+	}
+	return entries, nil
 }
 
-func (m *mockWebStore) GetUsage(_ context.Context, _ string, _, _ time.Time) ([]UsageRecord, error) {
-	return nil, nil
+func (m *mockWebStore) GetUsage(_ context.Context, tenantID string, from, to time.Time) ([]UsageRecord, error) {
+	var result []UsageRecord
+	for _, r := range m.usage {
+		if r.TenantID == tenantID && !r.Period.Before(from) && !r.Period.After(to) {
+			result = append(result, r)
+		}
+	}
+	return result, nil
 }
 
 // testServer creates a Server with mock stores for testing.
 func testServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	srv, _, _, _ := testServerWithStores(t)
+	return srv, "test-jwt-secret"
+}
+
+// testServerWithStores creates a Server and returns access to mock stores for seeding data.
+func testServerWithStores(t *testing.T) (*Server, *mockWebStore, *mockNPCStore, string) {
 	t.Helper()
 
 	secret := "test-jwt-secret"
@@ -163,13 +197,16 @@ func testServer(t *testing.T) (*Server, string) {
 		DiscordRedirectURI:  "http://localhost/callback",
 	}
 
-	return &Server{
+	ws := newMockWebStore()
+	ns := newMockNPCStore()
+	srv := &Server{
 		mux:       http.NewServeMux(),
 		cfg:       cfg,
-		store:     newMockWebStore(),
-		npcs:      newMockNPCStore(),
+		store:     ws,
+		npcs:      ns,
 		gatewayHC: &http.Client{Timeout: 5 * time.Second},
-	}, secret
+	}
+	return srv, ws, ns, secret
 }
 
 func signTestToken(t *testing.T, secret, userID, tenantID, role string) string {
@@ -184,6 +221,20 @@ func signTestToken(t *testing.T, secret, userID, tenantID, role string) string {
 		t.Fatalf("SignJWT: %v", err)
 	}
 	return token
+}
+
+// authReq creates an HTTP request with a valid JWT Authorization header.
+func authReq(t *testing.T, method, path string, body *bytes.Buffer, secret, userID, tenantID, role string) *http.Request {
+	t.Helper()
+	var req *http.Request
+	if body != nil {
+		req = httptest.NewRequest(method, path, body)
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	token := signTestToken(t, secret, userID, tenantID, role)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
 }
 
 func TestHandleDiscordLogin_Redirect(t *testing.T) {
