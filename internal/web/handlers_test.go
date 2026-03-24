@@ -423,6 +423,74 @@ func (m *mockWebStore) DeleteKnowledgeEntity(_ context.Context, _, campaignID, e
 	return fmt.Errorf("web: knowledge entity %q not found", entityID)
 }
 
+// Dashboard mocks.
+
+func (m *mockWebStore) GetDashboardStats(_ context.Context, tenantID string) (*DashboardStats, error) {
+	var campCount int
+	for _, c := range m.campaigns {
+		if c.TenantID == tenantID {
+			campCount++
+		}
+	}
+	var activeCount int
+	for _, s := range m.sessions {
+		if s.TenantID == tenantID && s.State == "running" {
+			activeCount++
+		}
+	}
+	var hoursUsed float64
+	monthStart := time.Now().UTC()
+	monthStart = time.Date(monthStart.Year(), monthStart.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for _, r := range m.usage {
+		if r.TenantID == tenantID && !r.Period.Before(monthStart) {
+			hoursUsed += r.SessionHours
+		}
+	}
+	return &DashboardStats{
+		CampaignCount:      campCount,
+		ActiveSessionCount: activeCount,
+		HoursUsed:          hoursUsed,
+	}, nil
+}
+
+func (m *mockWebStore) GetRecentActivity(_ context.Context, tenantID string, limit int) ([]ActivityItem, error) {
+	var items []ActivityItem
+	for _, c := range m.campaigns {
+		if c.TenantID == tenantID {
+			items = append(items, ActivityItem{
+				ID:          c.ID,
+				Type:        "campaign_created",
+				Description: "Campaign \"" + c.Name + "\" created",
+				Timestamp:   c.CreatedAt,
+				CampaignID:  c.ID,
+			})
+		}
+	}
+	for _, s := range m.sessions {
+		if s.TenantID == tenantID {
+			if s.State == "running" {
+				items = append(items, ActivityItem{
+					ID:          s.ID,
+					Type:        "session_started",
+					Description: "Session started",
+					Timestamp:   s.StartedAt,
+				})
+			} else if s.EndedAt != nil {
+				items = append(items, ActivityItem{
+					ID:          s.ID,
+					Type:        "session_ended",
+					Description: "Session ended",
+					Timestamp:   *s.EndedAt,
+				})
+			}
+		}
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
 // testServer creates a Server with mock stores for testing.
 func testServer(t *testing.T) (*Server, string) {
 	t.Helper()

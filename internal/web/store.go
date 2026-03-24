@@ -140,6 +140,10 @@ type WebStore interface {
 	// Knowledge graph.
 	ListKnowledgeEntities(ctx context.Context, tenantID, campaignID string, page CursorPage) ([]KnowledgeEntity, error)
 	DeleteKnowledgeEntity(ctx context.Context, tenantID, campaignID, entityID string) error
+
+	// Dashboard.
+	GetDashboardStats(ctx context.Context, tenantID string) (*DashboardStats, error)
+	GetRecentActivity(ctx context.Context, tenantID string, limit int) ([]ActivityItem, error)
 }
 
 // Compile-time assertion that *Store implements WebStore.
@@ -909,4 +913,119 @@ func (s *Store) UseInvite(ctx context.Context, inviteID, userID string) error {
 		return fmt.Errorf("web: invite %q not found or already used", inviteID)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+// GetDashboardStats returns aggregate statistics for a tenant's dashboard.
+func (s *Store) GetDashboardStats(ctx context.Context, tenantID string) (*DashboardStats, error) {
+	stats := &DashboardStats{}
+
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM mgmt.campaigns
+		WHERE tenant_id = $1 AND deleted_at IS NULL
+	`, tenantID).Scan(&stats.CampaignCount)
+	if err != nil {
+		return nil, fmt.Errorf("web: dashboard campaign count: %w", err)
+	}
+
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM sessions
+		WHERE tenant_id = $1 AND state = 'running'
+	`, tenantID).Scan(&stats.ActiveSessionCount)
+	if err != nil {
+		// sessions table may not exist yet — treat as zero.
+		stats.ActiveSessionCount = 0
+	}
+
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	err = s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(session_hours), 0) FROM usage_records
+		WHERE tenant_id = $1 AND period >= $2
+	`, tenantID, monthStart).Scan(&stats.HoursUsed)
+	if err != nil {
+		// usage_records table may not exist yet — treat as zero.
+		stats.HoursUsed = 0
+	}
+
+	return stats, nil
+}
+
+// GetRecentActivity returns the most recent activity items for a tenant,
+// synthesised from campaigns, sessions, and users.
+func (s *Store) GetRecentActivity(ctx context.Context, tenantID string, limit int) ([]ActivityItem, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var items []ActivityItem
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, created_at FROM mgmt.campaigns
+		WHERE tenant_id = $1 AND deleted_at IS NULL
+		ORDER BY created_at DESC LIMIT $2
+	`, tenantID, limit)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id, name string
+			var ts time.Time
+			if err := rows.Scan(&id, &name, &ts); err != nil {
+				continue
+			}
+			items = append(items, ActivityItem{
+				ID:          id,
+				Type:        "campaign_created",
+				Description: "Campaign created: " + name,
+				Timestamp:   ts,
+				CampaignID:  id,
+			})
+		}
+	}
+
+	srows, err := s.pool.Query(ctx, `
+		SELECT id, state, started_at, ended_at FROM sessions
+		WHERE tenant_id = $1
+		ORDER BY started_at DESC LIMIT $2
+	`, tenantID, limit)
+	if err == nil {
+		defer srows.Close()
+		for srows.Next() {
+			var ss SessionSummary
+			if err := srows.Scan(&ss.ID, &ss.State, &ss.StartedAt, &ss.EndedAt); err != nil {
+				continue
+			}
+			if ss.State == "running" {
+				items = append(items, ActivityItem{
+					ID:          ss.ID,
+					Type:        "session_started",
+					Description: "Session started",
+					Timestamp:   ss.StartedAt,
+				})
+			} else if ss.EndedAt != nil {
+				items = append(items, ActivityItem{
+					ID:          ss.ID,
+					Type:        "session_ended",
+					Description: "Session ended",
+					Timestamp:   *ss.EndedAt,
+				})
+			}
+		}
+	}
+
+	// Sort by timestamp descending and truncate.
+	for i := 0; i < len(items); i++ {
+		for j := i + 1; j < len(items); j++ {
+			if items[j].Timestamp.After(items[i].Timestamp) {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	return items, nil
 }

@@ -61,6 +61,11 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("PUT /api/v1/auth/me", auth(http.HandlerFunc(s.handleUpdateMe)))
 	s.mux.Handle("PATCH /api/v1/auth/me/preferences", auth(http.HandlerFunc(s.handleUpdatePreferences)))
 
+	// Dashboard.
+	s.mux.Handle("GET /api/v1/dashboard/stats", auth(http.HandlerFunc(s.handleDashboardStats)))
+	s.mux.Handle("GET /api/v1/dashboard/activity", auth(http.HandlerFunc(s.handleDashboardActivity)))
+	s.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(s.handleDashboardActiveSessions)))
+
 	// Users.
 	s.mux.Handle("GET /api/v1/users", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleListUsers))))
 	s.mux.Handle("GET /api/v1/users/{id}", auth(http.HandlerFunc(s.handleGetUser)))
