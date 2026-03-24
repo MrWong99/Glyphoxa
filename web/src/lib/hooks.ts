@@ -3,7 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "./api";
-import type { Campaign, NPC } from "./types";
+import type { Campaign, NPC, BotMode } from "./types";
 
 // Auth
 export function useUser() {
@@ -164,11 +164,12 @@ export function useSession(id: string) {
   });
 }
 
-export function useTranscript(sessionId: string) {
+export function useTranscript(sessionId: string, live?: boolean) {
   return useQuery({
     queryKey: ["sessions", sessionId, "transcript"],
     queryFn: () => api.sessions.transcript(sessionId),
     enabled: !!sessionId,
+    refetchInterval: live ? 5_000 : false,
   });
 }
 
@@ -182,5 +183,35 @@ export function useStopSession() {
       toast.success("Session stopped");
     },
     onError: (err) => toast.error("Failed to stop session", { description: err.message }),
+  });
+}
+
+// Onboarding
+export function useDiscordGuilds() {
+  return useQuery({
+    queryKey: ["onboarding", "guilds"],
+    queryFn: api.onboarding.guilds,
+    retry: false,
+    staleTime: 60 * 1000,
+  });
+}
+
+export function useOnboardingSetup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      botMode,
+      guildIds,
+      botToken,
+    }: {
+      botMode: BotMode;
+      guildIds: string[];
+      botToken?: string;
+    }) => api.onboarding.setup(botMode, guildIds, botToken),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["user"] });
+      toast.success("Setup complete! Welcome to Glyphoxa.");
+    },
+    onError: (err) => toast.error("Setup failed", { description: err.message }),
   });
 }

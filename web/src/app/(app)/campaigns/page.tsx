@@ -5,16 +5,41 @@ import { Plus, Swords, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCampaigns } from "@/lib/hooks";
 import { formatRelativeTime } from "@/lib/utils";
+
+function CampaignCardSkeleton() {
+  return (
+    <Card>
+      <CardContent className="space-y-3 p-6">
+        <div className="flex items-start justify-between">
+          <div className="space-y-2">
+            <div className="h-5 w-32 rounded bg-muted skeleton-shimmer" />
+            <div className="h-4 w-20 rounded bg-muted skeleton-shimmer" />
+          </div>
+          <div className="h-5 w-5 rounded bg-muted skeleton-shimmer" />
+        </div>
+        <div className="h-4 w-48 rounded bg-muted skeleton-shimmer" />
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function CampaignsPage() {
   const { data: campaigns, isLoading, isError, error } = useCampaigns();
 
   return (
     <div className="space-y-6">
+      <Breadcrumbs items={[{ label: "Campaigns" }]} />
+
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Campaigns</h1>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Campaigns</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Manage your tabletop RPG campaigns and their AI voice NPCs.
+          </p>
+        </div>
         <Button render={<Link href="/campaigns/new" />}>
             <Plus className="mr-1 h-4 w-4" />
             New Campaign
@@ -23,11 +48,9 @@ export default function CampaignsPage() {
 
       {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {[1, 2, 3].map((i) => (
-            <Card key={i} className="animate-pulse">
-              <CardContent className="h-40 p-6" />
-            </Card>
-          ))}
+          <CampaignCardSkeleton />
+          <CampaignCardSkeleton />
+          <CampaignCardSkeleton />
         </div>
       ) : isError ? (
         <Card className="border-destructive/50">
@@ -43,18 +66,18 @@ export default function CampaignsPage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {campaigns.map((campaign) => (
             <Link key={campaign.id} href={`/campaigns/${campaign.id}`}>
-              <Card className="h-full transition-colors hover:bg-accent/50">
+              <Card className="group h-full transition-all duration-200 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5">
                 <CardContent className="space-y-3 p-6">
                   <div className="flex items-start justify-between">
                     <div>
-                      <h3 className="font-semibold leading-tight">
+                      <h3 className="font-semibold leading-tight group-hover:text-primary transition-colors">
                         {campaign.name}
                       </h3>
                       <p className="mt-1 text-sm text-muted-foreground">
                         {campaign.game_system}
                       </p>
                     </div>
-                    <Swords className="h-5 w-5 text-muted-foreground" />
+                    <Swords className="h-5 w-5 text-muted-foreground/50 transition-colors group-hover:text-primary/50" />
                   </div>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <span>
@@ -71,6 +94,7 @@ export default function CampaignsPage() {
                       variant="default"
                       className="bg-green-600 hover:bg-green-600"
                     >
+                      <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
                       Active session
                     </Badge>
                   )}
@@ -81,10 +105,12 @@ export default function CampaignsPage() {
 
           {/* Create new card */}
           <Link href="/campaigns/new">
-            <Card className="flex h-full items-center justify-center border-dashed transition-colors hover:bg-accent/50">
+            <Card className="flex h-full items-center justify-center border-dashed transition-all duration-200 hover:border-primary/40 hover:bg-primary/5">
               <CardContent className="py-12 text-center">
-                <Plus className="mx-auto h-8 w-8 text-muted-foreground" />
-                <p className="mt-2 text-sm font-medium text-muted-foreground">
+                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
+                  <Plus className="h-6 w-6 text-primary" />
+                </div>
+                <p className="text-sm font-medium text-muted-foreground">
                   Create New Campaign
                 </p>
               </CardContent>
@@ -92,14 +118,16 @@ export default function CampaignsPage() {
           </Link>
         </div>
       ) : (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <Swords className="mx-auto h-12 w-12 text-muted-foreground" />
-            <h3 className="mt-4 text-lg font-medium">No campaigns yet</h3>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Create your first campaign to get started with AI voice NPCs.
+        <Card className="border-dashed">
+          <CardContent className="py-16 text-center">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
+              <Swords className="h-8 w-8 text-primary/60" />
+            </div>
+            <h3 className="text-lg font-medium">No campaigns yet</h3>
+            <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
+              Create your first campaign to get started with AI voice NPCs for your tabletop sessions.
             </p>
-            <Button className="mt-4" render={<Link href="/campaigns/new" />}>
+            <Button className="mt-6" render={<Link href="/campaigns/new" />}>
                 <Plus className="mr-1 h-4 w-4" />
                 Create Campaign
             </Button>

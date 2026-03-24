@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Sparkles } from "lucide-react";
 import { api } from "@/lib/api";
 
 function DiscordIcon({ className }: { className?: string }) {
@@ -58,15 +59,26 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
-      <div className="w-full max-w-md space-y-6">
+      {/* Background gradient effect */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div className="absolute -top-1/2 left-1/2 h-[800px] w-[800px] -translate-x-1/2 rounded-full bg-primary/5 blur-3xl" />
+        <div className="absolute -bottom-1/2 left-1/4 h-[600px] w-[600px] rounded-full bg-[oklch(0.6_0.18_240)]/5 blur-3xl" />
+      </div>
+
+      <div className="relative w-full max-w-md space-y-6">
         <div className="text-center">
-          <h1 className="text-3xl font-bold tracking-tight">Glyphoxa</h1>
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
+            <Sparkles className="h-7 w-7 text-primary" />
+          </div>
+          <h1 className="bg-gradient-to-r from-primary to-[oklch(0.6_0.18_240)] bg-clip-text text-4xl font-bold tracking-tight text-transparent">
+            Glyphoxa
+          </h1>
           <p className="mt-2 text-muted-foreground">
             AI-powered voice NPCs for tabletop RPGs
           </p>
         </div>
 
-        <Card>
+        <Card className="border-border/50 shadow-xl shadow-primary/5">
           <CardHeader>
             <CardTitle className="text-center text-xl">Welcome back</CardTitle>
           </CardHeader>
@@ -124,7 +136,7 @@ export default function LoginPage() {
           </CardContent>
         </Card>
 
-        <p className="text-center text-xs text-muted-foreground">
+        <p className="text-center text-xs text-muted-foreground/70">
           By signing in, you agree to our Terms of Service and Privacy Policy.
         </p>
       </div>

@@ -4,7 +4,7 @@ import { use } from "react";
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Save, Plus, X } from "lucide-react";
+import { Save, Plus, X, Volume2, ImagePlus, Wand2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,7 +18,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCampaign, useCreateNPC } from "@/lib/hooks";
+import { toast } from "sonner";
+
+const personalityTemplates = [
+  { label: "Gruff Guard", text: "A stern but fair guard who has watched over this area for decades. Suspicious of strangers, protective of the townsfolk, speaks in short, clipped sentences." },
+  { label: "Cheerful Innkeeper", text: "A warm and welcoming innkeeper who loves nothing more than a good story and a full tavern. Knows all the local gossip and is always ready with advice." },
+  { label: "Mysterious Merchant", text: "A traveling merchant who deals in rare and unusual goods. Speaks cryptically, knows more than they let on, and always has the right item for the right price." },
+  { label: "Wise Elder", text: "An ancient scholar or village elder with deep knowledge of history and lore. Patient and thoughtful, speaks in measured tones, occasionally shares prophecies." },
+];
 
 export default function NewNPCPage({
   params,
@@ -86,48 +95,73 @@ export default function NewNPCPage({
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
+      <Breadcrumbs
+        items={[
+          { label: "Campaigns", href: "/campaigns" },
+          { label: campaign?.name ?? "Campaign", href: `/campaigns/${campaignId}` },
+          { label: "New NPC" },
+        ]}
+      />
+
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" aria-label="Back to campaign" render={<Link href={`/campaigns/${campaignId}`} />}>
-              <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <div>
-            <p className="text-sm text-muted-foreground">
-              {campaign?.name ?? "Campaign"} / NPCs
-            </p>
-            <h1 className="text-2xl font-bold">New NPC</h1>
-          </div>
-        </div>
+        <h1 className="text-2xl font-bold tracking-tight">New NPC</h1>
         <Button onClick={handleSave} disabled={createNPC.isPending}>
           <Save className="mr-1 h-4 w-4" />
           {createNPC.isPending ? "Creating..." : "Create NPC"}
         </Button>
       </div>
 
-      {/* Identity */}
+      {/* Identity with Avatar Placeholder */}
       <Card>
         <CardHeader><CardTitle>Identity</CardTitle></CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="npc-name">Name</Label>
-            <Input
-              id="npc-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => touch("name")}
-              placeholder="Heinrich der Wächter"
-              aria-invalid={touched.name && !!errors.name}
-            />
-            {touched.name && errors.name && (
-              <p className="text-xs text-destructive">{errors.name}</p>
-            )}
+          <div className="flex gap-4">
+            <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-xl border-2 border-dashed border-border bg-muted/30 transition-colors hover:border-primary/30 hover:bg-primary/5 cursor-pointer" role="button" aria-label="Upload character portrait" tabIndex={0}>
+              <ImagePlus className="h-6 w-6 text-muted-foreground/50" />
+            </div>
+            <div className="flex-1 space-y-2">
+              <Label htmlFor="npc-name">Name</Label>
+              <Input
+                id="npc-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onBlur={() => touch("name")}
+                placeholder="Heinrich der W&auml;chter"
+                aria-invalid={touched.name && !!errors.name}
+              />
+              {touched.name && errors.name && (
+                <p className="text-xs text-destructive">{errors.name}</p>
+              )}
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Personality */}
+      {/* Personality with Templates */}
       <Card>
-        <CardHeader><CardTitle>Personality</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle>Personality</CardTitle>
+            <div className="flex gap-1.5">
+              {personalityTemplates.map((t) => (
+                <Button
+                  key={t.label}
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => {
+                    setPersonality(t.text);
+                    toast.info(`Template "${t.label}" applied`);
+                  }}
+                >
+                  <Wand2 className="mr-1 h-3 w-3" />
+                  {t.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </CardHeader>
         <CardContent className="space-y-2">
           <Textarea
             value={personality}
@@ -148,7 +182,7 @@ export default function NewNPCPage({
         </CardContent>
       </Card>
 
-      {/* Voice */}
+      {/* Voice with Preview */}
       <Card>
         <CardHeader><CardTitle>Voice</CardTitle></CardHeader>
         <CardContent className="space-y-4">
@@ -166,14 +200,27 @@ export default function NewNPCPage({
             </div>
             <div className="space-y-2">
               <Label htmlFor="voice-id">Voice ID</Label>
-              <Input
-                id="voice-id"
-                value={voiceId}
-                onChange={(e) => setVoiceId(e.target.value)}
-                onBlur={() => touch("voiceId")}
-                placeholder="Helmut"
-                aria-invalid={touched.voiceId && !!errors.voiceId}
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="voice-id"
+                  value={voiceId}
+                  onChange={(e) => setVoiceId(e.target.value)}
+                  onBlur={() => touch("voiceId")}
+                  placeholder="Helmut"
+                  aria-invalid={touched.voiceId && !!errors.voiceId}
+                  className="flex-1"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  disabled={!voiceId.trim()}
+                  aria-label="Preview voice"
+                  onClick={() => toast.info("Voice preview coming soon")}
+                >
+                  <Volume2 className="h-4 w-4" />
+                </Button>
+              </div>
               {touched.voiceId && errors.voiceId && (
                 <p className="text-xs text-destructive">{errors.voiceId}</p>
               )}
@@ -196,11 +243,11 @@ export default function NewNPCPage({
                   role="radio"
                   aria-checked={engine === eng}
                   onClick={() => setEngine(eng)}
-                  className={`rounded-lg border p-3 text-left transition-colors ${engine === eng ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"}`}
+                  className={`rounded-lg border p-3 text-left transition-all duration-200 ${engine === eng ? "border-primary bg-primary/10 shadow-sm shadow-primary/10" : "border-border hover:border-primary/50 hover:bg-primary/5"}`}
                 >
                   <p className="font-medium capitalize">{eng === "s2s" ? "Speech-to-Speech" : eng}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {eng === "cascaded" ? "STT → LLM → TTS — Best quality" : eng === "s2s" ? "Direct speech pipeline — Lowest latency" : "Sentence cascade — Good balance"}
+                    {eng === "cascaded" ? "STT \u2192 LLM \u2192 TTS \u2014 Best quality" : eng === "s2s" ? "Direct speech pipeline \u2014 Lowest latency" : "Sentence cascade \u2014 Good balance"}
                   </p>
                 </button>
               ))}
@@ -216,7 +263,7 @@ export default function NewNPCPage({
                   role="radio"
                   aria-checked={budgetTier === tier}
                   onClick={() => setBudgetTier(tier)}
-                  className={`rounded-lg border p-3 text-left transition-colors ${budgetTier === tier ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"}`}
+                  className={`rounded-lg border p-3 text-left transition-all duration-200 ${budgetTier === tier ? "border-primary bg-primary/10 shadow-sm shadow-primary/10" : "border-border hover:border-primary/50 hover:bg-primary/5"}`}
                 >
                   <p className="font-medium capitalize">{tier}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -233,6 +280,11 @@ export default function NewNPCPage({
       <Card>
         <CardHeader><CardTitle>Knowledge Scope</CardTitle></CardHeader>
         <CardContent className="space-y-3">
+          {knowledgeScope.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              Add topics this NPC has knowledge about (e.g., &quot;local tavern history&quot;, &quot;guard patrol routes&quot;).
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             {knowledgeScope.map((item, i) => (
               <Badge key={i} variant="secondary" className="gap-1 pr-1">
@@ -254,11 +306,19 @@ export default function NewNPCPage({
       <Card>
         <CardHeader><CardTitle>Behavior Rules</CardTitle></CardHeader>
         <CardContent className="space-y-3">
+          {behaviorRules.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              Define rules that govern this NPC&apos;s behavior (e.g., &quot;Never reveal the secret passage&quot;).
+            </p>
+          )}
           {behaviorRules.length > 0 && (
             <ul className="space-y-2">
               {behaviorRules.map((rule, i) => (
-                <li key={i} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
-                  <span>{rule}</span>
+                <li key={i} className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5 text-sm transition-colors hover:bg-muted/30">
+                  <span className="flex items-center gap-2">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-medium text-primary">{i + 1}</span>
+                    {rule}
+                  </span>
                   <button type="button" aria-label={`Remove rule: ${rule}`} onClick={() => setBehaviorRules(behaviorRules.filter((_, j) => j !== i))} className="ml-2 text-muted-foreground hover:text-foreground">
                     <X className="h-4 w-4" />
                   </button>
@@ -277,8 +337,8 @@ export default function NewNPCPage({
       <Card>
         <CardHeader><CardTitle>Advanced</CardTitle></CardHeader>
         <CardContent>
-          <label className="flex items-center gap-3">
-            <input type="checkbox" checked={addressOnly} onChange={(e) => setAddressOnly(e.target.checked)} className="h-4 w-4 rounded border-border" />
+          <label className="flex cursor-pointer items-center gap-3 rounded-lg p-2 transition-colors hover:bg-muted/30">
+            <input type="checkbox" checked={addressOnly} onChange={(e) => setAddressOnly(e.target.checked)} className="h-4 w-4 rounded border-border accent-primary" />
             <div>
               <p className="text-sm font-medium">Address Only</p>
               <p className="text-xs text-muted-foreground">NPC only responds when directly addressed by name</p>
