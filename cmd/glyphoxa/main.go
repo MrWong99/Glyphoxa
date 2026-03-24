@@ -363,12 +363,6 @@ func runGateway(cfg *config.Config) int {
 	var sessionCtrlsMu sync.Mutex
 	var sessionCtrls []*gw.GatewaySessionController
 
-	ctrlRegistry := gw.NewSessionControllerRegistry()
-
-	ctrlRegistry := gw.NewSessionControllerRegistry()
-
-	ctrlRegistry := gw.NewSessionControllerRegistry()
-
 	// ctrlRegistry maps tenant IDs to session controllers for the web
 	// management service to dispatch session start/stop via gRPC.
 	ctrlRegistry := gw.NewSessionControllerRegistry()
@@ -410,9 +404,6 @@ func runGateway(cfg *config.Config) int {
 		sessionCtrlsMu.Lock()
 		sessionCtrls = append(sessionCtrls, sessionCtrl)
 		sessionCtrlsMu.Unlock()
-		ctrlRegistry.Register(tenant.ID, sessionCtrl)
-		ctrlRegistry.Register(tenant.ID, sessionCtrl)
-		ctrlRegistry.Register(tenant.ID, sessionCtrl)
 		ctrlRegistry.Register(tenant.ID, sessionCtrl)
 
 		// Session start/stop commands.
@@ -704,7 +695,6 @@ func runGateway(cfg *config.Config) int {
 	sessionCtrlsMu.Lock()
 	ctrls := append([]*gw.GatewaySessionController(nil), sessionCtrls...)
 	sessionCtrlsMu.Unlock()
-		ctrlRegistry.Register(tenant.ID, sessionCtrl)
 	for _, ctrl := range ctrls {
 		ctrl.StopAll(shutdownCtx)
 	}

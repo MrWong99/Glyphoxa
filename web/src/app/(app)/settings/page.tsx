@@ -124,7 +124,7 @@ export default function SettingsPage() {
 
           <div className="space-y-2">
             <Label htmlFor="locale">Language</Label>
-            <Select value={locale} onValueChange={setLocale}>
+            <Select value={locale} onValueChange={(v) => v && setLocale(v)}>
               <SelectTrigger id="locale">
                 <SelectValue />
               </SelectTrigger>
