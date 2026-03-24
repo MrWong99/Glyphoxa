@@ -56,14 +56,14 @@ func WithQueueCapacity(n int) Option {
 type PriorityMixer struct {
 	output func(audio.AudioFrame) // callback that receives audio frames for playback
 
-	mu             sync.Mutex
-	queue          segmentHeap
-	seq            uint64              // monotonic counter for FIFO ordering
-	gap            time.Duration       // base silence gap between segments
-	playing        *audio.AudioSegment // currently playing segment, or nil
-	playingPri     int                 // priority of the currently playing segment
-	cancelPlaying   chan struct{}   // closed to interrupt the current segment
-	bargeInHandlers []func(string) // all registered barge-in callbacks
+	mu              sync.Mutex
+	queue           segmentHeap
+	seq             uint64              // monotonic counter for FIFO ordering
+	gap             time.Duration       // base silence gap between segments
+	playing         *audio.AudioSegment // currently playing segment, or nil
+	playingPri      int                 // priority of the currently playing segment
+	cancelPlaying   chan struct{}       // closed to interrupt the current segment
+	bargeInHandlers []func(string)      // all registered barge-in callbacks
 
 	notify chan struct{} // signalled when a new segment is enqueued or interrupt fires
 	done   chan struct{} // closed by Close to stop the dispatch goroutine

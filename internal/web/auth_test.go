@@ -128,9 +128,9 @@ func TestDiscordUser_DisplayName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		user       DiscordUser
-		wantName   string
+		name     string
+		user     DiscordUser
+		wantName string
 	}{
 		{
 			name:     "prefers global name",
