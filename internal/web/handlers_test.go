@@ -76,22 +76,38 @@ func (m *mockNPCStore) Upsert(_ context.Context, def *npcstore.NPCDefinition) er
 	return m.Create(context.Background(), def)
 }
 
+// mockVoicePreviewProvider is a mock VoicePreviewProvider for tests.
+type mockVoicePreviewProvider struct{}
+
+// Compile-time assertion.
+var _ VoicePreviewProvider = (*mockVoicePreviewProvider)(nil)
+
+func (m *mockVoicePreviewProvider) SynthesizePreview(_ context.Context, _ string, _ npcstore.VoiceConfig) ([]byte, string, error) {
+	return []byte("fake-audio-bytes"), "audio/mpeg", nil
+}
+
 // mockWebStore is a simple in-memory implementation of WebStore for tests.
 type mockWebStore struct {
-	users       map[string]*User
-	campaigns   map[string]*Campaign
-	sessions    []SessionSummary
-	transcripts map[string][]TranscriptEntry
-	usage       []UsageRecord
-	invites     map[string]*Invite
+	users             map[string]*User
+	campaigns         map[string]*Campaign
+	sessions          []SessionSummary
+	transcripts       map[string][]TranscriptEntry
+	usage             []UsageRecord
+	invites           map[string]*Invite
+	loreDocs          map[string]*LoreDocument
+	campaignNPCLinks  map[string][]CampaignNPCLink // keyed by campaign_id
+	knowledgeEntities map[string][]KnowledgeEntity // keyed by campaign_id
 }
 
 func newMockWebStore() *mockWebStore {
 	return &mockWebStore{
-		users:       make(map[string]*User),
-		campaigns:   make(map[string]*Campaign),
-		transcripts: make(map[string][]TranscriptEntry),
-		invites:     make(map[string]*Invite),
+		users:             make(map[string]*User),
+		campaigns:         make(map[string]*Campaign),
+		transcripts:       make(map[string][]TranscriptEntry),
+		invites:           make(map[string]*Invite),
+		loreDocs:          make(map[string]*LoreDocument),
+		campaignNPCLinks:  make(map[string][]CampaignNPCLink),
+		knowledgeEntities: make(map[string][]KnowledgeEntity),
 	}
 }
 
@@ -229,6 +245,9 @@ func (m *mockWebStore) CreateCampaign(_ context.Context, c *Campaign) error {
 	if c.ID == "" {
 		c.ID = "camp-" + c.Name
 	}
+	now := time.Now().UTC()
+	c.CreatedAt = now
+	c.UpdatedAt = now
 	m.campaigns[c.ID] = c
 	return nil
 }
@@ -241,7 +260,7 @@ func (m *mockWebStore) GetCampaign(_ context.Context, tenantID, id string) (*Cam
 	return c, nil
 }
 
-func (m *mockWebStore) ListCampaigns(_ context.Context, tenantID string) ([]Campaign, error) {
+func (m *mockWebStore) ListCampaigns(_ context.Context, tenantID string, _ CursorPage) ([]Campaign, error) {
 	var result []Campaign
 	for _, c := range m.campaigns {
 		if c.TenantID == tenantID {
@@ -256,7 +275,7 @@ func (m *mockWebStore) UpdateCampaign(_ context.Context, c *Campaign) error {
 	return nil
 }
 
-func (m *mockWebStore) DeleteCampaign(_ context.Context, tenantID, id string) error {
+func (m *mockWebStore) DeleteCampaign(_ context.Context, _, id string) error {
 	delete(m.campaigns, id)
 	return nil
 }
@@ -296,6 +315,104 @@ func (m *mockWebStore) GetUsage(_ context.Context, tenantID string, from, to tim
 	return result, nil
 }
 
+// Lore document mocks.
+
+func (m *mockWebStore) CreateLoreDocument(_ context.Context, doc *LoreDocument) error {
+	if doc.ID == "" {
+		doc.ID = "lore-" + doc.Title
+	}
+	now := time.Now().UTC()
+	doc.CreatedAt = now
+	doc.UpdatedAt = now
+	m.loreDocs[doc.ID] = doc
+	return nil
+}
+
+func (m *mockWebStore) GetLoreDocument(_ context.Context, campaignID, id string) (*LoreDocument, error) {
+	doc, ok := m.loreDocs[id]
+	if !ok || doc.CampaignID != campaignID {
+		return nil, nil
+	}
+	return doc, nil
+}
+
+func (m *mockWebStore) ListLoreDocuments(_ context.Context, campaignID string) ([]LoreDocument, error) {
+	var result []LoreDocument
+	for _, doc := range m.loreDocs {
+		if doc.CampaignID == campaignID {
+			result = append(result, *doc)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockWebStore) UpdateLoreDocument(_ context.Context, doc *LoreDocument) error {
+	existing, ok := m.loreDocs[doc.ID]
+	if !ok || existing.CampaignID != doc.CampaignID {
+		return fmt.Errorf("web: lore document %q not found", doc.ID)
+	}
+	doc.UpdatedAt = time.Now().UTC()
+	m.loreDocs[doc.ID] = doc
+	return nil
+}
+
+func (m *mockWebStore) DeleteLoreDocument(_ context.Context, campaignID, id string) error {
+	doc, ok := m.loreDocs[id]
+	if !ok || doc.CampaignID != campaignID {
+		return fmt.Errorf("web: lore document %q not found", id)
+	}
+	delete(m.loreDocs, id)
+	return nil
+}
+
+// Campaign-NPC link mocks.
+
+func (m *mockWebStore) LinkNPCToCampaign(_ context.Context, campaignID, npcID string) error {
+	for _, link := range m.campaignNPCLinks[campaignID] {
+		if link.NPCID == npcID {
+			return nil // ON CONFLICT DO NOTHING
+		}
+	}
+	m.campaignNPCLinks[campaignID] = append(m.campaignNPCLinks[campaignID], CampaignNPCLink{
+		CampaignID: campaignID,
+		NPCID:      npcID,
+		CreatedAt:  time.Now().UTC(),
+	})
+	return nil
+}
+
+func (m *mockWebStore) UnlinkNPCFromCampaign(_ context.Context, campaignID, npcID string) error {
+	links := m.campaignNPCLinks[campaignID]
+	for i, link := range links {
+		if link.NPCID == npcID {
+			m.campaignNPCLinks[campaignID] = append(links[:i], links[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("web: link not found for NPC %q in campaign %q", npcID, campaignID)
+}
+
+func (m *mockWebStore) ListCampaignNPCLinks(_ context.Context, campaignID string) ([]CampaignNPCLink, error) {
+	return m.campaignNPCLinks[campaignID], nil
+}
+
+// Knowledge entity mocks.
+
+func (m *mockWebStore) ListKnowledgeEntities(_ context.Context, _, campaignID string, _ CursorPage) ([]KnowledgeEntity, error) {
+	return m.knowledgeEntities[campaignID], nil
+}
+
+func (m *mockWebStore) DeleteKnowledgeEntity(_ context.Context, _, campaignID, entityID string) error {
+	entities := m.knowledgeEntities[campaignID]
+	for i, e := range entities {
+		if e.ID == entityID {
+			m.knowledgeEntities[campaignID] = append(entities[:i], entities[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("web: knowledge entity %q not found", entityID)
+}
+
 // testServer creates a Server with mock stores for testing.
 func testServer(t *testing.T) (*Server, string) {
 	t.Helper()
@@ -318,11 +435,13 @@ func testServerWithStores(t *testing.T) (*Server, *mockWebStore, *mockNPCStore, 
 	ws := newMockWebStore()
 	ns := newMockNPCStore()
 	srv := &Server{
-		mux:       http.NewServeMux(),
-		cfg:       cfg,
-		store:     ws,
-		npcs:      ns,
-		gatewayHC: &http.Client{Timeout: 5 * time.Second},
+		mux:            http.NewServeMux(),
+		cfg:            cfg,
+		store:          ws,
+		npcs:           ns,
+		gatewayHC:      &http.Client{Timeout: 5 * time.Second},
+		voicePreview:   &mockVoicePreviewProvider{},
+		voicePreviewRL: newVoicePreviewRateLimiter(5, time.Minute),
 	}
 	return srv, ws, ns, secret
 }
@@ -519,7 +638,7 @@ func TestConfigValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "empty — no auth method",
+			name:    "empty - no auth method",
 			cfg:     Config{},
 			wantErr: true,
 		},

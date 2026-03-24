@@ -11,15 +11,28 @@ import (
 
 // Server is the HTTP server for the web management service.
 type Server struct {
-	mux       *http.ServeMux
-	cfg       *Config
-	store     WebStore
-	npcs      npcstore.Store
-	gatewayHC *http.Client // HTTP client for gateway proxy requests.
+	mux            *http.ServeMux
+	cfg            *Config
+	store          WebStore
+	npcs           npcstore.Store
+	gatewayHC      *http.Client // HTTP client for gateway proxy requests.
+	voicePreview   VoicePreviewProvider
+	voicePreviewRL *voicePreviewRateLimiter
+}
+
+// ServerOption configures optional Server dependencies.
+type ServerOption func(*Server)
+
+// WithVoicePreview sets the voice preview provider for audio synthesis.
+func WithVoicePreview(vp VoicePreviewProvider) ServerOption {
+	return func(s *Server) {
+		s.voicePreview = vp
+		s.voicePreviewRL = newVoicePreviewRateLimiter(5, time.Minute)
+	}
 }
 
 // NewServer creates a Server and registers all routes.
-func NewServer(cfg *Config, store WebStore, npcs npcstore.Store) *Server {
+func NewServer(cfg *Config, store WebStore, npcs npcstore.Store, opts ...ServerOption) *Server {
 	s := &Server{
 		mux:   http.NewServeMux(),
 		cfg:   cfg,
@@ -28,6 +41,9 @@ func NewServer(cfg *Config, store WebStore, npcs npcstore.Store) *Server {
 		gatewayHC: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.registerRoutes()
 	return s
@@ -84,6 +100,29 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /api/v1/campaigns/{id}/npcs/{npc_id}", auth(http.HandlerFunc(s.handleGetNPC)))
 	s.mux.Handle("PUT /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(s.handleUpdateNPC))))
 	s.mux.Handle("DELETE /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(s.handleDeleteNPC))))
+
+	// Lore documents (nested under campaigns).
+	s.mux.Handle("POST /api/v1/campaigns/{id}/lore", auth(RequireRole("dm")(http.HandlerFunc(s.handleCreateLoreDocument))))
+	s.mux.Handle("GET /api/v1/campaigns/{id}/lore", auth(http.HandlerFunc(s.handleListLoreDocuments)))
+	s.mux.Handle("GET /api/v1/campaigns/{id}/lore/{lore_id}", auth(http.HandlerFunc(s.handleGetLoreDocument)))
+	s.mux.Handle("PUT /api/v1/campaigns/{id}/lore/{lore_id}", auth(RequireRole("dm")(http.HandlerFunc(s.handleUpdateLoreDocument))))
+	s.mux.Handle("DELETE /api/v1/campaigns/{id}/lore/{lore_id}", auth(RequireRole("dm")(http.HandlerFunc(s.handleDeleteLoreDocument))))
+
+	// Campaign-NPC links.
+	s.mux.Handle("POST /api/v1/campaigns/{id}/npcs/{npc_id}/link", auth(RequireRole("dm")(http.HandlerFunc(s.handleLinkNPCToCampaign))))
+	s.mux.Handle("DELETE /api/v1/campaigns/{id}/npcs/{npc_id}/link", auth(RequireRole("dm")(http.HandlerFunc(s.handleUnlinkNPCFromCampaign))))
+	s.mux.Handle("GET /api/v1/campaigns/{id}/linked-npcs", auth(http.HandlerFunc(s.handleListLinkedNPCs)))
+
+	// Knowledge management.
+	s.mux.Handle("GET /api/v1/campaigns/{id}/knowledge", auth(http.HandlerFunc(s.handleListKnowledgeEntities)))
+	s.mux.Handle("DELETE /api/v1/campaigns/{id}/knowledge/{entity_id}", auth(RequireRole("dm")(http.HandlerFunc(s.handleDeleteKnowledgeEntity))))
+	s.mux.Handle("POST /api/v1/campaigns/{id}/knowledge/rebuild", auth(RequireRole("dm")(http.HandlerFunc(s.handleRebuildKnowledgeGraph))))
+
+	// Voice preview.
+	s.mux.Handle("POST /api/v1/npcs/{npc_id}/voice-preview", auth(RequireRole("dm")(http.HandlerFunc(s.handleVoicePreview))))
+
+	// NPC templates.
+	s.mux.Handle("GET /api/v1/npc-templates", auth(http.HandlerFunc(s.handleListNPCTemplates)))
 
 	// Sessions.
 	s.mux.Handle("GET /api/v1/sessions", auth(http.HandlerFunc(s.handleListSessions)))
