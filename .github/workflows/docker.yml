@@ -10,8 +10,11 @@ permissions:
   packages: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Glyphoxa voice engine (main binary)
+  # ---------------------------------------------------------------------------
   docker:
-    name: Build and push
+    name: Build and push (glyphoxa)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -51,5 +54,53 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Glyphoxa web management service (Next.js frontend + Go API backend)
+  # ---------------------------------------------------------------------------
+  docker-web:
+    name: Build and push (glyphoxa-web)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta-web
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/mrwong99/glyphoxa-web
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.web
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
