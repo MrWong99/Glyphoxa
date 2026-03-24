@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCreateCampaign } from "@/lib/hooks";
 import type { GameSystem } from "@/lib/types";
 
@@ -63,12 +63,14 @@ export default function NewCampaignPage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
-      <div className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" aria-label="Back to campaigns" render={<Link href="/campaigns" />}>
-            <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <h1 className="text-2xl font-bold">New Campaign</h1>
-      </div>
+      <Breadcrumbs
+        items={[
+          { label: "Campaigns", href: "/campaigns" },
+          { label: "New Campaign" },
+        ]}
+      />
+
+      <h1 className="text-2xl font-bold tracking-tight">New Campaign</h1>
 
       <Card>
         <CardHeader>
@@ -137,7 +139,7 @@ export default function NewCampaignPage() {
               />
             </div>
 
-            <div className="flex justify-end gap-2">
+            <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" render={<Link href="/campaigns" />}>
                 Cancel
               </Button>

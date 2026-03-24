@@ -8,6 +8,7 @@ import {
   ScrollText,
   Settings,
   X,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -32,23 +33,28 @@ export function Sidebar({ open, onClose }: SidebarProps) {
       {/* Mobile overlay */}
       {open && (
         <div
-          className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
           onClick={onClose}
         />
       )}
 
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border bg-sidebar text-sidebar-foreground transition-transform lg:static lg:translate-x-0",
+          "fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-transform duration-300 ease-in-out lg:static lg:translate-x-0",
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <div className="flex h-14 items-center justify-between border-b border-border px-4">
+        <div className="flex h-14 items-center justify-between border-b border-sidebar-border px-4">
           <Link
             href="/dashboard"
-            className="flex items-center gap-2 font-semibold text-lg"
+            className="flex items-center gap-2.5 font-bold text-lg tracking-tight"
           >
-            <span className="text-primary">Glyphoxa</span>
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/15">
+              <Sparkles className="h-4 w-4 text-primary" />
+            </div>
+            <span className="bg-gradient-to-r from-primary to-[oklch(0.6_0.18_240)] bg-clip-text text-transparent">
+              Glyphoxa
+            </span>
           </Link>
           <Button
             variant="ghost"
@@ -61,7 +67,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
           </Button>
         </div>
 
-        <nav className="flex-1 space-y-1 p-3">
+        <nav className="flex-1 space-y-1 p-3" role="navigation" aria-label="Main navigation">
           {navItems.map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + "/");
@@ -71,21 +77,28 @@ export function Sidebar({ open, onClose }: SidebarProps) {
                 href={item.href}
                 onClick={onClose}
                 className={cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200",
                   active
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
+                    ? "bg-primary/12 text-primary"
+                    : "text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground",
                 )}
+                aria-current={active ? "page" : undefined}
               >
-                <item.icon className="h-4 w-4" />
+                {active && (
+                  <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-primary" />
+                )}
+                <item.icon className={cn(
+                  "h-4 w-4 transition-colors",
+                  active ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground/80",
+                )} />
                 {item.label}
               </Link>
             );
           })}
         </nav>
 
-        <div className="border-t border-border p-4">
-          <p className="text-xs text-muted-foreground">
+        <div className="border-t border-sidebar-border p-4">
+          <p className="text-xs text-muted-foreground/60">
             Glyphoxa Web Management
           </p>
         </div>

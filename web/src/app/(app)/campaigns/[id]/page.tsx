@@ -3,7 +3,7 @@
 import { useState, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Save, Trash2, Users, ScrollText } from "lucide-react";
+import { Save, Trash2, Users, ScrollText } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCampaign, useUpdateCampaign, useDeleteCampaign } from "@/lib/hooks";
 import { NPCList } from "./npcs/npc-list";
 import { CampaignSessions } from "./sessions";
@@ -79,13 +80,15 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
+      <Breadcrumbs
+        items={[
+          { label: "Campaigns", href: "/campaigns" },
+          { label: campaign.name },
+        ]}
+      />
+
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" aria-label="Back to campaigns" render={<Link href="/campaigns" />}>
-              <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h1 className="text-2xl font-bold">{campaign.name}</h1>
-        </div>
+        <h1 className="text-2xl font-bold tracking-tight">{campaign.name}</h1>
         {dirty && (
           <Button onClick={handleSave} disabled={updateCampaign.isPending}>
             <Save className="mr-1 h-4 w-4" />
@@ -245,17 +248,21 @@ export default function CampaignDetailPage({
 
   if (isLoading) {
     return (
-      <div className="mx-auto max-w-4xl animate-pulse space-y-4">
-        <div className="h-8 w-48 rounded bg-muted" />
-        <div className="h-64 rounded bg-muted" />
+      <div className="mx-auto max-w-4xl space-y-4">
+        <div className="h-4 w-48 rounded bg-muted skeleton-shimmer" />
+        <div className="h-8 w-64 rounded bg-muted skeleton-shimmer" />
+        <div className="h-64 rounded bg-muted skeleton-shimmer" />
       </div>
     );
   }
 
   if (!campaign) {
     return (
-      <div className="text-center">
+      <div className="flex flex-col items-center gap-3 py-16 text-center">
         <p className="text-muted-foreground">Campaign not found.</p>
+        <Button variant="outline" render={<Link href="/campaigns" />}>
+          Back to Campaigns
+        </Button>
       </div>
     );
   }

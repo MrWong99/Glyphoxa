@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Plus, Mic, Brain, Zap } from "lucide-react";
+import { Plus, Mic, Brain, Zap, Sparkles } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,8 +30,15 @@ export function NPCList({ campaignId }: NPCListProps) {
     return (
       <div className="grid gap-4 sm:grid-cols-2">
         {[1, 2].map((i) => (
-          <Card key={i} className="animate-pulse">
-            <CardContent className="h-32 p-6" />
+          <Card key={i}>
+            <CardContent className="space-y-3 p-6">
+              <div className="flex items-start justify-between">
+                <div className="h-5 w-24 rounded bg-muted skeleton-shimmer" />
+                <div className="h-5 w-16 rounded bg-muted skeleton-shimmer" />
+              </div>
+              <div className="h-4 w-full rounded bg-muted skeleton-shimmer" />
+              <div className="h-4 w-2/3 rounded bg-muted skeleton-shimmer" />
+            </CardContent>
           </Card>
         ))}
       </div>
@@ -57,10 +64,10 @@ export function NPCList({ campaignId }: NPCListProps) {
                 key={npc.id}
                 href={`/campaigns/${campaignId}/npcs/${npc.id}`}
               >
-                <Card className="h-full transition-colors hover:bg-accent/50">
+                <Card className="group h-full transition-all duration-200 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5">
                   <CardContent className="space-y-2 p-4">
                     <div className="flex items-start justify-between">
-                      <h3 className="font-semibold">{npc.name}</h3>
+                      <h3 className="font-semibold group-hover:text-primary transition-colors">{npc.name}</h3>
                       <Badge variant="secondary">
                         {engineLabels[npc.engine] ?? npc.engine}
                       </Badge>
@@ -85,12 +92,16 @@ export function NPCList({ campaignId }: NPCListProps) {
           })}
         </div>
       ) : (
-        <Card>
-          <CardContent className="py-8 text-center">
-            <p className="text-sm text-muted-foreground">
-              No NPCs yet. Create your first NPC to bring your campaign to life.
+        <Card className="border-dashed">
+          <CardContent className="py-12 text-center">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
+              <Sparkles className="h-6 w-6 text-primary/60" />
+            </div>
+            <p className="font-medium">No NPCs yet</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Create your first NPC to bring your campaign to life.
             </p>
-            <Button className="mt-3" size="sm" render={<Link href={`/campaigns/${campaignId}/npcs/new`} />}>
+            <Button className="mt-4" size="sm" render={<Link href={`/campaigns/${campaignId}/npcs/new`} />}>
                 <Plus className="mr-1 h-4 w-4" />
                 Create NPC
             </Button>
