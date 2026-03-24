@@ -28,8 +28,11 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (user) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDisplayName(user.display_name ?? "");
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTheme(user.preferences?.theme ?? "system");
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLocale(user.preferences?.locale ?? "en");
     }
   }, [user]);

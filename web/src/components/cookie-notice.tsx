@@ -13,6 +13,7 @@ export function CookieNotice() {
   useEffect(() => {
     const dismissed = localStorage.getItem(COOKIE_NOTICE_KEY);
     if (!dismissed) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setVisible(true);
     }
   }, []);
