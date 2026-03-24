@@ -10,19 +10,19 @@ import (
 
 // NPCCreateRequest is the JSON body for creating an NPC.
 type NPCCreateRequest struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	Personality    string            `json:"personality"`
-	Engine         string            `json:"engine"`
-	Voice          npcstore.VoiceConfig `json:"voice"`
-	KnowledgeScope []string          `json:"knowledge_scope"`
-	SecretKnowledge []string         `json:"secret_knowledge"`
-	BehaviorRules  []string          `json:"behavior_rules"`
-	Tools          []string          `json:"tools"`
-	BudgetTier     string            `json:"budget_tier"`
-	GMHelper       bool              `json:"gm_helper"`
-	AddressOnly    bool              `json:"address_only"`
-	Attributes     map[string]any    `json:"attributes"`
+	ID              string               `json:"id"`
+	Name            string               `json:"name"`
+	Personality     string               `json:"personality"`
+	Engine          string               `json:"engine"`
+	Voice           npcstore.VoiceConfig `json:"voice"`
+	KnowledgeScope  []string             `json:"knowledge_scope"`
+	SecretKnowledge []string             `json:"secret_knowledge"`
+	BehaviorRules   []string             `json:"behavior_rules"`
+	Tools           []string             `json:"tools"`
+	BudgetTier      string               `json:"budget_tier"`
+	GMHelper        bool                 `json:"gm_helper"`
+	AddressOnly     bool                 `json:"address_only"`
+	Attributes      map[string]any       `json:"attributes"`
 }
 
 func (s *Server) handleCreateNPC(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +118,15 @@ func (s *Server) handleGetNPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	campaignID := r.PathValue("id")
+
+	// Verify the campaign belongs to this tenant.
+	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
+	if err != nil || campaign == nil {
+		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+		return
+	}
+
 	npcID := r.PathValue("npc_id")
 	npc, err := s.npcs.Get(r.Context(), npcID)
 	if err != nil {
@@ -125,7 +134,7 @@ func (s *Server) handleGetNPC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to get NPC")
 		return
 	}
-	if npc == nil {
+	if npc == nil || npc.CampaignID != campaignID {
 		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
 		return
 	}
@@ -140,9 +149,16 @@ func (s *Server) handleUpdateNPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	npcID := r.PathValue("npc_id")
 	campaignID := r.PathValue("id")
 
+	// Verify the campaign belongs to this tenant.
+	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
+	if err != nil || campaign == nil {
+		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+		return
+	}
+
+	npcID := r.PathValue("npc_id")
 	existing, err := s.npcs.Get(r.Context(), npcID)
 	if err != nil || existing == nil {
 		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
@@ -190,13 +206,30 @@ func (s *Server) handleDeleteNPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	campaignID := r.PathValue("id")
+
+	// Verify the campaign belongs to this tenant.
+	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
+	if err != nil || campaign == nil {
+		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+		return
+	}
+
 	npcID := r.PathValue("npc_id")
+
+	// Verify the NPC belongs to this campaign before deleting.
+	existing, err := s.npcs.Get(r.Context(), npcID)
+	if err != nil || existing == nil || existing.CampaignID != campaignID {
+		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
+		return
+	}
+
 	if err := s.npcs.Delete(r.Context(), npcID); err != nil {
 		slog.Error("web: delete npc", "npc_id", npcID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to delete NPC")
 		return
 	}
 
-	slog.Info("web: npc deleted", "npc_id", npcID)
+	slog.Info("web: npc deleted", "npc_id", npcID, "campaign_id", campaignID)
 	w.WriteHeader(http.StatusNoContent)
 }

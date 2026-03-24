@@ -31,6 +31,7 @@ func NewServer(cfg *Config, store *Store, npcs npcstore.Store) *Server {
 // Handler returns the root http.Handler with all middleware applied.
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
+	h = MaxBytesMiddleware(h)
 	h = CORSMiddleware(h)
 	h = LoggingMiddleware(h)
 	return h

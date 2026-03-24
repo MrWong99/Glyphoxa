@@ -15,8 +15,14 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetTenant proxies to the gateway admin API.
+// tenant_admin can only access their own tenant; super_admin can access any.
 func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
+	claims := ClaimsFromContext(r.Context())
 	id := r.PathValue("id")
+	if claims != nil && claims.Role != "super_admin" && claims.TenantID != id {
+		writeError(w, http.StatusForbidden, "forbidden", "cannot access another tenant")
+		return
+	}
 	s.proxyToGateway(w, r, http.MethodGet, "/api/v1/tenants/"+id)
 }
 
@@ -26,8 +32,14 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateTenant proxies to the gateway admin API.
+// tenant_admin can only update their own tenant; super_admin can update any.
 func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
+	claims := ClaimsFromContext(r.Context())
 	id := r.PathValue("id")
+	if claims != nil && claims.Role != "super_admin" && claims.TenantID != id {
+		writeError(w, http.StatusForbidden, "forbidden", "cannot modify another tenant")
+		return
+	}
 	s.proxyToGatewayWithBody(w, r, http.MethodPut, "/api/v1/tenants/"+id)
 }
 
