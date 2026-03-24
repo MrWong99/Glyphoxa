@@ -6,6 +6,10 @@ import type {
   DashboardStats,
   ActivityItem,
   User,
+  Invite,
+  UserRole,
+  UserPreferences,
+  PaginatedResponse,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
@@ -161,4 +165,39 @@ export const sessions = {
     request<TranscriptEntry[]>(`/sessions/${id}/transcript`),
 };
 
-export const api = { auth, dashboard, campaigns, npcs, sessions };
+// Users
+export const users = {
+  list: (params?: { role?: UserRole; limit?: number; offset?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.role) q.set("role", params.role);
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    const qs = q.toString();
+    return request<PaginatedResponse<User>>(`/users${qs ? `?${qs}` : ""}`);
+  },
+  get: (id: string) => request<User>(`/users/${id}`),
+  update: (id: string, data: { display_name?: string; role?: UserRole }) =>
+    request<User>(`/users/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/users/${id}`, { method: "DELETE" }),
+  invite: (role: UserRole = "viewer") =>
+    request<Invite>("/users/invite", {
+      method: "POST",
+      body: JSON.stringify({ role }),
+    }),
+  updateMe: (data: { display_name: string }) =>
+    request<User>("/auth/me", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  updatePreferences: (prefs: Partial<UserPreferences>) =>
+    request<User>("/auth/me/preferences", {
+      method: "PATCH",
+      body: JSON.stringify(prefs),
+    }),
+};
+
+export const api = { auth, dashboard, campaigns, npcs, sessions, users };

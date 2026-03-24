@@ -19,7 +19,7 @@ func TestHandleMe_Authenticated(t *testing.T) {
 	ws.users["user-1"] = &User{
 		ID:          "user-1",
 		TenantID:    "tenant-1",
-		DiscordID:   "discord-1",
+		DiscordID:   strPtr("discord-1"),
 		DisplayName: "TestUser",
 		Role:        "dm",
 	}

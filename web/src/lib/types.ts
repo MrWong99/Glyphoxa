@@ -1,13 +1,40 @@
 // API types for the Glyphoxa Web Management Service
 
+export type UserRole = "super_admin" | "tenant_admin" | "dm" | "viewer";
+
+export interface UserPreferences {
+  theme?: "light" | "dark" | "system";
+  locale?: string;
+  [key: string]: unknown;
+}
+
 export interface User {
   id: string;
   email: string;
   display_name: string;
   avatar_url: string | null;
-  role: "super_admin" | "tenant_admin" | "dm" | "viewer";
+  role: UserRole;
+  preferences?: UserPreferences;
   tenant_id: string;
   created_at: string;
+  updated_at?: string;
+}
+
+export interface Invite {
+  id: string;
+  tenant_id: string;
+  role: UserRole;
+  created_by: string;
+  token: string;
+  expires_at: string;
+  used_by?: string;
+  used_at?: string;
+  created_at: string;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  total: number;
 }
 
 export interface Campaign {

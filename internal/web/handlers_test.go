@@ -3,7 +3,10 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,6 +83,7 @@ type mockWebStore struct {
 	sessions    []SessionSummary
 	transcripts map[string][]TranscriptEntry
 	usage       []UsageRecord
+	invites     map[string]*Invite
 }
 
 func newMockWebStore() *mockWebStore {
@@ -87,14 +91,18 @@ func newMockWebStore() *mockWebStore {
 		users:       make(map[string]*User),
 		campaigns:   make(map[string]*Campaign),
 		transcripts: make(map[string][]TranscriptEntry),
+		invites:     make(map[string]*Invite),
 	}
 }
 
 func (m *mockWebStore) Ping(_ context.Context) error { return nil }
 
+// strPtr returns a pointer to the given string.
+func strPtr(s string) *string { return &s }
+
 func (m *mockWebStore) UpsertDiscordUser(_ context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error) {
 	id := "user-" + discordID
-	u := &User{ID: id, TenantID: tenantID, DiscordID: discordID, Email: email, DisplayName: displayName, AvatarURL: avatarURL, Role: "dm"}
+	u := &User{ID: id, TenantID: tenantID, DiscordID: strPtr(discordID), Email: strPtr(email), DisplayName: displayName, AvatarURL: strPtr(avatarURL), Role: "dm"}
 	m.users[id] = u
 	return u, nil
 }
@@ -111,6 +119,110 @@ func (m *mockWebStore) GetUser(_ context.Context, id string) (*User, error) {
 		return nil, nil
 	}
 	return u, nil
+}
+
+func (m *mockWebStore) ListUsers(_ context.Context, tenantID, role string, limit, offset int) ([]User, int, error) {
+	var filtered []User
+	for _, u := range m.users {
+		if u.TenantID != tenantID {
+			continue
+		}
+		if role != "" && u.Role != role {
+			continue
+		}
+		filtered = append(filtered, *u)
+	}
+	total := len(filtered)
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	if offset >= len(filtered) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[offset:end], total, nil
+}
+
+func (m *mockWebStore) UpdateUser(_ context.Context, u *User) error {
+	existing, ok := m.users[u.ID]
+	if !ok {
+		return fmt.Errorf("web: user %q not found", u.ID)
+	}
+	if u.DisplayName != "" {
+		existing.DisplayName = u.DisplayName
+	}
+	if u.Role != "" {
+		existing.Role = u.Role
+	}
+	existing.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (m *mockWebStore) DeleteUser(_ context.Context, id string) error {
+	if _, ok := m.users[id]; !ok {
+		return fmt.Errorf("web: user %q not found", id)
+	}
+	delete(m.users, id)
+	return nil
+}
+
+func (m *mockWebStore) UpdateUserPreferences(_ context.Context, id string, prefs json.RawMessage) (*User, error) {
+	u, ok := m.users[id]
+	if !ok {
+		return nil, nil
+	}
+	// Simple merge: just overwrite for test purposes.
+	existing := map[string]any{}
+	if u.Preferences != nil {
+		_ = json.Unmarshal(u.Preferences, &existing)
+	}
+	incoming := map[string]any{}
+	_ = json.Unmarshal(prefs, &incoming)
+	for k, v := range incoming {
+		existing[k] = v
+	}
+	merged, _ := json.Marshal(existing)
+	u.Preferences = merged
+	u.UpdatedAt = time.Now().UTC()
+	return u, nil
+}
+
+func (m *mockWebStore) CreateInvite(_ context.Context, inv *Invite) error {
+	if inv.ID == "" {
+		inv.ID = "inv-" + inv.TenantID
+	}
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	inv.Token = hex.EncodeToString(b)
+	inv.CreatedAt = time.Now().UTC()
+	if inv.ExpiresAt.IsZero() {
+		inv.ExpiresAt = inv.CreatedAt.Add(7 * 24 * time.Hour)
+	}
+	m.invites[inv.ID] = inv
+	return nil
+}
+
+func (m *mockWebStore) GetInviteByToken(_ context.Context, token string) (*Invite, error) {
+	for _, inv := range m.invites {
+		if inv.Token == token && inv.UsedAt == nil {
+			return inv, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockWebStore) UseInvite(_ context.Context, inviteID, userID string) error {
+	inv, ok := m.invites[inviteID]
+	if !ok || inv.UsedAt != nil {
+		return fmt.Errorf("web: invite %q not found or already used", inviteID)
+	}
+	now := time.Now().UTC()
+	inv.UsedBy = &userID
+	inv.UsedAt = &now
+	return nil
 }
 
 func (m *mockWebStore) CreateCampaign(_ context.Context, c *Campaign) error {

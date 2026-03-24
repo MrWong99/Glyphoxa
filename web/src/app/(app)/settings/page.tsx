@@ -1,15 +1,48 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { useUser } from "@/lib/hooks";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useUser, useUpdateMe, useUpdatePreferences } from "@/lib/hooks";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumbs } from "@/components/breadcrumbs";
-import { Settings as SettingsIcon } from "lucide-react";
 
 export default function SettingsPage() {
   const { data: user } = useUser();
+  const updateMe = useUpdateMe();
+  const updatePreferences = useUpdatePreferences();
+
+  const [displayName, setDisplayName] = useState("");
+  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
+  const [locale, setLocale] = useState("en");
+
+  useEffect(() => {
+    if (user) {
+      setDisplayName(user.display_name ?? "");
+      setTheme(user.preferences?.theme ?? "system");
+      setLocale(user.preferences?.locale ?? "en");
+    }
+  }, [user]);
+
+  const handleSaveProfile = () => {
+    if (displayName.trim()) {
+      updateMe.mutate({ display_name: displayName.trim() });
+    }
+  };
+
+  const handleSavePreferences = () => {
+    updatePreferences.mutate({ theme, locale });
+  };
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -45,6 +78,28 @@ export default function SettingsPage() {
               </Badge>
             </div>
           </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="displayName">Display Name</Label>
+            <div className="flex gap-2">
+              <Input
+                id="displayName"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="Your display name"
+              />
+              <Button
+                onClick={handleSaveProfile}
+                disabled={
+                  updateMe.isPending ||
+                  !displayName.trim() ||
+                  displayName.trim() === user?.display_name
+                }
+              >
+                {updateMe.isPending ? "Saving..." : "Save"}
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -52,17 +107,40 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle>Preferences</CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="flex flex-col items-center gap-3 py-6 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
-              <SettingsIcon className="h-6 w-6 text-muted-foreground/50" />
-            </div>
-            <p className="text-sm text-muted-foreground">
-              Additional settings and preferences will be available here in a
-              future update, including API key management, notification
-              preferences, and billing.
-            </p>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="theme">Theme</Label>
+            <Select value={theme} onValueChange={(v) => setTheme(v as "light" | "dark" | "system")}>
+              <SelectTrigger id="theme">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="system">System</SelectItem>
+                <SelectItem value="light">Light</SelectItem>
+                <SelectItem value="dark">Dark</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="locale">Language</Label>
+            <Select value={locale} onValueChange={setLocale}>
+              <SelectTrigger id="locale">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="en">English</SelectItem>
+                <SelectItem value="de">Deutsch</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <Button
+            onClick={handleSavePreferences}
+            disabled={updatePreferences.isPending}
+          >
+            {updatePreferences.isPending ? "Saving..." : "Save Preferences"}
+          </Button>
         </CardContent>
       </Card>
 

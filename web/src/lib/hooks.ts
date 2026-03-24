@@ -3,7 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "./api";
-import type { Campaign, NPC, BotMode } from "./types";
+import type { Campaign, NPC, UserRole, UserPreferences } from "./types";
 
 // Auth
 export function useUser() {
@@ -186,32 +186,69 @@ export function useStopSession() {
   });
 }
 
-// Onboarding
-export function useDiscordGuilds() {
+// Users
+export function useUsers(params?: { role?: UserRole; limit?: number; offset?: number }) {
   return useQuery({
-    queryKey: ["onboarding", "guilds"],
-    queryFn: api.onboarding.guilds,
-    retry: false,
-    staleTime: 60 * 1000,
+    queryKey: ["users", params],
+    queryFn: () => api.users.list(params),
   });
 }
 
-export function useOnboardingSetup() {
+export function useUpdateUser(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      botMode,
-      guildIds,
-      botToken,
-    }: {
-      botMode: BotMode;
-      guildIds: string[];
-      botToken?: string;
-    }) => api.onboarding.setup(botMode, guildIds, botToken),
+    mutationFn: (data: { display_name?: string; role?: UserRole }) =>
+      api.users.update(id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["users"] });
+      toast.success("User updated");
+    },
+    onError: (err) => toast.error("Failed to update user", { description: err.message }),
+  });
+}
+
+export function useDeleteUser() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.users.delete(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["users"] });
+      toast.success("User removed");
+    },
+    onError: (err) => toast.error("Failed to delete user", { description: err.message }),
+  });
+}
+
+export function useCreateInvite() {
+  return useMutation({
+    mutationFn: (role: UserRole) => api.users.invite(role),
+    onSuccess: () => {
+      toast.success("Invite created");
+    },
+    onError: (err) => toast.error("Failed to create invite", { description: err.message }),
+  });
+}
+
+export function useUpdateMe() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { display_name: string }) => api.users.updateMe(data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user"] });
-      toast.success("Setup complete! Welcome to Glyphoxa.");
+      toast.success("Profile updated");
     },
-    onError: (err) => toast.error("Setup failed", { description: err.message }),
+    onError: (err) => toast.error("Failed to update profile", { description: err.message }),
+  });
+}
+
+export function useUpdatePreferences() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (prefs: Partial<UserPreferences>) => api.users.updatePreferences(prefs),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["user"] });
+      toast.success("Preferences saved");
+    },
+    onError: (err) => toast.error("Failed to save preferences", { description: err.message }),
   });
 }

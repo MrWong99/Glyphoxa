@@ -61,6 +61,15 @@ func (s *Server) registerRoutes() {
 	// Auth management.
 	s.mux.Handle("POST /api/v1/auth/refresh", auth(http.HandlerFunc(s.handleRefresh)))
 	s.mux.Handle("GET /api/v1/auth/me", auth(http.HandlerFunc(s.handleMe)))
+	s.mux.Handle("PUT /api/v1/auth/me", auth(http.HandlerFunc(s.handleUpdateMe)))
+	s.mux.Handle("PATCH /api/v1/auth/me/preferences", auth(http.HandlerFunc(s.handleUpdatePreferences)))
+
+	// Users.
+	s.mux.Handle("GET /api/v1/users", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleListUsers))))
+	s.mux.Handle("GET /api/v1/users/{id}", auth(http.HandlerFunc(s.handleGetUser)))
+	s.mux.Handle("PUT /api/v1/users/{id}", auth(http.HandlerFunc(s.handleUpdateUser)))
+	s.mux.Handle("DELETE /api/v1/users/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleDeleteUser))))
+	s.mux.Handle("POST /api/v1/users/invite", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleCreateInvite))))
 
 	// Campaigns.
 	s.mux.Handle("POST /api/v1/campaigns", auth(RequireRole("dm")(http.HandlerFunc(s.handleCreateCampaign))))
