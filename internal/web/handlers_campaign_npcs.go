@@ -31,6 +31,13 @@ func (s *Server) handleLinkNPCToCampaign(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Verify the NPC's home campaign belongs to this tenant (prevent cross-tenant linking).
+	npcCampaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, npc.CampaignID)
+	if err != nil || npcCampaign == nil {
+		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
+		return
+	}
+
 	// Reject linking to the NPC's home campaign.
 	if npc.CampaignID == campaignID {
 		writeError(w, http.StatusBadRequest, "same_campaign", "cannot link NPC to its home campaign")

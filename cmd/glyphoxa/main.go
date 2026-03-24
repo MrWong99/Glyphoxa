@@ -553,36 +553,22 @@ func runGateway(cfg *config.Config) int {
 		grpcOpts = append(grpcOpts, tlsCred)
 	}
 
+	// Shared secret for ManagementService RPCs. When set, callers must
+	// include the secret in gRPC metadata to access management endpoints.
+	mgmtSecret := os.Getenv("GLYPHOXA_GRPC_MGMT_SECRET")
+	if mgmtSecret != "" {
+		slog.Info("management gRPC auth enabled (shared secret)")
+		grpcOpts = append(grpcOpts,
+			grpc.ChainUnaryInterceptor(grpctransport.ManagementAuthUnaryInterceptor(mgmtSecret)),
+			grpc.ChainStreamInterceptor(grpctransport.ManagementAuthStreamInterceptor(mgmtSecret)),
+		)
+	} else {
+		slog.Warn("GLYPHOXA_GRPC_MGMT_SECRET not set — ManagementService RPCs are unauthenticated; restrict network access in production")
+	}
+
 	gwGRPCServer := grpc.NewServer(grpcOpts...)
 	grpctransport.NewGatewayServer(recordingBridge).Register(gwGRPCServer)
 	audioBridgeSrv.Register(gwGRPCServer)
-
-	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
-		Store:      adminStore,
-		Bots:       botConnector,
-		Orch:       orch,
-		UsageStore: usageStore,
-		BotChecker: botMgr,
-		CtrlLookup: ctrlRegistry.Lookup,
-	}).Register(gwGRPCServer)
-
-	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
-		Store:      adminStore,
-		Bots:       botConnector,
-		Orch:       orch,
-		UsageStore: usageStore,
-		BotChecker: botMgr,
-		CtrlLookup: ctrlRegistry.Lookup,
-	}).Register(gwGRPCServer)
-
-	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
-		Store:      adminStore,
-		Bots:       botConnector,
-		Orch:       orch,
-		UsageStore: usageStore,
-		BotChecker: botMgr,
-		CtrlLookup: ctrlRegistry.Lookup,
-	}).Register(gwGRPCServer)
 
 	// Management gRPC service — used by the web management service for
 	// tenant CRUD, session start/stop, usage queries, and bot status.
