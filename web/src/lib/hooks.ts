@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "./api";
+import { hasMinRole } from "./rbac";
 import type { Campaign, NPC, UserRole, UserPreferences } from "./types";
 
 // Auth
@@ -13,6 +14,12 @@ export function useUser() {
     retry: false,
     staleTime: 5 * 60 * 1000,
   });
+}
+
+/** Returns true if the current user has at least the given role. */
+export function useHasRole(minRole: UserRole): boolean {
+  const { data: user } = useUser();
+  return hasMinRole(user?.role, minRole);
 }
 
 // Dashboard

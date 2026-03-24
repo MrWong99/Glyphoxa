@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumbs } from "@/components/breadcrumbs";
-import { useCampaigns } from "@/lib/hooks";
+import { useCampaigns, useHasRole } from "@/lib/hooks";
 import { formatRelativeTime } from "@/lib/utils";
 
 function CampaignCardSkeleton() {
@@ -28,6 +28,7 @@ function CampaignCardSkeleton() {
 
 export default function CampaignsPage() {
   const { data: campaigns, isLoading, isError, error } = useCampaigns();
+  const canCreate = useHasRole("dm");
 
   return (
     <div className="space-y-6">
@@ -40,10 +41,12 @@ export default function CampaignsPage() {
             Manage your tabletop RPG campaigns and their AI voice NPCs.
           </p>
         </div>
-        <Button render={<Link href="/campaigns/new" />}>
-            <Plus className="mr-1 h-4 w-4" />
-            New Campaign
-        </Button>
+        {canCreate && (
+          <Button render={<Link href="/campaigns/new" />}>
+              <Plus className="mr-1 h-4 w-4" />
+              New Campaign
+          </Button>
+        )}
       </div>
 
       {isLoading ? (
@@ -104,18 +107,20 @@ export default function CampaignsPage() {
           ))}
 
           {/* Create new card */}
-          <Link href="/campaigns/new">
-            <Card className="flex h-full items-center justify-center border-dashed transition-all duration-200 hover:border-primary/40 hover:bg-primary/5">
-              <CardContent className="py-12 text-center">
-                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-                  <Plus className="h-6 w-6 text-primary" />
-                </div>
-                <p className="text-sm font-medium text-muted-foreground">
-                  Create New Campaign
-                </p>
-              </CardContent>
-            </Card>
-          </Link>
+          {canCreate && (
+            <Link href="/campaigns/new">
+              <Card className="flex h-full items-center justify-center border-dashed transition-all duration-200 hover:border-primary/40 hover:bg-primary/5">
+                <CardContent className="py-12 text-center">
+                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
+                    <Plus className="h-6 w-6 text-primary" />
+                  </div>
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Create New Campaign
+                  </p>
+                </CardContent>
+              </Card>
+            </Link>
+          )}
         </div>
       ) : (
         <Card className="border-dashed">
@@ -127,10 +132,12 @@ export default function CampaignsPage() {
             <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
               Create your first campaign to get started with AI voice NPCs for your tabletop sessions.
             </p>
-            <Button className="mt-6" render={<Link href="/campaigns/new" />}>
-                <Plus className="mr-1 h-4 w-4" />
-                Create Campaign
-            </Button>
+            {canCreate && (
+              <Button className="mt-6" render={<Link href="/campaigns/new" />}>
+                  <Plus className="mr-1 h-4 w-4" />
+                  Create Campaign
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}

@@ -22,6 +22,7 @@ import {
   useActiveSessions,
   useActivity,
   useStopSession,
+  useHasRole,
 } from "@/lib/hooks";
 import { formatRelativeTime } from "@/lib/utils";
 
@@ -87,6 +88,7 @@ export default function DashboardPage() {
   const { data: activeSessions } = useActiveSessions();
   const { data: activity, isLoading: activityLoading, isError: activityError } = useActivity();
   const stopSession = useStopSession();
+  const canManage = useHasRole("dm");
 
   const usagePercent = Math.min(100, ((stats?.hours_used ?? 0) / (stats?.hours_limit ?? 100)) * 100);
 
@@ -234,15 +236,17 @@ export default function DashboardPage() {
                           <Eye className="mr-1 h-3 w-3" />
                           View
                       </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => stopSession.mutate(session.id)}
-                        disabled={stopSession.isPending}
-                      >
-                        <Square className="mr-1 h-3 w-3" />
-                        Stop
-                      </Button>
+                      {canManage && (
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => stopSession.mutate(session.id)}
+                          disabled={stopSession.isPending}
+                        >
+                          <Square className="mr-1 h-3 w-3" />
+                          Stop
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </CardContent>
@@ -308,21 +312,23 @@ export default function DashboardPage() {
         <div className="space-y-4">
           <h2 className="text-lg font-semibold">Quick Actions</h2>
           <div className="grid gap-3">
-            <Link href="/campaigns/new">
-              <Card className="group cursor-pointer transition-all duration-200 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5">
-                <CardContent className="flex items-center gap-4 p-4">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 transition-colors group-hover:bg-primary/20">
-                    <Plus className="h-5 w-5 text-primary" />
-                  </div>
-                  <div>
-                    <p className="font-medium">New Campaign</p>
-                    <p className="text-sm text-muted-foreground">
-                      Create a new campaign with AI voice NPCs
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
+            {canManage && (
+              <Link href="/campaigns/new">
+                <Card className="group cursor-pointer transition-all duration-200 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5">
+                  <CardContent className="flex items-center gap-4 p-4">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 transition-colors group-hover:bg-primary/20">
+                      <Plus className="h-5 w-5 text-primary" />
+                    </div>
+                    <div>
+                      <p className="font-medium">New Campaign</p>
+                      <p className="text-sm text-muted-foreground">
+                        Create a new campaign with AI voice NPCs
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
+            )}
             <Link href="/sessions">
               <Card className="group cursor-pointer transition-all duration-200 hover:border-primary/30">
                 <CardContent className="flex items-center gap-4 p-4">

@@ -53,6 +53,18 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := r.PathValue("id")
+
+	exists, err := s.store.SessionExists(r.Context(), claims.TenantID, sessionID)
+	if err != nil {
+		slog.Error("web: check session exists", "session_id", sessionID, "err", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "failed to check session")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "not_found", "session not found")
+		return
+	}
+
 	entries, err := s.store.GetTranscript(r.Context(), claims.TenantID, sessionID)
 	if err != nil {
 		slog.Error("web: get transcript", "session_id", sessionID, "err", err)

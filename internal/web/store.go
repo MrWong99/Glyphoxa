@@ -121,6 +121,7 @@ type WebStore interface {
 	UpdateCampaign(ctx context.Context, c *Campaign) error
 	DeleteCampaign(ctx context.Context, tenantID, id string) error
 	ListSessions(ctx context.Context, tenantID string, limit, offset int) ([]SessionSummary, error)
+	SessionExists(ctx context.Context, tenantID, sessionID string) (bool, error)
 	GetTranscript(ctx context.Context, tenantID, sessionID string) ([]TranscriptEntry, error)
 	GetUsage(ctx context.Context, tenantID string, from, to time.Time) ([]UsageRecord, error)
 
@@ -378,7 +379,7 @@ type SessionSummary struct {
 	ID        string     `json:"id"`
 	TenantID  string     `json:"tenant_id"`
 	State     string     `json:"state"`
-	CreatedAt time.Time  `json:"created_at"`
+	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 }
 
@@ -388,10 +389,10 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, limit, offset
 		limit = 25
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, state, created_at, ended_at
+		SELECT id, tenant_id, state, started_at, ended_at
 		FROM sessions
 		WHERE tenant_id = $1
-		ORDER BY created_at DESC
+		ORDER BY started_at DESC
 		LIMIT $2 OFFSET $3
 	`, tenantID, limit, offset)
 	if err != nil {
@@ -402,12 +403,25 @@ func (s *Store) ListSessions(ctx context.Context, tenantID string, limit, offset
 	var sessions []SessionSummary
 	for rows.Next() {
 		var ss SessionSummary
-		if err := rows.Scan(&ss.ID, &ss.TenantID, &ss.State, &ss.CreatedAt, &ss.EndedAt); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.TenantID, &ss.State, &ss.StartedAt, &ss.EndedAt); err != nil {
 			return nil, fmt.Errorf("web: scan session: %w", err)
 		}
 		sessions = append(sessions, ss)
 	}
 	return sessions, rows.Err()
+}
+
+// SessionExists checks whether a session exists for the given tenant.
+func (s *Store) SessionExists(ctx context.Context, tenantID, sessionID string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = $1 AND tenant_id = $2)`,
+		sessionID, tenantID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("web: check session exists: %w", err)
+	}
+	return exists, nil
 }
 
 // TranscriptEntry represents a single entry in a session transcript.
@@ -662,23 +676,21 @@ func (s *Store) ListKnowledgeEntities(ctx context.Context, tenantID, campaignID 
 		}
 		cursorTime := time.UnixMicro(cd.UnixMicros).UTC()
 		query := fmt.Sprintf(`
-			SELECT campaign_id, id, type, name, attributes, created_at, updated_at
+			SELECT id, type, name, attributes, created_at, updated_at
 			FROM %s
-			WHERE campaign_id = $1
-			  AND (created_at, id) < ($3, $4)
+			WHERE (created_at, id) < ($2, $3)
 			ORDER BY created_at DESC, id DESC
-			LIMIT $2
+			LIMIT $1
 		`, table)
-		rows, err = s.pool.Query(ctx, query, campaignID, limit+1, cursorTime, cd.ID)
+		rows, err = s.pool.Query(ctx, query, limit+1, cursorTime, cd.ID)
 	} else {
 		query := fmt.Sprintf(`
-			SELECT campaign_id, id, type, name, attributes, created_at, updated_at
+			SELECT id, type, name, attributes, created_at, updated_at
 			FROM %s
-			WHERE campaign_id = $1
 			ORDER BY created_at DESC, id DESC
-			LIMIT $2
+			LIMIT $1
 		`, table)
-		rows, err = s.pool.Query(ctx, query, campaignID, limit+1)
+		rows, err = s.pool.Query(ctx, query, limit+1)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("web: list knowledge entities: %w", err)
@@ -688,9 +700,10 @@ func (s *Store) ListKnowledgeEntities(ctx context.Context, tenantID, campaignID 
 	var entities []KnowledgeEntity
 	for rows.Next() {
 		var e KnowledgeEntity
-		if err := rows.Scan(&e.CampaignID, &e.ID, &e.Type, &e.Name, &e.Attributes, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Type, &e.Name, &e.Attributes, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("web: scan knowledge entity: %w", err)
 		}
+		e.CampaignID = campaignID
 		entities = append(entities, e)
 	}
 	return entities, rows.Err()
@@ -705,8 +718,8 @@ func (s *Store) DeleteKnowledgeEntity(ctx context.Context, tenantID, campaignID,
 	schema := "tenant_" + tenantID
 	table := pgx.Identifier{schema, "entities"}.Sanitize()
 
-	query := fmt.Sprintf(`DELETE FROM %s WHERE campaign_id = $1 AND id = $2`, table)
-	tag, err := s.pool.Exec(ctx, query, campaignID, entityID)
+	query := fmt.Sprintf(`DELETE FROM %s WHERE id = $1`, table)
+	tag, err := s.pool.Exec(ctx, query, entityID)
 	if err != nil {
 		return fmt.Errorf("web: delete knowledge entity %q: %w", entityID, err)
 	}

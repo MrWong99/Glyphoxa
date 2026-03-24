@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/MrWong99/glyphoxa/internal/agent/npcstore"
 )
 
@@ -53,6 +54,10 @@ func (s *Server) handleCreateNPC(w http.ResponseWriter, r *http.Request) {
 	if len(req.Name) > 255 {
 		writeError(w, http.StatusBadRequest, "name_too_long", "name must be 255 characters or fewer")
 		return
+	}
+
+	if req.ID == "" {
+		req.ID = uuid.NewString()
 	}
 
 	def := &npcstore.NPCDefinition{

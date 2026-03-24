@@ -7,8 +7,10 @@ import (
 )
 
 // LoreCreateRequest is the JSON body for creating a lore document.
+// Accepts both "content" and "content_markdown" for the body text.
 type LoreCreateRequest struct {
 	Title           string `json:"title"`
+	Content         string `json:"content"`
 	ContentMarkdown string `json:"content_markdown"`
 	SortOrder       int    `json:"sort_order"`
 }
@@ -42,6 +44,11 @@ func (s *Server) handleCreateLoreDocument(w http.ResponseWriter, r *http.Request
 	if req.Title == "" {
 		writeError(w, http.StatusBadRequest, "missing_title", "title is required")
 		return
+	}
+
+	// Accept "content" as an alias for "content_markdown".
+	if req.ContentMarkdown == "" && req.Content != "" {
+		req.ContentMarkdown = req.Content
 	}
 
 	doc := &LoreDocument{

@@ -14,6 +14,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useUser } from "@/lib/hooks";
+import { hasMinRole } from "@/lib/rbac";
 import type { UserRole } from "@/lib/types";
 
 interface NavItem {
@@ -36,17 +37,9 @@ interface SidebarProps {
   onClose: () => void;
 }
 
-const roleLevels: Record<UserRole, number> = {
-  viewer: 0,
-  dm: 1,
-  tenant_admin: 2,
-  super_admin: 3,
-};
-
 export function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { data: user } = useUser();
-  const userLevel = roleLevels[user?.role ?? "viewer"];
 
   return (
     <>
@@ -88,7 +81,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         </div>
 
         <nav className="flex-1 space-y-1 p-3" role="navigation" aria-label="Main navigation">
-          {navItems.filter((item) => !item.minRole || userLevel >= roleLevels[item.minRole]).map((item) => {
+          {navItems.filter((item) => !item.minRole || hasMinRole(user?.role, item.minRole)).map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + "/");
             return (
