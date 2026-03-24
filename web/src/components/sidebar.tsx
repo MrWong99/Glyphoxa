@@ -7,16 +7,27 @@ import {
   Swords,
   ScrollText,
   Settings,
+  Users,
   X,
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useUser } from "@/lib/hooks";
+import type { UserRole } from "@/lib/types";
 
-const navItems = [
+interface NavItem {
+  href: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  minRole?: UserRole;
+}
+
+const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/campaigns", label: "Campaigns", icon: Swords },
   { href: "/sessions", label: "Sessions", icon: ScrollText },
+  { href: "/users", label: "Users", icon: Users, minRole: "tenant_admin" },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -25,8 +36,17 @@ interface SidebarProps {
   onClose: () => void;
 }
 
+const roleLevels: Record<UserRole, number> = {
+  viewer: 0,
+  dm: 1,
+  tenant_admin: 2,
+  super_admin: 3,
+};
+
 export function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
+  const { data: user } = useUser();
+  const userLevel = roleLevels[user?.role ?? "viewer"];
 
   return (
     <>
@@ -68,7 +88,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         </div>
 
         <nav className="flex-1 space-y-1 p-3" role="navigation" aria-label="Main navigation">
-          {navItems.map((item) => {
+          {navItems.filter((item) => !item.minRole || userLevel >= roleLevels[item.minRole]).map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + "/");
             return (

@@ -3,6 +3,7 @@
 import { Menu, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,6 +56,11 @@ export function Topbar({ user, onMenuClick }: TopbarProps) {
           <div className="px-2 py-1.5">
             <p className="text-sm font-medium">{user?.display_name}</p>
             <p className="text-xs text-muted-foreground">{user?.email}</p>
+            {user?.role && (
+              <Badge variant="secondary" className="mt-1 text-[10px]">
+                {user.role.replace("_", " ")}
+              </Badge>
+            )}
           </div>
           <DropdownMenuItem
             onClick={async () => {

@@ -73,7 +73,9 @@ func (s *Server) handleListCampaigns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	campaigns, err := s.store.ListCampaigns(r.Context(), claims.TenantID)
+	page := ParseCursorPage(r)
+
+	campaigns, err := s.store.ListCampaigns(r.Context(), claims.TenantID, page)
 	if err != nil {
 		slog.Error("web: list campaigns", "tenant_id", claims.TenantID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to list campaigns")
@@ -83,7 +85,15 @@ func (s *Server) handleListCampaigns(w http.ResponseWriter, r *http.Request) {
 		campaigns = []Campaign{}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"data": campaigns})
+	meta := PageMeta{Limit: page.Limit}
+	if len(campaigns) > page.Limit {
+		meta.HasMore = true
+		last := campaigns[page.Limit-1]
+		meta.NextCursor = EncodeCursor(last.CreatedAt, last.ID)
+		campaigns = campaigns[:page.Limit]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": campaigns, "pagination": meta})
 }
 
 func (s *Server) handleGetCampaign(w http.ResponseWriter, r *http.Request) {

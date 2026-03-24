@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package glyphoxa.v1;
+
+option go_package = "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1;glyphoxav1";
+
+import "google/protobuf/timestamp.proto";
+import "glyphoxa/v1/session.proto";
+
+// ManagementService is the gRPC service exposed by the gateway for the web
+// management service. It replaces the HTTP admin API proxy for tenant CRUD,
+// session control from the web UI, and usage queries.
+service ManagementService {
+  // CreateTenant creates a new tenant record.
+  rpc CreateTenant(CreateTenantRequest) returns (TenantResponse);
+  // GetTenant returns a single tenant by ID.
+  rpc GetTenant(GetTenantRequest) returns (TenantResponse);
+  // ListTenants returns all tenants.
+  rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+  // UpdateTenant updates an existing tenant.
+  rpc UpdateTenant(UpdateTenantRequest) returns (TenantResponse);
+  // DeleteTenant removes a tenant.
+  rpc DeleteTenant(DeleteTenantRequest) returns (DeleteTenantResponse);
+
+  // StartWebSession starts a voice session from the web UI.
+  rpc StartWebSession(StartWebSessionRequest) returns (StartWebSessionResponse);
+  // StopWebSession stops a running session from the web UI.
+  rpc StopWebSession(StopWebSessionRequest) returns (StopWebSessionResponse);
+  // ListActiveSessions returns all non-ended sessions for a tenant.
+  rpc ListActiveSessions(ListActiveSessionsRequest) returns (ListActiveSessionsResponse);
+
+  // GetUsage returns usage metrics for a tenant in a billing period.
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+
+  // GetBotStatus returns the health status of a tenant's Discord bot.
+  rpc GetBotStatus(GetBotStatusRequest) returns (GetBotStatusResponse);
+}
+
+// ── Tenant messages ─────────────────────────────────────────────────────────
+
+// TenantInfo is the wire representation of a tenant record.
+// Bot tokens are never returned — they are write-only.
+message TenantInfo {
+  string id = 1;
+  string license_tier = 2;
+  repeated string guild_ids = 3;
+  string dm_role_id = 4;
+  string campaign_id = 5;
+  double monthly_session_hours = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+message CreateTenantRequest {
+  string id = 1;
+  string license_tier = 2;
+  string bot_token = 3;
+  repeated string guild_ids = 4;
+  string dm_role_id = 5;
+  string campaign_id = 6;
+}
+
+message GetTenantRequest {
+  string id = 1;
+}
+
+message ListTenantsRequest {}
+
+message ListTenantsResponse {
+  repeated TenantInfo tenants = 1;
+}
+
+message UpdateTenantRequest {
+  string id = 1;
+  // Only non-empty fields are applied.
+  string license_tier = 2;
+  string bot_token = 3;
+  repeated string guild_ids = 4;
+  string dm_role_id = 5;
+  string campaign_id = 6;
+  // clear_dm_role_id / clear_campaign_id allow explicitly clearing optional
+  // string fields (since empty string is the proto default).
+  bool clear_dm_role_id = 7;
+  bool clear_campaign_id = 8;
+}
+
+message TenantResponse {
+  TenantInfo tenant = 1;
+}
+
+message DeleteTenantRequest {
+  string id = 1;
+}
+
+message DeleteTenantResponse {}
+
+// ── Session control messages ────────────────────────────────────────────────
+
+message StartWebSessionRequest {
+  string tenant_id = 1;
+  string campaign_id = 2;
+  string guild_id = 3;
+  string channel_id = 4;
+}
+
+message StartWebSessionResponse {
+  string session_id = 1;
+}
+
+message StopWebSessionRequest {
+  string session_id = 1;
+}
+
+message StopWebSessionResponse {}
+
+message ListActiveSessionsRequest {
+  string tenant_id = 1;
+}
+
+message ActiveSessionInfo {
+  string session_id = 1;
+  string tenant_id = 2;
+  string campaign_id = 3;
+  string guild_id = 4;
+  string channel_id = 5;
+  string license_tier = 6;
+  SessionState state = 7;
+  string error = 8;
+  google.protobuf.Timestamp started_at = 9;
+}
+
+message ListActiveSessionsResponse {
+  repeated ActiveSessionInfo sessions = 1;
+}
+
+// ── Usage messages ──────────────────────────────────────────────────────────
+
+message GetUsageRequest {
+  string tenant_id = 1;
+  // period is the first of the billing month (e.g. 2026-03-01T00:00:00Z).
+  // If unset, defaults to the current period.
+  google.protobuf.Timestamp period = 2;
+}
+
+message GetUsageResponse {
+  string tenant_id = 1;
+  google.protobuf.Timestamp period = 2;
+  double session_hours = 3;
+  int64 llm_tokens = 4;
+  double stt_seconds = 5;
+  int64 tts_chars = 6;
+}
+
+// ── Bot status messages ─────────────────────────────────────────────────────
+
+message GetBotStatusRequest {
+  string tenant_id = 1;
+}
+
+enum BotConnectionState {
+  BOT_CONNECTION_STATE_UNSPECIFIED = 0;
+  BOT_CONNECTION_STATE_CONNECTED = 1;
+  BOT_CONNECTION_STATE_DISCONNECTED = 2;
+  BOT_CONNECTION_STATE_ERROR = 3;
+}
+
+message GetBotStatusResponse {
+  string tenant_id = 1;
+  BotConnectionState state = 2;
+  int32 guild_count = 3;
+  string error = 4;
+}
