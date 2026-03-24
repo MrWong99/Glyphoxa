@@ -1,13 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { useUser } from "@/lib/hooks";
 import { Sidebar } from "@/components/sidebar";
 import { Topbar } from "@/components/topbar";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { data: user } = useUser();
+  const { data: user, isLoading } = useUser();
+  const router = useRouter();
+
+  useEffect(() => {
+    // Redirect users without a tenant to onboarding.
+    if (!isLoading && user && !user.tenant_id) {
+      router.replace("/onboarding");
+    }
+  }, [user, isLoading, router]);
 
   return (
     <div className="flex h-screen overflow-hidden">
