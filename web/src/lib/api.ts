@@ -104,7 +104,10 @@ export const auth = {
       // Logout endpoint may not exist; clearing token is sufficient.
     });
   },
-  discordUrl: () => `${API_BASE}/auth/discord`,
+  discordUrl: (invite?: string) =>
+    invite
+      ? `${API_BASE}/auth/discord?invite=${encodeURIComponent(invite)}`
+      : `${API_BASE}/auth/discord`,
   loginApiKey: async (apiKey: string): Promise<AuthResponse> => {
     const res = await request<AuthResponse>("/auth/apikey", {
       method: "POST",
@@ -209,4 +212,53 @@ export const users = {
     }),
 };
 
-export const api = { auth, dashboard, campaigns, npcs, sessions, users };
+// Onboarding
+interface OnboardingResponse {
+  data: {
+    access_token: string;
+    token_type: string;
+    expires_in: number;
+    tenant_id: string;
+  };
+}
+
+export const onboarding = {
+  complete: async (data: {
+    tenant_id: string;
+    display_name: string;
+    license_tier: string;
+  }): Promise<OnboardingResponse> => {
+    const res = await request<OnboardingResponse>("/onboarding/complete", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    setStoredToken(res.data.access_token);
+    return res;
+  },
+};
+
+// Invites (public, no auth required)
+interface InviteValidation {
+  valid: boolean;
+  role: string;
+  tenant_id: string;
+  expires_at: string;
+}
+
+export const invites = {
+  validate: (token: string) =>
+    requestData<InviteValidation>(
+      `/invites/validate?token=${encodeURIComponent(token)}`,
+    ),
+};
+
+export const api = {
+  auth,
+  dashboard,
+  campaigns,
+  npcs,
+  sessions,
+  users,
+  onboarding,
+  invites,
+};

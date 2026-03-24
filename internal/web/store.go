@@ -110,6 +110,7 @@ type WebStore interface {
 	GetUser(ctx context.Context, id string) (*User, error)
 	ListUsers(ctx context.Context, tenantID, role string, limit, offset int) ([]User, int, error)
 	UpdateUser(ctx context.Context, u *User) error
+	UpdateUserTenant(ctx context.Context, userID, tenantID, role string) error
 	DeleteUser(ctx context.Context, tenantID, id string) error
 	UpdateUserPreferences(ctx context.Context, id string, prefs json.RawMessage) (*User, error)
 	CreateInvite(ctx context.Context, inv *Invite) error

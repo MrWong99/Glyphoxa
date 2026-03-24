@@ -17,7 +17,13 @@ function CallbackHandler() {
     }
 
     setStoredToken(token);
-    router.replace("/dashboard");
+
+    // If the backend signals onboarding is needed, redirect there.
+    if (searchParams.get("onboarding") === "true") {
+      router.replace("/onboarding");
+    } else {
+      router.replace("/dashboard");
+    }
   }, [searchParams, router]);
 
   return null;

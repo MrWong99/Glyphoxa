@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -19,25 +19,21 @@ function DiscordIcon({ className }: { className?: string }) {
 
 function KeyIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" />
     </svg>
   );
 }
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // If there's an invite token in the URL, pass it through to Discord OAuth.
+  const inviteToken = searchParams.get("invite") ?? undefined;
 
   async function handleApiKeyLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -49,9 +45,7 @@ export default function LoginPage() {
       await api.auth.loginApiKey(apiKey.trim());
       router.push("/");
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Login failed. Check your API key.",
-      );
+      setError(err instanceof Error ? err.message : "Login failed. Check your API key.");
     } finally {
       setLoading(false);
     }
@@ -59,7 +53,6 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
-      {/* Background gradient effect */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -top-1/2 left-1/2 h-[800px] w-[800px] -translate-x-1/2 rounded-full bg-primary/5 blur-3xl" />
         <div className="absolute -bottom-1/2 left-1/4 h-[600px] w-[600px] rounded-full bg-[oklch(0.6_0.18_240)]/5 blur-3xl" />
@@ -80,59 +73,55 @@ export default function LoginPage() {
 
         <Card className="border-border/50 shadow-xl shadow-primary/5">
           <CardHeader>
-            <CardTitle className="text-center text-xl">Welcome back</CardTitle>
+            <CardTitle className="text-center text-xl">
+              {inviteToken ? "Accept Invite" : "Welcome back"}
+            </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <Button
               className="w-full gap-2"
               size="lg"
               onClick={() => {
-                window.location.href = api.auth.discordUrl();
+                window.location.href = api.auth.discordUrl(inviteToken);
               }}
             >
               <DiscordIcon className="h-5 w-5" />
               Continue with Discord
             </Button>
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t border-border" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-card px-2 text-muted-foreground">
-                  or use an API key
-                </span>
-              </div>
-            </div>
+            {!inviteToken && (
+              <>
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <span className="w-full border-t border-border" />
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-card px-2 text-muted-foreground">or use an API key</span>
+                  </div>
+                </div>
 
-            <form onSubmit={handleApiKeyLogin} className="space-y-3">
-              <div className="space-y-2">
-                <Label htmlFor="api-key">Admin API Key</Label>
-                <Input
-                  id="api-key"
-                  type="password"
-                  placeholder="Enter your API key"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  autoComplete="off"
-                />
-              </div>
-              {error && (
-                <p className="text-sm text-destructive" role="alert">
-                  {error}
-                </p>
-              )}
-              <Button
-                type="submit"
-                variant="outline"
-                className="w-full gap-2"
-                size="lg"
-                disabled={loading || !apiKey.trim()}
-              >
-                <KeyIcon className="h-4 w-4" />
-                {loading ? "Signing in..." : "Sign in with API Key"}
-              </Button>
-            </form>
+                <form onSubmit={handleApiKeyLogin} className="space-y-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="api-key">Admin API Key</Label>
+                    <Input
+                      id="api-key"
+                      type="password"
+                      placeholder="Enter your API key"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      autoComplete="off"
+                    />
+                  </div>
+                  {error && (
+                    <p className="text-sm text-destructive" role="alert">{error}</p>
+                  )}
+                  <Button type="submit" variant="outline" className="w-full gap-2" size="lg" disabled={loading || !apiKey.trim()}>
+                    <KeyIcon className="h-4 w-4" />
+                    {loading ? "Signing in..." : "Sign in with API Key"}
+                  </Button>
+                </form>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -141,5 +130,13 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }
