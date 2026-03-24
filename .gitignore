@@ -46,3 +46,7 @@ deploy/helm/*/Chart.lock
 # Zhi plugin build artifacts
 deploy/zhi/plugin/zhi-config-glyphoxa
 deploy/zhi/plugin/dist/
+
+# Web frontend
+web/node_modules/
+web/.next/
