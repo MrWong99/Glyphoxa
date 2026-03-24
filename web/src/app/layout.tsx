@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/providers";
+import { CookieNotice } from "@/components/cookie-notice";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -34,6 +35,7 @@ export default function RootLayout({
           Skip to content
         </a>
         <Providers>{children}</Providers>
+        <CookieNotice />
       </body>
     </html>
   );
