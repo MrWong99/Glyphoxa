@@ -64,25 +64,30 @@ Written in Go for native concurrency, every pipeline stage runs as a goroutine c
 
 ### Distributed Topology (`--mode=gateway` + `--mode=worker`)
 
-In multi-tenant deployments, the system splits into separate processes:
+In multi-tenant deployments, the system splits into separate processes connected by the **Gateway Audio Bridge**:
 
 ```
-┌─────────────────────────────────┐     ┌──────────────────────────────────┐
-│           Gateway               │     │            Worker                │
-│                                 │     │                                  │
-│  Admin API (tenant CRUD)        │     │  VAD → STT → LLM → TTS → Mixer  │
-│  Bot Manager (per-tenant bots)  │ gRPC│  Session Runtime                 │
-│  Session Orchestrator     ──────┼─────┤  Discord Voice (direct)          │
-│  Usage / Quota Tracking         │     │  MCP Tool Calls                  │
-│  Health + Metrics               │     │  Health + Metrics                │
-└─────────────────────────────────┘     └──────────────────────────────────┘
+┌──────────────────────────────────┐     ┌──────────────────────────────────┐
+│            Gateway               │     │            Worker                │
+│                                  │     │                                  │
+│  Admin API (tenant CRUD)         │     │  VAD → STT → LLM → TTS → Mixer  │
+│  Bot Manager (per-tenant bots)   │     │  Session Runtime                 │
+│  Discord Voice (VoiceManager)    │     │  grpcbridge.Connection           │
+│  Audio Bridge Server ────────────┼─────┤  (audio.Connection over gRPC)    │
+│  Session Orchestrator            │gRPC │  MCP Tool Calls                  │
+│  K8s Job Dispatcher              │     │  Health + Metrics                │
+│  Usage / Quota Tracking          │     │                                  │
+│  Health + Metrics                │     │                                  │
+└──────────────────────────────────┘     └──────────────────────────────────┘
          │                                          │
          └──── PostgreSQL (session state) ──────────┘
 ```
 
-The gateway manages tenant lifecycle and session orchestration. Workers run the voice pipeline and connect directly to Discord voice channels — audio never flows through the gateway. Control signals (start/stop/heartbeat) use gRPC. In `--mode=full`, both roles run in-process with direct function calls instead of gRPC.
+The gateway owns the Discord voice connection via disgo's `VoiceManager` and streams raw opus frames to/from workers over the `AudioBridgeService` gRPC bidirectional stream. Workers never connect to Discord directly — they receive audio through a `grpcbridge.Connection` that implements the same `audio.Connection` interface used by direct Discord connections. Control signals (start/stop/heartbeat) flow over separate `SessionWorkerService` and `SessionGatewayService` RPCs.
 
-See [Multi-Tenant Architecture](multi-tenant.md) for details.
+In `--mode=full`, both roles run in-process with direct function calls instead of gRPC, and the worker opens its own Discord voice connection.
+
+See [Multi-Tenant Architecture](multi-tenant.md) and [Distributed Mode](distributed-mode.md) for details.
 
 ---
 
@@ -213,10 +218,10 @@ The `var _ Interface = (*Impl)(nil)` line ensures the compiler checks that `*Imp
 | Interface | Package | Implementations |
 |-----------|---------|-----------------|
 | `audio.Platform` | `pkg/audio` | `discord.Platform`, `webrtc.Platform` |
-| `audio.Connection` | `pkg/audio` | `discord.Connection`, `webrtc.Connection` |
+| `audio.Connection` | `pkg/audio` | `discord.Connection`, `webrtc.Connection`, `grpcbridge.Connection` |
 | `engine.VoiceEngine` | `internal/engine` | `cascade.Engine`, `s2s.Engine`, `mock.VoiceEngine` |
 | `llm.Provider` | `pkg/provider/llm` | `anyllm.Provider`, `resilience.LLMFallback`, `mock.Provider` |
-| `stt.Provider` | `pkg/provider/stt` | `deepgram.Provider`, `whisper.Provider`, `whisper.NativeProvider`, `resilience.STTFallback`, `mock.Provider` |
+| `stt.Provider` | `pkg/provider/stt` | `elevenlabs.Provider`, `deepgram.Provider`, `whisper.Provider`, `whisper.NativeProvider`, `resilience.STTFallback`, `mock.Provider` |
 | `tts.Provider` | `pkg/provider/tts` | `elevenlabs.Provider`, `coqui.Provider`, `resilience.TTSFallback`, `mock.Provider` |
 | `s2s.Provider` | `pkg/provider/s2s` | `gemini.Provider`, `openai.Provider`, `mock.Provider` |
 | `vad.Engine` | `pkg/provider/vad` | `mock.Engine` (Silero via silero-vad-go) |

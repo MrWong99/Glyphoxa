@@ -39,8 +39,8 @@ Glyphoxa runs in four modes via `--mode`:
 | Mode | Description |
 |------|-------------|
 | `full` (default) | Single-process, self-hosted. No admin API, config from YAML. |
-| `gateway` | Multi-tenant orchestrator. Admin API, bot management, session routing via gRPC. |
-| `worker` | Voice pipeline executor. Receives sessions from gateway, connects to Discord voice. |
+| `gateway` | Multi-tenant orchestrator. Admin API, bot management, Discord voice ownership, audio streaming to workers via gRPC AudioBridge. |
+| `worker` | Voice pipeline executor. Receives audio from gateway via gRPC, runs VAD→STT→LLM→TTS pipeline, streams NPC audio back. |
 | `mcp-gateway` | Shared MCP tool server for workers. Stateless tools over HTTP. |
 
 ## 🏗️ Architecture
@@ -103,7 +103,7 @@ make check
 
 | Component | Providers |
 |-----------|-----------|
-| **STT** | Deepgram Nova-3, whisper.cpp (local) |
+| **STT** | ElevenLabs, Deepgram Nova-3, whisper.cpp (local) |
 | **LLM** | OpenAI, Anthropic, Google Gemini, Ollama (local) — via [any-llm-go](https://github.com/mozilla-ai/any-llm-go) |
 | **TTS** | ElevenLabs, Coqui XTTS (local) |
 | **S2S** | Gemini Live, OpenAI Realtime |
@@ -167,6 +167,7 @@ Comprehensive guides for developers and contributors — see the [full documenta
 | [Audio Pipeline](docs/audio-pipeline.md) | Audio flow, VAD, engine types |
 | [Commands](docs/commands.md) | Discord slash and voice commands |
 | [Deployment](docs/deployment.md) | Docker Compose, Kubernetes / Helm, production setup |
+| [Distributed Mode](docs/distributed-mode.md) | Gateway Audio Bridge, gRPC audio streaming, K8s deployment |
 | [Multi-Tenant](docs/multi-tenant.md) | Gateway, admin API, tenant model, usage tracking |
 | [Observability](docs/observability.md) | Metrics, Grafana, health endpoints |
 | [Testing](docs/testing.md) | Test conventions and patterns |

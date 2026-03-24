@@ -17,8 +17,8 @@ The Glyphoxa binary supports four modes via the `--mode` flag:
 | Mode | Description | Use case |
 |------|-------------|----------|
 | `full` (default) | Single-process. Gateway and worker in one binary. No admin API. Config from YAML. | Self-hosted, open-source |
-| `gateway` | Session orchestrator. Manages Discord bots, routes sessions to workers via gRPC. Serves admin API. | SaaS control plane |
-| `worker` | Voice pipeline executor. Receives session commands from gateway. Connects directly to Discord voice. | SaaS data plane |
+| `gateway` | Session orchestrator. Manages Discord bots, owns Discord voice connections, streams audio to workers via gRPC AudioBridge. Serves admin API. Dispatches K8s Jobs for workers. | SaaS control plane |
+| `worker` | Voice pipeline executor. Receives audio from gateway via gRPC AudioBridge, runs the full voice pipeline (VAD→STT→LLM→TTS→Mixer), streams NPC audio back. Never connects to Discord directly. | SaaS data plane |
 | `mcp-gateway` | Shared MCP tool server. Hosts stateless tools (dice, rules) and proxies external MCP servers over HTTP. | SaaS tool layer |
 
 In `--mode=full`, the gateway and worker contracts are satisfied by in-process function calls (`internal/gateway/local/`), so the full pipeline runs identically to distributed mode without network overhead.
@@ -147,7 +147,7 @@ The `usage.Store` tracks per-tenant resource consumption per billing period (mon
 
 ## gRPC Contract
 
-Gateway and worker communicate via two gRPC services defined in `proto/glyphoxa/v1/session.proto`:
+Gateway and worker communicate via three gRPC services defined in `proto/glyphoxa/v1/session.proto`:
 
 ### SessionWorkerService (worker exposes, gateway calls)
 
@@ -156,6 +156,20 @@ Gateway and worker communicate via two gRPC services defined in `proto/glyphoxa/
 | `StartSession` | gateway → worker | Launch voice pipeline for a session |
 | `StopSession` | gateway → worker | Tear down a running session |
 | `GetStatus` | gateway → worker | Query active session statuses |
+| `ListNPCs` | gateway → worker | List NPCs in a running session |
+| `MuteNPC` / `UnmuteNPC` | gateway → worker | Mute/unmute a specific NPC |
+| `MuteAllNPCs` / `UnmuteAllNPCs` | gateway → worker | Mute/unmute all NPCs in a session |
+| `SpeakNPC` | gateway → worker | Force an NPC to speak pre-written text |
+
+### AudioBridgeService (gateway exposes, worker calls)
+
+| RPC | Direction | Purpose |
+|-----|-----------|---------|
+| `StreamAudio` | bidirectional | Opus audio frames between gateway's Discord voice connection and worker's audio pipeline |
+
+The gateway joins Discord voice via disgo's `VoiceManager` and creates a per-session `SessionBridge` (`internal/gateway/audiobridge/`). When a worker starts, it opens a bidirectional gRPC stream to `StreamAudio`, sends a handshake frame with the `session_id`, and then receives Discord audio (gateway→worker) and sends NPC audio (worker→gateway) over the same stream. The worker uses `grpcbridge.Connection` (`pkg/audio/grpcbridge/`) which implements `audio.Connection`, so the rest of the voice pipeline is identical to direct Discord mode.
+
+Audio frames include `flush` signals for barge-in: when a player interrupts an NPC, the worker sends a flush frame and the gateway discards all buffered outgoing audio.
 
 ### SessionGatewayService (gateway exposes, worker calls)
 
@@ -166,7 +180,7 @@ Gateway and worker communicate via two gRPC services defined in `proto/glyphoxa/
 
 The gRPC client (`grpctransport.Client`) wraps all calls with a circuit breaker to prevent cascading failures when a worker becomes unreachable.
 
-In `--mode=full`, these contracts are satisfied by `local.Client` and `local.Callback` which make direct function calls with no serialisation overhead.
+In `--mode=full`, the `SessionWorkerService` and `SessionGatewayService` contracts are satisfied by `local.Client` and `local.Callback` which make direct function calls with no serialisation overhead. The AudioBridge is not used in full mode — the worker opens its own Discord voice connection directly.
 
 ---
 
@@ -217,18 +231,22 @@ L2 semantic chunks (vector embeddings) are included only for Dedicated tier expo
 | File | Description |
 |------|-------------|
 | `cmd/glyphoxa/main.go` | Mode flag parsing and dispatch |
+| `cmd/glyphoxa/worker_factory.go` | RuntimeFactory — builds voice pipeline, connects AudioBridge or direct Discord |
 | `internal/gateway/admin.go` | Admin API HTTP handlers |
 | `internal/gateway/botmanager.go` | Per-tenant bot lifecycle |
-| `internal/gateway/contract.go` | WorkerClient and GatewayCallback interfaces |
+| `internal/gateway/contract.go` | WorkerClient, NPCController, and GatewayCallback interfaces |
+| `internal/gateway/audiobridge/bridge.go` | Per-session audio bridge server (gateway-side, Discord↔gRPC) |
+| `internal/gateway/dispatch/dispatcher.go` | K8s Job dispatcher for worker pods |
 | `internal/gateway/sessionorch/orchestrator.go` | Session lifecycle and constraints |
 | `internal/gateway/usage/quota_guard.go` | Quota enforcement wrapper |
 | `internal/gateway/grpctransport/client.go` | gRPC WorkerClient with circuit breaker |
-| `internal/gateway/local/client.go` | In-process WorkerClient for full mode |
+| `internal/gateway/local/local.go` | In-process WorkerClient for full mode |
 | `internal/session/runtime.go` | Voice pipeline lifecycle |
 | `internal/session/worker_handler.go` | gRPC handler managing Runtime instances |
+| `pkg/audio/grpcbridge/connection.go` | Worker-side gRPC audio connection (implements audio.Connection) |
 | `pkg/memory/export/` | Campaign archive read/write |
 | `proto/glyphoxa/v1/session.proto` | gRPC service and message definitions |
 
 ---
 
-**See also:** [Architecture](architecture.md) · [Deployment](deployment.md) · [Observability](observability.md) · [Configuration](configuration.md)
+**See also:** [Architecture](architecture.md) · [Distributed Mode](distributed-mode.md) · [Deployment](deployment.md) · [Observability](observability.md) · [Configuration](configuration.md)
