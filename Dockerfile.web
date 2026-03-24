@@ -1,0 +1,66 @@
+# =============================================================================
+# Multi-stage build for Glyphoxa Web Management Service
+# =============================================================================
+#
+# Combines the Next.js frontend (standalone mode) with the Go API backend
+# in a single image. Next.js serves the frontend on port 3000 and proxies
+# /api/* requests to the Go backend on port 8090 (via next.config.ts rewrites).
+#
+# Both processes are managed by a lightweight entrypoint script.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build Next.js frontend (standalone output)
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 2: Build Go backend (no CGO required)
+# ---------------------------------------------------------------------------
+FROM golang:1.26 AS backend-build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 go build \
+    -o /out/glyphoxa-web \
+    -ldflags='-s -w' \
+    ./cmd/glyphoxa-web
+
+# ---------------------------------------------------------------------------
+# Stage 3: Final runtime image
+# ---------------------------------------------------------------------------
+FROM node:22-slim
+
+RUN groupadd -r glyphoxa && useradd -r -g glyphoxa -m glyphoxa
+
+# Copy Go backend binary.
+COPY --from=backend-build /out/glyphoxa-web /usr/local/bin/glyphoxa-web
+
+# Copy Next.js standalone server and static assets.
+COPY --from=frontend-build /app/.next/standalone /app
+COPY --from=frontend-build /app/.next/static /app/.next/static
+
+# Next.js standalone defaults to port 3000, Go backend to 8090.
+ENV HOSTNAME="0.0.0.0"
+ENV PORT=3000
+
+USER glyphoxa
+WORKDIR /app
+
+EXPOSE 3000 8090
+
+# Start Go API backend in background, Next.js frontend in foreground.
+CMD /usr/local/bin/glyphoxa-web & exec node server.js

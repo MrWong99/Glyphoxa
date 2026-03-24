@@ -3,11 +3,15 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs onnx-libs install-lint proto proto-check proto-lint
+.PHONY: build build-web test lint vet fmt check clean whisper-libs dave-libs onnx-libs install-lint proto proto-check proto-lint web-install web-dev web-build web-lint
 
-# Build
+# Build voice engine
 build:
 	go build -o bin/glyphoxa ./cmd/glyphoxa
+
+# Build web management service (no CGO required)
+build-web:
+	CGO_ENABLED=0 go build -o bin/glyphoxa-web ./cmd/glyphoxa-web
 
 # Run all tests with race detector
 test:
@@ -141,6 +145,26 @@ proto-check:
 # Lint protobuf definitions.
 proto-lint:
 	buf lint
+
+# ---------------------------------------------------------------------------
+# Web frontend (Next.js)
+# ---------------------------------------------------------------------------
+
+# Install web frontend dependencies
+web-install:
+	cd web && npm ci
+
+# Run web frontend dev server
+web-dev:
+	cd web && npm run dev
+
+# Build web frontend for production
+web-build:
+	cd web && npm run build
+
+# Lint web frontend
+web-lint:
+	cd web && npm run lint
 
 # Clean build artifacts
 clean:
