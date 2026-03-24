@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -9,9 +10,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
-	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 )
 
 // DialGateway establishes a gRPC connection to the gateway's ManagementService.
@@ -36,8 +37,19 @@ func DialGateway(cfg *Config) (pb.ManagementServiceClient, *grpc.ClientConn, err
 
 	// Send shared secret in gRPC metadata for ManagementService auth.
 	if cfg.GatewaySharedSecret != "" {
+		secret := cfg.GatewaySharedSecret
 		opts = append(opts, grpc.WithUnaryInterceptor(
-			grpctransport.MgmtSecretUnaryClientInterceptor(cfg.GatewaySharedSecret),
+			func(
+				ctx context.Context,
+				method string,
+				req, reply any,
+				cc *grpc.ClientConn,
+				invoker grpc.UnaryInvoker,
+				callOpts ...grpc.CallOption,
+			) error {
+				ctx = metadata.AppendToOutgoingContext(ctx, "x-mgmt-secret", secret)
+				return invoker(ctx, method, req, reply, cc, callOpts...)
+			},
 		))
 	}
 

@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/MrWong99/glyphoxa/internal/agent/npcstore"
+	"github.com/google/uuid"
 )
 
 // NPCCreateRequest is the JSON body for creating an NPC.
