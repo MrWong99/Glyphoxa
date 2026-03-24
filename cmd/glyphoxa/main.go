@@ -363,6 +363,16 @@ func runGateway(cfg *config.Config) int {
 	var sessionCtrlsMu sync.Mutex
 	var sessionCtrls []*gw.GatewaySessionController
 
+	ctrlRegistry := gw.NewSessionControllerRegistry()
+
+	ctrlRegistry := gw.NewSessionControllerRegistry()
+
+	ctrlRegistry := gw.NewSessionControllerRegistry()
+
+	// ctrlRegistry maps tenant IDs to session controllers for the web
+	// management service to dispatch session start/stop via gRPC.
+	ctrlRegistry := gw.NewSessionControllerRegistry()
+
 	// Configure per-tenant slash command wiring.
 	botConnector.SetCommandSetup(func(gwBot *gw.GatewayBot, tenant gw.Tenant) {
 		router := gwBot.Router()
@@ -400,6 +410,10 @@ func runGateway(cfg *config.Config) int {
 		sessionCtrlsMu.Lock()
 		sessionCtrls = append(sessionCtrls, sessionCtrl)
 		sessionCtrlsMu.Unlock()
+		ctrlRegistry.Register(tenant.ID, sessionCtrl)
+		ctrlRegistry.Register(tenant.ID, sessionCtrl)
+		ctrlRegistry.Register(tenant.ID, sessionCtrl)
+		ctrlRegistry.Register(tenant.ID, sessionCtrl)
 
 		// Session start/stop commands.
 		commands.NewGatewaySessionCommands(gwBot, sessionCtrl, perms)
@@ -552,6 +566,44 @@ func runGateway(cfg *config.Config) int {
 	grpctransport.NewGatewayServer(recordingBridge).Register(gwGRPCServer)
 	audioBridgeSrv.Register(gwGRPCServer)
 
+	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
+		Store:      adminStore,
+		Bots:       botConnector,
+		Orch:       orch,
+		UsageStore: usageStore,
+		BotChecker: botMgr,
+		CtrlLookup: ctrlRegistry.Lookup,
+	}).Register(gwGRPCServer)
+
+	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
+		Store:      adminStore,
+		Bots:       botConnector,
+		Orch:       orch,
+		UsageStore: usageStore,
+		BotChecker: botMgr,
+		CtrlLookup: ctrlRegistry.Lookup,
+	}).Register(gwGRPCServer)
+
+	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
+		Store:      adminStore,
+		Bots:       botConnector,
+		Orch:       orch,
+		UsageStore: usageStore,
+		BotChecker: botMgr,
+		CtrlLookup: ctrlRegistry.Lookup,
+	}).Register(gwGRPCServer)
+
+	// Management gRPC service — used by the web management service for
+	// tenant CRUD, session start/stop, usage queries, and bot status.
+	grpctransport.NewManagementServer(grpctransport.ManagementServerConfig{
+		Store:      adminStore,
+		Bots:       botConnector,
+		Orch:       orch,
+		UsageStore: usageStore,
+		BotChecker: botMgr,
+		CtrlLookup: ctrlRegistry.Lookup,
+	}).Register(gwGRPCServer)
+
 	go func() {
 		ln, err := net.Listen("tcp", grpcAddr)
 		if err != nil {
@@ -652,6 +704,7 @@ func runGateway(cfg *config.Config) int {
 	sessionCtrlsMu.Lock()
 	ctrls := append([]*gw.GatewaySessionController(nil), sessionCtrls...)
 	sessionCtrlsMu.Unlock()
+		ctrlRegistry.Register(tenant.ID, sessionCtrl)
 	for _, ctrl := range ctrls {
 		ctrl.StopAll(shutdownCtx)
 	}

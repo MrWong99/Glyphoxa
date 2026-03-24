@@ -2,13 +2,83 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
+
+	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// mockMgmtClient implements pb.ManagementServiceClient for testing.
+type mockMgmtClient struct {
+	pb.ManagementServiceClient
+	tenants map[string]*pb.TenantInfo
+}
+
+func newMockMgmtClient() *mockMgmtClient {
+	return &mockMgmtClient{
+		tenants: map[string]*pb.TenantInfo{
+			"t1": {Id: "t1", LicenseTier: "shared", CreatedAt: timestamppb.Now(), UpdatedAt: timestamppb.Now()},
+		},
+	}
+}
+
+func (m *mockMgmtClient) ListTenants(_ context.Context, _ *pb.ListTenantsRequest, _ ...grpc.CallOption) (*pb.ListTenantsResponse, error) {
+	ts := make([]*pb.TenantInfo, 0, len(m.tenants))
+	for _, t := range m.tenants {
+		ts = append(ts, t)
+	}
+	return &pb.ListTenantsResponse{Tenants: ts}, nil
+}
+
+func (m *mockMgmtClient) GetTenant(_ context.Context, req *pb.GetTenantRequest, _ ...grpc.CallOption) (*pb.TenantResponse, error) {
+	t, ok := m.tenants[req.GetId()]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "tenant %q not found", req.GetId())
+	}
+	return &pb.TenantResponse{Tenant: t}, nil
+}
+
+func (m *mockMgmtClient) CreateTenant(_ context.Context, req *pb.CreateTenantRequest, _ ...grpc.CallOption) (*pb.TenantResponse, error) {
+	if _, exists := m.tenants[req.GetId()]; exists {
+		return nil, status.Errorf(codes.AlreadyExists, "tenant %q already exists", req.GetId())
+	}
+	t := &pb.TenantInfo{
+		Id:          req.GetId(),
+		LicenseTier: req.GetLicenseTier(),
+		GuildIds:    req.GetGuildIds(),
+		CreatedAt:   timestamppb.Now(),
+		UpdatedAt:   timestamppb.Now(),
+	}
+	m.tenants[req.GetId()] = t
+	return &pb.TenantResponse{Tenant: t}, nil
+}
+
+func (m *mockMgmtClient) UpdateTenant(_ context.Context, req *pb.UpdateTenantRequest, _ ...grpc.CallOption) (*pb.TenantResponse, error) {
+	t, ok := m.tenants[req.GetId()]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "tenant %q not found", req.GetId())
+	}
+	if req.GetLicenseTier() != "" {
+		t.LicenseTier = req.GetLicenseTier()
+	}
+	return &pb.TenantResponse{Tenant: t}, nil
+}
+
+func (m *mockMgmtClient) DeleteTenant(_ context.Context, req *pb.DeleteTenantRequest, _ ...grpc.CallOption) (*pb.DeleteTenantResponse, error) {
+	if _, ok := m.tenants[req.GetId()]; !ok {
+		return nil, status.Errorf(codes.NotFound, "tenant %q not found", req.GetId())
+	}
+	delete(m.tenants, req.GetId())
+	return &pb.DeleteTenantResponse{}, nil
+}
 
 func TestTenantHandlers_NoGateway(t *testing.T) {
 	t.Parallel()
@@ -31,10 +101,9 @@ func TestTenantHandlers_NoGateway(t *testing.T) {
 			t.Parallel()
 
 			srv, _, _, secret := testServerWithStores(t)
-			// No GatewayURL configured.
+			// No gwClient configured — should return 503.
 			auth := AuthMiddleware(secret)
 
-			// Register all tenant routes.
 			srv.mux.Handle("GET /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleListTenants))))
 			srv.mux.Handle("GET /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleGetTenant))))
 			srv.mux.Handle("POST /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleCreateTenant))))
@@ -59,32 +128,8 @@ func TestTenantHandlers_NoGateway(t *testing.T) {
 	}
 }
 
-func TestTenantHandlers_ProxyToGateway(t *testing.T) {
+func TestTenantHandlers_GRPCClient(t *testing.T) {
 	t.Parallel()
-
-	// Start a fake gateway server. Use t.Cleanup so it stays alive for parallel subtests.
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tenants":
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "t1"}}})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tenants/t1":
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tenants":
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "new-t"}})
-		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/tenants/t1":
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/tenants/t1":
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(gateway.Close)
 
 	tests := []struct {
 		name     string
@@ -95,8 +140,8 @@ func TestTenantHandlers_ProxyToGateway(t *testing.T) {
 	}{
 		{"list tenants", http.MethodGet, "/api/v1/tenants", "", http.StatusOK},
 		{"get tenant", http.MethodGet, "/api/v1/tenants/t1", "", http.StatusOK},
-		{"create tenant", http.MethodPost, "/api/v1/tenants", `{"id":"new-t"}`, http.StatusCreated},
-		{"update tenant", http.MethodPut, "/api/v1/tenants/t1", `{"display_name":"Upd"}`, http.StatusOK},
+		{"create tenant", http.MethodPost, "/api/v1/tenants", `{"id":"new-t","license_tier":"shared"}`, http.StatusCreated},
+		{"update tenant", http.MethodPut, "/api/v1/tenants/t1", `{"license_tier":"dedicated"}`, http.StatusOK},
 		{"delete tenant", http.MethodDelete, "/api/v1/tenants/t1", "", http.StatusNoContent},
 	}
 
@@ -105,8 +150,7 @@ func TestTenantHandlers_ProxyToGateway(t *testing.T) {
 			t.Parallel()
 
 			srv, _, _, secret := testServerWithStores(t)
-			srv.cfg.GatewayURL = gateway.URL
-			srv.gatewayHC = &http.Client{Timeout: 5 * time.Second}
+			srv.gwClient = newMockMgmtClient()
 
 			auth := AuthMiddleware(secret)
 			srv.mux.Handle("GET /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleListTenants))))
@@ -136,13 +180,6 @@ func TestTenantHandlers_ProxyToGateway(t *testing.T) {
 func TestHandleGetTenant_TenantIsolation(t *testing.T) {
 	t.Parallel()
 
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
-	}))
-	t.Cleanup(gateway.Close)
-
 	tests := []struct {
 		name     string
 		userTID  string
@@ -152,7 +189,7 @@ func TestHandleGetTenant_TenantIsolation(t *testing.T) {
 	}{
 		{"tenant_admin own tenant", "t1", "tenant_admin", "t1", http.StatusOK},
 		{"tenant_admin other tenant", "t1", "tenant_admin", "t2", http.StatusForbidden},
-		{"super_admin any tenant", "t1", "super_admin", "t2", http.StatusOK},
+		{"super_admin any tenant", "t1", "super_admin", "t2", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
@@ -160,8 +197,7 @@ func TestHandleGetTenant_TenantIsolation(t *testing.T) {
 			t.Parallel()
 
 			srv, _, _, secret := testServerWithStores(t)
-			srv.cfg.GatewayURL = gateway.URL
-			srv.gatewayHC = &http.Client{Timeout: 5 * time.Second}
+			srv.gwClient = newMockMgmtClient()
 
 			auth := AuthMiddleware(secret)
 			srv.mux.Handle("GET /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleGetTenant))))
@@ -180,13 +216,6 @@ func TestHandleGetTenant_TenantIsolation(t *testing.T) {
 func TestHandleUpdateTenant_TenantIsolation(t *testing.T) {
 	t.Parallel()
 
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
-	}))
-	t.Cleanup(gateway.Close)
-
 	tests := []struct {
 		name     string
 		userTID  string
@@ -196,7 +225,7 @@ func TestHandleUpdateTenant_TenantIsolation(t *testing.T) {
 	}{
 		{"tenant_admin own tenant", "t1", "tenant_admin", "t1", http.StatusOK},
 		{"tenant_admin other tenant", "t1", "tenant_admin", "t2", http.StatusForbidden},
-		{"super_admin any tenant", "t1", "super_admin", "t2", http.StatusOK},
+		{"super_admin any tenant", "t1", "super_admin", "t2", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
@@ -204,14 +233,13 @@ func TestHandleUpdateTenant_TenantIsolation(t *testing.T) {
 			t.Parallel()
 
 			srv, _, _, secret := testServerWithStores(t)
-			srv.cfg.GatewayURL = gateway.URL
-			srv.gatewayHC = &http.Client{Timeout: 5 * time.Second}
+			srv.gwClient = newMockMgmtClient()
 
 			auth := AuthMiddleware(secret)
 			srv.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleUpdateTenant))))
 
 			req := authReq(t, http.MethodPut, "/api/v1/tenants/"+tt.targetID,
-				bytes.NewBufferString(`{"display_name":"Test"}`), secret, "user-1", tt.userTID, tt.role)
+				bytes.NewBufferString(`{"license_tier":"dedicated"}`), secret, "user-1", tt.userTID, tt.role)
 			rr := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rr, req)
 
@@ -252,7 +280,7 @@ func TestHandleCreateTenantSelfService(t *testing.T) {
 			t.Parallel()
 
 			srv, _, _, secret := testServerWithStores(t)
-			// No GatewayURL — self-service should still work, just skip the gateway proxy.
+			// No gwClient — self-service should still work, just skip the gateway call.
 			auth := AuthMiddleware(secret)
 			srv.mux.Handle("POST /api/v1/tenants/self-service", auth(http.HandlerFunc(srv.handleCreateTenantSelfService)))
 
@@ -271,17 +299,8 @@ func TestHandleCreateTenantSelfService(t *testing.T) {
 func TestHandleCreateTenantSelfService_WithGateway(t *testing.T) {
 	t.Parallel()
 
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/tenants" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-	}))
-	t.Cleanup(gateway.Close)
-
 	srv, _, _, secret := testServerWithStores(t)
-	srv.cfg.GatewayURL = gateway.URL
+	srv.gwClient = newMockMgmtClient()
 
 	auth := AuthMiddleware(secret)
 	srv.mux.Handle("POST /api/v1/tenants/self-service", auth(http.HandlerFunc(srv.handleCreateTenantSelfService)))
@@ -330,17 +349,16 @@ func TestTenantHandlers_InsufficientRole(t *testing.T) {
 			t.Parallel()
 
 			srv, _, _, secret := testServerWithStores(t)
-			auth := AuthMiddleware(secret)
+			srv.gwClient = newMockMgmtClient()
 
+			auth := AuthMiddleware(secret)
 			srv.mux.Handle("GET /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleListTenants))))
 			srv.mux.Handle("GET /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleGetTenant))))
 			srv.mux.Handle("POST /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleCreateTenant))))
 			srv.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleUpdateTenant))))
 			srv.mux.Handle("DELETE /api/v1/tenants/{id}", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleDeleteTenant))))
 
-			req := authReq(t, http.MethodGet, tt.path, nil, secret, "user-1", "t1", tt.role)
-			// For POST/PUT/DELETE, use the correct method.
-			req = httptest.NewRequest(tt.method, tt.path, nil)
+			req := httptest.NewRequest(tt.method, tt.path, nil)
 			token := signTestToken(t, secret, "user-1", "t1", tt.role)
 			req.Header.Set("Authorization", "Bearer "+token)
 

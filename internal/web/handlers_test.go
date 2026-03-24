@@ -94,7 +94,7 @@ func (m *mockWebStore) Ping(_ context.Context) error { return nil }
 
 func (m *mockWebStore) UpsertDiscordUser(_ context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error) {
 	id := "user-" + discordID
-	u := &User{ID: id, TenantID: tenantID, DiscordID: discordID, Email: email, DisplayName: displayName, AvatarURL: avatarURL, Role: "dm"}
+	u := &User{ID: id, TenantID: tenantID, DiscordID: &discordID, Email: &email, DisplayName: displayName, AvatarURL: &avatarURL, Role: "dm"}
 	m.users[id] = u
 	return u, nil
 }
@@ -210,7 +210,7 @@ func testServerWithStores(t *testing.T) (*Server, *mockWebStore, *mockNPCStore, 
 		cfg:       cfg,
 		store:     ws,
 		npcs:      ns,
-		gatewayHC: &http.Client{Timeout: 5 * time.Second},
+		
 	}
 	return srv, ws, ns, secret
 }

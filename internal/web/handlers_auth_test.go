@@ -16,10 +16,11 @@ func TestHandleMe_Authenticated(t *testing.T) {
 	srv.mux.Handle("GET /api/v1/auth/me", auth(http.HandlerFunc(srv.handleMe)))
 
 	// Seed user.
+	discordID := "discord-1"
 	ws.users["user-1"] = &User{
 		ID:          "user-1",
 		TenantID:    "tenant-1",
-		DiscordID:   "discord-1",
+		DiscordID:   &discordID,
 		DisplayName: "TestUser",
 		Role:        "dm",
 	}

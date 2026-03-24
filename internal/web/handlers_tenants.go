@@ -2,19 +2,31 @@ package web
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"strings"
+
+	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// handleListTenants proxies to the gateway admin API.
+// handleListTenants calls the gateway ManagementService via gRPC.
 func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
-	s.proxyToGateway(w, r, http.MethodGet, "/api/v1/tenants")
+	if s.gwClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway gRPC not configured")
+		return
+	}
+
+	resp, err := s.gwClient.ListTenants(r.Context(), &pb.ListTenantsRequest{})
+	if err != nil {
+		writeGRPCError(w, "list tenants", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": tenantsFromPB(resp.GetTenants())})
 }
 
-// handleGetTenant proxies to the gateway admin API.
+// handleGetTenant calls the gateway ManagementService via gRPC.
 // tenant_admin can only access their own tenant; super_admin can access any.
 func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFromContext(r.Context())
@@ -23,15 +35,58 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "cannot access another tenant")
 		return
 	}
-	s.proxyToGateway(w, r, http.MethodGet, "/api/v1/tenants/"+id)
+
+	if s.gwClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway gRPC not configured")
+		return
+	}
+
+	resp, err := s.gwClient.GetTenant(r.Context(), &pb.GetTenantRequest{Id: id})
+	if err != nil {
+		writeGRPCError(w, "get tenant", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": tenantFromPB(resp.GetTenant())})
 }
 
-// handleCreateTenant proxies to the gateway admin API.
+// handleCreateTenant calls the gateway ManagementService via gRPC.
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
-	s.proxyToGatewayWithBody(w, r, http.MethodPost, "/api/v1/tenants")
+	if s.gwClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway gRPC not configured")
+		return
+	}
+
+	var req struct {
+		ID          string   `json:"id"`
+		LicenseTier string   `json:"license_tier"`
+		BotToken    string   `json:"bot_token,omitempty"`
+		GuildIDs    []string `json:"guild_ids,omitempty"`
+		DMRoleID    string   `json:"dm_role_id,omitempty"`
+		CampaignID  string   `json:"campaign_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+		return
+	}
+
+	resp, err := s.gwClient.CreateTenant(r.Context(), &pb.CreateTenantRequest{
+		Id:          req.ID,
+		LicenseTier: req.LicenseTier,
+		BotToken:    req.BotToken,
+		GuildIds:    req.GuildIDs,
+		DmRoleId:    req.DMRoleID,
+		CampaignId:  req.CampaignID,
+	})
+	if err != nil {
+		writeGRPCError(w, "create tenant", err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{"data": tenantFromPB(resp.GetTenant())})
 }
 
-// handleUpdateTenant proxies to the gateway admin API.
+// handleUpdateTenant calls the gateway ManagementService via gRPC.
 // tenant_admin can only update their own tenant; super_admin can update any.
 func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFromContext(r.Context())
@@ -40,72 +95,68 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "cannot modify another tenant")
 		return
 	}
-	s.proxyToGatewayWithBody(w, r, http.MethodPut, "/api/v1/tenants/"+id)
+
+	if s.gwClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway gRPC not configured")
+		return
+	}
+
+	var req struct {
+		LicenseTier string   `json:"license_tier,omitempty"`
+		BotToken    string   `json:"bot_token,omitempty"`
+		GuildIDs    []string `json:"guild_ids,omitempty"`
+		DMRoleID    *string  `json:"dm_role_id,omitempty"`
+		CampaignID  *string  `json:"campaign_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+		return
+	}
+
+	grpcReq := &pb.UpdateTenantRequest{
+		Id:          id,
+		LicenseTier: req.LicenseTier,
+		BotToken:    req.BotToken,
+		GuildIds:    req.GuildIDs,
+	}
+	if req.DMRoleID != nil {
+		if *req.DMRoleID == "" {
+			grpcReq.ClearDmRoleId = true
+		} else {
+			grpcReq.DmRoleId = *req.DMRoleID
+		}
+	}
+	if req.CampaignID != nil {
+		if *req.CampaignID == "" {
+			grpcReq.ClearCampaignId = true
+		} else {
+			grpcReq.CampaignId = *req.CampaignID
+		}
+	}
+
+	resp, err := s.gwClient.UpdateTenant(r.Context(), grpcReq)
+	if err != nil {
+		writeGRPCError(w, "update tenant", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": tenantFromPB(resp.GetTenant())})
 }
 
-// handleDeleteTenant proxies to the gateway admin API.
+// handleDeleteTenant calls the gateway ManagementService via gRPC.
 func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
+	if s.gwClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway gRPC not configured")
+		return
+	}
+
 	id := r.PathValue("id")
-	s.proxyToGateway(w, r, http.MethodDelete, "/api/v1/tenants/"+id)
-}
-
-func (s *Server) proxyToGateway(w http.ResponseWriter, r *http.Request, method, path string) {
-	if s.cfg.GatewayURL == "" {
-		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway URL not configured")
+	if _, err := s.gwClient.DeleteTenant(r.Context(), &pb.DeleteTenantRequest{Id: id}); err != nil {
+		writeGRPCError(w, "delete tenant", err)
 		return
 	}
 
-	target := strings.TrimRight(s.cfg.GatewayURL, "/") + path
-	req, err := http.NewRequestWithContext(r.Context(), method, target, nil)
-	if err != nil {
-		slog.Error("web: create gateway request", "err", err)
-		writeError(w, http.StatusInternalServerError, "server_error", "failed to create gateway request")
-		return
-	}
-
-	resp, err := s.gatewayHC.Do(req)
-	if err != nil {
-		slog.Error("web: gateway request failed", "path", path, "err", err)
-		writeError(w, http.StatusBadGateway, "gateway_error", "failed to reach gateway")
-		return
-	}
-	defer resp.Body.Close()
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		slog.Error("web: copy gateway response", "err", err)
-	}
-}
-
-func (s *Server) proxyToGatewayWithBody(w http.ResponseWriter, r *http.Request, method, path string) {
-	if s.cfg.GatewayURL == "" {
-		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway URL not configured")
-		return
-	}
-
-	target := strings.TrimRight(s.cfg.GatewayURL, "/") + path
-	req, err := http.NewRequestWithContext(r.Context(), method, target, r.Body)
-	if err != nil {
-		slog.Error("web: create gateway request", "err", err)
-		writeError(w, http.StatusInternalServerError, "server_error", "failed to create gateway request")
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.gatewayHC.Do(req)
-	if err != nil {
-		slog.Error("web: gateway request failed", "path", path, "err", err)
-		writeError(w, http.StatusBadGateway, "gateway_error", "failed to reach gateway")
-		return
-	}
-	defer resp.Body.Close()
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		slog.Error("web: copy gateway response", "err", err)
-	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleCreateTenantSelfService creates a tenant via the gateway and then
@@ -130,24 +181,15 @@ func (s *Server) handleCreateTenantSelfService(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Proxy creation to gateway if configured.
-	if s.cfg.GatewayURL != "" {
-		gwBody := fmt.Sprintf(`{"id":%q,"license_tier":"shared"}`, req.ID)
-		target := strings.TrimRight(s.cfg.GatewayURL, "/") + "/api/v1/tenants"
-		gwReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, strings.NewReader(gwBody))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "server_error", "failed to create gateway request")
-			return
-		}
-		gwReq.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(gwReq)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "gateway_error", "failed to create tenant in gateway")
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			writeError(w, resp.StatusCode, "gateway_error", "gateway rejected tenant creation")
+	// Create tenant via gateway gRPC if configured.
+	if s.gwClient != nil {
+		if _, err := s.gwClient.CreateTenant(r.Context(), &pb.CreateTenantRequest{
+			Id:          req.ID,
+			LicenseTier: "shared",
+		}); err != nil {
+			st, _ := status.FromError(err)
+			slog.Warn("web: self-service gateway create failed", "tenant_id", req.ID, "err", err)
+			writeError(w, grpcStatusToHTTP(st.Code()), "gateway_error", "gateway rejected tenant creation")
 			return
 		}
 	}
@@ -163,4 +205,63 @@ func (s *Server) handleCreateTenantSelfService(w http.ResponseWriter, r *http.Re
 			"display_name": req.DisplayName,
 		},
 	})
+}
+
+// ── Conversion helpers ──────────────────────────────────────────────────────
+
+func tenantFromPB(t *pb.TenantInfo) map[string]any {
+	if t == nil {
+		return nil
+	}
+	m := map[string]any{
+		"id":                    t.GetId(),
+		"license_tier":          t.GetLicenseTier(),
+		"guild_ids":             t.GetGuildIds(),
+		"dm_role_id":            t.GetDmRoleId(),
+		"campaign_id":           t.GetCampaignId(),
+		"monthly_session_hours": t.GetMonthlySessionHours(),
+		"created_at":            t.GetCreatedAt().AsTime(),
+		"updated_at":            t.GetUpdatedAt().AsTime(),
+	}
+	return m
+}
+
+func tenantsFromPB(ts []*pb.TenantInfo) []map[string]any {
+	result := make([]map[string]any, len(ts))
+	for i, t := range ts {
+		result[i] = tenantFromPB(t)
+	}
+	return result
+}
+
+// writeGRPCError translates a gRPC error to an HTTP error response.
+func writeGRPCError(w http.ResponseWriter, op string, err error) {
+	st, _ := status.FromError(err)
+	httpCode := grpcStatusToHTTP(st.Code())
+	slog.Warn("web: gateway gRPC error", "op", op, "code", st.Code(), "msg", st.Message())
+	writeError(w, httpCode, "gateway_error", st.Message())
+}
+
+// grpcStatusToHTTP maps gRPC status codes to HTTP status codes.
+func grpcStatusToHTTP(c codes.Code) int {
+	switch c {
+	case codes.OK:
+		return http.StatusOK
+	case codes.InvalidArgument:
+		return http.StatusBadRequest
+	case codes.NotFound:
+		return http.StatusNotFound
+	case codes.AlreadyExists:
+		return http.StatusConflict
+	case codes.PermissionDenied:
+		return http.StatusForbidden
+	case codes.Unauthenticated:
+		return http.StatusUnauthorized
+	case codes.FailedPrecondition:
+		return http.StatusPreconditionFailed
+	case codes.Unavailable:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadGateway
+	}
 }

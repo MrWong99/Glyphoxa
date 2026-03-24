@@ -157,6 +157,18 @@ func (bm *BotManager) RouteEventForGuild(tenantID, guildID string, handler func(
 	handler(client)
 }
 
+// IsBotConnected reports whether a tenant has a connected bot and the number
+// of guilds in its allowlist.
+func (bm *BotManager) IsBotConnected(tenantID string) (connected bool, guildCount int) {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+	entry, ok := bm.bots[tenantID]
+	if !ok {
+		return false, 0
+	}
+	return true, len(entry.guildIDs)
+}
+
 // Close removes and shuts down all registered bots gracefully.
 func (bm *BotManager) Close() {
 	bm.mu.Lock()

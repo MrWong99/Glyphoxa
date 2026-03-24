@@ -40,7 +40,24 @@ type Config struct {
 	AdminAPIKey string
 
 	// GatewayURL is the base URL of the gateway's internal admin API.
+	// Deprecated: use GatewayGRPCAddr instead.
 	GatewayURL string
+
+	// GatewayGRPCAddr is the address of the gateway's gRPC server
+	// (e.g. "gateway:50051"). Used for tenant CRUD, session control,
+	// usage queries, and bot status via the ManagementService.
+	GatewayGRPCAddr string
+
+	// GatewayTLSCert is the path to the client TLS certificate for mTLS
+	// to the gateway gRPC server.
+	GatewayTLSCert string
+
+	// GatewayTLSKey is the path to the client TLS private key for mTLS.
+	GatewayTLSKey string
+
+	// GatewayTLSCA is the path to the CA certificate used to verify the
+	// gateway's server certificate.
+	GatewayTLSCA string
 
 	// AllowedOrigins is the list of origins permitted by CORS. An empty list
 	// defaults to ["*"] (allow all), which is acceptable for development but
@@ -68,6 +85,10 @@ func LoadConfig() (*Config, error) {
 		DiscordRedirectURI:  os.Getenv("GLYPHOXA_WEB_DISCORD_REDIRECT_URI"),
 		AdminAPIKey:         adminKey,
 		GatewayURL:          os.Getenv("GLYPHOXA_WEB_GATEWAY_URL"),
+		GatewayGRPCAddr:     os.Getenv("GLYPHOXA_WEB_GATEWAY_GRPC_ADDR"),
+		GatewayTLSCert:      os.Getenv("GLYPHOXA_WEB_GATEWAY_TLS_CERT"),
+		GatewayTLSKey:       os.Getenv("GLYPHOXA_WEB_GATEWAY_TLS_KEY"),
+		GatewayTLSCA:        os.Getenv("GLYPHOXA_WEB_GATEWAY_TLS_CA"),
 		ListenAddr:          os.Getenv("GLYPHOXA_WEB_LISTEN_ADDR"),
 	}
 
@@ -109,6 +130,21 @@ func (c *Config) Validate() error {
 
 	if !hasDiscord && !hasAPIKey {
 		errs = append(errs, fmt.Errorf("at least one auth method required: set Discord OAuth2 vars or GLYPHOXA_WEB_ADMIN_KEY / GLYPHOXA_ADMIN_API_KEY"))
+	}
+
+	// mTLS: if any TLS field is set, all three must be set.
+	tlsFields := []string{c.GatewayTLSCert, c.GatewayTLSKey, c.GatewayTLSCA}
+	var hasAnyTLS bool
+	for _, f := range tlsFields {
+		if f != "" {
+			hasAnyTLS = true
+			break
+		}
+	}
+	if hasAnyTLS {
+		if c.GatewayTLSCert == "" || c.GatewayTLSKey == "" || c.GatewayTLSCA == "" {
+			errs = append(errs, fmt.Errorf("when mTLS is configured, all three vars are required: GLYPHOXA_WEB_GATEWAY_TLS_CERT, _KEY, _CA"))
+		}
 	}
 
 	return errors.Join(errs...)
