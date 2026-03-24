@@ -1,7 +1,11 @@
 "use client";
 
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 
 function DiscordIcon({ className }: { className?: string }) {
@@ -12,7 +16,46 @@ function DiscordIcon({ className }: { className?: string }) {
   );
 }
 
+function KeyIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" />
+    </svg>
+  );
+}
+
 export default function LoginPage() {
+  const router = useRouter();
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleApiKeyLogin(e: React.FormEvent) {
+    e.preventDefault();
+    if (!apiKey.trim()) return;
+
+    setError("");
+    setLoading(true);
+    try {
+      await api.auth.loginApiKey(apiKey.trim());
+      router.push("/");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Login failed. Check your API key.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <div className="w-full max-w-md space-y-6">
@@ -45,16 +88,39 @@ export default function LoginPage() {
               </div>
               <div className="relative flex justify-center text-xs uppercase">
                 <span className="bg-card px-2 text-muted-foreground">
-                  Discord is the primary login method
+                  or use an API key
                 </span>
               </div>
             </div>
 
-            <p className="text-center text-sm text-muted-foreground">
-              Sign in with your Discord account to manage campaigns, NPCs, and
-              voice sessions. Your Discord guilds determine which campaigns you
-              can access.
-            </p>
+            <form onSubmit={handleApiKeyLogin} className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="api-key">Admin API Key</Label>
+                <Input
+                  id="api-key"
+                  type="password"
+                  placeholder="Enter your API key"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              {error && (
+                <p className="text-sm text-destructive" role="alert">
+                  {error}
+                </p>
+              )}
+              <Button
+                type="submit"
+                variant="outline"
+                className="w-full gap-2"
+                size="lg"
+                disabled={loading || !apiKey.trim()}
+              >
+                <KeyIcon className="h-4 w-4" />
+                {loading ? "Signing in..." : "Sign in with API Key"}
+              </Button>
+            </form>
           </CardContent>
         </Card>
 

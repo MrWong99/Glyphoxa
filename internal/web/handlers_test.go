@@ -99,6 +99,12 @@ func (m *mockWebStore) UpsertDiscordUser(_ context.Context, discordID, email, di
 	return u, nil
 }
 
+func (m *mockWebStore) EnsureAdminUser(_ context.Context, tenantID string) (*User, error) {
+	u := &User{ID: adminUserID, TenantID: tenantID, DisplayName: "Admin", Role: "super_admin"}
+	m.users[adminUserID] = u
+	return u, nil
+}
+
 func (m *mockWebStore) GetUser(_ context.Context, id string) (*User, error) {
 	u, ok := m.users[id]
 	if !ok {
@@ -358,13 +364,34 @@ func TestConfigValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid",
+			name: "valid with discord",
 			cfg: Config{
 				DatabaseDSN:         "postgres://localhost/test",
 				JWTSecret:           "a-very-long-jwt-secret-that-is-at-least-32-chars",
 				DiscordClientID:     "id",
 				DiscordClientSecret: "secret",
 				DiscordRedirectURI:  "http://localhost/callback",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with apikey only",
+			cfg: Config{
+				DatabaseDSN: "postgres://localhost/test",
+				JWTSecret:   "a-very-long-jwt-secret-that-is-at-least-32-chars",
+				AdminAPIKey: "my-admin-key",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with both",
+			cfg: Config{
+				DatabaseDSN:         "postgres://localhost/test",
+				JWTSecret:           "a-very-long-jwt-secret-that-is-at-least-32-chars",
+				DiscordClientID:     "id",
+				DiscordClientSecret: "secret",
+				DiscordRedirectURI:  "http://localhost/callback",
+				AdminAPIKey:         "my-admin-key",
 			},
 			wantErr: false,
 		},
@@ -380,7 +407,7 @@ func TestConfigValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "empty",
+			name:    "empty — no auth method",
 			cfg:     Config{},
 			wantErr: true,
 		},
@@ -391,6 +418,14 @@ func TestConfigValidation(t *testing.T) {
 				DiscordClientID:     "id",
 				DiscordClientSecret: "secret",
 				DiscordRedirectURI:  "http://localhost/callback",
+			},
+			wantErr: true,
+		},
+		{
+			name: "no auth method configured",
+			cfg: Config{
+				DatabaseDSN: "postgres://localhost/test",
+				JWTSecret:   "a-very-long-jwt-secret-that-is-at-least-32-chars",
 			},
 			wantErr: true,
 		},

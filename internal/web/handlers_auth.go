@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -168,6 +170,68 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to issue token")
 		return
 	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"access_token": token,
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+			"user":         user,
+		},
+	})
+}
+
+// handleAPIKeyLogin authenticates a user via a shared admin API key and
+// returns a JWT for the super_admin user. This is a fallback for environments
+// where Discord OAuth2 is not configured.
+func (s *Server) handleAPIKeyLogin(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.AdminAPIKey == "" {
+		writeError(w, http.StatusNotFound, "not_configured", "API key login is not enabled")
+		return
+	}
+
+	var body struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "expected JSON with api_key field")
+		return
+	}
+	if body.APIKey == "" {
+		writeError(w, http.StatusBadRequest, "missing_key", "api_key is required")
+		return
+	}
+
+	// Constant-time comparison to prevent timing attacks.
+	if subtle.ConstantTimeCompare([]byte(body.APIKey), []byte(s.cfg.AdminAPIKey)) != 1 {
+		slog.Warn("web: invalid API key login attempt", "remote", r.RemoteAddr)
+		writeError(w, http.StatusUnauthorized, "invalid_key", "invalid API key")
+		return
+	}
+
+	tenantID := "default"
+	user, err := s.store.EnsureAdminUser(r.Context(), tenantID)
+	if err != nil {
+		slog.Error("web: ensure admin user", "err", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "failed to create admin user")
+		return
+	}
+
+	token, err := SignJWT(s.cfg.JWTSecret, Claims{
+		Sub:      user.ID,
+		TenantID: user.TenantID,
+		Role:     user.Role,
+	})
+	if err != nil {
+		slog.Error("web: sign jwt for apikey login", "user_id", user.ID, "err", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "failed to issue token")
+		return
+	}
+
+	slog.Info("web: user authenticated via API key",
+		"user_id", user.ID,
+		"remote", r.RemoteAddr,
+	)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{

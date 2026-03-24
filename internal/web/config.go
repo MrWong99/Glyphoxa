@@ -23,13 +23,21 @@ type Config struct {
 	JWTSecret string
 
 	// DiscordClientID is the Discord OAuth2 application client ID.
+	// Optional when AdminAPIKey is set.
 	DiscordClientID string
 
 	// DiscordClientSecret is the Discord OAuth2 application client secret.
+	// Optional when AdminAPIKey is set.
 	DiscordClientSecret string
 
 	// DiscordRedirectURI is the OAuth2 callback URL registered with Discord.
+	// Optional when AdminAPIKey is set.
 	DiscordRedirectURI string
+
+	// AdminAPIKey is the shared admin key that can be used as a login
+	// fallback when Discord OAuth2 is not configured. Loaded from
+	// GLYPHOXA_WEB_ADMIN_KEY or GLYPHOXA_ADMIN_API_KEY.
+	AdminAPIKey string
 
 	// GatewayURL is the base URL of the gateway's internal admin API.
 	GatewayURL string
@@ -46,12 +54,19 @@ type Config struct {
 // LoadConfig reads configuration from environment variables and validates
 // that all required values are present.
 func LoadConfig() (*Config, error) {
+	// AdminAPIKey: prefer GLYPHOXA_WEB_ADMIN_KEY, fall back to GLYPHOXA_ADMIN_API_KEY.
+	adminKey := os.Getenv("GLYPHOXA_WEB_ADMIN_KEY")
+	if adminKey == "" {
+		adminKey = os.Getenv("GLYPHOXA_ADMIN_API_KEY")
+	}
+
 	cfg := &Config{
 		DatabaseDSN:         os.Getenv("GLYPHOXA_WEB_DATABASE_DSN"),
 		JWTSecret:           os.Getenv("GLYPHOXA_WEB_JWT_SECRET"),
 		DiscordClientID:     os.Getenv("GLYPHOXA_WEB_DISCORD_CLIENT_ID"),
 		DiscordClientSecret: os.Getenv("GLYPHOXA_WEB_DISCORD_CLIENT_SECRET"),
 		DiscordRedirectURI:  os.Getenv("GLYPHOXA_WEB_DISCORD_REDIRECT_URI"),
+		AdminAPIKey:         adminKey,
 		GatewayURL:          os.Getenv("GLYPHOXA_WEB_GATEWAY_URL"),
 		ListenAddr:          os.Getenv("GLYPHOXA_WEB_LISTEN_ADDR"),
 	}
@@ -76,6 +91,7 @@ func LoadConfig() (*Config, error) {
 }
 
 // Validate checks that all required configuration values are set.
+// At least one auth method must be configured: Discord OAuth2 or AdminAPIKey.
 func (c *Config) Validate() error {
 	var errs []error
 	if c.DatabaseDSN == "" {
@@ -86,14 +102,14 @@ func (c *Config) Validate() error {
 	} else if len(c.JWTSecret) < 32 {
 		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_JWT_SECRET must be at least 32 characters"))
 	}
-	if c.DiscordClientID == "" {
-		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_DISCORD_CLIENT_ID is required"))
+
+	// Discord OAuth is only required when no API key fallback is configured.
+	hasDiscord := c.DiscordClientID != "" && c.DiscordClientSecret != "" && c.DiscordRedirectURI != ""
+	hasAPIKey := c.AdminAPIKey != ""
+
+	if !hasDiscord && !hasAPIKey {
+		errs = append(errs, fmt.Errorf("at least one auth method required: set Discord OAuth2 vars or GLYPHOXA_WEB_ADMIN_KEY / GLYPHOXA_ADMIN_API_KEY"))
 	}
-	if c.DiscordClientSecret == "" {
-		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_DISCORD_CLIENT_SECRET is required"))
-	}
-	if c.DiscordRedirectURI == "" {
-		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_DISCORD_REDIRECT_URI is required"))
-	}
+
 	return errors.Join(errs...)
 }

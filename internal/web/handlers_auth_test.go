@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -217,5 +218,119 @@ func TestHandleDiscordCallback_DiscordError(t *testing.T) {
 	}
 	if body.Error.Code != "discord_error" {
 		t.Errorf("error code = %q, want %q", body.Error.Code, "discord_error")
+	}
+}
+
+func TestHandleAPIKeyLogin_Success(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, _ := testServerWithStores(t)
+	srv.cfg.AdminAPIKey = "test-admin-key-12345"
+	srv.mux.HandleFunc("POST /api/v1/auth/apikey", srv.handleAPIKeyLogin)
+
+	body := bytes.NewBufferString(`{"api_key":"test-admin-key-12345"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apikey", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			AccessToken string `json:"access_token"`
+			TokenType   string `json:"token_type"`
+			ExpiresIn   int    `json:"expires_in"`
+			User        User   `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Data.AccessToken == "" {
+		t.Error("expected non-empty access_token")
+	}
+	if resp.Data.TokenType != "Bearer" {
+		t.Errorf("token_type = %q, want %q", resp.Data.TokenType, "Bearer")
+	}
+	if resp.Data.User.Role != "super_admin" {
+		t.Errorf("role = %q, want %q", resp.Data.User.Role, "super_admin")
+	}
+	if resp.Data.User.ID != adminUserID {
+		t.Errorf("user ID = %q, want %q", resp.Data.User.ID, adminUserID)
+	}
+}
+
+func TestHandleAPIKeyLogin_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, _ := testServerWithStores(t)
+	srv.cfg.AdminAPIKey = "correct-key"
+	srv.mux.HandleFunc("POST /api/v1/auth/apikey", srv.handleAPIKeyLogin)
+
+	body := bytes.NewBufferString(`{"api_key":"wrong-key"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apikey", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleAPIKeyLogin_NotConfigured(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, _ := testServerWithStores(t)
+	// AdminAPIKey left empty.
+	srv.mux.HandleFunc("POST /api/v1/auth/apikey", srv.handleAPIKeyLogin)
+
+	body := bytes.NewBufferString(`{"api_key":"anything"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apikey", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleAPIKeyLogin_MissingKey(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, _ := testServerWithStores(t)
+	srv.cfg.AdminAPIKey = "some-key"
+	srv.mux.HandleFunc("POST /api/v1/auth/apikey", srv.handleAPIKeyLogin)
+
+	body := bytes.NewBufferString(`{}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apikey", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPIKeyLogin_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, _ := testServerWithStores(t)
+	srv.cfg.AdminAPIKey = "some-key"
+	srv.mux.HandleFunc("POST /api/v1/auth/apikey", srv.handleAPIKeyLogin)
+
+	body := bytes.NewBufferString(`not json`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/apikey", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 }
