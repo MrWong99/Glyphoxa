@@ -25,10 +25,10 @@ var migrationsFS embed.FS
 type User struct {
 	ID          string     `json:"id"`
 	TenantID    string     `json:"tenant_id"`
-	DiscordID   string     `json:"discord_id,omitempty"`
-	Email       string     `json:"email,omitempty"`
+	DiscordID   *string    `json:"discord_id,omitempty"`
+	Email       *string    `json:"email,omitempty"`
 	DisplayName string     `json:"display_name"`
-	AvatarURL   string     `json:"avatar_url,omitempty"`
+	AvatarURL   *string    `json:"avatar_url,omitempty"`
 	Role        string     `json:"role"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
