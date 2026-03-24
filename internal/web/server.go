@@ -53,6 +53,7 @@ func (s *Server) registerRoutes() {
 	// Auth endpoints (unauthenticated).
 	s.mux.HandleFunc("GET /api/v1/auth/discord", s.handleDiscordLogin)
 	s.mux.HandleFunc("GET /api/v1/auth/discord/callback", s.handleDiscordCallback)
+	s.mux.HandleFunc("POST /api/v1/auth/apikey", s.handleAPIKeyLogin)
 
 	// Authenticated endpoints — wrap with auth middleware.
 	auth := AuthMiddleware(s.cfg.JWTSecret)

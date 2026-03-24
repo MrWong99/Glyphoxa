@@ -51,6 +51,7 @@ type Campaign struct {
 type WebStore interface {
 	Ping(ctx context.Context) error
 	UpsertDiscordUser(ctx context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error)
+	EnsureAdminUser(ctx context.Context, tenantID string) (*User, error)
 	GetUser(ctx context.Context, id string) (*User, error)
 	CreateCampaign(ctx context.Context, c *Campaign) error
 	GetCampaign(ctx context.Context, tenantID, id string) (*Campaign, error)
@@ -129,6 +130,32 @@ func (s *Store) UpsertDiscordUser(ctx context.Context, discordID, email, display
 	)
 	if err != nil {
 		return nil, fmt.Errorf("web: upsert discord user: %w", err)
+	}
+	return &user, nil
+}
+
+// adminUserID is the well-known user ID for API-key authenticated admins.
+const adminUserID = "apikey-admin"
+
+// EnsureAdminUser upserts the well-known API-key admin user, returning it
+// with the super_admin role. This is used by the API-key login flow.
+func (s *Store) EnsureAdminUser(ctx context.Context, tenantID string) (*User, error) {
+	now := time.Now().UTC()
+	var user User
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO mgmt.users (id, tenant_id, display_name, role, last_login_at, created_at, updated_at)
+		VALUES ($1, $2, 'Admin', 'super_admin', $3, $3, $3)
+		ON CONFLICT (id) DO UPDATE SET
+			last_login_at = EXCLUDED.last_login_at,
+			updated_at = EXCLUDED.updated_at
+		RETURNING id, tenant_id, discord_id, email, display_name, avatar_url, role, last_login_at, created_at, updated_at
+	`, adminUserID, tenantID, now).Scan(
+		&user.ID, &user.TenantID, &user.DiscordID, &user.Email,
+		&user.DisplayName, &user.AvatarURL, &user.Role, &user.LastLoginAt,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("web: ensure admin user: %w", err)
 	}
 	return &user, nil
 }

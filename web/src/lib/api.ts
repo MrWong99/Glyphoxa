@@ -20,17 +20,44 @@ class ApiError extends Error {
   }
 }
 
+const TOKEN_KEY = "glyphoxa_token";
+
+export function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setStoredToken(token: string): void {
+  if (typeof window !== "undefined") {
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+}
+
+export function clearStoredToken(): void {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = getStoredToken();
+  const authHeaders: Record<string, string> = {};
+  if (token) {
+    authHeaders["Authorization"] = `Bearer ${token}`;
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      ...authHeaders,
       ...options?.headers,
     },
   });
 
   if (res.status === 401) {
+    clearStoredToken();
     if (typeof window !== "undefined") {
       window.location.href = "/login";
     }
@@ -46,11 +73,33 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+interface AuthResponse {
+  data: {
+    access_token: string;
+    token_type: string;
+    expires_in: number;
+    user: User;
+  };
+}
+
 // Auth
 export const auth = {
   me: () => request<User>("/auth/me"),
-  logout: () => request<void>("/auth/logout", { method: "POST" }),
+  logout: () => {
+    clearStoredToken();
+    return request<void>("/auth/logout", { method: "POST" }).catch(() => {
+      // Logout endpoint may not exist; clearing token is sufficient.
+    });
+  },
   discordUrl: () => `${API_BASE}/auth/discord`,
+  loginApiKey: async (apiKey: string): Promise<AuthResponse> => {
+    const res = await request<AuthResponse>("/auth/apikey", {
+      method: "POST",
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    setStoredToken(res.data.access_token);
+    return res;
+  },
 };
 
 // Dashboard
