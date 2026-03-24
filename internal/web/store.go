@@ -46,6 +46,36 @@ type Campaign struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// LoreDocument is a rich-text lore entry attached to a campaign.
+type LoreDocument struct {
+	ID              string    `json:"id"`
+	CampaignID      string    `json:"campaign_id"`
+	Title           string    `json:"title"`
+	ContentMarkdown string    `json:"content_markdown"`
+	SortOrder       int       `json:"sort_order"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// CampaignNPCLink records an NPC linked to a secondary campaign.
+type CampaignNPCLink struct {
+	CampaignID string    `json:"campaign_id"`
+	NPCID      string    `json:"npc_id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// KnowledgeEntity represents a knowledge-graph entity stored in a
+// tenant-specific schema.
+type KnowledgeEntity struct {
+	CampaignID string         `json:"campaign_id"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Name       string         `json:"name"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
 // WebStore defines the data operations required by the web management handlers.
 // Implementations must be safe for concurrent use.
 type WebStore interface {
@@ -55,12 +85,28 @@ type WebStore interface {
 	GetUser(ctx context.Context, id string) (*User, error)
 	CreateCampaign(ctx context.Context, c *Campaign) error
 	GetCampaign(ctx context.Context, tenantID, id string) (*Campaign, error)
-	ListCampaigns(ctx context.Context, tenantID string) ([]Campaign, error)
+	ListCampaigns(ctx context.Context, tenantID string, page CursorPage) ([]Campaign, error)
 	UpdateCampaign(ctx context.Context, c *Campaign) error
 	DeleteCampaign(ctx context.Context, tenantID, id string) error
 	ListSessions(ctx context.Context, tenantID string, limit, offset int) ([]SessionSummary, error)
 	GetTranscript(ctx context.Context, tenantID, sessionID string) ([]TranscriptEntry, error)
 	GetUsage(ctx context.Context, tenantID string, from, to time.Time) ([]UsageRecord, error)
+
+	// Lore documents.
+	CreateLoreDocument(ctx context.Context, doc *LoreDocument) error
+	GetLoreDocument(ctx context.Context, campaignID, id string) (*LoreDocument, error)
+	ListLoreDocuments(ctx context.Context, campaignID string) ([]LoreDocument, error)
+	UpdateLoreDocument(ctx context.Context, doc *LoreDocument) error
+	DeleteLoreDocument(ctx context.Context, campaignID, id string) error
+
+	// Campaign-NPC links.
+	LinkNPCToCampaign(ctx context.Context, campaignID, npcID string) error
+	UnlinkNPCFromCampaign(ctx context.Context, campaignID, npcID string) error
+	ListCampaignNPCLinks(ctx context.Context, campaignID string) ([]CampaignNPCLink, error)
+
+	// Knowledge graph.
+	ListKnowledgeEntities(ctx context.Context, tenantID, campaignID string, page CursorPage) ([]KnowledgeEntity, error)
+	DeleteKnowledgeEntity(ctx context.Context, tenantID, campaignID, entityID string) error
 }
 
 // Compile-time assertion that *Store implements WebStore.
@@ -216,14 +262,38 @@ func (s *Store) GetCampaign(ctx context.Context, tenantID, id string) (*Campaign
 	return &c, nil
 }
 
-// ListCampaigns returns all campaigns for a tenant.
-func (s *Store) ListCampaigns(ctx context.Context, tenantID string) ([]Campaign, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, name, system, description, created_at, updated_at
-		FROM mgmt.campaigns
-		WHERE tenant_id = $1 AND deleted_at IS NULL
-		ORDER BY created_at DESC
-	`, tenantID)
+// ListCampaigns returns campaigns for a tenant with cursor-based pagination.
+func (s *Store) ListCampaigns(ctx context.Context, tenantID string, page CursorPage) ([]Campaign, error) {
+	limit := page.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+
+	var rows pgx.Rows
+	var err error
+	if page.Cursor != "" {
+		cd, cerr := DecodeCursor(page.Cursor)
+		if cerr != nil {
+			return nil, fmt.Errorf("web: list campaigns: %w", cerr)
+		}
+		cursorTime := time.UnixMicro(cd.UnixMicros).UTC()
+		rows, err = s.pool.Query(ctx, `
+			SELECT id, tenant_id, name, system, description, created_at, updated_at
+			FROM mgmt.campaigns
+			WHERE tenant_id = $1 AND deleted_at IS NULL
+			  AND (created_at, id) < ($3, $4)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2
+		`, tenantID, limit+1, cursorTime, cd.ID)
+	} else {
+		rows, err = s.pool.Query(ctx, `
+			SELECT id, tenant_id, name, system, description, created_at, updated_at
+			FROM mgmt.campaigns
+			WHERE tenant_id = $1 AND deleted_at IS NULL
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2
+		`, tenantID, limit+1)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("web: list campaigns: %w", err)
 	}
@@ -380,4 +450,236 @@ func (s *Store) GetUsage(ctx context.Context, tenantID string, from, to time.Tim
 		records = append(records, r)
 	}
 	return records, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Lore documents
+// ---------------------------------------------------------------------------
+
+// CreateLoreDocument inserts a new lore document.
+func (s *Store) CreateLoreDocument(ctx context.Context, doc *LoreDocument) error {
+	if doc.ID == "" {
+		doc.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	doc.CreatedAt = now
+	doc.UpdatedAt = now
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO mgmt.lore_documents (id, campaign_id, title, content_markdown, sort_order, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, doc.ID, doc.CampaignID, doc.Title, doc.ContentMarkdown, doc.SortOrder, doc.CreatedAt, doc.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("web: create lore document %q: %w", doc.ID, err)
+	}
+	return nil
+}
+
+// GetLoreDocument retrieves a lore document by campaign and ID.
+func (s *Store) GetLoreDocument(ctx context.Context, campaignID, id string) (*LoreDocument, error) {
+	var doc LoreDocument
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, campaign_id, title, content_markdown, sort_order, created_at, updated_at
+		FROM mgmt.lore_documents
+		WHERE id = $1 AND campaign_id = $2
+	`, id, campaignID).Scan(&doc.ID, &doc.CampaignID, &doc.Title, &doc.ContentMarkdown, &doc.SortOrder, &doc.CreatedAt, &doc.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("web: get lore document %q: %w", id, err)
+	}
+	return &doc, nil
+}
+
+// ListLoreDocuments returns all lore documents for a campaign ordered by
+// sort_order ascending.
+func (s *Store) ListLoreDocuments(ctx context.Context, campaignID string) ([]LoreDocument, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, campaign_id, title, content_markdown, sort_order, created_at, updated_at
+		FROM mgmt.lore_documents
+		WHERE campaign_id = $1
+		ORDER BY sort_order ASC, created_at ASC
+	`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("web: list lore documents: %w", err)
+	}
+	defer rows.Close()
+
+	var docs []LoreDocument
+	for rows.Next() {
+		var d LoreDocument
+		if err := rows.Scan(&d.ID, &d.CampaignID, &d.Title, &d.ContentMarkdown, &d.SortOrder, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("web: scan lore document: %w", err)
+		}
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}
+
+// UpdateLoreDocument updates an existing lore document.
+func (s *Store) UpdateLoreDocument(ctx context.Context, doc *LoreDocument) error {
+	doc.UpdatedAt = time.Now().UTC()
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE mgmt.lore_documents
+		SET title = $3, content_markdown = $4, sort_order = $5, updated_at = $6
+		WHERE id = $1 AND campaign_id = $2
+	`, doc.ID, doc.CampaignID, doc.Title, doc.ContentMarkdown, doc.SortOrder, doc.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("web: update lore document %q: %w", doc.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("web: lore document %q not found", doc.ID)
+	}
+	return nil
+}
+
+// DeleteLoreDocument removes a lore document.
+func (s *Store) DeleteLoreDocument(ctx context.Context, campaignID, id string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM mgmt.lore_documents WHERE id = $1 AND campaign_id = $2
+	`, id, campaignID)
+	if err != nil {
+		return fmt.Errorf("web: delete lore document %q: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("web: lore document %q not found", id)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Campaign-NPC links
+// ---------------------------------------------------------------------------
+
+// LinkNPCToCampaign creates a link between an NPC and a secondary campaign.
+// If the link already exists it is a no-op.
+func (s *Store) LinkNPCToCampaign(ctx context.Context, campaignID, npcID string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO mgmt.campaign_npcs (campaign_id, npc_id, created_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT DO NOTHING
+	`, campaignID, npcID)
+	if err != nil {
+		return fmt.Errorf("web: link NPC %q to campaign %q: %w", npcID, campaignID, err)
+	}
+	return nil
+}
+
+// UnlinkNPCFromCampaign removes a campaign-NPC link.
+func (s *Store) UnlinkNPCFromCampaign(ctx context.Context, campaignID, npcID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM mgmt.campaign_npcs WHERE campaign_id = $1 AND npc_id = $2
+	`, campaignID, npcID)
+	if err != nil {
+		return fmt.Errorf("web: unlink NPC %q from campaign %q: %w", npcID, campaignID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("web: link not found for NPC %q in campaign %q", npcID, campaignID)
+	}
+	return nil
+}
+
+// ListCampaignNPCLinks returns all NPC links for a campaign.
+func (s *Store) ListCampaignNPCLinks(ctx context.Context, campaignID string) ([]CampaignNPCLink, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT campaign_id, npc_id, created_at
+		FROM mgmt.campaign_npcs
+		WHERE campaign_id = $1
+		ORDER BY created_at ASC
+	`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("web: list campaign NPC links: %w", err)
+	}
+	defer rows.Close()
+
+	var links []CampaignNPCLink
+	for rows.Next() {
+		var l CampaignNPCLink
+		if err := rows.Scan(&l.CampaignID, &l.NPCID, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("web: scan campaign NPC link: %w", err)
+		}
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge graph
+// ---------------------------------------------------------------------------
+
+// ListKnowledgeEntities retrieves knowledge-graph entities from the
+// tenant-specific schema (tenant_<id>.entities) for a given campaign.
+func (s *Store) ListKnowledgeEntities(ctx context.Context, tenantID, campaignID string, page CursorPage) ([]KnowledgeEntity, error) {
+	if !validTenantID.MatchString(tenantID) {
+		return nil, fmt.Errorf("web: invalid tenant ID %q", tenantID)
+	}
+	schema := "tenant_" + tenantID
+	table := pgx.Identifier{schema, "entities"}.Sanitize()
+
+	limit := page.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+
+	var rows pgx.Rows
+	var err error
+	if page.Cursor != "" {
+		cd, cerr := DecodeCursor(page.Cursor)
+		if cerr != nil {
+			return nil, fmt.Errorf("web: list knowledge entities: %w", cerr)
+		}
+		cursorTime := time.UnixMicro(cd.UnixMicros).UTC()
+		query := fmt.Sprintf(`
+			SELECT campaign_id, id, type, name, attributes, created_at, updated_at
+			FROM %s
+			WHERE campaign_id = $1
+			  AND (created_at, id) < ($3, $4)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2
+		`, table)
+		rows, err = s.pool.Query(ctx, query, campaignID, limit+1, cursorTime, cd.ID)
+	} else {
+		query := fmt.Sprintf(`
+			SELECT campaign_id, id, type, name, attributes, created_at, updated_at
+			FROM %s
+			WHERE campaign_id = $1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2
+		`, table)
+		rows, err = s.pool.Query(ctx, query, campaignID, limit+1)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("web: list knowledge entities: %w", err)
+	}
+	defer rows.Close()
+
+	var entities []KnowledgeEntity
+	for rows.Next() {
+		var e KnowledgeEntity
+		if err := rows.Scan(&e.CampaignID, &e.ID, &e.Type, &e.Name, &e.Attributes, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("web: scan knowledge entity: %w", err)
+		}
+		entities = append(entities, e)
+	}
+	return entities, rows.Err()
+}
+
+// DeleteKnowledgeEntity removes a knowledge-graph entity from the
+// tenant-specific schema.
+func (s *Store) DeleteKnowledgeEntity(ctx context.Context, tenantID, campaignID, entityID string) error {
+	if !validTenantID.MatchString(tenantID) {
+		return fmt.Errorf("web: invalid tenant ID %q", tenantID)
+	}
+	schema := "tenant_" + tenantID
+	table := pgx.Identifier{schema, "entities"}.Sanitize()
+
+	query := fmt.Sprintf(`DELETE FROM %s WHERE campaign_id = $1 AND id = $2`, table)
+	tag, err := s.pool.Exec(ctx, query, campaignID, entityID)
+	if err != nil {
+		return fmt.Errorf("web: delete knowledge entity %q: %w", entityID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("web: knowledge entity %q not found", entityID)
+	}
+	return nil
 }
