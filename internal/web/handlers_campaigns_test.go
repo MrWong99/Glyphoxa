@@ -20,13 +20,13 @@ func TestHandleCreateCampaign(t *testing.T) {
 	}{
 		{
 			name:     "valid campaign",
-			body:     `{"name":"Rabenheim","system":"D&D 5e","description":"A dark fantasy campaign"}`,
+			body:     `{"name":"Rabenheim","game_system":"D&D 5e","description":"A dark fantasy campaign"}`,
 			role:     "dm",
 			wantCode: http.StatusCreated,
 		},
 		{
 			name:     "missing name",
-			body:     `{"system":"D&D 5e"}`,
+			body:     `{"game_system":"D&D 5e"}`,
 			role:     "dm",
 			wantCode: http.StatusBadRequest,
 		},
@@ -287,8 +287,8 @@ func TestHandleUpdateCampaign_PartialFieldPreservation(t *testing.T) {
 		Description: "Keep this",
 	}
 
-	// Only update system, name and description should remain.
-	body := `{"system":"Pathfinder 2e"}`
+	// Only update game_system, name and description should remain.
+	body := `{"game_system":"Pathfinder 2e"}`
 	req := authReq(t, http.MethodPut, "/api/v1/campaigns/c1",
 		bytes.NewBufferString(body), secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
