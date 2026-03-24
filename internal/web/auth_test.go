@@ -100,6 +100,140 @@ func TestVerifyJWT_Malformed(t *testing.T) {
 	}
 }
 
+func TestClaimsValid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		expires int64
+		want    bool
+	}{
+		{"future expiry", time.Now().Add(1 * time.Hour).Unix(), true},
+		{"past expiry", time.Now().Add(-1 * time.Hour).Unix(), false},
+		{"zero expiry", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := Claims{Sub: "user-1", Expires: tt.expires}
+			if got := c.Valid(); got != tt.want {
+				t.Errorf("Valid() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiscordUser_DisplayName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		user       DiscordUser
+		wantName   string
+	}{
+		{
+			name:     "prefers global name",
+			user:     DiscordUser{Username: "user123", GlobalName: "Cool User"},
+			wantName: "Cool User",
+		},
+		{
+			name:     "falls back to username",
+			user:     DiscordUser{Username: "user123", GlobalName: ""},
+			wantName: "user123",
+		},
+		{
+			name:     "both empty",
+			user:     DiscordUser{Username: "", GlobalName: ""},
+			wantName: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.user.DisplayName(); got != tt.wantName {
+				t.Errorf("DisplayName() = %q, want %q", got, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestDiscordUser_AvatarURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		user    DiscordUser
+		wantURL string
+	}{
+		{
+			name:    "with avatar",
+			user:    DiscordUser{ID: "123456", Avatar: "abc123"},
+			wantURL: "https://cdn.discordapp.com/avatars/123456/abc123.png",
+		},
+		{
+			name:    "no avatar",
+			user:    DiscordUser{ID: "123456", Avatar: ""},
+			wantURL: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.user.AvatarURL(); got != tt.wantURL {
+				t.Errorf("AvatarURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestSignJWT_DefaultExpiration(t *testing.T) {
+	t.Parallel()
+
+	// When Expires is 0, SignJWT should set a default (24h).
+	token, err := SignJWT("secret", Claims{Sub: "user-1"})
+	if err != nil {
+		t.Fatalf("SignJWT: %v", err)
+	}
+
+	claims, err := VerifyJWT("secret", token)
+	if err != nil {
+		t.Fatalf("VerifyJWT: %v", err)
+	}
+
+	// Expires should be roughly 24h from now.
+	expectedMin := time.Now().Add(23 * time.Hour).Unix()
+	expectedMax := time.Now().Add(25 * time.Hour).Unix()
+	if claims.Expires < expectedMin || claims.Expires > expectedMax {
+		t.Errorf("Expires = %d, want within 24h from now", claims.Expires)
+	}
+}
+
+func TestSignJWT_SetsIssuerAndIssuedAt(t *testing.T) {
+	t.Parallel()
+
+	before := time.Now().Unix()
+	token, err := SignJWT("secret", Claims{Sub: "user-1", Expires: time.Now().Add(time.Hour).Unix()})
+	if err != nil {
+		t.Fatalf("SignJWT: %v", err)
+	}
+	after := time.Now().Unix()
+
+	claims, err := VerifyJWT("secret", token)
+	if err != nil {
+		t.Fatalf("VerifyJWT: %v", err)
+	}
+
+	if claims.Issuer != "glyphoxa-manage" {
+		t.Errorf("Issuer = %q, want %q", claims.Issuer, "glyphoxa-manage")
+	}
+	if claims.IssuedAt < before || claims.IssuedAt > after {
+		t.Errorf("IssuedAt = %d, want between %d and %d", claims.IssuedAt, before, after)
+	}
+}
+
 func TestGenerateState(t *testing.T) {
 	t.Parallel()
 
