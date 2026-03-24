@@ -50,3 +50,4 @@ deploy/zhi/plugin/dist/
 # Web frontend
 web/node_modules/
 web/.next/
+.claude/
