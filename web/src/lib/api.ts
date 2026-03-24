@@ -77,6 +77,15 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// Unwraps the standard API envelope { data: T } returned by all endpoints.
+async function requestData<T>(
+  path: string,
+  options?: RequestInit,
+): Promise<T> {
+  const envelope = await request<{ data: T }>(path, options);
+  return envelope.data;
+}
+
 interface AuthResponse {
   data: {
     access_token: string;
@@ -88,7 +97,7 @@ interface AuthResponse {
 
 // Auth
 export const auth = {
-  me: () => request<User>("/auth/me"),
+  me: () => requestData<User>("/auth/me"),
   logout: () => {
     clearStoredToken();
     return request<void>("/auth/logout", { method: "POST" }).catch(() => {
@@ -108,22 +117,22 @@ export const auth = {
 
 // Dashboard
 export const dashboard = {
-  stats: () => request<DashboardStats>("/dashboard/stats"),
-  activity: () => request<ActivityItem[]>("/dashboard/activity"),
-  activeSessions: () => request<Session[]>("/dashboard/active-sessions"),
+  stats: () => requestData<DashboardStats>("/dashboard/stats"),
+  activity: () => requestData<ActivityItem[]>("/dashboard/activity"),
+  activeSessions: () => requestData<Session[]>("/dashboard/active-sessions"),
 };
 
 // Campaigns
 export const campaigns = {
-  list: () => request<Campaign[]>("/campaigns"),
-  get: (id: string) => request<Campaign>(`/campaigns/${id}`),
+  list: () => requestData<Campaign[]>("/campaigns"),
+  get: (id: string) => requestData<Campaign>(`/campaigns/${id}`),
   create: (data: Partial<Campaign>) =>
-    request<Campaign>("/campaigns", {
+    requestData<Campaign>("/campaigns", {
       method: "POST",
       body: JSON.stringify(data),
     }),
   update: (id: string, data: Partial<Campaign>) =>
-    request<Campaign>(`/campaigns/${id}`, {
+    requestData<Campaign>(`/campaigns/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
@@ -134,16 +143,16 @@ export const campaigns = {
 // NPCs
 export const npcs = {
   list: (campaignId: string) =>
-    request<NPC[]>(`/campaigns/${campaignId}/npcs`),
+    requestData<NPC[]>(`/campaigns/${campaignId}/npcs`),
   get: (campaignId: string, npcId: string) =>
-    request<NPC>(`/campaigns/${campaignId}/npcs/${npcId}`),
+    requestData<NPC>(`/campaigns/${campaignId}/npcs/${npcId}`),
   create: (campaignId: string, data: Partial<NPC>) =>
-    request<NPC>(`/campaigns/${campaignId}/npcs`, {
+    requestData<NPC>(`/campaigns/${campaignId}/npcs`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
   update: (campaignId: string, npcId: string, data: Partial<NPC>) =>
-    request<NPC>(`/campaigns/${campaignId}/npcs/${npcId}`, {
+    requestData<NPC>(`/campaigns/${campaignId}/npcs/${npcId}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
@@ -155,14 +164,14 @@ export const npcs = {
 
 // Sessions
 export const sessions = {
-  list: () => request<Session[]>("/sessions"),
+  list: () => requestData<Session[]>("/sessions"),
   listByCampaign: (campaignId: string) =>
-    request<Session[]>(`/campaigns/${campaignId}/sessions`),
-  get: (id: string) => request<Session>(`/sessions/${id}`),
+    requestData<Session[]>(`/campaigns/${campaignId}/sessions`),
+  get: (id: string) => requestData<Session>(`/sessions/${id}`),
   stop: (id: string) =>
     request<void>(`/sessions/${id}`, { method: "DELETE" }),
   transcript: (id: string) =>
-    request<TranscriptEntry[]>(`/sessions/${id}/transcript`),
+    requestData<TranscriptEntry[]>(`/sessions/${id}/transcript`),
 };
 
 // Users
@@ -175,26 +184,26 @@ export const users = {
     const qs = q.toString();
     return request<PaginatedResponse<User>>(`/users${qs ? `?${qs}` : ""}`);
   },
-  get: (id: string) => request<User>(`/users/${id}`),
+  get: (id: string) => requestData<User>(`/users/${id}`),
   update: (id: string, data: { display_name?: string; role?: UserRole }) =>
-    request<User>(`/users/${id}`, {
+    requestData<User>(`/users/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
   delete: (id: string) =>
     request<void>(`/users/${id}`, { method: "DELETE" }),
   invite: (role: UserRole = "viewer") =>
-    request<Invite>("/users/invite", {
+    requestData<Invite>("/users/invite", {
       method: "POST",
       body: JSON.stringify({ role }),
     }),
   updateMe: (data: { display_name: string }) =>
-    request<User>("/auth/me", {
+    requestData<User>("/auth/me", {
       method: "PUT",
       body: JSON.stringify(data),
     }),
   updatePreferences: (prefs: Partial<UserPreferences>) =>
-    request<User>("/auth/me/preferences", {
+    requestData<User>("/auth/me/preferences", {
       method: "PATCH",
       body: JSON.stringify(prefs),
     }),

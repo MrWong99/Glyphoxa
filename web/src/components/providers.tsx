@@ -1,9 +1,19 @@
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
+
+/** Dismiss all toasts on client-side route changes. */
+function RouteChangeToastDismisser() {
+  const pathname = usePathname();
+  useEffect(() => {
+    toast.dismiss();
+  }, [pathname]);
+  return null;
+}
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -21,12 +31,14 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
+        <RouteChangeToastDismisser />
         {children}
         <Toaster
           theme="dark"
           position="bottom-right"
           richColors
           closeButton
+          duration={4000}
         />
       </TooltipProvider>
     </QueryClientProvider>

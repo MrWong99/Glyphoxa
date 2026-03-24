@@ -64,7 +64,8 @@ type Campaign struct {
 	ID          string    `json:"id"`
 	TenantID    string    `json:"tenant_id"`
 	Name        string    `json:"name"`
-	System      string    `json:"system,omitempty"`
+	System      string    `json:"game_system,omitempty"`
+	Language    string    `json:"language,omitempty"`
 	Description string    `json:"description,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -267,9 +268,9 @@ func (s *Store) CreateCampaign(ctx context.Context, c *Campaign) error {
 	c.CreatedAt = now
 	c.UpdatedAt = now
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO mgmt.campaigns (id, tenant_id, name, system, description, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, c.ID, c.TenantID, c.Name, c.System, c.Description, c.CreatedAt, c.UpdatedAt)
+		INSERT INTO mgmt.campaigns (id, tenant_id, name, system, language, description, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, c.ID, c.TenantID, c.Name, c.System, c.Language, c.Description, c.CreatedAt, c.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("web: create campaign %q: %w", c.ID, err)
 	}
@@ -280,10 +281,10 @@ func (s *Store) CreateCampaign(ctx context.Context, c *Campaign) error {
 func (s *Store) GetCampaign(ctx context.Context, tenantID, id string) (*Campaign, error) {
 	var c Campaign
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, name, system, description, created_at, updated_at
+		SELECT id, tenant_id, name, system, language, description, created_at, updated_at
 		FROM mgmt.campaigns
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, id, tenantID).Scan(&c.ID, &c.TenantID, &c.Name, &c.System, &c.Description, &c.CreatedAt, &c.UpdatedAt)
+	`, id, tenantID).Scan(&c.ID, &c.TenantID, &c.Name, &c.System, &c.Language, &c.Description, &c.CreatedAt, &c.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -309,7 +310,7 @@ func (s *Store) ListCampaigns(ctx context.Context, tenantID string, page CursorP
 		}
 		cursorTime := time.UnixMicro(cd.UnixMicros).UTC()
 		rows, err = s.pool.Query(ctx, `
-			SELECT id, tenant_id, name, system, description, created_at, updated_at
+			SELECT id, tenant_id, name, system, language, description, created_at, updated_at
 			FROM mgmt.campaigns
 			WHERE tenant_id = $1 AND deleted_at IS NULL
 			  AND (created_at, id) < ($3, $4)
@@ -318,7 +319,7 @@ func (s *Store) ListCampaigns(ctx context.Context, tenantID string, page CursorP
 		`, tenantID, limit+1, cursorTime, cd.ID)
 	} else {
 		rows, err = s.pool.Query(ctx, `
-			SELECT id, tenant_id, name, system, description, created_at, updated_at
+			SELECT id, tenant_id, name, system, language, description, created_at, updated_at
 			FROM mgmt.campaigns
 			WHERE tenant_id = $1 AND deleted_at IS NULL
 			ORDER BY created_at DESC, id DESC
@@ -333,7 +334,7 @@ func (s *Store) ListCampaigns(ctx context.Context, tenantID string, page CursorP
 	var campaigns []Campaign
 	for rows.Next() {
 		var c Campaign
-		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.System, &c.Description, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.System, &c.Language, &c.Description, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("web: scan campaign: %w", err)
 		}
 		campaigns = append(campaigns, c)
@@ -346,9 +347,9 @@ func (s *Store) UpdateCampaign(ctx context.Context, c *Campaign) error {
 	c.UpdatedAt = time.Now().UTC()
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE mgmt.campaigns
-		SET name = $3, system = $4, description = $5, updated_at = $6
+		SET name = $3, system = $4, language = $5, description = $6, updated_at = $7
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, c.ID, c.TenantID, c.Name, c.System, c.Description, c.UpdatedAt)
+	`, c.ID, c.TenantID, c.Name, c.System, c.Language, c.Description, c.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("web: update campaign %q: %w", c.ID, err)
 	}

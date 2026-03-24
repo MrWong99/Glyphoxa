@@ -9,14 +9,16 @@ import (
 // CampaignCreateRequest is the JSON body for creating a campaign.
 type CampaignCreateRequest struct {
 	Name        string `json:"name"`
-	System      string `json:"system"`
+	System      string `json:"game_system"`
+	Language    string `json:"language"`
 	Description string `json:"description"`
 }
 
 // CampaignUpdateRequest is the JSON body for updating a campaign.
 type CampaignUpdateRequest struct {
 	Name        *string `json:"name"`
-	System      *string `json:"system"`
+	System      *string `json:"game_system"`
+	Language    *string `json:"language"`
 	Description *string `json:"description"`
 }
 
@@ -49,6 +51,7 @@ func (s *Server) handleCreateCampaign(w http.ResponseWriter, r *http.Request) {
 		TenantID:    claims.TenantID,
 		Name:        req.Name,
 		System:      req.System,
+		Language:    req.Language,
 		Description: req.Description,
 	}
 
@@ -150,6 +153,9 @@ func (s *Server) handleUpdateCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.System != nil {
 		existing.System = *req.System
+	}
+	if req.Language != nil {
+		existing.Language = *req.Language
 	}
 	if req.Description != nil {
 		existing.Description = *req.Description
