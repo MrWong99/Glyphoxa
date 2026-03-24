@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -137,7 +138,15 @@ export default function LoginPage() {
         </Card>
 
         <p className="text-center text-xs text-muted-foreground/70">
-          By signing in, you agree to our Terms of Service and Privacy Policy.
+          By signing in, you agree to our{" "}
+          <Link href="/terms" className="text-muted-foreground underline hover:text-primary">
+            Terms of Service
+          </Link>{" "}
+          and{" "}
+          <Link href="/privacy" className="text-muted-foreground underline hover:text-primary">
+            Privacy Policy
+          </Link>
+          .
         </p>
       </div>
     </div>
