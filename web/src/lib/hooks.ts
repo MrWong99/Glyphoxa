@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api } from "./api";
 import type { Campaign, NPC } from "./types";
 
@@ -57,7 +58,11 @@ export function useCreateCampaign() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: Partial<Campaign>) => api.campaigns.create(data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["campaigns"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+      toast.success("Campaign created");
+    },
+    onError: (err) => toast.error("Failed to create campaign", { description: err.message }),
   });
 }
 
@@ -68,7 +73,9 @@ export function useUpdateCampaign(id: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["campaigns"] });
       qc.invalidateQueries({ queryKey: ["campaigns", id] });
+      toast.success("Campaign updated");
     },
+    onError: (err) => toast.error("Failed to update campaign", { description: err.message }),
   });
 }
 
@@ -76,7 +83,11 @@ export function useDeleteCampaign() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.campaigns.delete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["campaigns"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+      toast.success("Campaign deleted");
+    },
+    onError: (err) => toast.error("Failed to delete campaign", { description: err.message }),
   });
 }
 
@@ -101,8 +112,11 @@ export function useCreateNPC(campaignId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: Partial<NPC>) => api.npcs.create(campaignId, data),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["campaigns", campaignId, "npcs"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["campaigns", campaignId, "npcs"] });
+      toast.success("NPC created");
+    },
+    onError: (err) => toast.error("Failed to create NPC", { description: err.message }),
   });
 }
 
@@ -116,7 +130,9 @@ export function useUpdateNPC(campaignId: string, npcId: string) {
       qc.invalidateQueries({
         queryKey: ["campaigns", campaignId, "npcs", npcId],
       });
+      toast.success("NPC updated");
     },
+    onError: (err) => toast.error("Failed to update NPC", { description: err.message }),
   });
 }
 
@@ -124,8 +140,11 @@ export function useDeleteNPC(campaignId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (npcId: string) => api.npcs.delete(campaignId, npcId),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["campaigns", campaignId, "npcs"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["campaigns", campaignId, "npcs"] });
+      toast.success("NPC deleted");
+    },
+    onError: (err) => toast.error("Failed to delete NPC", { description: err.message }),
   });
 }
 
@@ -160,6 +179,8 @@ export function useStopSession() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["sessions"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success("Session stopped");
     },
+    onError: (err) => toast.error("Failed to stop session", { description: err.message }),
   });
 }

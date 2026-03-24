@@ -38,13 +38,24 @@ export default function NewCampaignPage() {
   const [gameSystem, setGameSystem] = useState<string>("");
   const [description, setDescription] = useState("");
   const [language, setLanguage] = useState("en");
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+
+  const errors: Record<string, string> = {};
+  if (!name.trim()) errors.name = "Campaign name is required";
+  if (!gameSystem) errors.gameSystem = "Please select a game system";
+
+  function touch(field: string) {
+    setTouched((prev) => ({ ...prev, [field]: true }));
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setTouched({ name: true, gameSystem: true });
+    if (Object.keys(errors).length > 0) return;
     await createCampaign.mutateAsync({
-      name,
+      name: name.trim(),
       game_system: gameSystem,
-      description,
+      description: description.trim(),
       language,
     });
     router.push("/campaigns");
@@ -53,7 +64,7 @@ export default function NewCampaignPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" render={<Link href="/campaigns" />}>
+        <Button variant="ghost" size="icon" aria-label="Back to campaigns" render={<Link href="/campaigns" />}>
             <ArrowLeft className="h-4 w-4" />
         </Button>
         <h1 className="text-2xl font-bold">New Campaign</h1>
@@ -71,15 +82,20 @@ export default function NewCampaignPage() {
                 id="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                onBlur={() => touch("name")}
                 placeholder="Die Chroniken von Rabenheim"
+                aria-invalid={touched.name && !!errors.name}
                 required
               />
+              {touched.name && errors.name && (
+                <p className="text-xs text-destructive">{errors.name}</p>
+              )}
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="system">Game System</Label>
-              <Select value={gameSystem} onValueChange={(v) => v && setGameSystem(v)}>
-                <SelectTrigger>
+              <Select value={gameSystem} onValueChange={(v) => { if (v) setGameSystem(v); touch("gameSystem"); }}>
+                <SelectTrigger aria-invalid={touched.gameSystem && !!errors.gameSystem}>
                   <SelectValue placeholder="Select a game system" />
                 </SelectTrigger>
                 <SelectContent>
@@ -90,6 +106,9 @@ export default function NewCampaignPage() {
                   ))}
                 </SelectContent>
               </Select>
+              {touched.gameSystem && errors.gameSystem && (
+                <p className="text-xs text-destructive">{errors.gameSystem}</p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -101,8 +120,8 @@ export default function NewCampaignPage() {
                 <SelectContent>
                   <SelectItem value="en">English</SelectItem>
                   <SelectItem value="de">Deutsch</SelectItem>
-                  <SelectItem value="fr">Français</SelectItem>
-                  <SelectItem value="es">Español</SelectItem>
+                  <SelectItem value="fr">Fran&ccedil;ais</SelectItem>
+                  <SelectItem value="es">Espa&ntilde;ol</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -124,7 +143,7 @@ export default function NewCampaignPage() {
               </Button>
               <Button
                 type="submit"
-                disabled={!name || createCampaign.isPending}
+                disabled={createCampaign.isPending}
               >
                 {createCampaign.isPending ? "Creating..." : "Create Campaign"}
               </Button>

@@ -32,6 +32,7 @@ export function Topbar({ user, onMenuClick }: TopbarProps) {
         size="icon"
         className="lg:hidden"
         onClick={onMenuClick}
+        aria-label="Open menu"
       >
         <Menu className="h-5 w-5" />
       </Button>
