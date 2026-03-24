@@ -114,7 +114,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleCreateTenant))))
 	s.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleUpdateTenant))))
 	s.mux.Handle("DELETE /api/v1/tenants/{id}", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleDeleteTenant))))
-	s.mux.Handle("GET /api/v1/usage", auth(http.HandlerFunc(s.handleGetUsage)))
+	s.mux.Handle("GET /api/v1/usage", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleGetUsage))))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

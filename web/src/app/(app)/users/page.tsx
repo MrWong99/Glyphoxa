@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Users as UsersIcon, AlertTriangle, Copy, Plus, Trash2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Users as UsersIcon, AlertTriangle, Copy, Plus, Trash2, ShieldAlert } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ import {
   useDeleteUser,
   useCreateInvite,
   useUser,
+  useHasRole,
 } from "@/lib/hooks";
 import { toast } from "sonner";
 import type { UserRole } from "@/lib/types";
@@ -43,12 +45,25 @@ const roleBadgeVariant: Record<
 
 export default function UsersPage() {
   const { data: currentUser } = useUser();
+  const isAdmin = useHasRole("tenant_admin");
   const { data, isLoading, isError, error } = useUsers();
   const deleteUser = useDeleteUser();
   const createInvite = useCreateInvite();
   const [inviteRole, setInviteRole] = useState<UserRole>("viewer");
 
   const users = data?.data ?? [];
+
+  if (currentUser && !isAdmin) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-16 text-center">
+        <ShieldAlert className="h-12 w-12 text-destructive" />
+        <h2 className="text-lg font-semibold">Access Denied</h2>
+        <p className="text-sm text-muted-foreground">
+          You need tenant admin permissions to manage users.
+        </p>
+      </div>
+    );
+  }
 
   const handleInvite = async () => {
     const result = await createInvite.mutateAsync(inviteRole);

@@ -5,7 +5,7 @@ import { Plus, Mic, Brain, Zap, Sparkles } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { useNPCs } from "@/lib/hooks";
+import { useNPCs, useHasRole } from "@/lib/hooks";
 
 const engineLabels: Record<string, string> = {
   cascaded: "Cascaded",
@@ -25,6 +25,7 @@ interface NPCListProps {
 
 export function NPCList({ campaignId }: NPCListProps) {
   const { data: npcs, isLoading } = useNPCs(campaignId);
+  const canCreate = useHasRole("dm");
 
   if (isLoading) {
     return (
@@ -49,10 +50,12 @@ export function NPCList({ campaignId }: NPCListProps) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">NPCs</h2>
-        <Button render={<Link href={`/campaigns/${campaignId}/npcs/new`} />}>
-            <Plus className="mr-1 h-4 w-4" />
-            New NPC
-        </Button>
+        {canCreate && (
+          <Button render={<Link href={`/campaigns/${campaignId}/npcs/new`} />}>
+              <Plus className="mr-1 h-4 w-4" />
+              New NPC
+          </Button>
+        )}
       </div>
 
       {npcs && npcs.length > 0 ? (
@@ -101,10 +104,12 @@ export function NPCList({ campaignId }: NPCListProps) {
             <p className="mt-1 text-sm text-muted-foreground">
               Create your first NPC to bring your campaign to life.
             </p>
-            <Button className="mt-4" size="sm" render={<Link href={`/campaigns/${campaignId}/npcs/new`} />}>
-                <Plus className="mr-1 h-4 w-4" />
-                Create NPC
-            </Button>
+            {canCreate && (
+              <Button className="mt-4" size="sm" render={<Link href={`/campaigns/${campaignId}/npcs/new`} />}>
+                  <Plus className="mr-1 h-4 w-4" />
+                  Create NPC
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}

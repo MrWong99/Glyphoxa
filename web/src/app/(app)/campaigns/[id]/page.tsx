@@ -27,7 +27,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Breadcrumbs } from "@/components/breadcrumbs";
-import { useCampaign, useUpdateCampaign, useDeleteCampaign } from "@/lib/hooks";
+import { useCampaign, useUpdateCampaign, useDeleteCampaign, useHasRole } from "@/lib/hooks";
 import { NPCList } from "./npcs/npc-list";
 import { CampaignSessions } from "./sessions";
 import type { Campaign, GameSystem } from "@/lib/types";
@@ -49,6 +49,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
   const updateCampaign = useUpdateCampaign(campaignId);
   const deleteCampaign = useDeleteCampaign();
   const [deleteConfirm, setDeleteConfirm] = useState("");
+  const canEdit = useHasRole("dm");
 
   const [name, setName] = useState(campaign.name);
   const [gameSystem, setGameSystem] = useState(campaign.game_system);
@@ -89,7 +90,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
 
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold tracking-tight">{campaign.name}</h1>
-        {dirty && (
+        {canEdit && dirty && (
           <Button onClick={handleSave} disabled={updateCampaign.isPending}>
             <Save className="mr-1 h-4 w-4" />
             {updateCampaign.isPending ? "Saving..." : "Save Changes"}
@@ -122,6 +123,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
                   id="name"
                   value={name}
                   onChange={(e) => handleChange(setName)(e.target.value)}
+                  readOnly={!canEdit}
                 />
               </div>
 
@@ -130,6 +132,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
                 <Select
                   value={gameSystem}
                   onValueChange={(v) => v && handleChange(setGameSystem)(v)}
+                  disabled={!canEdit}
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -149,6 +152,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
                 <Select
                   value={language}
                   onValueChange={(v) => v && handleChange(setLanguage)(v)}
+                  disabled={!canEdit}
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -171,59 +175,62 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
                     handleChange(setDescription)(e.target.value)
                   }
                   rows={8}
+                  readOnly={!canEdit}
                 />
               </div>
             </CardContent>
           </Card>
 
-          {/* Danger zone */}
-          <Card className="border-destructive/50">
-            <CardHeader>
-              <CardTitle className="text-destructive">Danger Zone</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <Dialog>
-                <DialogTrigger render={<Button variant="destructive" />}>
-                    <Trash2 className="mr-1 h-4 w-4" />
-                    Delete Campaign
-                </DialogTrigger>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>Delete Campaign</DialogTitle>
-                    <DialogDescription>
-                      This action cannot be undone. This will permanently delete
-                      the campaign &quot;{campaign.name}&quot; and all its NPCs,
-                      sessions, and transcripts.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <div className="space-y-2">
-                    <Label>
-                      Type <strong>{campaign.name}</strong> to confirm
-                    </Label>
-                    <Input
-                      value={deleteConfirm}
-                      onChange={(e) => setDeleteConfirm(e.target.value)}
-                      placeholder={campaign.name}
-                    />
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      variant="destructive"
-                      disabled={
-                        deleteConfirm !== campaign.name ||
-                        deleteCampaign.isPending
-                      }
-                      onClick={handleDelete}
-                    >
-                      {deleteCampaign.isPending
-                        ? "Deleting..."
-                        : "Delete Campaign"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            </CardContent>
-          </Card>
+          {/* Danger zone — only visible for DM+ roles */}
+          {canEdit && (
+            <Card className="border-destructive/50">
+              <CardHeader>
+                <CardTitle className="text-destructive">Danger Zone</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <Dialog>
+                  <DialogTrigger render={<Button variant="destructive" />}>
+                      <Trash2 className="mr-1 h-4 w-4" />
+                      Delete Campaign
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Delete Campaign</DialogTitle>
+                      <DialogDescription>
+                        This action cannot be undone. This will permanently delete
+                        the campaign &quot;{campaign.name}&quot; and all its NPCs,
+                        sessions, and transcripts.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-2">
+                      <Label>
+                        Type <strong>{campaign.name}</strong> to confirm
+                      </Label>
+                      <Input
+                        value={deleteConfirm}
+                        onChange={(e) => setDeleteConfirm(e.target.value)}
+                        placeholder={campaign.name}
+                      />
+                    </div>
+                    <DialogFooter>
+                      <Button
+                        variant="destructive"
+                        disabled={
+                          deleteConfirm !== campaign.name ||
+                          deleteCampaign.isPending
+                        }
+                        onClick={handleDelete}
+                      >
+                        {deleteCampaign.isPending
+                          ? "Deleting..."
+                          : "Delete Campaign"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="npcs">

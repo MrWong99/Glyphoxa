@@ -298,6 +298,15 @@ func (m *mockWebStore) ListSessions(_ context.Context, tenantID string, limit, o
 	return filtered[offset:end], nil
 }
 
+func (m *mockWebStore) SessionExists(_ context.Context, tenantID, sessionID string) (bool, error) {
+	for _, s := range m.sessions {
+		if s.ID == sessionID && s.TenantID == tenantID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *mockWebStore) GetTranscript(_ context.Context, _, sessionID string) ([]TranscriptEntry, error) {
 	entries, ok := m.transcripts[sessionID]
 	if !ok {

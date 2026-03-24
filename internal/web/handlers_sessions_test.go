@@ -17,9 +17,9 @@ func TestHandleListSessions(t *testing.T) {
 
 	now := time.Now().UTC()
 	ws.sessions = []SessionSummary{
-		{ID: "s1", TenantID: "tenant-1", State: "active", CreatedAt: now},
-		{ID: "s2", TenantID: "tenant-1", State: "ended", CreatedAt: now.Add(-time.Hour)},
-		{ID: "s3", TenantID: "tenant-2", State: "active", CreatedAt: now},
+		{ID: "s1", TenantID: "tenant-1", State: "active", StartedAt: now},
+		{ID: "s2", TenantID: "tenant-1", State: "ended", StartedAt: now.Add(-time.Hour)},
+		{ID: "s3", TenantID: "tenant-2", State: "active", StartedAt: now},
 	}
 
 	req := authReq(t, http.MethodGet, "/api/v1/sessions", nil, secret, "user-1", "tenant-1", "dm")
@@ -64,7 +64,7 @@ func TestHandleListSessions_Pagination(t *testing.T) {
 			ID:        "s" + string(rune('1'+i)),
 			TenantID:  "tenant-1",
 			State:     "ended",
-			CreatedAt: now.Add(-time.Duration(i) * time.Hour),
+			StartedAt: now.Add(-time.Duration(i) * time.Hour),
 		})
 	}
 
@@ -181,6 +181,9 @@ func TestHandleGetTranscript(t *testing.T) {
 	srv.mux.Handle("GET /api/v1/sessions/{id}/transcript", auth(http.HandlerFunc(srv.handleGetTranscript)))
 
 	now := time.Now().UTC()
+	ws.sessions = []SessionSummary{
+		{ID: "session-1", TenantID: "tenant-1", State: "ended", StartedAt: now},
+	}
 	ws.transcripts["session-1"] = []TranscriptEntry{
 		{ID: 1, Speaker: "Heinrich", Content: "Willkommen!", CreatedAt: now},
 		{ID: 2, Speaker: "Player", Content: "Hello there", CreatedAt: now.Add(time.Second)},
@@ -208,7 +211,7 @@ func TestHandleGetTranscript(t *testing.T) {
 	}
 }
 
-func TestHandleGetTranscript_Empty(t *testing.T) {
+func TestHandleGetTranscript_NotFound(t *testing.T) {
 	t.Parallel()
 
 	srv, _, _, secret := testServerWithStores(t)
@@ -219,17 +222,7 @@ func TestHandleGetTranscript_Empty(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
-	}
-
-	var body struct {
-		Data []TranscriptEntry `json:"data"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Data == nil {
-		t.Error("data should be empty array, not null")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
 	}
 }
