@@ -103,6 +103,13 @@ func base64URLDecode(s string) ([]byte, error) {
 	return base64.URLEncoding.DecodeString(s)
 }
 
+// discordHTTPClient is used for all outbound requests to the Discord API.
+// It enforces a 10-second timeout to prevent slow upstream responses from
+// blocking the web service indefinitely.
+var discordHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
+
 // DiscordOAuthConfig holds Discord OAuth2 configuration.
 type DiscordOAuthConfig struct {
 	ClientID     string
@@ -161,7 +168,7 @@ func ExchangeDiscordCode(ctx context.Context, cfg DiscordOAuthConfig, code strin
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := discordHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("web: exchange discord code: %w", err)
 	}
@@ -188,7 +195,7 @@ func FetchDiscordUser(ctx context.Context, accessToken string) (*DiscordUser, er
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := discordHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("web: fetch discord user: %w", err)
 	}

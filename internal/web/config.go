@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Config holds all configuration for the web management service.
@@ -33,6 +34,11 @@ type Config struct {
 	// GatewayURL is the base URL of the gateway's internal admin API.
 	GatewayURL string
 
+	// AllowedOrigins is the list of origins permitted by CORS. An empty list
+	// defaults to ["*"] (allow all), which is acceptable for development but
+	// should be restricted in production.
+	AllowedOrigins []string
+
 	// ListenAddr is the address the HTTP server binds to.
 	ListenAddr string
 }
@@ -48,6 +54,15 @@ func LoadConfig() (*Config, error) {
 		DiscordRedirectURI:  os.Getenv("GLYPHOXA_WEB_DISCORD_REDIRECT_URI"),
 		GatewayURL:          os.Getenv("GLYPHOXA_WEB_GATEWAY_URL"),
 		ListenAddr:          os.Getenv("GLYPHOXA_WEB_LISTEN_ADDR"),
+	}
+
+	if origins := os.Getenv("GLYPHOXA_WEB_ALLOWED_ORIGINS"); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				cfg.AllowedOrigins = append(cfg.AllowedOrigins, o)
+			}
+		}
 	}
 
 	if cfg.ListenAddr == "" {

@@ -63,7 +63,7 @@ func (s *Server) proxyToGateway(w http.ResponseWriter, r *http.Request, method, 
 		return
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.gatewayHC.Do(req)
 	if err != nil {
 		slog.Error("web: gateway request failed", "path", path, "err", err)
 		writeError(w, http.StatusBadGateway, "gateway_error", "failed to reach gateway")
@@ -93,7 +93,7 @@ func (s *Server) proxyToGatewayWithBody(w http.ResponseWriter, r *http.Request, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.gatewayHC.Do(req)
 	if err != nil {
 		slog.Error("web: gateway request failed", "path", path, "err", err)
 		writeError(w, http.StatusBadGateway, "gateway_error", "failed to reach gateway")

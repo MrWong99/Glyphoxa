@@ -136,7 +136,7 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 		t.Error("inner handler should not be called for OPTIONS")
 	})
 
-	handler := CORSMiddleware(inner)
+	handler := CORSMiddleware(nil)(inner) // nil = allow all
 	req := httptest.NewRequest(http.MethodOptions, "/test", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -156,7 +156,7 @@ func TestCORSMiddleware_RegularRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := CORSMiddleware(inner)
+	handler := CORSMiddleware(nil)(inner) // nil = allow all
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -166,5 +166,38 @@ func TestCORSMiddleware_RegularRequest(t *testing.T) {
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("CORS origin = %q, want %q", got, "*")
+	}
+}
+
+func TestCORSMiddleware_RestrictedOrigin(t *testing.T) {
+	t.Parallel()
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := CORSMiddleware([]string{"https://app.example.com"})(inner)
+
+	// Allowed origin.
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("CORS origin = %q, want %q", got, "https://app.example.com")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Allow-Credentials = %q, want %q", got, "true")
+	}
+
+	// Disallowed origin.
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req2.Header.Set("Origin", "https://evil.example.com")
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+
+	if got := rr2.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("CORS origin for disallowed = %q, want empty", got)
 	}
 }

@@ -36,6 +36,14 @@ func (s *Server) handleCreateCampaign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_name", "name is required")
 		return
 	}
+	if len(req.Name) > 255 {
+		writeError(w, http.StatusBadRequest, "name_too_long", "name must be 255 characters or fewer")
+		return
+	}
+	if len(req.Description) > 4096 {
+		writeError(w, http.StatusBadRequest, "description_too_long", "description must be 4096 characters or fewer")
+		return
+	}
 
 	campaign := &Campaign{
 		TenantID:    claims.TenantID,
