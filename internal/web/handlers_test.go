@@ -177,6 +177,17 @@ func (m *mockWebStore) UpdateUser(_ context.Context, u *User) error {
 	return nil
 }
 
+func (m *mockWebStore) UpdateUserTenant(_ context.Context, userID, tenantID, role string) error {
+	u, ok := m.users[userID]
+	if !ok {
+		return fmt.Errorf("web: user %q not found", userID)
+	}
+	u.TenantID = tenantID
+	u.Role = role
+	u.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
 func (m *mockWebStore) DeleteUser(_ context.Context, tenantID, id string) error {
 	u, ok := m.users[id]
 	if !ok || u.TenantID != tenantID {
@@ -421,6 +432,50 @@ func (m *mockWebStore) DeleteKnowledgeEntity(_ context.Context, _, campaignID, e
 		}
 	}
 	return fmt.Errorf("web: knowledge entity %q not found", entityID)
+}
+
+func (m *mockWebStore) GetDashboardStats(_ context.Context, tenantID string) (*DashboardStats, error) {
+	stats := &DashboardStats{}
+	for _, c := range m.campaigns {
+		if c.TenantID == tenantID {
+			stats.CampaignCount++
+		}
+	}
+	for _, s := range m.sessions {
+		if s.TenantID == tenantID && s.State == "running" {
+			stats.ActiveSessionCount++
+		}
+	}
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for _, u := range m.usage {
+		if u.TenantID == tenantID && !u.Period.Before(monthStart) {
+			stats.HoursUsed += u.SessionHours
+		}
+	}
+	return stats, nil
+}
+
+func (m *mockWebStore) GetRecentActivity(_ context.Context, tenantID string, limit int) ([]ActivityItem, error) {
+	var items []ActivityItem
+	for _, c := range m.campaigns {
+		if c.TenantID == tenantID {
+			items = append(items, ActivityItem{ID: c.ID, Type: "campaign_created", Description: "Campaign created: " + c.Name, Timestamp: c.CreatedAt, CampaignID: c.ID})
+		}
+	}
+	for _, s := range m.sessions {
+		if s.TenantID == tenantID {
+			if s.State == "running" {
+				items = append(items, ActivityItem{ID: s.ID, Type: "session_started", Description: "Session started", Timestamp: s.StartedAt})
+			} else if s.EndedAt != nil {
+				items = append(items, ActivityItem{ID: s.ID, Type: "session_ended", Description: "Session ended", Timestamp: *s.EndedAt})
+			}
+		}
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
 }
 
 // testServer creates a Server with mock stores for testing.

@@ -30,6 +30,18 @@ func (s *Server) handleDiscordLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
+	if inviteToken := r.URL.Query().Get("invite"); inviteToken != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "glyphoxa_invite",
+			Value:    inviteToken,
+			Path:     "/",
+			MaxAge:   300,
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+
 	params := url.Values{
 		"client_id":     {s.cfg.DiscordClientID},
 		"redirect_uri":  {s.cfg.DiscordRedirectURI},
@@ -64,6 +76,12 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		Path:   "/",
 		MaxAge: -1,
 	})
+
+	var inviteToken string
+	if ic, err := r.Cookie("glyphoxa_invite"); err == nil {
+		inviteToken = ic.Value
+	}
+	http.SetCookie(w, &http.Cookie{Name: "glyphoxa_invite", Value: "", Path: "/", MaxAge: -1})
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -101,8 +119,22 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upsert user — for MVP, auto-assign to a default tenant.
-	tenantID := "default"
+	var invite *Invite
+	if inviteToken != "" {
+		invite, err = s.store.GetInviteByToken(r.Context(), inviteToken)
+		if err != nil {
+			slog.Warn("web: get invite by token", "err", err)
+		}
+		if invite == nil {
+			slog.Warn("web: invite token invalid or expired", "token_prefix", inviteToken[:min(8, len(inviteToken))])
+		}
+	}
+
+	tenantID := ""
+	if invite != nil {
+		tenantID = invite.TenantID
+	}
+
 	user, err := s.store.UpsertDiscordUser(
 		r.Context(),
 		discordUser.ID,
@@ -115,6 +147,33 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		slog.Error("web: upsert discord user", "discord_id", discordUser.ID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to create user")
 		return
+	}
+
+	if invite != nil {
+		switch {
+		case user.TenantID != "" && user.TenantID != invite.TenantID:
+			slog.Warn("web: invite ignored, user already in tenant", "user_id", user.ID, "user_tenant", user.TenantID, "invite_tenant", invite.TenantID)
+		case user.TenantID == "":
+			if err := s.store.UpdateUserTenant(r.Context(), user.ID, invite.TenantID, invite.Role); err != nil {
+				slog.Error("web: assign user to invite tenant", "err", err)
+				writeError(w, http.StatusInternalServerError, "server_error", "failed to join tenant")
+				return
+			}
+			user.TenantID = invite.TenantID
+			user.Role = invite.Role
+			fallthrough
+		default:
+			if user.Role != invite.Role {
+				if err := s.store.UpdateUser(r.Context(), &User{ID: user.ID, Role: invite.Role}); err != nil {
+					slog.Warn("web: update invite role", "err", err)
+				} else {
+					user.Role = invite.Role
+				}
+			}
+			if err := s.store.UseInvite(r.Context(), invite.ID, user.ID); err != nil {
+				slog.Warn("web: mark invite used", "invite_id", invite.ID, "err", err)
+			}
+		}
 	}
 
 	// Issue JWT.
@@ -133,11 +192,15 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		"user_id", user.ID,
 		"discord_id", discordUser.ID,
 		"display_name", user.DisplayName,
+		"tenant_id", user.TenantID,
 	)
 
 	// Redirect to the frontend callback page with the JWT as a query param.
 	// The frontend will store the token and redirect to the dashboard.
 	redirect := "/auth/callback?token=" + url.QueryEscape(token)
+	if user.TenantID == "" {
+		redirect += "&onboarding=true"
+	}
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
