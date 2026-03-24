@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,17 +22,13 @@ export default function SettingsPage() {
   const updateMe = useUpdateMe();
   const updatePreferences = useUpdatePreferences();
 
-  const [displayName, setDisplayName] = useState("");
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
-  const [locale, setLocale] = useState("en");
+  const [displayNameDraft, setDisplayNameDraft] = useState<string | null>(null);
+  const [themeDraft, setThemeDraft] = useState<"light" | "dark" | "system" | null>(null);
+  const [localeDraft, setLocaleDraft] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.display_name ?? "");
-      setTheme(user.preferences?.theme ?? "system");
-      setLocale(user.preferences?.locale ?? "en");
-    }
-  }, [user]);
+  const displayName = displayNameDraft ?? user?.display_name ?? "";
+  const theme = themeDraft ?? user?.preferences?.theme ?? "system";
+  const locale = localeDraft ?? user?.preferences?.locale ?? "en";
 
   const handleSaveProfile = () => {
     if (displayName.trim()) {
@@ -85,7 +81,7 @@ export default function SettingsPage() {
               <Input
                 id="displayName"
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
+                onChange={(e) => setDisplayNameDraft(e.target.value)}
                 placeholder="Your display name"
               />
               <Button
@@ -110,7 +106,7 @@ export default function SettingsPage() {
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="theme">Theme</Label>
-            <Select value={theme} onValueChange={(v) => setTheme(v as "light" | "dark" | "system")}>
+            <Select value={theme} onValueChange={(v) => setThemeDraft(v as "light" | "dark" | "system")}>
               <SelectTrigger id="theme">
                 <SelectValue />
               </SelectTrigger>
@@ -124,7 +120,7 @@ export default function SettingsPage() {
 
           <div className="space-y-2">
             <Label htmlFor="locale">Language</Label>
-            <Select value={locale} onValueChange={setLocale}>
+            <Select value={locale} onValueChange={setLocaleDraft}>
               <SelectTrigger id="locale">
                 <SelectValue />
               </SelectTrigger>

@@ -358,7 +358,7 @@ func TestLoggingMiddleware_DefaultStatus(t *testing.T) {
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Don't explicitly write a status — should default to 200.
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
 	handler := LoggingMiddleware(inner)

@@ -68,13 +68,13 @@ func TestTenantHandlers_ProxyToGateway(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tenants":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "t1"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "t1"}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tenants/t1":
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tenants":
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "new-t"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "new-t"}})
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/tenants/t1":
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "t1"}})
@@ -338,9 +338,8 @@ func TestTenantHandlers_InsufficientRole(t *testing.T) {
 			srv.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleUpdateTenant))))
 			srv.mux.Handle("DELETE /api/v1/tenants/{id}", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleDeleteTenant))))
 
-			req := authReq(t, http.MethodGet, tt.path, nil, secret, "user-1", "t1", tt.role)
 			// For POST/PUT/DELETE, use the correct method.
-			req = httptest.NewRequest(tt.method, tt.path, nil)
+			req := httptest.NewRequest(tt.method, tt.path, nil)
 			token := signTestToken(t, secret, "user-1", "t1", tt.role)
 			req.Header.Set("Authorization", "Bearer "+token)
 

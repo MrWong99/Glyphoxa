@@ -162,10 +162,7 @@ func TestConnPool_Warm(t *testing.T) {
 
 	// Wait for the warm-up goroutine to complete.
 	deadline := time.After(5 * time.Second)
-	for {
-		if p.idleCount(url) > 0 {
-			break
-		}
+	for p.idleCount(url) == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("timed out waiting for warm-up to complete")
@@ -230,10 +227,7 @@ func TestConnPool_WarmNoOpWhenInProgress(t *testing.T) {
 
 	// Wait for warm-up to complete.
 	deadline := time.After(5 * time.Second)
-	for {
-		if p.idleCount(url) > 0 {
-			break
-		}
+	for p.idleCount(url) == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("timed out waiting for warm-up")
@@ -373,10 +367,7 @@ func TestStartStream_UsesPool(t *testing.T) {
 	// Wait for the warm-up connection to be established.
 	wsURLStr, _ := p.buildURL(stt.StreamConfig{SampleRate: 16000, Language: "en"})
 	deadline := time.After(5 * time.Second)
-	for {
-		if p.pool.idleCount(wsURLStr) > 0 {
-			break
-		}
+	for p.pool.idleCount(wsURLStr) == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("timed out waiting for pool warm-up")
