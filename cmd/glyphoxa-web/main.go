@@ -2,18 +2,21 @@
 //
 // The service provides user authentication (Discord OAuth2), campaign and NPC
 // management, session/transcript viewing, usage queries, and tenant
-// administration (proxied to the gateway). It is a standalone binary that
+// administration via gRPC to the gateway. It is a standalone binary that
 // shares the same PostgreSQL database as the Glyphoxa gateway.
 //
 // Configuration is via environment variables:
 //
-//	GLYPHOXA_WEB_DATABASE_DSN         — PostgreSQL connection string (required)
-//	GLYPHOXA_WEB_JWT_SECRET           — HMAC key for JWT signing (required)
-//	GLYPHOXA_WEB_DISCORD_CLIENT_ID    — Discord OAuth2 client ID (required)
-//	GLYPHOXA_WEB_DISCORD_CLIENT_SECRET — Discord OAuth2 client secret (required)
-//	GLYPHOXA_WEB_DISCORD_REDIRECT_URI — OAuth2 callback URL (required)
-//	GLYPHOXA_WEB_GATEWAY_URL          — Gateway admin API base URL (optional)
-//	GLYPHOXA_WEB_LISTEN_ADDR          — Listen address (default :8090)
+//	GLYPHOXA_WEB_DATABASE_DSN            — PostgreSQL connection string (required)
+//	GLYPHOXA_WEB_JWT_SECRET              — HMAC key for JWT signing (required)
+//	GLYPHOXA_WEB_DISCORD_CLIENT_ID       — Discord OAuth2 client ID (required)
+//	GLYPHOXA_WEB_DISCORD_CLIENT_SECRET   — Discord OAuth2 client secret (required)
+//	GLYPHOXA_WEB_DISCORD_REDIRECT_URI    — OAuth2 callback URL (required)
+//	GLYPHOXA_WEB_GATEWAY_GRPC_ADDR       — Gateway gRPC address (e.g. "gateway:50051")
+//	GLYPHOXA_WEB_GATEWAY_TLS_CERT        — Client TLS cert for mTLS (optional)
+//	GLYPHOXA_WEB_GATEWAY_TLS_KEY         — Client TLS key for mTLS (optional)
+//	GLYPHOXA_WEB_GATEWAY_TLS_CA          — CA cert for verifying gateway (optional)
+//	GLYPHOXA_WEB_LISTEN_ADDR             — Listen address (default :8090)
 package main
 
 import (
@@ -27,7 +30,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
 
+	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
 	"github.com/MrWong99/glyphoxa/internal/agent/npcstore"
 	"github.com/MrWong99/glyphoxa/internal/web"
 )
@@ -50,7 +55,7 @@ func run() error {
 
 	slog.Info("glyphoxa-web: starting",
 		"listen_addr", cfg.ListenAddr,
-		"gateway_url", cfg.GatewayURL,
+		"gateway_grpc_addr", cfg.GatewayGRPCAddr,
 	)
 
 	// Connect to PostgreSQL.
@@ -77,8 +82,22 @@ func run() error {
 		return err
 	}
 
-	// Build and start HTTP server.
-	srv := web.NewServer(cfg, store, npcs)
+	// Server options.
+	// Connect to gateway gRPC if configured.
+	var gwClient pb.ManagementServiceClient
+	if cfg.GatewayGRPCAddr != "" {
+		var gwConn *grpc.ClientConn
+		gwClient, gwConn, err = web.DialGateway(cfg)
+		if err != nil {
+			return err
+		}
+		defer gwConn.Close()
+		slog.Info("glyphoxa-web: gateway gRPC connected", "addr", cfg.GatewayGRPCAddr)
+	} else {
+		slog.Warn("glyphoxa-web: no gateway gRPC addr — tenant/session ops disabled")
+	}
+
+	srv := web.NewServer(cfg, store, npcs, gwClient)
 
 	httpServer := &http.Server{
 		Addr:         cfg.ListenAddr,

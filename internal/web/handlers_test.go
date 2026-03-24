@@ -439,7 +439,6 @@ func testServerWithStores(t *testing.T) (*Server, *mockWebStore, *mockNPCStore, 
 		cfg:            cfg,
 		store:          ws,
 		npcs:           ns,
-		gatewayHC:      &http.Client{Timeout: 5 * time.Second},
 		voicePreview:   &mockVoicePreviewProvider{},
 		voicePreviewRL: newVoicePreviewRateLimiter(5, time.Minute),
 	}
