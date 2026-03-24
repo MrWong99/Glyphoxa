@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,14 +8,10 @@ import { Button } from "@/components/ui/button";
 const COOKIE_NOTICE_KEY = "glyphoxa_cookie_notice_dismissed";
 
 export function CookieNotice() {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const dismissed = localStorage.getItem(COOKIE_NOTICE_KEY);
-    if (!dismissed) {
-      setVisible(true);
-    }
-  }, []);
+  const [visible, setVisible] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return !localStorage.getItem(COOKIE_NOTICE_KEY);
+  });
 
   function dismiss() {
     localStorage.setItem(COOKIE_NOTICE_KEY, "1");

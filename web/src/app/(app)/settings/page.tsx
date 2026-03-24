@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,17 +22,13 @@ export default function SettingsPage() {
   const updateMe = useUpdateMe();
   const updatePreferences = useUpdatePreferences();
 
-  const [displayName, setDisplayName] = useState("");
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
-  const [locale, setLocale] = useState("en");
+  const [displayNameOverride, setDisplayName] = useState<string | undefined>(undefined);
+  const [themeOverride, setTheme] = useState<"light" | "dark" | "system" | undefined>(undefined);
+  const [localeOverride, setLocale] = useState<string | undefined>(undefined);
 
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.display_name ?? "");
-      setTheme(user.preferences?.theme ?? "system");
-      setLocale(user.preferences?.locale ?? "en");
-    }
-  }, [user]);
+  const displayName = displayNameOverride ?? (user?.display_name ?? "");
+  const theme = themeOverride ?? (user?.preferences?.theme ?? "system");
+  const locale = localeOverride ?? (user?.preferences?.locale ?? "en");
 
   const handleSaveProfile = () => {
     if (displayName.trim()) {
