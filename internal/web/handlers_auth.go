@@ -135,14 +135,10 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		"display_name", user.DisplayName,
 	)
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"access_token": token,
-			"token_type":   "Bearer",
-			"expires_in":   86400,
-			"user":         user,
-		},
-	})
+	// Redirect to the frontend callback page with the JWT as a query param.
+	// The frontend will store the token and redirect to the dashboard.
+	redirect := "/auth/callback?token=" + url.QueryEscape(token)
+	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
 // handleRefresh issues a new JWT from a valid existing token.
