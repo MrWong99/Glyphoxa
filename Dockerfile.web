@@ -20,6 +20,11 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 COPY web/ ./
+
+# Set backend URL for Next.js rewrites (resolved at build time).
+ARG API_BACKEND_URL=http://glyphoxa-web-api:8090
+ENV API_BACKEND_URL=${API_BACKEND_URL}
+
 RUN npm run build
 
 # ---------------------------------------------------------------------------

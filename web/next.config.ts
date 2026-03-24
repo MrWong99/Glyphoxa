@@ -1,7 +1,17 @@
 import type { NextConfig } from "next";
 
+const apiBackendUrl =
+  process.env.API_BACKEND_URL || "http://localhost:8090";
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${apiBackendUrl}/api/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;
