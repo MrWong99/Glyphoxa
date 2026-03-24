@@ -9,10 +9,10 @@ import {
   Eye,
   Square,
   ScrollText,
+  AlertTriangle,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   useUser,
   useDashboardStats,
@@ -20,6 +20,7 @@ import {
   useActivity,
   useStopSession,
 } from "@/lib/hooks";
+import { formatRelativeTime } from "@/lib/utils";
 
 function greeting(): string {
   const hour = new Date().getHours();
@@ -28,32 +29,31 @@ function greeting(): string {
   return "Good evening";
 }
 
-function formatDuration(seconds: number): string {
+function formatDashboardDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   return `${h}:${m.toString().padStart(2, "0")}`;
 }
 
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60_000);
-  const diffHours = Math.floor(diffMs / 3_600_000);
-  const diffDays = Math.floor(diffMs / 86_400_000);
-
-  if (diffMin < 1) return "Just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays === 1) return "Yesterday";
-  return `${diffDays} days ago`;
+function StatCardSkeleton() {
+  return (
+    <Card className="animate-pulse">
+      <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <div className="h-4 w-20 rounded bg-muted" />
+        <div className="h-4 w-4 rounded bg-muted" />
+      </CardHeader>
+      <CardContent>
+        <div className="h-8 w-16 rounded bg-muted" />
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function DashboardPage() {
   const { data: user } = useUser();
-  const { data: stats } = useDashboardStats();
+  const { data: stats, isLoading: statsLoading, isError: statsError } = useDashboardStats();
   const { data: activeSessions } = useActiveSessions();
-  const { data: activity } = useActivity();
+  const { data: activity, isLoading: activityLoading, isError: activityError } = useActivity();
   const stopSession = useStopSession();
 
   return (
@@ -63,63 +63,80 @@ export default function DashboardPage() {
       </h1>
 
       {/* Stats cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Link href="/campaigns">
-          <Card className="transition-colors hover:bg-accent/50">
+      {statsLoading ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+        </div>
+      ) : statsError ? (
+        <Card className="border-destructive/50">
+          <CardContent className="flex items-center gap-3 p-4">
+            <AlertTriangle className="h-5 w-5 text-destructive" />
+            <p className="text-sm text-muted-foreground">
+              Failed to load dashboard stats.
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <Link href="/campaigns">
+            <Card className="transition-colors hover:bg-accent/50">
+              <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">
+                  Campaigns
+                </CardTitle>
+                <Swords className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold">
+                  {stats?.campaign_count ?? 0}
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
+
+          <Card>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Campaigns
+                Active Sessions
               </CardTitle>
-              <Swords className="h-4 w-4 text-muted-foreground" />
+              <Radio className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold">
-                {stats?.campaign_count ?? 0}
+                {stats?.active_session_count ?? 0}
               </div>
             </CardContent>
           </Card>
-        </Link>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Active Sessions
-            </CardTitle>
-            <Radio className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">
-              {stats?.active_session_count ?? 0}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              This Month
-            </CardTitle>
-            <Clock className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">
-              {stats?.hours_used ?? 0}h
-              <span className="text-base font-normal text-muted-foreground">
-                {" "}
-                / {stats?.hours_limit ?? 100}h
-              </span>
-            </div>
-            <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-secondary">
-              <div
-                className="h-full rounded-full bg-primary transition-all"
-                style={{
-                  width: `${Math.min(100, ((stats?.hours_used ?? 0) / (stats?.hours_limit ?? 100)) * 100)}%`,
-                }}
-              />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                This Month
+              </CardTitle>
+              <Clock className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold">
+                {stats?.hours_used ?? 0}h
+                <span className="text-base font-normal text-muted-foreground">
+                  {" "}
+                  / {stats?.hours_limit ?? 100}h
+                </span>
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-secondary">
+                <div
+                  className="h-full rounded-full bg-primary transition-all"
+                  style={{
+                    width: `${Math.min(100, ((stats?.hours_used ?? 0) / (stats?.hours_limit ?? 100)) * 100)}%`,
+                  }}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Active sessions */}
       {activeSessions && activeSessions.length > 0 && (
@@ -138,7 +155,7 @@ export default function DashboardPage() {
                     </div>
                     <p className="text-sm text-muted-foreground">
                       {session.guild_name} &middot; Duration:{" "}
-                      {formatDuration(session.duration_seconds)}
+                      {formatDashboardDuration(session.duration_seconds)}
                     </p>
                     <p className="text-sm text-muted-foreground">
                       NPCs: {session.npc_names.join(", ")}
@@ -171,7 +188,26 @@ export default function DashboardPage() {
         <h2 className="text-lg font-semibold">Recent Activity</h2>
         <Card>
           <CardContent className="divide-y divide-border p-0">
-            {activity && activity.length > 0 ? (
+            {activityLoading ? (
+              <div className="space-y-3 p-4">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="flex animate-pulse items-start gap-3">
+                    <div className="h-4 w-4 rounded bg-muted" />
+                    <div className="flex-1 space-y-1">
+                      <div className="h-4 w-3/4 rounded bg-muted" />
+                      <div className="h-3 w-16 rounded bg-muted" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : activityError ? (
+              <div className="flex items-center gap-2 p-6">
+                <AlertTriangle className="h-4 w-4 text-destructive" />
+                <p className="text-sm text-muted-foreground">
+                  Failed to load activity.
+                </p>
+              </div>
+            ) : activity && activity.length > 0 ? (
               activity.slice(0, 10).map((item) => (
                 <div key={item.id} className="flex items-start gap-3 p-4">
                   <div className="mt-0.5 text-muted-foreground">

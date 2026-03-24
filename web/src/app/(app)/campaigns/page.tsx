@@ -1,28 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { Plus, Swords } from "lucide-react";
+import { Plus, Swords, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useCampaigns } from "@/lib/hooks";
-
-function formatRelativeTime(dateStr: string | null): string {
-  if (!dateStr) return "No sessions yet";
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffHours = Math.floor(diffMs / 3_600_000);
-  const diffDays = Math.floor(diffMs / 86_400_000);
-
-  if (diffHours < 1) return "Just now";
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays === 1) return "Yesterday";
-  return `${diffDays} days ago`;
-}
+import { formatRelativeTime } from "@/lib/utils";
 
 export default function CampaignsPage() {
-  const { data: campaigns, isLoading } = useCampaigns();
+  const { data: campaigns, isLoading, isError, error } = useCampaigns();
 
   return (
     <div className="space-y-6">
@@ -42,6 +29,16 @@ export default function CampaignsPage() {
             </Card>
           ))}
         </div>
+      ) : isError ? (
+        <Card className="border-destructive/50">
+          <CardContent className="py-8 text-center">
+            <AlertTriangle className="mx-auto h-12 w-12 text-destructive" />
+            <h3 className="mt-4 text-lg font-medium">Failed to load campaigns</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {error?.message || "An unexpected error occurred."}
+            </p>
+          </CardContent>
+        </Card>
       ) : campaigns && campaigns.length > 0 ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {campaigns.map((campaign) => (

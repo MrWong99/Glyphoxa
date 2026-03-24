@@ -1,6 +1,6 @@
 "use client";
 
-import { use } from "react";
+import { use, useMemo } from "react";
 import Link from "next/link";
 import { ArrowLeft, Clock, Radio, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,15 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useSession, useTranscript, useStopSession } from "@/lib/hooks";
-import { cn } from "@/lib/utils";
-
-function formatDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m ${s}s`;
-}
+import { cn, formatDuration } from "@/lib/utils";
 
 function formatTime(dateStr: string): string {
   return new Date(dateStr).toLocaleTimeString("en-US", {
@@ -26,7 +18,7 @@ function formatTime(dateStr: string): string {
   });
 }
 
-function formatDate(dateStr: string): string {
+function formatLongDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
@@ -35,7 +27,6 @@ function formatDate(dateStr: string): string {
   });
 }
 
-const speakerColors: Record<string, string> = {};
 const colorPool = [
   "text-blue-400",
   "text-green-400",
@@ -47,12 +38,13 @@ const colorPool = [
   "text-red-400",
 ];
 
-function getSpeakerColor(speaker: string): string {
-  if (!(speaker in speakerColors)) {
-    speakerColors[speaker] =
-      colorPool[Object.keys(speakerColors).length % colorPool.length];
-  }
-  return speakerColors[speaker];
+function buildSpeakerColorMap(speakers: string[]): Record<string, string> {
+  const unique = [...new Set(speakers)];
+  const map: Record<string, string> = {};
+  unique.forEach((speaker, i) => {
+    map[speaker] = colorPool[i % colorPool.length];
+  });
+  return map;
 }
 
 export default function SessionDetailPage({
@@ -64,6 +56,14 @@ export default function SessionDetailPage({
   const { data: session, isLoading: sessionLoading } = useSession(id);
   const { data: transcript, isLoading: transcriptLoading } = useTranscript(id);
   const stopSession = useStopSession();
+
+  const speakerColors = useMemo(() => {
+    if (!transcript) return {};
+    const npcSpeakers = transcript
+      .filter((e) => e.speaker_type === "npc")
+      .map((e) => e.speaker);
+    return buildSpeakerColorMap(npcSpeakers);
+  }, [transcript]);
 
   if (sessionLoading) {
     return (
@@ -87,13 +87,13 @@ export default function SessionDetailPage({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" render={<Link href="/sessions" />}>
+          <Button variant="ghost" size="icon" aria-label="Back to sessions" render={<Link href="/sessions" />}>
               <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>
             <h1 className="text-2xl font-bold">{session.campaign_name}</h1>
             <p className="text-sm text-muted-foreground">
-              {formatDate(session.started_at)}
+              {formatLongDate(session.started_at)}
             </p>
           </div>
         </div>
@@ -209,7 +209,7 @@ export default function SessionDetailPage({
                           className={cn(
                             "mr-2 text-sm font-semibold",
                             entry.speaker_type === "npc"
-                              ? getSpeakerColor(entry.speaker)
+                              ? speakerColors[entry.speaker] ?? "text-foreground"
                               : "text-foreground",
                           )}
                         >

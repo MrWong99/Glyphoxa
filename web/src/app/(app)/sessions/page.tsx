@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ScrollText } from "lucide-react";
+import { ScrollText, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -13,25 +13,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useSessions } from "@/lib/hooks";
-
-function formatDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+import { formatDuration, formatDate } from "@/lib/utils";
 
 export default function SessionsPage() {
-  const { data: sessions, isLoading } = useSessions();
+  const { data: sessions, isLoading, isError, error } = useSessions();
 
   return (
     <div className="space-y-6">
@@ -40,6 +25,16 @@ export default function SessionsPage() {
       {isLoading ? (
         <Card className="animate-pulse">
           <CardContent className="h-64" />
+        </Card>
+      ) : isError ? (
+        <Card className="border-destructive/50">
+          <CardContent className="py-8 text-center">
+            <AlertTriangle className="mx-auto h-12 w-12 text-destructive" />
+            <h3 className="mt-4 text-lg font-medium">Failed to load sessions</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {error?.message || "An unexpected error occurred."}
+            </p>
+          </CardContent>
         </Card>
       ) : sessions && sessions.length > 0 ? (
         <Card>

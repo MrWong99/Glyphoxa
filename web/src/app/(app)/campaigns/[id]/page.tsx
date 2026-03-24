@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Save, Trash2, Users, ScrollText } from "lucide-react";
@@ -26,10 +26,10 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { useCampaign, useUpdateCampaign, useDeleteCampaign, useNPCs } from "@/lib/hooks";
+import { useCampaign, useUpdateCampaign, useDeleteCampaign } from "@/lib/hooks";
 import { NPCList } from "./npcs/npc-list";
 import { CampaignSessions } from "./sessions";
-import type { GameSystem } from "@/lib/types";
+import type { Campaign, GameSystem } from "@/lib/types";
 
 const gameSystems: GameSystem[] = [
   "D&D 5e",
@@ -43,33 +43,17 @@ const gameSystems: GameSystem[] = [
   "Other",
 ];
 
-export default function CampaignDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = use(params);
+function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId: string }) {
   const router = useRouter();
-  const { data: campaign, isLoading } = useCampaign(id);
-  const updateCampaign = useUpdateCampaign(id);
+  const updateCampaign = useUpdateCampaign(campaignId);
   const deleteCampaign = useDeleteCampaign();
   const [deleteConfirm, setDeleteConfirm] = useState("");
 
-  const [name, setName] = useState("");
-  const [gameSystem, setGameSystem] = useState("");
-  const [description, setDescription] = useState("");
-  const [language, setLanguage] = useState("en");
+  const [name, setName] = useState(campaign.name);
+  const [gameSystem, setGameSystem] = useState(campaign.game_system);
+  const [description, setDescription] = useState(campaign.description);
+  const [language, setLanguage] = useState(campaign.language);
   const [dirty, setDirty] = useState(false);
-
-  useEffect(() => {
-    if (campaign) {
-      setName(campaign.name);
-      setGameSystem(campaign.game_system);
-      setDescription(campaign.description);
-      setLanguage(campaign.language);
-      setDirty(false);
-    }
-  }, [campaign]);
 
   function handleChange<T>(setter: (v: T) => void) {
     return (v: T) => {
@@ -89,32 +73,15 @@ export default function CampaignDetailPage({
   }
 
   async function handleDelete() {
-    await deleteCampaign.mutateAsync(id);
+    await deleteCampaign.mutateAsync(campaignId);
     router.push("/campaigns");
-  }
-
-  if (isLoading) {
-    return (
-      <div className="mx-auto max-w-4xl animate-pulse space-y-4">
-        <div className="h-8 w-48 rounded bg-muted" />
-        <div className="h-64 rounded bg-muted" />
-      </div>
-    );
-  }
-
-  if (!campaign) {
-    return (
-      <div className="text-center">
-        <p className="text-muted-foreground">Campaign not found.</p>
-      </div>
-    );
   }
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" render={<Link href="/campaigns" />}>
+          <Button variant="ghost" size="icon" aria-label="Back to campaigns" render={<Link href="/campaigns" />}>
               <ArrowLeft className="h-4 w-4" />
           </Button>
           <h1 className="text-2xl font-bold">{campaign.name}</h1>
@@ -186,8 +153,8 @@ export default function CampaignDetailPage({
                   <SelectContent>
                     <SelectItem value="en">English</SelectItem>
                     <SelectItem value="de">Deutsch</SelectItem>
-                    <SelectItem value="fr">Français</SelectItem>
-                    <SelectItem value="es">Español</SelectItem>
+                    <SelectItem value="fr">Fran&ccedil;ais</SelectItem>
+                    <SelectItem value="es">Espa&ntilde;ol</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -257,13 +224,41 @@ export default function CampaignDetailPage({
         </TabsContent>
 
         <TabsContent value="npcs">
-          <NPCList campaignId={id} />
+          <NPCList campaignId={campaignId} />
         </TabsContent>
 
         <TabsContent value="sessions">
-          <CampaignSessions campaignId={id} />
+          <CampaignSessions campaignId={campaignId} />
         </TabsContent>
       </Tabs>
     </div>
   );
+}
+
+export default function CampaignDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
+  const { data: campaign, isLoading } = useCampaign(id);
+
+  if (isLoading) {
+    return (
+      <div className="mx-auto max-w-4xl animate-pulse space-y-4">
+        <div className="h-8 w-48 rounded bg-muted" />
+        <div className="h-64 rounded bg-muted" />
+      </div>
+    );
+  }
+
+  if (!campaign) {
+    return (
+      <div className="text-center">
+        <p className="text-muted-foreground">Campaign not found.</p>
+      </div>
+    );
+  }
+
+  return <CampaignForm key={campaign.id} campaign={campaign} campaignId={id} />;
 }
