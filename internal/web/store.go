@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// validTenantID matches lowercase alphanumeric IDs with optional hyphens/
+// underscores — the characters safe for use in a PostgreSQL schema name.
+var validTenantID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
@@ -40,6 +45,25 @@ type Campaign struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+// WebStore defines the data operations required by the web management handlers.
+// Implementations must be safe for concurrent use.
+type WebStore interface {
+	Ping(ctx context.Context) error
+	UpsertDiscordUser(ctx context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error)
+	GetUser(ctx context.Context, id string) (*User, error)
+	CreateCampaign(ctx context.Context, c *Campaign) error
+	GetCampaign(ctx context.Context, tenantID, id string) (*Campaign, error)
+	ListCampaigns(ctx context.Context, tenantID string) ([]Campaign, error)
+	UpdateCampaign(ctx context.Context, c *Campaign) error
+	DeleteCampaign(ctx context.Context, tenantID, id string) error
+	ListSessions(ctx context.Context, tenantID string, limit, offset int) ([]SessionSummary, error)
+	GetTranscript(ctx context.Context, tenantID, sessionID string) ([]TranscriptEntry, error)
+	GetUsage(ctx context.Context, tenantID string, from, to time.Time) ([]UsageRecord, error)
+}
+
+// Compile-time assertion that *Store implements WebStore.
+var _ WebStore = (*Store)(nil)
 
 // Store provides database operations for the web management service.
 type Store struct {
@@ -268,6 +292,9 @@ type TranscriptEntry struct {
 // GetTranscript retrieves transcript entries for a session from the
 // tenant-specific schema.
 func (s *Store) GetTranscript(ctx context.Context, tenantID, sessionID string) ([]TranscriptEntry, error) {
+	if !validTenantID.MatchString(tenantID) {
+		return nil, fmt.Errorf("web: invalid tenant ID %q", tenantID)
+	}
 	// Per-tenant schema: tenant_<id>.session_entries
 	schema := "tenant_" + tenantID
 	query := fmt.Sprintf(`

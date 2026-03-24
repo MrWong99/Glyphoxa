@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/internal/agent/npcstore"
 	"github.com/MrWong99/glyphoxa/internal/health"
@@ -10,19 +11,23 @@ import (
 
 // Server is the HTTP server for the web management service.
 type Server struct {
-	mux   *http.ServeMux
-	cfg   *Config
-	store *Store
-	npcs  npcstore.Store
+	mux       *http.ServeMux
+	cfg       *Config
+	store     WebStore
+	npcs      npcstore.Store
+	gatewayHC *http.Client // HTTP client for gateway proxy requests.
 }
 
 // NewServer creates a Server and registers all routes.
-func NewServer(cfg *Config, store *Store, npcs npcstore.Store) *Server {
+func NewServer(cfg *Config, store WebStore, npcs npcstore.Store) *Server {
 	s := &Server{
 		mux:   http.NewServeMux(),
 		cfg:   cfg,
 		store: store,
 		npcs:  npcs,
+		gatewayHC: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 	s.registerRoutes()
 	return s
@@ -32,7 +37,7 @@ func NewServer(cfg *Config, store *Store, npcs npcstore.Store) *Server {
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 	h = MaxBytesMiddleware(h)
-	h = CORSMiddleware(h)
+	h = CORSMiddleware(s.cfg.AllowedOrigins)(h)
 	h = LoggingMiddleware(h)
 	return h
 }

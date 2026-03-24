@@ -77,23 +77,49 @@ var roleLevel = map[string]int{
 }
 
 func hasMinRole(userRole, minRole string) bool {
-	return roleLevel[userRole] >= roleLevel[minRole]
+	uLevel, uOK := roleLevel[userRole]
+	mLevel, mOK := roleLevel[minRole]
+	if !uOK || !mOK {
+		return false
+	}
+	return uLevel >= mLevel
 }
 
-// CORSMiddleware adds CORS headers allowing browser-based access from any origin.
-func CORSMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
+// CORSMiddleware adds CORS headers. When allowedOrigins is empty or contains
+// "*", all origins are permitted. Otherwise only listed origins receive the
+// Access-Control-Allow-Origin header and credentials are allowed.
+func CORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	allowAll := len(allowedOrigins) == 0
+	for _, o := range allowedOrigins {
+		if o == "*" {
+			allowAll = true
 		}
-		next.ServeHTTP(w, r)
-	})
+		allowed[o] = struct{}{}
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if allowAll {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else if _, ok := allowed[origin]; ok {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Vary", "Origin")
+			}
+
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // maxRequestBodyBytes is the maximum allowed request body size (1 MiB).

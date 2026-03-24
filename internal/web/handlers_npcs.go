@@ -50,6 +50,10 @@ func (s *Server) handleCreateNPC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_name", "name is required")
 		return
 	}
+	if len(req.Name) > 255 {
+		writeError(w, http.StatusBadRequest, "name_too_long", "name must be 255 characters or fewer")
+		return
+	}
 
 	def := &npcstore.NPCDefinition{
 		ID:              req.ID,

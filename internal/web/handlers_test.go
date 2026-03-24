@@ -12,6 +12,9 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/agent/npcstore"
 )
 
+// Compile-time assertion.
+var _ WebStore = (*mockWebStore)(nil)
+
 // mockNPCStore is a simple in-memory implementation of npcstore.Store for tests.
 type mockNPCStore struct {
 	npcs map[string]*npcstore.NPCDefinition
@@ -70,8 +73,7 @@ func (m *mockNPCStore) Upsert(_ context.Context, def *npcstore.NPCDefinition) er
 	return m.Create(context.Background(), def)
 }
 
-// mockStore is a simple in-memory implementation of the web Store for tests.
-// It wraps campaigns and users in slices to avoid needing a real database.
+// mockWebStore is a simple in-memory implementation of WebStore for tests.
 type mockWebStore struct {
 	users     map[string]*User
 	campaigns map[string]*Campaign
@@ -82,6 +84,71 @@ func newMockWebStore() *mockWebStore {
 		users:     make(map[string]*User),
 		campaigns: make(map[string]*Campaign),
 	}
+}
+
+func (m *mockWebStore) Ping(_ context.Context) error { return nil }
+
+func (m *mockWebStore) UpsertDiscordUser(_ context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error) {
+	id := "user-" + discordID
+	u := &User{ID: id, TenantID: tenantID, DiscordID: discordID, Email: email, DisplayName: displayName, AvatarURL: avatarURL, Role: "dm"}
+	m.users[id] = u
+	return u, nil
+}
+
+func (m *mockWebStore) GetUser(_ context.Context, id string) (*User, error) {
+	u, ok := m.users[id]
+	if !ok {
+		return nil, nil
+	}
+	return u, nil
+}
+
+func (m *mockWebStore) CreateCampaign(_ context.Context, c *Campaign) error {
+	if c.ID == "" {
+		c.ID = "camp-" + c.Name
+	}
+	m.campaigns[c.ID] = c
+	return nil
+}
+
+func (m *mockWebStore) GetCampaign(_ context.Context, tenantID, id string) (*Campaign, error) {
+	c, ok := m.campaigns[id]
+	if !ok || c.TenantID != tenantID {
+		return nil, nil
+	}
+	return c, nil
+}
+
+func (m *mockWebStore) ListCampaigns(_ context.Context, tenantID string) ([]Campaign, error) {
+	var result []Campaign
+	for _, c := range m.campaigns {
+		if c.TenantID == tenantID {
+			result = append(result, *c)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockWebStore) UpdateCampaign(_ context.Context, c *Campaign) error {
+	m.campaigns[c.ID] = c
+	return nil
+}
+
+func (m *mockWebStore) DeleteCampaign(_ context.Context, tenantID, id string) error {
+	delete(m.campaigns, id)
+	return nil
+}
+
+func (m *mockWebStore) ListSessions(_ context.Context, _ string, _, _ int) ([]SessionSummary, error) {
+	return nil, nil
+}
+
+func (m *mockWebStore) GetTranscript(_ context.Context, _, _ string) ([]TranscriptEntry, error) {
+	return nil, nil
+}
+
+func (m *mockWebStore) GetUsage(_ context.Context, _ string, _, _ time.Time) ([]UsageRecord, error) {
+	return nil, nil
 }
 
 // testServer creates a Server with mock stores for testing.
@@ -96,16 +163,12 @@ func testServer(t *testing.T) (*Server, string) {
 		DiscordRedirectURI:  "http://localhost/callback",
 	}
 
-	// We can't use the real Store (needs PostgreSQL), so we test at the
-	// handler level using the full Server with a real HTTP mux and JWT
-	// auth. Tests that need store interactions are integration tests.
-	// Here we test route registration, auth, and request/response format.
-
 	return &Server{
-		mux:   http.NewServeMux(),
-		cfg:   cfg,
-		store: nil, // Will cause nil-pointer if store methods are called
-		npcs:  newMockNPCStore(),
+		mux:       http.NewServeMux(),
+		cfg:       cfg,
+		store:     newMockWebStore(),
+		npcs:      newMockNPCStore(),
+		gatewayHC: &http.Client{Timeout: 5 * time.Second},
 	}, secret
 }
 
