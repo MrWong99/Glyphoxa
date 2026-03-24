@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
+	"github.com/MrWong99/glyphoxa/internal/gateway/grpctransport"
 )
 
 // DialGateway establishes a gRPC connection to the gateway's ManagementService.
@@ -31,6 +32,13 @@ func DialGateway(cfg *Config) (pb.ManagementServiceClient, *grpc.ClientConn, err
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	// Send shared secret in gRPC metadata for ManagementService auth.
+	if cfg.GatewaySharedSecret != "" {
+		opts = append(opts, grpc.WithUnaryInterceptor(
+			grpctransport.MgmtSecretUnaryClientInterceptor(cfg.GatewaySharedSecret),
+		))
 	}
 
 	conn, err := grpc.NewClient(cfg.GatewayGRPCAddr, opts...)

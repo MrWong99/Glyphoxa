@@ -109,7 +109,7 @@ type WebStore interface {
 	GetUser(ctx context.Context, id string) (*User, error)
 	ListUsers(ctx context.Context, tenantID, role string, limit, offset int) ([]User, int, error)
 	UpdateUser(ctx context.Context, u *User) error
-	DeleteUser(ctx context.Context, id string) error
+	DeleteUser(ctx context.Context, tenantID, id string) error
 	UpdateUserPreferences(ctx context.Context, id string, prefs json.RawMessage) (*User, error)
 	CreateInvite(ctx context.Context, inv *Invite) error
 	GetInviteByToken(ctx context.Context, token string) (*Invite, error)
@@ -800,11 +800,12 @@ func (s *Store) UpdateUser(ctx context.Context, u *User) error {
 	return nil
 }
 
-// DeleteUser soft-deletes a user.
-func (s *Store) DeleteUser(ctx context.Context, id string) error {
+// DeleteUser soft-deletes a user. The tenant_id parameter ensures users
+// cannot be deleted across tenant boundaries (defense-in-depth).
+func (s *Store) DeleteUser(ctx context.Context, tenantID, id string) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE mgmt.users SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL
-	`, id)
+		UPDATE mgmt.users SET deleted_at = now() WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`, id, tenantID)
 	if err != nil {
 		return fmt.Errorf("web: delete user %q: %w", id, err)
 	}

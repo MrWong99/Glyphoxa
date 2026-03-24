@@ -177,8 +177,9 @@ func (m *mockWebStore) UpdateUser(_ context.Context, u *User) error {
 	return nil
 }
 
-func (m *mockWebStore) DeleteUser(_ context.Context, id string) error {
-	if _, ok := m.users[id]; !ok {
+func (m *mockWebStore) DeleteUser(_ context.Context, tenantID, id string) error {
+	u, ok := m.users[id]
+	if !ok || u.TenantID != tenantID {
 		return fmt.Errorf("web: user %q not found", id)
 	}
 	delete(m.users, id)

@@ -59,6 +59,11 @@ type Config struct {
 	// gateway's server certificate.
 	GatewayTLSCA string
 
+	// GatewaySharedSecret is the shared secret for authenticating to the
+	// gateway's ManagementService gRPC endpoint. When set, the secret is
+	// sent in gRPC metadata on every management RPC.
+	GatewaySharedSecret string
+
 	// AllowedOrigins is the list of origins permitted by CORS. An empty list
 	// defaults to ["*"] (allow all), which is acceptable for development but
 	// should be restricted in production.
@@ -89,6 +94,7 @@ func LoadConfig() (*Config, error) {
 		GatewayTLSCert:      os.Getenv("GLYPHOXA_WEB_GATEWAY_TLS_CERT"),
 		GatewayTLSKey:       os.Getenv("GLYPHOXA_WEB_GATEWAY_TLS_KEY"),
 		GatewayTLSCA:        os.Getenv("GLYPHOXA_WEB_GATEWAY_TLS_CA"),
+		GatewaySharedSecret: os.Getenv("GLYPHOXA_WEB_GATEWAY_SECRET"),
 		ListenAddr:          os.Getenv("GLYPHOXA_WEB_LISTEN_ADDR"),
 	}
 

@@ -116,6 +116,7 @@ func TestHandleUpdateUser(t *testing.T) {
 		{"dm cannot change role", "u1", "u1", "dm", `{"role":"tenant_admin"}`, http.StatusForbidden},
 		{"invalid role value", "u2", "u1", "tenant_admin", `{"role":"hacker"}`, http.StatusBadRequest},
 		{"invalid json", "u1", "u1", "dm", `{bad}`, http.StatusBadRequest},
+		{"cross-tenant update blocked", "u3", "u1", "tenant_admin", `{"role":"dm"}`, http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +129,7 @@ func TestHandleUpdateUser(t *testing.T) {
 
 			ws.users["u1"] = &User{ID: "u1", TenantID: "tenant-1", DisplayName: "Alice", Role: "dm"}
 			ws.users["u2"] = &User{ID: "u2", TenantID: "tenant-1", DisplayName: "Bob", Role: "viewer"}
+			ws.users["u3"] = &User{ID: "u3", TenantID: "tenant-2", DisplayName: "Eve", Role: "viewer"}
 
 			req := authReq(t, http.MethodPut, "/api/v1/users/"+tt.targetID,
 				bytes.NewBufferString(tt.body), secret, tt.callerID, "tenant-1", tt.role)
@@ -148,11 +150,13 @@ func TestHandleDeleteUser(t *testing.T) {
 		name     string
 		targetID string
 		callerID string
+		tenant   string
 		wantCode int
 	}{
-		{"delete other user", "u2", "u1", http.StatusNoContent},
-		{"cannot delete self", "u1", "u1", http.StatusBadRequest},
-		{"delete nonexistent", "u999", "u1", http.StatusNotFound},
+		{"delete other user", "u2", "u1", "tenant-1", http.StatusNoContent},
+		{"cannot delete self", "u1", "u1", "tenant-1", http.StatusBadRequest},
+		{"delete nonexistent", "u999", "u1", "tenant-1", http.StatusNotFound},
+		{"cross-tenant delete blocked", "u3", "u1", "tenant-1", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
@@ -165,13 +169,21 @@ func TestHandleDeleteUser(t *testing.T) {
 
 			ws.users["u1"] = &User{ID: "u1", TenantID: "tenant-1", DisplayName: "Alice", Role: "tenant_admin"}
 			ws.users["u2"] = &User{ID: "u2", TenantID: "tenant-1", DisplayName: "Bob", Role: "viewer"}
+			ws.users["u3"] = &User{ID: "u3", TenantID: "tenant-2", DisplayName: "Eve", Role: "viewer"}
 
-			req := authReq(t, http.MethodDelete, "/api/v1/users/"+tt.targetID, nil, secret, tt.callerID, "tenant-1", "tenant_admin")
+			req := authReq(t, http.MethodDelete, "/api/v1/users/"+tt.targetID, nil, secret, tt.callerID, tt.tenant, "tenant_admin")
 			rr := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rr, req)
 
 			if rr.Code != tt.wantCode {
 				t.Errorf("status = %d, want %d; body: %s", rr.Code, tt.wantCode, rr.Body.String())
+			}
+
+			// Verify cross-tenant user was not deleted.
+			if tt.name == "cross-tenant delete blocked" {
+				if _, ok := ws.users["u3"]; !ok {
+					t.Error("cross-tenant user u3 was deleted — tenant isolation breached")
+				}
 			}
 		})
 	}

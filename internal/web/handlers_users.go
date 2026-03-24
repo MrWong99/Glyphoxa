@@ -88,6 +88,15 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When admins update another user, verify they belong to the same tenant.
+	if id != claims.Sub {
+		target, err := s.store.GetUser(r.Context(), id)
+		if err != nil || target == nil || target.TenantID != claims.TenantID {
+			writeError(w, http.StatusNotFound, "not_found", "user not found")
+			return
+		}
+	}
+
 	var req UserUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
@@ -146,7 +155,14 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.DeleteUser(r.Context(), id); err != nil {
+	// Verify the target user belongs to the same tenant before deleting.
+	target, err := s.store.GetUser(r.Context(), id)
+	if err != nil || target == nil || target.TenantID != claims.TenantID {
+		writeError(w, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+
+	if err := s.store.DeleteUser(r.Context(), claims.TenantID, id); err != nil {
 		slog.Error("web: delete user", "user_id", id, "err", err)
 		writeError(w, http.StatusNotFound, "not_found", "user not found")
 		return
