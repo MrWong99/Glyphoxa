@@ -68,6 +68,8 @@ func (c *Config) Validate() error {
 	}
 	if c.JWTSecret == "" {
 		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_JWT_SECRET is required"))
+	} else if len(c.JWTSecret) < 32 {
+		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_JWT_SECRET must be at least 32 characters"))
 	}
 	if c.DiscordClientID == "" {
 		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_DISCORD_CLIENT_ID is required"))

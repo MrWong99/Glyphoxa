@@ -163,6 +163,9 @@ func TestHandleDiscordLogin_Redirect(t *testing.T) {
 	if stateCookie.Value == "" {
 		t.Fatal("empty state cookie value")
 	}
+	if !stateCookie.Secure {
+		t.Error("state cookie should have Secure flag set")
+	}
 }
 
 func TestHandleMe_Unauthenticated(t *testing.T) {
@@ -244,12 +247,23 @@ func TestConfigValidation(t *testing.T) {
 			name: "valid",
 			cfg: Config{
 				DatabaseDSN:         "postgres://localhost/test",
-				JWTSecret:           "secret",
+				JWTSecret:           "a-very-long-jwt-secret-that-is-at-least-32-chars",
 				DiscordClientID:     "id",
 				DiscordClientSecret: "secret",
 				DiscordRedirectURI:  "http://localhost/callback",
 			},
 			wantErr: false,
+		},
+		{
+			name: "jwt secret too short",
+			cfg: Config{
+				DatabaseDSN:         "postgres://localhost/test",
+				JWTSecret:           "short",
+				DiscordClientID:     "id",
+				DiscordClientSecret: "secret",
+				DiscordRedirectURI:  "http://localhost/callback",
+			},
+			wantErr: true,
 		},
 		{
 			name:    "empty",

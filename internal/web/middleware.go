@@ -96,6 +96,17 @@ func CORSMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// maxRequestBodyBytes is the maximum allowed request body size (1 MiB).
+const maxRequestBodyBytes = 1 << 20
+
+// MaxBytesMiddleware limits request body size to prevent memory exhaustion.
+func MaxBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // LoggingMiddleware logs each request with method, path, status, and duration.
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -146,12 +147,15 @@ func GenerateState() (string, error) {
 
 // ExchangeDiscordCode exchanges an authorization code for a Discord access token.
 func ExchangeDiscordCode(ctx context.Context, cfg DiscordOAuthConfig, code string) (string, error) {
-	data := fmt.Sprintf(
-		"client_id=%s&client_secret=%s&grant_type=authorization_code&code=%s&redirect_uri=%s",
-		cfg.ClientID, cfg.ClientSecret, code, cfg.RedirectURI,
-	)
+	data := url.Values{
+		"client_id":     {cfg.ClientID},
+		"client_secret": {cfg.ClientSecret},
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {cfg.RedirectURI},
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://discord.com/api/oauth2/token", strings.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://discord.com/api/oauth2/token", strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("web: create token request: %w", err)
 	}
