@@ -86,8 +86,8 @@ The Glyphoxa binary supports four modes:
 | Mode | Flag | Description |
 |------|------|-------------|
 | Full | `--mode=full` | Single-process (default). Self-hosted, no admin API. |
-| Gateway | `--mode=gateway` | Session orchestrator with admin API. Manages bots and routes sessions. |
-| Worker | `--mode=worker` | Voice pipeline executor. Created as Kubernetes Jobs by the gateway. |
+| Gateway | `--mode=gateway` | Session orchestrator with admin API. Owns Discord voice connections and streams audio to workers via gRPC AudioBridge. Dispatches workers as K8s Jobs. |
+| Worker | `--mode=worker` | Voice pipeline executor. Receives audio from gateway via gRPC AudioBridge, runs VAD→STT→LLM→TTS→Mixer, and streams NPC audio back. Never connects to Discord directly. |
 | MCP Gateway | `--mode=mcp-gateway` | Shared tool server for all workers. |
 
 ### Quick Start (Shared Topology)
@@ -139,6 +139,7 @@ Gateway and worker pods use these environment variables (set automatically by th
 | `GLYPHOXA_GRPC_ADDR` | gateway, worker | gRPC listen address |
 | `GLYPHOXA_GATEWAY_ADDR` | worker | Gateway gRPC address for callbacks |
 | `GLYPHOXA_DATABASE_DSN` | gateway, worker | PostgreSQL connection string |
+| `GLYPHOXA_AUDIO_BRIDGE_ADDR` | worker | Gateway's AudioBridge gRPC address (enables distributed audio mode) |
 | `GLYPHOXA_MCP_GATEWAY_URL` | worker | MCP gateway HTTP URL |
 
 ### Tier-Aware Node Scheduling

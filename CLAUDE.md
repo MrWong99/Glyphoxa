@@ -35,7 +35,8 @@ go test -race -count=1 -run TestFunctionName ./path/to/package/...
 
 ### Package Layout
 
-- **`cmd/glyphoxa/`** — Entry point. Parses config, registers provider factories, wires `app.New()`, handles graceful shutdown (SIGINT/SIGTERM).
+- **`cmd/glyphoxa/`** — Entry point. Parses config, registers provider factories, wires `app.New()`, handles graceful shutdown (SIGINT/SIGTERM). `cmd/glyphoxa-web/` is the web management service entry point.
+- **`internal/web/`** — Web management service. Authentication (Discord OAuth2 + API key), tenant/campaign/NPC/session CRUD handlers, PostgreSQL store, middleware.
 - **`internal/`** — Application-private packages (not importable externally).
 - **`pkg/`** — Public API packages (external code may import).
 
@@ -55,12 +56,12 @@ Player speaks → **VAD** (voice activity detection) → **STT** (speech-to-text
 - **`internal/config/`** — YAML config loader with provider registry and hot-reload support.
 - **`internal/hotctx/`** — Concurrent assembly of NPC identity, recent transcript, and scene context in <50ms.
 - **`internal/mcp/`** — MCP host and tool registry with budget tiers (instant/fast/standard).
-- **`internal/gateway/`** — Multi-tenant gateway. `AdminAPI` serves tenant CRUD over HTTP. `BotManager` manages per-tenant Discord bots. `sessionorch/` orchestrates session lifecycle with PostgreSQL-backed state and license constraint enforcement. `usage/` tracks session hours and enforces quotas. `grpctransport/` implements the gateway↔worker gRPC contract; `local/` provides in-process equivalents for `--mode=full`.
+- **`internal/gateway/`** — Multi-tenant gateway. `AdminAPI` serves tenant CRUD over HTTP. `BotManager` manages per-tenant Discord bots. `sessionorch/` orchestrates session lifecycle with PostgreSQL-backed state and license constraint enforcement. `usage/` tracks session hours and enforces quotas. `audiobridge/` bridges per-session Discord voice audio to workers over gRPC. `dispatch/` creates K8s Jobs for worker pods. `grpctransport/` implements the gateway↔worker gRPC contract; `local/` provides in-process equivalents for `--mode=full`.
 - **`internal/session/`** — Voice pipeline lifecycle. `Runtime` owns the full pipeline (VAD→STT→LLM→TTS→Mixer) for a single session. `WorkerHandler` receives gRPC commands from the gateway and manages `Runtime` instances. Shared by `--mode=full` and `--mode=worker`.
 - **`internal/observe/`** — Observability. Prometheus metrics, OTel distributed traces, structured logging via `slog`. Per-tenant labels (`tenant_id`, `campaign_id`) on all telemetry. HTTP middleware for automatic instrumentation.
 - **`internal/health/`** — Health probes. `/healthz` (liveness) and `/readyz` (readiness with pluggable checkers).
 - **`internal/resilience/`** — Resilience patterns. `CircuitBreaker` (closed→open→half-open) wraps gRPC clients and provider calls.
-- **`pkg/audio/`** — `Platform`/`Connection` interfaces. Adapters: `discord/`, `webrtc/`. `mixer/` handles priority queue with barge-in detection.
+- **`pkg/audio/`** — `Platform`/`Connection` interfaces. Adapters: `discord/`, `webrtc/`, `grpcbridge/` (worker-side gRPC audio connection for distributed mode). `mixer/` handles priority queue with barge-in detection.
 - **`pkg/memory/`** — 3-layer memory: L1 (session log), L2 (semantic/vector via pgvector), L3 (knowledge graph with recursive CTEs). Backend: PostgreSQL + pgvector.
 - **`pkg/provider/`** — Provider interfaces and implementations for `llm/`, `stt/`, `tts/`, `s2s/`, `vad/`, `embeddings/`. Each has a `mock/` subdirectory.
 

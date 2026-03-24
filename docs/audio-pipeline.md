@@ -180,17 +180,34 @@ providers:
 
 **When to use:** Custom web UIs, browser-based TTRPG tools, or environments where Discord is not available. Currently in alpha -- the `PeerTransport` interface abstracts the pion/webrtc integration so it can be developed independently.
 
+### 🔗 gRPC Audio Bridge Transport (`pkg/audio/grpcbridge/`)
+
+The gRPC bridge transport is used by workers in **distributed mode** (`--mode=worker`). Instead of connecting to Discord directly, the worker receives and sends opus audio frames via the gateway's `AudioBridgeService` gRPC bidirectional stream.
+
+**How it works:**
+
+| Stage | Detail |
+|---|---|
+| **Inbound** | The gateway forwards raw opus frames from its Discord voice connection over gRPC. The `grpcbridge.Connection` decodes them to PCM using per-user `gopus.Decoder` instances and demuxes by `user_id` into per-participant input channels. New participants are detected lazily as frames arrive. |
+| **Outbound** | PCM `AudioFrame` values from the mixer are converted to 48 kHz stereo, buffered to full 20ms opus frames, encoded via `gopus.Encoder`, and sent back to the gateway over the same gRPC stream. The gateway then sends them to Discord. |
+| **Handshake** | On connection, the worker sends an initial frame containing only `session_id` so the gateway can route the stream to the correct `SessionBridge`. |
+| **Flush (barge-in)** | When the mixer interrupts playback (player barge-in or mute), `Flush()` drains the local output buffer and sends a `flush` control frame to the gateway, which discards its own buffered frames. This ensures stale NPC audio stops immediately on both sides. |
+| **Lifecycle** | `Disconnect()` closes the gRPC send direction; the recv loop exits when the stream ends, closing all input channels. Safe to call multiple times. |
+
+**When to use:** This transport is used automatically in distributed mode when the worker receives a `GLYPHOXA_AUDIO_BRIDGE_ADDR` environment variable. It is transparent to the rest of the pipeline — the `grpcbridge.Connection` implements the same `audio.Connection` interface as the Discord and WebRTC transports.
+
 ### Transport Comparison
 
-| Feature | Discord | WebRTC |
-|---|---|---|
-| Provider name | `discord` | `webrtc` |
-| Codec | Opus (48 kHz stereo) | Configurable (default 48 kHz) |
-| Client | Discord app | Any WebRTC browser |
-| Config | `api_key` + `options.guild_id` | `options.stun_servers` + `options.sample_rate` |
-| Maturity | Production | Alpha |
-| Participant tracking | VoiceStateUpdate events | Explicit AddPeer/RemovePeer |
-| Multi-room | One connection per channel | One connection per room |
+| Feature | Discord | WebRTC | gRPC Audio Bridge |
+|---|---|---|---|
+| Provider name | `discord` | `webrtc` | (automatic in distributed mode) |
+| Codec | Opus (48 kHz stereo) | Configurable (default 48 kHz) | Opus (48 kHz stereo, via gateway) |
+| Client | Discord app | Any WebRTC browser | Gateway (proxies Discord) |
+| Config | `api_key` + `options.guild_id` | `options.stun_servers` + `options.sample_rate` | `GLYPHOXA_AUDIO_BRIDGE_ADDR` env var |
+| Maturity | Production | Alpha | Production |
+| Participant tracking | VoiceStateUpdate events | Explicit AddPeer/RemovePeer | Lazy via user_id in frames |
+| Multi-room | One connection per channel | One connection per room | One stream per session |
+| Barge-in support | Direct | Direct | Flush frames over gRPC |
 
 ---
 
