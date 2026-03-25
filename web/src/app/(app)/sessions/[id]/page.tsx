@@ -29,8 +29,6 @@ function formatLongDate(dateStr: string): string {
 }
 
 function LiveSessionTimer({ startedAt }: { startedAt: string }) {
-  const [elapsed, setElapsed] = useState("");
-
   const computeElapsed = useCallback(() => {
     const start = new Date(startedAt).getTime();
     const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
@@ -40,8 +38,9 @@ function LiveSessionTimer({ startedAt }: { startedAt: string }) {
     return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   }, [startedAt]);
 
+  const [elapsed, setElapsed] = useState(computeElapsed);
+
   useEffect(() => {
-    setElapsed(computeElapsed());
     const interval = setInterval(() => setElapsed(computeElapsed()), 1000);
     return () => clearInterval(interval);
   }, [computeElapsed]);
