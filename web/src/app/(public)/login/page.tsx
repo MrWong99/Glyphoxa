@@ -72,8 +72,8 @@ function LoginForm() {
   }
 
   const showDiscord = !authProviders || authProviders.discord;
-  const showGoogle = !authProviders || authProviders.google;
-  const showGitHub = !authProviders || authProviders.github;
+  const showGoogle = true;
+  const showGitHub = true;
   const showApiKey = !inviteToken && (!authProviders || authProviders.apikey);
 
   return (
