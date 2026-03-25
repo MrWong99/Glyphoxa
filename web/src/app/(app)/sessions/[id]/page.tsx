@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState, useEffect, useCallback } from "react";
+import { use, useMemo, useState, useEffect } from "react";
 import Link from "next/link";
 import { Clock, Radio, Users, Server, MessageSquare } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,23 +28,22 @@ function formatLongDate(dateStr: string): string {
   });
 }
 
-function LiveSessionTimer({ startedAt }: { startedAt: string }) {
-  const [elapsed, setElapsed] = useState("");
+function computeElapsedTime(startedAt: string): string {
+  const start = new Date(startedAt).getTime();
+  const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const s = diff % 60;
+  return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+}
 
-  const computeElapsed = useCallback(() => {
-    const start = new Date(startedAt).getTime();
-    const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
-    const h = Math.floor(diff / 3600);
-    const m = Math.floor((diff % 3600) / 60);
-    const s = diff % 60;
-    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-  }, [startedAt]);
+function LiveSessionTimer({ startedAt }: { startedAt: string }) {
+  const [elapsed, setElapsed] = useState(() => computeElapsedTime(startedAt));
 
   useEffect(() => {
-    setElapsed(computeElapsed());
-    const interval = setInterval(() => setElapsed(computeElapsed()), 1000);
+    const interval = setInterval(() => setElapsed(computeElapsedTime(startedAt)), 1000);
     return () => clearInterval(interval);
-  }, [computeElapsed]);
+  }, [startedAt]);
 
   return <span className="font-mono tabular-nums">{elapsed}</span>;
 }

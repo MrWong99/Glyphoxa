@@ -71,27 +71,35 @@ func (noopSessionStore) GetRecent(context.Context, string, time.Duration) ([]mem
 func (noopSessionStore) Search(context.Context, string, memory.SearchOpts) ([]memory.TranscriptEntry, error) {
 	return nil, nil
 }
-func (noopSessionStore) EntryCount(context.Context, string) (int, error)                         { return 0, nil }
-func (noopSessionStore) ListSessions(context.Context, int) ([]memory.SessionInfo, error)         { return nil, nil }
-func (noopSessionStore) StartSession(context.Context, string) error                              { return nil }
-func (noopSessionStore) EndSession(context.Context, string) error                                { return nil }
+func (noopSessionStore) EntryCount(context.Context, string) (int, error) { return 0, nil }
+func (noopSessionStore) ListSessions(context.Context, int) ([]memory.SessionInfo, error) {
+	return nil, nil
+}
+func (noopSessionStore) StartSession(context.Context, string) error { return nil }
+func (noopSessionStore) EndSession(context.Context, string) error   { return nil }
 
 type noopKnowledgeGraph struct{}
 
-func (noopKnowledgeGraph) AddEntity(context.Context, memory.Entity) error                            { return nil }
-func (noopKnowledgeGraph) GetEntity(context.Context, string) (*memory.Entity, error)                 { return nil, nil }
-func (noopKnowledgeGraph) UpdateEntity(context.Context, string, map[string]any) error                { return nil }
-func (noopKnowledgeGraph) DeleteEntity(context.Context, string) error                                { return nil }
-func (noopKnowledgeGraph) FindEntities(context.Context, memory.EntityFilter) ([]memory.Entity, error) { return nil, nil }
-func (noopKnowledgeGraph) AddRelationship(context.Context, memory.Relationship) error                { return nil }
+func (noopKnowledgeGraph) AddEntity(context.Context, memory.Entity) error             { return nil }
+func (noopKnowledgeGraph) GetEntity(context.Context, string) (*memory.Entity, error)  { return nil, nil }
+func (noopKnowledgeGraph) UpdateEntity(context.Context, string, map[string]any) error { return nil }
+func (noopKnowledgeGraph) DeleteEntity(context.Context, string) error                 { return nil }
+func (noopKnowledgeGraph) FindEntities(context.Context, memory.EntityFilter) ([]memory.Entity, error) {
+	return nil, nil
+}
+func (noopKnowledgeGraph) AddRelationship(context.Context, memory.Relationship) error { return nil }
 func (noopKnowledgeGraph) GetRelationships(context.Context, string, ...memory.RelQueryOpt) ([]memory.Relationship, error) {
 	return nil, nil
 }
-func (noopKnowledgeGraph) DeleteRelationship(context.Context, string, string, string) error { return nil }
+func (noopKnowledgeGraph) DeleteRelationship(context.Context, string, string, string) error {
+	return nil
+}
 func (noopKnowledgeGraph) Neighbors(context.Context, string, int, ...memory.TraversalOpt) ([]memory.Entity, error) {
 	return nil, nil
 }
-func (noopKnowledgeGraph) FindPath(context.Context, string, string, int) ([]memory.Entity, error) { return nil, nil }
+func (noopKnowledgeGraph) FindPath(context.Context, string, string, int) ([]memory.Entity, error) {
+	return nil, nil
+}
 func (noopKnowledgeGraph) VisibleSubgraph(context.Context, string) ([]memory.Entity, []memory.Relationship, error) {
 	return nil, nil, nil
 }
