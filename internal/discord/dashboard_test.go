@@ -514,7 +514,7 @@ func TestDashboard_PostFinalEmbed(t *testing.T) {
 	}
 
 	// Now post final embed (simulates Stop behavior).
-	d.postFinalEmbed(nil)
+	d.postFinalEmbed(context.TODO())
 	if mock.getUpdateCalls() != 1 {
 		t.Errorf("expected 1 update call for final embed, got %d", mock.getUpdateCalls())
 	}
@@ -538,7 +538,7 @@ func TestDashboard_PostFinalEmbed_NoMessage(t *testing.T) {
 	})
 
 	// postFinalEmbed with no prior message should be a no-op.
-	d.postFinalEmbed(nil)
+	d.postFinalEmbed(context.TODO())
 	if mock.getUpdateCalls() != 0 {
 		t.Errorf("expected 0 update calls, got %d", mock.getUpdateCalls())
 	}
