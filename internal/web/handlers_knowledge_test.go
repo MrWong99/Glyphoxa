@@ -116,6 +116,68 @@ func TestHandleRebuildKnowledgeGraph(t *testing.T) {
 	}
 }
 
+func TestHandleGetKnowledgeGraph(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
+	ws.knowledgeEntities["c1"] = []KnowledgeEntity{
+		{CampaignID: "c1", ID: "e1", Type: "npc", Name: "Heinrich", CreatedAt: time.Now().UTC(), Attributes: map[string]any{"occupation": "guard"}},
+		{CampaignID: "c1", ID: "e2", Type: "location", Name: "Rabenheim", CreatedAt: time.Now().UTC(), Attributes: map[string]any{}},
+	}
+
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/c1/knowledge/graph", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Data KnowledgeGraphData `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data.Entities) != 2 {
+		t.Errorf("entities = %d, want 2", len(resp.Data.Entities))
+	}
+	// No relationships without explicit relationship attributes.
+	if resp.Data.Relationships == nil {
+		t.Error("relationships should not be nil (should be empty array)")
+	}
+}
+
+func TestHandleGetKnowledgeGraph_EmptyCampaign(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	ws.campaigns["c2"] = &Campaign{ID: "c2", TenantID: "tenant-1", Name: "EmptyCampaign"}
+
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/c2/knowledge/graph", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Data KnowledgeGraphData `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data.Entities) != 0 {
+		t.Errorf("entities = %d, want 0", len(resp.Data.Entities))
+	}
+}
+
 func TestHandleKnowledge_WrongCampaign(t *testing.T) {
 	t.Parallel()
 

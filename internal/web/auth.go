@@ -211,3 +211,194 @@ func FetchDiscordUser(ctx context.Context, accessToken string) (*DiscordUser, er
 	}
 	return &user, nil
 }
+
+// --- Google OAuth2 ---
+
+// oauthHTTPClient is shared for all outbound OAuth HTTP calls.
+var oauthHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
+
+// GoogleOAuthConfig holds Google OAuth2 configuration.
+type GoogleOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+}
+
+// GoogleUser represents the user profile returned by Google's userinfo endpoint.
+type GoogleUser struct {
+	Sub        string `json:"sub"`
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Picture    string `json:"picture"`
+	GivenName  string `json:"given_name"`
+	FamilyName string `json:"family_name"`
+}
+
+// DisplayName returns the best display name for the Google user.
+func (u GoogleUser) DisplayName() string {
+	if u.Name != "" {
+		return u.Name
+	}
+	if u.GivenName != "" {
+		return u.GivenName
+	}
+	return u.Email
+}
+
+// ExchangeGoogleCode exchanges an authorization code for a Google access token.
+func ExchangeGoogleCode(ctx context.Context, cfg GoogleOAuthConfig, code string) (string, error) {
+	data := url.Values{
+		"client_id":     {cfg.ClientID},
+		"client_secret": {cfg.ClientSecret},
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {cfg.RedirectURI},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("web: create google token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("web: exchange google code: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("web: google token exchange returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("web: decode google token response: %w", err)
+	}
+	return result.AccessToken, nil
+}
+
+// FetchGoogleUser fetches the authenticated user's profile from Google's userinfo endpoint.
+func FetchGoogleUser(ctx context.Context, accessToken string) (*GoogleUser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v3/userinfo", nil)
+	if err != nil {
+		return nil, fmt.Errorf("web: create google user request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("web: fetch google user: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("web: google userinfo endpoint returned %d", resp.StatusCode)
+	}
+
+	var user GoogleUser
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, fmt.Errorf("web: decode google user: %w", err)
+	}
+	return &user, nil
+}
+
+// --- GitHub OAuth2 ---
+
+// GitHubOAuthConfig holds GitHub OAuth2 configuration.
+type GitHubOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+}
+
+// GitHubUser represents the user profile returned by the GitHub API.
+type GitHubUser struct {
+	ID        int64  `json:"id"`
+	Login     string `json:"login"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	AvatarURL string `json:"avatar_url"`
+}
+
+// DisplayName returns the best display name for the GitHub user.
+func (u GitHubUser) DisplayName() string {
+	if u.Name != "" {
+		return u.Name
+	}
+	return u.Login
+}
+
+// GitHubID returns the string representation of the numeric GitHub user ID.
+func (u GitHubUser) GitHubID() string {
+	return fmt.Sprintf("%d", u.ID)
+}
+
+// ExchangeGitHubCode exchanges an authorization code for a GitHub access token.
+func ExchangeGitHubCode(ctx context.Context, cfg GitHubOAuthConfig, code string) (string, error) {
+	data := url.Values{
+		"client_id":     {cfg.ClientID},
+		"client_secret": {cfg.ClientSecret},
+		"code":          {code},
+		"redirect_uri":  {cfg.RedirectURI},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("web: create github token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("web: exchange github code: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("web: github token exchange returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("web: decode github token response: %w", err)
+	}
+	if result.Error != "" {
+		return "", fmt.Errorf("web: github token exchange error: %s", result.Error)
+	}
+	return result.AccessToken, nil
+}
+
+// FetchGitHubUser fetches the authenticated user's profile from the GitHub API.
+func FetchGitHubUser(ctx context.Context, accessToken string) (*GitHubUser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
+	if err != nil {
+		return nil, fmt.Errorf("web: create github user request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("web: fetch github user: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("web: github user endpoint returned %d", resp.StatusCode)
+	}
+
+	var user GitHubUser
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, fmt.Errorf("web: decode github user: %w", err)
+	}
+	return &user, nil
+}

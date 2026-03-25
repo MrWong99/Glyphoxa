@@ -34,6 +34,24 @@ type Config struct {
 	// Optional when AdminAPIKey is set.
 	DiscordRedirectURI string
 
+	// GoogleClientID is the Google OAuth2 application client ID.
+	GoogleClientID string
+
+	// GoogleClientSecret is the Google OAuth2 application client secret.
+	GoogleClientSecret string
+
+	// GoogleRedirectURI is the OAuth2 callback URL registered with Google.
+	GoogleRedirectURI string
+
+	// GitHubClientID is the GitHub OAuth2 application client ID.
+	GitHubClientID string
+
+	// GitHubClientSecret is the GitHub OAuth2 application client secret.
+	GitHubClientSecret string
+
+	// GitHubRedirectURI is the OAuth2 callback URL registered with GitHub.
+	GitHubRedirectURI string
+
 	// AdminAPIKey is the shared admin key that can be used as a login
 	// fallback when Discord OAuth2 is not configured. Loaded from
 	// GLYPHOXA_WEB_ADMIN_KEY or GLYPHOXA_ADMIN_API_KEY.
@@ -88,6 +106,12 @@ func LoadConfig() (*Config, error) {
 		DiscordClientID:     os.Getenv("GLYPHOXA_WEB_DISCORD_CLIENT_ID"),
 		DiscordClientSecret: os.Getenv("GLYPHOXA_WEB_DISCORD_CLIENT_SECRET"),
 		DiscordRedirectURI:  os.Getenv("GLYPHOXA_WEB_DISCORD_REDIRECT_URI"),
+		GoogleClientID:      os.Getenv("GLYPHOXA_WEB_GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:  os.Getenv("GLYPHOXA_WEB_GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURI:   os.Getenv("GLYPHOXA_WEB_GOOGLE_REDIRECT_URI"),
+		GitHubClientID:      os.Getenv("GLYPHOXA_WEB_GITHUB_CLIENT_ID"),
+		GitHubClientSecret:  os.Getenv("GLYPHOXA_WEB_GITHUB_CLIENT_SECRET"),
+		GitHubRedirectURI:   os.Getenv("GLYPHOXA_WEB_GITHUB_REDIRECT_URI"),
 		AdminAPIKey:         adminKey,
 		GatewayURL:          os.Getenv("GLYPHOXA_WEB_GATEWAY_URL"),
 		GatewayGRPCAddr:     os.Getenv("GLYPHOXA_WEB_GATEWAY_GRPC_ADDR"),
@@ -130,12 +154,14 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("GLYPHOXA_WEB_JWT_SECRET must be at least 32 characters"))
 	}
 
-	// Discord OAuth is only required when no API key fallback is configured.
+	// At least one auth method must be configured.
 	hasDiscord := c.DiscordClientID != "" && c.DiscordClientSecret != "" && c.DiscordRedirectURI != ""
+	hasGoogle := c.GoogleClientID != "" && c.GoogleClientSecret != "" && c.GoogleRedirectURI != ""
+	hasGitHub := c.GitHubClientID != "" && c.GitHubClientSecret != "" && c.GitHubRedirectURI != ""
 	hasAPIKey := c.AdminAPIKey != ""
 
-	if !hasDiscord && !hasAPIKey {
-		errs = append(errs, fmt.Errorf("at least one auth method required: set Discord OAuth2 vars or GLYPHOXA_WEB_ADMIN_KEY / GLYPHOXA_ADMIN_API_KEY"))
+	if !hasDiscord && !hasGoogle && !hasGitHub && !hasAPIKey {
+		errs = append(errs, fmt.Errorf("at least one auth method required: set Discord/Google/GitHub OAuth2 vars or GLYPHOXA_WEB_ADMIN_KEY / GLYPHOXA_ADMIN_API_KEY"))
 	}
 
 	// mTLS: if any TLS field is set, all three must be set.

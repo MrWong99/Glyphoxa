@@ -97,6 +97,7 @@ type mockWebStore struct {
 	loreDocs          map[string]*LoreDocument
 	campaignNPCLinks  map[string][]CampaignNPCLink // keyed by campaign_id
 	knowledgeEntities map[string][]KnowledgeEntity // keyed by campaign_id
+	auditLogs         []AuditLogEntry
 }
 
 func newMockWebStore() *mockWebStore {
@@ -119,6 +120,20 @@ func strPtr(s string) *string { return &s }
 func (m *mockWebStore) UpsertDiscordUser(_ context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error) {
 	id := "user-" + discordID
 	u := &User{ID: id, TenantID: tenantID, DiscordID: strPtr(discordID), Email: strPtr(email), DisplayName: displayName, AvatarURL: strPtr(avatarURL), Role: "dm"}
+	m.users[id] = u
+	return u, nil
+}
+
+func (m *mockWebStore) UpsertGoogleUser(_ context.Context, googleID, email, displayName, avatarURL, tenantID string) (*User, error) {
+	id := "user-google-" + googleID
+	u := &User{ID: id, TenantID: tenantID, GoogleID: strPtr(googleID), Email: strPtr(email), DisplayName: displayName, AvatarURL: strPtr(avatarURL), Role: "dm"}
+	m.users[id] = u
+	return u, nil
+}
+
+func (m *mockWebStore) UpsertGitHubUser(_ context.Context, githubID, email, displayName, avatarURL, tenantID string) (*User, error) {
+	id := "user-github-" + githubID
+	u := &User{ID: id, TenantID: tenantID, GitHubID: strPtr(githubID), Email: strPtr(email), DisplayName: displayName, AvatarURL: strPtr(avatarURL), Role: "dm"}
 	m.users[id] = u
 	return u, nil
 }
@@ -476,6 +491,71 @@ func (m *mockWebStore) GetRecentActivity(_ context.Context, tenantID string, lim
 		items = items[:limit]
 	}
 	return items, nil
+}
+
+// Audit log mocks.
+
+func (m *mockWebStore) CreateAuditLog(_ context.Context, entry *AuditLogEntry) error {
+	m.auditLogs = append(m.auditLogs, *entry)
+	return nil
+}
+
+func (m *mockWebStore) ListAuditLogs(_ context.Context, tenantID string, limit, offset int, resourceType, action string) ([]AuditLogEntry, int, error) {
+	var filtered []AuditLogEntry
+	for _, e := range m.auditLogs {
+		if tenantID != "" && (e.TenantID == nil || *e.TenantID != tenantID) {
+			continue
+		}
+		if resourceType != "" && e.ResourceType != resourceType {
+			continue
+		}
+		if action != "" && e.Action != action {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	total := len(filtered)
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	if offset >= len(filtered) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[offset:end], total, nil
+}
+
+func (m *mockWebStore) GetAdminDashboardStats(_ context.Context) (*AdminDashboardStats, error) {
+	return &AdminDashboardStats{
+		TotalTenants:      1,
+		TotalUsers:        len(m.users),
+		TotalCampaigns:    len(m.campaigns),
+		ActiveSessions:    0,
+		TotalSessionHours: 0,
+		AuditLogCount:     len(m.auditLogs),
+	}, nil
+}
+
+func (m *mockWebStore) ListAllTenantUsers(_ context.Context, limit, offset int) ([]User, int, error) {
+	var all []User
+	for _, u := range m.users {
+		all = append(all, *u)
+	}
+	total := len(all)
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	if offset >= len(all) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[offset:end], total, nil
 }
 
 // testServer creates a Server with mock stores for testing.
