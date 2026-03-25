@@ -53,6 +53,45 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": stats})
 }
 
+// handleDashboardActiveSessions returns active sessions for the tenant via the
+// gateway ManagementService. Returns 503 when the gateway gRPC client is not
+// configured.
+func (s *Server) handleDashboardActiveSessions(w http.ResponseWriter, r *http.Request) {
+	claims := ClaimsFromContext(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
+		return
+	}
+	if s.gwClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_gateway", "gateway gRPC not configured")
+		return
+	}
+
+	req := &pb.ListActiveSessionsRequest{TenantId: claims.TenantID}
+	resp, err := s.gwClient.ListActiveSessions(r.Context(), req)
+	if err != nil {
+		writeGRPCError(w, "list active sessions", err)
+		return
+	}
+
+	sessions := make([]map[string]any, len(resp.GetSessions()))
+	for i, sess := range resp.GetSessions() {
+		sessions[i] = map[string]any{
+			"session_id":   sess.GetSessionId(),
+			"tenant_id":    sess.GetTenantId(),
+			"campaign_id":  sess.GetCampaignId(),
+			"guild_id":     sess.GetGuildId(),
+			"channel_id":   sess.GetChannelId(),
+			"license_tier": sess.GetLicenseTier(),
+			"state":        sess.GetState().String(),
+			"error":        sess.GetError(),
+			"started_at":   sess.GetStartedAt().AsTime(),
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": sessions})
+}
+
 // handleDashboardActivity returns recent activity for the tenant.
 func (s *Server) handleDashboardActivity(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFromContext(r.Context())
