@@ -56,8 +56,8 @@ function NPCForm({ npc, campaignId, campaignName }: NPCFormProps) {
 
   const [name, setName] = useState(npc.name);
   const [personality, setPersonality] = useState(npc.personality);
-  const [voiceProvider, setVoiceProvider] = useState(npc.voice_provider);
-  const [voiceId, setVoiceId] = useState(npc.voice_id);
+  const [voiceProvider, setVoiceProvider] = useState(npc.voice_provider ?? npc.voice?.provider ?? '');
+  const [voiceId, setVoiceId] = useState(npc.voice_id ?? npc.voice?.voice_id ?? '');
   const [engine, setEngine] = useState<"cascaded" | "s2s" | "sentence">(npc.engine);
   const [budgetTier, setBudgetTier] = useState<"fast" | "standard" | "deep">(npc.budget_tier);
   const [knowledgeScope, setKnowledgeScope] = useState<string[]>(npc.knowledge_scope ?? []);
@@ -83,14 +83,13 @@ function NPCForm({ npc, campaignId, campaignName }: NPCFormProps) {
     await updateNPC.mutateAsync({
       name: name.trim(),
       personality: personality.trim(),
-      voice_provider: voiceProvider,
-      voice_id: voiceId.trim(),
+      voice: { provider: voiceProvider, voice_id: voiceId.trim() },
       engine,
       budget_tier: budgetTier,
       knowledge_scope: knowledgeScope,
       behavior_rules: behaviorRules,
       address_only: addressOnly,
-    });
+    } as Partial<NPC>);
   }
 
   async function handleDelete() {

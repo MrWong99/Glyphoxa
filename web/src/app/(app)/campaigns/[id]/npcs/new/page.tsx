@@ -20,6 +20,7 @@ import {
 import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCampaign, useCreateNPC } from "@/lib/hooks";
 import { toast } from "sonner";
+import type { NPC } from "@/lib/types";
 
 const personalityTemplates = [
   { label: "Gruff Guard", text: "A stern but fair guard who has watched over this area for decades. Suspicious of strangers, protective of the townsfolk, speaks in short, clipped sentences." },
@@ -67,14 +68,13 @@ export default function NewNPCPage({
     await createNPC.mutateAsync({
       name: name.trim(),
       personality: personality.trim(),
-      voice_provider: voiceProvider,
-      voice_id: voiceId.trim(),
+      voice: { provider: voiceProvider, voice_id: voiceId.trim() },
       engine,
       budget_tier: budgetTier,
       knowledge_scope: knowledgeScope,
       behavior_rules: behaviorRules,
       address_only: addressOnly,
-    });
+    } as Partial<NPC>);
     router.push(`/campaigns/${campaignId}`);
   }
 
