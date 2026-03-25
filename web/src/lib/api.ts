@@ -10,6 +10,11 @@ import type {
   UserRole,
   UserPreferences,
   PaginatedResponse,
+  AuditLogEntry,
+  AdminDashboardStats,
+  ProviderTestResult,
+  KnowledgeGraphData,
+  AuthProviders,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api/v1";
@@ -104,10 +109,19 @@ export const auth = {
       // Logout endpoint may not exist; clearing token is sufficient.
     });
   },
+  providers: () => requestData<AuthProviders>("/auth/providers"),
   discordUrl: (invite?: string) =>
     invite
       ? `${API_BASE}/auth/discord?invite=${encodeURIComponent(invite)}`
       : `${API_BASE}/auth/discord`,
+  googleUrl: (invite?: string) =>
+    invite
+      ? `${API_BASE}/auth/google?invite=${encodeURIComponent(invite)}`
+      : `${API_BASE}/auth/google`,
+  githubUrl: (invite?: string) =>
+    invite
+      ? `${API_BASE}/auth/github?invite=${encodeURIComponent(invite)}`
+      : `${API_BASE}/auth/github`,
   loginApiKey: async (apiKey: string): Promise<AuthResponse> => {
     const res = await request<AuthResponse>("/auth/apikey", {
       method: "POST",
@@ -252,6 +266,64 @@ export const invites = {
     ),
 };
 
+// Audit logs
+export const auditLogs = {
+  list: (params?: {
+    limit?: number;
+    offset?: number;
+    resource_type?: string;
+    action?: string;
+    tenant_id?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.resource_type) q.set("resource_type", params.resource_type);
+    if (params?.action) q.set("action", params.action);
+    if (params?.tenant_id) q.set("tenant_id", params.tenant_id);
+    const qs = q.toString();
+    return request<{ data: AuditLogEntry[]; total: number }>(
+      `/audit-logs${qs ? `?${qs}` : ""}`,
+    );
+  },
+};
+
+// Admin (super_admin only)
+export const admin = {
+  stats: () => requestData<AdminDashboardStats>("/admin/stats"),
+  users: (params?: { limit?: number; offset?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    const qs = q.toString();
+    return request<{ data: User[]; total: number }>(
+      `/admin/users${qs ? `?${qs}` : ""}`,
+    );
+  },
+};
+
+// Providers
+export const providers = {
+  test: (data: {
+    type: string;
+    provider: string;
+    api_key: string;
+    base_url?: string;
+  }) =>
+    requestData<ProviderTestResult>("/providers/test", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+};
+
+// Knowledge graph
+export const knowledge = {
+  graph: (campaignId: string) =>
+    requestData<KnowledgeGraphData>(
+      `/campaigns/${campaignId}/knowledge/graph`,
+    ),
+};
+
 export const api = {
   auth,
   dashboard,
@@ -261,4 +333,8 @@ export const api = {
   users,
   onboarding,
   invites,
+  auditLogs,
+  admin,
+  providers,
+  knowledge,
 };

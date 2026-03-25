@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "./api";
 import { hasMinRole } from "./rbac";
-import type { Campaign, NPC, UserRole, UserPreferences } from "./types";
+import type { Campaign, NPC, UserRole, UserPreferences, ProviderTestResult } from "./types";
 
 // Auth
 export function useUser() {
@@ -257,5 +257,76 @@ export function useUpdatePreferences() {
       toast.success("Preferences saved");
     },
     onError: (err) => toast.error("Failed to save preferences", { description: err.message }),
+  });
+}
+
+// Audit Logs
+export function useAuditLogs(params?: {
+  limit?: number;
+  offset?: number;
+  resource_type?: string;
+  action?: string;
+}) {
+  return useQuery({
+    queryKey: ["audit-logs", params],
+    queryFn: () => api.auditLogs.list(params),
+  });
+}
+
+// Admin
+export function useAdminStats() {
+  return useQuery({
+    queryKey: ["admin", "stats"],
+    queryFn: api.admin.stats,
+  });
+}
+
+export function useAdminUsers(params?: { limit?: number; offset?: number }) {
+  return useQuery({
+    queryKey: ["admin", "users", params],
+    queryFn: () => api.admin.users(params),
+  });
+}
+
+// Provider Testing
+export function useTestProvider() {
+  return useMutation({
+    mutationFn: (data: {
+      type: string;
+      provider: string;
+      api_key: string;
+      base_url?: string;
+    }) => api.providers.test(data),
+    onSuccess: (result: ProviderTestResult) => {
+      if (result.status === "ok") {
+        toast.success(`${result.provider} connected`, {
+          description: `Latency: ${result.latency_ms}ms`,
+        });
+      } else {
+        toast.error(`${result.provider} failed`, {
+          description: result.error,
+        });
+      }
+    },
+    onError: (err) => toast.error("Provider test failed", { description: err.message }),
+  });
+}
+
+// Knowledge Graph
+export function useKnowledgeGraph(campaignId: string) {
+  return useQuery({
+    queryKey: ["campaigns", campaignId, "knowledge", "graph"],
+    queryFn: () => api.knowledge.graph(campaignId),
+    enabled: !!campaignId,
+  });
+}
+
+// Auth Providers
+export function useAuthProviders() {
+  return useQuery({
+    queryKey: ["auth", "providers"],
+    queryFn: api.auth.providers,
+    staleTime: 60 * 60 * 1000, // Cache for 1 hour
+    retry: false,
   });
 }

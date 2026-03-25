@@ -29,6 +29,8 @@ type User struct {
 	ID          string          `json:"id"`
 	TenantID    string          `json:"tenant_id"`
 	DiscordID   *string         `json:"discord_id,omitempty"`
+	GoogleID    *string         `json:"google_id,omitempty"`
+	GitHubID    *string         `json:"github_id,omitempty"`
 	Email       *string         `json:"email,omitempty"`
 	DisplayName string          `json:"display_name"`
 	AvatarURL   *string         `json:"avatar_url,omitempty"`
@@ -101,11 +103,37 @@ type KnowledgeEntity struct {
 	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
+// AuditLogEntry represents a single audit log record.
+type AuditLogEntry struct {
+	ID           int64           `json:"id"`
+	TenantID     *string         `json:"tenant_id,omitempty"`
+	UserID       *string         `json:"user_id,omitempty"`
+	Action       string          `json:"action"`
+	ResourceType string          `json:"resource_type"`
+	ResourceID   string          `json:"resource_id"`
+	Changes      json.RawMessage `json:"changes,omitempty"`
+	IPAddress    *string         `json:"ip_address,omitempty"`
+	UserAgent    *string         `json:"user_agent,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+// AdminDashboardStats holds system-wide stats for the super admin dashboard.
+type AdminDashboardStats struct {
+	TotalTenants      int     `json:"total_tenants"`
+	TotalUsers        int     `json:"total_users"`
+	TotalCampaigns    int     `json:"total_campaigns"`
+	ActiveSessions    int     `json:"active_sessions"`
+	TotalSessionHours float64 `json:"total_session_hours"`
+	AuditLogCount     int     `json:"audit_log_count"`
+}
+
 // WebStore defines the data operations required by the web management handlers.
 // Implementations must be safe for concurrent use.
 type WebStore interface {
 	Ping(ctx context.Context) error
 	UpsertDiscordUser(ctx context.Context, discordID, email, displayName, avatarURL, tenantID string) (*User, error)
+	UpsertGoogleUser(ctx context.Context, googleID, email, displayName, avatarURL, tenantID string) (*User, error)
+	UpsertGitHubUser(ctx context.Context, githubID, email, displayName, avatarURL, tenantID string) (*User, error)
 	EnsureAdminUser(ctx context.Context, tenantID string) (*User, error)
 	GetUser(ctx context.Context, id string) (*User, error)
 	ListUsers(ctx context.Context, tenantID, role string, limit, offset int) ([]User, int, error)
@@ -145,6 +173,14 @@ type WebStore interface {
 	// Dashboard.
 	GetDashboardStats(ctx context.Context, tenantID string) (*DashboardStats, error)
 	GetRecentActivity(ctx context.Context, tenantID string, limit int) ([]ActivityItem, error)
+
+	// Audit log.
+	CreateAuditLog(ctx context.Context, entry *AuditLogEntry) error
+	ListAuditLogs(ctx context.Context, tenantID string, limit, offset int, resourceType, action string) ([]AuditLogEntry, int, error)
+
+	// Admin dashboard.
+	GetAdminDashboardStats(ctx context.Context) (*AdminDashboardStats, error)
+	ListAllTenantUsers(ctx context.Context, limit, offset int) ([]User, int, error)
 }
 
 // Compile-time assertion that *Store implements WebStore.
@@ -1026,4 +1062,199 @@ func (s *Store) GetRecentActivity(ctx context.Context, tenantID string, limit in
 	}
 
 	return items, nil
+}
+
+// UpsertGoogleUser creates or updates a user based on their Google ID.
+func (s *Store) UpsertGoogleUser(ctx context.Context, googleID, email, displayName, avatarURL, tenantID string) (*User, error) {
+	id := uuid.NewString()
+	now := time.Now().UTC()
+
+	var user User
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO mgmt.users (id, tenant_id, google_id, email, display_name, avatar_url, role, last_login_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'dm', $7, $7, $7)
+		ON CONFLICT (google_id) DO UPDATE SET
+			email = COALESCE(EXCLUDED.email, mgmt.users.email),
+			display_name = EXCLUDED.display_name,
+			avatar_url = EXCLUDED.avatar_url,
+			last_login_at = EXCLUDED.last_login_at,
+			updated_at = EXCLUDED.updated_at
+		RETURNING id, tenant_id, google_id, email, display_name, avatar_url, role, last_login_at, created_at, updated_at
+	`, id, tenantID, googleID, email, displayName, avatarURL, now).Scan(
+		&user.ID, &user.TenantID, &user.GoogleID, &user.Email,
+		&user.DisplayName, &user.AvatarURL, &user.Role, &user.LastLoginAt,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("web: upsert google user: %w", err)
+	}
+	return &user, nil
+}
+
+// UpsertGitHubUser creates or updates a user based on their GitHub ID.
+func (s *Store) UpsertGitHubUser(ctx context.Context, githubID, email, displayName, avatarURL, tenantID string) (*User, error) {
+	id := uuid.NewString()
+	now := time.Now().UTC()
+
+	var user User
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO mgmt.users (id, tenant_id, github_id, email, display_name, avatar_url, role, last_login_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'dm', $7, $7, $7)
+		ON CONFLICT (github_id) DO UPDATE SET
+			email = COALESCE(EXCLUDED.email, mgmt.users.email),
+			display_name = EXCLUDED.display_name,
+			avatar_url = EXCLUDED.avatar_url,
+			last_login_at = EXCLUDED.last_login_at,
+			updated_at = EXCLUDED.updated_at
+		RETURNING id, tenant_id, github_id, email, display_name, avatar_url, role, last_login_at, created_at, updated_at
+	`, id, tenantID, githubID, email, displayName, avatarURL, now).Scan(
+		&user.ID, &user.TenantID, &user.GitHubID, &user.Email,
+		&user.DisplayName, &user.AvatarURL, &user.Role, &user.LastLoginAt,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("web: upsert github user: %w", err)
+	}
+	return &user, nil
+}
+
+// CreateAuditLog inserts a new audit log entry.
+func (s *Store) CreateAuditLog(ctx context.Context, entry *AuditLogEntry) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO mgmt.audit_log (tenant_id, user_id, action, resource_type, resource_id, changes, ip_address, user_agent, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::INET, $8, COALESCE($9, now()))
+	`, entry.TenantID, entry.UserID, entry.Action, entry.ResourceType, entry.ResourceID,
+		entry.Changes, entry.IPAddress, entry.UserAgent, entry.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("web: create audit log: %w", err)
+	}
+	return nil
+}
+
+// ListAuditLogs returns audit log entries with pagination and optional filtering.
+func (s *Store) ListAuditLogs(ctx context.Context, tenantID string, limit, offset int, resourceType, action string) ([]AuditLogEntry, int, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+
+	// Build WHERE clause dynamically.
+	where := "WHERE 1=1"
+	args := []any{}
+	argIdx := 1
+
+	if tenantID != "" {
+		where += fmt.Sprintf(" AND tenant_id = $%d", argIdx)
+		args = append(args, tenantID)
+		argIdx++
+	}
+	if resourceType != "" {
+		where += fmt.Sprintf(" AND resource_type = $%d", argIdx)
+		args = append(args, resourceType)
+		argIdx++
+	}
+	if action != "" {
+		where += fmt.Sprintf(" AND action = $%d", argIdx)
+		args = append(args, action)
+		argIdx++
+	}
+
+	// Count total.
+	var total int
+	countQuery := "SELECT COUNT(*) FROM mgmt.audit_log " + where
+	if err := s.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("web: count audit logs: %w", err)
+	}
+
+	// Fetch entries.
+	query := fmt.Sprintf(`SELECT id, tenant_id, user_id, action, resource_type, resource_id, changes, ip_address::TEXT, user_agent, created_at
+		FROM mgmt.audit_log %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
+	args = append(args, limit, offset)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("web: list audit logs: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []AuditLogEntry
+	for rows.Next() {
+		var e AuditLogEntry
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.UserID, &e.Action, &e.ResourceType, &e.ResourceID, &e.Changes, &e.IPAddress, &e.UserAgent, &e.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("web: scan audit log entry: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, total, nil
+}
+
+// GetAdminDashboardStats returns system-wide aggregate stats for the super admin dashboard.
+func (s *Store) GetAdminDashboardStats(ctx context.Context) (*AdminDashboardStats, error) {
+	stats := &AdminDashboardStats{}
+
+	// Count tenants.
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.tenants`).Scan(&stats.TotalTenants); err != nil {
+		slog.Warn("web: admin stats count tenants", "err", err)
+	}
+
+	// Count users.
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mgmt.users WHERE deleted_at IS NULL`).Scan(&stats.TotalUsers); err != nil {
+		slog.Warn("web: admin stats count users", "err", err)
+	}
+
+	// Count campaigns.
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mgmt.campaigns WHERE deleted_at IS NULL`).Scan(&stats.TotalCampaigns); err != nil {
+		slog.Warn("web: admin stats count campaigns", "err", err)
+	}
+
+	// Active sessions.
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.sessions WHERE state = 'running'`).Scan(&stats.ActiveSessions); err != nil {
+		slog.Warn("web: admin stats active sessions", "err", err)
+	}
+
+	// Total session hours this month.
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(session_hours), 0) FROM public.usage_records WHERE period >= $1`, monthStart).Scan(&stats.TotalSessionHours); err != nil {
+		slog.Warn("web: admin stats session hours", "err", err)
+	}
+
+	// Audit log count.
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mgmt.audit_log`).Scan(&stats.AuditLogCount); err != nil {
+		slog.Warn("web: admin stats audit count", "err", err)
+	}
+
+	return stats, nil
+}
+
+// ListAllTenantUsers returns all users across all tenants (super_admin use).
+func (s *Store) ListAllTenantUsers(ctx context.Context, limit, offset int) ([]User, int, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM mgmt.users WHERE deleted_at IS NULL`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("web: count all users: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, discord_id, email, display_name, avatar_url, role, last_login_at, created_at, updated_at
+		FROM mgmt.users WHERE deleted_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("web: list all users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.TenantID, &u.DiscordID, &u.Email, &u.DisplayName, &u.AvatarURL, &u.Role, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("web: scan user: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, total, nil
 }
