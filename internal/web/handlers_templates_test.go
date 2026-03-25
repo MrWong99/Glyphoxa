@@ -116,3 +116,53 @@ func TestHandleListNPCTemplates_EmptyForUnknown(t *testing.T) {
 		t.Errorf("got %d templates, want 0", len(resp.Data))
 	}
 }
+
+func TestHandleListNPCTemplates_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/npc-templates", auth(http.HandlerFunc(srv.handleListNPCTemplates)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/npc-templates", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleListNPCTemplates_CombinedFilter(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	req := authReq(t, http.MethodGet, "/api/v1/npc-templates?system=D%26D+5e&category=quest", nil, secret, "user-1", "tenant-1", "viewer")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Data []NPCTemplate `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, tmpl := range resp.Data {
+		if tmpl.System != "D&D 5e" {
+			t.Errorf("template %q has system %q, want %q", tmpl.ID, tmpl.System, "D&D 5e")
+		}
+		if tmpl.Category != "quest" {
+			t.Errorf("template %q has category %q, want %q", tmpl.ID, tmpl.Category, "quest")
+		}
+	}
+	// wise-sage and haunted-priest are the "quest" category D&D 5e templates.
+	if len(resp.Data) != 2 {
+		t.Errorf("got %d templates, want 2", len(resp.Data))
+	}
+}

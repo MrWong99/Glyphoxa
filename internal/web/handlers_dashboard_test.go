@@ -233,3 +233,94 @@ func TestHandleDashboardActivity_Unauthenticated(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestHandleDashboardActiveSessions_NoGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleDashboardActiveSessions)))
+
+	req := authReq(t, http.MethodGet, "/api/v1/dashboard/active-sessions", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	// gwClient is nil in the test server, so handleListActiveSessions returns 503.
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+}
+
+func TestHandleDashboardStats_WithGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "t1", Name: "Camp A"}
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/dashboard/stats", auth(http.HandlerFunc(srv.handleDashboardStats)))
+
+	req := authReq(t, http.MethodGet, "/api/v1/dashboard/stats", nil, secret, "user-1", "t1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var body struct {
+		Data DashboardStats `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Data.CampaignCount != 1 {
+		t.Errorf("campaign_count = %d, want 1", body.Data.CampaignCount)
+	}
+}
+
+func TestHandleDashboardActiveSessions_WithGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleDashboardActiveSessions)))
+
+	req := authReq(t, http.MethodGet, "/api/v1/dashboard/active-sessions", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Errorf("got %d active sessions, want 1", len(resp.Data))
+	}
+}
+
+func TestHandleDashboardActiveSessions_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, secret := testServer(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleDashboardActiveSessions)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/active-sessions", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}

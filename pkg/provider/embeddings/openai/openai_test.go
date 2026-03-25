@@ -2,6 +2,7 @@ package openai
 
 import (
 	"testing"
+	"time"
 )
 
 // TestModelDimensions_TextEmbedding3Small verifies 1536 dims for 3-small.
@@ -94,6 +95,99 @@ func TestNew_Options(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("unexpected error with valid options: %v", err)
+	}
+}
+
+// TestNew_WithTimeout verifies that the timeout option is accepted.
+func TestNew_WithTimeout(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("sk-test", "text-embedding-3-small",
+		WithTimeout(30*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
+	}
+}
+
+// TestNew_WithAllOptions verifies that all options combined work correctly.
+func TestNew_WithAllOptions(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("sk-test", "text-embedding-3-large",
+		WithBaseURL("https://custom.example.com"),
+		WithOrganization("org-123"),
+		WithTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
+	}
+	if p.model != "text-embedding-3-large" {
+		t.Errorf("model = %q, want %q", p.model, "text-embedding-3-large")
+	}
+}
+
+// TestNew_CustomModel verifies that a custom model is preserved.
+func TestNew_CustomModel(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("sk-test", "my-custom-model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.model != "my-custom-model" {
+		t.Errorf("model = %q, want %q", p.model, "my-custom-model")
+	}
+}
+
+// TestModelDimensions_CaseInsensitive verifies case insensitivity.
+func TestModelDimensions_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	lower := modelDimensions("text-embedding-3-large")
+	upper := modelDimensions("TEXT-EMBEDDING-3-LARGE")
+	if lower != upper {
+		t.Errorf("case should not matter: got %d vs %d", lower, upper)
+	}
+}
+
+// TestFloat64ToFloat32_Empty verifies empty slice handling.
+func TestFloat64ToFloat32_Empty(t *testing.T) {
+	t.Parallel()
+
+	out := float64ToFloat32(nil)
+	if len(out) != 0 {
+		t.Errorf("expected empty result for nil input, got len %d", len(out))
+	}
+}
+
+// TestFloat64ToFloat32_Single verifies single-element conversion.
+func TestFloat64ToFloat32_Single(t *testing.T) {
+	t.Parallel()
+
+	out := float64ToFloat32([]float64{3.14})
+	if len(out) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(out))
+	}
+	if out[0] != float32(3.14) {
+		t.Errorf("expected %v, got %v", float32(3.14), out[0])
+	}
+}
+
+// TestDimensions_CustomModel verifies that custom models return default dimensions.
+func TestDimensions_CustomModel(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "my-custom-embeddings"}
+	got := p.Dimensions()
+	if got != 1536 {
+		t.Errorf("expected default 1536 dimensions for unknown model, got %d", got)
 	}
 }
 

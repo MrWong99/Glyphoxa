@@ -286,6 +286,181 @@ func TestHandleUpdateMe(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateUser_EmptyDisplayName(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/users/{id}", auth(http.HandlerFunc(srv.handleUpdateUser)))
+
+	ws.users["u1"] = &User{ID: "u1", TenantID: "tenant-1", DisplayName: "Alice", Role: "dm"}
+
+	// Empty display_name should be rejected.
+	req := authReq(t, http.MethodPut, "/api/v1/users/u1",
+		bytes.NewBufferString(`{"display_name":""}`), secret, "u1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleListUsers_WithRoleFilter(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/users", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleListUsers))))
+
+	ws.users["u1"] = &User{ID: "u1", TenantID: "tenant-1", DisplayName: "Alice", Role: "dm"}
+	ws.users["u2"] = &User{ID: "u2", TenantID: "tenant-1", DisplayName: "Bob", Role: "viewer"}
+	ws.users["u3"] = &User{ID: "u3", TenantID: "tenant-1", DisplayName: "Charlie", Role: "dm"}
+
+	req := authReq(t, http.MethodGet, "/api/v1/users?role=dm", nil, secret, "u1", "tenant-1", "tenant_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Data  []User `json:"data"`
+		Total int    `json:"total"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 2 {
+		t.Errorf("total = %d, want 2 (only DMs)", body.Total)
+	}
+	for _, u := range body.Data {
+		if u.Role != "dm" {
+			t.Errorf("user %q has role %q, want dm", u.ID, u.Role)
+		}
+	}
+}
+
+func TestHandleCreateInvite_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/users/invite", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleCreateInvite))))
+
+	req := authReq(t, http.MethodPost, "/api/v1/users/invite",
+		bytes.NewBufferString(`{bad json`), secret, "u1", "tenant-1", "tenant_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleGetUser_WrongTenant(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/users/{id}", auth(http.HandlerFunc(srv.handleGetUser)))
+
+	ws.users["u2"] = &User{ID: "u2", TenantID: "tenant-2", DisplayName: "Eve", Role: "viewer"}
+
+	// Admin of tenant-1 trying to access user in tenant-2.
+	req := authReq(t, http.MethodGet, "/api/v1/users/u2", nil, secret, "u1", "tenant-1", "tenant_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (wrong tenant)", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleUpdatePreferences_UserNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PATCH /api/v1/auth/me/preferences", auth(http.HandlerFunc(srv.handleUpdatePreferences)))
+
+	// No user seeded.
+	req := authReq(t, http.MethodPatch, "/api/v1/auth/me/preferences",
+		bytes.NewBufferString(`{"theme":"dark"}`), secret, "nonexistent", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleUpdateMe_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/auth/me", auth(http.HandlerFunc(srv.handleUpdateMe)))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/auth/me",
+		bytes.NewBufferString(`{"display_name":"New"}`))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleListUsers_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/users", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleListUsers))))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleGetUser_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/users/{id}", auth(http.HandlerFunc(srv.handleGetUser)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/u1", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleDeleteUser_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("DELETE /api/v1/users/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleDeleteUser))))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/u1", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestHandleUpdatePreferences(t *testing.T) {
 	t.Parallel()
 

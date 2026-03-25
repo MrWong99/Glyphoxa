@@ -558,6 +558,331 @@ func TestCountTokens_NonOpenAIModel(t *testing.T) {
 	}
 }
 
+// ── buildParams ───────────────────────────────────────────────────────────────
+
+// TestBuildParams_BasicRequest verifies that buildParams converts a simple request correctly.
+func TestBuildParams_BasicRequest(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		Messages: []llm.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+	params := p.buildParams(req)
+
+	if params.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q", params.Model, "gpt-4o")
+	}
+	if len(params.Messages) != 1 {
+		t.Fatalf("Messages count = %d, want 1", len(params.Messages))
+	}
+	if params.Messages[0].Role != "user" {
+		t.Errorf("Messages[0].Role = %q, want %q", params.Messages[0].Role, "user")
+	}
+	if params.Temperature != nil {
+		t.Error("expected nil Temperature when not set")
+	}
+	if params.MaxTokens != nil {
+		t.Error("expected nil MaxTokens when not set")
+	}
+}
+
+// TestBuildParams_WithSystemPrompt verifies that the system prompt is prepended.
+func TestBuildParams_WithSystemPrompt(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		SystemPrompt: "You are a helpful assistant.",
+		Messages: []llm.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+	params := p.buildParams(req)
+
+	if len(params.Messages) != 2 {
+		t.Fatalf("Messages count = %d, want 2", len(params.Messages))
+	}
+	if params.Messages[0].Role != "system" {
+		t.Errorf("Messages[0].Role = %q, want %q", params.Messages[0].Role, "system")
+	}
+	if params.Messages[0].ContentString() != "You are a helpful assistant." {
+		t.Errorf("Messages[0].Content = %q, want %q", params.Messages[0].ContentString(), "You are a helpful assistant.")
+	}
+	if params.Messages[1].Role != "user" {
+		t.Errorf("Messages[1].Role = %q, want %q", params.Messages[1].Role, "user")
+	}
+}
+
+// TestBuildParams_WithTemperature verifies the temperature option.
+func TestBuildParams_WithTemperature(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		Temperature: 0.7,
+		Messages:    []llm.Message{{Role: "user", Content: "Hi"}},
+	}
+	params := p.buildParams(req)
+
+	if params.Temperature == nil {
+		t.Fatal("expected non-nil Temperature")
+	}
+	if *params.Temperature != 0.7 {
+		t.Errorf("Temperature = %v, want %v", *params.Temperature, 0.7)
+	}
+}
+
+// TestBuildParams_WithMaxTokens verifies the max_tokens option.
+func TestBuildParams_WithMaxTokens(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		MaxTokens: 1024,
+		Messages:  []llm.Message{{Role: "user", Content: "Hi"}},
+	}
+	params := p.buildParams(req)
+
+	if params.MaxTokens == nil {
+		t.Fatal("expected non-nil MaxTokens")
+	}
+	if *params.MaxTokens != 1024 {
+		t.Errorf("MaxTokens = %d, want %d", *params.MaxTokens, 1024)
+	}
+}
+
+// TestBuildParams_ZeroTemperature verifies that zero temperature is NOT set.
+func TestBuildParams_ZeroTemperature(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		Temperature: 0,
+		Messages:    []llm.Message{{Role: "user", Content: "Hi"}},
+	}
+	params := p.buildParams(req)
+
+	if params.Temperature != nil {
+		t.Errorf("expected nil Temperature for 0, got %v", *params.Temperature)
+	}
+}
+
+// TestBuildParams_ZeroMaxTokens verifies that zero MaxTokens is NOT set.
+func TestBuildParams_ZeroMaxTokens(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		MaxTokens: 0,
+		Messages:  []llm.Message{{Role: "user", Content: "Hi"}},
+	}
+	params := p.buildParams(req)
+
+	if params.MaxTokens != nil {
+		t.Errorf("expected nil MaxTokens for 0, got %d", *params.MaxTokens)
+	}
+}
+
+// TestBuildParams_WithTools verifies tool definitions are converted.
+func TestBuildParams_WithTools(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		Messages: []llm.Message{{Role: "user", Content: "What's the weather?"}},
+		Tools: []llm.ToolDefinition{
+			{
+				Name:        "get_weather",
+				Description: "Get current weather",
+				Parameters:  map[string]any{"type": "object"},
+			},
+			{
+				Name:        "get_time",
+				Description: "Get current time",
+				Parameters:  map[string]any{"type": "object"},
+			},
+		},
+	}
+	params := p.buildParams(req)
+
+	if len(params.Tools) != 2 {
+		t.Fatalf("Tools count = %d, want 2", len(params.Tools))
+	}
+	if params.Tools[0].Function.Name != "get_weather" {
+		t.Errorf("Tools[0].Name = %q, want %q", params.Tools[0].Function.Name, "get_weather")
+	}
+	if params.Tools[0].Type != "function" {
+		t.Errorf("Tools[0].Type = %q, want %q", params.Tools[0].Type, "function")
+	}
+	if params.Tools[1].Function.Name != "get_time" {
+		t.Errorf("Tools[1].Name = %q, want %q", params.Tools[1].Function.Name, "get_time")
+	}
+	if params.Tools[0].Function.Description != "Get current weather" {
+		t.Errorf("Tools[0].Description = %q, want %q", params.Tools[0].Function.Description, "Get current weather")
+	}
+}
+
+// TestBuildParams_NoTools verifies that no tools results in nil Tools.
+func TestBuildParams_NoTools(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		Messages: []llm.Message{{Role: "user", Content: "Hi"}},
+	}
+	params := p.buildParams(req)
+
+	if params.Tools != nil {
+		t.Errorf("expected nil Tools, got %d", len(params.Tools))
+	}
+}
+
+// TestBuildParams_MultipleMessages verifies that multiple messages are converted in order.
+func TestBuildParams_MultipleMessages(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		Messages: []llm.Message{
+			{Role: "user", Content: "Hello"},
+			{Role: "assistant", Content: "Hi there!"},
+			{Role: "user", Content: "How are you?"},
+		},
+	}
+	params := p.buildParams(req)
+
+	if len(params.Messages) != 3 {
+		t.Fatalf("Messages count = %d, want 3", len(params.Messages))
+	}
+	roles := []string{"user", "assistant", "user"}
+	for i, want := range roles {
+		if params.Messages[i].Role != want {
+			t.Errorf("Messages[%d].Role = %q, want %q", i, params.Messages[i].Role, want)
+		}
+	}
+}
+
+// TestBuildParams_AllOptions verifies all options together.
+func TestBuildParams_AllOptions(t *testing.T) {
+	t.Parallel()
+
+	p := &Provider{model: "gpt-4o"}
+	req := llm.CompletionRequest{
+		SystemPrompt: "Be concise.",
+		Temperature:  0.5,
+		MaxTokens:    500,
+		Messages:     []llm.Message{{Role: "user", Content: "Hi"}},
+		Tools: []llm.ToolDefinition{
+			{Name: "tool1", Description: "desc1"},
+		},
+	}
+	params := p.buildParams(req)
+
+	if len(params.Messages) != 2 {
+		t.Fatalf("Messages count = %d, want 2 (system + user)", len(params.Messages))
+	}
+	if params.Temperature == nil || *params.Temperature != 0.5 {
+		t.Error("Temperature not set correctly")
+	}
+	if params.MaxTokens == nil || *params.MaxTokens != 500 {
+		t.Error("MaxTokens not set correctly")
+	}
+	if len(params.Tools) != 1 {
+		t.Errorf("Tools count = %d, want 1", len(params.Tools))
+	}
+}
+
+// ── O3 model capabilities ─────────────────────────────────────────────────────
+
+// TestModelCapabilities_O3Mini checks o3-mini capabilities.
+func TestModelCapabilities_O3Mini(t *testing.T) {
+	t.Parallel()
+
+	caps := modelCapabilities("o3-mini")
+	if caps.ContextWindow != 200_000 {
+		t.Errorf("o3-mini: expected context window 200000, got %d", caps.ContextWindow)
+	}
+	if !caps.SupportsToolCalling {
+		t.Error("o3-mini: expected SupportsToolCalling=true")
+	}
+	if caps.SupportsVision {
+		t.Error("o3-mini: expected SupportsVision=false")
+	}
+}
+
+// TestModelCapabilities_O3 checks o3 capabilities.
+func TestModelCapabilities_O3(t *testing.T) {
+	t.Parallel()
+
+	caps := modelCapabilities("o3")
+	if caps.ContextWindow != 200_000 {
+		t.Errorf("o3: expected context window 200000, got %d", caps.ContextWindow)
+	}
+	if !caps.SupportsToolCalling {
+		t.Error("o3: expected SupportsToolCalling=true")
+	}
+	if !caps.SupportsVision {
+		t.Error("o3: expected SupportsVision=true")
+	}
+}
+
+// TestModelCapabilities_Claude35Haiku checks claude-3-5-haiku capabilities.
+func TestModelCapabilities_Claude35Haiku(t *testing.T) {
+	t.Parallel()
+
+	caps := modelCapabilities("claude-3-5-haiku-latest")
+	if caps.ContextWindow != 200_000 {
+		t.Errorf("claude-3-5-haiku: expected context window 200000, got %d", caps.ContextWindow)
+	}
+	if !caps.SupportsVision {
+		t.Error("claude-3-5-haiku: expected SupportsVision=true")
+	}
+	if caps.MaxOutputTokens != 8_192 {
+		t.Errorf("claude-3-5-haiku: expected MaxOutputTokens 8192, got %d", caps.MaxOutputTokens)
+	}
+}
+
+// TestModelCapabilities_Claude3Sonnet checks claude-3-sonnet capabilities.
+func TestModelCapabilities_Claude3Sonnet(t *testing.T) {
+	t.Parallel()
+
+	caps := modelCapabilities("claude-3-sonnet-20240229")
+	if caps.ContextWindow != 200_000 {
+		t.Errorf("claude-3-sonnet: expected context window 200000, got %d", caps.ContextWindow)
+	}
+	if !caps.SupportsToolCalling {
+		t.Error("claude-3-sonnet: expected SupportsToolCalling=true")
+	}
+}
+
+// ── ConvertMessage with multiple tool calls ───────────────────────────────────
+
+// TestConvertMessage_MultipleToolCalls checks multiple tool call conversion.
+func TestConvertMessage_MultipleToolCalls(t *testing.T) {
+	t.Parallel()
+
+	m := llm.Message{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "get_weather", Arguments: `{"city":"Berlin"}`},
+			{ID: "call_2", Name: "get_time", Arguments: `{"tz":"UTC"}`},
+		},
+	}
+	got := convertMessage(m)
+	if len(got.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(got.ToolCalls))
+	}
+	if got.ToolCalls[0].ID != "call_1" {
+		t.Errorf("ToolCalls[0].ID = %q, want %q", got.ToolCalls[0].ID, "call_1")
+	}
+	if got.ToolCalls[1].Function.Name != "get_time" {
+		t.Errorf("ToolCalls[1].Function.Name = %q, want %q", got.ToolCalls[1].Function.Name, "get_time")
+	}
+}
+
 // TestCountTokens_LazyInit verifies that the tokenizer is initialised at most
 // once regardless of how many times CountTokens is called.
 func TestCountTokens_LazyInit(t *testing.T) {

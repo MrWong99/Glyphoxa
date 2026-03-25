@@ -967,3 +967,294 @@ func TestMuteAgent_NilMixer_NoOp(t *testing.T) {
 		t.Fatalf("mute: %v", err)
 	}
 }
+
+// ── IsMuted ──────────────────────────────────────────────────────────────────
+
+func TestIsMuted(t *testing.T) {
+	t.Parallel()
+
+	t.Run("muted agent returns true", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		elara, _ := newMockAgent("e1", "Elara")
+		o := New([]agent.NPCAgent{grimjaw, elara})
+
+		if err := o.MuteAgent("g1"); err != nil {
+			t.Fatalf("mute: %v", err)
+		}
+
+		muted, err := o.IsMuted("g1")
+		if err != nil {
+			t.Fatalf("IsMuted: %v", err)
+		}
+		if !muted {
+			t.Fatal("IsMuted = false, want true for muted agent")
+		}
+	})
+
+	t.Run("unmuted agent returns false", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		elara, _ := newMockAgent("e1", "Elara")
+		o := New([]agent.NPCAgent{grimjaw, elara})
+
+		// Mute grimjaw but check elara (unmuted).
+		if err := o.MuteAgent("g1"); err != nil {
+			t.Fatalf("mute: %v", err)
+		}
+
+		muted, err := o.IsMuted("e1")
+		if err != nil {
+			t.Fatalf("IsMuted: %v", err)
+		}
+		if muted {
+			t.Fatal("IsMuted = true, want false for unmuted agent")
+		}
+	})
+
+	t.Run("unknown agent returns error", func(t *testing.T) {
+		t.Parallel()
+		o := New(nil)
+
+		_, err := o.IsMuted("nonexistent")
+		if err == nil {
+			t.Fatal("expected error for unknown agent")
+		}
+	})
+
+	t.Run("default state is unmuted", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		muted, err := o.IsMuted("g1")
+		if err != nil {
+			t.Fatalf("IsMuted: %v", err)
+		}
+		if muted {
+			t.Fatal("IsMuted = true, want false for freshly created agent")
+		}
+	})
+
+	t.Run("reflects unmute after mute", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		if err := o.MuteAgent("g1"); err != nil {
+			t.Fatalf("mute: %v", err)
+		}
+		if err := o.UnmuteAgent("g1"); err != nil {
+			t.Fatalf("unmute: %v", err)
+		}
+
+		muted, err := o.IsMuted("g1")
+		if err != nil {
+			t.Fatalf("IsMuted: %v", err)
+		}
+		if muted {
+			t.Fatal("IsMuted = true, want false after unmute")
+		}
+	})
+
+	t.Run("concurrent reads are safe", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		var wg sync.WaitGroup
+		for range 50 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = o.IsMuted("g1")
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+// ── UnmuteAll ────────────────────────────────────────────────────────────────
+
+func TestUnmuteAll(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unmutes all muted agents", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		elara, _ := newMockAgent("e1", "Elara")
+		o := New([]agent.NPCAgent{grimjaw, elara})
+
+		if err := o.MuteAgent("g1"); err != nil {
+			t.Fatalf("mute g1: %v", err)
+		}
+		if err := o.MuteAgent("e1"); err != nil {
+			t.Fatalf("mute e1: %v", err)
+		}
+
+		changed := o.UnmuteAll()
+		if changed != 2 {
+			t.Fatalf("UnmuteAll changed = %d, want 2", changed)
+		}
+
+		// Verify both are now unmuted.
+		for _, id := range []string{"g1", "e1"} {
+			muted, err := o.IsMuted(id)
+			if err != nil {
+				t.Fatalf("IsMuted(%s): %v", id, err)
+			}
+			if muted {
+				t.Fatalf("agent %s still muted after UnmuteAll", id)
+			}
+		}
+	})
+
+	t.Run("already unmuted agents are not counted", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		elara, _ := newMockAgent("e1", "Elara")
+		o := New([]agent.NPCAgent{grimjaw, elara})
+
+		// Mute only one.
+		if err := o.MuteAgent("g1"); err != nil {
+			t.Fatalf("mute: %v", err)
+		}
+
+		changed := o.UnmuteAll()
+		if changed != 1 {
+			t.Fatalf("UnmuteAll changed = %d, want 1", changed)
+		}
+	})
+
+	t.Run("returns zero when none are muted", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		changed := o.UnmuteAll()
+		if changed != 0 {
+			t.Fatalf("UnmuteAll changed = %d, want 0", changed)
+		}
+	})
+
+	t.Run("returns zero for empty orchestrator", func(t *testing.T) {
+		t.Parallel()
+		o := New(nil)
+
+		changed := o.UnmuteAll()
+		if changed != 0 {
+			t.Fatalf("UnmuteAll changed = %d, want 0", changed)
+		}
+	})
+
+	t.Run("agents routable after UnmuteAll", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		if err := o.MuteAgent("g1"); err != nil {
+			t.Fatalf("mute: %v", err)
+		}
+
+		// Muted → should not be routable.
+		_, err := o.Route(context.Background(), "player-1", transcript("Hey Grimjaw"))
+		if !errors.Is(err, ErrNoTarget) {
+			t.Fatalf("want ErrNoTarget while muted, got %v", err)
+		}
+
+		o.UnmuteAll()
+
+		// After UnmuteAll → should be routable.
+		got, err := o.Route(context.Background(), "player-1", transcript("Hey Grimjaw"))
+		if err != nil {
+			t.Fatalf("route after UnmuteAll: %v", err)
+		}
+		if got.ID() != "g1" {
+			t.Fatalf("want g1, got %s", got.ID())
+		}
+	})
+}
+
+// ── AgentByName ──────────────────────────────────────────────────────────────
+
+func TestAgentByName(t *testing.T) {
+	t.Parallel()
+
+	t.Run("finds agent by exact name", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		elara, _ := newMockAgent("e1", "Elara")
+		o := New([]agent.NPCAgent{grimjaw, elara})
+
+		got := o.AgentByName("Grimjaw")
+		if got == nil {
+			t.Fatal("AgentByName returned nil")
+		}
+		if got.ID() != "g1" {
+			t.Fatalf("want g1, got %s", got.ID())
+		}
+	})
+
+	t.Run("case-insensitive match", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		tests := []string{"grimjaw", "GRIMJAW", "GrImJaW"}
+		for _, name := range tests {
+			got := o.AgentByName(name)
+			if got == nil {
+				t.Fatalf("AgentByName(%q) returned nil", name)
+			}
+			if got.ID() != "g1" {
+				t.Fatalf("AgentByName(%q): want g1, got %s", name, got.ID())
+			}
+		}
+	})
+
+	t.Run("returns nil for unknown name", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		got := o.AgentByName("Nobody")
+		if got != nil {
+			t.Fatalf("want nil for unknown name, got %s", got.ID())
+		}
+	})
+
+	t.Run("returns nil for empty orchestrator", func(t *testing.T) {
+		t.Parallel()
+		o := New(nil)
+
+		got := o.AgentByName("Grimjaw")
+		if got != nil {
+			t.Fatalf("want nil for empty orchestrator, got %s", got.ID())
+		}
+	})
+
+	t.Run("returns nil for empty name", func(t *testing.T) {
+		t.Parallel()
+		grimjaw, _ := newMockAgent("g1", "Grimjaw")
+		o := New([]agent.NPCAgent{grimjaw})
+
+		got := o.AgentByName("")
+		if got != nil {
+			t.Fatalf("want nil for empty name, got %s", got.ID())
+		}
+	})
+
+	t.Run("finds agent with multi-word name", func(t *testing.T) {
+		t.Parallel()
+		npc, _ := newMockAgent("h1", "Heinrich der Schmied")
+		o := New([]agent.NPCAgent{npc})
+
+		got := o.AgentByName("heinrich der schmied")
+		if got == nil {
+			t.Fatal("AgentByName returned nil for multi-word name")
+		}
+		if got.ID() != "h1" {
+			t.Fatalf("want h1, got %s", got.ID())
+		}
+	})
+}

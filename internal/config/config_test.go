@@ -7,10 +7,13 @@ import (
 	"testing"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
+	"github.com/MrWong99/glyphoxa/pkg/audio"
 	"github.com/MrWong99/glyphoxa/pkg/provider/embeddings"
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
+	"github.com/MrWong99/glyphoxa/pkg/provider/s2s"
 	"github.com/MrWong99/glyphoxa/pkg/provider/stt"
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
+	"github.com/MrWong99/glyphoxa/pkg/provider/vad"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -72,6 +75,31 @@ mcp:
       transport: streamable-http
       url: https://tools.example.com/mcp
 `
+
+// ── CascadeMode ──────────────────────────────────────────────────────────────
+
+func TestCascadeMode_IsValid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		mode  config.CascadeMode
+		valid bool
+	}{
+		{name: "empty", mode: "", valid: true},
+		{name: "off", mode: config.CascadeModeOff, valid: true},
+		{name: "auto", mode: config.CascadeModeAuto, valid: true},
+		{name: "always", mode: config.CascadeModeAlways, valid: true},
+		{name: "invalid", mode: "turbo", valid: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.mode.IsValid(); got != tt.valid {
+				t.Errorf("CascadeMode(%q).IsValid() = %v, want %v", tt.mode, got, tt.valid)
+			}
+		})
+	}
+}
 
 // ── YAML loading ──────────────────────────────────────────────────────────────
 
@@ -428,3 +456,73 @@ func (s *stubEmbeddings) EmbedBatch(_ context.Context, _ []string) ([][]float32,
 }
 func (s *stubEmbeddings) Dimensions() int { return 0 }
 func (s *stubEmbeddings) ModelID() string { return "stub" }
+
+// stubS2S implements s2s.Provider.
+type stubS2S struct{}
+
+func (s *stubS2S) Connect(_ context.Context, _ s2s.SessionConfig) (s2s.SessionHandle, error) {
+	return nil, nil
+}
+func (s *stubS2S) Capabilities() s2s.S2SCapabilities { return s2s.S2SCapabilities{} }
+
+// stubVAD implements vad.Engine.
+type stubVAD struct{}
+
+func (s *stubVAD) NewSession(_ vad.Config) (vad.SessionHandle, error) { return nil, nil }
+
+// stubAudio implements audio.Platform.
+type stubAudio struct{}
+
+func (s *stubAudio) Connect(_ context.Context, _ string) (audio.Connection, error) {
+	return nil, nil
+}
+
+// ── Registry with registered factories (S2S, VAD, Audio) ─────────────────────
+
+func TestRegistry_RegisteredS2S(t *testing.T) {
+	t.Parallel()
+	reg := config.NewRegistry()
+	want := &stubS2S{}
+	reg.RegisterS2S("stub", func(e config.ProviderEntry) (s2s.Provider, error) {
+		return want, nil
+	})
+	got, err := reg.CreateS2S(config.ProviderEntry{Name: "stub"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Error("returned provider is not the expected instance")
+	}
+}
+
+func TestRegistry_RegisteredVAD(t *testing.T) {
+	t.Parallel()
+	reg := config.NewRegistry()
+	want := &stubVAD{}
+	reg.RegisterVAD("stub", func(e config.ProviderEntry) (vad.Engine, error) {
+		return want, nil
+	})
+	got, err := reg.CreateVAD(config.ProviderEntry{Name: "stub"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Error("returned engine is not the expected instance")
+	}
+}
+
+func TestRegistry_RegisteredAudio(t *testing.T) {
+	t.Parallel()
+	reg := config.NewRegistry()
+	want := &stubAudio{}
+	reg.RegisterAudio("stub", func(e config.ProviderEntry) (audio.Platform, error) {
+		return want, nil
+	})
+	got, err := reg.CreateAudio(config.ProviderEntry{Name: "stub"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Error("returned platform is not the expected instance")
+	}
+}

@@ -2,6 +2,7 @@ package silero
 
 import (
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -96,6 +97,399 @@ func makeSession(t *testing.T, cfg vad.Config, m *mockInferencer, minSpeech, min
 		t.Fatalf("validateConfig: %v", err)
 	}
 	return newSession(cfg, m, minSpeech, minSilence)
+}
+
+// ─── contextSize tests ───────────────────────────────────────────────────
+
+func TestContextSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sampleRate int
+		want       int
+	}{
+		{"8kHz returns 32", 8000, 32},
+		{"16kHz returns 64", 16000, 64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := contextSize(tt.sampleRate)
+			if got != tt.want {
+				t.Errorf("contextSize(%d) = %d, want %d", tt.sampleRate, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── validateConfig edge cases ──────────────────────────────────────────
+
+func TestValidateConfig_SpeechThresholdOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     vad.Config
+		wantErr bool
+	}{
+		{
+			name: "negative speech threshold",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      32,
+				SpeechThreshold:  -0.1,
+				SilenceThreshold: 0.0,
+			},
+			wantErr: true,
+		},
+		{
+			name: "speech threshold above 1",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      32,
+				SpeechThreshold:  1.1,
+				SilenceThreshold: 0.5,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative silence threshold",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      32,
+				SpeechThreshold:  0.5,
+				SilenceThreshold: -0.1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "silence threshold above 1",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      32,
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 1.5,
+			},
+			wantErr: true,
+		},
+		{
+			name: "silence > speech threshold",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      32,
+				SpeechThreshold:  0.3,
+				SilenceThreshold: 0.5,
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid equal thresholds",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      32,
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.5,
+			},
+			wantErr: false,
+		},
+		{
+			name: "zero frame size ms",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      0,
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.3,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative frame size ms",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      -10,
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.3,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid chunk size for 16kHz",
+			cfg: vad.Config{
+				SampleRate:       16000,
+				FrameSizeMs:      30, // 16000*30/1000 = 480, not in {512,1024,1536}
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.3,
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid 8kHz 64ms",
+			cfg: vad.Config{
+				SampleRate:       8000,
+				FrameSizeMs:      64, // 8000*64/1000 = 512, valid
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.3,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid 8kHz 96ms",
+			cfg: vad.Config{
+				SampleRate:       8000,
+				FrameSizeMs:      96, // 8000*96/1000 = 768, valid
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.3,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid chunk size for 8kHz",
+			cfg: vad.Config{
+				SampleRate:       8000,
+				FrameSizeMs:      50, // 8000*50/1000 = 400, not in {256,512,768}
+				SpeechThreshold:  0.5,
+				SilenceThreshold: 0.3,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateConfig(tt.cfg)
+			if tt.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// ─── ProcessFrame edge cases ────────────────────────────────────────────
+
+func TestProcessFrame_WrongFrameSize(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	m := &mockInferencer{prob: 0.1}
+	sess := makeSession(t, cfg, m, 3, 15)
+	t.Cleanup(func() { _ = sess.Close() })
+
+	// Send a frame that's too short.
+	shortFrame := make([]byte, 10) // expected: chunkSize * 2
+	_, err := sess.ProcessFrame(shortFrame)
+	if err == nil {
+		t.Fatal("expected error for wrong frame size, got nil")
+	}
+}
+
+// ─── step edge cases ────────────────────────────────────────────────────
+
+func TestProcessFrame_SpeechCountResetOnLowProb(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	const minSpeech = 3
+
+	m := &mockInferencer{}
+	sess := makeSession(t, cfg, m, minSpeech, 15)
+	t.Cleanup(func() { _ = sess.Close() })
+
+	frame := silenceFrame(cfg)
+
+	// Two high-prob frames, then one low-prob. Should reset speech count.
+	m.mu.Lock()
+	m.prob = 0.9
+	m.mu.Unlock()
+	for range 2 {
+		sess.ProcessFrame(frame) //nolint:errcheck
+	}
+	// Now drop below threshold — speech count should reset.
+	m.mu.Lock()
+	m.prob = 0.1
+	m.mu.Unlock()
+	evt, err := sess.ProcessFrame(frame)
+	if err != nil {
+		t.Fatalf("ProcessFrame: %v", err)
+	}
+	if evt.Type != vad.VADSilence {
+		t.Errorf("expected VADSilence after count reset, got %v", evt.Type)
+	}
+	if sess.speechCount != 0 {
+		t.Errorf("speechCount = %d, want 0 after reset", sess.speechCount)
+	}
+}
+
+func TestProcessFrame_SilenceCountResetOnHighProb(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	const minSpeech, minSilence = 2, 5
+
+	m := &mockInferencer{prob: 0.9}
+	sess := makeSession(t, cfg, m, minSpeech, minSilence)
+	t.Cleanup(func() { _ = sess.Close() })
+
+	frame := silenceFrame(cfg)
+
+	// Drive into speech state.
+	for range minSpeech {
+		sess.ProcessFrame(frame) //nolint:errcheck
+	}
+	if sess.state != stateSpeaking {
+		t.Fatalf("expected stateSpeaking, got %v", sess.state)
+	}
+
+	// A few low-prob frames (not enough for speech end).
+	m.mu.Lock()
+	m.prob = 0.1
+	m.mu.Unlock()
+	for range minSilence - 1 {
+		sess.ProcessFrame(frame) //nolint:errcheck
+	}
+	if sess.silenceCount != minSilence-1 {
+		t.Fatalf("silenceCount = %d, want %d", sess.silenceCount, minSilence-1)
+	}
+
+	// One high-prob frame should reset silence count.
+	m.mu.Lock()
+	m.prob = 0.9
+	m.mu.Unlock()
+	evt, err := sess.ProcessFrame(frame)
+	if err != nil {
+		t.Fatalf("ProcessFrame: %v", err)
+	}
+	if evt.Type != vad.VADSpeechContinue {
+		t.Errorf("expected VADSpeechContinue, got %v", evt.Type)
+	}
+	if sess.silenceCount != 0 {
+		t.Errorf("silenceCount = %d, want 0 after reset", sess.silenceCount)
+	}
+}
+
+// ─── newSession tests ───────────────────────────────────────────────────
+
+func TestNewSession_InitialState(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	m := &mockInferencer{}
+	sess := newSession(cfg, m, 5, 10)
+
+	if sess.state != stateSilence {
+		t.Errorf("initial state = %v, want stateSilence", sess.state)
+	}
+	if sess.speechCount != 0 {
+		t.Errorf("initial speechCount = %d, want 0", sess.speechCount)
+	}
+	if sess.silenceCount != 0 {
+		t.Errorf("initial silenceCount = %d, want 0", sess.silenceCount)
+	}
+	if sess.minSpeechFrames != 5 {
+		t.Errorf("minSpeechFrames = %d, want 5", sess.minSpeechFrames)
+	}
+	if sess.minSilenceFrames != 10 {
+		t.Errorf("minSilenceFrames = %d, want 10", sess.minSilenceFrames)
+	}
+	if len(sess.lstmState) != stateSize {
+		t.Errorf("lstmState len = %d, want %d", len(sess.lstmState), stateSize)
+	}
+	if sess.closed {
+		t.Error("session should not be closed initially")
+	}
+
+	_ = sess.Close()
+}
+
+// ─── PCM conversion additional ──────────────────────────────────────────
+
+func TestPCMToFloat32_Empty(t *testing.T) {
+	t.Parallel()
+
+	got := pcmToFloat32(nil)
+	if len(got) != 0 {
+		t.Errorf("expected empty result for nil input, got len %d", len(got))
+	}
+}
+
+func TestPCMToFloat32_MultiSample(t *testing.T) {
+	t.Parallel()
+
+	// Encode two samples: 0 and 16384
+	pcm := make([]byte, 4)
+	binary.LittleEndian.PutUint16(pcm[0:], 0)
+	binary.LittleEndian.PutUint16(pcm[2:], uint16(int16(16384)))
+
+	got := pcmToFloat32(pcm)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0] != 0 {
+		t.Errorf("got[0] = %v, want 0", got[0])
+	}
+	const eps = 1e-6
+	want := float32(16384.0 / 32768.0)
+	if diff := got[1] - want; diff < -eps || diff > eps {
+		t.Errorf("got[1] = %v, want %v", got[1], want)
+	}
+}
+
+// ─── Option functions ───────────────────────────────────────────────────
+
+func TestWithMinSpeechFrames(t *testing.T) {
+	t.Parallel()
+
+	e := &Engine{}
+	WithMinSpeechFrames(7)(e)
+	if e.minSpeechFrames != 7 {
+		t.Errorf("minSpeechFrames = %d, want 7", e.minSpeechFrames)
+	}
+}
+
+func TestWithMinSilenceFrames(t *testing.T) {
+	t.Parallel()
+
+	e := &Engine{}
+	WithMinSilenceFrames(20)(e)
+	if e.minSilenceFrames != 20 {
+		t.Errorf("minSilenceFrames = %d, want 20", e.minSilenceFrames)
+	}
+}
+
+func TestWithONNXLibPath(t *testing.T) {
+	t.Parallel()
+
+	e := &Engine{}
+	WithONNXLibPath("/opt/onnx/lib")(e)
+	if e.onnxLibPath != "/opt/onnx/lib" {
+		t.Errorf("onnxLibPath = %q, want %q", e.onnxLibPath, "/opt/onnx/lib")
+	}
+}
+
+// ─── Close with inferencer error ────────────────────────────────────────
+
+func TestClose_InferencerError(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	m := &mockInferencer{
+		prob:     0.1,
+		closeErr: fmt.Errorf("onnx cleanup failed"),
+	}
+	sess := makeSession(t, cfg, m, 3, 15)
+
+	err := sess.Close()
+	if err == nil {
+		t.Fatal("expected error from Close when inferencer close fails")
+	}
+	if !m.closed {
+		t.Error("expected inferencer to be marked as closed")
+	}
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

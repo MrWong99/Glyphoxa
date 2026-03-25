@@ -253,6 +253,253 @@ func TestSetKeywords_ReturnsErrNotSupported(t *testing.T) {
 	}
 }
 
+// ---- session channel & SendAudio tests ----
+
+func TestSession_Partials_Returns_Channel(t *testing.T) {
+	t.Parallel()
+
+	s := &session{
+		partials: make(chan stt.Transcript, 1),
+		finals:   make(chan stt.Transcript, 1),
+		done:     make(chan struct{}),
+	}
+
+	ch := s.Partials()
+	if ch == nil {
+		t.Fatal("Partials() returned nil channel")
+	}
+	// Write a value and read it back.
+	s.partials <- stt.Transcript{Text: "hello"}
+	got := <-ch
+	if got.Text != "hello" {
+		t.Errorf("Partials: got %q, want %q", got.Text, "hello")
+	}
+}
+
+func TestSession_Finals_Returns_Channel(t *testing.T) {
+	t.Parallel()
+
+	s := &session{
+		partials: make(chan stt.Transcript, 1),
+		finals:   make(chan stt.Transcript, 1),
+		done:     make(chan struct{}),
+	}
+
+	ch := s.Finals()
+	if ch == nil {
+		t.Fatal("Finals() returned nil channel")
+	}
+	// Write a value and read it back.
+	s.finals <- stt.Transcript{Text: "final text", IsFinal: true}
+	got := <-ch
+	if got.Text != "final text" {
+		t.Errorf("Finals: got %q, want %q", got.Text, "final text")
+	}
+	if !got.IsFinal {
+		t.Error("Finals: expected IsFinal=true")
+	}
+}
+
+func TestSendAudio_WhenOpen(t *testing.T) {
+	t.Parallel()
+
+	s := &session{
+		audio: make(chan []byte, 2),
+		done:  make(chan struct{}),
+	}
+
+	chunk := []byte{0x01, 0x02, 0x03}
+	if err := s.SendAudio(chunk); err != nil {
+		t.Fatalf("SendAudio: unexpected error: %v", err)
+	}
+	// Read back the chunk.
+	got := <-s.audio
+	if len(got) != 3 || got[0] != 0x01 {
+		t.Errorf("SendAudio: got %v, want %v", got, chunk)
+	}
+}
+
+func TestSendAudio_WhenClosed(t *testing.T) {
+	t.Parallel()
+
+	s := &session{
+		audio: make(chan []byte, 2),
+		done:  make(chan struct{}),
+	}
+	close(s.done) // simulate closed session
+
+	err := s.SendAudio([]byte{0x01})
+	if err == nil {
+		t.Fatal("SendAudio after close: expected error, got nil")
+	}
+}
+
+func TestSendAudio_BlocksUntilClosed(t *testing.T) {
+	t.Parallel()
+
+	// Unbuffered audio channel — will block.
+	s := &session{
+		audio: make(chan []byte),
+		done:  make(chan struct{}),
+	}
+
+	// Close done so the blocking select branch fires.
+	close(s.done)
+	err := s.SendAudio([]byte{0x01})
+	if err == nil {
+		t.Fatal("expected error when session is closed and audio channel full")
+	}
+}
+
+// ---- buildURL additional edge cases ----
+
+func TestBuildURL_ZeroChannels(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rawURL, err := p.buildURL(stt.StreamConfig{SampleRate: 16000, Channels: 0})
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+
+	u, _ := url.Parse(rawURL)
+	// channels param should not be present when Channels == 0
+	if _, ok := u.Query()["channels"]; ok {
+		t.Error("expected no 'channels' param when Channels is 0")
+	}
+}
+
+func TestBuildURL_SampleRateOverrideByCfg(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("key", WithSampleRate(8000))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// cfg.SampleRate should override provider-level default.
+	rawURL, err := p.buildURL(stt.StreamConfig{SampleRate: 44100})
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+
+	u, _ := url.Parse(rawURL)
+	if got := u.Query().Get("sample_rate"); got != "44100" {
+		t.Errorf("sample_rate = %q, want %q", got, "44100")
+	}
+}
+
+func TestBuildURL_ProviderDefaultSampleRate(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("key", WithSampleRate(22050))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// cfg.SampleRate is 0, so provider's 22050 should be used.
+	rawURL, err := p.buildURL(stt.StreamConfig{SampleRate: 0})
+	if err != nil {
+		t.Fatalf("buildURL: %v", err)
+	}
+
+	u, _ := url.Parse(rawURL)
+	if got := u.Query().Get("sample_rate"); got != "22050" {
+		t.Errorf("sample_rate = %q, want %q", got, "22050")
+	}
+}
+
+// ---- New with all options ----
+
+func TestNew_AllOptions(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("key",
+		WithModel("enhanced"),
+		WithLanguage("ja"),
+		WithSampleRate(48000),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.model != "enhanced" {
+		t.Errorf("model = %q, want %q", p.model, "enhanced")
+	}
+	if p.language != "ja" {
+		t.Errorf("language = %q, want %q", p.language, "ja")
+	}
+	if p.sampleRate != 48000 {
+		t.Errorf("sampleRate = %d, want %d", p.sampleRate, 48000)
+	}
+}
+
+// ---- parseDeepgramResponse edge cases ----
+
+func TestParseDeepgramResponse_MultipleWords(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"type": "Results",
+		"is_final": true,
+		"channel": {
+			"alternatives": [{
+				"transcript": "The quick brown fox",
+				"confidence": 0.88,
+				"words": [
+					{"word": "The", "start": 0.0, "end": 0.2, "confidence": 0.9},
+					{"word": "quick", "start": 0.3, "end": 0.5, "confidence": 0.85},
+					{"word": "brown", "start": 0.6, "end": 0.8, "confidence": 0.9},
+					{"word": "fox", "start": 0.9, "end": 1.1, "confidence": 0.88}
+				]
+			}]
+		}
+	}`)
+
+	tr, ok := parseDeepgramResponse(raw)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if len(tr.Words) != 4 {
+		t.Fatalf("expected 4 words, got %d", len(tr.Words))
+	}
+	if tr.Words[3].Word != "fox" {
+		t.Errorf("word[3] = %q, want %q", tr.Words[3].Word, "fox")
+	}
+	if tr.Words[1].End != time.Duration(0.5*float64(time.Second)) {
+		t.Errorf("word[1].End = %v, unexpected", tr.Words[1].End)
+	}
+}
+
+func TestParseDeepgramResponse_NoWords(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"type": "Results",
+		"is_final": true,
+		"channel": {
+			"alternatives": [{
+				"transcript": "hello",
+				"confidence": 0.99
+			}]
+		}
+	}`)
+
+	tr, ok := parseDeepgramResponse(raw)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if len(tr.Words) != 0 {
+		t.Errorf("expected 0 words, got %d", len(tr.Words))
+	}
+	if tr.Text != "hello" {
+		t.Errorf("text = %q, want %q", tr.Text, "hello")
+	}
+}
+
 // ---- helpers ----
 
 func assertEqual(t *testing.T, label, want, got string) {

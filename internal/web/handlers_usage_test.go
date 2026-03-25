@@ -131,3 +131,102 @@ func TestHandleGetUsage_Unauthenticated(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestHandleGetUsage_OnlyFromParam(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/usage", auth(http.HandlerFunc(srv.handleGetUsage)))
+
+	ws.usage = []UsageRecord{
+		{TenantID: "tenant-1", Period: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), SessionHours: 5},
+		{TenantID: "tenant-1", Period: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), SessionHours: 15},
+	}
+
+	// Only set "from", should filter out records before that date.
+	req := authReq(t, http.MethodGet, "/api/v1/usage?from=2026-02-01", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Data []UsageRecord `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Data) != 1 {
+		t.Errorf("got %d records, want 1 (only March record)", len(body.Data))
+	}
+}
+
+func TestHandleGetUsage_OnlyToParam(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/usage", auth(http.HandlerFunc(srv.handleGetUsage)))
+
+	ws.usage = []UsageRecord{
+		{TenantID: "tenant-1", Period: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), SessionHours: 5},
+		{TenantID: "tenant-1", Period: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), SessionHours: 15},
+	}
+
+	// Only set "to", should filter out records after that date.
+	req := authReq(t, http.MethodGet, "/api/v1/usage?to=2026-02-01", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Data []UsageRecord `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Data) != 1 {
+		t.Errorf("got %d records, want 1 (only January record)", len(body.Data))
+	}
+}
+
+func TestHandleGetUsage_TenantIsolation(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/usage", auth(http.HandlerFunc(srv.handleGetUsage)))
+
+	now := time.Now().UTC()
+	ws.usage = []UsageRecord{
+		{TenantID: "tenant-1", Period: now, SessionHours: 10},
+		{TenantID: "tenant-2", Period: now, SessionHours: 20},
+	}
+
+	req := authReq(t, http.MethodGet, "/api/v1/usage", nil, secret, "user-2", "tenant-2", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Data []UsageRecord `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Data) != 1 {
+		t.Errorf("got %d records, want 1", len(body.Data))
+	}
+	if len(body.Data) == 1 && body.Data[0].TenantID != "tenant-2" {
+		t.Errorf("tenant_id = %q, want %q", body.Data[0].TenantID, "tenant-2")
+	}
+}

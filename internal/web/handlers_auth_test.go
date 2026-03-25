@@ -317,6 +317,58 @@ func TestHandleAPIKeyLogin_MissingKey(t *testing.T) {
 	}
 }
 
+func TestHandleDiscordLogin_WithInvite(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := testServer(t)
+	srv.mux.HandleFunc("GET /api/v1/auth/discord", srv.handleDiscordLogin)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/discord?invite=test-invite-token", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusFound)
+	}
+
+	// Should set both state and invite cookies.
+	cookies := rr.Result().Cookies()
+	var stateCookie, inviteCookie *http.Cookie
+	for _, c := range cookies {
+		switch c.Name {
+		case "glyphoxa_oauth_state":
+			stateCookie = c
+		case "glyphoxa_invite":
+			inviteCookie = c
+		}
+	}
+	if stateCookie == nil {
+		t.Error("missing glyphoxa_oauth_state cookie")
+	}
+	if inviteCookie == nil {
+		t.Fatal("missing glyphoxa_invite cookie")
+	}
+	if inviteCookie.Value != "test-invite-token" {
+		t.Errorf("invite cookie = %q, want %q", inviteCookie.Value, "test-invite-token")
+	}
+}
+
+func TestHandleMe_Unauthenticated_Explicit(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/auth/me", auth(http.HandlerFunc(srv.handleMe)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestHandleAPIKeyLogin_InvalidJSON(t *testing.T) {
 	t.Parallel()
 

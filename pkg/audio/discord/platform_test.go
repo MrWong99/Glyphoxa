@@ -358,3 +358,132 @@ func TestConnection_ReceiveNilPacket(t *testing.T) {
 		t.Errorf("InputStreams: want 0 entries, got %d", len(streams))
 	}
 }
+
+// TestConnection_Close verifies that the Close method delegates to Disconnect.
+func TestConnection_Close(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+	// Close should not panic and should be equivalent to Disconnect.
+	c.Close()
+
+	// After Close, the done channel should be closed.
+	select {
+	case <-c.done:
+		// expected
+	default:
+		t.Error("done channel not closed after Close()")
+	}
+}
+
+// TestInt16sToBytes verifies the int16-to-byte conversion.
+func TestInt16sToBytes(t *testing.T) {
+	t.Parallel()
+
+	pcm := []int16{0x0102, -1, 0}
+	b := int16sToBytes(pcm)
+
+	if len(b) != 6 {
+		t.Fatalf("len = %d, want 6", len(b))
+	}
+	// 0x0102 in little-endian: 0x02, 0x01
+	if b[0] != 0x02 || b[1] != 0x01 {
+		t.Errorf("bytes[0:2] = [%02x %02x], want [02 01]", b[0], b[1])
+	}
+	// -1 = 0xFFFF in little-endian: 0xFF, 0xFF
+	if b[2] != 0xFF || b[3] != 0xFF {
+		t.Errorf("bytes[2:4] = [%02x %02x], want [ff ff]", b[2], b[3])
+	}
+	// 0 = 0x0000
+	if b[4] != 0x00 || b[5] != 0x00 {
+		t.Errorf("bytes[4:6] = [%02x %02x], want [00 00]", b[4], b[5])
+	}
+}
+
+// TestBytesToInt16s verifies the byte-to-int16 conversion.
+func TestBytesToInt16s(t *testing.T) {
+	t.Parallel()
+
+	b := []byte{0x02, 0x01, 0xFF, 0xFF, 0x00, 0x00}
+	pcm := bytesToInt16s(b)
+
+	if len(pcm) != 3 {
+		t.Fatalf("len = %d, want 3", len(pcm))
+	}
+	if pcm[0] != 0x0102 {
+		t.Errorf("pcm[0] = %d, want %d", pcm[0], 0x0102)
+	}
+	if pcm[1] != -1 {
+		t.Errorf("pcm[1] = %d, want -1", pcm[1])
+	}
+	if pcm[2] != 0 {
+		t.Errorf("pcm[2] = %d, want 0", pcm[2])
+	}
+}
+
+// TestInt16sToBytes_RoundTrip verifies that converting to bytes and back
+// produces the original values.
+func TestInt16sToBytes_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := []int16{100, -200, 300, -400, 0, 32767, -32768}
+	b := int16sToBytes(original)
+	result := bytesToInt16s(b)
+
+	if len(result) != len(original) {
+		t.Fatalf("round-trip len = %d, want %d", len(result), len(original))
+	}
+	for i := range original {
+		if result[i] != original[i] {
+			t.Errorf("round-trip[%d] = %d, want %d", i, result[i], original[i])
+		}
+	}
+}
+
+// TestProvideOpusFrame_AfterDisconnect verifies that ProvideOpusFrame returns
+// io.EOF after the connection is disconnected.
+func TestProvideOpusFrame_AfterDisconnect(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+	_ = c.Disconnect()
+
+	_, err := c.ProvideOpusFrame()
+	if err == nil {
+		t.Fatal("expected error after disconnect")
+	}
+}
+
+// TestConnection_EmitEvent_NilCallback verifies that emitting an event with
+// no callback registered does not panic.
+func TestConnection_EmitEvent_NilCallback(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+	// No callback registered — should not panic.
+	c.emitEvent(audio.Event{Type: audio.EventJoin, UserID: "test"})
+}
+
+// TestCleanupUser_Nonexistent verifies that cleaning up a nonexistent user
+// does not emit a leave event.
+func TestCleanupUser_Nonexistent(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+
+	events := make(chan audio.Event, 4)
+	c.OnParticipantChange(func(ev audio.Event) {
+		events <- ev
+	})
+
+	// Clean up a user that never joined.
+	c.CleanupUser(snowflake.ID(999))
+
+	// No event should be emitted.
+	select {
+	case ev := <-events:
+		t.Errorf("unexpected event for nonexistent user: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+}

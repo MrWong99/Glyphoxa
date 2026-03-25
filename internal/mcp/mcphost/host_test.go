@@ -2,6 +2,7 @@ package mcphost
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -526,5 +527,168 @@ func assertNotContains(t *testing.T, tools []llm.ToolDefinition, name string) {
 	t.Helper()
 	if toolNamed(tools, name) != nil {
 		t.Errorf("expected tool %q to be absent, but it was present", name)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Pure helper function tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestExtractInt64(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		m    map[string]any
+		key  string
+		want int64
+	}{
+		{"int64 value", map[string]any{"k": int64(42)}, "k", 42},
+		{"float64 value", map[string]any{"k": float64(100)}, "k", 100},
+		{"json.Number value", map[string]any{"k": json.Number("250")}, "k", 250},
+		{"missing key", map[string]any{}, "k", 0},
+		{"string value", map[string]any{"k": "hello"}, "k", 0},
+		{"nil value", map[string]any{"k": nil}, "k", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractInt64(tt.m, tt.key)
+			if got != tt.want {
+				t.Errorf("extractInt64(%v, %q) = %d, want %d", tt.m, tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseLatencyFromDescription(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		desc     string
+		wantP50  int64
+		wantMax  int64
+	}{
+		{
+			name:    "valid JSON with both fields",
+			desc:    `Some tool description {"estimated_duration_ms": 100, "max_duration_ms": 500}`,
+			wantP50: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "no JSON",
+			desc:    "Just a plain description.",
+			wantP50: 0,
+			wantMax: 0,
+		},
+		{
+			name:    "invalid JSON",
+			desc:    "Tool {invalid json}",
+			wantP50: 0,
+			wantMax: 0,
+		},
+		{
+			name:    "empty description",
+			desc:    "",
+			wantP50: 0,
+			wantMax: 0,
+		},
+		{
+			name:    "only p50",
+			desc:    `Desc {"estimated_duration_ms": 200}`,
+			wantP50: 200,
+			wantMax: 0,
+		},
+		{
+			name:    "only max",
+			desc:    `Desc {"max_duration_ms": 1000}`,
+			wantP50: 0,
+			wantMax: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p50, max := parseLatencyFromDescription(tt.desc)
+			if p50 != tt.wantP50 {
+				t.Errorf("p50 = %d, want %d", p50, tt.wantP50)
+			}
+			if max != tt.wantMax {
+				t.Errorf("max = %d, want %d", max, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestSchemaToMap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil schema returns default", func(t *testing.T) {
+		t.Parallel()
+		got := schemaToMap(nil)
+		if got["type"] != "object" {
+			t.Errorf("expected type=object, got %v", got)
+		}
+	})
+
+	t.Run("map schema returned as-is", func(t *testing.T) {
+		t.Parallel()
+		m := map[string]any{"type": "string", "description": "test"}
+		got := schemaToMap(m)
+		if got["type"] != "string" {
+			t.Errorf("expected type=string, got %v", got["type"])
+		}
+		if got["description"] != "test" {
+			t.Errorf("expected description=test, got %v", got["description"])
+		}
+	})
+
+	t.Run("struct schema marshalled", func(t *testing.T) {
+		t.Parallel()
+		type schema struct {
+			Type string `json:"type"`
+		}
+		got := schemaToMap(schema{Type: "number"})
+		if got["type"] != "number" {
+			t.Errorf("expected type=number, got %v", got["type"])
+		}
+	})
+}
+
+func TestSplitCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		command  string
+		wantExec string
+		wantArgs []string
+	}{
+		{"single executable", "/bin/foo", "/bin/foo", nil},
+		{"executable with args", "/bin/foo --bar baz", "/bin/foo", []string{"--bar", "baz"}},
+		{"empty string", "", "", nil},
+		{"whitespace only", "   ", "", nil},
+		{"multiple spaces between args", "cmd   arg1   arg2", "cmd", []string{"arg1", "arg2"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			exec, args := splitCommand(tt.command)
+			if exec != tt.wantExec {
+				t.Errorf("executable = %q, want %q", exec, tt.wantExec)
+			}
+			if len(args) != len(tt.wantArgs) {
+				t.Fatalf("args len = %d, want %d", len(args), len(tt.wantArgs))
+			}
+			for i, a := range args {
+				if a != tt.wantArgs[i] {
+					t.Errorf("args[%d] = %q, want %q", i, a, tt.wantArgs[i])
+				}
+			}
+		})
 	}
 }

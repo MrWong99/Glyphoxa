@@ -80,6 +80,30 @@ func (m *mockMgmtClient) DeleteTenant(_ context.Context, req *pb.DeleteTenantReq
 	return &pb.DeleteTenantResponse{}, nil
 }
 
+func (m *mockMgmtClient) StartWebSession(_ context.Context, req *pb.StartWebSessionRequest, _ ...grpc.CallOption) (*pb.StartWebSessionResponse, error) {
+	return &pb.StartWebSessionResponse{SessionId: "session-" + req.GetChannelId()}, nil
+}
+
+func (m *mockMgmtClient) StopWebSession(_ context.Context, req *pb.StopWebSessionRequest, _ ...grpc.CallOption) (*pb.StopWebSessionResponse, error) {
+	return &pb.StopWebSessionResponse{}, nil
+}
+
+func (m *mockMgmtClient) ListActiveSessions(_ context.Context, req *pb.ListActiveSessionsRequest, _ ...grpc.CallOption) (*pb.ListActiveSessionsResponse, error) {
+	return &pb.ListActiveSessionsResponse{
+		Sessions: []*pb.ActiveSessionInfo{
+			{
+				SessionId:  "s1",
+				TenantId:   req.GetTenantId(),
+				CampaignId: "c1",
+				GuildId:    "g1",
+				ChannelId:  "ch1",
+				State:      pb.SessionState_SESSION_STATE_ACTIVE,
+				StartedAt:  timestamppb.Now(),
+			},
+		},
+	}, nil
+}
+
 func TestTenantHandlers_NoGateway(t *testing.T) {
 	t.Parallel()
 
@@ -213,6 +237,47 @@ func TestHandleGetTenant_TenantIsolation(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateTenant_ClearFields(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleUpdateTenant))))
+
+	// Clear dm_role_id and campaign_id by sending empty strings.
+	body := `{"dm_role_id":"","campaign_id":""}`
+	req := authReq(t, http.MethodPut, "/api/v1/tenants/t1",
+		bytes.NewBufferString(body), secret, "user-1", "t1", "tenant_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestHandleUpdateTenant_SetFields(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleUpdateTenant))))
+
+	body := `{"dm_role_id":"role-123","campaign_id":"camp-456","guild_ids":["g1","g2"],"bot_token":"tok"}`
+	req := authReq(t, http.MethodPut, "/api/v1/tenants/t1",
+		bytes.NewBufferString(body), secret, "user-1", "t1", "tenant_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
 func TestHandleUpdateTenant_TenantIsolation(t *testing.T) {
 	t.Parallel()
 
@@ -325,6 +390,160 @@ func TestHandleCreateTenantSelfService_WithGateway(t *testing.T) {
 	}
 	if body.Data.ID != "gw-tenant" {
 		t.Errorf("id = %q, want %q", body.Data.ID, "gw-tenant")
+	}
+}
+
+func TestGRPCStatusToHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		code     codes.Code
+		wantHTTP int
+	}{
+		{"OK", codes.OK, 200},
+		{"InvalidArgument", codes.InvalidArgument, 400},
+		{"NotFound", codes.NotFound, 404},
+		{"AlreadyExists", codes.AlreadyExists, 409},
+		{"PermissionDenied", codes.PermissionDenied, 403},
+		{"Unauthenticated", codes.Unauthenticated, 401},
+		{"FailedPrecondition", codes.FailedPrecondition, 412},
+		{"Unavailable", codes.Unavailable, 503},
+		{"Internal falls to default", codes.Internal, 502},
+		{"Unknown falls to default", codes.Unknown, 502},
+		{"DeadlineExceeded falls to default", codes.DeadlineExceeded, 502},
+		{"Unimplemented falls to default", codes.Unimplemented, 502},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := grpcStatusToHTTP(tt.code)
+			if got != tt.wantHTTP {
+				t.Errorf("grpcStatusToHTTP(%v) = %d, want %d", tt.code, got, tt.wantHTTP)
+			}
+		})
+	}
+}
+
+func TestTenantFromPB_Nil(t *testing.T) {
+	t.Parallel()
+
+	result := tenantFromPB(nil)
+	if result != nil {
+		t.Errorf("tenantFromPB(nil) = %v, want nil", result)
+	}
+}
+
+func TestHandleCreateTenant_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleCreateTenant))))
+
+	req := authReq(t, http.MethodPost, "/api/v1/tenants",
+		bytes.NewBufferString(`{bad json`), secret, "user-1", "t1", "super_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleUpdateTenant_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(srv.handleUpdateTenant))))
+
+	req := authReq(t, http.MethodPut, "/api/v1/tenants/t1",
+		bytes.NewBufferString(`{bad json`), secret, "user-1", "t1", "tenant_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleCreateTenantSelfService_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/tenants/self-service", auth(http.HandlerFunc(srv.handleCreateTenantSelfService)))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/self-service",
+		bytes.NewBufferString(`{"id":"test"}`))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleCreateTenantSelfService_GatewayConflict(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient() // t1 already exists
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/tenants/self-service", auth(http.HandlerFunc(srv.handleCreateTenantSelfService)))
+
+	// Try to create t1 which already exists.
+	req := authReq(t, http.MethodPost, "/api/v1/tenants/self-service",
+		bytes.NewBufferString(`{"id":"t1"}`), secret, "user-1", "default", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("status = %d, want %d (already exists)", rr.Code, http.StatusConflict)
+	}
+}
+
+func TestHandleDeleteTenant_GRPCNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("DELETE /api/v1/tenants/{id}", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleDeleteTenant))))
+
+	req := authReq(t, http.MethodDelete, "/api/v1/tenants/nonexistent", nil, secret, "user-1", "t1", "super_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleCreateTenant_AlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient() // t1 exists
+
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(srv.handleCreateTenant))))
+
+	req := authReq(t, http.MethodPost, "/api/v1/tenants",
+		bytes.NewBufferString(`{"id":"t1","license_tier":"shared"}`), secret, "user-1", "t1", "super_admin")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusConflict)
 	}
 }
 

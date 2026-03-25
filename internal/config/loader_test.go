@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -243,5 +245,77 @@ func TestValidProviderNames(t *testing.T) {
 	found := slices.Contains(llmNames, "openai")
 	if !found {
 		t.Error("ValidProviderNames[\"llm\"] should contain \"openai\"")
+	}
+}
+
+// ── Load (from disk) ─────────────────────────────────────────────────────────
+
+// loadSampleYAML is a minimal valid YAML config for testing Load from disk.
+const loadSampleYAML = `
+server:
+  listen_addr: ":8080"
+  log_level: info
+`
+
+func TestLoad(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T) string // returns path
+		wantErr bool
+	}{
+		{
+			name: "valid file",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				dir := t.TempDir()
+				p := filepath.Join(dir, "config.yaml")
+				if err := os.WriteFile(p, []byte(loadSampleYAML), 0o644); err != nil {
+					t.Fatalf("write temp file: %v", err)
+				}
+				return p
+			},
+			wantErr: false,
+		},
+		{
+			name: "nonexistent file",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				return filepath.Join(t.TempDir(), "does-not-exist.yaml")
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid YAML",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				dir := t.TempDir()
+				p := filepath.Join(dir, "bad.yaml")
+				if err := os.WriteFile(p, []byte("{{not yaml"), 0o644); err != nil {
+					t.Fatalf("write temp file: %v", err)
+				}
+				return p
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := tt.setup(t)
+			cfg, err := config.Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Server.ListenAddr != ":8080" {
+				t.Errorf("server.listen_addr: got %q, want %q", cfg.Server.ListenAddr, ":8080")
+			}
+		})
 	}
 }

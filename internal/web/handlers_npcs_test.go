@@ -374,6 +374,105 @@ func TestHandleDeleteNPC_WrongCampaign(t *testing.T) {
 	}
 }
 
+func TestHandleListNPCs_CampaignNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns/{id}/npcs", auth(http.HandlerFunc(srv.handleListNPCs)))
+
+	// No campaign seeded.
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/nonexistent/npcs", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleListNPCs_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns/{id}/npcs", auth(http.HandlerFunc(srv.handleListNPCs)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns/c1/npcs", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleGetNPC_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns/{id}/npcs/{npc_id}", auth(http.HandlerFunc(srv.handleGetNPC)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns/c1/npcs/npc-1", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleGetNPC_CampaignNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns/{id}/npcs/{npc_id}", auth(http.HandlerFunc(srv.handleGetNPC)))
+
+	// No campaign seeded.
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/nonexistent/npcs/npc-1", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleDeleteNPC_CampaignNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("DELETE /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleDeleteNPC))))
+
+	req := authReq(t, http.MethodDelete, "/api/v1/campaigns/nonexistent/npcs/npc-1", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleUpdateNPC_CampaignNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleUpdateNPC))))
+
+	req := authReq(t, http.MethodPut, "/api/v1/campaigns/nonexistent/npcs/npc-1",
+		bytes.NewBufferString(`{"name":"X"}`), secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
 func TestHandleCreateNPC_InsufficientRole(t *testing.T) {
 	t.Parallel()
 
