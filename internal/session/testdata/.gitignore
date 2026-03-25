@@ -1,0 +1,5 @@
+# Large model files — download via `make onnx-libs` and from huggingface
+*.onnx
+
+# Audio source files (keep PCM and WAV, ignore MP3)
+audio/*.mp3

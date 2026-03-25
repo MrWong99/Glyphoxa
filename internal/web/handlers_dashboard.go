@@ -73,9 +73,3 @@ func (s *Server) handleDashboardActivity(w http.ResponseWriter, r *http.Request)
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": items})
 }
-
-// handleDashboardActiveSessions delegates to handleListActiveSessions. The
-// frontend calls /dashboard/active-sessions instead of /sessions/active.
-func (s *Server) handleDashboardActiveSessions(w http.ResponseWriter, r *http.Request) {
-	s.handleListActiveSessions(w, r)
-}
