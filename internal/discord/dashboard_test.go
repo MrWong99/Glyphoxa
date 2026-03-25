@@ -377,7 +377,7 @@ func TestDashboard_UpdateCreatesMessage(t *testing.T) {
 	})
 
 	// First update creates the message.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}
@@ -386,7 +386,7 @@ func TestDashboard_UpdateCreatesMessage(t *testing.T) {
 	}
 
 	// Second update edits the message.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}
@@ -414,7 +414,7 @@ func TestDashboard_UpdateCreateError(t *testing.T) {
 	})
 
 	// Should not panic on create error.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}

@@ -45,7 +45,7 @@ func TestNoopSummariser(t *testing.T) {
 	t.Run("implements Summariser interface", func(t *testing.T) {
 		t.Parallel()
 
-		var _ Summariser = NoopSummariser()
+		var _ = NoopSummariser()
 	})
 }
 
