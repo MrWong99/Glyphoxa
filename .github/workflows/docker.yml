@@ -54,8 +54,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=glyphoxa
+          cache-to: type=gha,mode=max,scope=glyphoxa
 
   # ---------------------------------------------------------------------------
   # Glyphoxa web management service (Next.js frontend + Go API backend)
@@ -102,5 +102,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-web.outputs.tags }}
           labels: ${{ steps.meta-web.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=glyphoxa-web
+          cache-to: type=gha,mode=max,scope=glyphoxa-web

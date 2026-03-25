@@ -68,4 +68,4 @@ WORKDIR /app
 EXPOSE 3000 8090
 
 # Start Go API backend in background, Next.js frontend in foreground.
-CMD /usr/local/bin/glyphoxa-web & exec node server.js
+CMD ["/bin/sh", "-c", "/usr/local/bin/glyphoxa-web & exec node server.js"]
