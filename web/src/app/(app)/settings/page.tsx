@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,13 +13,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useUser, useUpdateMe, useUpdatePreferences } from "@/lib/hooks";
+import { useUser, useUpdateMe, useUpdatePreferences, useHasRole } from "@/lib/hooks";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumbs } from "@/components/breadcrumbs";
+import { Cpu, ChevronRight } from "lucide-react";
 
 export default function SettingsPage() {
   const { data: user } = useUser();
+  const isAdmin = useHasRole("tenant_admin");
   const updateMe = useUpdateMe();
   const updatePreferences = useUpdatePreferences();
 
@@ -144,6 +147,25 @@ export default function SettingsPage() {
           </Button>
         </CardContent>
       </Card>
+
+      {isAdmin && (
+        <Link href="/settings/providers">
+          <Card className="group transition-all duration-200 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5">
+            <CardContent className="flex items-center gap-4 p-6">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 transition-colors group-hover:bg-primary/20">
+                <Cpu className="h-5 w-5 text-primary" />
+              </div>
+              <div className="flex-1">
+                <p className="font-medium">Provider Configuration</p>
+                <p className="text-sm text-muted-foreground">
+                  Test and configure LLM, STT, and TTS provider connections
+                </p>
+              </div>
+              <ChevronRight className="h-5 w-5 text-muted-foreground/50 transition-colors group-hover:text-primary" />
+            </CardContent>
+          </Card>
+        </Link>
+      )}
 
       <Card className="border-destructive/50">
         <CardHeader>
