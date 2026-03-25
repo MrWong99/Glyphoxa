@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KnowledgeEntity, KnowledgeRelationship } from "@/lib/types";
 
 // Color palette for entity types.
@@ -29,120 +29,117 @@ interface Node {
   vy: number;
 }
 
-interface Edge {
-  source: string;
-  target: string;
-  label: string;
-}
-
 interface Props {
   entities: KnowledgeEntity[];
   relationships: KnowledgeRelationship[];
 }
 
+const W = 800;
+const H = 500;
+
+function initNodes(ents: KnowledgeEntity[]): Node[] {
+  return ents.map((e, i) => {
+    const angle = (2 * Math.PI * i) / ents.length;
+    const radius = Math.min(W, H) * 0.3;
+    return {
+      id: e.id,
+      name: e.name,
+      type: e.type,
+      x: W / 2 + radius * Math.cos(angle) + (Math.random() - 0.5) * 40,
+      y: H / 2 + radius * Math.sin(angle) + (Math.random() - 0.5) * 40,
+      vx: 0,
+      vy: 0,
+    };
+  });
+}
+
 export function KnowledgeGraphVisualization({ entities, relationships }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const [nodes, setNodes] = useState<Node[]>([]);
-  const [edges, setEdges] = useState<Edge[]>([]);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [draggedNode, setDraggedNode] = useState<string | null>(null);
-  const animFrameRef = useRef<number>(0);
-  const nodesRef = useRef<Node[]>([]);
 
-  const width = 800;
-  const height = 500;
+  // Derive edges from relationships (no mutation needed).
+  const edges = useMemo(
+    () => relationships.map((r) => ({ source: r.source_id, target: r.target_id, label: r.rel_type })),
+    [relationships],
+  );
 
-  // Initialize nodes with random positions.
+  // Reset nodes when entities change.
+  const [nodes, setNodes] = useState<Node[]>(() => initNodes(entities));
+  const [prevEntities, setPrevEntities] = useState(entities);
+  if (entities !== prevEntities) {
+    setPrevEntities(entities);
+    setNodes(initNodes(entities));
+  }
+
+  // Force simulation via requestAnimationFrame.
   useEffect(() => {
-    const newNodes: Node[] = entities.map((e, i) => {
-      const angle = (2 * Math.PI * i) / entities.length;
-      const radius = Math.min(width, height) * 0.3;
-      return {
-        id: e.id,
-        name: e.name,
-        type: e.type,
-        x: width / 2 + radius * Math.cos(angle) + (Math.random() - 0.5) * 40,
-        y: height / 2 + radius * Math.sin(angle) + (Math.random() - 0.5) * 40,
-        vx: 0,
-        vy: 0,
-      };
-    });
+    let frameId: number;
 
-    const newEdges: Edge[] = relationships.map((r) => ({
-      source: r.source_id,
-      target: r.target_id,
-      label: r.rel_type,
-    }));
+    function tick() {
+      setNodes((prev) => {
+        if (prev.length === 0) return prev;
+        const ns = prev.map((n) => ({ ...n }));
 
-    nodesRef.current = newNodes;
-    setNodes(newNodes);
-    setEdges(newEdges);
-  }, [entities, relationships]);
+        const alpha = 0.1;
+        const repulsion = 2000;
+        const attraction = 0.005;
+        const centerForce = 0.01;
 
-  // Simple force simulation.
-  const simulate = useCallback(() => {
-    const ns = nodesRef.current;
-    if (ns.length === 0) return;
+        // Repulsion between all node pairs.
+        for (let i = 0; i < ns.length; i++) {
+          for (let j = i + 1; j < ns.length; j++) {
+            const dx = ns[i].x - ns[j].x;
+            const dy = ns[i].y - ns[j].y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const force = repulsion / (dist * dist);
+            const fx = (dx / dist) * force * alpha;
+            const fy = (dy / dist) * force * alpha;
+            ns[i].vx += fx;
+            ns[i].vy += fy;
+            ns[j].vx -= fx;
+            ns[j].vy -= fy;
+          }
+        }
 
-    const alpha = 0.1;
-    const repulsion = 2000;
-    const attraction = 0.005;
-    const centerForce = 0.01;
+        // Attraction along edges.
+        const nodeMap = new Map(ns.map((n) => [n.id, n]));
+        for (const edge of edges) {
+          const s = nodeMap.get(edge.source);
+          const t = nodeMap.get(edge.target);
+          if (!s || !t) continue;
+          const dx = t.x - s.x;
+          const dy = t.y - s.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const force = dist * attraction * alpha;
+          s.vx += (dx / dist) * force;
+          s.vy += (dy / dist) * force;
+          t.vx -= (dx / dist) * force;
+          t.vy -= (dy / dist) * force;
+        }
 
-    // Repulsion between all node pairs.
-    for (let i = 0; i < ns.length; i++) {
-      for (let j = i + 1; j < ns.length; j++) {
-        const dx = ns[i].x - ns[j].x;
-        const dy = ns[i].y - ns[j].y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = repulsion / (dist * dist);
-        const fx = (dx / dist) * force * alpha;
-        const fy = (dy / dist) * force * alpha;
-        ns[i].vx += fx;
-        ns[i].vy += fy;
-        ns[j].vx -= fx;
-        ns[j].vy -= fy;
-      }
+        // Center gravity + velocity decay.
+        for (const n of ns) {
+          if (n.id === draggedNode) continue;
+          n.vx += (W / 2 - n.x) * centerForce * alpha;
+          n.vy += (H / 2 - n.y) * centerForce * alpha;
+          n.vx *= 0.85;
+          n.vy *= 0.85;
+          n.x += n.vx;
+          n.y += n.vy;
+          // Clamp to bounds.
+          n.x = Math.max(30, Math.min(W - 30, n.x));
+          n.y = Math.max(30, Math.min(H - 30, n.y));
+        }
+
+        return ns;
+      });
+      frameId = requestAnimationFrame(tick);
     }
 
-    // Attraction along edges.
-    const nodeMap = new Map(ns.map((n) => [n.id, n]));
-    for (const edge of edges) {
-      const s = nodeMap.get(edge.source);
-      const t = nodeMap.get(edge.target);
-      if (!s || !t) continue;
-      const dx = t.x - s.x;
-      const dy = t.y - s.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const force = dist * attraction * alpha;
-      s.vx += (dx / dist) * force;
-      s.vy += (dy / dist) * force;
-      t.vx -= (dx / dist) * force;
-      t.vy -= (dy / dist) * force;
-    }
-
-    // Center gravity + velocity decay.
-    for (const n of ns) {
-      if (n.id === draggedNode) continue;
-      n.vx += (width / 2 - n.x) * centerForce * alpha;
-      n.vy += (height / 2 - n.y) * centerForce * alpha;
-      n.vx *= 0.85;
-      n.vy *= 0.85;
-      n.x += n.vx;
-      n.y += n.vy;
-      // Clamp to bounds.
-      n.x = Math.max(30, Math.min(width - 30, n.x));
-      n.y = Math.max(30, Math.min(height - 30, n.y));
-    }
-
-    setNodes([...ns]);
-    animFrameRef.current = requestAnimationFrame(simulate);
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
   }, [edges, draggedNode]);
-
-  useEffect(() => {
-    animFrameRef.current = requestAnimationFrame(simulate);
-    return () => cancelAnimationFrame(animFrameRef.current);
-  }, [simulate]);
 
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
@@ -155,13 +152,9 @@ export function KnowledgeGraphVisualization({ entities, relationships }: Props) 
     const rect = svgRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const node = nodesRef.current.find((n) => n.id === draggedNode);
-    if (node) {
-      node.x = x;
-      node.y = y;
-      node.vx = 0;
-      node.vy = 0;
-    }
+    setNodes((prev) =>
+      prev.map((n) => (n.id === draggedNode ? { ...n, x, y, vx: 0, vy: 0 } : n)),
+    );
   }
 
   function handleMouseUp() {
@@ -171,7 +164,7 @@ export function KnowledgeGraphVisualization({ entities, relationships }: Props) 
   return (
     <svg
       ref={svgRef}
-      viewBox={`0 0 ${width} ${height}`}
+      viewBox={`0 0 ${W} ${H}`}
       className="w-full rounded-lg border border-border/50 bg-background"
       style={{ minHeight: 400 }}
       onMouseMove={handleMouseMove}

@@ -2,7 +2,6 @@
 
 import { use } from "react";
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Save, Plus, X, Volume2, ImagePlus, Wand2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
