@@ -242,21 +242,21 @@ func TestGatewaySessionController_WithAudioBridgeServer(t *testing.T) {
 
 // mockNPCController implements NPCController for dialNPCController tests.
 type mockNPCController struct {
-	listNPCs    []NPCStatus
-	listErr     error
-	muteErr     error
-	unmuteErr   error
-	muteAllN    int
-	muteAllErr  error
-	unmuteAllN  int
+	listNPCs     []NPCStatus
+	listErr      error
+	muteErr      error
+	unmuteErr    error
+	muteAllN     int
+	muteAllErr   error
+	unmuteAllN   int
 	unmuteAllErr error
-	speakErr    error
+	speakErr     error
 }
 
 func (m *mockNPCController) ListNPCs(_ context.Context, _ string) ([]NPCStatus, error) {
 	return m.listNPCs, m.listErr
 }
-func (m *mockNPCController) MuteNPC(_ context.Context, _, _ string) error { return m.muteErr }
+func (m *mockNPCController) MuteNPC(_ context.Context, _, _ string) error   { return m.muteErr }
 func (m *mockNPCController) UnmuteNPC(_ context.Context, _, _ string) error { return m.unmuteErr }
 func (m *mockNPCController) MuteAllNPCs(_ context.Context, _ string) (int, error) {
 	return m.muteAllN, m.muteAllErr
@@ -269,11 +269,11 @@ func (m *mockNPCController) SpeakNPC(_ context.Context, _, _, _ string) error { 
 // mockWorkerClient implements both WorkerClient and NPCController for dial tests.
 type mockWorkerClient struct {
 	mockNPCController
-	startErr error
-	stopErr  error
-	statuses []SessionStatus
+	startErr  error
+	stopErr   error
+	statuses  []SessionStatus
 	statusErr error
-	closed   bool
+	closed    bool
 }
 
 func (m *mockWorkerClient) StartSession(_ context.Context, _ StartSessionRequest) error {
@@ -446,7 +446,7 @@ type simpleWorkerClient struct{}
 func (s *simpleWorkerClient) StartSession(context.Context, StartSessionRequest) error { return nil }
 func (s *simpleWorkerClient) StopSession(context.Context, string) error               { return nil }
 func (s *simpleWorkerClient) GetStatus(context.Context) ([]SessionStatus, error)      { return nil, nil }
-func (s *simpleWorkerClient) Close() error                                             { return nil }
+func (s *simpleWorkerClient) Close() error                                            { return nil }
 
 func TestGatewaySessionController_CleanupVoiceBridge(t *testing.T) {
 	t.Parallel()

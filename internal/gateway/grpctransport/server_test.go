@@ -235,10 +235,10 @@ func TestWorkerServer_GetStatus(t *testing.T) {
 	now := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name     string
-		handler  *mockWorkerHandler
-		wantErr  bool
-		wantLen  int
+		name    string
+		handler *mockWorkerHandler
+		wantErr bool
+		wantLen int
 	}{
 		{
 			name: "returns statuses",

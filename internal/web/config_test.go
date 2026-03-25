@@ -17,15 +17,15 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "valid discord config",
 			env: map[string]string{
-				"GLYPHOXA_WEB_DATABASE_DSN":            "postgres://localhost/test",
-				"GLYPHOXA_WEB_JWT_SECRET":              "a-very-long-jwt-secret-that-is-at-least-32-chars",
-				"GLYPHOXA_WEB_DISCORD_CLIENT_ID":       "id",
-				"GLYPHOXA_WEB_DISCORD_CLIENT_SECRET":   "secret",
-				"GLYPHOXA_WEB_DISCORD_REDIRECT_URI":    "http://localhost/callback",
-				"GLYPHOXA_WEB_LISTEN_ADDR":             ":9090",
-				"GLYPHOXA_WEB_ALLOWED_ORIGINS":         "http://localhost:3000, https://app.example.com",
-				"GLYPHOXA_WEB_GATEWAY_GRPC_ADDR":       "gateway:50051",
-				"GLYPHOXA_WEB_GATEWAY_SECRET":          "shared-secret",
+				"GLYPHOXA_WEB_DATABASE_DSN":          "postgres://localhost/test",
+				"GLYPHOXA_WEB_JWT_SECRET":            "a-very-long-jwt-secret-that-is-at-least-32-chars",
+				"GLYPHOXA_WEB_DISCORD_CLIENT_ID":     "id",
+				"GLYPHOXA_WEB_DISCORD_CLIENT_SECRET": "secret",
+				"GLYPHOXA_WEB_DISCORD_REDIRECT_URI":  "http://localhost/callback",
+				"GLYPHOXA_WEB_LISTEN_ADDR":           ":9090",
+				"GLYPHOXA_WEB_ALLOWED_ORIGINS":       "http://localhost:3000, https://app.example.com",
+				"GLYPHOXA_WEB_GATEWAY_GRPC_ADDR":     "gateway:50051",
+				"GLYPHOXA_WEB_GATEWAY_SECRET":        "shared-secret",
 			},
 			wantErr: false,
 			check: func(t *testing.T, cfg *Config) {
@@ -86,10 +86,10 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "origins with empty entries trimmed",
 			env: map[string]string{
-				"GLYPHOXA_WEB_DATABASE_DSN":          "postgres://localhost/test",
-				"GLYPHOXA_WEB_JWT_SECRET":            "a-very-long-jwt-secret-that-is-at-least-32-chars",
-				"GLYPHOXA_WEB_ADMIN_KEY":             "key",
-				"GLYPHOXA_WEB_ALLOWED_ORIGINS":       "http://a.com, , http://b.com, ",
+				"GLYPHOXA_WEB_DATABASE_DSN":    "postgres://localhost/test",
+				"GLYPHOXA_WEB_JWT_SECRET":      "a-very-long-jwt-secret-that-is-at-least-32-chars",
+				"GLYPHOXA_WEB_ADMIN_KEY":       "key",
+				"GLYPHOXA_WEB_ALLOWED_ORIGINS": "http://a.com, , http://b.com, ",
 			},
 			wantErr: false,
 			check: func(t *testing.T, cfg *Config) {
@@ -167,12 +167,12 @@ func TestConfigValidate_mTLS(t *testing.T) {
 		{
 			name: "valid with all mTLS fields",
 			cfg: Config{
-				DatabaseDSN:     "postgres://localhost/test",
-				JWTSecret:       "a-very-long-jwt-secret-that-is-at-least-32-chars",
-				AdminAPIKey:     "key",
-				GatewayTLSCert:  "/path/to/cert.pem",
-				GatewayTLSKey:   "/path/to/key.pem",
-				GatewayTLSCA:    "/path/to/ca.pem",
+				DatabaseDSN:    "postgres://localhost/test",
+				JWTSecret:      "a-very-long-jwt-secret-that-is-at-least-32-chars",
+				AdminAPIKey:    "key",
+				GatewayTLSCert: "/path/to/cert.pem",
+				GatewayTLSKey:  "/path/to/key.pem",
+				GatewayTLSCA:   "/path/to/ca.pem",
 			},
 			wantErr: false,
 		},

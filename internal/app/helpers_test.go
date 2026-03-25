@@ -91,7 +91,7 @@ func TestVADConfigFromProvider(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
+		name  string
 		entry config.ProviderEntry
 		want  vad.Config
 	}{

@@ -285,7 +285,7 @@ func TestAdminAPI_ReconnectAllBots(t *testing.T) {
 
 		// Seed tenants directly in the store.
 		_ = store.CreateTenant(ctx, gateway.Tenant{ID: "t1", BotToken: "tok1"})
-		_ = store.CreateTenant(ctx, gateway.Tenant{ID: "t2", BotToken: ""})   // no token
+		_ = store.CreateTenant(ctx, gateway.Tenant{ID: "t2", BotToken: ""}) // no token
 		_ = store.CreateTenant(ctx, gateway.Tenant{ID: "t3", BotToken: "tok3"})
 
 		api.ReconnectAllBots(ctx)

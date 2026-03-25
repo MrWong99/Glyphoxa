@@ -151,12 +151,12 @@ func TestClient_Concurrent(t *testing.T) {
 // mockNPCController is a test double for gateway.NPCController.
 // Each field is a function that gets called by the corresponding method.
 type mockNPCController struct {
-	listNPCsFn    func(ctx context.Context, sessionID string) ([]gateway.NPCStatus, error)
-	muteNPCFn     func(ctx context.Context, sessionID, npcName string) error
-	unmuteNPCFn   func(ctx context.Context, sessionID, npcName string) error
-	muteAllFn     func(ctx context.Context, sessionID string) (int, error)
-	unmuteAllFn   func(ctx context.Context, sessionID string) (int, error)
-	speakNPCFn    func(ctx context.Context, sessionID, npcName, text string) error
+	listNPCsFn  func(ctx context.Context, sessionID string) ([]gateway.NPCStatus, error)
+	muteNPCFn   func(ctx context.Context, sessionID, npcName string) error
+	unmuteNPCFn func(ctx context.Context, sessionID, npcName string) error
+	muteAllFn   func(ctx context.Context, sessionID string) (int, error)
+	unmuteAllFn func(ctx context.Context, sessionID string) (int, error)
+	speakNPCFn  func(ctx context.Context, sessionID, npcName, text string) error
 }
 
 func (m *mockNPCController) ListNPCs(ctx context.Context, sessionID string) ([]gateway.NPCStatus, error) {
