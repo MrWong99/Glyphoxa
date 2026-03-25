@@ -72,8 +72,8 @@ function LoginForm() {
   }
 
   const showDiscord = !authProviders || authProviders.discord;
-  const showGoogle = authProviders?.google ?? false;
-  const showGitHub = authProviders?.github ?? false;
+  const showGoogle = !authProviders || authProviders.google;
+  const showGitHub = !authProviders || authProviders.github;
   const showApiKey = !inviteToken && (!authProviders || authProviders.apikey);
 
   return (
@@ -118,7 +118,7 @@ function LoginForm() {
 
             {showGoogle && (
               <Button
-                className="w-full gap-2"
+                className="w-full gap-2 border-border/60 bg-white text-gray-700 hover:bg-gray-50"
                 size="lg"
                 variant="outline"
                 onClick={() => {
@@ -132,9 +132,8 @@ function LoginForm() {
 
             {showGitHub && (
               <Button
-                className="w-full gap-2"
+                className="w-full gap-2 bg-[#24292f] text-white hover:bg-[#32383f]"
                 size="lg"
-                variant="outline"
                 onClick={() => {
                   window.location.href = api.auth.githubUrl(inviteToken);
                 }}

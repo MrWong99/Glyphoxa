@@ -59,6 +59,12 @@ export interface NPC {
   personality: string;
   voice_provider: string;
   voice_id: string;
+  voice?: {
+    provider: string;
+    voice_id: string;
+    pitch_shift?: number;
+    speed?: number;
+  };
   voice_config: {
     pitch?: number;
     speed?: number;
