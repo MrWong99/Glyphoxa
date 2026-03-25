@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Users as UsersIcon, AlertTriangle, Copy, Plus, Trash2, ShieldAlert } from "lucide-react";
+import { Users as UsersIcon, AlertTriangle, Plus, Trash2, ShieldAlert } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

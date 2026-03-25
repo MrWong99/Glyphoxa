@@ -10,6 +10,8 @@ import {
   Users,
   X,
   Sparkles,
+  Shield,
+  FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -29,7 +31,9 @@ const navItems: NavItem[] = [
   { href: "/campaigns", label: "Campaigns", icon: Swords },
   { href: "/sessions", label: "Sessions", icon: ScrollText },
   { href: "/users", label: "Users", icon: Users, minRole: "tenant_admin" },
+  { href: "/admin/audit-log", label: "Audit Log", icon: FileText, minRole: "tenant_admin" },
   { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/admin", label: "Admin", icon: Shield, minRole: "super_admin" },
 ];
 
 interface SidebarProps {

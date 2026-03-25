@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,15 +8,10 @@ import { Button } from "@/components/ui/button";
 const COOKIE_NOTICE_KEY = "glyphoxa_cookie_notice_dismissed";
 
 export function CookieNotice() {
-  const [dismissed, setDismissed] = useState(true);
-
-  useEffect(() => {
-    const stored = localStorage.getItem(COOKIE_NOTICE_KEY);
-    if (!stored) {
-      // Use rAF to avoid synchronous setState in effect body
-      requestAnimationFrame(() => setDismissed(false));
-    }
-  }, []);
+  const [dismissed, setDismissed] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return !!localStorage.getItem(COOKIE_NOTICE_KEY);
+  });
 
   function dismiss() {
     localStorage.setItem(COOKIE_NOTICE_KEY, "1");

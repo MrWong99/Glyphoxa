@@ -10,6 +10,12 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/health"
 )
 
+// defaultReadLimit is the default read rate limit (requests per minute).
+const defaultReadLimit = 60
+
+// defaultWriteLimit is the default write rate limit (requests per minute).
+const defaultWriteLimit = 30
+
 type Server struct {
 	mux            *http.ServeMux
 	cfg            *Config
@@ -18,6 +24,8 @@ type Server struct {
 	gwClient       pb.ManagementServiceClient
 	voicePreview   VoicePreviewProvider
 	voicePreviewRL *voicePreviewRateLimiter
+	readLimiter    *RateLimiter
+	writeLimiter   *RateLimiter
 }
 
 // ServerOption configures optional Server dependencies.
@@ -33,7 +41,15 @@ func WithVoicePreview(vp VoicePreviewProvider) ServerOption {
 
 // NewServer creates a Server and registers all routes.
 func NewServer(cfg *Config, store WebStore, npcs npcstore.Store, gwClient pb.ManagementServiceClient, opts ...ServerOption) *Server {
-	s := &Server{mux: http.NewServeMux(), cfg: cfg, store: store, npcs: npcs, gwClient: gwClient}
+	s := &Server{
+		mux:          http.NewServeMux(),
+		cfg:          cfg,
+		store:        store,
+		npcs:         npcs,
+		gwClient:     gwClient,
+		readLimiter:  NewRateLimiter(defaultReadLimit, defaultReadLimit, time.Minute),
+		writeLimiter: NewRateLimiter(defaultWriteLimit, defaultWriteLimit, time.Minute),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -44,6 +60,7 @@ func NewServer(cfg *Config, store WebStore, npcs npcstore.Store, gwClient pb.Man
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 	h = MaxBytesMiddleware(h)
+	h = RateLimitMiddleware(s.readLimiter, s.writeLimiter)(h)
 	h = CORSMiddleware(s.cfg.AllowedOrigins)(h)
 	h = LoggingMiddleware(h)
 	return h
@@ -52,9 +69,16 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) registerRoutes() {
 	hc := health.New(health.Checker{Name: "database", Check: s.store.Ping})
 	hc.Register(s.mux)
+
+	// Public auth routes.
 	s.mux.HandleFunc("GET /api/v1/auth/discord", s.handleDiscordLogin)
 	s.mux.HandleFunc("GET /api/v1/auth/discord/callback", s.handleDiscordCallback)
+	s.mux.HandleFunc("GET /api/v1/auth/google", s.handleGoogleLogin)
+	s.mux.HandleFunc("GET /api/v1/auth/google/callback", s.handleGoogleCallback)
+	s.mux.HandleFunc("GET /api/v1/auth/github", s.handleGitHubLogin)
+	s.mux.HandleFunc("GET /api/v1/auth/github/callback", s.handleGitHubCallback)
 	s.mux.HandleFunc("POST /api/v1/auth/apikey", s.handleAPIKeyLogin)
+	s.mux.HandleFunc("GET /api/v1/auth/providers", s.handleAuthProviders)
 	s.mux.HandleFunc("GET /api/v1/invites/validate", s.handleValidateInvite)
 	auth := AuthMiddleware(s.cfg.JWTSecret)
 	s.mux.Handle("POST /api/v1/onboarding/complete", auth(http.HandlerFunc(s.handleOnboardingComplete)))
@@ -96,6 +120,7 @@ func (s *Server) registerRoutes() {
 
 	// Knowledge management.
 	s.mux.Handle("GET /api/v1/campaigns/{id}/knowledge", auth(http.HandlerFunc(s.handleListKnowledgeEntities)))
+	s.mux.Handle("GET /api/v1/campaigns/{id}/knowledge/graph", auth(http.HandlerFunc(s.handleGetKnowledgeGraph)))
 	s.mux.Handle("DELETE /api/v1/campaigns/{id}/knowledge/{entity_id}", auth(RequireRole("dm")(http.HandlerFunc(s.handleDeleteKnowledgeEntity))))
 	s.mux.Handle("POST /api/v1/campaigns/{id}/knowledge/rebuild", auth(RequireRole("dm")(http.HandlerFunc(s.handleRebuildKnowledgeGraph))))
 
@@ -117,6 +142,16 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("PUT /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleUpdateTenant))))
 	s.mux.Handle("DELETE /api/v1/tenants/{id}", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleDeleteTenant))))
 	s.mux.Handle("GET /api/v1/usage", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleGetUsage))))
+
+	// Audit log.
+	s.mux.Handle("GET /api/v1/audit-logs", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleListAuditLogs))))
+
+	// Provider config test.
+	s.mux.Handle("POST /api/v1/providers/test", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleTestProvider))))
+
+	// Super admin dashboard.
+	s.mux.Handle("GET /api/v1/admin/stats", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleAdminDashboardStats))))
+	s.mux.Handle("GET /api/v1/admin/users", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleAdminListUsers))))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
