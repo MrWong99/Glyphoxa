@@ -9,6 +9,7 @@ import (
 	"github.com/MrWong99/glyphoxa/internal/mcp"
 	mcpmock "github.com/MrWong99/glyphoxa/internal/mcp/mock"
 	audiomock "github.com/MrWong99/glyphoxa/pkg/audio/mock"
+	"github.com/MrWong99/glyphoxa/pkg/memory"
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
 )
 
@@ -178,6 +179,117 @@ func TestLoader_WithMixer(t *testing.T) {
 	// We can verify the mixer is wired by performing a HandleUtterance and
 	// checking that Enqueue was called.
 	// (Tested more thoroughly in npc_test.go, just a smoke check here.)
+}
+
+func TestLoader_WithTTS(t *testing.T) {
+	t.Parallel()
+
+	assembler := testAssembler()
+	eng := &enginemock.VoiceEngine{
+		ProcessResult: &engine.Response{
+			Text:  "Voiced response.",
+			Audio: closedAudioCh(),
+		},
+	}
+
+	loader, err := agent.NewLoader(assembler, "session-001", agent.WithTTS(nil))
+	if err != nil {
+		t.Fatalf("NewLoader returned unexpected error: %v", err)
+	}
+	a, err := loader.Load("npc-1", testIdentity(), eng, mcp.BudgetFast)
+	if err != nil {
+		t.Fatalf("Load with WithTTS returned error: %v", err)
+	}
+	if a == nil {
+		t.Fatal("Load returned nil agent")
+	}
+}
+
+func TestLoader_WithTTSFormat(t *testing.T) {
+	t.Parallel()
+
+	assembler := testAssembler()
+	eng := &enginemock.VoiceEngine{
+		ProcessResult: &engine.Response{
+			Text:  "Formatted response.",
+			Audio: closedAudioCh(),
+		},
+	}
+
+	loader, err := agent.NewLoader(assembler, "session-001", agent.WithTTSFormat(22050, 1))
+	if err != nil {
+		t.Fatalf("NewLoader returned unexpected error: %v", err)
+	}
+	a, err := loader.Load("npc-1", testIdentity(), eng, mcp.BudgetFast)
+	if err != nil {
+		t.Fatalf("Load with WithTTSFormat returned error: %v", err)
+	}
+	if a == nil {
+		t.Fatal("Load returned nil agent")
+	}
+}
+
+func TestLoader_WithOnTranscript(t *testing.T) {
+	t.Parallel()
+
+	assembler := testAssembler()
+	eng := &enginemock.VoiceEngine{
+		ProcessResult: &engine.Response{
+			Text:  "Transcribed response.",
+			Audio: closedAudioCh(),
+		},
+	}
+
+	called := false
+	loader, err := agent.NewLoader(assembler, "session-001", agent.WithOnTranscript(func(_ memory.TranscriptEntry) {
+		called = true
+	}))
+	if err != nil {
+		t.Fatalf("NewLoader returned unexpected error: %v", err)
+	}
+	a, err := loader.Load("npc-1", testIdentity(), eng, mcp.BudgetFast)
+	if err != nil {
+		t.Fatalf("Load with WithOnTranscript returned error: %v", err)
+	}
+	if a == nil {
+		t.Fatal("Load returned nil agent")
+	}
+	_ = called // The callback is wired; it will be invoked during HandleUtterance.
+}
+
+func TestLoader_AllOptions(t *testing.T) {
+	t.Parallel()
+
+	assembler := testAssembler()
+	mixer := &audiomock.Mixer{}
+	mcpHost := &mcpmock.Host{
+		AvailableToolsResult: []llm.ToolDefinition{},
+	}
+	eng := &enginemock.VoiceEngine{
+		ProcessResult: &engine.Response{
+			Text:  "Full options response.",
+			Audio: closedAudioCh(),
+		},
+	}
+
+	loader, err := agent.NewLoader(
+		assembler, "session-001",
+		agent.WithMCPHost(mcpHost),
+		agent.WithMixer(mixer),
+		agent.WithTTS(nil),
+		agent.WithTTSFormat(24000, 1),
+		agent.WithOnTranscript(func(_ memory.TranscriptEntry) {}),
+	)
+	if err != nil {
+		t.Fatalf("NewLoader returned unexpected error: %v", err)
+	}
+	a, err := loader.Load("npc-1", testIdentity(), eng, mcp.BudgetStandard)
+	if err != nil {
+		t.Fatalf("Load with all options returned error: %v", err)
+	}
+	if a == nil {
+		t.Fatal("Load returned nil agent")
+	}
 }
 
 func TestLoader_MultipleAgents(t *testing.T) {

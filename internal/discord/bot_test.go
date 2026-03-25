@@ -171,3 +171,84 @@ func TestCommandRouter_RegisterHandler(t *testing.T) {
 		t.Error("handler was not called")
 	}
 }
+
+func TestNewPermissionChecker_InvalidRoleID(t *testing.T) {
+	t.Parallel()
+
+	// An invalid (non-numeric) DM role ID should fall back to "all users are DMs".
+	pc := NewPermissionChecker("not-a-number")
+	if pc.hasRole {
+		t.Error("expected hasRole=false for invalid role ID")
+	}
+
+	// Since hasRole is false, IsDM should return true for any member.
+	member := &testInteractionMember{
+		member: &discord.ResolvedMember{
+			Member: discord.Member{RoleIDs: []snowflake.ID{}},
+		},
+	}
+	if !pc.IsDM(member) {
+		t.Error("IsDM should return true when hasRole=false (invalid role ID)")
+	}
+}
+
+func TestNewPermissionChecker_ValidRoleID(t *testing.T) {
+	t.Parallel()
+
+	pc := NewPermissionChecker("999")
+	if !pc.hasRole {
+		t.Error("expected hasRole=true for valid role ID")
+	}
+	if pc.dmRoleID != snowflake.ID(999) {
+		t.Errorf("dmRoleID = %v, want 999", pc.dmRoleID)
+	}
+}
+
+func TestBot_Accessors(t *testing.T) {
+	t.Parallel()
+
+	router := NewCommandRouter()
+	perms := NewPermissionChecker("42")
+
+	b := &Bot{
+		router:  router,
+		perms:   perms,
+		guildID: snowflake.ID(12345),
+	}
+
+	t.Run("GuildID", func(t *testing.T) {
+		t.Parallel()
+		if got := b.GuildID(); got != snowflake.ID(12345) {
+			t.Errorf("GuildID() = %v, want 12345", got)
+		}
+	})
+
+	t.Run("Router", func(t *testing.T) {
+		t.Parallel()
+		if got := b.Router(); got != router {
+			t.Errorf("Router() returned unexpected value")
+		}
+	})
+
+	t.Run("Permissions", func(t *testing.T) {
+		t.Parallel()
+		if got := b.Permissions(); got != perms {
+			t.Errorf("Permissions() returned unexpected value")
+		}
+	})
+
+	t.Run("Client_nil", func(t *testing.T) {
+		t.Parallel()
+		// Client should be nil when no real connection has been established.
+		if got := b.Client(); got != nil {
+			t.Errorf("Client() = %v, want nil", got)
+		}
+	})
+
+	t.Run("Platform_zero", func(t *testing.T) {
+		t.Parallel()
+		// Platform returns a typed nil *discordaudio.Platform wrapped in an
+		// audio.Platform interface, so we just verify it doesn't panic.
+		_ = b.Platform()
+	})
+}

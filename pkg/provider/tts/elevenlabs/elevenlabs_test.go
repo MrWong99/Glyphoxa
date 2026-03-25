@@ -832,3 +832,229 @@ func TestWarmerInterfaceAssertion(t *testing.T) {
 		t.Error("Provider does not implement tts.Warmer")
 	}
 }
+
+func TestWithMaxIdleTime_Zero(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key", WithMaxIdleTime(0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Zero duration should keep the default.
+	if p.maxIdle != defaultMaxIdle {
+		t.Errorf("expected maxIdle %v for zero duration, got %v", defaultMaxIdle, p.maxIdle)
+	}
+}
+
+func TestWithMaxIdleTime_Negative(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key", WithMaxIdleTime(-5*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Negative duration should keep the default.
+	if p.maxIdle != defaultMaxIdle {
+		t.Errorf("expected maxIdle %v for negative duration, got %v", defaultMaxIdle, p.maxIdle)
+	}
+}
+
+func TestSynthesizeStream_EmptyVoiceID(t *testing.T) {
+	t.Parallel()
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	textCh := make(chan string, 1)
+	textCh <- "Hello"
+	close(textCh)
+	_, err = p.SynthesizeStream(context.Background(), textCh, tts.VoiceProfile{})
+	if err == nil {
+		t.Fatal("expected error for empty voice ID")
+	}
+}
+
+func TestListVoices_Success(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("xi-api-key") != "test-key" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+			"voices": [
+				{"voice_id": "v1", "name": "Alice", "category": "premade", "labels": {"accent": "british"}},
+				{"voice_id": "v2", "name": "Bob", "category": "cloned", "labels": {}}
+			]
+		}`)
+	}))
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Override the HTTP client to use the test server.
+	p.httpClient = srv.Client()
+	// We need to override the endpoint. Since ListVoices uses voicesEndpoint constant,
+	// we use a transport that redirects to the test server.
+	p.httpClient.Transport = &rewriteTransport{target: srv.URL}
+
+	voices, err := p.ListVoices(context.Background())
+	if err != nil {
+		t.Fatalf("ListVoices: %v", err)
+	}
+	if len(voices) != 2 {
+		t.Fatalf("expected 2 voices, got %d", len(voices))
+	}
+	if voices[0].ID != "v1" {
+		t.Errorf("voices[0].ID = %q, want %q", voices[0].ID, "v1")
+	}
+	if voices[0].Name != "Alice" {
+		t.Errorf("voices[0].Name = %q, want %q", voices[0].Name, "Alice")
+	}
+	if voices[0].Provider != "elevenlabs" {
+		t.Errorf("voices[0].Provider = %q, want %q", voices[0].Provider, "elevenlabs")
+	}
+	if voices[0].Metadata["accent"] != "british" {
+		t.Errorf("voices[0] accent = %q, want british", voices[0].Metadata["accent"])
+	}
+	if voices[0].Metadata["category"] != "premade" {
+		t.Errorf("voices[0] category = %q, want premade", voices[0].Metadata["category"])
+	}
+	if voices[1].ID != "v2" {
+		t.Errorf("voices[1].ID = %q, want %q", voices[1].ID, "v2")
+	}
+}
+
+func TestListVoices_HTTPError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p.httpClient = srv.Client()
+	p.httpClient.Transport = &rewriteTransport{target: srv.URL}
+
+	_, err = p.ListVoices(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should contain status 500, got: %v", err)
+	}
+}
+
+// rewriteTransport is a test helper that rewrites request URLs to point at a
+// local test server, enabling tests of code that uses hardcoded endpoint constants.
+type rewriteTransport struct {
+	target string
+}
+
+func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req2 := req.Clone(req.Context())
+	req2.URL.Scheme = "http"
+	req2.URL.Host = strings.TrimPrefix(t.target, "http://")
+	return http.DefaultTransport.RoundTrip(req2)
+}
+
+func TestPutWarm_AfterClose(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_ = p.Close()
+
+	// putWarm should return false after close.
+	if p.putWarm("voice-1", nil) {
+		t.Error("expected putWarm to return false after Close")
+	}
+}
+
+func TestDialAhead_PoolFullClosesConn(t *testing.T) {
+	t.Parallel()
+	srv := newIdleWSServer(t)
+	defer srv.Close()
+
+	// Pool size 1, pre-fill it.
+	p, err := New("test-key", WithPoolSize(1))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	dial, _ := testDialFunc(t, srv)
+	p.dialFunc = dial
+
+	// Pre-warm to fill the pool.
+	if err := p.Warm(context.Background(), tts.VoiceProfile{ID: "v1"}); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+
+	// dialAhead should dial but then close because pool is full.
+	p.dialAhead("v1")
+	p.wg.Wait()
+
+	// Pool should still have exactly 1 connection.
+	c := p.takeWarm("v1")
+	if c == nil {
+		t.Error("expected one warm connection")
+	}
+	if second := p.takeWarm("v1"); second != nil {
+		t.Error("expected no second connection")
+	}
+}
+
+func TestWarm_DialError(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p.dialFunc = func(_ context.Context, _ string) (*websocket.Conn, error) {
+		return nil, fmt.Errorf("dial failed")
+	}
+
+	err = p.Warm(context.Background(), tts.VoiceProfile{ID: "v1"})
+	if err == nil {
+		t.Fatal("expected error from failed dial")
+	}
+	if !strings.Contains(err.Error(), "dial failed") {
+		t.Errorf("expected dial error, got: %v", err)
+	}
+}
+
+func TestDialAhead_DialError(t *testing.T) {
+	t.Parallel()
+
+	p, err := New("test-key")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var count atomic.Int64
+	p.dialFunc = func(_ context.Context, _ string) (*websocket.Conn, error) {
+		count.Add(1)
+		return nil, fmt.Errorf("dial failed")
+	}
+
+	p.dialAhead("v1")
+	p.wg.Wait()
+
+	// The dial function should have been called once.
+	if got := count.Load(); got != 1 {
+		t.Errorf("expected 1 dial attempt, got %d", got)
+	}
+	// Pool should be empty since dial failed.
+	if c := p.takeWarm("v1"); c != nil {
+		t.Error("expected empty pool after dial failure")
+	}
+}

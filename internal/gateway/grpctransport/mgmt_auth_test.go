@@ -100,6 +100,104 @@ func TestManagementAuthUnaryInterceptor(t *testing.T) {
 	}
 }
 
+func TestManagementAuthStreamInterceptor(t *testing.T) {
+	t.Parallel()
+
+	dummyHandler := func(_ any, _ grpc.ServerStream) error {
+		return nil
+	}
+
+	tests := []struct {
+		name     string
+		secret   string
+		method   string
+		mdSecret string
+		wantCode codes.Code
+		wantPass bool
+	}{
+		{
+			name:     "no secret configured - passthrough",
+			secret:   "",
+			method:   "/glyphoxa.v1.ManagementService/CreateTenant",
+			mdSecret: "",
+			wantPass: true,
+		},
+		{
+			name:     "non-management RPC - passthrough",
+			secret:   "my-secret",
+			method:   "/glyphoxa.v1.GatewayService/SessionReady",
+			mdSecret: "",
+			wantPass: true,
+		},
+		{
+			name:     "valid secret",
+			secret:   "my-secret",
+			method:   "/glyphoxa.v1.ManagementService/ListTenants",
+			mdSecret: "my-secret",
+			wantPass: true,
+		},
+		{
+			name:     "missing secret",
+			secret:   "my-secret",
+			method:   "/glyphoxa.v1.ManagementService/ListTenants",
+			mdSecret: "",
+			wantCode: codes.Unauthenticated,
+		},
+		{
+			name:     "wrong secret",
+			secret:   "my-secret",
+			method:   "/glyphoxa.v1.ManagementService/ListTenants",
+			mdSecret: "wrong-secret",
+			wantCode: codes.Unauthenticated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			interceptor := ManagementAuthStreamInterceptor(tt.secret)
+
+			ctx := context.Background()
+			if tt.mdSecret != "" {
+				md := metadata.Pairs(mgmtSecretKey, tt.mdSecret)
+				ctx = metadata.NewIncomingContext(ctx, md)
+			}
+
+			info := &grpc.StreamServerInfo{FullMethod: tt.method}
+			ss := &fakeServerStream{ctx: ctx}
+			err := interceptor(nil, ss, info, dummyHandler)
+
+			if tt.wantPass {
+				if err != nil {
+					t.Fatalf("expected pass, got error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				st, ok := status.FromError(err)
+				if !ok {
+					t.Fatalf("expected gRPC status error, got: %v", err)
+				}
+				if st.Code() != tt.wantCode {
+					t.Errorf("code = %v, want %v", st.Code(), tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
+// fakeServerStream is a minimal grpc.ServerStream implementation for testing.
+type fakeServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (f *fakeServerStream) Context() context.Context {
+	return f.ctx
+}
+
 func TestMgmtSecretUnaryClientInterceptor(t *testing.T) {
 	t.Parallel()
 

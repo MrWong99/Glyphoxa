@@ -338,6 +338,86 @@ func TestHandleDeleteCampaign(t *testing.T) {
 	}
 }
 
+func TestHandleListCampaigns_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns", auth(http.HandlerFunc(srv.handleListCampaigns)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleGetCampaign_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns/{id}", auth(http.HandlerFunc(srv.handleGetCampaign)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns/c1", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleCreateCampaign_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/campaigns", auth(RequireRole("dm")(http.HandlerFunc(srv.handleCreateCampaign))))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/campaigns", bytes.NewBufferString(`{"name":"Test"}`))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleUpdateCampaign_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("PUT /api/v1/campaigns/{id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleUpdateCampaign))))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/campaigns/c1", bytes.NewBufferString(`{"name":"X"}`))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleDeleteCampaign_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("DELETE /api/v1/campaigns/{id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleDeleteCampaign))))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/campaigns/c1", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestHandleDeleteCampaign_InsufficientRole(t *testing.T) {
 	t.Parallel()
 

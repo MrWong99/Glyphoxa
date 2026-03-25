@@ -1604,3 +1604,474 @@ func TestFinalText_TranscriptEmitsTruncatedText(t *testing.T) {
 		t.Errorf("expected truncated NPC transcript entry, got: %+v", entries)
 	}
 }
+
+// ─── TestWithTTSFormat ────────────────────────────────────────────────────────
+
+func TestWithTTSFormat(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Hello.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{},
+		cascade.WithTTSFormat(16000, 1),
+	)
+	t.Cleanup(func() { _ = e.Close() })
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are a guard.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	if resp.SampleRate != 16000 {
+		t.Errorf("SampleRate = %d, want 16000", resp.SampleRate)
+	}
+	if resp.Channels != 1 {
+		t.Errorf("Channels = %d, want 1", resp.Channels)
+	}
+
+	drainAudio(resp.Audio)
+	signalDone(resp)
+	e.Wait()
+}
+
+// ─── TestSetTools_Nil ─────────────────────────────────────────────────────────
+
+func TestSetTools_Nil(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	// Setting tools then clearing them should work without error.
+	if err := e.SetTools([]llm.ToolDefinition{{Name: "search"}}); err != nil {
+		t.Fatalf("SetTools: %v", err)
+	}
+	if err := e.SetTools(nil); err != nil {
+		t.Fatalf("SetTools(nil): %v", err)
+	}
+}
+
+// ─── TestClose_DoubleClose ────────────────────────────────────────────────────
+
+func TestClose_DoubleClose(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+
+	if err := e.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// ─── TestAccumulateToolCalls ──────────────────────────────────────────────────
+
+func TestAccumulateToolCalls_MergesCorrectly(t *testing.T) {
+	t.Parallel()
+
+	existing := []llm.ToolCall{
+		{ID: "tc1", Name: "search", Arguments: `{"query": `},
+	}
+	incoming := []llm.ToolCall{
+		{Arguments: `"hello"}`},
+	}
+
+	result := cascade.AccumulateToolCallsForTest(existing, incoming)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result))
+	}
+	if result[0].ID != "tc1" {
+		t.Errorf("ID = %q, want tc1", result[0].ID)
+	}
+	if result[0].Name != "search" {
+		t.Errorf("Name = %q, want search", result[0].Name)
+	}
+	wantArgs := `{"query": "hello"}`
+	if result[0].Arguments != wantArgs {
+		t.Errorf("Arguments = %q, want %q", result[0].Arguments, wantArgs)
+	}
+}
+
+func TestAccumulateToolCalls_AddsNew(t *testing.T) {
+	t.Parallel()
+
+	existing := []llm.ToolCall{
+		{ID: "tc1", Name: "search", Arguments: `{"q":"hi"}`},
+	}
+	incoming := []llm.ToolCall{
+		{}, // update existing (empty)
+		{ID: "tc2", Name: "lookup", Arguments: `{"key":"x"}`},
+	}
+
+	result := cascade.AccumulateToolCallsForTest(existing, incoming)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(result))
+	}
+	if result[1].ID != "tc2" {
+		t.Errorf("result[1].ID = %q, want tc2", result[1].ID)
+	}
+}
+
+// ─── TestWithMaxToolIterations ────────────────────────────────────────────────
+
+func TestWithMaxToolIterations(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Greetings.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{},
+		cascade.WithMaxToolIterations(2),
+	)
+	t.Cleanup(func() { _ = e.Close() })
+
+	// Just verify it constructs without error and processes correctly.
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "Test",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	signalDone(resp)
+	e.Wait()
+}
+
+// ─── TestProcess_FastModelError ───────────────────────────────────────────────
+
+func TestProcess_FastModelStreamError(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamErr: fmt.Errorf("fast model unavailable"),
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	_, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "Test",
+	})
+	if err == nil {
+		t.Fatal("expected error from fast model failure")
+	}
+	if !strings.Contains(err.Error(), "fast model") {
+		t.Errorf("error should mention fast model, got: %v", err)
+	}
+}
+
+// ─── TestProcess_FastModelErrorChunk ──────────────────────────────────────────
+
+func TestProcess_FastModelErrorChunk(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Error: rate limited", FinishReason: "error"},
+		},
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	_, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "Test",
+	})
+	if err == nil {
+		t.Fatal("expected error from LLM error chunk")
+	}
+	if !strings.Contains(err.Error(), "LLM stream error") {
+		t.Errorf("error should mention LLM stream error, got: %v", err)
+	}
+}
+
+// ─── TestTranscripts ──────────────────────────────────────────────────────────
+
+func TestTranscripts_Channel(t *testing.T) {
+	t.Parallel()
+
+	fastLLM := &llmmock.Provider{}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{},
+		cascade.WithTranscriptBuffer(10),
+	)
+
+	ch := e.Transcripts()
+	if ch == nil {
+		t.Fatal("Transcripts() returned nil channel")
+	}
+
+	// Closing the engine should close the channel.
+	_ = e.Close()
+	_, ok := <-ch
+	if ok {
+		t.Error("expected channel to be closed after Close()")
+	}
+}
+
+// ─── TestOnToolCall ───────────────────────────────────────────────────────────
+
+func TestOnToolCall_RegistersAndProcesses(t *testing.T) {
+	t.Parallel()
+
+	called := atomic.Bool{}
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Let me check. ", FinishReason: ""},
+			{Text: "The answer is 42.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Indeed, the answer is 42.", FinishReason: "stop"},
+		},
+	}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{})
+	t.Cleanup(func() { _ = e.Close() })
+
+	e.OnToolCall(func(name, args string) (string, error) {
+		called.Store(true)
+		return "result", nil
+	})
+
+	// The handler is registered but won't be called unless the strong model
+	// returns tool calls. This just tests that registration doesn't panic.
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "Test",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	signalDone(resp)
+	e.Wait()
+}
+
+// ─── TestWithOpenerPromptSuffix ───────────────────────────────────────────────
+
+func TestWithOpenerPromptSuffix(t *testing.T) {
+	t.Parallel()
+
+	customSuffix := "Respond with a single word."
+	fastLLM := &llmmock.Provider{
+		StreamChunks: []llm.Chunk{
+			{Text: "Hello.", FinishReason: "stop"},
+		},
+	}
+	strongLLM := &llmmock.Provider{}
+	ttsProv := newTTS()
+
+	e := cascade.New(fastLLM, strongLLM, ttsProv, tts.VoiceProfile{},
+		cascade.WithOpenerPromptSuffix(customSuffix),
+	)
+	t.Cleanup(func() { _ = e.Close() })
+
+	resp, err := e.Process(context.Background(), emptyAudioFrame, enginepkg.PromptContext{
+		SystemPrompt: "You are a guard.",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	drainAudio(resp.Audio)
+	signalDone(resp)
+	e.Wait()
+
+	// Verify the fast model's system prompt contains the custom suffix.
+	if len(fastLLM.StreamCalls) == 0 {
+		t.Fatal("fastLLM was not called")
+	}
+	sysPrompt := fastLLM.StreamCalls[0].Req.SystemPrompt
+	if !strings.Contains(sysPrompt, customSuffix) {
+		t.Errorf("fast model system prompt should contain custom suffix, got: %s", sysPrompt)
+	}
+}
+
+// ─── TestTruncate ─────────────────────────────────────────────────────────────
+
+func TestTruncate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"short string", "hello", 10, "hello"},
+		{"exact length", "hello", 5, "hello"},
+		{"truncated", "hello world", 5, "hello…"},
+		{"empty", "", 5, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := cascade.TruncateForTest(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── TestIsDecimalDot ─────────────────────────────────────────────────────────
+
+func TestIsDecimalDot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		s    string
+		i    int
+		want bool
+	}{
+		{"between digits", "3.14", 1, true},
+		{"not between digits", "a.b", 1, false},
+		{"at start", ".5", 0, false},
+		{"at end", "3.", 1, false},
+		{"digit before, letter after", "3.x", 1, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := cascade.IsDecimalDotForTest(tt.s, tt.i)
+			if got != tt.want {
+				t.Errorf("isDecimalDot(%q, %d) = %v, want %v", tt.s, tt.i, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── TestIsEllipsisDot ────────────────────────────────────────────────────────
+
+func TestIsEllipsisDot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		s    string
+		i    int
+		want bool
+	}{
+		{"middle of ellipsis", "...", 1, true},
+		{"start of ellipsis", "..", 0, true},
+		{"single dot", ".", 0, false},
+		{"dot not adjacent", "a.b", 1, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := cascade.IsEllipsisDotForTest(tt.s, tt.i)
+			if got != tt.want {
+				t.Errorf("isEllipsisDot(%q, %d) = %v, want %v", tt.s, tt.i, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── TestIsSentenceWhitespace ─────────────────────────────────────────────────
+
+func TestIsSentenceWhitespace(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		b    byte
+		want bool
+	}{
+		{' ', true},
+		{'\n', true},
+		{'\r', true},
+		{'\t', true},
+		{'a', false},
+		{'0', false},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("byte_%d", tt.b), func(t *testing.T) {
+			t.Parallel()
+			got := cascade.IsSentenceWhitespaceForTest(tt.b)
+			if got != tt.want {
+				t.Errorf("isSentenceWhitespace(%d) = %v, want %v", tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+// ─── TestLastUserMessage ──────────────────────────────────────────────────────
+
+func TestLastUserMessage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("found", func(t *testing.T) {
+		t.Parallel()
+		msgs := []llm.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "hello", Name: "Alice"},
+			{Role: "assistant", Content: "hi"},
+			{Role: "user", Content: "goodbye", Name: "Bob"},
+		}
+		msg, ok := cascade.LastUserMessageForTest(msgs)
+		if !ok {
+			t.Fatal("expected to find a user message")
+		}
+		if msg.Content != "goodbye" {
+			t.Errorf("Content = %q, want %q", msg.Content, "goodbye")
+		}
+		if msg.Name != "Bob" {
+			t.Errorf("Name = %q, want %q", msg.Name, "Bob")
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		t.Parallel()
+		msgs := []llm.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "assistant", Content: "hi"},
+		}
+		_, ok := cascade.LastUserMessageForTest(msgs)
+		if ok {
+			t.Error("expected not to find a user message")
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		_, ok := cascade.LastUserMessageForTest(nil)
+		if ok {
+			t.Error("expected not to find a user message in nil slice")
+		}
+	})
+}

@@ -9,6 +9,46 @@ import (
 	llmmock "github.com/MrWong99/glyphoxa/pkg/provider/llm/mock"
 )
 
+func TestNoopSummariser(t *testing.T) {
+	t.Parallel()
+
+	s := NoopSummariser()
+
+	t.Run("returns empty string for nil messages", func(t *testing.T) {
+		t.Parallel()
+
+		result, err := s.Summarise(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "" {
+			t.Errorf("expected empty string, got %q", result)
+		}
+	})
+
+	t.Run("returns empty string for non-empty messages", func(t *testing.T) {
+		t.Parallel()
+
+		msgs := []llm.Message{
+			{Role: "user", Content: "Hello"},
+			{Role: "assistant", Content: "World"},
+		}
+		result, err := s.Summarise(context.Background(), msgs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "" {
+			t.Errorf("expected empty string, got %q", result)
+		}
+	})
+
+	t.Run("implements Summariser interface", func(t *testing.T) {
+		t.Parallel()
+
+		var _ = NoopSummariser()
+	})
+}
+
 func TestLLMSummariser_Summarise(t *testing.T) {
 	t.Run("empty messages returns empty string", func(t *testing.T) {
 		p := &llmmock.Provider{}

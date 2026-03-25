@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -130,5 +131,190 @@ func TestHandleKnowledge_WrongCampaign(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d (wrong tenant)", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleListKnowledgeEntities_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/campaigns/{id}/knowledge", auth(http.HandlerFunc(srv.handleListKnowledgeEntities)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns/c1/knowledge", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleDeleteKnowledgeEntity_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("DELETE /api/v1/campaigns/{id}/knowledge/{entity_id}", auth(http.HandlerFunc(srv.handleDeleteKnowledgeEntity)))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/campaigns/c1/knowledge/e1", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleRebuildKnowledgeGraph_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/campaigns/{id}/knowledge/rebuild", auth(http.HandlerFunc(srv.handleRebuildKnowledgeGraph)))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/campaigns/c1/knowledge/rebuild", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleRebuildKnowledgeGraph_WrongCampaign(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
+
+	req := authReq(t, http.MethodPost, "/api/v1/campaigns/c1/knowledge/rebuild", nil, secret, "user-2", "tenant-2", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (wrong tenant)", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleDeleteKnowledgeEntity_WrongCampaign(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
+	ws.knowledgeEntities["c1"] = []KnowledgeEntity{
+		{CampaignID: "c1", ID: "e1", Type: "person", Name: "Greymantle", CreatedAt: time.Now().UTC()},
+	}
+
+	req := authReq(t, http.MethodDelete, "/api/v1/campaigns/c1/knowledge/e1", nil, secret, "user-2", "tenant-2", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (wrong tenant)", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleListKnowledgeEntities_Empty(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
+	// No entities seeded.
+
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/c1/knowledge", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Data       []KnowledgeEntity `json:"data"`
+		Pagination PageMeta          `json:"pagination"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Data == nil {
+		t.Error("data should be empty array, not null")
+	}
+	if len(resp.Data) != 0 {
+		t.Errorf("got %d entities, want 0", len(resp.Data))
+	}
+}
+
+func TestHandleListKnowledgeEntities_NonexistentCampaign(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	// No campaigns seeded.
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/nonexistent/knowledge", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleListKnowledgeEntities_Pagination(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.registerRoutes()
+
+	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
+
+	// Seed more entities than the limit to trigger pagination metadata.
+	// Default limit is 25; create 27 entities so has_more is true when limit=2.
+	now := time.Now().UTC()
+	entities := make([]KnowledgeEntity, 3)
+	for i := range entities {
+		entities[i] = KnowledgeEntity{
+			CampaignID: "c1",
+			ID:         fmt.Sprintf("e%d", i+1),
+			Type:       "person",
+			Name:       fmt.Sprintf("Entity %d", i+1),
+			CreatedAt:  now.Add(time.Duration(i) * time.Second),
+		}
+	}
+	ws.knowledgeEntities["c1"] = entities
+
+	req := authReq(t, http.MethodGet, "/api/v1/campaigns/c1/knowledge?limit=2", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Data       []KnowledgeEntity `json:"data"`
+		Pagination PageMeta          `json:"pagination"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Pagination.Limit != 2 {
+		t.Errorf("pagination.limit = %d, want 2", resp.Pagination.Limit)
+	}
+	if !resp.Pagination.HasMore {
+		t.Error("pagination.has_more should be true when there are more entities than limit")
+	}
+	if resp.Pagination.NextCursor == "" {
+		t.Error("pagination.next_cursor should be set when has_more is true")
+	}
+	if len(resp.Data) != 2 {
+		t.Errorf("got %d entities, want 2 (trimmed to limit)", len(resp.Data))
 	}
 }

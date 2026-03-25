@@ -2,6 +2,8 @@ package entity_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -164,5 +166,50 @@ func TestImportCampaign_NilCampaign(t *testing.T) {
 	_, err := entity.ImportCampaign(ctx, s, nil)
 	if err == nil {
 		t.Fatal("ImportCampaign: expected error for nil campaign, got nil")
+	}
+}
+
+func TestLoadCampaignFile_Valid(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "campaign.yaml")
+	if err := os.WriteFile(path, []byte(validCampaignYAML), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cf, err := entity.LoadCampaignFile(path)
+	if err != nil {
+		t.Fatalf("LoadCampaignFile: %v", err)
+	}
+	if cf.Campaign.Name != "Test Campaign" {
+		t.Errorf("Campaign.Name = %q, want %q", cf.Campaign.Name, "Test Campaign")
+	}
+	if len(cf.Entities) != 2 {
+		t.Errorf("Entities count = %d, want 2", len(cf.Entities))
+	}
+}
+
+func TestLoadCampaignFile_NotFound(t *testing.T) {
+	t.Parallel()
+
+	_, err := entity.LoadCampaignFile("/nonexistent/path/campaign.yaml")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+func TestLoadCampaignFile_InvalidYAML(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(path, []byte("{{invalid yaml}}"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := entity.LoadCampaignFile(path)
+	if err == nil {
+		t.Fatal("expected error for invalid YAML")
 	}
 }

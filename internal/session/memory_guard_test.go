@@ -181,6 +181,195 @@ func TestMemoryGuard_IsDegraded(t *testing.T) {
 	})
 }
 
+func TestMemoryGuard_EntryCount(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful count", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{EntryCountResult: 42}
+		mg := NewMemoryGuard(store)
+
+		got, err := mg.EntryCount(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != 42 {
+			t.Errorf("expected 42 entries, got %d", got)
+		}
+		if mg.IsDegraded() {
+			t.Error("should not be degraded after successful count")
+		}
+		if store.CallCount("EntryCount") != 1 {
+			t.Errorf("expected 1 EntryCount call, got %d", store.CallCount("EntryCount"))
+		}
+	})
+
+	t.Run("count failure returns 0", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{
+			EntryCountErr: errors.New("db error"),
+		}
+		mg := NewMemoryGuard(store)
+
+		got, err := mg.EntryCount(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("expected nil error (swallowed), got %v", err)
+		}
+		if got != 0 {
+			t.Errorf("expected 0, got %d", got)
+		}
+		if !mg.IsDegraded() {
+			t.Error("should be degraded after failed count")
+		}
+	})
+}
+
+func TestMemoryGuard_ListSessions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful list", func(t *testing.T) {
+		t.Parallel()
+
+		sessions := []memory.SessionInfo{
+			{SessionID: "s1"},
+			{SessionID: "s2"},
+		}
+		store := &memorymock.SessionStore{ListSessionsResult: sessions}
+		mg := NewMemoryGuard(store)
+
+		got, err := mg.ListSessions(context.Background(), 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 2 {
+			t.Errorf("expected 2 sessions, got %d", len(got))
+		}
+		if mg.IsDegraded() {
+			t.Error("should not be degraded after successful list")
+		}
+	})
+
+	t.Run("list failure returns empty slice", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{
+			ListSessionsErr: errors.New("connection lost"),
+		}
+		mg := NewMemoryGuard(store)
+
+		got, err := mg.ListSessions(context.Background(), 10)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("expected empty slice, got %d sessions", len(got))
+		}
+		if !mg.IsDegraded() {
+			t.Error("should be degraded after failed list")
+		}
+	})
+}
+
+func TestMemoryGuard_StartSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful start", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{}
+		mg := NewMemoryGuard(store)
+
+		err := mg.StartSession(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mg.IsDegraded() {
+			t.Error("should not be degraded after successful start")
+		}
+		if store.CallCount("StartSession") != 1 {
+			t.Errorf("expected 1 StartSession call, got %d", store.CallCount("StartSession"))
+		}
+	})
+
+	t.Run("start failure is swallowed", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{
+			StartSessionErr: errors.New("table locked"),
+		}
+		mg := NewMemoryGuard(store)
+
+		err := mg.StartSession(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("expected nil error (swallowed), got %v", err)
+		}
+		if !mg.IsDegraded() {
+			t.Error("should be degraded after failed start")
+		}
+	})
+
+	t.Run("recovers from degraded after success", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{
+			StartSessionErr: errors.New("temporary"),
+		}
+		mg := NewMemoryGuard(store)
+
+		_ = mg.StartSession(context.Background(), "s1")
+		if !mg.IsDegraded() {
+			t.Error("should be degraded")
+		}
+
+		store.StartSessionErr = nil
+		_ = mg.StartSession(context.Background(), "s2")
+		if mg.IsDegraded() {
+			t.Error("should have recovered")
+		}
+	})
+}
+
+func TestMemoryGuard_EndSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successful end", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{}
+		mg := NewMemoryGuard(store)
+
+		err := mg.EndSession(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mg.IsDegraded() {
+			t.Error("should not be degraded after successful end")
+		}
+		if store.CallCount("EndSession") != 1 {
+			t.Errorf("expected 1 EndSession call, got %d", store.CallCount("EndSession"))
+		}
+	})
+
+	t.Run("end failure is swallowed", func(t *testing.T) {
+		t.Parallel()
+
+		store := &memorymock.SessionStore{
+			EndSessionErr: errors.New("db unavailable"),
+		}
+		mg := NewMemoryGuard(store)
+
+		err := mg.EndSession(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("expected nil error (swallowed), got %v", err)
+		}
+		if !mg.IsDegraded() {
+			t.Error("should be degraded after failed end")
+		}
+	})
+}
+
 func TestMemoryGuard_ImplementsSessionStore(t *testing.T) {
 	// This is a compile-time check, but let's also verify at runtime.
 	var _ memory.SessionStore = NewMemoryGuard(&memorymock.SessionStore{})

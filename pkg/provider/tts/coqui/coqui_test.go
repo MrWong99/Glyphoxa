@@ -813,3 +813,135 @@ func TestNew_WithAPIMode(t *testing.T) {
 		t.Errorf("apiMode = %q, want %q", p.apiMode, APIModeXTTS)
 	}
 }
+
+func TestParseWAV_ValidHeader(t *testing.T) {
+	t.Parallel()
+
+	pcm := []byte{0x01, 0x02, 0x03, 0x04}
+	wav := buildTestWAV(pcm)
+	info, err := parseWAV(wav)
+	if err != nil {
+		t.Fatalf("parseWAV: %v", err)
+	}
+	if info.SampleRate != 16000 {
+		t.Errorf("SampleRate = %d, want 16000", info.SampleRate)
+	}
+	if info.Channels != 1 {
+		t.Errorf("Channels = %d, want 1", info.Channels)
+	}
+	if info.DataOffset != len(wav)-len(pcm) {
+		t.Errorf("DataOffset = %d, want %d", info.DataOffset, len(wav)-len(pcm))
+	}
+}
+
+func TestParseWAV_TooShort(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseWAV([]byte{0x01})
+	if err == nil {
+		t.Fatal("expected error for short input")
+	}
+}
+
+func TestParseWAV_NotRIFF(t *testing.T) {
+	t.Parallel()
+
+	buf := make([]byte, 44)
+	copy(buf[0:4], "XXXX")
+	_, err := parseWAV(buf)
+	if err == nil {
+		t.Fatal("expected error for non-RIFF")
+	}
+}
+
+func TestParseWAV_NotWAVE(t *testing.T) {
+	t.Parallel()
+
+	buf := make([]byte, 44)
+	copy(buf[0:4], "RIFF")
+	copy(buf[8:12], "XXXX")
+	_, err := parseWAV(buf)
+	if err == nil {
+		t.Fatal("expected error for non-WAVE")
+	}
+}
+
+func TestCloneVoice_ServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := mustNew(t, srv.URL, WithAPIMode(APIModeXTTS))
+	_, err := p.CloneVoice(context.Background(), [][]byte{buildTestWAV([]byte{0x01})})
+	if err == nil {
+		t.Fatal("expected error for server error")
+	}
+}
+
+func TestCloneVoice_EmptyName(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"","status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	p := mustNew(t, srv.URL, WithAPIMode(APIModeXTTS))
+	_, err := p.CloneVoice(context.Background(), [][]byte{buildTestWAV([]byte{0x01})})
+	if err == nil {
+		t.Fatal("expected error for empty name response")
+	}
+}
+
+func TestListVoices_XTTS_ServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := mustNew(t, srv.URL, WithAPIMode(APIModeXTTS))
+	_, err := p.ListVoices(context.Background())
+	if err == nil {
+		t.Fatal("expected error for XTTS server error")
+	}
+}
+
+func TestListVoices_StandardAPI_SingleSpeaker_EmptyModelName(t *testing.T) {
+	t.Parallel()
+
+	details := detailsResponse{
+		ModelName: "",
+		Language:  "en",
+		Speakers:  nil,
+	}
+	data, _ := json.Marshal(details)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != detailsEndpoint {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	p := mustNew(t, srv.URL, WithAPIMode(APIModeStandard))
+	voices, err := p.ListVoices(context.Background())
+	if err != nil {
+		t.Fatalf("ListVoices: %v", err)
+	}
+	if len(voices) != 1 {
+		t.Fatalf("got %d voices, want 1", len(voices))
+	}
+	// Empty model name should default to "default".
+	if voices[0].ID != "default" {
+		t.Errorf("voices[0].ID = %q, want %q", voices[0].ID, "default")
+	}
+}

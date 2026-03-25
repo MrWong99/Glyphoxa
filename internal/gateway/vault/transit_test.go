@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTransitClient_EncryptDecrypt(t *testing.T) {
@@ -238,5 +239,98 @@ func TestTransitClient_WrongToken(t *testing.T) {
 	}
 	if ct != "secret" {
 		t.Fatalf("Encrypt() = %q, want plaintext fallback", ct)
+	}
+}
+
+func TestWithMountPath(t *testing.T) {
+	t.Parallel()
+
+	client := NewTransitClient("http://vault.test", "token", "key", WithMountPath("custom-transit"))
+	if client.mountPath != "custom-transit" {
+		t.Errorf("mountPath = %q, want %q", client.mountPath, "custom-transit")
+	}
+}
+
+func TestWithHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	custom := &http.Client{Timeout: 42 * time.Second}
+	client := NewTransitClient("http://vault.test", "token", "key", WithHTTPClient(custom))
+	if client.client != custom {
+		t.Error("expected custom HTTP client to be set")
+	}
+}
+
+func TestTransitClient_PingBadStatus(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewTransitClient(srv.URL, "test-token", "test-key")
+	err := client.Ping(context.Background())
+	if err == nil {
+		t.Fatal("Ping() should return error for non-200 status")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error should mention status code, got: %v", err)
+	}
+}
+
+func TestTransitClient_PingReenables(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sys/health") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"initialized": true}`))
+			return
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewTransitClient(srv.URL, "test-token", "test-key")
+
+	// Manually disable the client.
+	client.mu.Lock()
+	client.disabled = true
+	client.mu.Unlock()
+
+	// A successful Ping should re-enable it.
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+
+	// Client should be re-enabled.
+	if client.isDisabled() {
+		t.Error("client should be re-enabled after successful Ping")
+	}
+}
+
+func TestTransitResponseData_MissingKeys(t *testing.T) {
+	t.Parallel()
+
+	d := transitResponseData{}
+
+	if _, ok := d.Ciphertext(); ok {
+		t.Error("Ciphertext() should return false for empty data")
+	}
+	if _, ok := d.Plaintext(); ok {
+		t.Error("Plaintext() should return false for empty data")
+	}
+}
+
+func TestTransitResponseData_WrongType(t *testing.T) {
+	t.Parallel()
+
+	d := transitResponseData{"ciphertext": 42, "plaintext": true}
+
+	if _, ok := d.Ciphertext(); ok {
+		t.Error("Ciphertext() should return false for non-string value")
+	}
+	if _, ok := d.Plaintext(); ok {
+		t.Error("Plaintext() should return false for non-string value")
 	}
 }

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -224,5 +225,318 @@ func TestHandleGetTranscript_NotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleGetTranscript_EmptyReturnsArray(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions/{id}/transcript", auth(http.HandlerFunc(srv.handleGetTranscript)))
+
+	ws.sessions = []SessionSummary{
+		{ID: "session-empty", TenantID: "tenant-1", State: "ended", StartedAt: time.Now()},
+	}
+	// No transcript entries seeded.
+
+	req := authReq(t, http.MethodGet, "/api/v1/sessions/session-empty/transcript", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Data []TranscriptEntry `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Data == nil {
+		t.Error("data should be empty array, not null")
+	}
+}
+
+func TestHandleGetTranscript_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions/{id}/transcript", auth(http.HandlerFunc(srv.handleGetTranscript)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/s1/transcript", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleStartSession_NoGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/start", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStartSession))))
+
+	body := `{"campaign_id":"c1","guild_id":"g1","channel_id":"ch1"}`
+	req := authReq(t, http.MethodPost, "/api/v1/sessions/start",
+		bytes.NewBufferString(body), secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHandleStartSession_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/start", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStartSession))))
+
+	req := authReq(t, http.MethodPost, "/api/v1/sessions/start",
+		bytes.NewBufferString(`{bad`), secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleStartSession_MissingFields(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/start", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStartSession))))
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing guild_id", `{"channel_id":"ch1"}`},
+		{"missing channel_id", `{"guild_id":"g1"}`},
+		{"both missing", `{"campaign_id":"c1"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := authReq(t, http.MethodPost, "/api/v1/sessions/start",
+				bytes.NewBufferString(tt.body), secret, "user-1", "tenant-1", "dm")
+			rr := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleStartSession_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/start", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStartSession))))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/start",
+		bytes.NewBufferString(`{"guild_id":"g1","channel_id":"ch1"}`))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleStopSession_NoGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/{id}/stop", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStopSession))))
+
+	req := authReq(t, http.MethodPost, "/api/v1/sessions/s1/stop", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHandleStopSession_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/{id}/stop", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStopSession))))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/s1/stop", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleListActiveSessions_NoGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions/active", auth(http.HandlerFunc(srv.handleListActiveSessions)))
+
+	req := authReq(t, http.MethodGet, "/api/v1/sessions/active", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHandleListActiveSessions_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions/active", auth(http.HandlerFunc(srv.handleListActiveSessions)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/active", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleListSessions_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions", auth(http.HandlerFunc(srv.handleListSessions)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleStartSession_WithGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/start", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStartSession))))
+
+	body := `{"campaign_id":"c1","guild_id":"g1","channel_id":"ch1"}`
+	req := authReq(t, http.MethodPost, "/api/v1/sessions/start",
+		bytes.NewBufferString(body), secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			SessionID string `json:"session_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Data.SessionID == "" {
+		t.Error("expected non-empty session_id")
+	}
+}
+
+func TestHandleStopSession_WithGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/{id}/stop", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStopSession))))
+
+	req := authReq(t, http.MethodPost, "/api/v1/sessions/s1/stop", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+}
+
+func TestHandleListActiveSessions_WithGateway(t *testing.T) {
+	t.Parallel()
+
+	srv, _, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions/active", auth(http.HandlerFunc(srv.handleListActiveSessions)))
+
+	req := authReq(t, http.MethodGet, "/api/v1/sessions/active", nil, secret, "user-1", "tenant-1", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Errorf("got %d active sessions, want 1", len(resp.Data))
+	}
+	if resp.Data[0]["session_id"] != "s1" {
+		t.Errorf("session_id = %v, want s1", resp.Data[0]["session_id"])
+	}
+}
+
+func TestHandleGetTranscript_WrongTenant(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("GET /api/v1/sessions/{id}/transcript", auth(http.HandlerFunc(srv.handleGetTranscript)))
+
+	// Session belongs to tenant-1.
+	ws.sessions = []SessionSummary{
+		{ID: "session-1", TenantID: "tenant-1", State: "ended", StartedAt: time.Now()},
+	}
+
+	// Authenticate as tenant-2.
+	req := authReq(t, http.MethodGet, "/api/v1/sessions/session-1/transcript", nil, secret, "user-2", "tenant-2", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (wrong tenant)", rr.Code, http.StatusNotFound)
 	}
 }
