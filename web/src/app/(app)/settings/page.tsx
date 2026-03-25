@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,23 +16,15 @@ import { useUser, useUpdateMe, useUpdatePreferences } from "@/lib/hooks";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumbs } from "@/components/breadcrumbs";
+import type { User } from "@/lib/types";
 
-export default function SettingsPage() {
-  const { data: user } = useUser();
+function SettingsForm({ user }: { user: User }) {
   const updateMe = useUpdateMe();
   const updatePreferences = useUpdatePreferences();
 
-  const [displayName, setDisplayName] = useState("");
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
-  const [locale, setLocale] = useState("en");
-
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.display_name ?? "");
-      setTheme(user.preferences?.theme ?? "system");
-      setLocale(user.preferences?.locale ?? "en");
-    }
-  }, [user]);
+  const [displayName, setDisplayName] = useState(user.display_name ?? "");
+  const [theme, setTheme] = useState<"light" | "dark" | "system">(user.preferences?.theme ?? "system");
+  const [locale, setLocale] = useState(user.preferences?.locale ?? "en");
 
   const handleSaveProfile = () => {
     if (displayName.trim()) {
@@ -45,16 +37,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
-      <Breadcrumbs items={[{ label: "Settings" }]} />
-
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Manage your account and preferences.
-        </p>
-      </div>
-
+    <>
       <Card>
         <CardHeader>
           <CardTitle>Account</CardTitle>
@@ -63,18 +46,18 @@ export default function SettingsPage() {
           <div className="flex items-center gap-4">
             <Avatar className="h-16 w-16 border-2 border-primary/20">
               <AvatarImage
-                src={user?.avatar_url ?? undefined}
-                alt={user?.display_name ?? "User"}
+                src={user.avatar_url ?? undefined}
+                alt={user.display_name ?? "User"}
               />
               <AvatarFallback className="bg-primary/10 text-lg text-primary">
-                {user?.display_name?.[0]?.toUpperCase() ?? "?"}
+                {user.display_name?.[0]?.toUpperCase() ?? "?"}
               </AvatarFallback>
             </Avatar>
             <div>
-              <p className="text-lg font-medium">{user?.display_name}</p>
-              <p className="text-sm text-muted-foreground">{user?.email}</p>
+              <p className="text-lg font-medium">{user.display_name}</p>
+              <p className="text-sm text-muted-foreground">{user.email}</p>
               <Badge variant="secondary" className="mt-1.5">
-                {user?.role ?? "dm"}
+                {user.role ?? "dm"}
               </Badge>
             </div>
           </div>
@@ -93,7 +76,7 @@ export default function SettingsPage() {
                 disabled={
                   updateMe.isPending ||
                   !displayName.trim() ||
-                  displayName.trim() === user?.display_name
+                  displayName.trim() === user.display_name
                 }
               >
                 {updateMe.isPending ? "Saving..." : "Save"}
@@ -158,6 +141,25 @@ export default function SettingsPage() {
           </p>
         </CardContent>
       </Card>
+    </>
+  );
+}
+
+export default function SettingsPage() {
+  const { data: user } = useUser();
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-6">
+      <Breadcrumbs items={[{ label: "Settings" }]} />
+
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Manage your account and preferences.
+        </p>
+      </div>
+
+      {user && <SettingsForm key={user.id} user={user} />}
     </div>
   );
 }

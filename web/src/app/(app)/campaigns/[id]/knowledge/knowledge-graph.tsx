@@ -79,9 +79,11 @@ export function KnowledgeGraphVisualization({ entities, relationships }: Props) 
     setEdges(newEdges);
   }, [entities, relationships]);
 
+  const simulateRef = useRef<() => void>(() => {});
+
   // Simple force simulation.
   const simulate = useCallback(() => {
-    const ns = nodesRef.current;
+    const ns = nodesRef.current.map((n) => ({ ...n }));
     if (ns.length === 0) return;
 
     const alpha = 0.1;
@@ -135,11 +137,13 @@ export function KnowledgeGraphVisualization({ entities, relationships }: Props) 
       n.y = Math.max(30, Math.min(height - 30, n.y));
     }
 
+    nodesRef.current = ns;
     setNodes([...ns]);
-    animFrameRef.current = requestAnimationFrame(simulate);
+    animFrameRef.current = requestAnimationFrame(simulateRef.current);
   }, [edges, draggedNode]);
 
   useEffect(() => {
+    simulateRef.current = simulate;
     animFrameRef.current = requestAnimationFrame(simulate);
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [simulate]);
