@@ -377,7 +377,7 @@ func TestDashboard_UpdateCreatesMessage(t *testing.T) {
 	})
 
 	// First update creates the message.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}
@@ -386,7 +386,7 @@ func TestDashboard_UpdateCreatesMessage(t *testing.T) {
 	}
 
 	// Second update edits the message.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}
@@ -414,7 +414,7 @@ func TestDashboard_UpdateCreateError(t *testing.T) {
 	})
 
 	// Should not panic on create error.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}
@@ -448,7 +448,7 @@ func TestDashboard_UpdateWithStats(t *testing.T) {
 	})
 
 	// Should use stats in embed.
-	d.update(nil)
+	d.update(context.TODO())
 	if mock.getCreateCalls() != 1 {
 		t.Errorf("expected 1 create call, got %d", mock.getCreateCalls())
 	}
@@ -508,7 +508,7 @@ func TestDashboard_PostFinalEmbed(t *testing.T) {
 	})
 
 	// First, create a message via update.
-	d.update(nil)
+	d.update(context.TODO())
 	if d.messageID == 0 {
 		t.Fatal("expected messageID to be set after update")
 	}
@@ -562,7 +562,7 @@ func TestDashboard_StopIdempotent(t *testing.T) {
 	})
 
 	// Create initial message.
-	d.update(nil)
+	d.update(context.TODO())
 
 	ctx := context.Background()
 	// Multiple stops should only run once.
