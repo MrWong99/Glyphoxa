@@ -44,8 +44,8 @@ func TestParseRating(t *testing.T) {
 
 // mockFeedbackStore is a simple mock for FeedbackStore.
 type mockFeedbackStore struct {
-	saved    []Feedback
-	saveErr  error
+	saved   []Feedback
+	saveErr error
 }
 
 func (m *mockFeedbackStore) SaveFeedback(_ string, fb Feedback) error {

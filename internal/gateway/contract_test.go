@@ -30,10 +30,10 @@ func TestParseSessionState(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		input   string
-		want    SessionState
-		wantOK  bool
+		name   string
+		input  string
+		want   SessionState
+		wantOK bool
 	}{
 		{"pending", "pending", SessionPending, true},
 		{"active", "active", SessionActive, true},

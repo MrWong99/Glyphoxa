@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,14 +25,15 @@ export default function SettingsPage() {
   const [displayName, setDisplayName] = useState("");
   const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
   const [locale, setLocale] = useState("en");
+  const [synced, setSynced] = useState(false);
 
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.display_name ?? "");
-      setTheme(user.preferences?.theme ?? "system");
-      setLocale(user.preferences?.locale ?? "en");
-    }
-  }, [user]);
+  // Populate form from user data once loaded (render-time adjustment)
+  if (user && !synced) {
+    setDisplayName(user.display_name ?? "");
+    setTheme(user.preferences?.theme ?? "system");
+    setLocale(user.preferences?.locale ?? "en");
+    setSynced(true);
+  }
 
   const handleSaveProfile = () => {
     if (displayName.trim()) {

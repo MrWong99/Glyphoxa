@@ -8,21 +8,22 @@ import { Button } from "@/components/ui/button";
 const COOKIE_NOTICE_KEY = "glyphoxa_cookie_notice_dismissed";
 
 export function CookieNotice() {
-  const [visible, setVisible] = useState(false);
+  const [dismissed, setDismissed] = useState(true);
 
   useEffect(() => {
-    const dismissed = localStorage.getItem(COOKIE_NOTICE_KEY);
-    if (!dismissed) {
-      setVisible(true);
+    const stored = localStorage.getItem(COOKIE_NOTICE_KEY);
+    if (!stored) {
+      // Use rAF to avoid synchronous setState in effect body
+      requestAnimationFrame(() => setDismissed(false));
     }
   }, []);
 
   function dismiss() {
     localStorage.setItem(COOKIE_NOTICE_KEY, "1");
-    setVisible(false);
+    setDismissed(true);
   }
 
-  if (!visible) return null;
+  if (dismissed) return null;
 
   return (
     <div

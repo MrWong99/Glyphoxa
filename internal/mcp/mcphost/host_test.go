@@ -566,10 +566,10 @@ func TestParseLatencyFromDescription(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		desc     string
-		wantP50  int64
-		wantMax  int64
+		name    string
+		desc    string
+		wantP50 int64
+		wantMax int64
 	}{
 		{
 			name:    "valid JSON with both fields",

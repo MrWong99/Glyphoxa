@@ -10,14 +10,11 @@ import { api } from "@/lib/api";
 function InviteHandler() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
-  const [status, setStatus] = useState<"loading" | "valid" | "invalid">("loading");
+  const [status, setStatus] = useState<"loading" | "valid" | "invalid">(token ? "loading" : "invalid");
   const [inviteInfo, setInviteInfo] = useState<{ role: string; tenant_id: string } | null>(null);
 
   useEffect(() => {
-    if (!token) {
-      setStatus("invalid");
-      return;
-    }
+    if (!token) return;
     api.invites
       .validate(token)
       .then((data) => {

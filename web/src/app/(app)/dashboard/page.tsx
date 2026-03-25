@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import {
   Swords,
@@ -33,23 +33,22 @@ function greeting(): string {
   return "Good evening";
 }
 
-function LiveTimer({ startedAt }: { startedAt: string }) {
-  const [elapsed, setElapsed] = useState("");
+function computeElapsedTime(startedAt: string): string {
+  const start = new Date(startedAt).getTime();
+  const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const s = diff % 60;
+  return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+}
 
-  const computeElapsed = useCallback(() => {
-    const start = new Date(startedAt).getTime();
-    const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
-    const h = Math.floor(diff / 3600);
-    const m = Math.floor((diff % 3600) / 60);
-    const s = diff % 60;
-    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-  }, [startedAt]);
+function LiveTimer({ startedAt }: { startedAt: string }) {
+  const [elapsed, setElapsed] = useState(() => computeElapsedTime(startedAt));
 
   useEffect(() => {
-    setElapsed(computeElapsed());
-    const interval = setInterval(() => setElapsed(computeElapsed()), 1000);
+    const interval = setInterval(() => setElapsed(computeElapsedTime(startedAt)), 1000);
     return () => clearInterval(interval);
-  }, [computeElapsed]);
+  }, [startedAt]);
 
   return (
     <span className="font-mono tabular-nums text-sm">{elapsed}</span>
