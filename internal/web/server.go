@@ -111,6 +111,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/sessions/start", auth(RequireRole("dm")(http.HandlerFunc(s.handleStartSession))))
 	s.mux.Handle("POST /api/v1/sessions/{id}/stop", auth(RequireRole("dm")(http.HandlerFunc(s.handleStopSession))))
 	s.mux.Handle("GET /api/v1/sessions/active", auth(http.HandlerFunc(s.handleListActiveSessions)))
+	s.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(s.handleDashboardActiveSessions)))
 	s.mux.Handle("GET /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleListTenants))))
 	s.mux.Handle("GET /api/v1/tenants/{id}", auth(RequireRole("tenant_admin")(http.HandlerFunc(s.handleGetTenant))))
 	s.mux.Handle("POST /api/v1/tenants", auth(RequireRole("super_admin")(http.HandlerFunc(s.handleCreateTenant))))
