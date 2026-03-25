@@ -34,6 +34,7 @@ Thumbs.db
 # Build
 /build/
 /glyphoxa
+/glyphoxa-web
 deployments/compose/config.yaml
 
 # Helm dependency artifacts
