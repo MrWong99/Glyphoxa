@@ -3,7 +3,7 @@
 import { useState, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Save, Trash2, Users, ScrollText } from "lucide-react";
+import { Save, Trash2, Users, ScrollText, Network } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -108,6 +108,10 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
           <TabsTrigger value="sessions">
             <ScrollText className="mr-1 h-4 w-4" />
             Sessions
+          </TabsTrigger>
+          <TabsTrigger value="knowledge" render={<Link href={`/campaigns/${campaignId}/knowledge`} />}>
+            <Network className="mr-1 h-4 w-4" />
+            Knowledge Graph
           </TabsTrigger>
         </TabsList>
 

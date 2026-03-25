@@ -12,6 +12,7 @@ import {
   Sparkles,
   Shield,
   FileText,
+  Cpu,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ const navItems: NavItem[] = [
   { href: "/users", label: "Users", icon: Users, minRole: "tenant_admin" },
   { href: "/admin/audit-log", label: "Audit Log", icon: FileText, minRole: "tenant_admin" },
   { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/settings/providers", label: "Providers", icon: Cpu, minRole: "tenant_admin" },
   { href: "/admin", label: "Admin", icon: Shield, minRole: "super_admin" },
 ];
 
