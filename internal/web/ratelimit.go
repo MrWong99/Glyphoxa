@@ -105,14 +105,6 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
-// rateLimitTiers defines rate limits per role tier.
-var rateLimitTiers = map[string]struct{ read, write int }{
-	"viewer":       {60, 30},
-	"dm":           {60, 30},
-	"tenant_admin": {120, 60},
-	"super_admin":  {300, 120},
-}
-
 // RateLimitMiddleware applies per-user rate limiting based on JWT claims.
 // Uses the user ID as the rate limit key for authenticated requests,
 // and the client IP for unauthenticated requests.

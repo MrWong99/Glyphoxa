@@ -239,7 +239,7 @@ func TestHandleDashboardActiveSessions_NoGateway(t *testing.T) {
 
 	srv, _, _, secret := testServerWithStores(t)
 	auth := AuthMiddleware(secret)
-	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleDashboardActiveSessions)))
+	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleListActiveSessions)))
 
 	req := authReq(t, http.MethodGet, "/api/v1/dashboard/active-sessions", nil, secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
@@ -288,7 +288,7 @@ func TestHandleDashboardActiveSessions_WithGateway(t *testing.T) {
 	srv.gwClient = newMockMgmtClient()
 
 	auth := AuthMiddleware(secret)
-	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleDashboardActiveSessions)))
+	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleListActiveSessions)))
 
 	req := authReq(t, http.MethodGet, "/api/v1/dashboard/active-sessions", nil, secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
@@ -314,7 +314,7 @@ func TestHandleDashboardActiveSessions_Unauthenticated(t *testing.T) {
 
 	srv, secret := testServer(t)
 	auth := AuthMiddleware(secret)
-	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleDashboardActiveSessions)))
+	srv.mux.Handle("GET /api/v1/dashboard/active-sessions", auth(http.HandlerFunc(srv.handleListActiveSessions)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/active-sessions", nil)
 	rr := httptest.NewRecorder()
