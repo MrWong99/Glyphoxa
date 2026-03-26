@@ -13,6 +13,7 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 
+	"github.com/MrWong99/glyphoxa/internal/agent/npcstore"
 	"github.com/MrWong99/glyphoxa/internal/config"
 	"github.com/MrWong99/glyphoxa/internal/gateway/audiobridge"
 	"github.com/MrWong99/glyphoxa/internal/gateway/dispatch"
@@ -46,6 +47,7 @@ type GatewaySessionController struct {
 	tier       config.LicenseTier
 	botToken   string
 	npcConfigs []NPCConfigMsg
+	npcStore   npcstore.Store
 	dialer     WorkerDialer
 	gwBot      *GatewayBot // for voice channel management
 	bridgeSrv  *audiobridge.Server
@@ -139,6 +141,13 @@ func WithAudioBridgeServer(srv *audiobridge.Server) SessionControllerOption {
 	return func(gc *GatewaySessionController) { gc.bridgeSrv = srv }
 }
 
+// WithNPCStore sets the NPC store used to load NPC definitions from the
+// database at session start. When set, NPCs are loaded fresh from the DB for
+// the session's campaign instead of using the static npcConfigs snapshot.
+func WithNPCStore(store npcstore.Store) SessionControllerOption {
+	return func(gc *GatewaySessionController) { gc.npcStore = store }
+}
+
 // Start begins a new voice session.
 func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartRequest) error {
 	gc.mu.Lock()
@@ -148,21 +157,43 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	}
 	gc.mu.Unlock()
 
-	sessionID, err := gc.orch.ValidateAndCreate(ctx, gc.tenantID, gc.campaignID, req.GuildID, req.ChannelID, gc.tier)
+	// Use the request's CampaignID (from web or Discord) with fallback to
+	// the tenant's default campaign.
+	campaignID := req.CampaignID
+	if campaignID == "" {
+		campaignID = gc.campaignID
+	}
+
+	sessionID, err := gc.orch.ValidateAndCreate(ctx, gc.tenantID, campaignID, req.GuildID, req.ChannelID, gc.tier)
 	if err != nil {
 		return fmt.Errorf("gateway: validate session: %w", err)
+	}
+
+	// Load NPC definitions fresh from the database when an npcStore is
+	// configured. This ensures the session uses the latest NPCs for the
+	// campaign, not a stale startup snapshot.
+	npcConfigs := gc.npcConfigs
+	if gc.npcStore != nil && campaignID != "" {
+		defs, listErr := gc.npcStore.List(ctx, campaignID)
+		if listErr != nil {
+			_ = gc.orch.Transition(ctx, sessionID, SessionEnded, listErr.Error())
+			return fmt.Errorf("gateway: load NPCs for campaign %q: %w", campaignID, listErr)
+		}
+		if len(defs) > 0 {
+			npcConfigs = npcDefsToConfigs(defs)
+		}
 	}
 
 	if gc.dispatcher != nil {
 		startReq := StartSessionRequest{
 			SessionID:   sessionID,
 			TenantID:    gc.tenantID,
-			CampaignID:  gc.campaignID,
+			CampaignID:  campaignID,
 			GuildID:     req.GuildID,
 			ChannelID:   req.ChannelID,
 			LicenseTier: gc.tier.String(),
 			BotToken:    gc.botToken,
-			NPCConfigs:  gc.npcConfigs,
+			NPCConfigs:  npcConfigs,
 		}
 
 		// Join voice via the gateway bot's VoiceManager and set up the audio
@@ -512,6 +543,25 @@ func (gc *GatewaySessionController) SpeakNPC(ctx context.Context, sessionID, npc
 	}
 	defer cleanup()
 	return ctrl.SpeakNPC(ctx, sessionID, npcName, text)
+}
+
+// npcDefsToConfigs converts npcstore definitions to the gateway's NPCConfigMsg
+// format for transmission to workers.
+func npcDefsToConfigs(defs []npcstore.NPCDefinition) []NPCConfigMsg {
+	configs := make([]NPCConfigMsg, len(defs))
+	for i, d := range defs {
+		configs[i] = NPCConfigMsg{
+			Name:           d.Name,
+			Personality:    d.Personality,
+			Engine:         d.Engine,
+			VoiceID:        d.Voice.VoiceID,
+			KnowledgeScope: d.KnowledgeScope,
+			BudgetTier:     d.BudgetTier,
+			GMHelper:       d.GMHelper,
+			AddressOnly:    d.AddressOnly,
+		}
+	}
+	return configs
 }
 
 // ── Voice permission check ──────────────────────────────────────────────────

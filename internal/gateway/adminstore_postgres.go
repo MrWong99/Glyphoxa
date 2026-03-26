@@ -35,6 +35,7 @@ type PostgresAdminStore struct {
 // adminMigrationFiles lists the up-migration files in order.
 var adminMigrationFiles = []string{
 	"migrations/000001_tenants.up.sql",
+	"migrations/000002_tenant_campaign.up.sql",
 }
 
 // NewPostgresAdminStore creates a PostgreSQL-backed admin store.
@@ -77,9 +78,9 @@ func (s *PostgresAdminStore) CreateTenant(ctx context.Context, t Tenant) error {
 		return fmt.Errorf("gateway: encrypt bot token for tenant %q: %w", t.ID, err)
 	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO tenants (id, license_tier, bot_token, guild_ids, monthly_session_hours, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, t.ID, t.LicenseTier.String(), encToken, t.GuildIDs, t.MonthlySessionHours, t.CreatedAt, t.UpdatedAt)
+		INSERT INTO tenants (id, license_tier, bot_token, guild_ids, monthly_session_hours, campaign_id, dm_role_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, t.ID, t.LicenseTier.String(), encToken, t.GuildIDs, t.MonthlySessionHours, t.CampaignID, t.DMRoleID, t.CreatedAt, t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("gateway: create tenant %q: %w", t.ID, err)
 	}
@@ -93,7 +94,7 @@ func (s *PostgresAdminStore) CreateTenant(ctx context.Context, t Tenant) error {
 // The bot token is decrypted via the configured [vault.TokenEncryptor].
 func (s *PostgresAdminStore) GetTenant(ctx context.Context, id string) (Tenant, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, license_tier, bot_token, guild_ids, monthly_session_hours, created_at, updated_at
+		SELECT id, license_tier, bot_token, guild_ids, monthly_session_hours, campaign_id, dm_role_id, created_at, updated_at
 		FROM tenants
 		WHERE id = $1
 	`, id)
@@ -119,9 +120,9 @@ func (s *PostgresAdminStore) UpdateTenant(ctx context.Context, t Tenant) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE tenants
 		SET license_tier = $2, bot_token = $3, guild_ids = $4,
-		    monthly_session_hours = $5, updated_at = now()
+		    monthly_session_hours = $5, campaign_id = $6, dm_role_id = $7, updated_at = now()
 		WHERE id = $1
-	`, t.ID, t.LicenseTier.String(), encToken, t.GuildIDs, t.MonthlySessionHours)
+	`, t.ID, t.LicenseTier.String(), encToken, t.GuildIDs, t.MonthlySessionHours, t.CampaignID, t.DMRoleID)
 	if err != nil {
 		return fmt.Errorf("gateway: update tenant %q: %w", t.ID, err)
 	}
@@ -149,7 +150,7 @@ func (s *PostgresAdminStore) DeleteTenant(ctx context.Context, id string) error 
 // Bot tokens are decrypted via the configured [vault.TokenEncryptor].
 func (s *PostgresAdminStore) ListTenants(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, license_tier, bot_token, guild_ids, monthly_session_hours, created_at, updated_at
+		SELECT id, license_tier, bot_token, guild_ids, monthly_session_hours, campaign_id, dm_role_id, created_at, updated_at
 		FROM tenants
 		ORDER BY id
 	`)
@@ -181,7 +182,7 @@ func scanTenant(row pgx.Row) (Tenant, error) {
 	var t Tenant
 	var tierStr string
 
-	err := row.Scan(&t.ID, &tierStr, &t.BotToken, &t.GuildIDs, &t.MonthlySessionHours, &t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &tierStr, &t.BotToken, &t.GuildIDs, &t.MonthlySessionHours, &t.CampaignID, &t.DMRoleID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return Tenant{}, fmt.Errorf("gateway: tenant not found")
