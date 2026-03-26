@@ -133,7 +133,7 @@ func TestLogger_NoSpan(t *testing.T) {
 }
 
 func TestStartSpan_AddsTenantAttribute(t *testing.T) {
-	t.Parallel()
+	// Not parallel: modifies global otel.SetTracerProvider.
 	tp, exp := newTestTracerProvider(t)
 	origTP := otel.GetTracerProvider()
 	otel.SetTracerProvider(tp)
@@ -164,7 +164,7 @@ func TestStartSpan_AddsTenantAttribute(t *testing.T) {
 }
 
 func TestStartSpan_NoTenantContext(t *testing.T) {
-	t.Parallel()
+	// Not parallel: modifies global otel.SetTracerProvider.
 	tp, exp := newTestTracerProvider(t)
 	origTP := otel.GetTracerProvider()
 	otel.SetTracerProvider(tp)

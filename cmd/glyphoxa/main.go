@@ -229,12 +229,12 @@ func runFull(cfg *config.Config) int {
 		entityCmds := commands.NewEntityCommands(perms, func() entity.Store { return application.EntityStore() })
 		entityCmds.Register(bot.Router())
 
-		campaignCmds := commands.NewCampaignCommands(
-			perms,
-			func() entity.Store { return application.EntityStore() },
-			func() *config.CampaignConfig { return &cfg.Campaign },
-			sessionMgr.IsActive,
-		)
+		campaignCmds := commands.NewCampaignCommandsFromConfig(commands.CampaignCommandsConfig{
+			Perms:    perms,
+			GetStore: func() entity.Store { return application.EntityStore() },
+			GetCfg:   func() *config.CampaignConfig { return &cfg.Campaign },
+			IsActive: sessionMgr.IsActive,
+		})
 		campaignCmds.Register(bot.Router())
 
 		feedbackCmds := commands.NewFeedbackCommands(
@@ -418,12 +418,12 @@ func runGateway(cfg *config.Config) int {
 
 		// Campaign commands — config is available on the gateway; entity
 		// store is nil because entities live on the worker.
-		campaignCmds := commands.NewCampaignCommands(
-			perms,
-			func() entity.Store { return nil },
-			func() *config.CampaignConfig { return &cfg.Campaign },
-			func() bool { return sessionCtrl.IsActive("") },
-		)
+		campaignCmds := commands.NewCampaignCommandsFromConfig(commands.CampaignCommandsConfig{
+			Perms:    perms,
+			GetStore: func() entity.Store { return nil },
+			GetCfg:   func() *config.CampaignConfig { return &cfg.Campaign },
+			IsActive: func() bool { return sessionCtrl.IsActive("") },
+		})
 		campaignCmds.Register(router)
 
 		// Recap commands — text-only for gateway mode (no TTS providers on
