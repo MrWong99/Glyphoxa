@@ -120,23 +120,6 @@ func (c *Connection) ReceiveOpusFrame(userID snowflake.ID, packet *voice.Packet)
 	}
 	c.decodersMu.Unlock()
 
-	// Ensure an input channel exists for this user.
-	c.inputsMu.Lock()
-	ch, chExists := c.inputs[userID]
-	if !chExists {
-		ch = make(chan audio.AudioFrame, inputChannelBuffer)
-		c.inputs[userID] = ch
-	}
-	c.inputsMu.Unlock()
-
-	if !chExists {
-		slog.Debug("discord: new participant", "userID", userID)
-		c.emitEvent(audio.Event{
-			Type:   audio.EventJoin,
-			UserID: userID.String(),
-		})
-	}
-
 	pcm, err := dec.decode(packet.Opus)
 	if err != nil {
 		slog.Warn("discord: opus decode error", "userID", userID, "error", err)
@@ -150,10 +133,43 @@ func (c *Connection) ReceiveOpusFrame(userID snowflake.ID, packet *voice.Packet)
 		Timestamp:  time.Duration(packet.Timestamp) * time.Second / time.Duration(opusSampleRate),
 	}
 
+	// Fast path: send to an existing channel while holding the read lock.
+	// The RLock prevents concurrent CleanupUser/Disconnect from closing the
+	// channel between our map lookup and the send, avoiding a panic on
+	// send-to-closed-channel.
+	c.inputsMu.RLock()
+	ch, chExists := c.inputs[userID]
+	if chExists {
+		select {
+		case ch <- frame:
+		default:
+			// Channel full — drop frame rather than block.
+		}
+		c.inputsMu.RUnlock()
+		return nil
+	}
+	c.inputsMu.RUnlock()
+
+	// Slow path: create channel under write lock. Double-check after
+	// acquiring the write lock in case another goroutine created it.
+	c.inputsMu.Lock()
+	ch, chExists = c.inputs[userID]
+	if !chExists {
+		ch = make(chan audio.AudioFrame, inputChannelBuffer)
+		c.inputs[userID] = ch
+	}
 	select {
 	case ch <- frame:
 	default:
-		// Channel full — drop frame rather than block.
+	}
+	c.inputsMu.Unlock()
+
+	if !chExists {
+		slog.Debug("discord: new participant", "userID", userID)
+		c.emitEvent(audio.Event{
+			Type:   audio.EventJoin,
+			UserID: userID.String(),
+		})
 	}
 
 	return nil

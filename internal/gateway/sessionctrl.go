@@ -155,7 +155,20 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 		gc.mu.Unlock()
 		return fmt.Errorf("gateway: session already active for guild %s", req.GuildID)
 	}
+	// Reserve the guild slot with an empty sentinel to prevent concurrent
+	// duplicate Start calls for the same guild from racing past the check.
+	gc.active[req.GuildID] = ""
 	gc.mu.Unlock()
+
+	// releaseGuild removes the reservation on failure.
+	releaseGuild := func() {
+		gc.mu.Lock()
+		// Only delete if still the sentinel (not overwritten by success path).
+		if gc.active[req.GuildID] == "" {
+			delete(gc.active, req.GuildID)
+		}
+		gc.mu.Unlock()
+	}
 
 	// Use the request's CampaignID (from web or Discord) with fallback to
 	// the tenant's default campaign.
@@ -166,6 +179,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 
 	sessionID, err := gc.orch.ValidateAndCreate(ctx, gc.tenantID, campaignID, req.GuildID, req.ChannelID, gc.tier)
 	if err != nil {
+		releaseGuild()
 		return fmt.Errorf("gateway: validate session: %w", err)
 	}
 
@@ -177,6 +191,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 		defs, listErr := gc.npcStore.List(ctx, campaignID)
 		if listErr != nil {
 			_ = gc.orch.Transition(ctx, sessionID, SessionEnded, listErr.Error())
+			releaseGuild()
 			return fmt.Errorf("gateway: load NPCs for campaign %q: %w", campaignID, listErr)
 		}
 		if len(defs) > 0 {
@@ -208,6 +223,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			if voiceMgr == nil {
 				gc.bridgeSrv.RemoveBridge(sessionID)
 				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, "VoiceManager not available")
+				releaseGuild()
 				return fmt.Errorf("gateway: VoiceManager not available on gateway bot")
 			}
 
@@ -216,6 +232,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			if permErr := checkVoicePermissions(ctx, gc.gwBot.Client().Rest, gID, chID, gc.gwBot.Client().ApplicationID); permErr != nil {
 				gc.bridgeSrv.RemoveBridge(sessionID)
 				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, permErr.Error())
+				releaseGuild()
 				return fmt.Errorf("gateway: voice permission check: %w", permErr)
 			}
 
@@ -227,6 +244,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 				voiceMgr.RemoveConn(gID)
 				gc.bridgeSrv.RemoveBridge(sessionID)
 				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, joinErr.Error())
+				releaseGuild()
 				return fmt.Errorf("gateway: join voice channel: %w", joinErr)
 			}
 
@@ -274,6 +292,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 				slog.Error("gateway: failed to transition session after dispatch failure",
 					"session_id", sessionID, "err", transErr)
 			}
+			releaseGuild()
 			return fmt.Errorf("gateway: dispatch worker: %w", dispErr)
 		}
 
@@ -426,7 +445,9 @@ func (gc *GatewaySessionController) registerDisconnectListener(sessionID, guildI
 			slog.Info("gateway: bot disconnected from voice externally",
 				"session_id", sessionID, "guild_id", guildID)
 			go func() {
-				if err := gc.Stop(context.Background(), sessionID); err != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := gc.Stop(ctx, sessionID); err != nil {
 					slog.Error("gateway: failed to stop session after voice disconnect",
 						"session_id", sessionID, "err", err)
 				}
