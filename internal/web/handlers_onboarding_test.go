@@ -20,13 +20,13 @@ func TestHandleOnboardingComplete(t *testing.T) {
 		{
 			name:     "valid onboarding",
 			tenantID: "",
-			body:     `{"tenant_id":"new-tenant","display_name":"My Org"}`,
+			body:     `{"tenant_id":"new_tenant","display_name":"My Org"}`,
 			wantCode: http.StatusCreated,
 		},
 		{
 			name:     "already onboarded",
-			tenantID: "existing-tenant",
-			body:     `{"tenant_id":"new-tenant"}`,
+			tenantID: "existing_tenant",
+			body:     `{"tenant_id":"new_tenant"}`,
 			wantCode: http.StatusConflict,
 		},
 		{
@@ -50,14 +50,26 @@ func TestHandleOnboardingComplete(t *testing.T) {
 		{
 			name:     "valid with default display_name",
 			tenantID: "",
-			body:     `{"tenant_id":"auto-name"}`,
+			body:     `{"tenant_id":"autoname"}`,
 			wantCode: http.StatusCreated,
 		},
 		{
 			name:     "valid with license_tier",
 			tenantID: "",
-			body:     `{"tenant_id":"tier-test","license_tier":"dedicated"}`,
+			body:     `{"tenant_id":"tiertest","license_tier":"dedicated"}`,
 			wantCode: http.StatusCreated,
+		},
+		{
+			name:     "invalid tenant_id with hyphens",
+			tenantID: "",
+			body:     `{"tenant_id":"bad-hyphen"}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "invalid tenant_id with uppercase",
+			tenantID: "",
+			body:     `{"tenant_id":"BadCase"}`,
+			wantCode: http.StatusBadRequest,
 		},
 	}
 
@@ -133,7 +145,7 @@ func TestHandleOnboardingComplete_WithGateway(t *testing.T) {
 	ws.users["user-1"] = &User{ID: "user-1", TenantID: "", DisplayName: "Alice", Role: "dm"}
 
 	req := authReq(t, http.MethodPost, "/api/v1/onboarding/complete",
-		bytes.NewBufferString(`{"tenant_id":"gw-onboard"}`), secret, "user-1", "", "dm")
+		bytes.NewBufferString(`{"tenant_id":"gw_onboard"}`), secret, "user-1", "", "dm")
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 

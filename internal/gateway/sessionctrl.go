@@ -290,6 +290,15 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			if err != nil {
 				return fmt.Errorf("dial worker gRPC at %s: %w", addr, err)
 			}
+			// Close the gRPC connection when done to prevent fd leaks.
+			if c, ok := client.(interface{ Close() error }); ok {
+				defer func() {
+					if closeErr := c.Close(); closeErr != nil {
+						slog.Debug("gateway: close worker client after StartSession",
+							"addr", addr, "err", closeErr)
+					}
+				}()
+			}
 			if err := client.StartSession(callCtx, startReq); err != nil {
 				return fmt.Errorf("StartSession RPC: %w", err)
 			}

@@ -246,8 +246,17 @@ func (p *PostgresOrchestrator) AllNonEndedSessions(ctx context.Context) ([]Sessi
 		); err != nil {
 			return nil, fmt.Errorf("sessionorch: scan session: %w", err)
 		}
-		s.LicenseTier, _ = config.ParseLicenseTier(tierStr)
-		s.State, _ = gateway.ParseSessionState(stateStr)
+		tier, tierErr := config.ParseLicenseTier(tierStr)
+		if tierErr != nil {
+			return nil, fmt.Errorf("sessionorch: parse tier %q for session %s: %w", tierStr, s.ID, tierErr)
+		}
+		s.LicenseTier = tier
+
+		state, stateOK := gateway.ParseSessionState(stateStr)
+		if !stateOK {
+			return nil, fmt.Errorf("sessionorch: unknown state %q for session %s", stateStr, s.ID)
+		}
+		s.State = state
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()

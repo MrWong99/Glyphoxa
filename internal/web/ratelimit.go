@@ -146,23 +146,10 @@ func RateLimitMiddleware(readLimiter, writeLimiter *RateLimiter) func(http.Handl
 	}
 }
 
-// clientIP extracts the client IP from the request, respecting X-Forwarded-For.
+// clientIP extracts the client IP from the direct connection address.
+// Forwarded headers (X-Forwarded-For, X-Real-IP) are not trusted because
+// they can be spoofed by attackers to bypass rate limits.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the chain.
-		if i := 0; i < len(xff) {
-			for j, c := range xff {
-				if c == ',' {
-					return xff[:j]
-				}
-				_ = j
-			}
-			return xff
-		}
-	}
-	if xff := r.Header.Get("X-Real-IP"); xff != "" {
-		return xff
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
