@@ -55,6 +55,7 @@ type GatewaySessionController struct {
 	mu          sync.Mutex
 	active      map[string]string // guildID -> sessionID
 	workerAddrs map[string]string // sessionID -> worker gRPC address
+	stopping    map[string]bool   // sessionID -> true if stop is in progress
 
 	// voiceCleanups stores cleanup functions for voice bridges, keyed by sessionID.
 	voiceCleanupsMu sync.Mutex
@@ -77,6 +78,7 @@ func NewGatewaySessionController(
 		tier:          tier,
 		active:        make(map[string]string),
 		workerAddrs:   make(map[string]string),
+		stopping:      make(map[string]bool),
 		voiceCleanups: make(map[string]func()),
 	}
 	for _, opt := range opts {
@@ -335,11 +337,28 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 // Stop gracefully ends the session. It first sends a StopSession RPC to the
 // worker so it can flush transcripts and cleanly shut down before the K8s Job
 // is deleted.
+//
+// Stop is idempotent: concurrent calls for the same session are coalesced.
+// The first caller runs the cleanup; subsequent callers return nil immediately.
 func (gc *GatewaySessionController) Stop(ctx context.Context, sessionID string) error {
-	// 1. Tell the worker to stop gracefully (flush transcripts, etc.).
+	// Guard against concurrent Stop calls from multiple triggers
+	// (user command, audio bridge detach, voice disconnect listener).
 	gc.mu.Lock()
+	if gc.stopping[sessionID] {
+		gc.mu.Unlock()
+		return nil
+	}
+	gc.stopping[sessionID] = true
 	addr := gc.workerAddrs[sessionID]
 	gc.mu.Unlock()
+
+	defer func() {
+		gc.mu.Lock()
+		delete(gc.stopping, sessionID)
+		gc.mu.Unlock()
+	}()
+
+	// 1. Tell the worker to stop gracefully (flush transcripts, etc.).
 	if addr != "" && gc.dialer != nil {
 		rpcCtx, rpcCancel := context.WithTimeout(ctx, 5*time.Second)
 		client, dialErr := gc.dialer(addr)
@@ -435,6 +454,24 @@ func (gc *GatewaySessionController) StopAll(ctx context.Context) {
 	}
 }
 
+// RemoveSession removes a session from the in-memory active and workerAddrs
+// maps without sending any RPCs. This is used by the zombie cleanup loop to
+// sync in-memory state after the orchestrator has already transitioned the
+// session to ended in the database.
+func (gc *GatewaySessionController) RemoveSession(sessionID string) {
+	gc.mu.Lock()
+	delete(gc.workerAddrs, sessionID)
+	for guildID, sid := range gc.active {
+		if sid == sessionID {
+			delete(gc.active, guildID)
+			break
+		}
+	}
+	gc.mu.Unlock()
+
+	gc.cleanupVoiceBridge(sessionID)
+}
+
 // cleanupVoiceBridge tears down the voice bridge and audio bridge for a session.
 func (gc *GatewaySessionController) cleanupVoiceBridge(sessionID string) {
 	gc.voiceCleanupsMu.Lock()
@@ -480,10 +517,10 @@ func (gc *GatewaySessionController) registerDisconnectListener(sessionID, guildI
 		}
 	})
 
-	gc.gwBot.Client().AddEventListeners(listener)
-
-	// Store removal function alongside the voice cleanup.
+	// Add listener and store its cleanup atomically so a concurrent
+	// cleanupVoiceBridge call cannot miss the listener removal.
 	gc.voiceCleanupsMu.Lock()
+	gc.gwBot.Client().AddEventListeners(listener)
 	prev := gc.voiceCleanups[sessionID]
 	gc.voiceCleanups[sessionID] = func() {
 		gc.gwBot.Client().RemoveEventListeners(listener)

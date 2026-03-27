@@ -26,6 +26,9 @@ const (
 // the monitor attempts reconnection with exponential backoff and invokes the
 // configured OnReconnect callback on success.
 //
+// If all reconnection attempts fail, the OnFailure callback is invoked so the
+// caller can trigger session cleanup.
+//
 // All methods are safe for concurrent use.
 type Reconnector struct {
 	platform    audio.Platform
@@ -34,6 +37,7 @@ type Reconnector struct {
 	backoff     time.Duration
 	maxBackoff  time.Duration
 	onReconnect func(audio.Connection)
+	onFailure   func()
 
 	mu           sync.Mutex
 	conn         audio.Connection
@@ -64,6 +68,10 @@ type ReconnectorConfig struct {
 	// OnReconnect is called after a successful reconnection with the new
 	// connection. May be nil.
 	OnReconnect func(audio.Connection)
+
+	// OnFailure is called when all reconnection attempts are exhausted.
+	// Use this to trigger session stop and cleanup. May be nil.
+	OnFailure func()
 }
 
 // NewReconnector creates a new [Reconnector] with the given configuration.
@@ -87,6 +95,7 @@ func NewReconnector(cfg ReconnectorConfig) *Reconnector {
 		backoff:      backoff,
 		maxBackoff:   maxBackoff,
 		onReconnect:  cfg.OnReconnect,
+		onFailure:    cfg.OnFailure,
 		done:         make(chan struct{}),
 		disconnected: make(chan struct{}, 1),
 	}
@@ -233,4 +242,8 @@ func (r *Reconnector) attemptReconnect(ctx context.Context) {
 		"channel_id", r.channelID,
 		"max_retries", r.maxRetries,
 	)
+
+	if r.onFailure != nil {
+		r.onFailure()
+	}
 }

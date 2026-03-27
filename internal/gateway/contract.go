@@ -47,6 +47,22 @@ func ParseSessionState(s string) (SessionState, bool) {
 	}
 }
 
+// validTransitions defines allowed state transitions.
+// Only these transitions are permitted: pending→active, pending→ended, active→ended.
+var validTransitions = map[SessionState]map[SessionState]bool{
+	SessionPending: {SessionActive: true, SessionEnded: true},
+	SessionActive:  {SessionEnded: true},
+}
+
+// ValidTransition reports whether transitioning from → to is allowed.
+func ValidTransition(from, to SessionState) bool {
+	targets, ok := validTransitions[from]
+	if !ok {
+		return false
+	}
+	return targets[to]
+}
+
 // NPCConfigMsg carries an NPC definition over the gRPC boundary.
 type NPCConfigMsg struct {
 	Name           string

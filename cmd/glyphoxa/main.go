@@ -184,10 +184,11 @@ func runFull(cfg *config.Config) int {
 	observeSrv := startObserveServer(cfg, application.ReadinessChecks()...)
 
 	// ── Discord commands (when audio provider is "discord") ──────────────────
+	var sessionMgr *app.SessionManager
 	if bot != nil {
 		perms := bot.Permissions()
 
-		sessionMgr := app.NewSessionManager(app.SessionManagerConfig{
+		sessionMgr = app.NewSessionManager(app.SessionManagerConfig{
 			Platform:     providers.Audio,
 			Config:       cfg,
 			Providers:    providers,
@@ -269,6 +270,13 @@ func runFull(cfg *config.Config) int {
 
 	if err := observeSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("observe server shutdown error", "err", err)
+	}
+
+	// Stop the active session (flush transcripts, consolidate memory, disconnect voice).
+	if sessionMgr != nil {
+		if err := sessionMgr.Stop(shutdownCtx); err != nil {
+			slog.Warn("session manager stop error", "err", err)
+		}
 	}
 
 	if bot != nil {
@@ -623,6 +631,25 @@ func runGateway(cfg *config.Config) int {
 	)
 
 	// ── Zombie session + orphan job cleanup ──────────────────────────────────
+	// purgeFromControllers removes cleaned-up sessions from every
+	// GatewaySessionController's in-memory maps so IsActive and Start
+	// work correctly after zombie cleanup.
+	purgeFromControllers := func(ids []string) {
+		if len(ids) == 0 {
+			return
+		}
+		sessionCtrlsMu.Lock()
+		ctrls := make([]*gw.GatewaySessionController, len(sessionCtrls))
+		copy(ctrls, sessionCtrls)
+		sessionCtrlsMu.Unlock()
+
+		for _, ctrl := range ctrls {
+			for _, id := range ids {
+				ctrl.RemoveSession(id)
+			}
+		}
+	}
+
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -631,18 +658,20 @@ func runGateway(cfg *config.Config) int {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if n, err := orch.CleanupZombies(ctx, 45*time.Second); err != nil {
+				if ids, err := orch.CleanupZombies(ctx, 45*time.Second); err != nil {
 					slog.Warn("zombie cleanup error", "err", err)
-				} else if n > 0 {
-					slog.Info("cleaned up zombie sessions", "count", n)
+				} else if len(ids) > 0 {
+					slog.Info("cleaned up zombie sessions", "count", len(ids))
+					purgeFromControllers(ids)
 				}
 				// Clean up sessions stuck in 'pending' beyond the dispatch
 				// timeout + buffer. These are sessions where dispatch failed
 				// but the transition to 'ended' was missed.
-				if n, err := orch.CleanupStalePending(ctx, 3*time.Minute); err != nil {
+				if ids, err := orch.CleanupStalePending(ctx, 3*time.Minute); err != nil {
 					slog.Warn("stale pending cleanup error", "err", err)
-				} else if n > 0 {
-					slog.Info("cleaned up stale pending sessions", "count", n)
+				} else if len(ids) > 0 {
+					slog.Info("cleaned up stale pending sessions", "count", len(ids))
+					purgeFromControllers(ids)
 				}
 				// Clean up orphaned K8s Jobs alongside zombie sessions.
 				if dispatcher != nil {

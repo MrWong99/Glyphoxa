@@ -214,12 +214,12 @@ func TestIntegration_SessionOrchestrator_Lifecycle(t *testing.T) {
 		})
 
 		// Cleanup with a very long maxAge — should not clean anything.
-		count, err := orch.CleanupStalePending(ctx, 24*time.Hour)
+		ids, err := orch.CleanupStalePending(ctx, 24*time.Hour)
 		if err != nil {
 			t.Fatalf("CleanupStalePending: %v", err)
 		}
-		// We can't assert count == 0 because other tests might have stale sessions.
-		_ = count
+		// We can't assert len(ids) == 0 because other tests might have stale sessions.
+		_ = ids
 	})
 
 	t.Run("cleanup zombies", func(t *testing.T) {
@@ -238,11 +238,11 @@ func TestIntegration_SessionOrchestrator_Lifecycle(t *testing.T) {
 		orch.RecordHeartbeat(ctx, sessionID)
 
 		// Cleanup with a very long timeout — should not clean our session.
-		count, err := orch.CleanupZombies(ctx, 24*time.Hour)
+		ids, err := orch.CleanupZombies(ctx, 24*time.Hour)
 		if err != nil {
 			t.Fatalf("CleanupZombies: %v", err)
 		}
-		_ = count
+		_ = ids
 
 		// Verify our session is still active.
 		session, _ := orch.GetSession(ctx, sessionID)

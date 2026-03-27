@@ -43,6 +43,7 @@ func NewPostgresOrchestrator(ctx context.Context, pool *pgxpool.Pool) (*Postgres
 var migrationFiles = []string{
 	"migrations/000001_sessions.up.sql",
 	"migrations/000002_usage_records.up.sql",
+	"migrations/000003_unique_active_guild.up.sql",
 }
 
 // ValidateAndCreate atomically creates a session, relying on database
@@ -64,28 +65,32 @@ func (p *PostgresOrchestrator) ValidateAndCreate(ctx context.Context, req Sessio
 }
 
 // Transition moves a session to the given state.
+// Invalid transitions (e.g., ended→active) are rejected. Transitions from
+// ended are silently ignored to make idempotent stop calls safe.
 func (p *PostgresOrchestrator) Transition(ctx context.Context, sessionID string, state gateway.SessionState, errMsg string) error {
-	var tag pgx.Rows
-	var err error
-
 	if state == gateway.SessionEnded {
-		tag, err = p.pool.Query(ctx, `
-			UPDATE sessions SET state = $2, error = $3, ended_at = now()
-			WHERE id = $1
-		`, sessionID, state.String(), errMsg)
-	} else {
-		tag, err = p.pool.Query(ctx, `
-			UPDATE sessions SET state = $2
-			WHERE id = $1
-		`, sessionID, state.String())
+		// Use WHERE state != 'ended' to prevent re-opening ended sessions
+		// and to make idempotent stop calls safe (no error on double-end).
+		tag, err := p.pool.Exec(ctx, `
+			UPDATE sessions SET state = 'ended', error = $2, ended_at = now()
+			WHERE id = $1 AND state != 'ended'
+		`, sessionID, errMsg)
+		if err != nil {
+			return fmt.Errorf("sessionorch: transition session %q to ended: %w", sessionID, err)
+		}
+		_ = tag
+		return nil
 	}
-	if tag != nil {
-		tag.Close()
-	}
+
+	// For non-ended transitions, validate the transition is allowed.
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE sessions SET state = $2, last_heartbeat = CASE WHEN $2 = 'active' THEN now() ELSE last_heartbeat END
+		WHERE id = $1 AND state != 'ended'
+	`, sessionID, state.String())
 	if err != nil {
 		return fmt.Errorf("sessionorch: transition session %q to %s: %w", sessionID, state, err)
 	}
-
+	_ = tag
 	return nil
 }
 
@@ -142,43 +147,75 @@ func (p *PostgresOrchestrator) GetSession(ctx context.Context, sessionID string)
 }
 
 // CleanupZombies transitions sessions with stale heartbeats to ended.
-func (p *PostgresOrchestrator) CleanupZombies(ctx context.Context, timeout time.Duration) (int, error) {
-	tag, err := p.pool.Exec(ctx, `
+// Also catches active sessions with NULL heartbeat (worker died before first
+// heartbeat tick) that are older than the timeout.
+// Returns the IDs of cleaned-up sessions.
+func (p *PostgresOrchestrator) CleanupZombies(ctx context.Context, timeout time.Duration) ([]string, error) {
+	rows, err := p.pool.Query(ctx, `
 		UPDATE sessions
 		SET state = 'ended', error = 'heartbeat timeout', ended_at = now()
 		WHERE state != 'ended'
-		  AND last_heartbeat IS NOT NULL
-		  AND last_heartbeat < now() - $1::interval
+		  AND (
+		    (last_heartbeat IS NOT NULL AND last_heartbeat < now() - $1::interval)
+		    OR (last_heartbeat IS NULL AND state != 'pending' AND started_at < now() - $1::interval)
+		  )
+		RETURNING id
 	`, timeout.String())
 	if err != nil {
-		return 0, fmt.Errorf("sessionorch: cleanup zombies: %w", err)
+		return nil, fmt.Errorf("sessionorch: cleanup zombies: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("sessionorch: scan zombie id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sessionorch: cleanup zombies rows: %w", err)
 	}
 
-	count := int(tag.RowsAffected())
-	if count > 0 {
-		slog.Warn("sessionorch: cleaned up zombie sessions", "count", count)
+	if len(ids) > 0 {
+		slog.Warn("sessionorch: cleaned up zombie sessions", "count", len(ids), "ids", ids)
 	}
-	return count, nil
+	return ids, nil
 }
 
 // CleanupStalePending transitions sessions stuck in 'pending' state
 // older than maxAge to ended.
-func (p *PostgresOrchestrator) CleanupStalePending(ctx context.Context, maxAge time.Duration) (int, error) {
-	tag, err := p.pool.Exec(ctx, `
+// Returns the IDs of cleaned-up sessions.
+func (p *PostgresOrchestrator) CleanupStalePending(ctx context.Context, maxAge time.Duration) ([]string, error) {
+	rows, err := p.pool.Query(ctx, `
 		UPDATE sessions
 		SET state = 'ended', error = 'stale pending: dispatch timeout', ended_at = now()
 		WHERE state = 'pending'
 		  AND started_at < now() - $1::interval
+		RETURNING id
 	`, maxAge.String())
 	if err != nil {
-		return 0, fmt.Errorf("sessionorch: cleanup stale pending: %w", err)
+		return nil, fmt.Errorf("sessionorch: cleanup stale pending: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("sessionorch: scan stale pending id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sessionorch: cleanup stale pending rows: %w", err)
 	}
 
-	count := int(tag.RowsAffected())
-	if count > 0 {
-		slog.Warn("sessionorch: cleaned up stale pending sessions", "count", count)
+	if len(ids) > 0 {
+		slog.Warn("sessionorch: cleaned up stale pending sessions", "count", len(ids), "ids", ids)
 	}
-	return count, nil
+	return ids, nil
 }
 
 // scanSessions reads session rows into a slice.

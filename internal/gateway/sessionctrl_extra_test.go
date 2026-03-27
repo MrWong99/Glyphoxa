@@ -482,3 +482,71 @@ func TestGatewaySessionController_CleanupVoiceBridge_NoCleanup(t *testing.T) {
 	// Should not panic when no cleanup is registered and no bridgeSrv.
 	ctrl.cleanupVoiceBridge("nonexistent")
 }
+
+func TestGatewaySessionController_RemoveSession(t *testing.T) {
+	t.Parallel()
+
+	orch := newMockOrch()
+	ctrl := NewGatewaySessionController(orch, nil, "tenant-1", "campaign-1", config.TierShared)
+
+	ctx := context.Background()
+
+	// Start a session.
+	orch.sessionID = "session-zombie"
+	err := ctrl.Start(ctx, SessionStartRequest{GuildID: "guild-1", ChannelID: "chan-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if !ctrl.IsActive("guild-1") {
+		t.Fatal("expected session to be active")
+	}
+
+	// Simulate zombie cleanup removing the session.
+	ctrl.RemoveSession("session-zombie")
+
+	if ctrl.IsActive("guild-1") {
+		t.Error("expected session to be inactive after RemoveSession")
+	}
+
+	// Should be able to start a new session for the same guild.
+	orch.sessionID = "session-new"
+	err = ctrl.Start(ctx, SessionStartRequest{GuildID: "guild-1", ChannelID: "chan-2", UserID: "user-2"})
+	if err != nil {
+		t.Errorf("expected Start to succeed after RemoveSession, got: %v", err)
+	}
+}
+
+func TestGatewaySessionController_ConcurrentStop(t *testing.T) {
+	t.Parallel()
+
+	orch := newMockOrch()
+	ctrl := NewGatewaySessionController(orch, nil, "tenant-1", "campaign-1", config.TierShared)
+
+	ctx := context.Background()
+
+	// Start a session.
+	orch.sessionID = "session-concurrent"
+	err := ctrl.Start(ctx, SessionStartRequest{GuildID: "guild-1", ChannelID: "chan-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Stop concurrently — both should succeed without panic.
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errs <- ctrl.Stop(ctx, "session-concurrent")
+		}()
+	}
+
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Stop error: %v", err)
+		}
+	}
+
+	if ctrl.IsActive("guild-1") {
+		t.Error("expected session to be inactive after concurrent stops")
+	}
+}
