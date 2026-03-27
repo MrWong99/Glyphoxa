@@ -30,19 +30,8 @@ import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCampaign, useUpdateCampaign, useDeleteCampaign, useHasRole } from "@/lib/hooks";
 import { NPCList } from "./npcs/npc-list";
 import { CampaignSessions } from "./sessions";
-import type { Campaign, GameSystem } from "@/lib/types";
-
-const gameSystems: GameSystem[] = [
-  "D&D 5e",
-  "D&D 5e (2024)",
-  "Pathfinder 2e",
-  "Das Schwarze Auge",
-  "Call of Cthulhu",
-  "Shadowrun",
-  "Fate Core",
-  "Savage Worlds",
-  "Other",
-];
+import { GAME_SYSTEMS } from "@/lib/types";
+import type { Campaign } from "@/lib/types";
 
 function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId: string }) {
   const router = useRouter();
@@ -142,7 +131,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {gameSystems.map((system) => (
+                    {GAME_SYSTEMS.map((system) => (
                       <SelectItem key={system} value={system}>
                         {system}
                       </SelectItem>

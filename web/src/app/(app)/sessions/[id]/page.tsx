@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState, useEffect } from "react";
+import { use, useMemo } from "react";
 import Link from "next/link";
 import { Clock, Radio, Users, Server, MessageSquare } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Breadcrumbs } from "@/components/breadcrumbs";
+import { SessionStatusBadge } from "@/components/session-status-badge";
+import { LiveTimer } from "@/components/live-timer";
 import { useSession, useTranscript, useStopSession } from "@/lib/hooks";
 import { cn, formatDuration } from "@/lib/utils";
 
@@ -26,26 +28,6 @@ function formatLongDate(dateStr: string): string {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function computeElapsedTime(startedAt: string): string {
-  const start = new Date(startedAt).getTime();
-  const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
-  const h = Math.floor(diff / 3600);
-  const m = Math.floor((diff % 3600) / 60);
-  const s = diff % 60;
-  return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-}
-
-function LiveSessionTimer({ startedAt }: { startedAt: string }) {
-  const [elapsed, setElapsed] = useState(() => computeElapsedTime(startedAt));
-
-  useEffect(() => {
-    const interval = setInterval(() => setElapsed(computeElapsedTime(startedAt)), 1000);
-    return () => clearInterval(interval);
-  }, [startedAt]);
-
-  return <span className="font-mono tabular-nums">{elapsed}</span>;
 }
 
 const colorPool = [
@@ -152,19 +134,7 @@ export default function SessionDetailPage({
             </div>
             <div>
               <p className="text-xs text-muted-foreground">Status</p>
-              <Badge
-                variant={
-                  isActive
-                    ? "default"
-                    : session.status === "ended"
-                      ? "secondary"
-                      : "destructive"
-                }
-                className={isActive ? "bg-green-600 hover:bg-green-600" : undefined}
-              >
-                {isActive && <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-white animate-pulse" />}
-                {session.status}
-              </Badge>
+              <SessionStatusBadge status={session.status} />
             </div>
           </CardContent>
         </Card>
@@ -177,7 +147,7 @@ export default function SessionDetailPage({
               <p className="text-xs text-muted-foreground">Duration</p>
               <p className="font-medium">
                 {isActive ? (
-                  <LiveSessionTimer startedAt={session.started_at} />
+                  <LiveTimer startedAt={session.started_at} />
                 ) : (
                   formatDuration(session.duration_seconds)
                 )}
