@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **25 findings** were identified: 2 Critical, 7 High, 12 Medium, and 4 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **31 findings** were identified: 3 Critical, 9 High, 14 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -129,11 +129,11 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 
 #### 3.1 No Echo Cancellation / Self-Hearing Guard
 
-- **Severity:** High
-- **Location:** `internal/session/runtime.go`, `internal/engine/cascade/cascade.go`
-- **Description:** There is no mechanism to prevent the NPC's own TTS audio output (played into the Discord voice channel) from being picked up by VAD and re-transcribed by STT. In Discord, the bot sends opus frames and receives opus frames from all participants. While Discord *usually* excludes the bot's own audio from the receive stream, this is not guaranteed in all configurations (especially with audio bridges and WebRTC). There is no explicit NPC-audio-is-playing flag to suppress VAD during TTS playback.
-- **Impact:** In edge cases (especially distributed mode with audio bridges), the NPC could hear itself speak, transcribe its own output, and enter a feedback loop. This would be perceived as the NPC "talking to itself."
-- **Suggested fix:** Add a "NPC is speaking" flag that suppresses VAD processing while TTS audio is being played. The mixer already tracks active playback — connect this to the VAD input gate.
+- **Severity:** Critical
+- **Location:** `pkg/audio/discord/connection.go:99-160`, `internal/app/audio_pipeline.go:86-94`
+- **Description:** The Discord connection's `ReceiveOpusFrame` creates an input stream for **every** user ID that sends audio, including the bot's own user ID. There is no filtering of the bot's own user ID anywhere in the pipeline. `audioPipeline.Start()` iterates `conn.InputStreams()` and starts a VAD/STT worker for every participant, including the bot itself. Similarly, `handleParticipantChange` starts a worker for every `EventJoin`, with no bot-ID exclusion. The gRPC bridge has the same gap.
+- **Impact:** The NPC's synthesized speech is decoded, fed into VAD, transcribed by STT, routed to an NPC agent, and generates a response — creating a feedback loop where the NPC talks to itself indefinitely. While Discord *usually* doesn't route bot audio back, this is not guaranteed (especially with audio bridges in distributed mode).
+- **Suggested fix:** Store the bot's own user ID in the `Connection` struct and skip it in `ReceiveOpusFrame`. Alternatively, filter in `audioPipeline.startWorker()` by checking the participant ID against a known bot ID.
 
 #### 3.2 Cascade Engine Background Goroutine Leak on Fast Close
 
@@ -150,6 +150,46 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Description:** The gRPC audio bridge uses a bidirectional stream where frames are sent/received sequentially. gRPC guarantees in-order delivery on a single stream, so frame ordering is preserved in the normal case. However, if the stream reconnects (e.g., after a transient network error), frames sent during the reconnection window are lost with no indication to the pipeline.
 - **Impact:** Brief audio gaps during gRPC stream reconnection, which could cause STT to produce garbled transcriptions for that segment.
 - **Suggested fix:** Add sequence numbers to audio frames and detect/log gaps on the receiving end. Consider buffering a small window for reorder tolerance.
+
+#### 3.4 Data Race Between Flush() and sendLoop in gRPC Bridge
+
+- **Severity:** High
+- **Location:** `pkg/audio/grpcbridge/connection.go:194-198`, `pkg/audio/grpcbridge/connection.go:313-324`
+- **Description:** `Flush()` drains the output channel concurrently while `sendLoop()` also reads from it. Both goroutines race on `<-c.output`, causing frames to be non-deterministically consumed by either. Frames consumed by `Flush()` are silently discarded, while `sendLoop` may have already buffered a partial opus frame from a previous read.
+- **Impact:** During barge-in, the race produces audio glitches or corruption on the gateway side. A frame read by Flush is lost; sendLoop may encode against stale partial buffer data.
+- **Suggested fix:** Remove the local output drain from `Flush()` and let `sendLoop` do both the channel drain and buffer reset atomically via the existing `flushCh` signal.
+
+#### 3.5 STT Session Leak on Rapid VAD Speech Start/End Cycles
+
+- **Severity:** High
+- **Location:** `internal/app/audio_pipeline.go:203-238`
+- **Description:** When `VADSpeechStart` fires, the code opens a new STT session and launches a `collectAndRoute` goroutine. If a second `VADSpeechStart` fires before a corresponding `VADSpeechEnd` (e.g., VAD glitch), the `sttSession` variable is overwritten without closing the previous session. The old session's WebSocket/HTTP connection is leaked.
+- **Impact:** Under rapid false-positive VAD triggers, this could leak many STT sessions (network connections, server-side state), causing resource exhaustion.
+- **Suggested fix:** Before opening a new STT session on `VADSpeechStart`, close the existing one if non-nil.
+
+#### 3.6 TTS/LLM Fallback Only Covers Stream Setup, Not Mid-Stream Failures
+
+- **Severity:** Medium
+- **Location:** `internal/resilience/tts_fallback.go:33-37`, `internal/resilience/llm_fallback.go:43`
+- **Description:** The fallback wrappers only apply failover to the initial `SynthesizeStream`/`StreamCompletion` call. Mid-stream errors (WebSocket disconnect, API timeout) close the audio channel prematurely. The text that was already consumed from the input channel cannot be re-sent to a fallback provider because channels are one-read. The circuit breaker won't record this as a failure since the initial call succeeded.
+- **Impact:** If ElevenLabs drops the WebSocket mid-synthesis, the NPC's response is truncated with no automatic recovery to a fallback provider.
+- **Suggested fix:** Buffer the text channel's contents so they can be replayed to a fallback provider on mid-stream failure. Have the cascade engine detect stream errors and retry with a different provider.
+
+#### 3.7 voiceBridgeReceiver.frameCount Data Race
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/voicebridge.go:33,45-46,156`
+- **Description:** `frameCount` (type `uint64`) is incremented from the disgo voice receiver goroutine but read from the cleanup goroutine with no synchronization. This is a data race detectable by `-race`.
+- **Impact:** Go race detector would flag this. Violates the project's "race detector always on" convention.
+- **Suggested fix:** Change `frameCount` to `atomic.Uint64`.
+
+#### 3.8 Consolidator Summary Skip Heuristic Drops Legitimate Messages
+
+- **Severity:** Low
+- **Location:** `internal/session/consolidator.go:158`
+- **Description:** The consolidator skips "synthetic summary messages" by checking `m.Content[0] == '['`. Any legitimate user message starting with `[` (e.g., "[OOC] hey guys", "[laughs nervously]", "[attacks the goblin]") is incorrectly skipped and permanently lost from the session store.
+- **Impact:** Transcript entries starting with `[` are silently lost. Common tabletop RPG conventions include bracketed OOC messages, action descriptions, and emotes — all would be dropped.
+- **Suggested fix:** Use a more specific prefix check, e.g., `strings.HasPrefix(m.Content, "[Previous conversation summary]")`.
 
 ---
 
@@ -264,9 +304,14 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 2.6 | UpdateUser not scoped by tenant | Medium | Multi-Tenancy |
 | 2.7 | Gateway admin API open when key empty | Medium | Multi-Tenancy |
 | 2.8 | Worker gRPC calls not tenant-scoped | Medium | Multi-Tenancy |
-| 3.1 | No echo cancellation | High | Voice Pipeline |
+| 3.1 | No echo cancellation — NPC self-talk loop | Critical | Voice Pipeline |
 | 3.2 | Cascade engine goroutine leak | Medium | Voice Pipeline |
 | 3.3 | Audio frame gaps on stream reconnect | Medium | Voice Pipeline |
+| 3.4 | Flush/sendLoop data race in gRPC bridge | High | Voice Pipeline |
+| 3.5 | STT session leak on rapid VAD cycles | High | Voice Pipeline |
+| 3.6 | TTS/LLM fallback no mid-stream recovery | Medium | Voice Pipeline |
+| 3.7 | voiceBridgeReceiver frameCount data race | Medium | Voice Pipeline |
+| 3.8 | Consolidator drops bracketed messages | Low | Voice Pipeline |
 | 4.1 | Non-atomic invite acceptance | Medium | Data Consistency |
 | 4.2 | Campaign deletion no cascade | Medium | Data Consistency |
 | 5.1 | CORS defaults to allow-all | High | Config & Startup |
@@ -278,10 +323,10 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 7.3 | JWT in redirect URL | High | Security |
 | 7.4 | No JWT revocation | Medium | Security |
 
-**Critical (2):** 1.2, 2.1 — require immediate attention
-**High (7):** 1.1, 2.4, 2.5, 3.1, 5.1, 7.1, 7.3 — should be addressed before production deployment
-**Medium (12):** 1.3, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 4.1, 4.2, 5.2, 7.4 — should be addressed in the next sprint
-**Low (4):** 1.4, 6.1, 6.2, 7.2 — address opportunistically
+**Critical (3):** 1.2, 2.1, 3.1 — require immediate attention
+**High (9):** 1.1, 2.4, 2.5, 3.4, 3.5, 5.1, 7.1, 7.3 — should be addressed before production deployment
+**Medium (14):** 1.3, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.2, 7.4 — should be addressed in the next sprint
+**Low (5):** 1.4, 3.8, 6.1, 6.2, 7.2 — address opportunistically
 
 ---
 
