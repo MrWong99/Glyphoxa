@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **51 findings** were identified: 4 Critical, 14 High, 28 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **55 findings** were identified: 4 Critical, 17 High, 29 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -243,13 +243,45 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** Invite reuse, inconsistent user-tenant-role state after partial failure.
 - **Suggested fix:** Wrap the three operations in a single database transaction.
 
-#### 4.2 Campaign Deletion Doesn't Cascade to Lore/NPC Links
+#### 4.2 Zero Transaction Usage Across Entire Web Store
+
+- **Severity:** High
+- **Location:** `internal/web/store.go` (entire file)
+- **Description:** The `Store` type wraps a `*pgxpool.Pool` but never calls `pool.Begin()` or uses `pgx.Tx` anywhere. Every multi-step operation runs as individual auto-committed statements. All read-modify-write flows (campaign update, lore update, NPC update, invite acceptance) are subject to TOCTOU races under concurrent requests.
+- **Impact:** A second concurrent write can overwrite the first without seeing its changes. This affects every handler that reads, modifies in Go, then writes back.
+- **Suggested fix:** For read-modify-write flows, use `SELECT ... FOR UPDATE` inside a transaction, or optimistic concurrency control via `updated_at` versioning in the `WHERE` clause.
+
+#### 4.3 Onboarding Creates Gateway Tenant Without Compensating Transaction
+
+- **Severity:** High
+- **Location:** `internal/web/handlers_onboarding.go:42-52`
+- **Description:** `handleOnboardingComplete` creates a tenant via gRPC to the gateway, then assigns the user to that tenant in the web DB. If step 2 fails, the tenant exists in the gateway but no user is assigned to it. There is no rollback.
+- **Impact:** Orphaned tenant in the gateway with no associated user. The user cannot retry (gateway rejects duplicate ID) and the tenant cannot be managed (no `tenant_admin`).
+- **Suggested fix:** Add compensating logic: if `UpdateUserTenant` fails, call `DeleteTenant` on the gateway.
+
+#### 4.4 Campaign Deletion Doesn't Cascade to NPCs/Lore/Links
+
+- **Severity:** High
+- **Location:** `internal/web/store.go:405-416`
+- **Description:** `DeleteCampaign` soft-deletes the campaign but does not cascade to dependent resources. NPCs remain queryable via `npcstore.List(campaignID)` (no `deleted_at` concept). Campaign-NPC links, lore documents, and knowledge graph entities persist. The gateway's `tenants.campaign_id` can still reference the deleted campaign, allowing new sessions to start against it.
+- **Impact:** Deleted campaigns become zombies — invisible in the web UI but their NPCs/lore/knowledge persist and can be referenced by the gateway to start sessions.
+- **Suggested fix:** Add a transaction that also deletes/soft-deletes NPCs, campaign_npcs links, and lore documents. Validate campaign existence in `GatewaySessionController.Start`.
+
+#### 4.5 Gateway tenant.campaign_id Can Reference Deleted Campaign
 
 - **Severity:** Medium
-- **Location:** `internal/web/store.go:405-416`
-- **Description:** `DeleteCampaign` performs a soft-delete (`SET deleted_at = now()`) but does not clean up dependent resources: lore documents (`mgmt.lore_documents`), campaign-NPC links (`mgmt.campaign_npcs`), and NPC definitions tied to the campaign. These orphaned records consume storage and could resurface if a campaign ID is reused.
-- **Impact:** Orphaned data after campaign deletion. Not a data corruption issue but a data hygiene concern.
-- **Suggested fix:** Either cascade the soft-delete to dependent tables, or add a cleanup sweep. For hard references, use ON DELETE CASCADE in the FK definitions.
+- **Location:** `internal/gateway/adminstore_postgres.go:62-65`, `internal/gateway/sessionctrl.go:162-164`
+- **Description:** The `tenants.campaign_id` column has no FK to `mgmt.campaigns`. When a campaign is soft-deleted via the web service, the gateway still references it. `GatewaySessionController.Start` uses it as a fallback without validating it exists.
+- **Impact:** Sessions can be started against soft-deleted campaigns.
+- **Suggested fix:** Add a validation step that checks campaign existence via `CampaignReader.Get` before creating the session.
+
+#### 4.6 Quota Check and Session Creation Not Atomic
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/usage/postgres.go:69-84`, `internal/gateway/sessionorch/postgres.go:51-64`
+- **Description:** `CheckQuota` and `ValidateAndCreate` are separate operations with no shared transaction. Between the check and the insert, a concurrent request could consume the remaining quota.
+- **Impact:** Under concurrent session starts, a tenant could exceed their monthly session hour quota.
+- **Suggested fix:** Combine in a single transaction with `SELECT ... FOR UPDATE` on the usage record, or use a database advisory lock.
 
 ---
 
@@ -462,7 +494,11 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 3.7 | voiceBridgeReceiver frameCount data race | Medium | Voice Pipeline |
 | 3.8 | Consolidator drops bracketed messages | Low | Voice Pipeline |
 | 4.1 | Non-atomic invite acceptance | Medium | Data Consistency |
-| 4.2 | Campaign deletion no cascade | Medium | Data Consistency |
+| 4.2 | Zero transaction usage in web Store | High | Data Consistency |
+| 4.3 | Onboarding orphans tenant on failure | High | Data Consistency |
+| 4.4 | Campaign deletion no cascade to NPCs/lore | High | Data Consistency |
+| 4.5 | Gateway campaign_id references deleted campaign | Medium | Data Consistency |
+| 4.6 | Quota check and session create not atomic | Medium | Data Consistency |
 | 5.1 | CORS defaults to allow-all | High | Config & Startup |
 | 5.2 | ManagementService gRPC unauthenticated by default | Critical | Config & Startup |
 | 5.3 | No API key validation for cloud providers | High | Config & Startup |
@@ -486,8 +522,8 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 7.7 | WebRTC signaling no authentication | Medium | Security |
 
 **Critical (4):** 1.2, 2.1, 3.1, 5.2 — require immediate attention
-**High (14):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 5.3, 6.2, 7.1, 7.3, 7.4, 7.5 — address before production
-**Medium (28):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.4, 5.5, 5.6, 5.7, 5.8, 6.3, 6.4, 6.5, 7.6, 7.7 — next sprint
+**High (17):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 4.2, 4.3, 4.4, 5.1, 5.3, 6.2, 7.1, 7.3, 7.4, 7.5 — address before production
+**Medium (29):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.5, 4.6, 5.4, 5.5, 5.6, 5.7, 5.8, 6.3, 6.4, 6.5, 7.6, 7.7 — next sprint
 **Low (5):** 1.9, 3.8, 6.1, 6.6, 7.2 — address opportunistically
 
 ---
