@@ -17,19 +17,7 @@ import {
 } from "@/components/ui/select";
 import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useCreateCampaign } from "@/lib/hooks";
-import type { GameSystem } from "@/lib/types";
-
-const gameSystems: GameSystem[] = [
-  "D&D 5e",
-  "D&D 5e (2024)",
-  "Pathfinder 2e",
-  "Das Schwarze Auge",
-  "Call of Cthulhu",
-  "Shadowrun",
-  "Fate Core",
-  "Savage Worlds",
-  "Other",
-];
+import { GAME_SYSTEMS } from "@/lib/types";
 
 export default function NewCampaignPage() {
   const router = useRouter();
@@ -101,7 +89,7 @@ export default function NewCampaignPage() {
                   <SelectValue placeholder="Select a game system" />
                 </SelectTrigger>
                 <SelectContent>
-                  {gameSystems.map((system) => (
+                  {GAME_SYSTEMS.map((system) => (
                     <SelectItem key={system} value={system}>
                       {system}
                     </SelectItem>

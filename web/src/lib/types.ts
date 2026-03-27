@@ -188,3 +188,15 @@ export type GameSystem =
   | "Fate Core"
   | "Savage Worlds"
   | "Other";
+
+export const GAME_SYSTEMS: GameSystem[] = [
+  "D&D 5e",
+  "D&D 5e (2024)",
+  "Pathfinder 2e",
+  "Das Schwarze Auge",
+  "Call of Cthulhu",
+  "Shadowrun",
+  "Fate Core",
+  "Savage Worlds",
+  "Other",
+];

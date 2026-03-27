@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { ScrollText, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -13,6 +12,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Breadcrumbs } from "@/components/breadcrumbs";
+import { SessionStatusBadge } from "@/components/session-status-badge";
 import { useSessions } from "@/lib/hooks";
 import { formatDuration, formatDate } from "@/lib/utils";
 
@@ -90,21 +90,7 @@ export default function SessionsPage() {
                       {formatDuration(session.duration_seconds)}
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={
-                          session.status === "active"
-                            ? "default"
-                            : session.status === "ended"
-                              ? "secondary"
-                              : "destructive"
-                        }
-                        className={session.status === "active" ? "bg-green-600 hover:bg-green-600" : undefined}
-                      >
-                        {session.status === "active" && (
-                          <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
-                        )}
-                        {session.status}
-                      </Badge>
+                      <SessionStatusBadge status={session.status} />
                     </TableCell>
                     <TableCell className="max-w-48 truncate text-muted-foreground">
                       {session.npc_names.join(", ")}
