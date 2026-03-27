@@ -29,7 +29,7 @@ func (s *Server) handleOnboardingComplete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !validTenantID.MatchString(req.TenantID) {
-		writeError(w, http.StatusBadRequest, "invalid_id", "tenant_id must be alphanumeric with optional hyphens/underscores")
+		writeError(w, http.StatusBadRequest, "invalid_id", "tenant_id must start with a lowercase letter and contain only lowercase alphanumeric and underscores")
 		return
 	}
 	if req.DisplayName == "" {

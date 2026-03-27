@@ -17,9 +17,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// validTenantID matches lowercase alphanumeric IDs with optional hyphens/
-// underscores — the characters safe for use in a PostgreSQL schema name.
-var validTenantID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
+// validTenantID enforces safe tenant IDs that can be used as PostgreSQL
+// schema names (tenant_<id>). Must match the canonical pattern in
+// config.validTenantID: starts with a lowercase letter, followed by
+// lowercase alphanumeric and underscores, max 63 chars.
+var validTenantID = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS

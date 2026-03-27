@@ -66,19 +66,46 @@ func (s *PostgresStore) GetUsage(ctx context.Context, tenantID string, period ti
 }
 
 // CheckQuota checks whether the tenant can start a new session.
+// Uses SELECT FOR UPDATE inside a transaction to serialize concurrent
+// quota checks for the same tenant, preventing TOCTOU races where two
+// sessions both pass the check before either records usage.
 func (s *PostgresStore) CheckQuota(ctx context.Context, tenantID string, quota QuotaConfig) error {
 	if quota.MonthlySessionHours <= 0 {
 		return nil // unlimited
 	}
 
 	period := CurrentPeriod()
-	rec, err := s.GetUsage(ctx, tenantID, period)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("usage: begin quota check: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Ensure a row exists for this tenant+period so FOR UPDATE has
+	// something to lock.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO usage_records (tenant_id, period, session_hours, llm_tokens, stt_seconds, tts_chars)
+		VALUES ($1, $2, 0, 0, 0, 0)
+		ON CONFLICT (tenant_id, period) DO NOTHING
+	`, tenantID, period); err != nil {
+		return fmt.Errorf("usage: ensure usage row: %w", err)
+	}
+
+	// Lock the row to serialize concurrent quota checks for this tenant.
+	var hours float64
+	err = tx.QueryRow(ctx, `
+		SELECT session_hours FROM usage_records
+		WHERE tenant_id = $1 AND period = $2
+		FOR UPDATE
+	`, tenantID, period).Scan(&hours)
 	if err != nil {
 		return fmt.Errorf("usage: check quota: %w", err)
 	}
 
-	if rec.SessionHours >= quota.MonthlySessionHours {
+	if hours >= quota.MonthlySessionHours {
 		return ErrQuotaExceeded
 	}
-	return nil
+
+	return tx.Commit(ctx)
 }

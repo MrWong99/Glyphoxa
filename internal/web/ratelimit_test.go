@@ -145,16 +145,21 @@ func TestClientIP(t *testing.T) {
 			wantIP: "10.0.0.1",
 		},
 		{
-			name:   "x-forwarded-for",
+			name:   "xff ignored for rate limiting",
 			xff:    "203.0.113.50, 70.41.3.18",
 			remote: "10.0.0.1:8080",
-			wantIP: "203.0.113.50",
+			wantIP: "10.0.0.1", // uses RemoteAddr, not XFF
 		},
 		{
-			name:   "x-real-ip",
+			name:   "x-real-ip ignored for rate limiting",
 			xri:    "203.0.113.100",
 			remote: "10.0.0.1:8080",
-			wantIP: "203.0.113.100",
+			wantIP: "10.0.0.1", // uses RemoteAddr, not X-Real-IP
+		},
+		{
+			name:   "remote addr without port",
+			remote: "10.0.0.1",
+			wantIP: "10.0.0.1",
 		},
 	}
 
