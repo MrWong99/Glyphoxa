@@ -244,8 +244,8 @@ func TestQuotaGuard_CleanupZombies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CleanupZombies: %v", err)
 	}
-	if cleaned != 0 {
-		t.Errorf("CleanupZombies = %d, want 0 (heartbeat is recent)", cleaned)
+	if len(cleaned) != 0 {
+		t.Errorf("CleanupZombies = %d, want 0 (heartbeat is recent)", len(cleaned))
 	}
 }
 
@@ -275,8 +275,8 @@ func TestQuotaGuard_CleanupStalePending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CleanupStalePending: %v", err)
 	}
-	if cleaned != 0 {
-		t.Errorf("CleanupStalePending = %d, want 0 (session is recent)", cleaned)
+	if len(cleaned) != 0 {
+		t.Errorf("CleanupStalePending = %d, want 0 (session is recent)", len(cleaned))
 	}
 }
 

@@ -1,6 +1,8 @@
 package gateway
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestSessionState_String(t *testing.T) {
 	t.Parallel()
@@ -52,6 +54,35 @@ func TestParseSessionState(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ParseSessionState(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidTransition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		from SessionState
+		to   SessionState
+		want bool
+	}{
+		{"pending→active", SessionPending, SessionActive, true},
+		{"pending→ended", SessionPending, SessionEnded, true},
+		{"active→ended", SessionActive, SessionEnded, true},
+		{"ended→active", SessionEnded, SessionActive, false},
+		{"ended→pending", SessionEnded, SessionPending, false},
+		{"active→pending", SessionActive, SessionPending, false},
+		{"pending→pending", SessionPending, SessionPending, false},
+		{"ended→ended", SessionEnded, SessionEnded, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ValidTransition(tt.from, tt.to); got != tt.want {
+				t.Errorf("ValidTransition(%v, %v) = %v, want %v", tt.from, tt.to, got, tt.want)
 			}
 		})
 	}

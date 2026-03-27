@@ -327,27 +327,31 @@ func TestMemoryOrchestrator_CleanupZombies(t *testing.T) {
 		LicenseTier: config.TierShared,
 	})
 
-	// No heartbeat yet — should not be cleaned up (heartbeat is nil).
-	count, err := m.CleanupZombies(ctx, 1*time.Second)
+	// Session is still pending with nil heartbeat — should not be cleaned up.
+	ids, err := m.CleanupZombies(ctx, 1*time.Second)
 	if err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("got %d cleaned up, want 0 (no heartbeat set)", count)
+	if len(ids) != 0 {
+		t.Fatalf("got %d cleaned up, want 0 (pending sessions skipped)", len(ids))
 	}
 
-	// Set heartbeat in the past.
+	// Transition to active and set heartbeat in the past.
+	_ = m.Transition(ctx, id, gateway.SessionActive, "")
 	m.mu.Lock()
 	past := time.Now().UTC().Add(-10 * time.Second)
 	m.sessions[id].LastHeartbeat = &past
 	m.mu.Unlock()
 
-	count, err = m.CleanupZombies(ctx, 5*time.Second)
+	ids, err = m.CleanupZombies(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("got %d cleaned up, want 1", count)
+	if len(ids) != 1 {
+		t.Fatalf("got %d cleaned up, want 1", len(ids))
+	}
+	if ids[0] != id {
+		t.Errorf("got id %q, want %q", ids[0], id)
 	}
 
 	s, _ := m.GetSession(ctx, id)
@@ -379,12 +383,12 @@ func TestMemoryOrchestrator_CleanupStalePending(t *testing.T) {
 		m.sessions[id].StartedAt = time.Now().UTC().Add(-5 * time.Minute)
 		m.mu.Unlock()
 
-		count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+		ids, err := m.CleanupStalePending(ctx, 2*time.Minute)
 		if err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if count != 1 {
-			t.Fatalf("got %d cleaned up, want 1", count)
+		if len(ids) != 1 {
+			t.Fatalf("got %d cleaned up, want 1", len(ids))
 		}
 
 		s, _ := m.GetSession(ctx, id)
@@ -409,12 +413,12 @@ func TestMemoryOrchestrator_CleanupStalePending(t *testing.T) {
 		})
 
 		// Session was just created — should not be cleaned up.
-		count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+		ids, err := m.CleanupStalePending(ctx, 2*time.Minute)
 		if err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if count != 0 {
-			t.Fatalf("got %d cleaned up, want 0", count)
+		if len(ids) != 0 {
+			t.Fatalf("got %d cleaned up, want 0", len(ids))
 		}
 	})
 
@@ -447,12 +451,12 @@ func TestMemoryOrchestrator_CleanupStalePending(t *testing.T) {
 		m.sessions[id2].StartedAt = old
 		m.mu.Unlock()
 
-		count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+		ids, err := m.CleanupStalePending(ctx, 2*time.Minute)
 		if err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if count != 0 {
-			t.Fatalf("got %d cleaned up, want 0 (neither is pending)", count)
+		if len(ids) != 0 {
+			t.Fatalf("got %d cleaned up, want 0 (neither is pending)", len(ids))
 		}
 	})
 
@@ -874,12 +878,12 @@ func TestMemoryOrchestrator_CleanupZombies_MixedSessions(t *testing.T) {
 		m.sessions[id4].State = gateway.SessionEnded
 		m.mu.Unlock()
 
-		count, err := m.CleanupZombies(ctx, 10*time.Second)
+		ids, err := m.CleanupZombies(ctx, 10*time.Second)
 		if err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if count != 1 {
-			t.Fatalf("got %d cleaned up, want 1", count)
+		if len(ids) != 1 {
+			t.Fatalf("got %d cleaned up, want 1", len(ids))
 		}
 
 		// Verify id1 was ended.
@@ -931,6 +935,163 @@ func TestMemoryOrchestrator_CleanupZombies_MixedSessions(t *testing.T) {
 	})
 }
 
+func TestMemoryOrchestrator_CleanupZombies_NullHeartbeatActiveSession(t *testing.T) {
+	t.Parallel()
+
+	m := NewMemoryOrchestrator()
+	ctx := context.Background()
+
+	id, _ := m.ValidateAndCreate(ctx, SessionRequest{
+		TenantID:    "t1",
+		CampaignID:  "c1",
+		GuildID:     "g1",
+		LicenseTier: config.TierShared,
+	})
+
+	// Transition to active (sets initial heartbeat), then nil-out the heartbeat
+	// to simulate the worker dying before first heartbeat tick.
+	_ = m.Transition(ctx, id, gateway.SessionActive, "")
+	m.mu.Lock()
+	m.sessions[id].LastHeartbeat = nil
+	m.sessions[id].StartedAt = time.Now().UTC().Add(-10 * time.Minute)
+	m.mu.Unlock()
+
+	ids, err := m.CleanupZombies(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("got %d cleaned up, want 1 (NULL heartbeat active session)", len(ids))
+	}
+	if ids[0] != id {
+		t.Errorf("cleaned id = %q, want %q", ids[0], id)
+	}
+
+	s, _ := m.GetSession(ctx, id)
+	if s.State != gateway.SessionEnded {
+		t.Errorf("got state %v, want %v", s.State, gateway.SessionEnded)
+	}
+}
+
+func TestMemoryOrchestrator_TransitionValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects ended to active", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		id, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID: "t1", CampaignID: "c1", GuildID: "g1", LicenseTier: config.TierShared,
+		})
+		_ = m.Transition(ctx, id, gateway.SessionEnded, "done")
+
+		// ended→active should be silently ignored (idempotent stop safety).
+		err := m.Transition(ctx, id, gateway.SessionActive, "")
+		if err != nil {
+			t.Fatalf("expected nil (silent ignore), got: %v", err)
+		}
+		s, _ := m.GetSession(ctx, id)
+		if s.State != gateway.SessionEnded {
+			t.Errorf("session should still be ended, got %v", s.State)
+		}
+	})
+
+	t.Run("rejects active to pending", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		id, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID: "t1", CampaignID: "c1", GuildID: "g1", LicenseTier: config.TierShared,
+		})
+		_ = m.Transition(ctx, id, gateway.SessionActive, "")
+
+		err := m.Transition(ctx, id, gateway.SessionPending, "")
+		if err == nil {
+			t.Fatal("expected error for active→pending transition")
+		}
+	})
+
+	t.Run("double end is idempotent", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		id, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID: "t1", CampaignID: "c1", GuildID: "g1", LicenseTier: config.TierShared,
+		})
+		_ = m.Transition(ctx, id, gateway.SessionEnded, "first")
+		err := m.Transition(ctx, id, gateway.SessionEnded, "second")
+		if err != nil {
+			t.Fatalf("double end should be idempotent, got: %v", err)
+		}
+		// First error message should be preserved.
+		s, _ := m.GetSession(ctx, id)
+		if s.Error != "first" {
+			t.Errorf("got error %q, want %q", s.Error, "first")
+		}
+	})
+
+	t.Run("active sets initial heartbeat", func(t *testing.T) {
+		t.Parallel()
+		m := NewMemoryOrchestrator()
+		ctx := context.Background()
+
+		id, _ := m.ValidateAndCreate(ctx, SessionRequest{
+			TenantID: "t1", CampaignID: "c1", GuildID: "g1", LicenseTier: config.TierShared,
+		})
+
+		s, _ := m.GetSession(ctx, id)
+		if s.LastHeartbeat != nil {
+			t.Fatal("pending session should have nil heartbeat")
+		}
+
+		_ = m.Transition(ctx, id, gateway.SessionActive, "")
+		s, _ = m.GetSession(ctx, id)
+		if s.LastHeartbeat == nil {
+			t.Fatal("active transition should set initial heartbeat")
+		}
+	})
+}
+
+func TestMemoryOrchestrator_CleanupZombies_ReturnsIDs(t *testing.T) {
+	t.Parallel()
+
+	m := NewMemoryOrchestrator()
+	ctx := context.Background()
+
+	id1, _ := m.ValidateAndCreate(ctx, SessionRequest{
+		TenantID: "t1", CampaignID: "c1", GuildID: "g1", LicenseTier: config.TierDedicated,
+	})
+	id2, _ := m.ValidateAndCreate(ctx, SessionRequest{
+		TenantID: "t1", CampaignID: "c2", GuildID: "g2", LicenseTier: config.TierDedicated,
+	})
+
+	// Transition both to active, then backdate heartbeats.
+	_ = m.Transition(ctx, id1, gateway.SessionActive, "")
+	_ = m.Transition(ctx, id2, gateway.SessionActive, "")
+	m.mu.Lock()
+	stale := time.Now().UTC().Add(-2 * time.Minute)
+	m.sessions[id1].LastHeartbeat = &stale
+	m.sessions[id2].LastHeartbeat = &stale
+	m.mu.Unlock()
+
+	ids, err := m.CleanupZombies(ctx, 1*time.Minute)
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("got %d IDs, want 2", len(ids))
+	}
+
+	// Verify both IDs are returned.
+	idSet := map[string]bool{ids[0]: true, ids[1]: true}
+	if !idSet[id1] || !idSet[id2] {
+		t.Errorf("expected IDs %q and %q, got %v", id1, id2, ids)
+	}
+}
+
 func TestMemoryOrchestrator_CleanupStalePending_MultipleSessions(t *testing.T) {
 	t.Parallel()
 
@@ -963,12 +1124,12 @@ func TestMemoryOrchestrator_CleanupStalePending_MultipleSessions(t *testing.T) {
 	m.sessions[id3].StartedAt = old
 	m.mu.Unlock()
 
-	count, err := m.CleanupStalePending(ctx, 2*time.Minute)
+	ids, err := m.CleanupStalePending(ctx, 2*time.Minute)
 	if err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("got %d cleaned up, want 2", count)
+	if len(ids) != 2 {
+		t.Fatalf("got %d cleaned up, want 2", len(ids))
 	}
 
 	// id2 should still be pending.

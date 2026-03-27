@@ -252,6 +252,44 @@ func TestReconnector_Stop(t *testing.T) {
 	}
 }
 
+func TestReconnector_OnFailureCalledAfterMaxRetries(t *testing.T) {
+	var connectAttempts atomic.Int32
+	platform := &countingFailPlatform{
+		err:   errors.New("permanently down"),
+		count: &connectAttempts,
+	}
+
+	var failureCalled atomic.Bool
+	r := NewReconnector(ReconnectorConfig{
+		Platform:   platform,
+		ChannelID:  "channel-1",
+		MaxRetries: 2,
+		Backoff:    1 * time.Millisecond,
+		MaxBackoff: 5 * time.Millisecond,
+		OnFailure: func() {
+			failureCalled.Store(true)
+		},
+	})
+
+	r.mu.Lock()
+	r.conn = &audiomock.Connection{}
+	r.mu.Unlock()
+
+	ctx := t.Context()
+
+	r.Monitor(ctx)
+	r.NotifyDisconnect()
+
+	// Wait for retries to exhaust.
+	time.Sleep(100 * time.Millisecond)
+
+	if !failureCalled.Load() {
+		t.Error("expected OnFailure to be called after max retries exhausted")
+	}
+
+	_ = r.Stop()
+}
+
 func TestReconnector_NotifyDisconnectNonBlocking(t *testing.T) {
 	r := NewReconnector(ReconnectorConfig{
 		Platform:  &audiomock.Platform{},

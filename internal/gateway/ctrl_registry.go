@@ -39,3 +39,22 @@ func (r *SessionControllerRegistry) Remove(tenantID string) {
 	delete(r.ctrls, tenantID)
 	r.mu.Unlock()
 }
+
+// ForEach calls fn for every registered controller. The callback receives a
+// snapshot of the registry entries so it is safe to call other registry methods
+// inside fn. If fn returns false, iteration stops.
+func (r *SessionControllerRegistry) ForEach(fn func(tenantID string, ctrl SessionController) bool) {
+	r.mu.RLock()
+	// Snapshot to avoid holding the lock during callbacks.
+	snapshot := make(map[string]SessionController, len(r.ctrls))
+	for k, v := range r.ctrls {
+		snapshot[k] = v
+	}
+	r.mu.RUnlock()
+
+	for k, v := range snapshot {
+		if !fn(k, v) {
+			return
+		}
+	}
+}

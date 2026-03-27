@@ -62,14 +62,17 @@ type Orchestrator interface {
 	GetSession(ctx context.Context, sessionID string) (Session, error)
 
 	// CleanupZombies transitions sessions with stale heartbeats to ended.
-	// Called periodically by the gateway.
-	CleanupZombies(ctx context.Context, timeout time.Duration) (int, error)
+	// Also catches sessions in active state with NULL heartbeat that are
+	// older than the timeout (workers that died before first heartbeat).
+	// Returns the IDs of cleaned-up sessions so callers can sync in-memory state.
+	CleanupZombies(ctx context.Context, timeout time.Duration) ([]string, error)
 
 	// CleanupStalePending transitions sessions stuck in 'pending' state
 	// older than the given age to ended. These are sessions where dispatch
 	// failed but the transition to 'ended' was missed (e.g., gateway crash
 	// during dispatch, context cancellation before DB write).
-	CleanupStalePending(ctx context.Context, maxAge time.Duration) (int, error)
+	// Returns the IDs of cleaned-up sessions so callers can sync in-memory state.
+	CleanupStalePending(ctx context.Context, maxAge time.Duration) ([]string, error)
 
 	// AllNonEndedSessions returns all sessions across all tenants that are
 	// not in the ended state. Used for orphaned job cleanup.

@@ -126,3 +126,44 @@ func TestSessionControllerRegistry_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestSessionControllerRegistry_ForEach(t *testing.T) {
+	t.Parallel()
+
+	reg := NewSessionControllerRegistry()
+	reg.Register("tenant-a", &stubSessionController{id: "a"})
+	reg.Register("tenant-b", &stubSessionController{id: "b"})
+
+	visited := make(map[string]string)
+	reg.ForEach(func(tenantID string, ctrl SessionController) bool {
+		sc := ctrl.(*stubSessionController)
+		visited[tenantID] = sc.id
+		return true
+	})
+
+	if len(visited) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(visited))
+	}
+	if visited["tenant-a"] != "a" || visited["tenant-b"] != "b" {
+		t.Errorf("unexpected entries: %v", visited)
+	}
+}
+
+func TestSessionControllerRegistry_ForEach_StopsOnFalse(t *testing.T) {
+	t.Parallel()
+
+	reg := NewSessionControllerRegistry()
+	for i := range 5 {
+		reg.Register(tenantID(i), &stubSessionController{id: itoa(i)})
+	}
+
+	count := 0
+	reg.ForEach(func(_ string, _ SessionController) bool {
+		count++
+		return count < 2
+	})
+
+	if count != 2 {
+		t.Errorf("expected ForEach to stop after 2 iterations, got %d", count)
+	}
+}

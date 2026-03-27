@@ -304,6 +304,9 @@ func (h *WorkerHandler) sessionOrch(sessionID string) (*orchestrator.Orchestrato
 }
 
 // StopAll stops all running sessions. Used during graceful shutdown.
+// Reports ended state to the gateway for each session so the gateway
+// learns these sessions have stopped immediately (instead of waiting for
+// heartbeat timeout + zombie cleanup).
 func (h *WorkerHandler) StopAll(ctx context.Context) {
 	h.mu.Lock()
 	sessions := make(map[string]*managedSession, len(h.sessions))
@@ -313,8 +316,17 @@ func (h *WorkerHandler) StopAll(ctx context.Context) {
 
 	for id, ms := range sessions {
 		ms.cancel()
+		var errMsg string
 		if err := ms.runtime.Stop(ctx); err != nil {
+			errMsg = err.Error()
 			slog.Warn("session: stop error during shutdown", "session_id", id, "err", err)
+		}
+
+		// Report ended state to gateway, matching StopSession behaviour.
+		if h.callback != nil {
+			if err := h.callback.ReportState(ctx, id, gateway.SessionEnded, errMsg); err != nil {
+				slog.Warn("session: failed to report ended state during shutdown", "session_id", id, "err", err)
+			}
 		}
 	}
 }

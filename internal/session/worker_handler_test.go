@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/MrWong99/glyphoxa/internal/gateway"
@@ -178,3 +179,59 @@ func TestWorkerHandler_StopAll(t *testing.T) {
 		t.Fatalf("got %d statuses after StopAll, want 0", len(statuses))
 	}
 }
+
+func TestWorkerHandler_StopAll_ReportsEndedState(t *testing.T) {
+	t.Parallel()
+
+	var reported sync.Map // sessionID -> gateway.SessionState
+
+	callback := &mockGatewayCallback{
+		reportState: func(_ context.Context, sessionID string, state gateway.SessionState, _ string) error {
+			reported.Store(sessionID, state)
+			return nil
+		},
+	}
+
+	handler := NewWorkerHandler(
+		func(_ context.Context, req gateway.StartSessionRequest) (*Runtime, error) {
+			return NewRuntime(RuntimeConfig{SessionID: req.SessionID}), nil
+		},
+		callback,
+	)
+	ctx := context.Background()
+
+	if err := handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s1"}); err != nil {
+		t.Fatalf("start s1: %v", err)
+	}
+	if err := handler.StartSession(ctx, gateway.StartSessionRequest{SessionID: "s2"}); err != nil {
+		t.Fatalf("start s2: %v", err)
+	}
+
+	handler.StopAll(ctx)
+
+	// Verify both sessions reported ended (StartSession reports active, StopAll reports ended).
+	for _, sid := range []string{"s1", "s2"} {
+		val, ok := reported.Load(sid)
+		if !ok {
+			t.Errorf("session %q: no state reported", sid)
+			continue
+		}
+		if val != gateway.SessionEnded {
+			t.Errorf("session %q: got state %v, want %v", sid, val, gateway.SessionEnded)
+		}
+	}
+}
+
+// mockGatewayCallback implements gateway.GatewayCallback for testing.
+type mockGatewayCallback struct {
+	reportState func(ctx context.Context, sessionID string, state gateway.SessionState, errMsg string) error
+}
+
+func (m *mockGatewayCallback) ReportState(ctx context.Context, sessionID string, state gateway.SessionState, errMsg string) error {
+	if m.reportState != nil {
+		return m.reportState(ctx, sessionID, state, errMsg)
+	}
+	return nil
+}
+
+func (m *mockGatewayCallback) Heartbeat(_ context.Context, _ string) error { return nil }

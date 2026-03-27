@@ -80,6 +80,8 @@ func (m *MemoryOrchestrator) ValidateAndCreate(_ context.Context, req SessionReq
 }
 
 // Transition moves a session to the given state.
+// Invalid transitions (e.g., ended→active) are rejected. Transitions from
+// ended are silently ignored to make idempotent stop calls safe.
 func (m *MemoryOrchestrator) Transition(_ context.Context, sessionID string, state gateway.SessionState, errMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -89,11 +91,25 @@ func (m *MemoryOrchestrator) Transition(_ context.Context, sessionID string, sta
 		return fmt.Errorf("sessionorch: session %q not found", sessionID)
 	}
 
+	// Prevent re-opening ended sessions (idempotent stop is OK).
+	if s.State == gateway.SessionEnded {
+		return nil
+	}
+
+	if !gateway.ValidTransition(s.State, state) {
+		return fmt.Errorf("sessionorch: invalid transition %s → %s for session %q", s.State, state, sessionID)
+	}
+
 	s.State = state
 	if state == gateway.SessionEnded {
 		now := time.Now().UTC()
 		s.EndedAt = &now
 		s.Error = errMsg
+	}
+	// Set initial heartbeat when transitioning to active (prevents NULL heartbeat zombies).
+	if state == gateway.SessionActive {
+		now := time.Now().UTC()
+		s.LastHeartbeat = &now
 	}
 
 	return nil
@@ -141,37 +157,47 @@ func (m *MemoryOrchestrator) GetSession(_ context.Context, sessionID string) (Se
 }
 
 // CleanupZombies transitions sessions with stale heartbeats to ended.
-func (m *MemoryOrchestrator) CleanupZombies(_ context.Context, timeout time.Duration) (int, error) {
+// Also catches active sessions with NULL heartbeat (worker died before first
+// heartbeat tick) that are older than the timeout.
+// Returns the IDs of cleaned-up sessions.
+func (m *MemoryOrchestrator) CleanupZombies(_ context.Context, timeout time.Duration) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	cutoff := time.Now().UTC().Add(-timeout)
-	count := 0
+	var ids []string
 
 	for _, s := range m.sessions {
 		if s.State == gateway.SessionEnded {
 			continue
 		}
-		if s.LastHeartbeat != nil && s.LastHeartbeat.Before(cutoff) {
+
+		stale := s.LastHeartbeat != nil && s.LastHeartbeat.Before(cutoff)
+		// Catch sessions in active state with NULL heartbeat (worker died
+		// before first heartbeat tick).
+		nullHBZombie := s.LastHeartbeat == nil && s.State != gateway.SessionPending && s.StartedAt.Before(cutoff)
+
+		if stale || nullHBZombie {
 			s.State = gateway.SessionEnded
 			now := time.Now().UTC()
 			s.EndedAt = &now
 			s.Error = "heartbeat timeout"
-			count++
+			ids = append(ids, s.ID)
 		}
 	}
 
-	return count, nil
+	return ids, nil
 }
 
 // CleanupStalePending transitions sessions stuck in 'pending' state
 // older than maxAge to ended.
-func (m *MemoryOrchestrator) CleanupStalePending(_ context.Context, maxAge time.Duration) (int, error) {
+// Returns the IDs of cleaned-up sessions.
+func (m *MemoryOrchestrator) CleanupStalePending(_ context.Context, maxAge time.Duration) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	cutoff := time.Now().UTC().Add(-maxAge)
-	count := 0
+	var ids []string
 
 	for _, s := range m.sessions {
 		if s.State != gateway.SessionPending {
@@ -182,11 +208,11 @@ func (m *MemoryOrchestrator) CleanupStalePending(_ context.Context, maxAge time.
 			now := time.Now().UTC()
 			s.EndedAt = &now
 			s.Error = "stale pending: dispatch timeout"
-			count++
+			ids = append(ids, s.ID)
 		}
 	}
 
-	return count, nil
+	return ids, nil
 }
 
 // AllNonEndedSessions returns all non-ended sessions across all tenants.
