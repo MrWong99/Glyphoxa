@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **21 findings** were identified: 3 Critical, 5 High, 8 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), a TOCTOU race in session start that can bypass the duplicate-session guard, and zombie sessions that can permanently leak when they reach "active" state but never heartbeat.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **25 findings** were identified: 2 Critical, 7 High, 12 Medium, and 4 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -76,7 +76,47 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** Defense-in-depth gap — currently mitigated by handler-level campaign ownership checks, but fragile against future handler additions.
 - **Suggested fix:** Add `tenant_id` to the `lore_documents` table or join against `campaigns` with a `tenant_id` filter in the store queries.
 
-#### 2.4 ValidRoles Excludes super_admin (Correctly)
+#### 2.4 Knowledge Entity Queries Missing campaign_id Filter
+
+- **Severity:** High
+- **Location:** `internal/web/store.go:697-751` (ListKnowledgeEntities), `internal/web/store.go:753-771` (DeleteKnowledgeEntity)
+- **Description:** Both `ListKnowledgeEntities` and `DeleteKnowledgeEntity` query the tenant-specific schema (`tenant_<id>.entities`) but do NOT filter by `campaign_id` in the SQL WHERE clause. The `campaignID` parameter is accepted but never included in the query.
+- **Impact:** Within the same tenant, users with access to Campaign A can see and delete knowledge entities from Campaign B. This violates the campaign-scoped access model.
+- **Suggested fix:** Add `AND campaign_id = $<N>` to both queries, using the `campaignID` parameter that is already passed in.
+
+#### 2.5 NPC Store Has No Tenant-Level Isolation
+
+- **Severity:** High
+- **Location:** `internal/agent/npcstore/postgres.go:132-159` (Get), `internal/agent/npcstore/postgres.go:219-226` (Delete)
+- **Description:** The `npc_definitions` table has no `tenant_id` column. `Get` retrieves by NPC ID alone (`WHERE id = $1`). `Delete` also uses only `WHERE id = $1`. The web handlers verify the NPC's campaign belongs to the current tenant via `requireCampaign`, but the store has no tenant guard.
+- **Impact:** Defense-in-depth violation. Any future code path calling `npcs.Get()` or `npcs.Delete()` without first verifying campaign ownership will have cross-tenant access.
+- **Suggested fix:** Add a `tenant_id` column to `npc_definitions` and include it in all queries, or move NPC definitions to tenant-specific schemas.
+
+#### 2.6 UpdateUser Store Method Not Scoped by Tenant
+
+- **Severity:** Medium
+- **Location:** `internal/web/store.go:826-856`
+- **Description:** `UpdateUser` uses `WHERE id = $1 AND deleted_at IS NULL` with no `tenant_id` filter. Compare to `DeleteUser` which properly includes `AND tenant_id = $2`. The handler does a separate tenant check, but the store method can update any user in any tenant.
+- **Impact:** Defense-in-depth violation — if any future caller invokes `UpdateUser` without the handler-level tenant check, cross-tenant user modification is possible.
+- **Suggested fix:** Add `AND tenant_id = $<N>` to the `UpdateUser` WHERE clause, consistent with `DeleteUser`.
+
+#### 2.7 Gateway Admin API Open When API Key Empty
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/admin.go:148-175`
+- **Description:** When no API key is configured (`a.apiKey == ""`), the gateway admin API auth middleware allows all requests without authentication. This is noted as "backward compat" but is dangerous in production.
+- **Impact:** If deployed without an API key, anyone with network access can create, modify, or delete any tenant, including injecting bot tokens.
+- **Suggested fix:** Refuse to start the admin API without an API key in production, or default to denying all requests.
+
+#### 2.8 Worker gRPC Calls Not Tenant-Scoped
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/grpctransport/client.go:94-210`, `internal/gateway/grpctransport/server.go:88-169`
+- **Description:** Worker gRPC calls for `StopSession`, `ListNPCs`, `MuteNPC`, `UnmuteNPC`, `SpeakNPC` are keyed by `sessionID` only — no `tenantID` is passed or verified. The gRPC auth only protects ManagementService RPCs; SessionWorkerService RPCs are unguarded.
+- **Impact:** If the gateway is compromised or multiple gateways share a worker pool, a session from Tenant A could be manipulated through worker RPCs referencing Tenant B's session ID.
+- **Suggested fix:** Include `tenant_id` in worker RPC requests and have the worker verify it matches the session's tenant.
+
+#### 2.9 ValidRoles Excludes super_admin (Correctly)
 
 - **Severity:** Low (Positive Finding)
 - **Location:** `internal/web/store.go:58-62`
@@ -219,6 +259,11 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 2.1 | StopSession missing tenant auth | Critical | Multi-Tenancy |
 | 2.2 | GetUser not scoped by tenant | Medium | Multi-Tenancy |
 | 2.3 | Lore/Knowledge no tenant guard in store | Medium | Multi-Tenancy |
+| 2.4 | Knowledge entity queries missing campaign_id | High | Multi-Tenancy |
+| 2.5 | NPC store has no tenant isolation | High | Multi-Tenancy |
+| 2.6 | UpdateUser not scoped by tenant | Medium | Multi-Tenancy |
+| 2.7 | Gateway admin API open when key empty | Medium | Multi-Tenancy |
+| 2.8 | Worker gRPC calls not tenant-scoped | Medium | Multi-Tenancy |
 | 3.1 | No echo cancellation | High | Voice Pipeline |
 | 3.2 | Cascade engine goroutine leak | Medium | Voice Pipeline |
 | 3.3 | Audio frame gaps on stream reconnect | Medium | Voice Pipeline |
@@ -233,10 +278,10 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 7.3 | JWT in redirect URL | High | Security |
 | 7.4 | No JWT revocation | Medium | Security |
 
-**Critical (3):** 1.2, 2.1 — require immediate attention
-**High (5):** 1.1, 3.1, 5.1, 7.1, 7.3 — should be addressed before production deployment
-**Medium (8):** 1.3, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 5.2, 7.4 — should be addressed in the next sprint
-**Low (5):** 1.4, 6.1, 6.2, 7.2 — address opportunistically
+**Critical (2):** 1.2, 2.1 — require immediate attention
+**High (7):** 1.1, 2.4, 2.5, 3.1, 5.1, 7.1, 7.3 — should be addressed before production deployment
+**Medium (12):** 1.3, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 4.1, 4.2, 5.2, 7.4 — should be addressed in the next sprint
+**Low (4):** 1.4, 6.1, 6.2, 7.2 — address opportunistically
 
 ---
 
