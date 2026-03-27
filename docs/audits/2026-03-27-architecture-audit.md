@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **31 findings** were identified: 3 Critical, 9 High, 14 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **36 findings** were identified: 3 Critical, 10 High, 18 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -40,13 +40,53 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** If a bug or race condition causes an out-of-order transition, the session can end up in an inconsistent state. For example, a late `ReportState(active)` arriving after `Stop()` has already set `ended` would resurrect a dead session.
 - **Suggested fix:** Add a `WHERE state != 'ended'` guard to prevent re-opening ended sessions, and/or add a valid-transitions map (pending→active, pending→ended, active→ended).
 
-#### 1.4 Disconnect Listener Never Removed on Non-Voice Sessions
+#### 1.4 Zombie Cleanup Doesn't Update Gateway In-Memory State
+
+- **Severity:** High
+- **Location:** `cmd/glyphoxa/main.go:625-662`, `internal/gateway/sessionctrl.go:42-62`
+- **Description:** The zombie cleanup loop correctly transitions stale sessions to `ended` in the DB and cleans up orphaned K8s Jobs, but does NOT update the `GatewaySessionController`'s in-memory `active` map or `workerAddrs` map. After `CleanupZombies` runs, `gc.active[guildID]` still points to the now-ended session. `IsActive(guildID)` returns `true`, and `/session start` is rejected with "session already active."
+- **Impact:** After a worker dies and zombie cleanup fires, the guild is permanently locked out of starting new sessions until the gateway is restarted.
+- **Suggested fix:** The zombie/orphan cleanup should notify the relevant `GatewaySessionController` to remove stale sessions from its in-memory maps. Alternatively, `IsActive` could cross-check with the orchestrator's DB state.
+
+#### 1.5 Concurrent Stop Calls from Multiple Triggers
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/sessionctrl.go:310-357`
+- **Description:** `Stop` can be called concurrently from three sources: (1) user `/session stop`, (2) `onStreamDetach` callback when audio bridge detects worker death, and (3) `registerDisconnectListener` when bot is kicked from voice. None guard against concurrent execution. The `voice.Conn` double-close could cause a panic in the disgo library.
+- **Impact:** Log noise from failed RPCs and "not found" K8s errors. Potential panic from double-closing the voice connection.
+- **Suggested fix:** Add a `sync.Once` or "stopping" sentinel per session to prevent concurrent Stop execution.
+
+#### 1.6 Full-Mode Session Not Stopped on Process Shutdown
+
+- **Severity:** Medium
+- **Location:** `cmd/glyphoxa/main.go:264-285`
+- **Description:** In `runFull`, the graceful shutdown path calls `application.Shutdown()` and `bot.Close()` but does NOT call `sessionMgr.Stop()`. The active session's consolidator final consolidation is skipped (conversation history lost), the voice connection is not cleanly disconnected, and transcript recorders may not drain properly.
+- **Impact:** On SIGTERM during an active session: conversation history lost, Discord shows bot still in voice channel briefly, final transcript entries may be lost.
+- **Suggested fix:** Explicitly call `sessionMgr.Stop(shutdownCtx)` in the `runFull` shutdown path before `application.Shutdown()`.
+
+#### 1.7 WorkerHandler.StopAll Doesn't Report Ended State
+
+- **Severity:** Medium
+- **Location:** `internal/session/worker_handler.go:289-302`
+- **Description:** `StopAll` (worker graceful shutdown) empties the sessions map and stops runtimes, but does NOT call `h.callback.ReportState(sessionID, SessionEnded, ...)`. Compare with `StopSession` which does report ended state. The gateway never learns these sessions have ended.
+- **Impact:** After worker pod shutdown, the gateway still considers those sessions active for up to ~60s (until heartbeat timeout + zombie cleanup). During this window, the guild is locked out and license slots are consumed by dead sessions.
+- **Suggested fix:** Have `StopAll` report ended state for each session via the callback, matching `StopSession` behavior.
+
+#### 1.8 Reconnector Does Not Signal Session Failure After Max Retries
+
+- **Severity:** Medium
+- **Location:** `internal/session/reconnect.go:230-236`
+- **Description:** When `attemptReconnect` exhausts all retries, it logs an error and returns. There is no callback, no session termination, and no state transition. The session remains "active" in the orchestrator but the audio connection is dead. Heartbeats continue flowing, the pipeline continues running on silence.
+- **Impact:** A persistent network disconnection leaves a zombie session that consumes resources, counts against license limits, and is invisible to the user.
+- **Suggested fix:** Add an `OnFailure` callback to `ReconnectorConfig` that triggers `Stop` and cleanup after all retries are exhausted.
+
+#### 1.9 Disconnect Listener Leak on Failed Voice Setup
 
 - **Severity:** Low
 - **Location:** `internal/gateway/sessionctrl.go:430-465`
-- **Description:** `registerDisconnectListener` adds a `GuildVoiceStateUpdate` event listener to the bot client. The listener is stored in `voiceCleanups` and removed during `cleanupVoiceBridge`. If the voice bridge setup fails after the listener is registered but before the cleanup function is stored, the listener leaks. This is a minor edge case since the listener checks `gc.active` ownership.
+- **Description:** `registerDisconnectListener` adds a `GuildVoiceStateUpdate` event listener. If the voice bridge setup fails after the listener is registered but before the cleanup function is stored, the listener leaks.
 - **Impact:** Minor memory leak of event listeners over many failed session starts.
-- **Suggested fix:** Register the listener only after the voice bridge is fully set up, or use a deferred cleanup.
+- **Suggested fix:** Register the listener only after the voice bridge is fully set up.
 
 ---
 
@@ -295,7 +335,12 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 1.1 | TOCTOU race in session start | High | Session Lifecycle |
 | 1.2 | Zombie sessions with NULL heartbeat | Critical | Session Lifecycle |
 | 1.3 | No state transition validation | Medium | Session Lifecycle |
-| 1.4 | Disconnect listener leak on failure | Low | Session Lifecycle |
+| 1.4 | Zombie cleanup doesn't update in-memory state | High | Session Lifecycle |
+| 1.5 | Concurrent Stop from multiple triggers | Medium | Session Lifecycle |
+| 1.6 | Full-mode session not stopped on shutdown | Medium | Session Lifecycle |
+| 1.7 | StopAll doesn't report ended state | Medium | Session Lifecycle |
+| 1.8 | Reconnector silent failure after max retries | Medium | Session Lifecycle |
+| 1.9 | Disconnect listener leak on failure | Low | Session Lifecycle |
 | 2.1 | StopSession missing tenant auth | Critical | Multi-Tenancy |
 | 2.2 | GetUser not scoped by tenant | Medium | Multi-Tenancy |
 | 2.3 | Lore/Knowledge no tenant guard in store | Medium | Multi-Tenancy |
@@ -324,9 +369,9 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 7.4 | No JWT revocation | Medium | Security |
 
 **Critical (3):** 1.2, 2.1, 3.1 — require immediate attention
-**High (9):** 1.1, 2.4, 2.5, 3.4, 3.5, 5.1, 7.1, 7.3 — should be addressed before production deployment
-**Medium (14):** 1.3, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.2, 7.4 — should be addressed in the next sprint
-**Low (5):** 1.4, 3.8, 6.1, 6.2, 7.2 — address opportunistically
+**High (10):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 7.1, 7.3 — should be addressed before production deployment
+**Medium (18):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.2, 7.4 — next sprint
+**Low (5):** 1.9, 3.8, 6.1, 6.2, 7.2 — address opportunistically
 
 ---
 
