@@ -80,7 +80,7 @@ func (s *PostgresStore) CheckQuota(ctx context.Context, tenantID string, quota Q
 	if err != nil {
 		return fmt.Errorf("usage: begin quota check: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Ensure a row exists for this tenant+period so FOR UPDATE has
 	// something to lock.
