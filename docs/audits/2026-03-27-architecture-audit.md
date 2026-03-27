@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **47 findings** were identified: 4 Critical, 13 High, 25 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **51 findings** were identified: 4 Critical, 14 High, 28 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -331,12 +331,44 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** Minor goroutine leak — in practice only 2-3 rate limiters are created at startup (read + write + voice preview). But if rate limiters are ever created dynamically (e.g., per-tenant), this would leak significantly.
 - **Suggested fix:** Add a `context.Context` parameter to `NewRateLimiter` or a `Close()` method that stops the ticker.
 
-#### 6.2 Dispatch Context Not Cancelled on Success Path
+#### 6.2 Discord Connection Operates Silently with nil Opus Encoder
+
+- **Severity:** High
+- **Location:** `pkg/audio/discord/connection.go:84-88,199-201`
+- **Description:** If `newOpusEncoder()` fails during `newConnection()`, the error is logged but the connection is returned with `c.encoder = nil`. In `ProvideOpusFrame()`, when `encoder` is nil, the code silently discards PCM data and returns `nil, nil` (silence). The NPC's TTS audio is generated and transcribed, but players hear complete silence.
+- **Impact:** Players hear nothing from the NPC. The system appears fully functional from the server side (no errors after the initial log), making this extremely hard to diagnose. The session continues consuming LLM and TTS quota with no audible output.
+- **Suggested fix:** Return an error from `newConnection()` when the encoder cannot be created. At minimum, emit periodic warnings in `ProvideOpusFrame` rather than silently dropping all audio.
+
+#### 6.3 S2S Engine Audio Channel Shared Across Concurrent Process Calls
+
+- **Severity:** Medium
+- **Location:** `internal/engine/s2s/engine.go:199-252,261-302`
+- **Description:** Each `Process` call captures `sessionAudioCh` (the shared session audio channel) and spawns a `forwardAudio` goroutine that reads from it. If two `Process` calls are concurrent (docstring says this is allowed), both goroutines read from the same channel. Audio chunks are non-deterministically split between the two turn channels.
+- **Impact:** Rapid successive calls to `Process` produce garbled per-turn audio because chunks are stolen by the previous turn's forwarder.
+- **Suggested fix:** Use a single long-lived forwarder goroutine that demuxes audio into the most recent turn's channel, or serialize `Process` calls.
+
+#### 6.4 ElevenLabs STT readLoop Swallows Fatal Errors
+
+- **Severity:** Medium
+- **Location:** `pkg/provider/stt/elevenlabs/elevenlabs.go:532-548`
+- **Description:** When `parseResponse` encounters a fatal error like `auth_error`, `quota_exceeded`, or `invalid_api_key`, it logs and returns `(zero, false)`. The `readLoop` continues calling `conn.Read()`. The session continues in a degraded state producing no transcripts but still sending audio (wasting bandwidth/quota).
+- **Impact:** Invalid API key or exceeded quota causes silent transcript loss. The NPC responds based on empty transcripts, leading to confused behavior.
+- **Suggested fix:** Close the `done` channel on fatal errors so `readLoop` exits and the failure propagates upstream.
+
+#### 6.5 No Circuit Breaker on GatewayClient
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/grpctransport/server.go:211-251`
+- **Description:** The worker-facing `Client` wraps every call in a circuit breaker, but the gateway-facing `GatewayClient` (used by workers for heartbeats and state-report) has none. Gateway outage causes every heartbeat call to block until gRPC deadline.
+- **Impact:** Gateway outage causes worker goroutines to pile up waiting on gRPC timeouts, potentially exhausting worker resources.
+- **Suggested fix:** Add a circuit breaker to `GatewayClient` so heartbeat calls fail fast when the gateway is unreachable.
+
+#### 6.6 Dispatch Context Not Cancelled on Success Path
 
 - **Severity:** Low
 - **Location:** `internal/gateway/dispatch/dispatcher.go:108`
-- **Description:** `Dispatch()` creates `ctx, cancel := context.WithTimeout(ctx, d.timeout)` and stores the cancel function in the session. On the success path, the cancel is intentionally NOT called because the timeout context must remain live for the session's lifetime. However, the `WithTimeout` context is derived from the *request* context, which may be cancelled after the RPC returns. This is mitigated because `WorkerHandler.StartSession` (line 68) creates its own `context.Background()` session context.
-- **Impact:** Minimal — the dispatch timeout context is not used after Dispatch returns. The session uses its own background context.
+- **Description:** `Dispatch()` creates `ctx, cancel := context.WithTimeout(ctx, d.timeout)` and stores the cancel in the session. On the success path, cancel is not called because the context must remain live. The timeout timer goroutine lingers for up to 120s.
+- **Impact:** Each successful dispatch leaks a timer goroutine for up to 120 seconds. Bounded and temporary.
 
 ---
 
@@ -440,7 +472,11 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 5.7 | No min length on AdminAPIKey | Medium | Config & Startup |
 | 5.8 | Vault encryption enabled after health check fail | Medium | Config & Startup |
 | 6.1 | RateLimiter goroutine leak | Low | Error Propagation |
-| 6.2 | Dispatch context on success path | Low | Error Propagation |
+| 6.2 | Nil opus encoder silent failure | High | Error Propagation |
+| 6.3 | S2S audio channel shared across concurrent calls | Medium | Error Propagation |
+| 6.4 | ElevenLabs STT swallows fatal errors | Medium | Error Propagation |
+| 6.5 | No circuit breaker on GatewayClient | Medium | Error Propagation |
+| 6.6 | Dispatch context timer leak on success | Low | Error Propagation |
 | 7.1 | X-Forwarded-For trusted blindly | High | Security |
 | 7.2 | OAuth state timing attack | Low | Security |
 | 7.3 | JWT in redirect URL | High | Security |
@@ -450,9 +486,9 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 7.7 | WebRTC signaling no authentication | Medium | Security |
 
 **Critical (4):** 1.2, 2.1, 3.1, 5.2 — require immediate attention
-**High (13):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 5.3, 7.1, 7.3, 7.4, 7.5 — address before production
-**Medium (25):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.4, 5.5, 5.6, 5.7, 5.8, 7.6, 7.7 — next sprint
-**Low (5):** 1.9, 3.8, 6.1, 6.2, 7.2 — address opportunistically
+**High (14):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 5.3, 6.2, 7.1, 7.3, 7.4, 7.5 — address before production
+**Medium (28):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.4, 5.5, 5.6, 5.7, 5.8, 6.3, 6.4, 6.5, 7.6, 7.7 — next sprint
+**Low (5):** 1.9, 3.8, 6.1, 6.6, 7.2 — address opportunistically
 
 ---
 
