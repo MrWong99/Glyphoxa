@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **36 findings** were identified: 3 Critical, 10 High, 18 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **47 findings** were identified: 4 Critical, 13 High, 25 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -263,13 +263,61 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** CSRF-like attacks where a malicious website can interact with the Glyphoxa API on behalf of an authenticated user. Note: the code correctly does NOT send `Access-Control-Allow-Credentials: true` in allow-all mode, which mitigates cookie-based attacks. But since Glyphoxa uses Bearer tokens (not cookies), this is still exploitable if the token is stored in a way accessible to JS.
 - **Suggested fix:** Require `GLYPHOXA_WEB_ALLOWED_ORIGINS` to be explicitly set in production. Add a startup warning when running with wildcard CORS.
 
-#### 5.2 No Minimum Length on AdminAPIKey
+#### 5.2 ManagementService gRPC Unauthenticated by Default
+
+- **Severity:** Critical
+- **Location:** `cmd/glyphoxa/main.go:558-567`
+- **Description:** When `GLYPHOXA_GRPC_MGMT_SECRET` is not set, the ManagementService gRPC endpoint is completely unauthenticated. Combined with the gateway admin API (2.7), both management interfaces default to open.
+- **Impact:** Any network-reachable client can invoke management RPCs: create/delete tenants, start/stop sessions, query usage.
+- **Suggested fix:** Require the secret in production or refuse to start. At minimum, bind to localhost-only when unauthenticated.
+
+#### 5.3 No API Key Validation for Cloud Providers at Config Time
+
+- **Severity:** High
+- **Location:** `internal/config/loader.go:82-89`, `cmd/glyphoxa/main.go:1100-1115`
+- **Description:** Config validation checks provider names but never validates that `api_key` is non-empty for providers that require it. LLM provider factories accept empty API keys and create the provider without error. The error only surfaces on the first API call at runtime.
+- **Impact:** The server starts successfully and appears healthy, but fails on the first player interaction.
+- **Suggested fix:** Add API key presence validation at the `Validate()` level for known cloud providers.
+
+#### 5.4 HTTP Servers Lack Read/Write/Idle Timeouts
+
+- **Severity:** Medium
+- **Location:** `cmd/glyphoxa/main.go:509-512` (admin), `cmd/glyphoxa/main.go:1005-1008` (MCP), `cmd/glyphoxa/main.go:1066-1069` (observe)
+- **Description:** Three `http.Server` instances are created without `ReadTimeout`, `WriteTimeout`, or `IdleTimeout`. Only the web service sets these.
+- **Impact:** Slowloris-style denial-of-service attacks can exhaust file descriptors and goroutines.
+- **Suggested fix:** Set `ReadTimeout: 15s`, `WriteTimeout: 30s`, `IdleTimeout: 60s` on all HTTP servers.
+
+#### 5.5 Database SSL Mode Defaults to "prefer" Instead of "require"
+
+- **Severity:** Medium
+- **Location:** `cmd/glyphoxa/main.go:732-750`
+- **Description:** `applySSLMode()` defaults to `sslmode=prefer`. A TLS-stripping attacker can force cleartext database connections.
+- **Impact:** Database credentials and all query data (bot tokens, transcripts) transmitted in cleartext.
+- **Suggested fix:** Default to `sslmode=require` in production. Log a warning when `prefer` is in effect.
+
+#### 5.6 Embedding Dimension Mismatch Silently Defaults to 1536
+
+- **Severity:** Medium
+- **Location:** `internal/app/app.go:212-215`, `cmd/glyphoxa/worker_factory.go:94-97`
+- **Description:** When `memory.embedding_dimensions` is 0, both code paths silently default to 1536. If the provider uses a different dimension, pgvector columns are created with the wrong size.
+- **Impact:** Semantic search returns garbage results due to dimension mismatch.
+- **Suggested fix:** Cross-validate `embedding_dimensions` against the configured provider's known defaults.
+
+#### 5.7 No Minimum Length on AdminAPIKey
 
 - **Severity:** Medium
 - **Location:** `internal/web/config.go:146-183`
-- **Description:** The `Validate()` method requires `JWTSecret` to be at least 32 characters but has no minimum length requirement for `AdminAPIKey`. A single-character API key would pass validation.
+- **Description:** `JWTSecret` requires 32+ characters but `AdminAPIKey` has no minimum length.
 - **Impact:** Weak admin keys that can be brute-forced.
-- **Suggested fix:** Add `len(c.AdminAPIKey) < 16` validation similar to the JWT secret check.
+- **Suggested fix:** Add `len(c.AdminAPIKey) < 16` validation.
+
+#### 5.8 Vault Token Encryption Enabled After Health Check Failure
+
+- **Severity:** Medium
+- **Location:** `cmd/glyphoxa/main.go:469-476`
+- **Description:** When Vault's health check fails, the code still assigns `tokenEncryptor = tc`. Subsequent encrypt/decrypt calls will either fail or fall through to plaintext.
+- **Impact:** Bot tokens may be stored in plaintext or all tenant operations may fail.
+- **Suggested fix:** Only set `tokenEncryptor = tc` when Ping succeeds.
 
 ---
 
@@ -318,13 +366,37 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** JWT token leakage via browser history, proxy logs, or HTTP Referer headers. Anyone with access to these sources can impersonate the user for 24 hours.
 - **Suggested fix:** Use a short-lived authorization code flow: redirect with a single-use code, then exchange it for the JWT via a POST request. Alternatively, set the token in a secure, httpOnly cookie during the redirect.
 
-#### 7.4 No JWT Revocation Mechanism
+#### 7.4 SSRF via Provider Test Endpoint
+
+- **Severity:** High
+- **Location:** `internal/web/handlers_providers.go:77-126`
+- **Description:** The `handleTestProvider` endpoint accepts a user-supplied `base_url` field and makes HTTP requests to it with API keys attached in headers. No URL validation or allowlisting. An attacker with `tenant_admin` role can point `base_url` to internal services (e.g., `http://169.254.169.254/` for cloud metadata).
+- **Impact:** Server-Side Request Forgery (SSRF). Attacker can probe internal infrastructure, access cloud metadata endpoints (AWS/GCP/Azure instance credentials), or exfiltrate data. The server includes API keys/tokens in outbound request headers.
+- **Suggested fix:** Validate `base_url` against an allowlist of known provider domains. Block private/link-local IP ranges and `localhost`. Resolve hostname before request and reject private IPs.
+
+#### 7.5 Gateway Admin API Key Comparison Not Constant-Time
+
+- **Severity:** High
+- **Location:** `internal/gateway/admin.go:169`
+- **Description:** The API key comparison uses `key != a.apiKey` (standard string equality), vulnerable to timing attacks. Compare with `handleAPIKeyLogin` and `mgmt_auth.go` which correctly use `subtle.ConstantTimeCompare`.
+- **Impact:** An attacker with network access to the admin API can determine the correct key character-by-character by measuring response times.
+- **Suggested fix:** Use `crypto/subtle.ConstantTimeCompare([]byte(key), []byte(a.apiKey)) != 1`.
+
+#### 7.6 No JWT Revocation Mechanism
 
 - **Severity:** Medium
 - **Location:** `internal/web/auth.go:32-34`, `internal/web/middleware.go:24-50`
-- **Description:** JWTs are valid for 24 hours (`Claims.Expires`). There is no token revocation mechanism — no deny-list, no server-side session store, and no way to invalidate a token before expiry. If a token is compromised, it remains valid for up to 24 hours.
-- **Impact:** Compromised tokens cannot be revoked. If a user's account is deleted or their role is changed, their existing JWT remains valid with the old role/tenant until expiry.
-- **Suggested fix:** Implement a lightweight token deny-list (e.g., in Redis or an in-memory set with TTL matching the token lifetime). Alternatively, shorten token lifetime to 15-30 minutes and add a refresh token mechanism.
+- **Description:** JWTs are valid for 24 hours (`Claims.Expires`). There is no token revocation mechanism — no deny-list, no server-side session store, and no way to invalidate a token before expiry.
+- **Impact:** Compromised tokens cannot be revoked. If a user's account is deleted or role changed, their JWT remains valid until expiry.
+- **Suggested fix:** Implement a lightweight token deny-list. Alternatively, shorten token lifetime to 15-30 minutes with a refresh token mechanism.
+
+#### 7.7 WebRTC Signaling Has No Authentication
+
+- **Severity:** Medium
+- **Location:** `pkg/audio/webrtc/signaling.go:33-38`
+- **Description:** WebRTC signaling endpoints (`/rooms/{roomID}/join`, `/rooms/{roomID}/ice`, `/rooms/{roomID}/leave`) have no authentication. Any client can join rooms, inject ICE candidates, or disconnect peers.
+- **Impact:** Unauthorized users can join voice rooms, impersonate others, inject audio, or disconnect legitimate users — a direct path to session hijacking.
+- **Suggested fix:** Add authentication (session token/API key). Verify `user_id` matches the authenticated caller.
 
 ---
 
@@ -360,17 +432,26 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 4.1 | Non-atomic invite acceptance | Medium | Data Consistency |
 | 4.2 | Campaign deletion no cascade | Medium | Data Consistency |
 | 5.1 | CORS defaults to allow-all | High | Config & Startup |
-| 5.2 | No min length on AdminAPIKey | Medium | Config & Startup |
+| 5.2 | ManagementService gRPC unauthenticated by default | Critical | Config & Startup |
+| 5.3 | No API key validation for cloud providers | High | Config & Startup |
+| 5.4 | HTTP servers lack timeouts (Slowloris) | Medium | Config & Startup |
+| 5.5 | DB SSL defaults to "prefer" not "require" | Medium | Config & Startup |
+| 5.6 | Embedding dimension mismatch defaults to 1536 | Medium | Config & Startup |
+| 5.7 | No min length on AdminAPIKey | Medium | Config & Startup |
+| 5.8 | Vault encryption enabled after health check fail | Medium | Config & Startup |
 | 6.1 | RateLimiter goroutine leak | Low | Error Propagation |
 | 6.2 | Dispatch context on success path | Low | Error Propagation |
 | 7.1 | X-Forwarded-For trusted blindly | High | Security |
 | 7.2 | OAuth state timing attack | Low | Security |
 | 7.3 | JWT in redirect URL | High | Security |
-| 7.4 | No JWT revocation | Medium | Security |
+| 7.4 | SSRF via provider test base_url | High | Security |
+| 7.5 | Admin API key comparison not constant-time | High | Security |
+| 7.6 | No JWT revocation | Medium | Security |
+| 7.7 | WebRTC signaling no authentication | Medium | Security |
 
-**Critical (3):** 1.2, 2.1, 3.1 — require immediate attention
-**High (10):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 7.1, 7.3 — should be addressed before production deployment
-**Medium (18):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.2, 7.4 — next sprint
+**Critical (4):** 1.2, 2.1, 3.1, 5.2 — require immediate attention
+**High (13):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 5.3, 7.1, 7.3, 7.4, 7.5 — address before production
+**Medium (25):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.4, 5.5, 5.6, 5.7, 5.8, 7.6, 7.7 — next sprint
 **Low (5):** 1.9, 3.8, 6.1, 6.2, 7.2 — address opportunistically
 
 ---
