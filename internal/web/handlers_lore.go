@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 )
@@ -23,22 +22,18 @@ type LoreUpdateRequest struct {
 }
 
 func (s *Server) handleCreateLoreDocument(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
 	var req LoreCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Title == "" {
@@ -72,16 +67,13 @@ func (s *Server) handleCreateLoreDocument(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleListLoreDocuments(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -99,16 +91,13 @@ func (s *Server) handleListLoreDocuments(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleGetLoreDocument(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -128,16 +117,13 @@ func (s *Server) handleGetLoreDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateLoreDocument(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -154,8 +140,7 @@ func (s *Server) handleUpdateLoreDocument(w http.ResponseWriter, r *http.Request
 	}
 
 	var req LoreUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -180,16 +165,13 @@ func (s *Server) handleUpdateLoreDocument(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleDeleteLoreDocument(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 

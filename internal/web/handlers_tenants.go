@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -65,8 +64,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		DMRoleID    string   `json:"dm_role_id,omitempty"`
 		CampaignID  string   `json:"campaign_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -108,8 +106,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 		DMRoleID    *string  `json:"dm_role_id,omitempty"`
 		CampaignID  *string  `json:"campaign_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -162,7 +159,7 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 // handleCreateTenantSelfService creates a tenant via the gateway and then
 // creates an associated user record. Used by the onboarding flow.
 func (s *Server) handleCreateTenantSelfService(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
 		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
@@ -172,8 +169,7 @@ func (s *Server) handleCreateTenantSelfService(w http.ResponseWriter, r *http.Re
 		ID          string `json:"id"`
 		DisplayName string `json:"display_name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.ID == "" {

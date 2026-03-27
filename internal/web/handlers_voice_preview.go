@@ -17,9 +17,8 @@ type VoicePreviewRequest struct {
 }
 
 func (s *Server) handleVoicePreview(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 

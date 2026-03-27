@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -27,24 +26,18 @@ type NPCCreateRequest struct {
 }
 
 func (s *Server) handleCreateNPC(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
 	var req NPCCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -92,18 +85,13 @@ func (s *Server) handleCreateNPC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListNPCs(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -121,18 +109,13 @@ func (s *Server) handleListNPCs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetNPC(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -152,18 +135,13 @@ func (s *Server) handleGetNPC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateNPC(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -180,8 +158,7 @@ func (s *Server) handleUpdateNPC(w http.ResponseWriter, r *http.Request) {
 
 	// Decode full replacement body.
 	var req NPCCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -209,18 +186,13 @@ func (s *Server) handleUpdateNPC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteNPC(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 

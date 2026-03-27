@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 )
@@ -23,15 +22,13 @@ type CampaignUpdateRequest struct {
 }
 
 func (s *Server) handleCreateCampaign(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
 	var req CampaignCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -70,9 +67,8 @@ func (s *Server) handleCreateCampaign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListCampaigns(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -100,21 +96,13 @@ func (s *Server) handleListCampaigns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetCampaign(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	id := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, id)
-	if err != nil {
-		slog.Error("web: get campaign", "campaign_id", id, "err", err)
-		writeError(w, http.StatusInternalServerError, "server_error", "failed to get campaign")
-		return
-	}
+	campaign, _ := s.requireCampaign(w, r, claims.TenantID)
 	if campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
 		return
 	}
 
@@ -122,29 +110,20 @@ func (s *Server) handleGetCampaign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateCampaign(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
+		return
+	}
+
+	existing, _ := s.requireCampaign(w, r, claims.TenantID)
+	if existing == nil {
 		return
 	}
 
 	id := r.PathValue("id")
 
-	// Fetch existing to merge partial updates.
-	existing, err := s.store.GetCampaign(r.Context(), claims.TenantID, id)
-	if err != nil {
-		slog.Error("web: get campaign for update", "campaign_id", id, "err", err)
-		writeError(w, http.StatusInternalServerError, "server_error", "failed to get campaign")
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
-		return
-	}
-
 	var req CampaignUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -172,9 +151,8 @@ func (s *Server) handleUpdateCampaign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteCampaign(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 

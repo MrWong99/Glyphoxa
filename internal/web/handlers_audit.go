@@ -3,15 +3,13 @@ package web
 import (
 	"log/slog"
 	"net/http"
-	"strconv"
 )
 
 // handleListAuditLogs returns audit log entries for the current tenant,
 // or for all tenants if the user is a super_admin.
 func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -25,8 +23,7 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, offset := parseLimitOffset(r, 25)
 	resourceType := r.URL.Query().Get("resource_type")
 	action := r.URL.Query().Get("action")
 

@@ -8,21 +8,17 @@ import (
 )
 
 func (s *Server) handleLinkNPCToCampaign(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
+		return
+	}
+
 	npcID := r.PathValue("npc_id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
-		return
-	}
 
 	// Verify NPC exists.
 	npc, err := s.npcs.Get(r.Context(), npcID)
@@ -60,21 +56,17 @@ func (s *Server) handleLinkNPCToCampaign(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleUnlinkNPCFromCampaign(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
+		return
+	}
+
 	npcID := r.PathValue("npc_id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
-		return
-	}
 
 	if err := s.store.UnlinkNPCFromCampaign(r.Context(), campaignID, npcID); err != nil {
 		slog.Error("web: unlink NPC from campaign", "npc_id", npcID, "campaign_id", campaignID, "err", err)
@@ -87,18 +79,13 @@ func (s *Server) handleUnlinkNPCFromCampaign(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleListLinkedNPCs(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 

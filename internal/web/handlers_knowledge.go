@@ -7,18 +7,13 @@ import (
 )
 
 func (s *Server) handleListKnowledgeEntities(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -45,18 +40,13 @@ func (s *Server) handleListKnowledgeEntities(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleDeleteKnowledgeEntity(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -90,16 +80,13 @@ type KnowledgeRelationship struct {
 // handleGetKnowledgeGraph returns the full knowledge graph for a campaign,
 // formatted for force-directed graph visualization.
 func (s *Server) handleGetKnowledgeGraph(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
@@ -155,18 +142,13 @@ func (s *Server) handleGetKnowledgeGraph(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleRebuildKnowledgeGraph(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	campaignID := r.PathValue("id")
-
-	// Verify the campaign belongs to this tenant.
-	campaign, err := s.store.GetCampaign(r.Context(), claims.TenantID, campaignID)
-	if err != nil || campaign == nil {
-		writeError(w, http.StatusNotFound, "not_found", "campaign not found")
+	_, campaignID := s.requireCampaign(w, r, claims.TenantID)
+	if campaignID == "" {
 		return
 	}
 
