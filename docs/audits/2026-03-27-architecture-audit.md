@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **21 findings** were identified: 3 Critical, 5 High, 8 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), a TOCTOU race in session start that can bypass the duplicate-session guard, and zombie sessions that can permanently leak when they reach "active" state but never heartbeat.
+This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. **36 findings** were identified: 3 Critical, 10 High, 18 Medium, and 5 Low severity. The most urgent issues are a missing tenant authorization check on session stop (allowing cross-tenant session termination), zombie sessions that permanently leak when they reach "active" state but never heartbeat, knowledge entity queries missing campaign_id filters, and NPC store lacking tenant-level isolation.
 
 ---
 
@@ -40,13 +40,53 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** If a bug or race condition causes an out-of-order transition, the session can end up in an inconsistent state. For example, a late `ReportState(active)` arriving after `Stop()` has already set `ended` would resurrect a dead session.
 - **Suggested fix:** Add a `WHERE state != 'ended'` guard to prevent re-opening ended sessions, and/or add a valid-transitions map (pending→active, pending→ended, active→ended).
 
-#### 1.4 Disconnect Listener Never Removed on Non-Voice Sessions
+#### 1.4 Zombie Cleanup Doesn't Update Gateway In-Memory State
+
+- **Severity:** High
+- **Location:** `cmd/glyphoxa/main.go:625-662`, `internal/gateway/sessionctrl.go:42-62`
+- **Description:** The zombie cleanup loop correctly transitions stale sessions to `ended` in the DB and cleans up orphaned K8s Jobs, but does NOT update the `GatewaySessionController`'s in-memory `active` map or `workerAddrs` map. After `CleanupZombies` runs, `gc.active[guildID]` still points to the now-ended session. `IsActive(guildID)` returns `true`, and `/session start` is rejected with "session already active."
+- **Impact:** After a worker dies and zombie cleanup fires, the guild is permanently locked out of starting new sessions until the gateway is restarted.
+- **Suggested fix:** The zombie/orphan cleanup should notify the relevant `GatewaySessionController` to remove stale sessions from its in-memory maps. Alternatively, `IsActive` could cross-check with the orchestrator's DB state.
+
+#### 1.5 Concurrent Stop Calls from Multiple Triggers
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/sessionctrl.go:310-357`
+- **Description:** `Stop` can be called concurrently from three sources: (1) user `/session stop`, (2) `onStreamDetach` callback when audio bridge detects worker death, and (3) `registerDisconnectListener` when bot is kicked from voice. None guard against concurrent execution. The `voice.Conn` double-close could cause a panic in the disgo library.
+- **Impact:** Log noise from failed RPCs and "not found" K8s errors. Potential panic from double-closing the voice connection.
+- **Suggested fix:** Add a `sync.Once` or "stopping" sentinel per session to prevent concurrent Stop execution.
+
+#### 1.6 Full-Mode Session Not Stopped on Process Shutdown
+
+- **Severity:** Medium
+- **Location:** `cmd/glyphoxa/main.go:264-285`
+- **Description:** In `runFull`, the graceful shutdown path calls `application.Shutdown()` and `bot.Close()` but does NOT call `sessionMgr.Stop()`. The active session's consolidator final consolidation is skipped (conversation history lost), the voice connection is not cleanly disconnected, and transcript recorders may not drain properly.
+- **Impact:** On SIGTERM during an active session: conversation history lost, Discord shows bot still in voice channel briefly, final transcript entries may be lost.
+- **Suggested fix:** Explicitly call `sessionMgr.Stop(shutdownCtx)` in the `runFull` shutdown path before `application.Shutdown()`.
+
+#### 1.7 WorkerHandler.StopAll Doesn't Report Ended State
+
+- **Severity:** Medium
+- **Location:** `internal/session/worker_handler.go:289-302`
+- **Description:** `StopAll` (worker graceful shutdown) empties the sessions map and stops runtimes, but does NOT call `h.callback.ReportState(sessionID, SessionEnded, ...)`. Compare with `StopSession` which does report ended state. The gateway never learns these sessions have ended.
+- **Impact:** After worker pod shutdown, the gateway still considers those sessions active for up to ~60s (until heartbeat timeout + zombie cleanup). During this window, the guild is locked out and license slots are consumed by dead sessions.
+- **Suggested fix:** Have `StopAll` report ended state for each session via the callback, matching `StopSession` behavior.
+
+#### 1.8 Reconnector Does Not Signal Session Failure After Max Retries
+
+- **Severity:** Medium
+- **Location:** `internal/session/reconnect.go:230-236`
+- **Description:** When `attemptReconnect` exhausts all retries, it logs an error and returns. There is no callback, no session termination, and no state transition. The session remains "active" in the orchestrator but the audio connection is dead. Heartbeats continue flowing, the pipeline continues running on silence.
+- **Impact:** A persistent network disconnection leaves a zombie session that consumes resources, counts against license limits, and is invisible to the user.
+- **Suggested fix:** Add an `OnFailure` callback to `ReconnectorConfig` that triggers `Stop` and cleanup after all retries are exhausted.
+
+#### 1.9 Disconnect Listener Leak on Failed Voice Setup
 
 - **Severity:** Low
 - **Location:** `internal/gateway/sessionctrl.go:430-465`
-- **Description:** `registerDisconnectListener` adds a `GuildVoiceStateUpdate` event listener to the bot client. The listener is stored in `voiceCleanups` and removed during `cleanupVoiceBridge`. If the voice bridge setup fails after the listener is registered but before the cleanup function is stored, the listener leaks. This is a minor edge case since the listener checks `gc.active` ownership.
+- **Description:** `registerDisconnectListener` adds a `GuildVoiceStateUpdate` event listener. If the voice bridge setup fails after the listener is registered but before the cleanup function is stored, the listener leaks.
 - **Impact:** Minor memory leak of event listeners over many failed session starts.
-- **Suggested fix:** Register the listener only after the voice bridge is fully set up, or use a deferred cleanup.
+- **Suggested fix:** Register the listener only after the voice bridge is fully set up.
 
 ---
 
@@ -76,7 +116,47 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Impact:** Defense-in-depth gap — currently mitigated by handler-level campaign ownership checks, but fragile against future handler additions.
 - **Suggested fix:** Add `tenant_id` to the `lore_documents` table or join against `campaigns` with a `tenant_id` filter in the store queries.
 
-#### 2.4 ValidRoles Excludes super_admin (Correctly)
+#### 2.4 Knowledge Entity Queries Missing campaign_id Filter
+
+- **Severity:** High
+- **Location:** `internal/web/store.go:697-751` (ListKnowledgeEntities), `internal/web/store.go:753-771` (DeleteKnowledgeEntity)
+- **Description:** Both `ListKnowledgeEntities` and `DeleteKnowledgeEntity` query the tenant-specific schema (`tenant_<id>.entities`) but do NOT filter by `campaign_id` in the SQL WHERE clause. The `campaignID` parameter is accepted but never included in the query.
+- **Impact:** Within the same tenant, users with access to Campaign A can see and delete knowledge entities from Campaign B. This violates the campaign-scoped access model.
+- **Suggested fix:** Add `AND campaign_id = $<N>` to both queries, using the `campaignID` parameter that is already passed in.
+
+#### 2.5 NPC Store Has No Tenant-Level Isolation
+
+- **Severity:** High
+- **Location:** `internal/agent/npcstore/postgres.go:132-159` (Get), `internal/agent/npcstore/postgres.go:219-226` (Delete)
+- **Description:** The `npc_definitions` table has no `tenant_id` column. `Get` retrieves by NPC ID alone (`WHERE id = $1`). `Delete` also uses only `WHERE id = $1`. The web handlers verify the NPC's campaign belongs to the current tenant via `requireCampaign`, but the store has no tenant guard.
+- **Impact:** Defense-in-depth violation. Any future code path calling `npcs.Get()` or `npcs.Delete()` without first verifying campaign ownership will have cross-tenant access.
+- **Suggested fix:** Add a `tenant_id` column to `npc_definitions` and include it in all queries, or move NPC definitions to tenant-specific schemas.
+
+#### 2.6 UpdateUser Store Method Not Scoped by Tenant
+
+- **Severity:** Medium
+- **Location:** `internal/web/store.go:826-856`
+- **Description:** `UpdateUser` uses `WHERE id = $1 AND deleted_at IS NULL` with no `tenant_id` filter. Compare to `DeleteUser` which properly includes `AND tenant_id = $2`. The handler does a separate tenant check, but the store method can update any user in any tenant.
+- **Impact:** Defense-in-depth violation — if any future caller invokes `UpdateUser` without the handler-level tenant check, cross-tenant user modification is possible.
+- **Suggested fix:** Add `AND tenant_id = $<N>` to the `UpdateUser` WHERE clause, consistent with `DeleteUser`.
+
+#### 2.7 Gateway Admin API Open When API Key Empty
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/admin.go:148-175`
+- **Description:** When no API key is configured (`a.apiKey == ""`), the gateway admin API auth middleware allows all requests without authentication. This is noted as "backward compat" but is dangerous in production.
+- **Impact:** If deployed without an API key, anyone with network access can create, modify, or delete any tenant, including injecting bot tokens.
+- **Suggested fix:** Refuse to start the admin API without an API key in production, or default to denying all requests.
+
+#### 2.8 Worker gRPC Calls Not Tenant-Scoped
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/grpctransport/client.go:94-210`, `internal/gateway/grpctransport/server.go:88-169`
+- **Description:** Worker gRPC calls for `StopSession`, `ListNPCs`, `MuteNPC`, `UnmuteNPC`, `SpeakNPC` are keyed by `sessionID` only — no `tenantID` is passed or verified. The gRPC auth only protects ManagementService RPCs; SessionWorkerService RPCs are unguarded.
+- **Impact:** If the gateway is compromised or multiple gateways share a worker pool, a session from Tenant A could be manipulated through worker RPCs referencing Tenant B's session ID.
+- **Suggested fix:** Include `tenant_id` in worker RPC requests and have the worker verify it matches the session's tenant.
+
+#### 2.9 ValidRoles Excludes super_admin (Correctly)
 
 - **Severity:** Low (Positive Finding)
 - **Location:** `internal/web/store.go:58-62`
@@ -89,11 +169,11 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 
 #### 3.1 No Echo Cancellation / Self-Hearing Guard
 
-- **Severity:** High
-- **Location:** `internal/session/runtime.go`, `internal/engine/cascade/cascade.go`
-- **Description:** There is no mechanism to prevent the NPC's own TTS audio output (played into the Discord voice channel) from being picked up by VAD and re-transcribed by STT. In Discord, the bot sends opus frames and receives opus frames from all participants. While Discord *usually* excludes the bot's own audio from the receive stream, this is not guaranteed in all configurations (especially with audio bridges and WebRTC). There is no explicit NPC-audio-is-playing flag to suppress VAD during TTS playback.
-- **Impact:** In edge cases (especially distributed mode with audio bridges), the NPC could hear itself speak, transcribe its own output, and enter a feedback loop. This would be perceived as the NPC "talking to itself."
-- **Suggested fix:** Add a "NPC is speaking" flag that suppresses VAD processing while TTS audio is being played. The mixer already tracks active playback — connect this to the VAD input gate.
+- **Severity:** Critical
+- **Location:** `pkg/audio/discord/connection.go:99-160`, `internal/app/audio_pipeline.go:86-94`
+- **Description:** The Discord connection's `ReceiveOpusFrame` creates an input stream for **every** user ID that sends audio, including the bot's own user ID. There is no filtering of the bot's own user ID anywhere in the pipeline. `audioPipeline.Start()` iterates `conn.InputStreams()` and starts a VAD/STT worker for every participant, including the bot itself. Similarly, `handleParticipantChange` starts a worker for every `EventJoin`, with no bot-ID exclusion. The gRPC bridge has the same gap.
+- **Impact:** The NPC's synthesized speech is decoded, fed into VAD, transcribed by STT, routed to an NPC agent, and generates a response — creating a feedback loop where the NPC talks to itself indefinitely. While Discord *usually* doesn't route bot audio back, this is not guaranteed (especially with audio bridges in distributed mode).
+- **Suggested fix:** Store the bot's own user ID in the `Connection` struct and skip it in `ReceiveOpusFrame`. Alternatively, filter in `audioPipeline.startWorker()` by checking the participant ID against a known bot ID.
 
 #### 3.2 Cascade Engine Background Goroutine Leak on Fast Close
 
@@ -110,6 +190,46 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 - **Description:** The gRPC audio bridge uses a bidirectional stream where frames are sent/received sequentially. gRPC guarantees in-order delivery on a single stream, so frame ordering is preserved in the normal case. However, if the stream reconnects (e.g., after a transient network error), frames sent during the reconnection window are lost with no indication to the pipeline.
 - **Impact:** Brief audio gaps during gRPC stream reconnection, which could cause STT to produce garbled transcriptions for that segment.
 - **Suggested fix:** Add sequence numbers to audio frames and detect/log gaps on the receiving end. Consider buffering a small window for reorder tolerance.
+
+#### 3.4 Data Race Between Flush() and sendLoop in gRPC Bridge
+
+- **Severity:** High
+- **Location:** `pkg/audio/grpcbridge/connection.go:194-198`, `pkg/audio/grpcbridge/connection.go:313-324`
+- **Description:** `Flush()` drains the output channel concurrently while `sendLoop()` also reads from it. Both goroutines race on `<-c.output`, causing frames to be non-deterministically consumed by either. Frames consumed by `Flush()` are silently discarded, while `sendLoop` may have already buffered a partial opus frame from a previous read.
+- **Impact:** During barge-in, the race produces audio glitches or corruption on the gateway side. A frame read by Flush is lost; sendLoop may encode against stale partial buffer data.
+- **Suggested fix:** Remove the local output drain from `Flush()` and let `sendLoop` do both the channel drain and buffer reset atomically via the existing `flushCh` signal.
+
+#### 3.5 STT Session Leak on Rapid VAD Speech Start/End Cycles
+
+- **Severity:** High
+- **Location:** `internal/app/audio_pipeline.go:203-238`
+- **Description:** When `VADSpeechStart` fires, the code opens a new STT session and launches a `collectAndRoute` goroutine. If a second `VADSpeechStart` fires before a corresponding `VADSpeechEnd` (e.g., VAD glitch), the `sttSession` variable is overwritten without closing the previous session. The old session's WebSocket/HTTP connection is leaked.
+- **Impact:** Under rapid false-positive VAD triggers, this could leak many STT sessions (network connections, server-side state), causing resource exhaustion.
+- **Suggested fix:** Before opening a new STT session on `VADSpeechStart`, close the existing one if non-nil.
+
+#### 3.6 TTS/LLM Fallback Only Covers Stream Setup, Not Mid-Stream Failures
+
+- **Severity:** Medium
+- **Location:** `internal/resilience/tts_fallback.go:33-37`, `internal/resilience/llm_fallback.go:43`
+- **Description:** The fallback wrappers only apply failover to the initial `SynthesizeStream`/`StreamCompletion` call. Mid-stream errors (WebSocket disconnect, API timeout) close the audio channel prematurely. The text that was already consumed from the input channel cannot be re-sent to a fallback provider because channels are one-read. The circuit breaker won't record this as a failure since the initial call succeeded.
+- **Impact:** If ElevenLabs drops the WebSocket mid-synthesis, the NPC's response is truncated with no automatic recovery to a fallback provider.
+- **Suggested fix:** Buffer the text channel's contents so they can be replayed to a fallback provider on mid-stream failure. Have the cascade engine detect stream errors and retry with a different provider.
+
+#### 3.7 voiceBridgeReceiver.frameCount Data Race
+
+- **Severity:** Medium
+- **Location:** `internal/gateway/voicebridge.go:33,45-46,156`
+- **Description:** `frameCount` (type `uint64`) is incremented from the disgo voice receiver goroutine but read from the cleanup goroutine with no synchronization. This is a data race detectable by `-race`.
+- **Impact:** Go race detector would flag this. Violates the project's "race detector always on" convention.
+- **Suggested fix:** Change `frameCount` to `atomic.Uint64`.
+
+#### 3.8 Consolidator Summary Skip Heuristic Drops Legitimate Messages
+
+- **Severity:** Low
+- **Location:** `internal/session/consolidator.go:158`
+- **Description:** The consolidator skips "synthetic summary messages" by checking `m.Content[0] == '['`. Any legitimate user message starting with `[` (e.g., "[OOC] hey guys", "[laughs nervously]", "[attacks the goblin]") is incorrectly skipped and permanently lost from the session store.
+- **Impact:** Transcript entries starting with `[` are silently lost. Common tabletop RPG conventions include bracketed OOC messages, action descriptions, and emotes — all would be dropped.
+- **Suggested fix:** Use a more specific prefix check, e.g., `strings.HasPrefix(m.Content, "[Previous conversation summary]")`.
 
 ---
 
@@ -215,13 +335,28 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 1.1 | TOCTOU race in session start | High | Session Lifecycle |
 | 1.2 | Zombie sessions with NULL heartbeat | Critical | Session Lifecycle |
 | 1.3 | No state transition validation | Medium | Session Lifecycle |
-| 1.4 | Disconnect listener leak on failure | Low | Session Lifecycle |
+| 1.4 | Zombie cleanup doesn't update in-memory state | High | Session Lifecycle |
+| 1.5 | Concurrent Stop from multiple triggers | Medium | Session Lifecycle |
+| 1.6 | Full-mode session not stopped on shutdown | Medium | Session Lifecycle |
+| 1.7 | StopAll doesn't report ended state | Medium | Session Lifecycle |
+| 1.8 | Reconnector silent failure after max retries | Medium | Session Lifecycle |
+| 1.9 | Disconnect listener leak on failure | Low | Session Lifecycle |
 | 2.1 | StopSession missing tenant auth | Critical | Multi-Tenancy |
 | 2.2 | GetUser not scoped by tenant | Medium | Multi-Tenancy |
 | 2.3 | Lore/Knowledge no tenant guard in store | Medium | Multi-Tenancy |
-| 3.1 | No echo cancellation | High | Voice Pipeline |
+| 2.4 | Knowledge entity queries missing campaign_id | High | Multi-Tenancy |
+| 2.5 | NPC store has no tenant isolation | High | Multi-Tenancy |
+| 2.6 | UpdateUser not scoped by tenant | Medium | Multi-Tenancy |
+| 2.7 | Gateway admin API open when key empty | Medium | Multi-Tenancy |
+| 2.8 | Worker gRPC calls not tenant-scoped | Medium | Multi-Tenancy |
+| 3.1 | No echo cancellation — NPC self-talk loop | Critical | Voice Pipeline |
 | 3.2 | Cascade engine goroutine leak | Medium | Voice Pipeline |
 | 3.3 | Audio frame gaps on stream reconnect | Medium | Voice Pipeline |
+| 3.4 | Flush/sendLoop data race in gRPC bridge | High | Voice Pipeline |
+| 3.5 | STT session leak on rapid VAD cycles | High | Voice Pipeline |
+| 3.6 | TTS/LLM fallback no mid-stream recovery | Medium | Voice Pipeline |
+| 3.7 | voiceBridgeReceiver frameCount data race | Medium | Voice Pipeline |
+| 3.8 | Consolidator drops bracketed messages | Low | Voice Pipeline |
 | 4.1 | Non-atomic invite acceptance | Medium | Data Consistency |
 | 4.2 | Campaign deletion no cascade | Medium | Data Consistency |
 | 5.1 | CORS defaults to allow-all | High | Config & Startup |
@@ -233,10 +368,10 @@ This audit reviewed ~170 non-test Go source files across the Glyphoxa codebase. 
 | 7.3 | JWT in redirect URL | High | Security |
 | 7.4 | No JWT revocation | Medium | Security |
 
-**Critical (3):** 1.2, 2.1 — require immediate attention
-**High (5):** 1.1, 3.1, 5.1, 7.1, 7.3 — should be addressed before production deployment
-**Medium (8):** 1.3, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 5.2, 7.4 — should be addressed in the next sprint
-**Low (5):** 1.4, 6.1, 6.2, 7.2 — address opportunistically
+**Critical (3):** 1.2, 2.1, 3.1 — require immediate attention
+**High (10):** 1.1, 1.4, 2.4, 2.5, 3.4, 3.5, 5.1, 7.1, 7.3 — should be addressed before production deployment
+**Medium (18):** 1.3, 1.5, 1.6, 1.7, 1.8, 2.2, 2.3, 2.6, 2.7, 2.8, 3.2, 3.3, 3.6, 3.7, 4.1, 4.2, 5.2, 7.4 — next sprint
+**Low (5):** 1.9, 3.8, 6.1, 6.2, 7.2 — address opportunistically
 
 ---
 
