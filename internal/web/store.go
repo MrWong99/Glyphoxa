@@ -137,7 +137,7 @@ type WebStore interface {
 	UpsertGoogleUser(ctx context.Context, googleID, email, displayName, avatarURL, tenantID string) (*User, error)
 	UpsertGitHubUser(ctx context.Context, githubID, email, displayName, avatarURL, tenantID string) (*User, error)
 	EnsureAdminUser(ctx context.Context, tenantID string) (*User, error)
-	GetUser(ctx context.Context, id string) (*User, error)
+	GetUser(ctx context.Context, tenantID, id string) (*User, error)
 	ListUsers(ctx context.Context, tenantID, role string, limit, offset int) ([]User, int, error)
 	UpdateUser(ctx context.Context, u *User) error
 	UpdateUserTenant(ctx context.Context, userID, tenantID, role string) error
@@ -156,12 +156,12 @@ type WebStore interface {
 	GetTranscript(ctx context.Context, tenantID, sessionID string) ([]TranscriptEntry, error)
 	GetUsage(ctx context.Context, tenantID string, from, to time.Time) ([]UsageRecord, error)
 
-	// Lore documents.
-	CreateLoreDocument(ctx context.Context, doc *LoreDocument) error
-	GetLoreDocument(ctx context.Context, campaignID, id string) (*LoreDocument, error)
-	ListLoreDocuments(ctx context.Context, campaignID string) ([]LoreDocument, error)
-	UpdateLoreDocument(ctx context.Context, doc *LoreDocument) error
-	DeleteLoreDocument(ctx context.Context, campaignID, id string) error
+	// Lore documents — tenantID is verified via campaign ownership (defense-in-depth).
+	CreateLoreDocument(ctx context.Context, tenantID string, doc *LoreDocument) error
+	GetLoreDocument(ctx context.Context, tenantID, campaignID, id string) (*LoreDocument, error)
+	ListLoreDocuments(ctx context.Context, tenantID, campaignID string) ([]LoreDocument, error)
+	UpdateLoreDocument(ctx context.Context, tenantID string, doc *LoreDocument) error
+	DeleteLoreDocument(ctx context.Context, tenantID, campaignID, id string) error
 
 	// Campaign-NPC links.
 	LinkNPCToCampaign(ctx context.Context, campaignID, npcID string) error
@@ -282,14 +282,14 @@ func (s *Store) EnsureAdminUser(ctx context.Context, tenantID string) (*User, er
 	return &user, nil
 }
 
-// GetUser retrieves a user by ID.
-func (s *Store) GetUser(ctx context.Context, id string) (*User, error) {
+// GetUser retrieves a user by ID within a tenant (defense-in-depth).
+func (s *Store) GetUser(ctx context.Context, tenantID, id string) (*User, error) {
 	var user User
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, tenant_id, discord_id, email, display_name, avatar_url, role, preferences, last_login_at, created_at, updated_at
 		FROM mgmt.users
-		WHERE id = $1 AND deleted_at IS NULL
-	`, id).Scan(
+		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`, id, tenantID).Scan(
 		&user.ID, &user.TenantID, &user.DiscordID, &user.Email,
 		&user.DisplayName, &user.AvatarURL, &user.Role, &user.Preferences,
 		&user.LastLoginAt, &user.CreatedAt, &user.UpdatedAt,
@@ -545,8 +545,9 @@ func (s *Store) GetUsage(ctx context.Context, tenantID string, from, to time.Tim
 // Lore documents
 // ---------------------------------------------------------------------------
 
-// CreateLoreDocument inserts a new lore document.
-func (s *Store) CreateLoreDocument(ctx context.Context, doc *LoreDocument) error {
+// CreateLoreDocument inserts a new lore document. The tenantID is verified
+// against campaign ownership for defense-in-depth.
+func (s *Store) CreateLoreDocument(ctx context.Context, tenantID string, doc *LoreDocument) error {
 	if doc.ID == "" {
 		doc.ID = uuid.NewString()
 	}
@@ -555,22 +556,25 @@ func (s *Store) CreateLoreDocument(ctx context.Context, doc *LoreDocument) error
 	doc.UpdatedAt = now
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO mgmt.lore_documents (id, campaign_id, title, content_markdown, sort_order, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, doc.ID, doc.CampaignID, doc.Title, doc.ContentMarkdown, doc.SortOrder, doc.CreatedAt, doc.UpdatedAt)
+		SELECT $1, $2, $3, $4, $5, $6, $7
+		WHERE EXISTS (SELECT 1 FROM mgmt.campaigns WHERE id = $2 AND tenant_id = $8 AND deleted_at IS NULL)
+	`, doc.ID, doc.CampaignID, doc.Title, doc.ContentMarkdown, doc.SortOrder, doc.CreatedAt, doc.UpdatedAt, tenantID)
 	if err != nil {
 		return fmt.Errorf("web: create lore document %q: %w", doc.ID, err)
 	}
 	return nil
 }
 
-// GetLoreDocument retrieves a lore document by campaign and ID.
-func (s *Store) GetLoreDocument(ctx context.Context, campaignID, id string) (*LoreDocument, error) {
+// GetLoreDocument retrieves a lore document by campaign and ID, verifying
+// tenant ownership of the campaign (defense-in-depth).
+func (s *Store) GetLoreDocument(ctx context.Context, tenantID, campaignID, id string) (*LoreDocument, error) {
 	var doc LoreDocument
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, campaign_id, title, content_markdown, sort_order, created_at, updated_at
-		FROM mgmt.lore_documents
-		WHERE id = $1 AND campaign_id = $2
-	`, id, campaignID).Scan(&doc.ID, &doc.CampaignID, &doc.Title, &doc.ContentMarkdown, &doc.SortOrder, &doc.CreatedAt, &doc.UpdatedAt)
+		SELECT ld.id, ld.campaign_id, ld.title, ld.content_markdown, ld.sort_order, ld.created_at, ld.updated_at
+		FROM mgmt.lore_documents ld
+		JOIN mgmt.campaigns c ON c.id = ld.campaign_id AND c.tenant_id = $3 AND c.deleted_at IS NULL
+		WHERE ld.id = $1 AND ld.campaign_id = $2
+	`, id, campaignID, tenantID).Scan(&doc.ID, &doc.CampaignID, &doc.Title, &doc.ContentMarkdown, &doc.SortOrder, &doc.CreatedAt, &doc.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -581,14 +585,15 @@ func (s *Store) GetLoreDocument(ctx context.Context, campaignID, id string) (*Lo
 }
 
 // ListLoreDocuments returns all lore documents for a campaign ordered by
-// sort_order ascending.
-func (s *Store) ListLoreDocuments(ctx context.Context, campaignID string) ([]LoreDocument, error) {
+// sort_order ascending. Verifies tenant ownership of the campaign.
+func (s *Store) ListLoreDocuments(ctx context.Context, tenantID, campaignID string) ([]LoreDocument, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, campaign_id, title, content_markdown, sort_order, created_at, updated_at
-		FROM mgmt.lore_documents
-		WHERE campaign_id = $1
-		ORDER BY sort_order ASC, created_at ASC
-	`, campaignID)
+		SELECT ld.id, ld.campaign_id, ld.title, ld.content_markdown, ld.sort_order, ld.created_at, ld.updated_at
+		FROM mgmt.lore_documents ld
+		JOIN mgmt.campaigns c ON c.id = ld.campaign_id AND c.tenant_id = $2 AND c.deleted_at IS NULL
+		WHERE ld.campaign_id = $1
+		ORDER BY ld.sort_order ASC, ld.created_at ASC
+	`, campaignID, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("web: list lore documents: %w", err)
 	}
@@ -605,14 +610,17 @@ func (s *Store) ListLoreDocuments(ctx context.Context, campaignID string) ([]Lor
 	return docs, rows.Err()
 }
 
-// UpdateLoreDocument updates an existing lore document.
-func (s *Store) UpdateLoreDocument(ctx context.Context, doc *LoreDocument) error {
+// UpdateLoreDocument updates an existing lore document, verifying tenant
+// ownership of the campaign (defense-in-depth).
+func (s *Store) UpdateLoreDocument(ctx context.Context, tenantID string, doc *LoreDocument) error {
 	doc.UpdatedAt = time.Now().UTC()
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE mgmt.lore_documents
+		UPDATE mgmt.lore_documents ld
 		SET title = $3, content_markdown = $4, sort_order = $5, updated_at = $6
-		WHERE id = $1 AND campaign_id = $2
-	`, doc.ID, doc.CampaignID, doc.Title, doc.ContentMarkdown, doc.SortOrder, doc.UpdatedAt)
+		FROM mgmt.campaigns c
+		WHERE ld.id = $1 AND ld.campaign_id = $2
+		  AND c.id = ld.campaign_id AND c.tenant_id = $7 AND c.deleted_at IS NULL
+	`, doc.ID, doc.CampaignID, doc.Title, doc.ContentMarkdown, doc.SortOrder, doc.UpdatedAt, tenantID)
 	if err != nil {
 		return fmt.Errorf("web: update lore document %q: %w", doc.ID, err)
 	}
@@ -622,11 +630,15 @@ func (s *Store) UpdateLoreDocument(ctx context.Context, doc *LoreDocument) error
 	return nil
 }
 
-// DeleteLoreDocument removes a lore document.
-func (s *Store) DeleteLoreDocument(ctx context.Context, campaignID, id string) error {
+// DeleteLoreDocument removes a lore document, verifying tenant ownership
+// of the campaign (defense-in-depth).
+func (s *Store) DeleteLoreDocument(ctx context.Context, tenantID, campaignID, id string) error {
 	tag, err := s.pool.Exec(ctx, `
-		DELETE FROM mgmt.lore_documents WHERE id = $1 AND campaign_id = $2
-	`, id, campaignID)
+		DELETE FROM mgmt.lore_documents ld
+		USING mgmt.campaigns c
+		WHERE ld.id = $1 AND ld.campaign_id = $2
+		  AND c.id = ld.campaign_id AND c.tenant_id = $3 AND c.deleted_at IS NULL
+	`, id, campaignID, tenantID)
 	if err != nil {
 		return fmt.Errorf("web: delete lore document %q: %w", id, err)
 	}
@@ -721,19 +733,20 @@ func (s *Store) ListKnowledgeEntities(ctx context.Context, tenantID, campaignID 
 		query := fmt.Sprintf(`
 			SELECT id, type, name, attributes, created_at, updated_at
 			FROM %s
-			WHERE (created_at, id) < ($2, $3)
+			WHERE campaign_id = $4 AND (created_at, id) < ($2, $3)
 			ORDER BY created_at DESC, id DESC
 			LIMIT $1
 		`, table)
-		rows, err = s.pool.Query(ctx, query, limit+1, cursorTime, cd.ID)
+		rows, err = s.pool.Query(ctx, query, limit+1, cursorTime, cd.ID, campaignID)
 	} else {
 		query := fmt.Sprintf(`
 			SELECT id, type, name, attributes, created_at, updated_at
 			FROM %s
+			WHERE campaign_id = $2
 			ORDER BY created_at DESC, id DESC
 			LIMIT $1
 		`, table)
-		rows, err = s.pool.Query(ctx, query, limit+1)
+		rows, err = s.pool.Query(ctx, query, limit+1, campaignID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("web: list knowledge entities: %w", err)
@@ -761,8 +774,8 @@ func (s *Store) DeleteKnowledgeEntity(ctx context.Context, tenantID, campaignID,
 	schema := "tenant_" + tenantID
 	table := pgx.Identifier{schema, "entities"}.Sanitize()
 
-	query := fmt.Sprintf(`DELETE FROM %s WHERE id = $1`, table)
-	tag, err := s.pool.Exec(ctx, query, entityID)
+	query := fmt.Sprintf(`DELETE FROM %s WHERE id = $1 AND campaign_id = $2`, table)
+	tag, err := s.pool.Exec(ctx, query, entityID, campaignID)
 	if err != nil {
 		return fmt.Errorf("web: delete knowledge entity %q: %w", entityID, err)
 	}
@@ -845,8 +858,11 @@ func (s *Store) UpdateUser(ctx context.Context, u *User) error {
 
 	sets = append(sets, fmt.Sprintf("updated_at = $%d", idx))
 	args = append(args, u.UpdatedAt)
+	idx++
 
-	query := fmt.Sprintf("UPDATE mgmt.users SET %s WHERE id = $1 AND deleted_at IS NULL", strings.Join(sets, ", "))
+	// Defense-in-depth: scope update to the user's tenant.
+	query := fmt.Sprintf("UPDATE mgmt.users SET %s WHERE id = $1 AND tenant_id = $%d AND deleted_at IS NULL", strings.Join(sets, ", "), idx)
+	args = append(args, u.TenantID)
 	tag, err := s.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("web: update user %q: %w", u.ID, err)

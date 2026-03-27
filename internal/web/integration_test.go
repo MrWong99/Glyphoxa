@@ -88,9 +88,12 @@ func (m *mockNPCStore) Create(_ context.Context, def *npcstore.NPCDefinition) er
 	return nil
 }
 
-func (m *mockNPCStore) Get(_ context.Context, id string) (*npcstore.NPCDefinition, error) {
+func (m *mockNPCStore) Get(_ context.Context, id, campaignID string) (*npcstore.NPCDefinition, error) {
 	def, ok := m.npcs[id]
 	if !ok {
+		return nil, nil
+	}
+	if campaignID != "" && def.CampaignID != campaignID {
 		return nil, nil
 	}
 	return def, nil
@@ -105,7 +108,7 @@ func (m *mockNPCStore) Update(_ context.Context, def *npcstore.NPCDefinition) er
 	return nil
 }
 
-func (m *mockNPCStore) Delete(_ context.Context, id string) error {
+func (m *mockNPCStore) Delete(_ context.Context, id, _ string) error {
 	delete(m.npcs, id)
 	return nil
 }

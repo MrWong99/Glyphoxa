@@ -147,9 +147,9 @@ func (a *AdminAPI) registerRoutes() {
 
 func (a *AdminAPI) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// When no API key is configured, allow all requests (backward compat).
+		// When no API key is configured, reject all requests.
 		if a.apiKey == "" {
-			next.ServeHTTP(w, r)
+			writeAdminError(w, http.StatusForbidden, "admin API key not configured — set GLYPHOXA_ADMIN_API_KEY")
 			return
 		}
 

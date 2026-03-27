@@ -163,7 +163,7 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 			fallthrough
 		default:
 			if user.Role != invite.Role {
-				if err := s.store.UpdateUser(r.Context(), &User{ID: user.ID, Role: invite.Role}); err != nil {
+				if err := s.store.UpdateUser(r.Context(), &User{ID: user.ID, TenantID: user.TenantID, Role: invite.Role}); err != nil {
 					slog.Warn("web: update invite role", "err", err)
 				} else {
 					user.Role = invite.Role
@@ -211,7 +211,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch user to get current role/tenant.
-	user, err := s.store.GetUser(r.Context(), claims.Sub)
+	user, err := s.store.GetUser(r.Context(), claims.TenantID, claims.Sub)
 	if err != nil || user == nil {
 		writeError(w, http.StatusUnauthorized, "user_not_found", "user no longer exists")
 		return
@@ -306,7 +306,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.store.GetUser(r.Context(), claims.Sub)
+	user, err := s.store.GetUser(r.Context(), claims.TenantID, claims.Sub)
 	if err != nil {
 		slog.Error("web: get user for /me", "user_id", claims.Sub, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to fetch user")

@@ -40,9 +40,12 @@ func (m *mockNPCStore) Create(_ context.Context, def *npcstore.NPCDefinition) er
 	return nil
 }
 
-func (m *mockNPCStore) Get(_ context.Context, id string) (*npcstore.NPCDefinition, error) {
+func (m *mockNPCStore) Get(_ context.Context, id, campaignID string) (*npcstore.NPCDefinition, error) {
 	def, ok := m.npcs[id]
 	if !ok {
+		return nil, nil
+	}
+	if campaignID != "" && def.CampaignID != campaignID {
 		return nil, nil
 	}
 	return def, nil
@@ -57,7 +60,12 @@ func (m *mockNPCStore) Update(_ context.Context, def *npcstore.NPCDefinition) er
 	return nil
 }
 
-func (m *mockNPCStore) Delete(_ context.Context, id string) error {
+func (m *mockNPCStore) Delete(_ context.Context, id, campaignID string) error {
+	if campaignID != "" {
+		if def, ok := m.npcs[id]; ok && def.CampaignID != campaignID {
+			return nil
+		}
+	}
 	delete(m.npcs, id)
 	return nil
 }
@@ -144,9 +152,9 @@ func (m *mockWebStore) EnsureAdminUser(_ context.Context, tenantID string) (*Use
 	return u, nil
 }
 
-func (m *mockWebStore) GetUser(_ context.Context, id string) (*User, error) {
+func (m *mockWebStore) GetUser(_ context.Context, tenantID, id string) (*User, error) {
 	u, ok := m.users[id]
-	if !ok {
+	if !ok || u.TenantID != tenantID {
 		return nil, nil
 	}
 	return u, nil
@@ -179,7 +187,7 @@ func (m *mockWebStore) ListUsers(_ context.Context, tenantID, role string, limit
 
 func (m *mockWebStore) UpdateUser(_ context.Context, u *User) error {
 	existing, ok := m.users[u.ID]
-	if !ok {
+	if !ok || (u.TenantID != "" && existing.TenantID != u.TenantID) {
 		return fmt.Errorf("web: user %q not found", u.ID)
 	}
 	if u.DisplayName != "" {
@@ -353,7 +361,7 @@ func (m *mockWebStore) GetUsage(_ context.Context, tenantID string, from, to tim
 
 // Lore document mocks.
 
-func (m *mockWebStore) CreateLoreDocument(_ context.Context, doc *LoreDocument) error {
+func (m *mockWebStore) CreateLoreDocument(_ context.Context, _ string, doc *LoreDocument) error {
 	if doc.ID == "" {
 		doc.ID = "lore-" + doc.Title
 	}
@@ -364,7 +372,7 @@ func (m *mockWebStore) CreateLoreDocument(_ context.Context, doc *LoreDocument) 
 	return nil
 }
 
-func (m *mockWebStore) GetLoreDocument(_ context.Context, campaignID, id string) (*LoreDocument, error) {
+func (m *mockWebStore) GetLoreDocument(_ context.Context, _, campaignID, id string) (*LoreDocument, error) {
 	doc, ok := m.loreDocs[id]
 	if !ok || doc.CampaignID != campaignID {
 		return nil, nil
@@ -372,7 +380,7 @@ func (m *mockWebStore) GetLoreDocument(_ context.Context, campaignID, id string)
 	return doc, nil
 }
 
-func (m *mockWebStore) ListLoreDocuments(_ context.Context, campaignID string) ([]LoreDocument, error) {
+func (m *mockWebStore) ListLoreDocuments(_ context.Context, _, campaignID string) ([]LoreDocument, error) {
 	var result []LoreDocument
 	for _, doc := range m.loreDocs {
 		if doc.CampaignID == campaignID {
@@ -382,7 +390,7 @@ func (m *mockWebStore) ListLoreDocuments(_ context.Context, campaignID string) (
 	return result, nil
 }
 
-func (m *mockWebStore) UpdateLoreDocument(_ context.Context, doc *LoreDocument) error {
+func (m *mockWebStore) UpdateLoreDocument(_ context.Context, _ string, doc *LoreDocument) error {
 	existing, ok := m.loreDocs[doc.ID]
 	if !ok || existing.CampaignID != doc.CampaignID {
 		return fmt.Errorf("web: lore document %q not found", doc.ID)
@@ -392,7 +400,7 @@ func (m *mockWebStore) UpdateLoreDocument(_ context.Context, doc *LoreDocument) 
 	return nil
 }
 
-func (m *mockWebStore) DeleteLoreDocument(_ context.Context, campaignID, id string) error {
+func (m *mockWebStore) DeleteLoreDocument(_ context.Context, _, campaignID, id string) error {
 	doc, ok := m.loreDocs[id]
 	if !ok || doc.CampaignID != campaignID {
 		return fmt.Errorf("web: lore document %q not found", id)

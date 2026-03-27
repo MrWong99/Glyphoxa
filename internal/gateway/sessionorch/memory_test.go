@@ -661,10 +661,11 @@ func TestMemoryOrchestrator_AllNonEndedSessions(t *testing.T) {
 	})
 }
 
-func TestMemoryOrchestrator_ValidateAndCreate_CrossTenantCampaignConflict(t *testing.T) {
+func TestMemoryOrchestrator_ValidateAndCreate_CrossTenantCampaignIndependent(t *testing.T) {
 	t.Parallel()
 
-	// Campaign uniqueness is global, not per-tenant.
+	// Campaign uniqueness is per-tenant, not global. Different tenants
+	// with the same campaign ID must not block each other.
 	m := NewMemoryOrchestrator()
 	ctx := context.Background()
 
@@ -678,15 +679,43 @@ func TestMemoryOrchestrator_ValidateAndCreate_CrossTenantCampaignConflict(t *tes
 		t.Fatalf("first create: %v", err)
 	}
 
-	// Different tenant, same campaign ID — should fail.
+	// Different tenant, same campaign ID — should succeed (tenant isolation).
 	_, err = m.ValidateAndCreate(ctx, SessionRequest{
 		TenantID:    "tenant2",
 		CampaignID:  "shared-campaign",
 		GuildID:     "g2",
 		LicenseTier: config.TierDedicated,
 	})
+	if err != nil {
+		t.Fatalf("cross-tenant campaign should not conflict: %v", err)
+	}
+}
+
+func TestMemoryOrchestrator_ValidateAndCreate_SameTenantCampaignConflict(t *testing.T) {
+	t.Parallel()
+
+	// Same tenant, same campaign — must be rejected.
+	m := NewMemoryOrchestrator()
+	ctx := context.Background()
+
+	_, err := m.ValidateAndCreate(ctx, SessionRequest{
+		TenantID:    "tenant1",
+		CampaignID:  "camp1",
+		GuildID:     "g1",
+		LicenseTier: config.TierDedicated,
+	})
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	_, err = m.ValidateAndCreate(ctx, SessionRequest{
+		TenantID:    "tenant1",
+		CampaignID:  "camp1",
+		GuildID:     "g2",
+		LicenseTier: config.TierDedicated,
+	})
 	if err == nil {
-		t.Fatal("expected error: same campaign across different tenants should conflict")
+		t.Fatal("expected error: same tenant, same campaign should conflict")
 	}
 }
 

@@ -9,12 +9,25 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
 	"github.com/MrWong99/glyphoxa/internal/gateway"
 	"github.com/MrWong99/glyphoxa/internal/resilience"
 )
+
+// tenantMetadataKey is the gRPC metadata key used to pass the tenant ID
+// for defense-in-depth session ownership verification.
+const tenantMetadataKey = "x-tenant-id"
+
+// withTenantMD adds the tenant ID to outgoing gRPC metadata.
+func withTenantMD(ctx context.Context, tenantID string) context.Context {
+	if tenantID == "" {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, tenantMetadataKey, tenantID)
+}
 
 // Compile-time interface assertions.
 var (
@@ -72,7 +85,7 @@ func (c *Client) StartSession(ctx context.Context, req gateway.StartSessionReque
 	}
 
 	return c.breaker.Execute(func() error {
-		_, err := c.client.StartSession(ctx, &pb.StartSessionRequest{
+		_, err := c.client.StartSession(withTenantMD(ctx, req.TenantID), &pb.StartSessionRequest{
 			SessionId:   req.SessionID,
 			TenantId:    req.TenantID,
 			CampaignId:  req.CampaignID,

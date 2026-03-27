@@ -562,7 +562,7 @@ func TestPostgresStore_Get(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		def, err := store.Get(context.Background(), "npc-1")
+		def, err := store.Get(context.Background(), "npc-1", "camp-1")
 		if err != nil {
 			t.Fatalf("Get() unexpected error: %v", err)
 		}
@@ -597,7 +597,7 @@ func TestPostgresStore_Get(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		def, err := store.Get(context.Background(), "missing")
+		def, err := store.Get(context.Background(), "missing", "camp-1")
 		if err != nil {
 			t.Fatalf("Get() unexpected error: %v", err)
 		}
@@ -616,7 +616,7 @@ func TestPostgresStore_Get(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		_, err := store.Get(context.Background(), "npc-1")
+		_, err := store.Get(context.Background(), "npc-1", "camp-1")
 		if err == nil {
 			t.Fatal("Get() expected error, got nil")
 		}
@@ -707,15 +707,15 @@ func TestPostgresStore_Delete(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		err := store.Delete(context.Background(), "npc-1")
+		err := store.Delete(context.Background(), "npc-1", "camp-1")
 		if err != nil {
 			t.Fatalf("Delete() unexpected error: %v", err)
 		}
 		if !strings.Contains(capturedSQL, "DELETE FROM npc_definitions") {
 			t.Errorf("SQL = %q, want DELETE statement", capturedSQL)
 		}
-		if len(capturedArgs) != 1 || capturedArgs[0] != "npc-1" {
-			t.Errorf("args = %v, want [npc-1]", capturedArgs)
+		if len(capturedArgs) != 2 || capturedArgs[0] != "npc-1" || capturedArgs[1] != "camp-1" {
+			t.Errorf("args = %v, want [npc-1 camp-1]", capturedArgs)
 		}
 	})
 
@@ -727,7 +727,7 @@ func TestPostgresStore_Delete(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		err := store.Delete(context.Background(), "npc-1")
+		err := store.Delete(context.Background(), "npc-1", "camp-1")
 		if err == nil {
 			t.Fatal("Delete() expected error, got nil")
 		}
