@@ -65,17 +65,21 @@ export default function NewNPCPage({
   async function handleSave() {
     setTouched({ name: true, voiceId: true, personality: true });
     if (Object.keys(errors).length > 0) return;
-    await createNPC.mutateAsync({
-      name: name.trim(),
-      personality: personality.trim(),
-      voice: { provider: voiceProvider, voice_id: voiceId.trim() },
-      engine,
-      budget_tier: budgetTier,
-      knowledge_scope: knowledgeScope,
-      behavior_rules: behaviorRules,
-      address_only: addressOnly,
-    } as Partial<NPC>);
-    router.push(`/campaigns/${campaignId}`);
+    try {
+      await createNPC.mutateAsync({
+        name: name.trim(),
+        personality: personality.trim(),
+        voice: { provider: voiceProvider, voice_id: voiceId.trim() },
+        engine,
+        budget_tier: budgetTier,
+        knowledge_scope: knowledgeScope,
+        behavior_rules: behaviorRules,
+        address_only: addressOnly,
+      } as Partial<NPC>);
+      router.push(`/campaigns/${campaignId}`);
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   function addKnowledge() {

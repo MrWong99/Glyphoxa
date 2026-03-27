@@ -25,7 +25,7 @@ import { formatDate } from "@/lib/utils";
 import { ChevronLeft, ChevronRight, ShieldAlert, ScrollText } from "lucide-react";
 
 const RESOURCE_TYPES = [
-  { value: "", label: "All Resources" },
+  { value: "all", label: "All Resources" },
   { value: "campaign", label: "Campaign" },
   { value: "npc", label: "NPC" },
   { value: "user", label: "User" },
@@ -37,14 +37,14 @@ const RESOURCE_TYPES = [
 export default function AuditLogPage() {
   const isAdmin = useHasRole("tenant_admin");
   const [offset, setOffset] = useState(0);
-  const [resourceType, setResourceType] = useState("");
+  const [resourceType, setResourceType] = useState("all");
   const [actionFilter, setActionFilter] = useState("");
   const limit = 25;
 
   const { data, isLoading } = useAuditLogs({
     limit,
     offset,
-    resource_type: resourceType || undefined,
+    resource_type: resourceType === "all" ? undefined : resourceType,
     action: actionFilter || undefined,
   });
 
@@ -79,7 +79,7 @@ export default function AuditLogPage() {
         <Select
           value={resourceType}
           onValueChange={(v) => {
-            setResourceType(v ?? "");
+            setResourceType(v ?? "all");
             setOffset(0);
           }}
         >
@@ -186,6 +186,7 @@ export default function AuditLogPage() {
                   size="sm"
                   disabled={!hasPrev}
                   onClick={() => setOffset(Math.max(0, offset - limit))}
+                  aria-label="Previous page"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -194,6 +195,7 @@ export default function AuditLogPage() {
                   size="sm"
                   disabled={!hasNext}
                   onClick={() => setOffset(offset + limit)}
+                  aria-label="Next page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>

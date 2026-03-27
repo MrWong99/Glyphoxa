@@ -107,7 +107,7 @@ export default function SessionsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell className="max-w-48 truncate text-muted-foreground">
-                      {session.npc_names.join(", ")}
+                      {(session.npc_names ?? []).join(", ")}
                     </TableCell>
                   </TableRow>
                 ))}
