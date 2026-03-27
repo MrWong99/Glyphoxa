@@ -1,6 +1,5 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import Link from "next/link";
 import {
   Swords,
@@ -25,34 +24,13 @@ import {
   useHasRole,
 } from "@/lib/hooks";
 import { formatRelativeTime } from "@/lib/utils";
+import { LiveTimer } from "@/components/live-timer";
 
 function greeting(): string {
   const hour = new Date().getHours();
   if (hour < 12) return "Good morning";
   if (hour < 18) return "Good afternoon";
   return "Good evening";
-}
-
-function computeElapsedTime(startedAt: string): string {
-  const start = new Date(startedAt).getTime();
-  const diff = Math.max(0, Math.floor((Date.now() - start) / 1000));
-  const h = Math.floor(diff / 3600);
-  const m = Math.floor((diff % 3600) / 60);
-  const s = diff % 60;
-  return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-}
-
-function LiveTimer({ startedAt }: { startedAt: string }) {
-  const [elapsed, setElapsed] = useState(() => computeElapsedTime(startedAt));
-
-  useEffect(() => {
-    const interval = setInterval(() => setElapsed(computeElapsedTime(startedAt)), 1000);
-    return () => clearInterval(interval);
-  }, [startedAt]);
-
-  return (
-    <span className="font-mono tabular-nums text-sm">{elapsed}</span>
-  );
 }
 
 function StatCardSkeleton() {

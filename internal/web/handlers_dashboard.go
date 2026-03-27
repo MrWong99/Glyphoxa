@@ -27,9 +27,8 @@ type ActivityItem struct {
 
 // handleDashboardStats returns aggregate stats for the current user's tenant.
 func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -55,9 +54,8 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 
 // handleDashboardActivity returns recent activity for the tenant.
 func (s *Server) handleDashboardActivity(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 

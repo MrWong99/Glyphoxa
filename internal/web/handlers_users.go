@@ -4,21 +4,18 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strconv"
 )
 
 // handleListUsers returns paginated users for the authenticated tenant.
 // Requires tenant_admin role.
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
 	role := r.URL.Query().Get("role")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, offset := parseLimitOffset(r, 25)
 
 	users, total, err := s.store.ListUsers(r.Context(), claims.TenantID, role, limit, offset)
 	if err != nil {
@@ -39,9 +36,8 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 // handleGetUser returns a single user by ID. Users can always read their own
 // profile; tenant_admin can read any user in their tenant.
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -75,9 +71,8 @@ type UserUpdateRequest struct {
 // handleUpdateUser updates a user's display_name or role. Requires
 // tenant_admin for role changes.
 func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -98,8 +93,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req UserUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -143,9 +137,8 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteUser soft-deletes a user. Requires tenant_admin.
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -179,15 +172,13 @@ type InviteCreateRequest struct {
 
 // handleCreateInvite creates a new tenant invite link. Requires tenant_admin.
 func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
 	var req InviteCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Role == "" {
@@ -216,17 +207,15 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateMe allows the current user to update their own display_name.
 func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
 	var req struct {
 		DisplayName string `json:"display_name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.DisplayName == "" {
@@ -253,15 +242,13 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 // handleUpdatePreferences merges the JSON body into the current user's
 // preferences column.
 func (s *Server) handleUpdatePreferences(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
 	var prefs json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&prefs); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &prefs) {
 		return
 	}
 

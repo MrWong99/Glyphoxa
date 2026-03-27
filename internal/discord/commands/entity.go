@@ -151,7 +151,11 @@ func (ec *EntityCommands) handleList(e *events.ApplicationCommandInteractionCrea
 	}
 
 	opts := entity.ListOptions{}
-	data := e.Data.(discord.SlashCommandInteractionData)
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Unexpected interaction data type.")
+		return
+	}
 	if typeFilter, ok := data.OptString("type"); ok {
 		opts.Type = entity.EntityType(typeFilter)
 	}
@@ -218,7 +222,11 @@ func (ec *EntityCommands) handleRemove(e *events.ApplicationCommandInteractionCr
 		return
 	}
 
-	data := e.Data.(discord.SlashCommandInteractionData)
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Unexpected interaction data type.")
+		return
+	}
 	name := data.String("name")
 	if name == "" {
 		discordbot.RespondEphemeral(e, "Please provide an entity name.")
@@ -344,7 +352,11 @@ func (ec *EntityCommands) handleImport(e *events.ApplicationCommandInteractionCr
 		return
 	}
 
-	data := e.Data.(discord.SlashCommandInteractionData)
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Unexpected interaction data type.")
+		return
+	}
 	attachment, ok := FirstAttachment(data)
 	if !ok {
 		discordbot.RespondEphemeral(e, "Please attach a YAML or JSON file to import.")

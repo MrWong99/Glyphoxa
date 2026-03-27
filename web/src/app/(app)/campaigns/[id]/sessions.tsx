@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { SessionStatusBadge } from "@/components/session-status-badge";
 import {
   Table,
   TableBody,
@@ -66,17 +66,7 @@ export function CampaignSessions({ campaignId }: CampaignSessionsProps) {
               </TableCell>
               <TableCell>{formatDuration(session.duration_seconds)}</TableCell>
               <TableCell>
-                <Badge
-                  variant={
-                    session.status === "active"
-                      ? "default"
-                      : session.status === "ended"
-                        ? "secondary"
-                        : "destructive"
-                  }
-                >
-                  {session.status}
-                </Badge>
+                <SessionStatusBadge status={session.status} />
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {(session.npc_names ?? []).join(", ")}

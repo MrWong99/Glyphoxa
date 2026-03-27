@@ -4,12 +4,12 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/glyphoxa/internal/config"
+	"github.com/MrWong99/glyphoxa/internal/dbutil"
 	"github.com/MrWong99/glyphoxa/internal/gateway/vault"
 )
 
@@ -43,31 +43,13 @@ var adminMigrationFiles = []string{
 //
 // If enc is nil, a [vault.NoopEncryptor] is used (no encryption).
 func NewPostgresAdminStore(ctx context.Context, pool *pgxpool.Pool, enc vault.TokenEncryptor) (*PostgresAdminStore, error) {
-	if err := runAdminMigrations(ctx, pool); err != nil {
+	if err := dbutil.RunMigrations(ctx, pool, adminMigrationFiles, adminMigrationsFS, "gateway"); err != nil {
 		return nil, fmt.Errorf("gateway: run admin migrations: %w", err)
 	}
 	if enc == nil {
 		enc = vault.NoopEncryptor{}
 	}
 	return &PostgresAdminStore{pool: pool, encryptor: enc}, nil
-}
-
-// runAdminMigrations applies the embedded SQL migration files in order.
-func runAdminMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	for _, f := range adminMigrationFiles {
-		upSQL, err := adminMigrationsFS.ReadFile(f)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", f, err)
-		}
-
-		_, err = pool.Exec(ctx, string(upSQL))
-		if err != nil {
-			return fmt.Errorf("exec migration %s: %w", f, err)
-		}
-	}
-
-	slog.Info("gateway: admin migrations applied")
-	return nil
 }
 
 // CreateTenant inserts a new tenant. Returns an error if the ID already exists.

@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -9,9 +8,8 @@ import (
 )
 
 func (s *Server) handleOnboardingComplete(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 	if claims.TenantID != "" {
@@ -23,8 +21,7 @@ func (s *Server) handleOnboardingComplete(w http.ResponseWriter, r *http.Request
 		DisplayName string `json:"display_name"`
 		LicenseTier string `json:"license_tier"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.TenantID == "" {
