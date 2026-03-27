@@ -93,7 +93,7 @@ export default function SessionsPage() {
                       <SessionStatusBadge status={session.status} />
                     </TableCell>
                     <TableCell className="max-w-48 truncate text-muted-foreground">
-                      {session.npc_names.join(", ")}
+                      {(session.npc_names ?? []).join(", ")}
                     </TableCell>
                   </TableRow>
                 ))}

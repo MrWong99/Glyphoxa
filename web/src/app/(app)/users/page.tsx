@@ -65,11 +65,15 @@ export default function UsersPage() {
   }
 
   const handleInvite = async () => {
-    const result = await createInvite.mutateAsync(inviteRole);
-    // Copy token to clipboard.
-    if (result?.token) {
-      await navigator.clipboard.writeText(result.token);
-      toast.success("Invite link copied to clipboard");
+    try {
+      const result = await createInvite.mutateAsync(inviteRole);
+      // Copy token to clipboard.
+      if (result?.token) {
+        await navigator.clipboard.writeText(result.token);
+        toast.success("Invite link copied to clipboard");
+      }
+    } catch {
+      // Error is handled by the mutation's onError callback.
     }
   };
 

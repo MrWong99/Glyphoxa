@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, Suspense } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -180,7 +181,10 @@ function LoginForm() {
         </Card>
 
         <p className="text-center text-xs text-muted-foreground/70">
-          By signing in, you agree to our Terms of Service and Privacy Policy.
+          By signing in, you agree to our{" "}
+          <Link href="/terms" className="text-primary hover:underline">Terms of Service</Link>{" "}
+          and{" "}
+          <Link href="/privacy" className="text-primary hover:underline">Privacy Policy</Link>.
         </p>
       </div>
     </div>

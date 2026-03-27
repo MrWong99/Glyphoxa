@@ -54,18 +54,27 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
   }
 
   async function handleSave() {
-    await updateCampaign.mutateAsync({
-      name,
-      game_system: gameSystem,
-      description,
-      language,
-    });
-    setDirty(false);
+    if (!name.trim()) return;
+    try {
+      await updateCampaign.mutateAsync({
+        name: name.trim(),
+        game_system: gameSystem,
+        description,
+        language,
+      });
+      setDirty(false);
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   async function handleDelete() {
-    await deleteCampaign.mutateAsync(campaignId);
-    router.push("/campaigns");
+    try {
+      await deleteCampaign.mutateAsync(campaignId);
+      router.push("/campaigns");
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   return (
@@ -244,7 +253,7 @@ export default function CampaignDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const { data: campaign, isLoading } = useCampaign(id);
+  const { data: campaign, isLoading, isError, error } = useCampaign(id);
 
   if (isLoading) {
     return (
@@ -252,6 +261,19 @@ export default function CampaignDetailPage({
         <div className="h-4 w-48 rounded bg-muted skeleton-shimmer" />
         <div className="h-8 w-64 rounded bg-muted skeleton-shimmer" />
         <div className="h-64 rounded bg-muted skeleton-shimmer" />
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-16 text-center">
+        <p className="text-muted-foreground">
+          {error?.message || "Failed to load campaign."}
+        </p>
+        <Button variant="outline" render={<Link href="/campaigns" />}>
+          Back to Campaigns
+        </Button>
       </div>
     );
   }

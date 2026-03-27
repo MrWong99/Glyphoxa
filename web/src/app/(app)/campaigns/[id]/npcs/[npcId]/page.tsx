@@ -66,21 +66,29 @@ function NPCForm({ npc, campaignId, campaignName }: NPCFormProps) {
     setTouched({ name: true, voiceId: true, personality: true });
     if (Object.keys(errors).length > 0) return;
 
-    await updateNPC.mutateAsync({
-      name: state.name.trim(),
-      personality: state.personality.trim(),
-      voice: { provider: state.voiceProvider, voice_id: state.voiceId.trim() },
-      engine: state.engine,
-      budget_tier: state.budgetTier,
-      knowledge_scope: state.knowledgeScope,
-      behavior_rules: state.behaviorRules,
-      address_only: state.addressOnly,
-    } as Partial<NPC>);
+    try {
+      await updateNPC.mutateAsync({
+        name: state.name.trim(),
+        personality: state.personality.trim(),
+        voice: { provider: state.voiceProvider, voice_id: state.voiceId.trim() },
+        engine: state.engine,
+        budget_tier: state.budgetTier,
+        knowledge_scope: state.knowledgeScope,
+        behavior_rules: state.behaviorRules,
+        address_only: state.addressOnly,
+      } as Partial<NPC>);
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   async function handleDelete() {
-    await deleteNPC.mutateAsync(npc.id);
-    router.push(`/campaigns/${campaignId}`);
+    try {
+      await deleteNPC.mutateAsync(npc.id);
+      router.push(`/campaigns/${campaignId}`);
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   return (

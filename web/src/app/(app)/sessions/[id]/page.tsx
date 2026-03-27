@@ -162,7 +162,7 @@ export default function SessionDetailPage({
             </div>
             <div>
               <p className="text-xs text-muted-foreground">NPCs</p>
-              <p className="font-medium">{session.npc_names.length}</p>
+              <p className="font-medium">{(session.npc_names ?? []).length}</p>
             </div>
           </CardContent>
         </Card>

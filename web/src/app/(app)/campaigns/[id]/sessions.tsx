@@ -69,7 +69,7 @@ export function CampaignSessions({ campaignId }: CampaignSessionsProps) {
                 <SessionStatusBadge status={session.status} />
               </TableCell>
               <TableCell className="text-muted-foreground">
-                {session.npc_names.join(", ")}
+                {(session.npc_names ?? []).join(", ")}
               </TableCell>
             </TableRow>
           ))}

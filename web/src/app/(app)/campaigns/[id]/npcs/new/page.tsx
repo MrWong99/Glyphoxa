@@ -49,17 +49,21 @@ export default function NewNPCPage({
   async function handleSave() {
     setTouched({ name: true, voiceId: true, personality: true });
     if (Object.keys(errors).length > 0) return;
-    await createNPC.mutateAsync({
-      name: state.name.trim(),
-      personality: state.personality.trim(),
-      voice: { provider: state.voiceProvider, voice_id: state.voiceId.trim() },
-      engine: state.engine,
-      budget_tier: state.budgetTier,
-      knowledge_scope: state.knowledgeScope,
-      behavior_rules: state.behaviorRules,
-      address_only: state.addressOnly,
-    } as Partial<NPC>);
-    router.push(`/campaigns/${campaignId}`);
+    try {
+      await createNPC.mutateAsync({
+        name: state.name.trim(),
+        personality: state.personality.trim(),
+        voice: { provider: state.voiceProvider, voice_id: state.voiceId.trim() },
+        engine: state.engine,
+        budget_tier: state.budgetTier,
+        knowledge_scope: state.knowledgeScope,
+        behavior_rules: state.behaviorRules,
+        address_only: state.addressOnly,
+      } as Partial<NPC>);
+      router.push(`/campaigns/${campaignId}`);
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   return (

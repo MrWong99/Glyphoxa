@@ -205,7 +205,7 @@ export default function DashboardPage() {
                         <LiveTimer startedAt={session.started_at} />
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        NPCs: {session.npc_names.join(", ")}
+                        NPCs: {(session.npc_names ?? []).join(", ")}
                       </p>
                     </div>
                     <div className="flex flex-col gap-2">

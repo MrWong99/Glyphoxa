@@ -40,13 +40,17 @@ export default function NewCampaignPage() {
     e.preventDefault();
     setTouched({ name: true, gameSystem: true });
     if (Object.keys(errors).length > 0) return;
-    await createCampaign.mutateAsync({
-      name: name.trim(),
-      game_system: gameSystem,
-      description: description.trim(),
-      language,
-    });
-    router.push("/campaigns");
+    try {
+      await createCampaign.mutateAsync({
+        name: name.trim(),
+        game_system: gameSystem,
+        description: description.trim(),
+        language,
+      });
+      router.push("/campaigns");
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   return (

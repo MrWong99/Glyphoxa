@@ -65,13 +65,17 @@ function ProviderTestCard({
 
   async function handleTest() {
     setResult(null);
-    const res = await testMutation.mutateAsync({
-      type,
-      provider,
-      api_key: apiKey,
-      base_url: baseUrl || undefined,
-    });
-    setResult(res);
+    try {
+      const res = await testMutation.mutateAsync({
+        type,
+        provider,
+        api_key: apiKey,
+        base_url: baseUrl || undefined,
+      });
+      setResult(res);
+    } catch {
+      // Error is handled by the mutation's onError callback.
+    }
   }
 
   return (
