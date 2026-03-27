@@ -235,7 +235,11 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 					slog.Debug("elevenlabs: text channel closed, sending flush")
 					// Text channel closed — send flush command.
 					flush := textMessage{Text: ""}
-					flushBytes, _ := json.Marshal(flush)
+					flushBytes, err := json.Marshal(flush)
+					if err != nil {
+						slog.Debug("elevenlabs: marshal flush error", "error", err)
+						return
+					}
 					_ = conn.Write(ctx, websocket.MessageText, flushBytes)
 					// Wait for the reader to finish draining audio.
 					<-readDone
@@ -249,7 +253,11 @@ func (p *Provider) SynthesizeStream(ctx context.Context, text <-chan string, voi
 				payload := textMessage{Text: sentence, VoiceSettings: vs}
 				// Only send voice settings on the first chunk; subsequent chunks can omit them.
 				vs = nil
-				msgBytes, _ := json.Marshal(payload)
+				msgBytes, err := json.Marshal(payload)
+				if err != nil {
+					slog.Debug("elevenlabs: marshal payload error", "error", err)
+					return
+				}
 				if err := conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
 					slog.Debug("elevenlabs: write error", "error", err)
 					return
@@ -290,7 +298,10 @@ func (p *Provider) acquireAndInit(ctx context.Context, voiceID string) (*websock
 		XiAPIKey:     p.apiKey,
 		OutputFormat: p.outputFormat,
 	}
-	boiBytes, _ := json.Marshal(boi)
+	boiBytes, err := json.Marshal(boi)
+	if err != nil {
+		return nil, fmt.Errorf("elevenlabs: marshal BOI: %w", err)
+	}
 
 	// Try a pre-warmed connection first.
 	if conn := p.takeWarm(voiceID); conn != nil {

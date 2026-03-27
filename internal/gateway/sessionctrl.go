@@ -201,8 +201,18 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 		if gc.gwBot != nil && gc.bridgeSrv != nil {
 			bridge := gc.bridgeSrv.NewSessionBridge(sessionID)
 
-			gID, _ := snowflake.Parse(req.GuildID)
-			chID, _ := snowflake.Parse(req.ChannelID)
+			gID, parseErr := snowflake.Parse(req.GuildID)
+			if parseErr != nil {
+				gc.bridgeSrv.RemoveBridge(sessionID)
+				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, parseErr.Error())
+				return fmt.Errorf("gateway: parse guild ID %q: %w", req.GuildID, parseErr)
+			}
+			chID, parseErr := snowflake.Parse(req.ChannelID)
+			if parseErr != nil {
+				gc.bridgeSrv.RemoveBridge(sessionID)
+				_ = gc.orch.Transition(ctx, sessionID, SessionEnded, parseErr.Error())
+				return fmt.Errorf("gateway: parse channel ID %q: %w", req.ChannelID, parseErr)
+			}
 
 			voiceMgr := gc.gwBot.Client().VoiceManager
 			if voiceMgr == nil {
@@ -311,7 +321,9 @@ func (gc *GatewaySessionController) Stop(ctx context.Context, sessionID string) 
 					"session_id", sessionID, "err", stopErr)
 			}
 			if c, ok := client.(interface{ Close() error }); ok {
-				c.Close()
+				if closeErr := c.Close(); closeErr != nil {
+					slog.Debug("gateway: close worker client error", "session_id", sessionID, "err", closeErr)
+				}
 			}
 		}
 		rpcCancel()
@@ -416,7 +428,11 @@ func (gc *GatewaySessionController) cleanupVoiceBridge(sessionID string) {
 // registerDisconnectListener watches for the bot being kicked from the voice
 // channel and stops the session if that happens.
 func (gc *GatewaySessionController) registerDisconnectListener(sessionID, guildID string) {
-	gID, _ := snowflake.Parse(guildID)
+	gID, err := snowflake.Parse(guildID)
+	if err != nil {
+		slog.Warn("gateway: invalid guild ID for disconnect listener", "guild_id", guildID, "err", err)
+		return
+	}
 
 	listener := bot.NewListenerFunc(func(e *events.GuildVoiceStateUpdate) {
 		if e.VoiceState.GuildID != gID || e.VoiceState.UserID != gc.gwBot.Client().ApplicationID {
@@ -473,13 +489,17 @@ func (gc *GatewaySessionController) dialNPCController(sessionID string) (NPCCont
 	npcCtrl, ok := client.(NPCController)
 	if !ok {
 		if c, ok := client.(interface{ Close() error }); ok {
-			c.Close()
+			if closeErr := c.Close(); closeErr != nil {
+				slog.Debug("gateway: close worker client error", "err", closeErr)
+			}
 		}
 		return nil, nil, fmt.Errorf("gateway: worker client does not implement NPCController")
 	}
 	cleanup := func() {
 		if c, ok := client.(interface{ Close() error }); ok {
-			c.Close()
+			if closeErr := c.Close(); closeErr != nil {
+				slog.Debug("gateway: close worker client error", "err", closeErr)
+			}
 		}
 	}
 	return npcCtrl, cleanup, nil
@@ -499,20 +519,26 @@ func (gc *GatewaySessionController) ListNPCs(ctx context.Context, sessionID stri
 func (gc *GatewaySessionController) MuteNPC(ctx context.Context, sessionID, npcName string) error {
 	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("gateway: mute NPC %q: %w", npcName, err)
 	}
 	defer cleanup()
-	return ctrl.MuteNPC(ctx, sessionID, npcName)
+	if err := ctrl.MuteNPC(ctx, sessionID, npcName); err != nil {
+		return fmt.Errorf("gateway: mute NPC %q: %w", npcName, err)
+	}
+	return nil
 }
 
 // UnmuteNPC implements [NPCController].
 func (gc *GatewaySessionController) UnmuteNPC(ctx context.Context, sessionID, npcName string) error {
 	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("gateway: unmute NPC %q: %w", npcName, err)
 	}
 	defer cleanup()
-	return ctrl.UnmuteNPC(ctx, sessionID, npcName)
+	if err := ctrl.UnmuteNPC(ctx, sessionID, npcName); err != nil {
+		return fmt.Errorf("gateway: unmute NPC %q: %w", npcName, err)
+	}
+	return nil
 }
 
 // MuteAllNPCs implements [NPCController].
@@ -539,10 +565,13 @@ func (gc *GatewaySessionController) UnmuteAllNPCs(ctx context.Context, sessionID
 func (gc *GatewaySessionController) SpeakNPC(ctx context.Context, sessionID, npcName, text string) error {
 	ctrl, cleanup, err := gc.dialNPCController(sessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("gateway: speak NPC %q: %w", npcName, err)
 	}
 	defer cleanup()
-	return ctrl.SpeakNPC(ctx, sessionID, npcName, text)
+	if err := ctrl.SpeakNPC(ctx, sessionID, npcName, text); err != nil {
+		return fmt.Errorf("gateway: speak NPC %q: %w", npcName, err)
+	}
+	return nil
 }
 
 // npcDefsToConfigs converts npcstore definitions to the gateway's NPCConfigMsg

@@ -258,7 +258,11 @@ func (cc *CampaignCommands) handleLoad(e *events.ApplicationCommandInteractionCr
 		return
 	}
 
-	data := e.Data.(discord.SlashCommandInteractionData)
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Unexpected interaction data type.")
+		return
+	}
 	attachment, ok := FirstAttachment(data)
 	if !ok {
 		discordbot.RespondEphemeral(e, "Please attach a campaign YAML file.")
@@ -345,7 +349,11 @@ func (cc *CampaignCommands) handleSwitch(e *events.ApplicationCommandInteraction
 		return
 	}
 
-	data := e.Data.(discord.SlashCommandInteractionData)
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		discordbot.RespondEphemeral(e, "Unexpected interaction data type.")
+		return
+	}
 	name := data.String("name")
 	if name == "" {
 		discordbot.RespondEphemeral(e, "Please provide a campaign name.")

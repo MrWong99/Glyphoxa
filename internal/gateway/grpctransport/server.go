@@ -2,6 +2,7 @@ package grpctransport
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"google.golang.org/grpc"
@@ -232,7 +233,10 @@ func (c *GatewayClient) ReportState(ctx context.Context, sessionID string, state
 		State:     stringToPBState(state),
 		Error:     errMsg,
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("grpctransport: report state for session %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 // Heartbeat sends a heartbeat to the gateway via gRPC.
@@ -240,7 +244,10 @@ func (c *GatewayClient) Heartbeat(ctx context.Context, sessionID string) error {
 	_, err := c.client.Heartbeat(ctx, &pb.HeartbeatRequest{
 		SessionId: sessionID,
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("grpctransport: heartbeat for session %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 // TimestampPB converts a gateway.SessionStatus.StartedAt to a protobuf Timestamp.
