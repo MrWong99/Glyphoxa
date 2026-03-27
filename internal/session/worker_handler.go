@@ -28,6 +28,7 @@ type RuntimeFactory func(ctx context.Context, req gateway.StartSessionRequest) (
 type WorkerHandler struct {
 	mu       sync.Mutex
 	sessions map[string]*managedSession
+	starting map[string]struct{} // session IDs currently being initialized
 	factory  RuntimeFactory
 	callback gateway.GatewayCallback
 }
@@ -47,6 +48,7 @@ type managedSession struct {
 func NewWorkerHandler(factory RuntimeFactory, callback gateway.GatewayCallback) *WorkerHandler {
 	return &WorkerHandler{
 		sessions: make(map[string]*managedSession),
+		starting: make(map[string]struct{}),
 		factory:  factory,
 		callback: callback,
 	}
@@ -59,6 +61,12 @@ func (h *WorkerHandler) StartSession(ctx context.Context, req gateway.StartSessi
 		h.mu.Unlock()
 		return fmt.Errorf("session: %q already running", req.SessionID)
 	}
+	if _, starting := h.starting[req.SessionID]; starting {
+		h.mu.Unlock()
+		return fmt.Errorf("session: %q is already starting", req.SessionID)
+	}
+	// Reserve the session ID to prevent concurrent duplicate starts.
+	h.starting[req.SessionID] = struct{}{}
 	h.mu.Unlock()
 
 	// Use a session-scoped context derived from context.Background() instead
@@ -67,18 +75,28 @@ func (h *WorkerHandler) StartSession(ctx context.Context, req gateway.StartSessi
 	// (audio pipeline, consolidator) created by the factory.
 	sessionCtx, cancel := context.WithCancel(context.Background())
 
+	// releaseStart removes the starting reservation on failure.
+	releaseStart := func() {
+		h.mu.Lock()
+		delete(h.starting, req.SessionID)
+		h.mu.Unlock()
+	}
+
 	rt, err := h.factory(sessionCtx, req)
 	if err != nil {
 		cancel()
+		releaseStart()
 		return fmt.Errorf("session: create runtime for %q: %w", req.SessionID, err)
 	}
 
 	if err := rt.Start(sessionCtx, nil); err != nil {
 		cancel()
+		releaseStart()
 		return fmt.Errorf("session: start runtime for %q: %w", req.SessionID, err)
 	}
 
 	h.mu.Lock()
+	delete(h.starting, req.SessionID)
 	h.sessions[req.SessionID] = &managedSession{
 		runtime:   rt,
 		state:     gateway.SessionActive,
