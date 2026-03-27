@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -20,9 +19,8 @@ type ProviderConfig struct {
 // handleTestProvider tests a provider connection by making a minimal API call.
 // This is a lightweight check — it validates API key / connectivity, not full functionality.
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -32,8 +30,7 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		APIKey   string `json:"api_key"`
 		BaseURL  string `json:"base_url,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", "expected JSON body")
+	if !decodeJSON(w, r, &body) {
 		return
 	}
 	if body.Type == "" || body.Provider == "" {

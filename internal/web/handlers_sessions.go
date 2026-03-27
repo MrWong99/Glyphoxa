@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -10,9 +9,8 @@ import (
 )
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -46,9 +44,8 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -80,9 +77,8 @@ func (s *Server) handleGetTranscript(w http.ResponseWriter, r *http.Request) {
 
 // handleStartSession starts a voice session via the gateway ManagementService.
 func (s *Server) handleStartSession(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 	if s.gwClient == nil {
@@ -95,8 +91,7 @@ func (s *Server) handleStartSession(w http.ResponseWriter, r *http.Request) {
 		GuildID    string `json:"guild_id"`
 		ChannelID  string `json:"channel_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.GuildID == "" || req.ChannelID == "" {
@@ -124,9 +119,8 @@ func (s *Server) handleStartSession(w http.ResponseWriter, r *http.Request) {
 
 // handleStopSession stops a running session via the gateway ManagementService.
 func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 	if s.gwClient == nil {
@@ -148,9 +142,8 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 // handleListActiveSessions returns active (non-ended) sessions for the tenant
 // via the gateway ManagementService.
 func (s *Server) handleListActiveSessions(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 	if s.gwClient == nil {

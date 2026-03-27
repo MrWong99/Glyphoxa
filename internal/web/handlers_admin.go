@@ -3,14 +3,12 @@ package web
 import (
 	"log/slog"
 	"net/http"
-	"strconv"
 )
 
 // handleAdminDashboardStats returns system-wide aggregate stats for super admins.
 func (s *Server) handleAdminDashboardStats(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -26,14 +24,12 @@ func (s *Server) handleAdminDashboardStats(w http.ResponseWriter, r *http.Reques
 
 // handleAdminListUsers lists all users across all tenants (super_admin only).
 func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, offset := parseLimitOffset(r, 25)
 
 	users, total, err := s.store.ListAllTenantUsers(r.Context(), limit, offset)
 	if err != nil {

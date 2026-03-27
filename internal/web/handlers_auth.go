@@ -2,7 +2,6 @@ package web
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -206,9 +205,8 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 
 // handleRefresh issues a new JWT from a valid existing token.
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
@@ -252,8 +250,7 @@ func (s *Server) handleAPIKeyLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		APIKey string `json:"api_key"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", "expected JSON with api_key field")
+	if !decodeJSON(w, r, &body) {
 		return
 	}
 	if body.APIKey == "" {
@@ -304,9 +301,8 @@ func (s *Server) handleAPIKeyLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleMe returns the current authenticated user's profile.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 

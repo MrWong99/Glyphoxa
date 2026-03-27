@@ -130,9 +130,8 @@ var builtinTemplates = []NPCTemplate{
 }
 
 func (s *Server) handleListNPCTemplates(w http.ResponseWriter, r *http.Request) {
-	claims := ClaimsFromContext(r.Context())
+	claims := requireClaims(w, r)
 	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "no_auth", "authentication required")
 		return
 	}
 
