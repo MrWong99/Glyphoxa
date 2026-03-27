@@ -512,3 +512,93 @@ func TestOpusRoundTrip(t *testing.T) {
 		t.Errorf("decoded sample count: got %d, want %d", len(decoded), opusFrameSize*opusChannels)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: self-hearing guard
+// ---------------------------------------------------------------------------
+
+func TestConnection_SelfHearingGuard(t *testing.T) {
+	t.Parallel()
+
+	ms := newMockStream()
+	conn, err := New("sess-guard", ms)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = conn.Disconnect() }()
+
+	conn.SetBotUserID("bot-user-1")
+
+	opus := encodeOpusSilence(t)
+
+	// Frame from the bot should be dropped.
+	ms.recvCh <- &pb.AudioFrame{SessionId: "sess-guard", OpusData: opus, UserId: "bot-user-1", Ssrc: 1}
+	// Frame from another user should go through.
+	ms.recvCh <- &pb.AudioFrame{SessionId: "sess-guard", OpusData: opus, UserId: "real-player", Ssrc: 2}
+
+	// Wait for the real player's stream to appear.
+	deadline := time.After(2 * time.Second)
+	for {
+		streams := conn.InputStreams()
+		if len(streams) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for player input stream")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	streams := conn.InputStreams()
+	if _, ok := streams["bot-user-1"]; ok {
+		t.Error("bot user should NOT have an input stream")
+	}
+	if _, ok := streams["real-player"]; !ok {
+		t.Error("real player should have an input stream")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Flush race (3.4) — concurrent Flush and sendLoop
+// ---------------------------------------------------------------------------
+
+func TestConnection_FlushNoRace(t *testing.T) {
+	t.Parallel()
+
+	ms := newMockStream()
+	conn, err := New("sess-flush", ms)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = conn.Disconnect() }()
+
+	// Fill the output channel with frames.
+	for range 10 {
+		conn.OutputStream() <- audio.AudioFrame{
+			Data:       make([]byte, opusFrameBytes),
+			SampleRate: opusSampleRate,
+			Channels:   opusChannels,
+		}
+	}
+
+	// Flush should not race with sendLoop (run with -race to verify).
+	conn.Flush()
+
+	// Give sendLoop time to process the flush.
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the output channel was drained by checking that sendLoop processed
+	// the flush (no crash, no race). The test primarily validates via -race.
+	// Writing another frame after flush should succeed without blocking.
+	select {
+	case conn.OutputStream() <- audio.AudioFrame{
+		Data:       make([]byte, opusFrameBytes),
+		SampleRate: opusSampleRate,
+		Channels:   opusChannels,
+	}:
+		// success — channel has space, confirming it was drained
+	case <-time.After(time.Second):
+		t.Error("output channel write blocked after flush — channel was not drained")
+	}
+}

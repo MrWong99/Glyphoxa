@@ -487,3 +487,77 @@ func TestCleanupUser_Nonexistent(t *testing.T) {
 		// expected
 	}
 }
+
+// ─── Self-hearing guard tests ──────────────────────────────────────────────
+
+// TestConnection_SelfHearingGuard verifies that frames from the bot's own
+// user ID are silently dropped by ReceiveOpusFrame.
+func TestConnection_SelfHearingGuard(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+
+	botID := snowflake.ID(999)
+	c.SetBotUserID(botID)
+
+	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
+
+	// Frame from the bot's own user ID should be dropped.
+	if err := c.ReceiveOpusFrame(botID, &voice.Packet{SSRC: 1, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame(botID): %v", err)
+	}
+
+	// No input stream should be created for the bot.
+	streams := c.InputStreams()
+	if len(streams) != 0 {
+		t.Errorf("InputStreams: want 0 entries after bot frame, got %d", len(streams))
+	}
+}
+
+// TestConnection_SelfHearingGuardAllowsOthers verifies that the self-hearing
+// guard does not affect frames from other users.
+func TestConnection_SelfHearingGuardAllowsOthers(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+
+	botID := snowflake.ID(999)
+	otherID := snowflake.ID(123)
+	c.SetBotUserID(botID)
+
+	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
+
+	// Frame from another user should go through.
+	if err := c.ReceiveOpusFrame(otherID, &voice.Packet{SSRC: 2, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame(otherID): %v", err)
+	}
+
+	streams := c.InputStreams()
+	if len(streams) != 1 {
+		t.Fatalf("InputStreams: want 1 entry, got %d", len(streams))
+	}
+	if _, ok := streams[otherID.String()]; !ok {
+		t.Error("InputStreams: missing stream for otherID")
+	}
+}
+
+// TestConnection_SelfHearingGuardNoID verifies that when no bot user ID is set,
+// all frames pass through (backwards compatible).
+func TestConnection_SelfHearingGuardNoID(t *testing.T) {
+	t.Parallel()
+
+	c := newTestConnection(t)
+	// No SetBotUserID call — guard should be inactive.
+
+	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
+	userID := snowflake.ID(42)
+
+	if err := c.ReceiveOpusFrame(userID, &voice.Packet{SSRC: 1, Opus: silenceOpus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame: %v", err)
+	}
+
+	streams := c.InputStreams()
+	if len(streams) != 1 {
+		t.Fatalf("InputStreams: want 1 entry, got %d", len(streams))
+	}
+}

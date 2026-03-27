@@ -175,8 +175,8 @@ func TestVoiceBridgeReceiver_FrameCount(t *testing.T) {
 		})
 	}
 
-	if receiver.frameCount != 5 {
-		t.Errorf("frameCount = %d, want 5", receiver.frameCount)
+	if got := receiver.frameCount.Load(); got != 5 {
+		t.Errorf("frameCount = %d, want 5", got)
 	}
 }
 
@@ -193,7 +193,7 @@ func TestVoiceBridgeProvider_GotFirst(t *testing.T) {
 		done:      make(chan struct{}),
 	}
 
-	if provider.gotFirst {
+	if provider.gotFirst.Load() {
 		t.Error("gotFirst should be false initially")
 	}
 }

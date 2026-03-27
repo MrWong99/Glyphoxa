@@ -335,6 +335,8 @@ func (e *Engine) Process(ctx context.Context, _ audio.AudioFrame, prompt engine.
 			commitSentence(opener)
 		case <-ctx.Done():
 			return
+		case <-e.done:
+			return
 		}
 
 		// Run the strong model with tool-call loop support, tracking
@@ -501,6 +503,8 @@ func (e *Engine) forwardStrongModelTracked(
 			select {
 			case textCh <- sentence:
 			case <-ctx.Done():
+				return
+			case <-e.done:
 				return
 			}
 		}
@@ -702,6 +706,8 @@ func (e *Engine) forwardSentencesWithTools(
 		select {
 		case <-ctx.Done():
 			return collected.String(), nil, true
+		case <-e.done:
+			return collected.String(), nil, true
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed: flush remaining text.
@@ -709,6 +715,7 @@ func (e *Engine) forwardSentencesWithTools(
 					select {
 					case textCh <- buf.String():
 					case <-ctx.Done():
+					case <-e.done:
 					}
 				}
 				return collected.String(), nil, true
@@ -739,6 +746,8 @@ func (e *Engine) forwardSentencesWithTools(
 				case textCh <- sentence:
 				case <-ctx.Done():
 					return collected.String(), nil, true
+				case <-e.done:
+					return collected.String(), nil, true
 				}
 			}
 
@@ -752,6 +761,7 @@ func (e *Engine) forwardSentencesWithTools(
 					select {
 					case textCh <- buf.String():
 					case <-ctx.Done():
+					case <-e.done:
 					}
 				}
 				if chunk.FinishReason == "tool_calls" && len(accum) > 0 {

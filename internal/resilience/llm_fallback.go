@@ -2,6 +2,7 @@ package resilience
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/MrWong99/glyphoxa/pkg/provider/llm"
 )
@@ -37,13 +38,39 @@ func (f *LLMFallback) Complete(ctx context.Context, req llm.CompletionRequest) (
 }
 
 // StreamCompletion sends the request to the first healthy provider and returns a
-// streaming chunk channel. Note: only the initial connection attempt is covered
-// by failover; once a stream is established, mid-stream errors are the caller's
-// responsibility.
+// streaming chunk channel. The returned channel is monitored: if a mid-stream
+// error chunk (FinishReason == "error") arrives, the circuit breaker is notified
+// so future calls prefer a healthy fallback.
 func (f *LLMFallback) StreamCompletion(ctx context.Context, req llm.CompletionRequest) (<-chan llm.Chunk, error) {
-	return ExecuteWithResult(f.group, func(p llm.Provider) (<-chan llm.Chunk, error) {
+	var activeIdx int
+	ch, err := ExecuteWithResultIndex(f.group, func(p llm.Provider) (<-chan llm.Chunk, error) {
 		return p.StreamCompletion(ctx, req)
-	})
+	}, &activeIdx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap the chunk channel to detect mid-stream errors and record them
+	// on the circuit breaker.
+	out := make(chan llm.Chunk, 16)
+	go func() {
+		defer close(out)
+		for chunk := range ch {
+			if chunk.FinishReason == "error" && activeIdx < len(f.group.entries) {
+				entry := &f.group.entries[activeIdx]
+				entry.breaker.RecordFailure()
+				slog.Warn("llm fallback: mid-stream error, recorded circuit breaker failure",
+					"provider", entry.name, "error_text", chunk.Text)
+			}
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return out, nil
 }
 
 // CountTokens delegates to the first healthy provider's token counter.

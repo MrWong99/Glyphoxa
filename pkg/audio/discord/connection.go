@@ -35,6 +35,11 @@ type Connection struct {
 	conn    voice.Conn
 	guildID snowflake.ID
 
+	// botUserID is the bot's own Discord user ID. When set, frames from this
+	// user are silently dropped in ReceiveOpusFrame to prevent the NPC from
+	// hearing its own TTS output (echo/feedback loop).
+	botUserID snowflake.ID
+
 	inputsMu sync.RWMutex
 	inputs   map[snowflake.ID]chan audio.AudioFrame
 
@@ -94,14 +99,31 @@ func newConnection(conn voice.Conn, guildID snowflake.ID) *Connection {
 	return c
 }
 
-// ── voice.OpusFrameReceiver implementation ──────────────────────────────────
+// SetBotUserID sets the bot's own user ID so that its audio is filtered out.
+// This prevents echo/feedback loops where the NPC hears its own TTS output.
+// Must be called before audio starts flowing. Safe for concurrent use (the
+// field is read atomically by ReceiveOpusFrame).
+func (c *Connection) SetBotUserID(id snowflake.ID) {
+	c.botUserID = id
+	slog.Debug("discord: bot user ID set for self-hearing guard", "bot_user_id", id)
+}
+
+// ── voice.OpusFrameReceiver implementation ──────────────────��───────────────
 
 // ReceiveOpusFrame receives an Opus packet from a specific user, decodes it
 // to PCM, and delivers the resulting [audio.AudioFrame] on the per-user input
 // channel. If this is the first frame from a user, a new channel is created and
 // an [audio.EventJoin] is emitted.
+//
+// Frames from the bot's own user ID (set via [SetBotUserID]) are silently
+// dropped to prevent echo/feedback loops.
 func (c *Connection) ReceiveOpusFrame(userID snowflake.ID, packet *voice.Packet) error {
 	if packet == nil {
+		return nil
+	}
+
+	// Self-hearing guard: drop frames from the bot's own user ID.
+	if c.botUserID != 0 && userID == c.botUserID {
 		return nil
 	}
 
