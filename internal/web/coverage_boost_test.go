@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -356,713 +357,87 @@ func TestHandleUpdateCampaign_AllFields(t *testing.T) {
 	}
 }
 
-// --- handleMe: error from store (simulate by overriding mock behavior) ---
+// --- NoClaims: all handlers return 401 when called without auth middleware ---
+//
+// Each handler should check ClaimsFromContext and return 401 if claims are
+// missing, independent of the auth middleware. This table-driven test covers
+// all handlers that follow this pattern.
 
-func TestHandleMe_NoClaims(t *testing.T) {
+func TestHandlers_NoClaims(t *testing.T) {
 	t.Parallel()
 
-	// Call handleMe directly without claims in context to hit the first branch.
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /me-direct", srv.handleMe)
-
-	req := httptest.NewRequest(http.MethodGet, "/me-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	tests := []struct {
+		name    string
+		route   string // Go 1.22+ mux pattern, e.g. "GET /t/{id}"
+		path    string // request URL path
+		body    string // optional request body
+		handler func(*Server, http.ResponseWriter, *http.Request)
+	}{
+		{"me", "GET /t", "/t", "", (*Server).handleMe},
+		{"refresh", "POST /t", "/t", "", (*Server).handleRefresh},
+		{"listSessions", "GET /t", "/t", "", (*Server).handleListSessions},
+		{"getTranscript", "GET /t/{id}", "/t/s1", "", (*Server).handleGetTranscript},
+		{"startSession", "POST /t", "/t", "{}", (*Server).handleStartSession},
+		{"stopSession", "POST /t/{id}", "/t/s1", "", (*Server).handleStopSession},
+		{"listActiveSessions", "GET /t", "/t", "", (*Server).handleListActiveSessions},
+		{"dashboardStats", "GET /t", "/t", "", (*Server).handleDashboardStats},
+		{"dashboardActivity", "GET /t", "/t", "", (*Server).handleDashboardActivity},
+		{"getUsage", "GET /t", "/t", "", (*Server).handleGetUsage},
+		{"createCampaign", "POST /t", "/t", `{"name":"X"}`, (*Server).handleCreateCampaign},
+		{"listCampaigns", "GET /t", "/t", "", (*Server).handleListCampaigns},
+		{"getCampaign", "GET /t/{id}", "/t/c1", "", (*Server).handleGetCampaign},
+		{"updateCampaign", "PUT /t/{id}", "/t/c1", `{"name":"X"}`, (*Server).handleUpdateCampaign},
+		{"deleteCampaign", "DELETE /t/{id}", "/t/c1", "", (*Server).handleDeleteCampaign},
+		{"listUsers", "GET /t", "/t", "", (*Server).handleListUsers},
+		{"getUser", "GET /t/{id}", "/t/u1", "", (*Server).handleGetUser},
+		{"updateUser", "PUT /t/{id}", "/t/u1", `{"display_name":"X"}`, (*Server).handleUpdateUser},
+		{"deleteUser", "DELETE /t/{id}", "/t/u1", "", (*Server).handleDeleteUser},
+		{"createInvite", "POST /t", "/t", `{"role":"viewer"}`, (*Server).handleCreateInvite},
+		{"updateMe", "PUT /t", "/t", `{"display_name":"X"}`, (*Server).handleUpdateMe},
+		{"updatePreferences", "PATCH /t", "/t", `{"theme":"dark"}`, (*Server).handleUpdatePreferences},
+		{"onboardingComplete", "POST /t", "/t", `{"tenant_id":"test"}`, (*Server).handleOnboardingComplete},
+		{"createNPC", "POST /t/{id}", "/t/c1", `{"name":"X"}`, (*Server).handleCreateNPC},
+		{"listNPCs", "GET /t/{id}", "/t/c1", "", (*Server).handleListNPCs},
+		{"getNPC", "GET /t/{id}/{npc_id}", "/t/c1/n1", "", (*Server).handleGetNPC},
+		{"updateNPC", "PUT /t/{id}/{npc_id}", "/t/c1/n1", `{"name":"X"}`, (*Server).handleUpdateNPC},
+		{"deleteNPC", "DELETE /t/{id}/{npc_id}", "/t/c1/n1", "", (*Server).handleDeleteNPC},
+		{"voicePreview", "POST /t/{npc_id}", "/t/n1", "{}", (*Server).handleVoicePreview},
+		{"createLoreDocument", "POST /t/{id}", "/t/c1", `{"title":"X"}`, (*Server).handleCreateLoreDocument},
+		{"listLoreDocuments", "GET /t/{id}", "/t/c1", "", (*Server).handleListLoreDocuments},
+		{"getLoreDocument", "GET /t/{id}/{lore_id}", "/t/c1/l1", "", (*Server).handleGetLoreDocument},
+		{"updateLoreDocument", "PUT /t/{id}/{lore_id}", "/t/c1/l1", `{"title":"X"}`, (*Server).handleUpdateLoreDocument},
+		{"deleteLoreDocument", "DELETE /t/{id}/{lore_id}", "/t/c1/l1", "", (*Server).handleDeleteLoreDocument},
+		{"linkNPCToCampaign", "POST /t/{id}/{npc_id}", "/t/c1/n1", "", (*Server).handleLinkNPCToCampaign},
+		{"unlinkNPCFromCampaign", "DELETE /t/{id}/{npc_id}", "/t/c1/n1", "", (*Server).handleUnlinkNPCFromCampaign},
+		{"listLinkedNPCs", "GET /t/{id}", "/t/c1", "", (*Server).handleListLinkedNPCs},
+		{"listKnowledgeEntities", "GET /t/{id}", "/t/c1", "", (*Server).handleListKnowledgeEntities},
+		{"deleteKnowledgeEntity", "DELETE /t/{id}/{entity_id}", "/t/c1/e1", "", (*Server).handleDeleteKnowledgeEntity},
+		{"rebuildKnowledgeGraph", "POST /t/{id}", "/t/c1", "", (*Server).handleRebuildKnowledgeGraph},
+		{"listNPCTemplates", "GET /t", "/t", "", (*Server).handleListNPCTemplates},
 	}
-}
 
-// --- handleRefresh: no claims (direct call without auth middleware) ---
-
-func TestHandleRefresh_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /refresh-direct", srv.handleRefresh)
-
-	req := httptest.NewRequest(http.MethodPost, "/refresh-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListSessions: no claims (direct call without auth middleware) ---
-
-func TestHandleListSessions_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /sessions-direct", srv.handleListSessions)
-
-	req := httptest.NewRequest(http.MethodGet, "/sessions-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleGetTranscript: no claims (direct call without auth middleware) ---
-
-func TestHandleGetTranscript_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /transcript-direct/{id}", srv.handleGetTranscript)
-
-	req := httptest.NewRequest(http.MethodGet, "/transcript-direct/s1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleStartSession: no claims (direct call without auth middleware) ---
-
-func TestHandleStartSession_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /start-direct", srv.handleStartSession)
-
-	req := httptest.NewRequest(http.MethodPost, "/start-direct", bytes.NewBufferString(`{}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleStopSession: no claims (direct call without auth middleware) ---
-
-func TestHandleStopSession_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /stop-direct/{id}", srv.handleStopSession)
-
-	req := httptest.NewRequest(http.MethodPost, "/stop-direct/s1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListActiveSessions: no claims (direct call without auth middleware) ---
-
-func TestHandleListActiveSessions_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /active-direct", srv.handleListActiveSessions)
-
-	req := httptest.NewRequest(http.MethodGet, "/active-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDashboardStats: no claims ---
-
-func TestHandleDashboardStats_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /stats-direct", srv.handleDashboardStats)
-
-	req := httptest.NewRequest(http.MethodGet, "/stats-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDashboardActivity: no claims ---
-
-func TestHandleDashboardActivity_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /activity-direct", srv.handleDashboardActivity)
-
-	req := httptest.NewRequest(http.MethodGet, "/activity-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleGetUsage: no claims ---
-
-func TestHandleGetUsage_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /usage-direct", srv.handleGetUsage)
-
-	req := httptest.NewRequest(http.MethodGet, "/usage-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleCreateCampaign: no claims ---
-
-func TestHandleCreateCampaign_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /campaign-direct", srv.handleCreateCampaign)
-
-	req := httptest.NewRequest(http.MethodPost, "/campaign-direct",
-		bytes.NewBufferString(`{"name":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListCampaigns: no claims ---
-
-func TestHandleListCampaigns_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /campaigns-direct", srv.handleListCampaigns)
-
-	req := httptest.NewRequest(http.MethodGet, "/campaigns-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleGetCampaign: no claims ---
-
-func TestHandleGetCampaign_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /campaign-direct/{id}", srv.handleGetCampaign)
-
-	req := httptest.NewRequest(http.MethodGet, "/campaign-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUpdateCampaign: no claims ---
-
-func TestHandleUpdateCampaign_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("PUT /campaign-direct/{id}", srv.handleUpdateCampaign)
-
-	req := httptest.NewRequest(http.MethodPut, "/campaign-direct/c1",
-		bytes.NewBufferString(`{"name":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDeleteCampaign: no claims ---
-
-func TestHandleDeleteCampaign_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("DELETE /campaign-direct/{id}", srv.handleDeleteCampaign)
-
-	req := httptest.NewRequest(http.MethodDelete, "/campaign-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListUsers: no claims ---
-
-func TestHandleListUsers_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /users-direct", srv.handleListUsers)
-
-	req := httptest.NewRequest(http.MethodGet, "/users-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleGetUser: no claims ---
-
-func TestHandleGetUser_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /users-direct/{id}", srv.handleGetUser)
-
-	req := httptest.NewRequest(http.MethodGet, "/users-direct/u1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUpdateUser: no claims ---
-
-func TestHandleUpdateUser_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("PUT /users-direct/{id}", srv.handleUpdateUser)
-
-	req := httptest.NewRequest(http.MethodPut, "/users-direct/u1",
-		bytes.NewBufferString(`{"display_name":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDeleteUser: no claims ---
-
-func TestHandleDeleteUser_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("DELETE /users-direct/{id}", srv.handleDeleteUser)
-
-	req := httptest.NewRequest(http.MethodDelete, "/users-direct/u1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleCreateInvite: no claims ---
-
-func TestHandleCreateInvite_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /invite-direct", srv.handleCreateInvite)
-
-	req := httptest.NewRequest(http.MethodPost, "/invite-direct",
-		bytes.NewBufferString(`{"role":"viewer"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUpdateMe: no claims ---
-
-func TestHandleUpdateMe_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("PUT /me-direct", srv.handleUpdateMe)
-
-	req := httptest.NewRequest(http.MethodPut, "/me-direct",
-		bytes.NewBufferString(`{"display_name":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUpdatePreferences: no claims ---
-
-func TestHandleUpdatePreferences_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("PATCH /prefs-direct", srv.handleUpdatePreferences)
-
-	req := httptest.NewRequest(http.MethodPatch, "/prefs-direct",
-		bytes.NewBufferString(`{"theme":"dark"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleOnboardingComplete: no claims ---
-
-func TestHandleOnboardingComplete_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /onboard-direct", srv.handleOnboardingComplete)
-
-	req := httptest.NewRequest(http.MethodPost, "/onboard-direct",
-		bytes.NewBufferString(`{"tenant_id":"test"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleCreateNPC: no claims ---
-
-func TestHandleCreateNPC_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /npc-direct/{id}", srv.handleCreateNPC)
-
-	req := httptest.NewRequest(http.MethodPost, "/npc-direct/c1",
-		bytes.NewBufferString(`{"name":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListNPCs: no claims ---
-
-func TestHandleListNPCs_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /npcs-direct/{id}", srv.handleListNPCs)
-
-	req := httptest.NewRequest(http.MethodGet, "/npcs-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleGetNPC: no claims ---
-
-func TestHandleGetNPC_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /npc-direct/{id}/{npc_id}", srv.handleGetNPC)
-
-	req := httptest.NewRequest(http.MethodGet, "/npc-direct/c1/n1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUpdateNPC: no claims ---
-
-func TestHandleUpdateNPC_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("PUT /npc-update-direct/{id}/{npc_id}", srv.handleUpdateNPC)
-
-	req := httptest.NewRequest(http.MethodPut, "/npc-update-direct/c1/n1",
-		bytes.NewBufferString(`{"name":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDeleteNPC: no claims ---
-
-func TestHandleDeleteNPC_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("DELETE /npc-del-direct/{id}/{npc_id}", srv.handleDeleteNPC)
-
-	req := httptest.NewRequest(http.MethodDelete, "/npc-del-direct/c1/n1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleVoicePreview: no claims ---
-
-func TestHandleVoicePreview_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /vp-direct/{npc_id}", srv.handleVoicePreview)
-
-	req := httptest.NewRequest(http.MethodPost, "/vp-direct/n1",
-		bytes.NewBufferString(`{}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleCreateLoreDocument: no claims ---
-
-func TestHandleCreateLoreDocument_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /lore-direct/{id}", srv.handleCreateLoreDocument)
-
-	req := httptest.NewRequest(http.MethodPost, "/lore-direct/c1",
-		bytes.NewBufferString(`{"title":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListLoreDocuments: no claims ---
-
-func TestHandleListLoreDocuments_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /lore-list-direct/{id}", srv.handleListLoreDocuments)
-
-	req := httptest.NewRequest(http.MethodGet, "/lore-list-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleGetLoreDocument: no claims ---
-
-func TestHandleGetLoreDocument_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /lore-get-direct/{id}/{lore_id}", srv.handleGetLoreDocument)
-
-	req := httptest.NewRequest(http.MethodGet, "/lore-get-direct/c1/l1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUpdateLoreDocument: no claims ---
-
-func TestHandleUpdateLoreDocument_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("PUT /lore-upd-direct/{id}/{lore_id}", srv.handleUpdateLoreDocument)
-
-	req := httptest.NewRequest(http.MethodPut, "/lore-upd-direct/c1/l1",
-		bytes.NewBufferString(`{"title":"X"}`))
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDeleteLoreDocument: no claims ---
-
-func TestHandleDeleteLoreDocument_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("DELETE /lore-del-direct/{id}/{lore_id}", srv.handleDeleteLoreDocument)
-
-	req := httptest.NewRequest(http.MethodDelete, "/lore-del-direct/c1/l1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleLinkNPCToCampaign: no claims ---
-
-func TestHandleLinkNPC_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /link-direct/{id}/{npc_id}", srv.handleLinkNPCToCampaign)
-
-	req := httptest.NewRequest(http.MethodPost, "/link-direct/c1/n1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleUnlinkNPCFromCampaign: no claims ---
-
-func TestHandleUnlinkNPC_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("DELETE /unlink-direct/{id}/{npc_id}", srv.handleUnlinkNPCFromCampaign)
-
-	req := httptest.NewRequest(http.MethodDelete, "/unlink-direct/c1/n1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListLinkedNPCs: no claims ---
-
-func TestHandleListLinkedNPCs_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /linked-direct/{id}", srv.handleListLinkedNPCs)
-
-	req := httptest.NewRequest(http.MethodGet, "/linked-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListKnowledgeEntities: no claims ---
-
-func TestHandleListKnowledge_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /knowledge-direct/{id}", srv.handleListKnowledgeEntities)
-
-	req := httptest.NewRequest(http.MethodGet, "/knowledge-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleDeleteKnowledgeEntity: no claims ---
-
-func TestHandleDeleteKnowledge_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("DELETE /knowledge-del-direct/{id}/{entity_id}", srv.handleDeleteKnowledgeEntity)
-
-	req := httptest.NewRequest(http.MethodDelete, "/knowledge-del-direct/c1/e1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleRebuildKnowledgeGraph: no claims ---
-
-func TestHandleRebuildKnowledge_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("POST /rebuild-direct/{id}", srv.handleRebuildKnowledgeGraph)
-
-	req := httptest.NewRequest(http.MethodPost, "/rebuild-direct/c1", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-// --- handleListNPCTemplates: no claims ---
-
-func TestHandleListNPCTemplates_NoClaims(t *testing.T) {
-	t.Parallel()
-
-	srv, _, _, _ := testServerWithStores(t)
-	srv.mux.HandleFunc("GET /templates-direct", srv.handleListNPCTemplates)
-
-	req := httptest.NewRequest(http.MethodGet, "/templates-direct", nil)
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, _, _, _ := testServerWithStores(t)
+			srv.mux.HandleFunc(tt.route, func(w http.ResponseWriter, r *http.Request) {
+				tt.handler(srv, w, r)
+			})
+
+			method, _, _ := strings.Cut(tt.route, " ")
+			var body io.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+			}
+			req := httptest.NewRequest(method, tt.path, body)
+			rr := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+			}
+		})
 	}
 }
 
@@ -1088,18 +463,18 @@ func TestHandleListUsers_CustomPagination(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 
-	var body struct {
+	var respBody struct {
 		Data  []User `json:"data"`
 		Total int    `json:"total"`
 	}
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(rr.Body).Decode(&respBody); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Data) != 2 {
-		t.Errorf("got %d users, want 2", len(body.Data))
+	if len(respBody.Data) != 2 {
+		t.Errorf("got %d users, want 2", len(respBody.Data))
 	}
-	if body.Total != 5 {
-		t.Errorf("total = %d, want 5", body.Total)
+	if respBody.Total != 5 {
+		t.Errorf("total = %d, want 5", respBody.Total)
 	}
 }
 
@@ -1120,13 +495,13 @@ func TestHandleListUsers_EmptyReturnsArray(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 
-	var body struct {
+	var respBody struct {
 		Data []User `json:"data"`
 	}
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(rr.Body).Decode(&respBody); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.Data == nil {
+	if respBody.Data == nil {
 		t.Error("data should be empty array, not null")
 	}
 }
@@ -1141,9 +516,9 @@ func TestHandleCreateLoreDocument_ContentMarkdownTakesPrecedence(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 
 	// When both "content" and "content_markdown" are present, content_markdown wins.
-	body := `{"title":"Both","content":"via content","content_markdown":"via markdown"}`
+	reqBody := `{"title":"Both","content":"via content","content_markdown":"via markdown"}`
 	req := authReq(t, http.MethodPost, "/api/v1/campaigns/c1/lore",
-		bytes.NewBufferString(body), secret, "user-1", "tenant-1", "dm")
+		bytes.NewBufferString(reqBody), secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -1172,9 +547,9 @@ func TestHandleUpdateLoreDocument_UpdateContent(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ws.loreDocs["l1"] = &LoreDocument{ID: "l1", CampaignID: "c1", Title: "Original", ContentMarkdown: "Old content"}
 
-	body := `{"content_markdown":"New content"}`
+	reqBody := `{"content_markdown":"New content"}`
 	req := authReq(t, http.MethodPut, "/api/v1/campaigns/c1/lore/l1",
-		bytes.NewBufferString(body), secret, "user-1", "tenant-1", "dm")
+		bytes.NewBufferString(reqBody), secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -1196,29 +571,29 @@ func TestHandleUpdateLoreDocument_UpdateContent(t *testing.T) {
 	}
 }
 
-// --- ParseCursorPage: negative and zero limits ---
+// --- ParseCursorPage: edge cases ---
 
-func TestParseCursorPage_ZeroLimit(t *testing.T) {
+func TestParseCursorPage_EdgeCases(t *testing.T) {
 	t.Parallel()
 
-	req := httptest.NewRequest(http.MethodGet, "/test?limit=0", nil)
-	page := ParseCursorPage(req)
-
-	// limit=0 is not > 0, so it falls through to default 25.
-	if page.Limit != 25 {
-		t.Errorf("limit = %d, want 25 (default for zero)", page.Limit)
+	tests := []struct {
+		name      string
+		query     string
+		wantLimit int
+	}{
+		{"zero limit", "limit=0", 25},
+		{"negative limit", "limit=-5", 25},
 	}
-}
 
-func TestParseCursorPage_NegativeLimit(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest(http.MethodGet, "/test?limit=-5", nil)
-	page := ParseCursorPage(req)
-
-	// Negative is not > 0, so it falls through to default 25.
-	if page.Limit != 25 {
-		t.Errorf("limit = %d, want 25 (default for negative)", page.Limit)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/test?"+tt.query, nil)
+			page := ParseCursorPage(req)
+			if page.Limit != tt.wantLimit {
+				t.Errorf("limit = %d, want %d", page.Limit, tt.wantLimit)
+			}
+		})
 	}
 }
 
