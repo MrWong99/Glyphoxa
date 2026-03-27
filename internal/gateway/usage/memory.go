@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -67,7 +68,7 @@ func (s *MemoryStore) CheckQuota(ctx context.Context, tenantID string, quota Quo
 	period := CurrentPeriod()
 	rec, err := s.GetUsage(ctx, tenantID, period)
 	if err != nil {
-		return err
+		return fmt.Errorf("usage: check quota for tenant %s: %w", tenantID, err)
 	}
 
 	if rec.SessionHours >= quota.MonthlySessionHours {

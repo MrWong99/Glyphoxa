@@ -377,15 +377,20 @@ func (s *session) handleFunctionCall(evt *serverEvent) {
 	}
 
 	// Return tool result and trigger the next model response.
-	_ = s.writeJSON(createConversationItemMessage{
+	if err := s.writeJSON(createConversationItemMessage{
 		Type: "conversation.item.create",
 		Item: conversationItem{
 			Type:   "function_call_output",
 			CallID: evt.CallID,
 			Output: result,
 		},
-	})
-	_ = s.writeJSON(map[string]string{"type": "response.create"})
+	}); err != nil {
+		s.setErr(fmt.Errorf("openai: send tool result: %w", err))
+		return
+	}
+	if err := s.writeJSON(map[string]string{"type": "response.create"}); err != nil {
+		s.setErr(fmt.Errorf("openai: trigger response after tool call: %w", err))
+	}
 }
 
 func (s *session) setErr(err error) {
@@ -534,7 +539,7 @@ func (s *session) InjectTextContext(items []s2s.ContextItem) error {
 			},
 		}
 		if err := s.writeJSON(msg); err != nil {
-			return err
+			return fmt.Errorf("openai: inject context item: %w", err)
 		}
 	}
 	return nil
