@@ -334,7 +334,7 @@ func (s *Server) processInvite(r *http.Request, user *User, invite *Invite) {
 		fallthrough
 	default:
 		if user.Role != invite.Role {
-			if err := s.store.UpdateUser(r.Context(), &User{ID: user.ID, Role: invite.Role}); err != nil {
+			if err := s.store.UpdateUser(r.Context(), &User{ID: user.ID, TenantID: user.TenantID, Role: invite.Role}); err != nil {
 				slog.Warn("web: update invite role", "err", err)
 			} else {
 				user.Role = invite.Role

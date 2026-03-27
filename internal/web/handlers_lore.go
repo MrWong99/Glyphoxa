@@ -53,7 +53,7 @@ func (s *Server) handleCreateLoreDocument(w http.ResponseWriter, r *http.Request
 		SortOrder:       req.SortOrder,
 	}
 
-	if err := s.store.CreateLoreDocument(r.Context(), doc); err != nil {
+	if err := s.store.CreateLoreDocument(r.Context(), claims.TenantID, doc); err != nil {
 		slog.Error("web: create lore document", "campaign_id", campaignID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to create lore document")
 		return
@@ -77,7 +77,7 @@ func (s *Server) handleListLoreDocuments(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	docs, err := s.store.ListLoreDocuments(r.Context(), campaignID)
+	docs, err := s.store.ListLoreDocuments(r.Context(), claims.TenantID, campaignID)
 	if err != nil {
 		slog.Error("web: list lore documents", "campaign_id", campaignID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to list lore documents")
@@ -102,7 +102,7 @@ func (s *Server) handleGetLoreDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loreID := r.PathValue("lore_id")
-	doc, err := s.store.GetLoreDocument(r.Context(), campaignID, loreID)
+	doc, err := s.store.GetLoreDocument(r.Context(), claims.TenantID, campaignID, loreID)
 	if err != nil {
 		slog.Error("web: get lore document", "lore_id", loreID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to get lore document")
@@ -128,7 +128,7 @@ func (s *Server) handleUpdateLoreDocument(w http.ResponseWriter, r *http.Request
 	}
 
 	loreID := r.PathValue("lore_id")
-	existing, err := s.store.GetLoreDocument(r.Context(), campaignID, loreID)
+	existing, err := s.store.GetLoreDocument(r.Context(), claims.TenantID, campaignID, loreID)
 	if err != nil {
 		slog.Error("web: get lore document for update", "lore_id", loreID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to get lore document")
@@ -154,7 +154,7 @@ func (s *Server) handleUpdateLoreDocument(w http.ResponseWriter, r *http.Request
 		existing.SortOrder = *req.SortOrder
 	}
 
-	if err := s.store.UpdateLoreDocument(r.Context(), existing); err != nil {
+	if err := s.store.UpdateLoreDocument(r.Context(), claims.TenantID, existing); err != nil {
 		slog.Error("web: update lore document", "lore_id", loreID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to update lore document")
 		return
@@ -176,7 +176,7 @@ func (s *Server) handleDeleteLoreDocument(w http.ResponseWriter, r *http.Request
 	}
 
 	loreID := r.PathValue("lore_id")
-	if err := s.store.DeleteLoreDocument(r.Context(), campaignID, loreID); err != nil {
+	if err := s.store.DeleteLoreDocument(r.Context(), claims.TenantID, campaignID, loreID); err != nil {
 		slog.Error("web: delete lore document", "lore_id", loreID, "err", err)
 		writeError(w, http.StatusNotFound, "not_found", "lore document not found")
 		return

@@ -37,19 +37,19 @@ func (m *MemoryOrchestrator) ValidateAndCreate(_ context.Context, req SessionReq
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check constraints.
+	// Check constraints — filter by tenant first to prevent cross-tenant interference.
 	for _, s := range m.sessions {
 		if s.State == gateway.SessionEnded {
 			continue
 		}
 
-		// Prevent two active sessions for the same campaign.
-		if s.CampaignID == req.CampaignID {
-			return "", fmt.Errorf("sessionorch: campaign %q already has an active session %q", req.CampaignID, s.ID)
-		}
-
 		if s.TenantID != req.TenantID {
 			continue
+		}
+
+		// Prevent two active sessions for the same campaign within the tenant.
+		if s.CampaignID == req.CampaignID {
+			return "", fmt.Errorf("sessionorch: campaign %q already has an active session %q", req.CampaignID, s.ID)
 		}
 
 		// Shared tier: at most 1 active session per tenant.

@@ -129,6 +129,19 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := r.PathValue("id")
+
+	// Verify the session belongs to the caller's tenant before allowing stop.
+	exists, err := s.store.SessionExists(r.Context(), claims.TenantID, sessionID)
+	if err != nil {
+		slog.Error("web: check session exists", "session_id", sessionID, "err", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "failed to check session")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "not_found", "session not found")
+		return
+	}
+
 	if _, err := s.gwClient.StopWebSession(r.Context(), &pb.StopWebSessionRequest{
 		SessionId: sessionID,
 	}); err != nil {

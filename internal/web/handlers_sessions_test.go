@@ -475,10 +475,15 @@ func TestHandleStartSession_WithGateway(t *testing.T) {
 func TestHandleStopSession_WithGateway(t *testing.T) {
 	t.Parallel()
 
-	srv, _, _, secret := testServerWithStores(t)
+	srv, ws, _, secret := testServerWithStores(t)
 	srv.gwClient = newMockMgmtClient()
 	auth := AuthMiddleware(secret)
 	srv.mux.Handle("POST /api/v1/sessions/{id}/stop", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStopSession))))
+
+	// Seed session belonging to tenant-1.
+	ws.sessions = []SessionSummary{
+		{ID: "s1", TenantID: "tenant-1", State: "active", StartedAt: time.Now()},
+	}
 
 	req := authReq(t, http.MethodPost, "/api/v1/sessions/s1/stop", nil, secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
@@ -486,6 +491,29 @@ func TestHandleStopSession_WithGateway(t *testing.T) {
 
 	if rr.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+}
+
+func TestHandleStopSession_CrossTenantBlocked(t *testing.T) {
+	t.Parallel()
+
+	srv, ws, _, secret := testServerWithStores(t)
+	srv.gwClient = newMockMgmtClient()
+	auth := AuthMiddleware(secret)
+	srv.mux.Handle("POST /api/v1/sessions/{id}/stop", auth(RequireRole("dm")(http.HandlerFunc(srv.handleStopSession))))
+
+	// Session belongs to tenant-1.
+	ws.sessions = []SessionSummary{
+		{ID: "session-t1", TenantID: "tenant-1", State: "active", StartedAt: time.Now()},
+	}
+
+	// Authenticate as tenant-2 — should be blocked.
+	req := authReq(t, http.MethodPost, "/api/v1/sessions/session-t1/stop", nil, secret, "user-2", "tenant-2", "dm")
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d (cross-tenant stop should be blocked)", rr.Code, http.StatusNotFound)
 	}
 }
 

@@ -127,20 +127,21 @@ func (s *PostgresStore) Create(ctx context.Context, def *NPCDefinition) error {
 	return nil
 }
 
-// Get retrieves an NPC definition by ID. It returns (nil, nil) if no NPC with
-// the given ID exists.
-func (s *PostgresStore) Get(ctx context.Context, id string) (*NPCDefinition, error) {
+// Get retrieves an NPC definition by ID. When campaignID is non-empty, it is
+// included as a filter (defense-in-depth against cross-campaign access).
+// Returns (nil, nil) if no NPC with the given ID exists.
+func (s *PostgresStore) Get(ctx context.Context, id, campaignID string) (*NPCDefinition, error) {
 	const query = `
 		SELECT id, campaign_id, name, personality, engine,
 		       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
 		       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 		FROM npc_definitions
-		WHERE id = $1`
+		WHERE id = $1 AND ($2 = '' OR campaign_id = $2)`
 
 	var def NPCDefinition
 	var voiceJSON, ksJSON, skJSON, brJSON, toolsJSON, attrJSON []byte
 
-	err := s.db.QueryRow(ctx, query, id).Scan(
+	err := s.db.QueryRow(ctx, query, id, campaignID).Scan(
 		&def.ID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
 		&voiceJSON, &ksJSON, &skJSON, &brJSON, &toolsJSON,
 		&def.BudgetTier, &def.GMHelper, &def.AddressOnly, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
@@ -214,11 +215,11 @@ func (s *PostgresStore) Update(ctx context.Context, def *NPCDefinition) error {
 	return nil
 }
 
-// Delete removes an NPC definition by ID. Deleting a non-existent NPC is not
-// an error.
-func (s *PostgresStore) Delete(ctx context.Context, id string) error {
-	const query = `DELETE FROM npc_definitions WHERE id = $1`
-	_, err := s.db.Exec(ctx, query, id)
+// Delete removes an NPC definition by ID and campaign ID (defense-in-depth).
+// Deleting a non-existent NPC is not an error.
+func (s *PostgresStore) Delete(ctx context.Context, id, campaignID string) error {
+	const query = `DELETE FROM npc_definitions WHERE id = $1 AND campaign_id = $2`
+	_, err := s.db.Exec(ctx, query, id, campaignID)
 	if err != nil {
 		return fmt.Errorf("npcstore: delete %q: %w", id, err)
 	}

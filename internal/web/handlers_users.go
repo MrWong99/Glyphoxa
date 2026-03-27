@@ -48,13 +48,13 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.store.GetUser(r.Context(), id)
+	user, err := s.store.GetUser(r.Context(), claims.TenantID, id)
 	if err != nil {
 		slog.Error("web: get user", "user_id", id, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to get user")
 		return
 	}
-	if user == nil || user.TenantID != claims.TenantID {
+	if user == nil {
 		writeError(w, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
@@ -85,8 +85,8 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	// When admins update another user, verify they belong to the same tenant.
 	if id != claims.Sub {
-		target, err := s.store.GetUser(r.Context(), id)
-		if err != nil || target == nil || target.TenantID != claims.TenantID {
+		target, err := s.store.GetUser(r.Context(), claims.TenantID, id)
+		if err != nil || target == nil {
 			writeError(w, http.StatusNotFound, "not_found", "user not found")
 			return
 		}
@@ -103,7 +103,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := &User{ID: id}
+	u := &User{ID: id, TenantID: claims.TenantID}
 	if req.DisplayName != nil {
 		if *req.DisplayName == "" {
 			writeError(w, http.StatusBadRequest, "invalid_name", "display_name must not be empty")
@@ -125,7 +125,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := s.store.GetUser(r.Context(), id)
+	updated, err := s.store.GetUser(r.Context(), claims.TenantID, id)
 	if err != nil || updated == nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to fetch updated user")
 		return
@@ -149,8 +149,8 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify the target user belongs to the same tenant before deleting.
-	target, err := s.store.GetUser(r.Context(), id)
-	if err != nil || target == nil || target.TenantID != claims.TenantID {
+	target, err := s.store.GetUser(r.Context(), claims.TenantID, id)
+	if err != nil || target == nil {
 		writeError(w, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
@@ -223,14 +223,14 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := &User{ID: claims.Sub, DisplayName: req.DisplayName}
+	u := &User{ID: claims.Sub, TenantID: claims.TenantID, DisplayName: req.DisplayName}
 	if err := s.store.UpdateUser(r.Context(), u); err != nil {
 		slog.Error("web: update me", "user_id", claims.Sub, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to update profile")
 		return
 	}
 
-	updated, err := s.store.GetUser(r.Context(), claims.Sub)
+	updated, err := s.store.GetUser(r.Context(), claims.TenantID, claims.Sub)
 	if err != nil || updated == nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to fetch updated profile")
 		return

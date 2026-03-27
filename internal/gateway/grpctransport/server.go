@@ -7,12 +7,27 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
 	"github.com/MrWong99/glyphoxa/internal/gateway"
 )
+
+// tenantIDFromMD extracts the tenant ID from incoming gRPC metadata.
+// Returns empty string if not present.
+func tenantIDFromMD(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	vals := md.Get(tenantMetadataKey)
+	if len(vals) == 0 {
+		return ""
+	}
+	return vals[0]
+}
 
 // WorkerServer implements the SessionWorker gRPC service on the worker side.
 // It delegates to a WorkerHandler which owns the actual voice pipeline logic.
@@ -84,8 +99,12 @@ func (s *WorkerServer) StartSession(ctx context.Context, req *pb.StartSessionReq
 	}, nil
 }
 
-// StopSession implements the gRPC StopSession RPC.
+// StopSession implements the gRPC StopSession RPC. When tenant metadata is
+// present, it is logged for audit purposes.
 func (s *WorkerServer) StopSession(ctx context.Context, req *pb.StopSessionRequest) (*pb.StopSessionResponse, error) {
+	if tid := tenantIDFromMD(ctx); tid != "" {
+		slog.Debug("grpc: stop session with tenant context", "session_id", req.GetSessionId(), "tenant_id", tid)
+	}
 	if err := s.handler.StopSession(ctx, req.GetSessionId()); err != nil {
 		slog.Warn("grpc: stop session failed", "session_id", req.GetSessionId(), "err", err)
 		return &pb.StopSessionResponse{}, status.Errorf(codes.Internal, "stop session: %v", err)

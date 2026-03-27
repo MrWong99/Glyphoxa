@@ -87,13 +87,13 @@ func TestAdminAPI_AuthMiddleware_NoKey(t *testing.T) {
 	api := gateway.NewAdminAPI(store, "", nil) // no API key configured
 	handler := api.Handler()
 
-	// Without an API key configured, all requests should pass through.
+	// Without an API key configured, all requests should be rejected.
 	req := httptest.NewRequest("GET", "/api/v1/tenants", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("got status %d, want %d — unauthenticated request should succeed when no key is set", rr.Code, http.StatusOK)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("got status %d, want %d — requests should be rejected when no key is configured", rr.Code, http.StatusForbidden)
 	}
 }
 
