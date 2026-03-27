@@ -211,6 +211,15 @@ func (cb *CircuitBreaker) State() State {
 	return cb.state
 }
 
+// RecordFailure manually records a failure on the circuit breaker from outside
+// the [Execute] call path. This is useful for reporting mid-stream errors that
+// occur after the initial call succeeded (e.g., a TTS WebSocket drops mid-synthesis).
+func (cb *CircuitBreaker) RecordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.recordFailure(cb.state == StateHalfOpen)
+}
+
 // Reset manually forces the breaker back to [StateClosed], clearing all failure
 // counters.
 func (cb *CircuitBreaker) Reset() {

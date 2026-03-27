@@ -26,6 +26,7 @@ type audioPipelineConfig struct {
 	ctx         context.Context
 	pipeline    transcript.Pipeline // may be nil — correction is skipped when nil
 	entities    func() []string     // returns current entity names; may be nil
+	botUserID   string              // bot's own user ID — workers for this ID are skipped
 }
 
 // audioPipeline manages per-participant audio processing goroutines.
@@ -44,6 +45,7 @@ type audioPipeline struct {
 	sttCfg      stt.StreamConfig
 	pipeline    transcript.Pipeline
 	entities    func() []string
+	botUserID   string // bot's own user ID — workers for this ID are skipped
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -67,6 +69,7 @@ func newAudioPipeline(cfg audioPipelineConfig) *audioPipeline {
 		sttCfg:      cfg.sttCfg,
 		pipeline:    cfg.pipeline,
 		entities:    cfg.entities,
+		botUserID:   cfg.botUserID,
 		ctx:         ctx,
 		cancel:      cancel,
 		workers:     make(map[string]context.CancelFunc),
@@ -131,6 +134,13 @@ func (p *audioPipeline) handleParticipantChange(ev audio.Event) {
 // startWorker launches a per-participant processing goroutine that converts
 // the input stream to 16kHz mono, runs VAD, and pipes speech to STT.
 func (p *audioPipeline) startWorker(id string, ch <-chan audio.AudioFrame) {
+	// Defense-in-depth: skip the bot's own user ID even if the connection
+	// layer didn't filter it. Prevents NPC self-hearing feedback loops.
+	if p.botUserID != "" && id == p.botUserID {
+		slog.Debug("audio pipeline: skipping bot's own user ID", "user_id", id)
+		return
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -212,6 +222,15 @@ func (p *audioPipeline) processParticipant(ctx context.Context, speakerID string
 					// gateway stops playing stale NPC audio immediately.
 					if f, ok := p.conn.(audio.Flusher); ok {
 						f.Flush()
+					}
+
+					// Close any existing STT session before opening a new one.
+					// This prevents session leaks on rapid VAD speech start/end
+					// cycles (e.g., VAD glitches firing SpeechStart twice without
+					// an intervening SpeechEnd).
+					if sttSession != nil {
+						_ = sttSession.Close()
+						sttSession = nil
 					}
 
 					// Snapshot STT config under lock — UpdateKeywords may be

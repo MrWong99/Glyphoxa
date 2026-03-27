@@ -120,3 +120,35 @@ func ExecuteWithResult[T any, R any](fg *FallbackGroup[T], fn func(T) (R, error)
 	}
 	return zero, fmt.Errorf("%w: %v", ErrAllFailed, lastErr)
 }
+
+// ExecuteWithResultIndex is like [ExecuteWithResult] but also records which
+// entry index succeeded, via the activeIdx pointer. This allows callers to
+// identify the provider that handled the request (e.g., to record mid-stream
+// circuit breaker failures).
+func ExecuteWithResultIndex[T any, R any](fg *FallbackGroup[T], fn func(T) (R, error), activeIdx *int) (R, error) {
+	var (
+		lastErr error
+		zero    R
+	)
+	for i := range fg.entries {
+		entry := &fg.entries[i]
+		var result R
+		err := entry.breaker.Execute(func() error {
+			var innerErr error
+			result, innerErr = fn(entry.value)
+			return innerErr
+		})
+		if err == nil {
+			*activeIdx = i
+			return result, nil
+		}
+		lastErr = err
+		if errors.Is(err, ErrCircuitOpen) {
+			slog.Debug("skipping provider (circuit open)", "provider", entry.name)
+		} else {
+			slog.Warn("provider failed, trying next",
+				"provider", entry.name, "error", err)
+		}
+	}
+	return zero, fmt.Errorf("%w: %v", ErrAllFailed, lastErr)
+}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -56,6 +57,11 @@ type Connection struct {
 	stream    grpc.BidiStreamingClient[pb.AudioFrame, pb.AudioFrame]
 	sessionID string
 
+	// botUserID is the bot's own user ID. When set, frames from this user are
+	// silently dropped in recvLoop to prevent the NPC from hearing its own
+	// TTS output (echo/feedback loop).
+	botUserID string
+
 	inputsMu   sync.RWMutex
 	inputs     map[string]chan audio.AudioFrame
 	decodersMu sync.Mutex
@@ -73,8 +79,8 @@ type Connection struct {
 	// frame. Buffered so Flush() never blocks.
 	flushCh chan struct{}
 
-	recvFrames uint64
-	sendFrames uint64
+	recvFrames atomic.Uint64
+	sendFrames atomic.Uint64
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -115,6 +121,15 @@ func New(sessionID string, stream grpc.BidiStreamingClient[pb.AudioFrame, pb.Aud
 	return c, nil
 }
 
+// SetBotUserID sets the bot's own user ID so that its audio is filtered out.
+// This prevents echo/feedback loops where the NPC hears its own TTS output.
+// Must be called before audio starts flowing.
+func (c *Connection) SetBotUserID(id string) {
+	c.botUserID = id
+	slog.Debug("grpcbridge: bot user ID set for self-hearing guard",
+		"bot_user_id", id, "session_id", c.sessionID)
+}
+
 // recvLoop reads opus frames from the gRPC stream, decodes them to PCM, and
 // demuxes by user_id into per-participant input channels. On exit it closes
 // all input channels so that consumers ranging over them terminate.
@@ -141,6 +156,11 @@ func (c *Connection) recvLoop() {
 
 		userID := frame.GetUserId()
 		if userID == "" || len(frame.GetOpusData()) == 0 {
+			continue
+		}
+
+		// Self-hearing guard: drop frames from the bot's own user ID.
+		if c.botUserID != "" && userID == c.botUserID {
 			continue
 		}
 
@@ -191,11 +211,11 @@ func (c *Connection) recvLoop() {
 			Timestamp:  time.Duration(frame.GetSsrc()) * time.Second / time.Duration(opusSampleRate),
 		}
 
-		c.recvFrames++
-		if c.recvFrames%frameLogInterval == 1 {
+		n := c.recvFrames.Add(1)
+		if n%frameLogInterval == 1 {
 			slog.Info("grpcbridge: receiving gateway→worker audio",
 				"session_id", c.sessionID,
-				"frames_total", c.recvFrames,
+				"frames_total", n,
 				"participants", len(c.inputs),
 			)
 		}
@@ -217,10 +237,27 @@ func (c *Connection) sendLoop() {
 			return
 
 		case <-c.flushCh:
-			// Barge-in or mute: discard partial opus buffer and tell the
-			// gateway to flush its own buffer. This runs on the sendLoop
-			// goroutine so there is no data race with buf access.
+			// Barge-in or mute: drain the output channel, discard partial
+			// opus buffer, and tell the gateway to flush its own buffer.
+			// All output channel reads happen here (on the sendLoop goroutine)
+			// to avoid a data race with the normal frame read path.
+			drained := 0
+			for {
+				select {
+				case <-c.output:
+					drained++
+				default:
+					goto drainDone
+				}
+			}
+		drainDone:
 			c.buf = c.buf[:0]
+			if drained > 0 {
+				slog.Info("grpcbridge: flushed local output buffer",
+					"session_id", c.sessionID,
+					"drained_frames", drained,
+				)
+			}
 			if err := c.stream.Send(&pb.AudioFrame{
 				SessionId: c.sessionID,
 				Flush:     true,
@@ -250,16 +287,16 @@ func (c *Connection) sendLoop() {
 					continue
 				}
 
-				c.sendFrames++
-				if c.sendFrames == 1 {
+				sn := c.sendFrames.Add(1)
+				if sn == 1 {
 					slog.Info("grpcbridge: first NPC audio frame sent to gateway",
 						"session_id", c.sessionID,
 					)
 				}
-				if c.sendFrames%frameLogInterval == 0 {
+				if sn%frameLogInterval == 0 {
 					slog.Info("grpcbridge: sending worker→gateway audio",
 						"session_id", c.sessionID,
-						"frames_total", c.sendFrames,
+						"frames_total", sn,
 					)
 				}
 
@@ -303,34 +340,19 @@ func (c *Connection) OnParticipantChange(cb func(audio.Event)) {
 	c.changeCb = cb
 }
 
-// Flush drains any unsent frames from the local output channel and signals
-// sendLoop to clear its partial opus buffer and send a flush control frame
-// to the gateway. This ensures that after a barge-in or mute, stale NPC
-// audio stops playing immediately on both the worker and gateway sides.
+// Flush signals sendLoop to drain the output channel, clear its partial opus
+// buffer, and send a flush control frame to the gateway. This ensures that
+// after a barge-in or mute, stale NPC audio stops playing immediately on both
+// the worker and gateway sides.
 //
-// Safe for concurrent use — the output channel drain is lock-free, and
-// sendLoop handles buf clearing and the gRPC send to avoid data races.
+// The output channel drain is performed by sendLoop (not here) to avoid a
+// data race between Flush() and sendLoop both reading from c.output.
+//
+// Safe for concurrent use.
 func (c *Connection) Flush() {
-	// Drain local output channel so sendLoop doesn't transmit stale frames.
-	// Channel receives are safe from multiple goroutines.
-	drained := 0
-	for {
-		select {
-		case <-c.output:
-			drained++
-		default:
-			goto drainDone
-		}
-	}
-drainDone:
-	if drained > 0 {
-		slog.Info("grpcbridge: flushed local output buffer",
-			"session_id", c.sessionID,
-			"drained_frames", drained,
-		)
-	}
-
-	// Signal sendLoop to clear its partial buf and send a flush frame.
+	// Signal sendLoop to drain the output channel, clear its partial buf,
+	// and send a flush frame. All output channel reads happen in sendLoop's
+	// goroutine to avoid data races.
 	select {
 	case c.flushCh <- struct{}{}:
 	default:

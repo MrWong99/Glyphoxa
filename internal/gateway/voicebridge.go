@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/MrWong99/glyphoxa/gen/glyphoxa/v1"
@@ -30,7 +31,7 @@ type voiceBridgeReceiver struct {
 	bridge    *audiobridge.SessionBridge
 	sessionID string
 
-	frameCount uint64
+	frameCount atomic.Uint64
 	done       chan struct{}
 	closeOnce  sync.Once
 }
@@ -42,11 +43,11 @@ func (r *voiceBridgeReceiver) ReceiveOpusFrame(userID snowflake.ID, packet *voic
 		return nil
 	}
 
-	r.frameCount++
-	if r.frameCount%frameLogInterval == 1 {
+	n := r.frameCount.Add(1)
+	if n%frameLogInterval == 1 {
 		slog.Info("voicebridge: forwarding Discord→worker audio",
 			"session_id", r.sessionID,
-			"frames_total", r.frameCount,
+			"frames_total", n,
 			"user_id", userID,
 		)
 	}
@@ -79,8 +80,8 @@ type voiceBridgeProvider struct {
 	bridge    *audiobridge.SessionBridge
 	sessionID string
 
-	frameCount uint64
-	gotFirst   bool
+	frameCount atomic.Uint64
+	gotFirst   atomic.Bool
 	done       chan struct{}
 	closeOnce  sync.Once
 }
@@ -96,17 +97,16 @@ func (p *voiceBridgeProvider) ProvideOpusFrame() ([]byte, error) {
 		if frame == nil {
 			return nil, nil
 		}
-		p.frameCount++
-		if !p.gotFirst {
-			p.gotFirst = true
+		n := p.frameCount.Add(1)
+		if p.gotFirst.CompareAndSwap(false, true) {
 			slog.Info("voicebridge: first worker audio frame received",
 				"session_id", p.sessionID,
 			)
 		}
-		if p.frameCount%frameLogInterval == 0 {
+		if n%frameLogInterval == 0 {
 			slog.Info("voicebridge: forwarding worker→Discord audio",
 				"session_id", p.sessionID,
-				"frames_total", p.frameCount,
+				"frames_total", n,
 			)
 		}
 		return frame.GetOpusData(), nil
@@ -153,8 +153,8 @@ func setupVoiceBridge(
 	return func() {
 		slog.Info("voicebridge: stopping audio bridge",
 			"session_id", sessionID,
-			"discord_to_worker_frames", receiver.frameCount,
-			"worker_to_discord_frames", provider.frameCount,
+			"discord_to_worker_frames", receiver.frameCount.Load(),
+			"worker_to_discord_frames", provider.frameCount.Load(),
 		)
 		receiver.Close()
 		provider.Close()
