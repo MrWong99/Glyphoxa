@@ -10,6 +10,8 @@ import (
 )
 
 func TestTTSFallback_SynthesizeStream_PrimarySuccess(t *testing.T) {
+	t.Parallel()
+
 	primary := &ttsmock.Provider{
 		SynthesizeChunks: [][]byte{[]byte("audio1"), []byte("audio2")},
 	}
@@ -53,6 +55,8 @@ func TestTTSFallback_SynthesizeStream_PrimarySuccess(t *testing.T) {
 }
 
 func TestTTSFallback_SynthesizeStream_Failover(t *testing.T) {
+	t.Parallel()
+
 	primary := &ttsmock.Provider{
 		SynthesizeErr: errors.New("primary down"),
 	}
@@ -87,6 +91,8 @@ func TestTTSFallback_SynthesizeStream_Failover(t *testing.T) {
 }
 
 func TestTTSFallback_SynthesizeStream_AllFail(t *testing.T) {
+	t.Parallel()
+
 	primary := &ttsmock.Provider{SynthesizeErr: errors.New("primary down")}
 	secondary := &ttsmock.Provider{SynthesizeErr: errors.New("secondary down")}
 
@@ -105,6 +111,8 @@ func TestTTSFallback_SynthesizeStream_AllFail(t *testing.T) {
 }
 
 func TestTTSFallback_ListVoices_Failover(t *testing.T) {
+	t.Parallel()
+
 	primary := &ttsmock.Provider{
 		ListVoicesErr: errors.New("primary down"),
 	}
@@ -133,6 +141,8 @@ func TestTTSFallback_ListVoices_Failover(t *testing.T) {
 }
 
 func TestTTSFallback_CloneVoice_Failover(t *testing.T) {
+	t.Parallel()
+
 	primary := &ttsmock.Provider{
 		CloneVoiceErr: errors.New("primary down"),
 	}
