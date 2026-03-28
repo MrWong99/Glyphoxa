@@ -132,9 +132,9 @@ func TestHandleListNPCs(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 
 	// Seed NPCs.
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "Heinrich"}
-	ns.npcs["npc-2"] = &npcstore.NPCDefinition{ID: "npc-2", CampaignID: "c1", Name: "Mathilde"}
-	ns.npcs["npc-3"] = &npcstore.NPCDefinition{ID: "npc-3", CampaignID: "c2", Name: "OtherCampaign"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "Heinrich"}
+	ns.npcs["npc-2"] = &npcstore.NPCDefinition{ID: "npc-2", TenantID: "tenant-1", CampaignID: "c1", Name: "Mathilde"}
+	ns.npcs["npc-3"] = &npcstore.NPCDefinition{ID: "npc-3", TenantID: "tenant-1", CampaignID: "c2", Name: "OtherCampaign"}
 
 	req := authReq(t, http.MethodGet, "/api/v1/campaigns/c1/npcs", nil, secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
@@ -205,8 +205,8 @@ func TestHandleGetNPC(t *testing.T) {
 			srv.mux.Handle("GET /api/v1/campaigns/{id}/npcs/{npc_id}", auth(http.HandlerFunc(srv.handleGetNPC)))
 
 			ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
-			ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "Heinrich"}
-			ns.npcs["npc-other"] = &npcstore.NPCDefinition{ID: "npc-other", CampaignID: "c2", Name: "WrongCampaign"}
+			ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "Heinrich"}
+			ns.npcs["npc-other"] = &npcstore.NPCDefinition{ID: "npc-other", TenantID: "tenant-1", CampaignID: "c2", Name: "WrongCampaign"}
 
 			req := authReq(t, http.MethodGet, "/api/v1/campaigns/c1/npcs/"+tt.npcID, nil, secret, "user-1", "tenant-1", "dm")
 			rr := httptest.NewRecorder()
@@ -262,7 +262,7 @@ func TestHandleUpdateNPC(t *testing.T) {
 
 			ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 			if tt.seedNPC {
-				ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "OldName", Personality: "Wise"}
+				ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "OldName", Personality: "Wise"}
 			}
 
 			req := authReq(t, http.MethodPut, "/api/v1/campaigns/c1/npcs/"+tt.npcID,
@@ -297,7 +297,7 @@ func TestHandleUpdateNPC_WrongCampaign(t *testing.T) {
 	srv.mux.Handle("PUT /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleUpdateNPC))))
 
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "Campaign1"}
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c2", Name: "WrongCampaign"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c2", Name: "WrongCampaign"}
 
 	req := authReq(t, http.MethodPut, "/api/v1/campaigns/c1/npcs/npc-1",
 		bytes.NewBufferString(`{"name":"Hack"}`), secret, "user-1", "tenant-1", "dm")
@@ -317,7 +317,7 @@ func TestHandleDeleteNPC(t *testing.T) {
 	srv.mux.Handle("DELETE /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleDeleteNPC))))
 
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "Campaign"}
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "ToDelete"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "ToDelete"}
 
 	req := authReq(t, http.MethodDelete, "/api/v1/campaigns/c1/npcs/npc-1", nil, secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()
@@ -358,7 +358,7 @@ func TestHandleDeleteNPC_WrongCampaign(t *testing.T) {
 	srv.mux.Handle("DELETE /api/v1/campaigns/{id}/npcs/{npc_id}", auth(RequireRole("dm")(http.HandlerFunc(srv.handleDeleteNPC))))
 
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "Campaign"}
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c-other", Name: "WrongCampaign"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c-other", Name: "WrongCampaign"}
 
 	req := authReq(t, http.MethodDelete, "/api/v1/campaigns/c1/npcs/npc-1", nil, secret, "user-1", "tenant-1", "dm")
 	rr := httptest.NewRecorder()

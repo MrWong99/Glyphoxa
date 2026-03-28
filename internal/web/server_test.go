@@ -130,7 +130,7 @@ func TestServer_RegistrationIntegration(t *testing.T) {
 
 	// Seed data.
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "t1", Name: "Camp"}
-	ns.npcs["n1"] = &npcstore.NPCDefinition{ID: "n1", CampaignID: "c1", Name: "NPC"}
+	ns.npcs["n1"] = &npcstore.NPCDefinition{ID: "n1", TenantID: "t1", CampaignID: "c1", Name: "NPC"}
 
 	token := signTestToken(t, cfg.JWTSecret, "u1", "t1", "dm")
 

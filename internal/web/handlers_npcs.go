@@ -55,6 +55,7 @@ func (s *Server) handleCreateNPC(w http.ResponseWriter, r *http.Request) {
 
 	def := &npcstore.NPCDefinition{
 		ID:              req.ID,
+		TenantID:        claims.TenantID,
 		CampaignID:      campaignID,
 		Name:            req.Name,
 		Personality:     req.Personality,
@@ -95,7 +96,7 @@ func (s *Server) handleListNPCs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	npcs, err := s.npcs.List(r.Context(), campaignID)
+	npcs, err := s.npcs.List(r.Context(), claims.TenantID, campaignID)
 	if err != nil {
 		slog.Error("web: list npcs", "campaign_id", campaignID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to list NPCs")
@@ -120,7 +121,7 @@ func (s *Server) handleGetNPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	npcID := r.PathValue("npc_id")
-	npc, err := s.npcs.Get(r.Context(), npcID, campaignID)
+	npc, err := s.npcs.Get(r.Context(), claims.TenantID, npcID, campaignID)
 	if err != nil {
 		slog.Error("web: get npc", "npc_id", npcID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to get NPC")
@@ -146,7 +147,7 @@ func (s *Server) handleUpdateNPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	npcID := r.PathValue("npc_id")
-	existing, err := s.npcs.Get(r.Context(), npcID, campaignID)
+	existing, err := s.npcs.Get(r.Context(), claims.TenantID, npcID, campaignID)
 	if err != nil || existing == nil {
 		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
 		return
@@ -194,14 +195,14 @@ func (s *Server) handleDeleteNPC(w http.ResponseWriter, r *http.Request) {
 
 	npcID := r.PathValue("npc_id")
 
-	// Verify the NPC belongs to this campaign before deleting.
-	existing, err := s.npcs.Get(r.Context(), npcID, campaignID)
+	// Verify the NPC belongs to this tenant and campaign before deleting.
+	existing, err := s.npcs.Get(r.Context(), claims.TenantID, npcID, campaignID)
 	if err != nil || existing == nil {
 		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
 		return
 	}
 
-	if err := s.npcs.Delete(r.Context(), npcID, campaignID); err != nil {
+	if err := s.npcs.Delete(r.Context(), claims.TenantID, npcID, campaignID); err != nil {
 		slog.Error("web: delete npc", "npc_id", npcID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to delete NPC")
 		return

@@ -190,7 +190,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	// campaign, not a stale startup snapshot.
 	npcConfigs := gc.npcConfigs
 	if gc.npcStore != nil && campaignID != "" {
-		defs, listErr := gc.npcStore.List(ctx, campaignID)
+		defs, listErr := gc.npcStore.List(ctx, gc.tenantID, campaignID)
 		if listErr != nil {
 			_ = gc.orch.Transition(ctx, sessionID, SessionEnded, listErr.Error())
 			releaseGuild()

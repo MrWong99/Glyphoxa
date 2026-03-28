@@ -15,6 +15,7 @@ import (
 const Schema = `
 CREATE TABLE IF NOT EXISTS npc_definitions (
     id               TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL DEFAULT '',
     campaign_id      TEXT NOT NULL DEFAULT '',
     name             TEXT NOT NULL,
     personality      TEXT NOT NULL DEFAULT '',
@@ -33,10 +34,15 @@ CREATE TABLE IF NOT EXISTS npc_definitions (
 );
 CREATE INDEX IF NOT EXISTS idx_npc_definitions_campaign ON npc_definitions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_npc_definitions_name ON npc_definitions(name);
+CREATE INDEX IF NOT EXISTS idx_npc_definitions_tenant ON npc_definitions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_npc_definitions_tenant_campaign ON npc_definitions(tenant_id, campaign_id);
 
 -- Migration: add columns for existing tables that predate the GM helper feature.
 ALTER TABLE npc_definitions ADD COLUMN IF NOT EXISTS gm_helper BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE npc_definitions ADD COLUMN IF NOT EXISTS address_only BOOLEAN NOT NULL DEFAULT false;
+
+-- Migration: add tenant_id column for existing tables that predate tenant isolation.
+ALTER TABLE npc_definitions ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
 `
 
 // DB is the database interface used by [PostgresStore]. Both *pgxpool.Pool
@@ -74,7 +80,8 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 }
 
 // Create inserts a new NPC definition. It validates the definition and returns
-// an error if an NPC with the same ID already exists.
+// an error if an NPC with the same ID already exists. The definition's TenantID
+// field must be set.
 func (s *PostgresStore) Create(ctx context.Context, def *NPCDefinition) error {
 	if err := def.Validate(); err != nil {
 		return err
@@ -107,14 +114,14 @@ func (s *PostgresStore) Create(ctx context.Context, def *NPCDefinition) error {
 
 	const query = `
 		INSERT INTO npc_definitions (
-			id, campaign_id, name, personality, engine,
+			id, tenant_id, campaign_id, name, personality, engine,
 			voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
 			budget_tier, gm_helper, address_only, attributes
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		RETURNING created_at, updated_at`
 
 	err = s.db.QueryRow(ctx, query,
-		def.ID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
+		def.ID, def.TenantID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
 		voiceJSON, ksJSON, skJSON, brJSON, toolsJSON,
 		defaultBudgetTier(def.BudgetTier), def.GMHelper, def.AddressOnly, attrJSON,
 	).Scan(&def.CreatedAt, &def.UpdatedAt)
@@ -127,22 +134,23 @@ func (s *PostgresStore) Create(ctx context.Context, def *NPCDefinition) error {
 	return nil
 }
 
-// Get retrieves an NPC definition by ID. When campaignID is non-empty, it is
-// included as a filter (defense-in-depth against cross-campaign access).
-// Returns (nil, nil) if no NPC with the given ID exists.
-func (s *PostgresStore) Get(ctx context.Context, id, campaignID string) (*NPCDefinition, error) {
+// Get retrieves an NPC definition by ID, scoped to the given tenant. When
+// campaignID is non-empty, it is included as an additional filter
+// (defense-in-depth against cross-campaign access).
+// Returns (nil, nil) if no NPC with the given ID exists for the tenant.
+func (s *PostgresStore) Get(ctx context.Context, tenantID, id, campaignID string) (*NPCDefinition, error) {
 	const query = `
-		SELECT id, campaign_id, name, personality, engine,
+		SELECT id, tenant_id, campaign_id, name, personality, engine,
 		       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
 		       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 		FROM npc_definitions
-		WHERE id = $1 AND ($2 = '' OR campaign_id = $2)`
+		WHERE id = $1 AND tenant_id = $2 AND ($3 = '' OR campaign_id = $3)`
 
 	var def NPCDefinition
 	var voiceJSON, ksJSON, skJSON, brJSON, toolsJSON, attrJSON []byte
 
-	err := s.db.QueryRow(ctx, query, id, campaignID).Scan(
-		&def.ID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
+	err := s.db.QueryRow(ctx, query, id, tenantID, campaignID).Scan(
+		&def.ID, &def.TenantID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
 		&voiceJSON, &ksJSON, &skJSON, &brJSON, &toolsJSON,
 		&def.BudgetTier, &def.GMHelper, &def.AddressOnly, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
 	)
@@ -160,7 +168,8 @@ func (s *PostgresStore) Get(ctx context.Context, id, campaignID string) (*NPCDef
 }
 
 // Update replaces an existing NPC definition. It validates the new definition
-// and returns an error if the NPC is not found.
+// and returns an error if the NPC is not found. The WHERE clause includes
+// tenant_id to prevent cross-tenant updates.
 func (s *PostgresStore) Update(ctx context.Context, def *NPCDefinition) error {
 	if err := def.Validate(); err != nil {
 		return err
@@ -193,16 +202,16 @@ func (s *PostgresStore) Update(ctx context.Context, def *NPCDefinition) error {
 
 	const query = `
 		UPDATE npc_definitions SET
-			campaign_id = $2, name = $3, personality = $4, engine = $5,
-			voice = $6, knowledge_scope = $7, secret_knowledge = $8,
-			behavior_rules = $9, tools = $10, budget_tier = $11,
-			gm_helper = $12, address_only = $13,
-			attributes = $14, updated_at = now()
-		WHERE id = $1
+			campaign_id = $3, name = $4, personality = $5, engine = $6,
+			voice = $7, knowledge_scope = $8, secret_knowledge = $9,
+			behavior_rules = $10, tools = $11, budget_tier = $12,
+			gm_helper = $13, address_only = $14,
+			attributes = $15, updated_at = now()
+		WHERE id = $1 AND tenant_id = $2
 		RETURNING updated_at`
 
 	err = s.db.QueryRow(ctx, query,
-		def.ID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
+		def.ID, def.TenantID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
 		voiceJSON, ksJSON, skJSON, brJSON, toolsJSON,
 		defaultBudgetTier(def.BudgetTier), def.GMHelper, def.AddressOnly, attrJSON,
 	).Scan(&def.UpdatedAt)
@@ -215,41 +224,42 @@ func (s *PostgresStore) Update(ctx context.Context, def *NPCDefinition) error {
 	return nil
 }
 
-// Delete removes an NPC definition by ID and campaign ID (defense-in-depth).
-// Deleting a non-existent NPC is not an error.
-func (s *PostgresStore) Delete(ctx context.Context, id, campaignID string) error {
-	const query = `DELETE FROM npc_definitions WHERE id = $1 AND campaign_id = $2`
-	_, err := s.db.Exec(ctx, query, id, campaignID)
+// Delete removes an NPC definition by ID, scoped to the given tenant and
+// campaign (defense-in-depth). Deleting a non-existent NPC is not an error.
+func (s *PostgresStore) Delete(ctx context.Context, tenantID, id, campaignID string) error {
+	const query = `DELETE FROM npc_definitions WHERE id = $1 AND tenant_id = $2 AND campaign_id = $3`
+	_, err := s.db.Exec(ctx, query, id, tenantID, campaignID)
 	if err != nil {
 		return fmt.Errorf("npcstore: delete %q: %w", id, err)
 	}
 	return nil
 }
 
-// List returns all NPC definitions, optionally filtered by campaign ID. An
-// empty campaignID returns all definitions.
-func (s *PostgresStore) List(ctx context.Context, campaignID string) ([]NPCDefinition, error) {
+// List returns NPC definitions for the given tenant, optionally filtered by
+// campaign ID. An empty campaignID returns all definitions for the tenant.
+func (s *PostgresStore) List(ctx context.Context, tenantID, campaignID string) ([]NPCDefinition, error) {
 	var (
 		rows pgx.Rows
 		err  error
 	)
 	if campaignID == "" {
 		const query = `
-			SELECT id, campaign_id, name, personality, engine,
+			SELECT id, tenant_id, campaign_id, name, personality, engine,
 			       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
 			       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 			FROM npc_definitions
+			WHERE tenant_id = $1
 			ORDER BY name`
-		rows, err = s.db.Query(ctx, query)
+		rows, err = s.db.Query(ctx, query, tenantID)
 	} else {
 		const query = `
-			SELECT id, campaign_id, name, personality, engine,
+			SELECT id, tenant_id, campaign_id, name, personality, engine,
 			       voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
 			       budget_tier, gm_helper, address_only, attributes, created_at, updated_at
 			FROM npc_definitions
-			WHERE campaign_id = $1
+			WHERE tenant_id = $1 AND campaign_id = $2
 			ORDER BY name`
-		rows, err = s.db.Query(ctx, query, campaignID)
+		rows, err = s.db.Query(ctx, query, tenantID, campaignID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("npcstore: list: %w", err)
@@ -262,7 +272,7 @@ func (s *PostgresStore) List(ctx context.Context, campaignID string) ([]NPCDefin
 		var voiceJSON, ksJSON, skJSON, brJSON, toolsJSON, attrJSON []byte
 
 		if err := rows.Scan(
-			&def.ID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
+			&def.ID, &def.TenantID, &def.CampaignID, &def.Name, &def.Personality, &def.Engine,
 			&voiceJSON, &ksJSON, &skJSON, &brJSON, &toolsJSON,
 			&def.BudgetTier, &def.GMHelper, &def.AddressOnly, &attrJSON, &def.CreatedAt, &def.UpdatedAt,
 		); err != nil {
@@ -282,7 +292,7 @@ func (s *PostgresStore) List(ctx context.Context, campaignID string) ([]NPCDefin
 
 // Upsert creates or replaces an NPC definition. This is useful for importing
 // definitions from YAML config files. The definition is validated before
-// persistence.
+// persistence. The definition's TenantID field must be set.
 func (s *PostgresStore) Upsert(ctx context.Context, def *NPCDefinition) error {
 	if err := def.Validate(); err != nil {
 		return err
@@ -315,11 +325,12 @@ func (s *PostgresStore) Upsert(ctx context.Context, def *NPCDefinition) error {
 
 	const query = `
 		INSERT INTO npc_definitions (
-			id, campaign_id, name, personality, engine,
+			id, tenant_id, campaign_id, name, personality, engine,
 			voice, knowledge_scope, secret_knowledge, behavior_rules, tools,
 			budget_tier, gm_helper, address_only, attributes
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (id) DO UPDATE SET
+			tenant_id = EXCLUDED.tenant_id,
 			campaign_id = EXCLUDED.campaign_id,
 			name = EXCLUDED.name,
 			personality = EXCLUDED.personality,
@@ -337,7 +348,7 @@ func (s *PostgresStore) Upsert(ctx context.Context, def *NPCDefinition) error {
 		RETURNING created_at, updated_at`
 
 	err = s.db.QueryRow(ctx, query,
-		def.ID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
+		def.ID, def.TenantID, def.CampaignID, def.Name, def.Personality, defaultEngine(def.Engine),
 		voiceJSON, ksJSON, skJSON, brJSON, toolsJSON,
 		defaultBudgetTier(def.BudgetTier), def.GMHelper, def.AddressOnly, attrJSON,
 	).Scan(&def.CreatedAt, &def.UpdatedAt)

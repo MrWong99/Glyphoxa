@@ -88,9 +88,12 @@ func (m *mockNPCStore) Create(_ context.Context, def *npcstore.NPCDefinition) er
 	return nil
 }
 
-func (m *mockNPCStore) Get(_ context.Context, id, campaignID string) (*npcstore.NPCDefinition, error) {
+func (m *mockNPCStore) Get(_ context.Context, tenantID, id, campaignID string) (*npcstore.NPCDefinition, error) {
 	def, ok := m.npcs[id]
 	if !ok {
+		return nil, nil
+	}
+	if tenantID != "" && def.TenantID != tenantID {
 		return nil, nil
 	}
 	if campaignID != "" && def.CampaignID != campaignID {
@@ -100,7 +103,11 @@ func (m *mockNPCStore) Get(_ context.Context, id, campaignID string) (*npcstore.
 }
 
 func (m *mockNPCStore) Update(_ context.Context, def *npcstore.NPCDefinition) error {
-	if _, ok := m.npcs[def.ID]; !ok {
+	existing, ok := m.npcs[def.ID]
+	if !ok {
+		return nil
+	}
+	if def.TenantID != "" && existing.TenantID != def.TenantID {
 		return nil
 	}
 	def.UpdatedAt = time.Now().UTC()
@@ -108,14 +115,22 @@ func (m *mockNPCStore) Update(_ context.Context, def *npcstore.NPCDefinition) er
 	return nil
 }
 
-func (m *mockNPCStore) Delete(_ context.Context, id, _ string) error {
+func (m *mockNPCStore) Delete(_ context.Context, tenantID, id, _ string) error {
+	if def, ok := m.npcs[id]; ok {
+		if tenantID != "" && def.TenantID != tenantID {
+			return nil
+		}
+	}
 	delete(m.npcs, id)
 	return nil
 }
 
-func (m *mockNPCStore) List(_ context.Context, campaignID string) ([]npcstore.NPCDefinition, error) {
+func (m *mockNPCStore) List(_ context.Context, tenantID, campaignID string) ([]npcstore.NPCDefinition, error) {
 	var result []npcstore.NPCDefinition
 	for _, def := range m.npcs {
+		if tenantID != "" && def.TenantID != tenantID {
+			continue
+		}
 		if campaignID == "" || def.CampaignID == campaignID {
 			result = append(result, *def)
 		}

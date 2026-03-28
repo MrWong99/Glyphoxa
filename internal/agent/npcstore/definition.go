@@ -28,6 +28,10 @@ type NPCDefinition struct {
 	// ID is the unique identifier for this NPC definition.
 	ID string `yaml:"id" json:"id"`
 
+	// TenantID identifies the tenant that owns this NPC definition. All
+	// queries are scoped by tenant to enforce multi-tenant isolation.
+	TenantID string `yaml:"tenant_id" json:"tenant_id"`
+
 	// CampaignID groups NPCs that belong to the same campaign.
 	CampaignID string `yaml:"campaign_id" json:"campaign_id"`
 
