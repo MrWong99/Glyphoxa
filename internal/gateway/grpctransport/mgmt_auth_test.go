@@ -26,9 +26,16 @@ func TestManagementAuthUnaryInterceptor(t *testing.T) {
 		wantPass bool
 	}{
 		{
-			name:     "no secret configured — passthrough",
+			name:     "no secret configured — fail-closed",
 			secret:   "",
 			method:   "/glyphoxa.v1.ManagementService/CreateTenant",
+			mdSecret: "",
+			wantCode: codes.Unavailable,
+		},
+		{
+			name:     "non-management RPC — passthrough even without secret",
+			secret:   "",
+			method:   "/glyphoxa.v1.GatewayService/SessionReady",
 			mdSecret: "",
 			wantPass: true,
 		},
@@ -116,9 +123,16 @@ func TestManagementAuthStreamInterceptor(t *testing.T) {
 		wantPass bool
 	}{
 		{
-			name:     "no secret configured - passthrough",
+			name:     "no secret configured - fail-closed",
 			secret:   "",
 			method:   "/glyphoxa.v1.ManagementService/CreateTenant",
+			mdSecret: "",
+			wantCode: codes.Unavailable,
+		},
+		{
+			name:     "non-management RPC - passthrough even without secret",
+			secret:   "",
+			method:   "/glyphoxa.v1.GatewayService/SessionReady",
 			mdSecret: "",
 			wantPass: true,
 		},

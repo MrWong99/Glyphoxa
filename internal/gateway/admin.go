@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -166,7 +167,7 @@ func (a *AdminAPI) authMiddleware(next http.Handler) http.Handler {
 		if len(key) > len(bearerPrefix) && key[:len(bearerPrefix)] == bearerPrefix {
 			key = key[len(bearerPrefix):]
 		}
-		if key != a.apiKey {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(a.apiKey)) != 1 {
 			writeAdminError(w, http.StatusForbidden, "invalid API key")
 			return
 		}
