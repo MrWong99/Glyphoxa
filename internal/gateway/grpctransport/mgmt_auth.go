@@ -25,7 +25,8 @@ const (
 // validates a shared secret in gRPC metadata for ManagementService RPCs.
 // Other services (GatewayService, AudioBridgeService) pass through unchecked.
 //
-// If secret is empty the interceptor is a no-op (backward compatible for dev).
+// If secret is empty, all ManagementService RPCs are rejected (fail-closed).
+// Set GLYPHOXA_GRPC_MGMT_SECRET in production.
 func ManagementAuthUnaryInterceptor(secret string) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -33,8 +34,12 @@ func ManagementAuthUnaryInterceptor(secret string) grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		if secret == "" || !strings.HasPrefix(info.FullMethod, managementServicePrefix) {
+		if !strings.HasPrefix(info.FullMethod, managementServicePrefix) {
 			return handler(ctx, req)
+		}
+		if secret == "" {
+			slog.Error("mgmt-auth: GLYPHOXA_GRPC_MGMT_SECRET not configured — rejecting management RPC", "method", info.FullMethod)
+			return nil, status.Error(codes.Unavailable, "management secret not configured — set GLYPHOXA_GRPC_MGMT_SECRET")
 		}
 		if err := verifyMgmtSecret(ctx, secret); err != nil {
 			return nil, err
@@ -45,6 +50,8 @@ func ManagementAuthUnaryInterceptor(secret string) grpc.UnaryServerInterceptor {
 
 // ManagementAuthStreamInterceptor returns a [grpc.StreamServerInterceptor]
 // that validates a shared secret for ManagementService streaming RPCs.
+//
+// If secret is empty, all ManagementService streaming RPCs are rejected (fail-closed).
 func ManagementAuthStreamInterceptor(secret string) grpc.StreamServerInterceptor {
 	return func(
 		srv any,
@@ -52,8 +59,12 @@ func ManagementAuthStreamInterceptor(secret string) grpc.StreamServerInterceptor
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
-		if secret == "" || !strings.HasPrefix(info.FullMethod, managementServicePrefix) {
+		if !strings.HasPrefix(info.FullMethod, managementServicePrefix) {
 			return handler(srv, ss)
+		}
+		if secret == "" {
+			slog.Error("mgmt-auth: GLYPHOXA_GRPC_MGMT_SECRET not configured — rejecting management RPC", "method", info.FullMethod)
+			return status.Error(codes.Unavailable, "management secret not configured — set GLYPHOXA_GRPC_MGMT_SECRET")
 		}
 		if err := verifyMgmtSecret(ss.Context(), secret); err != nil {
 			return err
