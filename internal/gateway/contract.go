@@ -85,6 +85,11 @@ type StartSessionRequest struct {
 	LicenseTier string
 	NPCConfigs  []NPCConfigMsg
 	BotToken    string
+
+	// BotUserID is the bot's Discord user ID (snowflake string). Workers use
+	// it to activate the self-hearing guard, filtering out the bot's own audio
+	// frames so NPCs don't respond to their own TTS output.
+	BotUserID string
 }
 
 // SessionStatus describes the current state of a session.

@@ -178,15 +178,19 @@ func (x *NPCConfig) GetAddressOnly() bool {
 
 // StartSessionRequest is sent by the gateway to a worker to start a new voice session.
 type StartSessionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TenantId      string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	CampaignId    string                 `protobuf:"bytes,2,opt,name=campaign_id,json=campaignId,proto3" json:"campaign_id,omitempty"`
-	GuildId       string                 `protobuf:"bytes,3,opt,name=guild_id,json=guildId,proto3" json:"guild_id,omitempty"`
-	ChannelId     string                 `protobuf:"bytes,4,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	LicenseTier   string                 `protobuf:"bytes,5,opt,name=license_tier,json=licenseTier,proto3" json:"license_tier,omitempty"`
-	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	NpcConfigs    []*NPCConfig           `protobuf:"bytes,7,rep,name=npc_configs,json=npcConfigs,proto3" json:"npc_configs,omitempty"`
-	BotToken      string                 `protobuf:"bytes,8,opt,name=bot_token,json=botToken,proto3" json:"bot_token,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	TenantId    string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	CampaignId  string                 `protobuf:"bytes,2,opt,name=campaign_id,json=campaignId,proto3" json:"campaign_id,omitempty"`
+	GuildId     string                 `protobuf:"bytes,3,opt,name=guild_id,json=guildId,proto3" json:"guild_id,omitempty"`
+	ChannelId   string                 `protobuf:"bytes,4,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	LicenseTier string                 `protobuf:"bytes,5,opt,name=license_tier,json=licenseTier,proto3" json:"license_tier,omitempty"`
+	SessionId   string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	NpcConfigs  []*NPCConfig           `protobuf:"bytes,7,rep,name=npc_configs,json=npcConfigs,proto3" json:"npc_configs,omitempty"`
+	BotToken    string                 `protobuf:"bytes,8,opt,name=bot_token,json=botToken,proto3" json:"bot_token,omitempty"`
+	// bot_user_id is the bot's Discord user ID (snowflake). Workers use it to
+	// activate the self-hearing guard — filtering out the bot's own audio frames
+	// so NPCs don't hear their own TTS output (echo/feedback loop prevention).
+	BotUserId     string `protobuf:"bytes,13,opt,name=bot_user_id,json=botUserId,proto3" json:"bot_user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,6 +277,13 @@ func (x *StartSessionRequest) GetNpcConfigs() []*NPCConfig {
 func (x *StartSessionRequest) GetBotToken() string {
 	if x != nil {
 		return x.BotToken
+	}
+	return ""
+}
+
+func (x *StartSessionRequest) GetBotUserId() string {
+	if x != nil {
+		return x.BotUserId
 	}
 	return ""
 }
@@ -1486,7 +1497,7 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"\vbudget_tier\x18\x06 \x01(\tR\n" +
 	"budgetTier\x12\x1b\n" +
 	"\tgm_helper\x18\a \x01(\bR\bgmHelper\x12!\n" +
-	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\xf9\x02\n" +
+	"\faddress_only\x18\b \x01(\bR\vaddressOnly\"\x8c\x03\n" +
 	"\x13StartSessionRequest\x12\x1b\n" +
 	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12\x1f\n" +
 	"\vcampaign_id\x18\x02 \x01(\tR\n" +
@@ -1499,9 +1510,10 @@ const file_glyphoxa_v1_session_proto_rawDesc = "" +
 	"session_id\x18\x06 \x01(\tR\tsessionId\x127\n" +
 	"\vnpc_configs\x18\a \x03(\v2\x16.glyphoxa.v1.NPCConfigR\n" +
 	"npcConfigs\x12\x1b\n" +
-	"\tbot_token\x18\b \x01(\tR\bbotTokenJ\x04\b\t\x10\n" +
+	"\tbot_token\x18\b \x01(\tR\bbotToken\x12\x1e\n" +
+	"\vbot_user_id\x18\r \x01(\tR\tbotUserIdJ\x04\b\t\x10\n" +
 	"J\x04\b\n" +
-	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rR\x10voice_session_idR\vvoice_tokenR\x0evoice_endpointR\vbot_user_id\"K\n" +
+	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rR\x10voice_session_idR\vvoice_tokenR\x0evoice_endpoint\"K\n" +
 	"\x14StartSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +

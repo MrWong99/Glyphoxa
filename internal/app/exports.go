@@ -75,6 +75,7 @@ type AudioPipelineConfig struct {
 	Ctx         context.Context
 	Pipeline    transcript.Pipeline // may be nil — correction is skipped when nil
 	Entities    func() []string     // returns current entity names; may be nil
+	BotUserID   string              // bot's own user ID — workers for this ID are skipped
 }
 
 // AudioPipeline is the exported type alias for the audio pipeline.
@@ -95,5 +96,6 @@ func NewAudioPipeline(cfg AudioPipelineConfig) *AudioPipeline {
 		ctx:         cfg.Ctx,
 		pipeline:    cfg.Pipeline,
 		entities:    cfg.Entities,
+		botUserID:   cfg.BotUserID,
 	})
 }

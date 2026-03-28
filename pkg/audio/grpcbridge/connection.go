@@ -24,8 +24,9 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ audio.Connection = (*Connection)(nil)
-	_ audio.Flusher    = (*Connection)(nil)
+	_ audio.Connection       = (*Connection)(nil)
+	_ audio.Flusher          = (*Connection)(nil)
+	_ audio.SelfHearingGuard = (*Connection)(nil)
 )
 
 const (

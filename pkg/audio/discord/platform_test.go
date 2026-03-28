@@ -498,7 +498,7 @@ func TestConnection_SelfHearingGuard(t *testing.T) {
 	c := newTestConnection(t)
 
 	botID := snowflake.ID(999)
-	c.SetBotUserID(botID)
+	c.SetBotUserID(botID.String())
 
 	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
 
@@ -523,7 +523,7 @@ func TestConnection_SelfHearingGuardAllowsOthers(t *testing.T) {
 
 	botID := snowflake.ID(999)
 	otherID := snowflake.ID(123)
-	c.SetBotUserID(botID)
+	c.SetBotUserID(botID.String())
 
 	silenceOpus := []byte{0xF8, 0xFF, 0xFE}
 

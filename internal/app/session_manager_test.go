@@ -466,6 +466,94 @@ func TestSessionManager_UsesLLMSummariser(t *testing.T) {
 	}
 }
 
+// ─── Self-hearing guard wiring ──────────────────────────────────────────────
+
+// guardConnection is a mock that implements both audio.Connection and
+// audio.SelfHearingGuard, so we can verify that SessionManager calls
+// SetBotUserID on the connection when BotUserID is configured.
+type guardConnection struct {
+	audiomock.Connection
+	mu          sync.Mutex
+	botUserIDCh chan string
+}
+
+func (g *guardConnection) SetBotUserID(id string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.botUserIDCh <- id
+}
+
+// TestSessionManager_SelfHearingGuardWired verifies that when BotUserID is
+// configured and the connection implements audio.SelfHearingGuard,
+// SetBotUserID is called during session Start.
+func TestSessionManager_SelfHearingGuardWired(t *testing.T) {
+	t.Parallel()
+
+	conn := &guardConnection{botUserIDCh: make(chan string, 1)}
+	platform := &audiomock.Platform{ConnectResult: conn}
+	store := &memorymock.SessionStore{}
+	cfg := &config.Config{
+		Campaign: config.CampaignConfig{Name: "GuardTest"},
+	}
+
+	sm := app.NewSessionManager(app.SessionManagerConfig{
+		Platform:     platform,
+		Config:       cfg,
+		Providers:    &app.Providers{},
+		SessionStore: store,
+		BotUserID:    "123456789",
+	})
+
+	ctx := context.Background()
+	if err := sm.Start(ctx, "ch-guard", "dm-1"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() { _ = sm.Stop(ctx) }()
+
+	select {
+	case id := <-conn.botUserIDCh:
+		if id != "123456789" {
+			t.Errorf("SetBotUserID called with %q, want %q", id, "123456789")
+		}
+	case <-time.After(time.Second):
+		t.Error("SetBotUserID was not called on the connection")
+	}
+}
+
+// TestSessionManager_SelfHearingGuardSkippedWhenEmpty verifies that when
+// BotUserID is empty, SetBotUserID is NOT called (no-op).
+func TestSessionManager_SelfHearingGuardSkippedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	conn := &guardConnection{botUserIDCh: make(chan string, 1)}
+	platform := &audiomock.Platform{ConnectResult: conn}
+	store := &memorymock.SessionStore{}
+	cfg := &config.Config{
+		Campaign: config.CampaignConfig{Name: "GuardEmpty"},
+	}
+
+	sm := app.NewSessionManager(app.SessionManagerConfig{
+		Platform:     platform,
+		Config:       cfg,
+		Providers:    &app.Providers{},
+		SessionStore: store,
+		// BotUserID intentionally empty.
+	})
+
+	ctx := context.Background()
+	if err := sm.Start(ctx, "ch-guard-empty", "dm-1"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() { _ = sm.Stop(ctx) }()
+
+	select {
+	case id := <-conn.botUserIDCh:
+		t.Errorf("SetBotUserID should NOT have been called, got %q", id)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no call when BotUserID is empty.
+	}
+}
+
 // TestSessionManager_FallbackNoopSummariser verifies graceful degradation:
 // when Providers.LLM is nil the session still starts and stops correctly,
 // using the noopSummariser fallback.

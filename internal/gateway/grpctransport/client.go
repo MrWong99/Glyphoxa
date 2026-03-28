@@ -94,6 +94,7 @@ func (c *Client) StartSession(ctx context.Context, req gateway.StartSessionReque
 			LicenseTier: req.LicenseTier,
 			NpcConfigs:  pbNPCConfigs,
 			BotToken:    req.BotToken,
+			BotUserId:   req.BotUserID,
 		})
 		if err != nil {
 			return fmt.Errorf("grpctransport: start session: %w", err)

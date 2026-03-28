@@ -15,6 +15,7 @@ import (
 // Compile-time interface assertions.
 var (
 	_ audio.Connection        = (*Connection)(nil)
+	_ audio.SelfHearingGuard  = (*Connection)(nil)
 	_ voice.OpusFrameProvider = (*Connection)(nil)
 	_ voice.OpusFrameReceiver = (*Connection)(nil)
 )
@@ -101,11 +102,18 @@ func newConnection(conn voice.Conn, guildID snowflake.ID) *Connection {
 
 // SetBotUserID sets the bot's own user ID so that its audio is filtered out.
 // This prevents echo/feedback loops where the NPC hears its own TTS output.
-// Must be called before audio starts flowing. Safe for concurrent use (the
-// field is read atomically by ReceiveOpusFrame).
-func (c *Connection) SetBotUserID(id snowflake.ID) {
-	c.botUserID = id
-	slog.Debug("discord: bot user ID set for self-hearing guard", "bot_user_id", id)
+// Must be called before audio starts flowing.
+//
+// The id parameter is a Discord snowflake string (e.g., "123456789012345678").
+// Invalid IDs are logged and ignored. Implements [audio.SelfHearingGuard].
+func (c *Connection) SetBotUserID(id string) {
+	parsed, err := snowflake.Parse(id)
+	if err != nil {
+		slog.Warn("discord: invalid bot user ID for self-hearing guard", "id", id, "err", err)
+		return
+	}
+	c.botUserID = parsed
+	slog.Debug("discord: bot user ID set for self-hearing guard", "bot_user_id", parsed)
 }
 
 // ── voice.OpusFrameReceiver implementation ──────────────────��───────────────

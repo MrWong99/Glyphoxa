@@ -40,7 +40,12 @@ message StartSessionRequest {
   // Fields 9-12 were voice proxy credentials, removed in favour of
   // AudioBridgeService which streams opus frames over gRPC.
   reserved 9, 10, 11, 12;
-  reserved "voice_session_id", "voice_token", "voice_endpoint", "bot_user_id";
+  reserved "voice_session_id", "voice_token", "voice_endpoint";
+
+  // bot_user_id is the bot's Discord user ID (snowflake). Workers use it to
+  // activate the self-hearing guard — filtering out the bot's own audio frames
+  // so NPCs don't hear their own TTS output (echo/feedback loop prevention).
+  string bot_user_id = 13;
 }
 
 // StartSessionResponse is the worker's reply after attempting to start a session.

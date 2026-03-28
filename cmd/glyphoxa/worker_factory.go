@@ -140,6 +140,11 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 			}
 			return nil, fmt.Errorf("worker: connect audio bridge: %w", err)
 		}
+		// Activate self-hearing guard so the worker drops frames from the
+		// bot's own user ID (prevents NPC echo/feedback loops).
+		if req.BotUserID != "" {
+			bridgeConn.SetBotUserID(req.BotUserID)
+		}
 		conn = bridgeConn
 		voicePlatformCloser = bridgeConnCloser
 	} else {
@@ -161,6 +166,12 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 				_ = storeCloser()
 			}
 			return nil, fmt.Errorf("worker: connect to voice channel %s: %w", req.ChannelID, err)
+		}
+		// Activate self-hearing guard on the voice connection.
+		if req.BotUserID != "" {
+			if guard, ok := conn.(audio.SelfHearingGuard); ok {
+				guard.SetBotUserID(req.BotUserID)
+			}
 		}
 		voicePlatformCloser = platform.Close
 	}
@@ -341,6 +352,7 @@ func (wf *workerFactory) CreateRuntime(ctx context.Context, req gw.StartSessionR
 			Ctx:         sessionCtx,
 			Pipeline:    correctionPipeline,
 			Entities:    entityNamesFn,
+			BotUserID:   req.BotUserID,
 		})
 		pipeline.Start()
 		pipelineCloser = pipeline.Stop

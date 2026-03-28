@@ -85,6 +85,7 @@ func (s *WorkerServer) StartSession(ctx context.Context, req *pb.StartSessionReq
 		LicenseTier: req.GetLicenseTier(),
 		NPCConfigs:  npcConfigs,
 		BotToken:    req.GetBotToken(),
+		BotUserID:   req.GetBotUserId(),
 	})
 	if err != nil {
 		slog.Warn("grpc: start session failed", "session_id", req.GetSessionId(), "err", err)

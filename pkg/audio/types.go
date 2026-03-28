@@ -11,6 +11,14 @@ type Flusher interface {
 	Flush()
 }
 
+// SelfHearingGuard is an optional interface that [Connection] implementations
+// may support. When SetBotUserID is called with the bot's own user ID,
+// incoming audio frames from that user are silently dropped. This prevents
+// echo/feedback loops where an NPC hears its own TTS output.
+type SelfHearingGuard interface {
+	SetBotUserID(id string)
+}
+
 // AudioFrame represents a single frame of audio data flowing through the pipeline.
 // Frames are the atomic unit of audio transport — captured from input streams,
 // processed by VAD, encoded/decoded by codecs, and played through output streams.
