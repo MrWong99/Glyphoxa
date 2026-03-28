@@ -38,6 +38,13 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate base URL to prevent SSRF attacks — block private IPs,
+	// internal DNS, cloud metadata endpoints, and K8s service addresses.
+	if err := validateBaseURL(body.BaseURL, nil); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_base_url", err.Error())
+		return
+	}
+
 	start := time.Now()
 	testErr := testProviderConnection(r, body.Type, body.Provider, body.APIKey, body.BaseURL)
 	latency := time.Since(start).Milliseconds()
