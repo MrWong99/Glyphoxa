@@ -198,6 +198,7 @@ func runFull(cfg *config.Config) int {
 			MCPHost:      application.MCPHost(),
 			Entities:     application.EntityStore(),
 			Tenant:       application.Tenant(),
+			BotUserID:    bot.Client().ApplicationID.String(),
 		})
 
 		// Session and recap register themselves in the constructor.

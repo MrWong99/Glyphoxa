@@ -80,6 +80,7 @@ type SessionManager struct {
 	mcpHost      mcp.Host
 	entities     entity.Store
 	tenant       config.TenantContext
+	botUserID    string // bot's own user ID — for self-hearing guard
 }
 
 // SessionManagerConfig holds all dependencies for a [SessionManager].
@@ -93,6 +94,11 @@ type SessionManagerConfig struct {
 	MCPHost      mcp.Host
 	Entities     entity.Store
 	Tenant       config.TenantContext
+
+	// BotUserID is the bot's own user ID (e.g., Discord application ID as a
+	// string). Used by the self-hearing guard to filter out the bot's own
+	// audio frames and prevent echo/feedback loops.
+	BotUserID string
 }
 
 // NewSessionManager creates a SessionManager with the given dependencies.
@@ -107,6 +113,7 @@ func NewSessionManager(cfg SessionManagerConfig) *SessionManager {
 		mcpHost:      cfg.MCPHost,
 		entities:     cfg.Entities,
 		tenant:       cfg.Tenant,
+		botUserID:    cfg.BotUserID,
 	}
 }
 
@@ -145,6 +152,15 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 	conn, err := sm.platform.Connect(ctx, channelID)
 	if err != nil {
 		return fmt.Errorf("session: connect to voice channel: %w", err)
+	}
+
+	// Activate self-hearing guard on the connection so the bot's own audio
+	// frames are dropped before reaching the pipeline. This prevents NPC
+	// echo/feedback loops where the bot hears its own TTS output.
+	if sm.botUserID != "" {
+		if guard, ok := conn.(audio.SelfHearingGuard); ok {
+			guard.SetBotUserID(sm.botUserID)
+		}
 	}
 
 	// Create mixer for this session, wired to the voice connection output.
@@ -272,6 +288,7 @@ func (sm *SessionManager) Start(ctx context.Context, channelID string, dmUserID 
 			ctx:         sessionCtx,
 			pipeline:    correctionPipeline,
 			entities:    entityNamesFn,
+			botUserID:   sm.botUserID,
 		})
 		activePipeline.Start()
 		closers = append(closers, activePipeline.Stop)

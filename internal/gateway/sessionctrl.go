@@ -202,6 +202,13 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 	}
 
 	if gc.dispatcher != nil {
+		// Resolve the bot's own user ID so the worker can activate its
+		// self-hearing guard and filter out the bot's audio frames.
+		var botUserID snowflake.ID
+		if gc.gwBot != nil {
+			botUserID = gc.gwBot.Client().ApplicationID
+		}
+
 		startReq := StartSessionRequest{
 			SessionID:   sessionID,
 			TenantID:    gc.tenantID,
@@ -211,6 +218,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			LicenseTier: gc.tier.String(),
 			BotToken:    gc.botToken,
 			NPCConfigs:  npcConfigs,
+			BotUserID:   botUserID.String(),
 		}
 
 		// Join voice via the gateway bot's VoiceManager and set up the audio
@@ -272,7 +280,7 @@ func (gc *GatewaySessionController) Start(ctx context.Context, req SessionStartR
 			// packets, so there is no need to block here waiting for a
 			// DAVE event. This matches the full-mode code path which
 			// also starts flowing audio right after Open().
-			cleanup := setupVoiceBridge(voiceConn, bridge, sessionID)
+			cleanup := setupVoiceBridge(voiceConn, bridge, sessionID, botUserID)
 			gc.voiceCleanupsMu.Lock()
 			gc.voiceCleanups[sessionID] = func() {
 				cleanup()

@@ -552,7 +552,7 @@ func TestSetupVoiceBridge_WiresReceiverAndProvider(t *testing.T) {
 
 	conn := &mockVoiceConn{guildID: snowflake.ID(123)}
 
-	cleanup := setupVoiceBridge(conn, bridge, "sess-setup")
+	cleanup := setupVoiceBridge(conn, bridge, "sess-setup", 0)
 
 	// Receiver and provider should be set on the mock conn.
 	if conn.receiver == nil {
@@ -578,7 +578,7 @@ func TestSetupVoiceBridge_CleanupIdempotent(t *testing.T) {
 
 	conn := &mockVoiceConn{guildID: snowflake.ID(456)}
 
-	cleanup := setupVoiceBridge(conn, bridge, "sess-cleanup-idem")
+	cleanup := setupVoiceBridge(conn, bridge, "sess-cleanup-idem", 0)
 
 	// Should not panic when called multiple times.
 	cleanup()
@@ -586,6 +586,132 @@ func TestSetupVoiceBridge_CleanupIdempotent(t *testing.T) {
 
 	if !conn.closed {
 		t.Error("expected conn to be closed")
+	}
+}
+
+// ── voiceBridgeReceiver self-hearing guard ──────────────────────────────────
+
+// TestVoiceBridgeReceiver_SelfHearingGuard verifies that frames from the bot's
+// own user ID are silently dropped at the gateway layer.
+func TestVoiceBridgeReceiver_SelfHearingGuard(t *testing.T) {
+	t.Parallel()
+
+	srv := audiobridge.NewServer()
+	bridge := srv.NewSessionBridge("sess-guard")
+	defer srv.RemoveBridge("sess-guard")
+
+	botID := snowflake.ID(42)
+
+	receiver := &voiceBridgeReceiver{
+		bridge:    bridge,
+		sessionID: "sess-guard",
+		botUserID: botID,
+		done:      make(chan struct{}),
+	}
+
+	opus := []byte{0xF8, 0xFF, 0xFE}
+
+	// Frame from the bot's own user ID should be dropped.
+	if err := receiver.ReceiveOpusFrame(botID, &voice.Packet{SSRC: 1, Opus: opus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame(botID): %v", err)
+	}
+
+	// Frame from a player should be forwarded.
+	playerID := snowflake.ID(123)
+	if err := receiver.ReceiveOpusFrame(playerID, &voice.Packet{SSRC: 2, Opus: opus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame(playerID): %v", err)
+	}
+
+	// Only the player frame should arrive on the toWorker channel.
+	select {
+	case frame := <-bridge.ReceiveFromWorker():
+		// This reads from fromWorker, but we sent to toWorker. Let's read toWorker directly.
+		_ = frame
+	default:
+	}
+
+	// Drain toWorker to check the forwarded frame.
+	var received int
+	for {
+		select {
+		case <-bridge.Done():
+			t.Fatal("bridge closed unexpectedly")
+		default:
+		}
+		// SendToWorker is non-blocking, so the frame should be in toWorker.
+		// We can't read toWorker directly from SessionBridge, so we verify
+		// via frame count: the receiver only incremented for the player.
+		break
+	}
+	_ = received
+
+	// The receiver's frame counter should be 1 (only the player frame counted).
+	if got := receiver.frameCount.Load(); got != 1 {
+		t.Errorf("frameCount: got %d, want 1 (only player frame should be counted)", got)
+	}
+}
+
+// TestVoiceBridgeReceiver_SelfHearingGuardInactive verifies that when no bot
+// user ID is set (zero value), all frames pass through.
+func TestVoiceBridgeReceiver_SelfHearingGuardInactive(t *testing.T) {
+	t.Parallel()
+
+	srv := audiobridge.NewServer()
+	bridge := srv.NewSessionBridge("sess-guard-off")
+	defer srv.RemoveBridge("sess-guard-off")
+
+	receiver := &voiceBridgeReceiver{
+		bridge:    bridge,
+		sessionID: "sess-guard-off",
+		// botUserID is zero — guard should be inactive.
+		done: make(chan struct{}),
+	}
+
+	opus := []byte{0xF8, 0xFF, 0xFE}
+	userID := snowflake.ID(42)
+
+	if err := receiver.ReceiveOpusFrame(userID, &voice.Packet{SSRC: 1, Opus: opus}); err != nil {
+		t.Fatalf("ReceiveOpusFrame: %v", err)
+	}
+
+	if got := receiver.frameCount.Load(); got != 1 {
+		t.Errorf("frameCount: got %d, want 1", got)
+	}
+}
+
+// TestSetupVoiceBridge_BotUserIDPassedToReceiver verifies that
+// setupVoiceBridge wires the botUserID into the receiver.
+func TestSetupVoiceBridge_BotUserIDPassedToReceiver(t *testing.T) {
+	t.Parallel()
+
+	srv := audiobridge.NewServer()
+	bridge := srv.NewSessionBridge("sess-guard-wire")
+	defer srv.RemoveBridge("sess-guard-wire")
+
+	conn := &mockVoiceConn{guildID: snowflake.ID(789)}
+	botID := snowflake.ID(42)
+
+	cleanup := setupVoiceBridge(conn, bridge, "sess-guard-wire", botID)
+	defer cleanup()
+
+	// The receiver should have botUserID set. Verify by sending a frame from
+	// the bot's user ID and checking it doesn't increment the frame counter.
+	receiver, ok := conn.receiver.(*voiceBridgeReceiver)
+	if !ok {
+		t.Fatal("receiver is not a *voiceBridgeReceiver")
+	}
+
+	opus := []byte{0xF8, 0xFF, 0xFE}
+	_ = receiver.ReceiveOpusFrame(botID, &voice.Packet{SSRC: 1, Opus: opus})
+
+	if got := receiver.frameCount.Load(); got != 0 {
+		t.Errorf("frameCount after bot frame: got %d, want 0", got)
+	}
+
+	// A non-bot frame should be counted.
+	_ = receiver.ReceiveOpusFrame(snowflake.ID(999), &voice.Packet{SSRC: 2, Opus: opus})
+	if got := receiver.frameCount.Load(); got != 1 {
+		t.Errorf("frameCount after player frame: got %d, want 1", got)
 	}
 }
 

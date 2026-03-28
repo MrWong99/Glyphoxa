@@ -31,6 +31,11 @@ type voiceBridgeReceiver struct {
 	bridge    *audiobridge.SessionBridge
 	sessionID string
 
+	// botUserID is the bot's own Discord user ID. When set, frames from this
+	// user are silently dropped to prevent echo/feedback loops at the gateway
+	// layer (defense-in-depth — the worker also filters by bot user ID).
+	botUserID snowflake.ID
+
 	frameCount atomic.Uint64
 	done       chan struct{}
 	closeOnce  sync.Once
@@ -38,8 +43,16 @@ type voiceBridgeReceiver struct {
 
 // ReceiveOpusFrame receives a raw opus packet from Discord and forwards it to
 // the worker via the audio bridge.
+//
+// Frames from the bot's own user ID (set via botUserID) are silently dropped
+// to prevent echo/feedback loops where the NPC hears its own TTS output.
 func (r *voiceBridgeReceiver) ReceiveOpusFrame(userID snowflake.ID, packet *voice.Packet) error {
 	if packet == nil || len(packet.Opus) == 0 {
+		return nil
+	}
+
+	// Self-hearing guard: drop frames from the bot's own user ID.
+	if r.botUserID != 0 && userID == r.botUserID {
 		return nil
 	}
 
@@ -126,14 +139,20 @@ func (p *voiceBridgeProvider) Close() {
 // setupVoiceBridge configures a voice.Conn to bridge audio to/from a
 // SessionBridge. The gateway joins voice normally via VoiceManager, then this
 // function wires the bridge receiver/provider onto the Conn.
+//
+// botUserID is the bot's own Discord user ID. When non-zero, the receiver
+// drops frames from this user to prevent echo/feedback loops at the gateway
+// layer (defense-in-depth).
 func setupVoiceBridge(
 	voiceConn voice.Conn,
 	bridge *audiobridge.SessionBridge,
 	sessionID string,
+	botUserID snowflake.ID,
 ) (cleanup func()) {
 	receiver := &voiceBridgeReceiver{
 		bridge:    bridge,
 		sessionID: sessionID,
+		botUserID: botUserID,
 		done:      make(chan struct{}),
 	}
 	provider := &voiceBridgeProvider{
