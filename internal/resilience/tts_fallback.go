@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/glyphoxa/pkg/provider/tts"
 )
@@ -39,9 +40,10 @@ func (f *TTSFallback) SynthesizeStream(ctx context.Context, text <-chan string, 
 	var (
 		bufMu   sync.Mutex
 		textBuf []string
-		done    bool // true once the input text channel is fully consumed
 	)
 	bufCh := make(chan string, 16)
+	// doneCh is closed when the input text channel is fully consumed.
+	doneCh := make(chan struct{})
 
 	go func() {
 		defer close(bufCh)
@@ -55,9 +57,7 @@ func (f *TTSFallback) SynthesizeStream(ctx context.Context, text <-chan string, 
 				return
 			}
 		}
-		bufMu.Lock()
-		done = true
-		bufMu.Unlock()
+		close(doneCh)
 	}()
 
 	var activeIdx int
@@ -83,17 +83,34 @@ func (f *TTSFallback) SynthesizeStream(ctx context.Context, text <-chan string, 
 			}
 		}
 
-		// Check if the text channel was fully consumed. If not, the TTS
-		// provider dropped the stream mid-synthesis.
+		// Determine whether the audio stream ended normally or was cut
+		// short. The buffer goroutine closes doneCh when all input text
+		// has been forwarded to bufCh. Wait briefly for that signal; if
+		// text is still in flight the provider dropped mid-stream.
+		select {
+		case <-doneCh:
+			return // Normal completion — all text was consumed.
+		case <-ctx.Done():
+			return
+		default:
+		}
+		// doneCh not ready — the buffer goroutine may need a moment to
+		// finish (common scheduling race on fast paths). Give it 1 ms
+		// before assuming a genuine mid-stream failure.
+		select {
+		case <-doneCh:
+			return // Normal completion — buffer goroutine caught up.
+		case <-time.After(time.Millisecond):
+			// Buffer goroutine still hasn't finished — likely mid-stream
+			// failure.
+		case <-ctx.Done():
+			return
+		}
+
 		bufMu.Lock()
-		inputDone := done
 		remaining := make([]string, len(textBuf))
 		copy(remaining, textBuf)
 		bufMu.Unlock()
-
-		if inputDone {
-			return // Normal completion — all text was consumed.
-		}
 
 		// Mid-stream failure: record it on the circuit breaker.
 		if activeIdx < len(f.group.entries) {
