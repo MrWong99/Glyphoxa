@@ -20,9 +20,9 @@ func (s *Server) handleLinkNPCToCampaign(w http.ResponseWriter, r *http.Request)
 
 	npcID := r.PathValue("npc_id")
 
-	// Verify NPC exists — pass the NPC's own campaign for lookup, then verify
-	// tenant ownership via the campaign check below.
-	npc, err := s.npcs.Get(r.Context(), npcID, "")
+	// Verify NPC exists — scoped to the calling tenant, pass empty campaign
+	// to look up across campaigns within the tenant.
+	npc, err := s.npcs.Get(r.Context(), claims.TenantID, npcID, "")
 	if err != nil || npc == nil {
 		writeError(w, http.StatusNotFound, "not_found", "NPC not found")
 		return
@@ -105,7 +105,7 @@ func (s *Server) handleListLinkedNPCs(w http.ResponseWriter, r *http.Request) {
 	result := make([]linkedNPC, 0, len(links))
 	for _, link := range links {
 		ln := linkedNPC{CampaignNPCLink: link}
-		npc, err := s.npcs.Get(r.Context(), link.NPCID, "")
+		npc, err := s.npcs.Get(r.Context(), claims.TenantID, link.NPCID, "")
 		if err == nil && npc != nil {
 			ln.NPC = npc
 		}

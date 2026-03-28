@@ -78,14 +78,14 @@ type mockNPCStore struct {
 }
 
 func (m *mockNPCStore) Create(_ context.Context, _ *npcstore.NPCDefinition) error { return nil }
-func (m *mockNPCStore) Get(_ context.Context, _, _ string) (*npcstore.NPCDefinition, error) {
+func (m *mockNPCStore) Get(_ context.Context, _, _, _ string) (*npcstore.NPCDefinition, error) {
 	return nil, nil
 }
 func (m *mockNPCStore) Update(_ context.Context, _ *npcstore.NPCDefinition) error { return nil }
-func (m *mockNPCStore) Delete(_ context.Context, _, _ string) error               { return nil }
+func (m *mockNPCStore) Delete(_ context.Context, _, _, _ string) error            { return nil }
 func (m *mockNPCStore) Upsert(_ context.Context, _ *npcstore.NPCDefinition) error { return nil }
 
-func (m *mockNPCStore) List(_ context.Context, _ string) ([]npcstore.NPCDefinition, error) {
+func (m *mockNPCStore) List(_ context.Context, _, _ string) ([]npcstore.NPCDefinition, error) {
 	return m.defs, m.listErr
 }
 

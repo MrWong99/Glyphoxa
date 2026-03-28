@@ -356,6 +356,9 @@ func TestPostgresStore_Migrate(t *testing.T) {
 				if !strings.Contains(sql, "CREATE TABLE") {
 					t.Errorf("Migrate SQL should contain CREATE TABLE, got: %s", sql)
 				}
+				if !strings.Contains(sql, "tenant_id") {
+					t.Errorf("Migrate SQL should contain tenant_id column, got: %s", sql)
+				}
 				return pgconn.CommandTag{}, nil
 			},
 		}
@@ -411,6 +414,7 @@ func TestPostgresStore_Create(t *testing.T) {
 		store := NewPostgresStore(db)
 		def := &NPCDefinition{
 			ID:         "npc-1",
+			TenantID:   "tenant-1",
 			CampaignID: "camp-1",
 			Name:       "Greymantle",
 		}
@@ -423,11 +427,14 @@ func TestPostgresStore_Create(t *testing.T) {
 		if !strings.Contains(capturedSQL, "INSERT INTO npc_definitions") {
 			t.Errorf("SQL should contain INSERT, got: %s", capturedSQL)
 		}
-		if len(capturedArgs) != 14 {
-			t.Errorf("expected 14 args, got %d", len(capturedArgs))
+		if len(capturedArgs) != 15 {
+			t.Errorf("expected 15 args, got %d", len(capturedArgs))
 		}
 		if capturedArgs[0] != "npc-1" {
-			t.Errorf("first arg = %v, want 'npc-1'", capturedArgs[0])
+			t.Errorf("first arg (id) = %v, want 'npc-1'", capturedArgs[0])
+		}
+		if capturedArgs[1] != "tenant-1" {
+			t.Errorf("second arg (tenant_id) = %v, want 'tenant-1'", capturedArgs[1])
 		}
 		if def.CreatedAt != fixedTime {
 			t.Errorf("CreatedAt = %v, want %v", def.CreatedAt, fixedTime)
@@ -509,17 +516,18 @@ func TestPostgresStore_Create(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		def := &NPCDefinition{ID: "npc-2", Name: "NPC"}
+		def := &NPCDefinition{ID: "npc-2", TenantID: "t1", Name: "NPC"}
 		if err := store.Create(context.Background(), def); err != nil {
 			t.Fatalf("Create() unexpected error: %v", err)
 		}
 
-		// engine is arg index 4 (0-based), budget_tier is arg index 10
-		if capturedArgs[4] != "cascaded" {
-			t.Errorf("engine = %v, want 'cascaded'", capturedArgs[4])
+		// engine is arg index 5 (0-based: id, tenant_id, campaign_id, name, personality, engine)
+		// budget_tier is arg index 11
+		if capturedArgs[5] != "cascaded" {
+			t.Errorf("engine = %v, want 'cascaded'", capturedArgs[5])
 		}
-		if capturedArgs[10] != "fast" {
-			t.Errorf("budget_tier = %v, want 'fast'", capturedArgs[10])
+		if capturedArgs[11] != "fast" {
+			t.Errorf("budget_tier = %v, want 'fast'", capturedArgs[11])
 		}
 	})
 }
@@ -537,24 +545,31 @@ func TestPostgresStore_Get(t *testing.T) {
 				if args[0] != "npc-1" {
 					t.Errorf("Get() id = %v, want 'npc-1'", args[0])
 				}
+				if args[1] != "tenant-1" {
+					t.Errorf("Get() tenant_id = %v, want 'tenant-1'", args[1])
+				}
+				if !strings.Contains(sql, "tenant_id = $2") {
+					t.Errorf("Get() SQL should contain tenant_id filter, got: %s", sql)
+				}
 				return &mockRow{
 					scanFunc: func(dest ...any) error {
 						*(dest[0].(*string)) = "npc-1"
-						*(dest[1].(*string)) = "camp-1"
-						*(dest[2].(*string)) = "Greymantle"
-						*(dest[3].(*string)) = "Wise"
-						*(dest[4].(*string)) = "cascaded"
-						*(dest[5].(*[]byte)) = []byte(`{"provider":"elevenlabs","voice_id":"v1","pitch_shift":0,"speed_factor":1.0}`)
-						*(dest[6].(*[]byte)) = []byte(`["history"]`)
-						*(dest[7].(*[]byte)) = []byte(`["secret"]`)
-						*(dest[8].(*[]byte)) = []byte(`["rule1"]`)
-						*(dest[9].(*[]byte)) = []byte(`["tool1"]`)
-						*(dest[10].(*string)) = "fast"
-						*(dest[11].(*bool)) = false
+						*(dest[1].(*string)) = "tenant-1"
+						*(dest[2].(*string)) = "camp-1"
+						*(dest[3].(*string)) = "Greymantle"
+						*(dest[4].(*string)) = "Wise"
+						*(dest[5].(*string)) = "cascaded"
+						*(dest[6].(*[]byte)) = []byte(`{"provider":"elevenlabs","voice_id":"v1","pitch_shift":0,"speed_factor":1.0}`)
+						*(dest[7].(*[]byte)) = []byte(`["history"]`)
+						*(dest[8].(*[]byte)) = []byte(`["secret"]`)
+						*(dest[9].(*[]byte)) = []byte(`["rule1"]`)
+						*(dest[10].(*[]byte)) = []byte(`["tool1"]`)
+						*(dest[11].(*string)) = "fast"
 						*(dest[12].(*bool)) = false
-						*(dest[13].(*[]byte)) = []byte(`{"race":"elf"}`)
-						*(dest[14].(*time.Time)) = fixedTime
+						*(dest[13].(*bool)) = false
+						*(dest[14].(*[]byte)) = []byte(`{"race":"elf"}`)
 						*(dest[15].(*time.Time)) = fixedTime
+						*(dest[16].(*time.Time)) = fixedTime
 						return nil
 					},
 				}
@@ -562,7 +577,7 @@ func TestPostgresStore_Get(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		def, err := store.Get(context.Background(), "npc-1", "camp-1")
+		def, err := store.Get(context.Background(), "tenant-1", "npc-1", "camp-1")
 		if err != nil {
 			t.Fatalf("Get() unexpected error: %v", err)
 		}
@@ -572,6 +587,9 @@ func TestPostgresStore_Get(t *testing.T) {
 		}
 		if def.ID != "npc-1" {
 			t.Errorf("ID = %q, want 'npc-1'", def.ID)
+		}
+		if def.TenantID != "tenant-1" {
+			t.Errorf("TenantID = %q, want 'tenant-1'", def.TenantID)
 		}
 		if def.Name != "Greymantle" {
 			t.Errorf("Name = %q, want 'Greymantle'", def.Name)
@@ -597,12 +615,32 @@ func TestPostgresStore_Get(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		def, err := store.Get(context.Background(), "missing", "camp-1")
+		def, err := store.Get(context.Background(), "tenant-1", "missing", "camp-1")
 		if err != nil {
 			t.Fatalf("Get() unexpected error: %v", err)
 		}
 		if def != nil {
 			t.Errorf("Get() = %v, want nil for missing NPC", def)
+		}
+	})
+
+	t.Run("wrong tenant returns nil", func(t *testing.T) {
+		t.Parallel()
+		db := &mockDB{
+			queryRowFunc: func(_ context.Context, _ string, _ ...any) pgx.Row {
+				// Simulates PostgreSQL returning no rows because tenant_id doesn't match.
+				return &mockRow{
+					scanFunc: func(_ ...any) error { return pgx.ErrNoRows },
+				}
+			},
+		}
+		store := NewPostgresStore(db)
+		def, err := store.Get(context.Background(), "wrong-tenant", "npc-1", "camp-1")
+		if err != nil {
+			t.Fatalf("Get() unexpected error: %v", err)
+		}
+		if def != nil {
+			t.Errorf("Get() = %v, want nil for wrong tenant", def)
 		}
 	})
 
@@ -616,7 +654,7 @@ func TestPostgresStore_Get(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		_, err := store.Get(context.Background(), "npc-1", "camp-1")
+		_, err := store.Get(context.Background(), "tenant-1", "npc-1", "camp-1")
 		if err == nil {
 			t.Fatal("Get() expected error, got nil")
 		}
@@ -638,6 +676,9 @@ func TestPostgresStore_Update(t *testing.T) {
 				if !strings.Contains(sql, "UPDATE npc_definitions") {
 					t.Errorf("Update SQL should contain UPDATE, got: %s", sql)
 				}
+				if !strings.Contains(sql, "tenant_id = $2") {
+					t.Errorf("Update SQL should contain tenant_id in WHERE, got: %s", sql)
+				}
 				return &mockRow{
 					scanFunc: func(dest ...any) error {
 						*(dest[0].(*time.Time)) = fixedTime
@@ -648,7 +689,7 @@ func TestPostgresStore_Update(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		def := &NPCDefinition{ID: "npc-1", Name: "Updated"}
+		def := &NPCDefinition{ID: "npc-1", TenantID: "tenant-1", Name: "Updated"}
 		err := store.Update(context.Background(), def)
 		if err != nil {
 			t.Fatalf("Update() unexpected error: %v", err)
@@ -668,7 +709,7 @@ func TestPostgresStore_Update(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		err := store.Update(context.Background(), &NPCDefinition{ID: "missing", Name: "X"})
+		err := store.Update(context.Background(), &NPCDefinition{ID: "missing", TenantID: "t1", Name: "X"})
 		if err == nil {
 			t.Fatal("Update() expected error for missing NPC")
 		}
@@ -707,15 +748,18 @@ func TestPostgresStore_Delete(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		err := store.Delete(context.Background(), "npc-1", "camp-1")
+		err := store.Delete(context.Background(), "tenant-1", "npc-1", "camp-1")
 		if err != nil {
 			t.Fatalf("Delete() unexpected error: %v", err)
 		}
 		if !strings.Contains(capturedSQL, "DELETE FROM npc_definitions") {
 			t.Errorf("SQL = %q, want DELETE statement", capturedSQL)
 		}
-		if len(capturedArgs) != 2 || capturedArgs[0] != "npc-1" || capturedArgs[1] != "camp-1" {
-			t.Errorf("args = %v, want [npc-1 camp-1]", capturedArgs)
+		if !strings.Contains(capturedSQL, "tenant_id = $2") {
+			t.Errorf("SQL = %q, want tenant_id in WHERE clause", capturedSQL)
+		}
+		if len(capturedArgs) != 3 || capturedArgs[0] != "npc-1" || capturedArgs[1] != "tenant-1" || capturedArgs[2] != "camp-1" {
+			t.Errorf("args = %v, want [npc-1 tenant-1 camp-1]", capturedArgs)
 		}
 	})
 
@@ -727,7 +771,7 @@ func TestPostgresStore_Delete(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		err := store.Delete(context.Background(), "npc-1", "camp-1")
+		err := store.Delete(context.Background(), "tenant-1", "npc-1", "camp-1")
 		if err == nil {
 			t.Fatal("Delete() expected error, got nil")
 		}
@@ -742,9 +786,10 @@ func TestPostgresStore_List(t *testing.T) {
 
 	fixedTime := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 
-	makeRow := func(id, campaignID, name string) []any {
+	makeRow := func(id, tenantID, campaignID, name string) []any {
 		return []any{
 			id,           // id
+			tenantID,     // tenant_id
 			campaignID,   // campaign_id
 			name,         // name
 			"",           // personality
@@ -763,27 +808,30 @@ func TestPostgresStore_List(t *testing.T) {
 		}
 	}
 
-	t.Run("all", func(t *testing.T) {
+	t.Run("all for tenant", func(t *testing.T) {
 		t.Parallel()
 		db := &mockDB{
 			queryFunc: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
-				if strings.Contains(sql, "WHERE campaign_id") {
+				if !strings.Contains(sql, "WHERE tenant_id = $1") {
+					t.Error("List should filter by tenant_id")
+				}
+				if strings.Contains(sql, "campaign_id = $2") {
 					t.Error("List all should not filter by campaign_id")
 				}
-				if len(args) != 0 {
-					t.Errorf("List all should have 0 args, got %d", len(args))
+				if len(args) != 1 || args[0] != "tenant-1" {
+					t.Errorf("List all args = %v, want [tenant-1]", args)
 				}
 				return &mockRows{
 					data: [][]any{
-						makeRow("npc-1", "camp-1", "Alpha"),
-						makeRow("npc-2", "camp-2", "Beta"),
+						makeRow("npc-1", "tenant-1", "camp-1", "Alpha"),
+						makeRow("npc-2", "tenant-1", "camp-2", "Beta"),
 					},
 				}, nil
 			},
 		}
 
 		store := NewPostgresStore(db)
-		defs, err := store.List(context.Background(), "")
+		defs, err := store.List(context.Background(), "tenant-1", "")
 		if err != nil {
 			t.Fatalf("List() unexpected error: %v", err)
 		}
@@ -792,6 +840,9 @@ func TestPostgresStore_List(t *testing.T) {
 		}
 		if defs[0].ID != "npc-1" {
 			t.Errorf("defs[0].ID = %q, want 'npc-1'", defs[0].ID)
+		}
+		if defs[0].TenantID != "tenant-1" {
+			t.Errorf("defs[0].TenantID = %q, want 'tenant-1'", defs[0].TenantID)
 		}
 		if defs[1].ID != "npc-2" {
 			t.Errorf("defs[1].ID = %q, want 'npc-2'", defs[1].ID)
@@ -802,22 +853,22 @@ func TestPostgresStore_List(t *testing.T) {
 		t.Parallel()
 		db := &mockDB{
 			queryFunc: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
-				if !strings.Contains(sql, "WHERE campaign_id") {
-					t.Error("List filtered should contain WHERE campaign_id")
+				if !strings.Contains(sql, "WHERE tenant_id = $1 AND campaign_id = $2") {
+					t.Error("List filtered should contain WHERE tenant_id AND campaign_id")
 				}
-				if len(args) != 1 || args[0] != "camp-1" {
-					t.Errorf("args = %v, want [camp-1]", args)
+				if len(args) != 2 || args[0] != "tenant-1" || args[1] != "camp-1" {
+					t.Errorf("args = %v, want [tenant-1 camp-1]", args)
 				}
 				return &mockRows{
 					data: [][]any{
-						makeRow("npc-1", "camp-1", "Alpha"),
+						makeRow("npc-1", "tenant-1", "camp-1", "Alpha"),
 					},
 				}, nil
 			},
 		}
 
 		store := NewPostgresStore(db)
-		defs, err := store.List(context.Background(), "camp-1")
+		defs, err := store.List(context.Background(), "tenant-1", "camp-1")
 		if err != nil {
 			t.Fatalf("List() unexpected error: %v", err)
 		}
@@ -835,7 +886,7 @@ func TestPostgresStore_List(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		defs, err := store.List(context.Background(), "")
+		defs, err := store.List(context.Background(), "tenant-1", "")
 		if err != nil {
 			t.Fatalf("List() unexpected error: %v", err)
 		}
@@ -853,7 +904,7 @@ func TestPostgresStore_List(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		_, err := store.List(context.Background(), "")
+		_, err := store.List(context.Background(), "tenant-1", "")
 		if err == nil {
 			t.Fatal("List() expected error, got nil")
 		}
@@ -871,7 +922,7 @@ func TestPostgresStore_List(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		_, err := store.List(context.Background(), "")
+		_, err := store.List(context.Background(), "tenant-1", "")
 		if err == nil {
 			t.Fatal("List() expected error from rows.Err()")
 		}
@@ -904,13 +955,16 @@ func TestPostgresStore_Upsert(t *testing.T) {
 		}
 
 		store := NewPostgresStore(db)
-		def := &NPCDefinition{ID: "npc-1", Name: "Upserted"}
+		def := &NPCDefinition{ID: "npc-1", TenantID: "tenant-1", Name: "Upserted"}
 		err := store.Upsert(context.Background(), def)
 		if err != nil {
 			t.Fatalf("Upsert() unexpected error: %v", err)
 		}
 		if !strings.Contains(capturedSQL, "ON CONFLICT") {
 			t.Errorf("SQL should contain ON CONFLICT, got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "tenant_id") {
+			t.Errorf("SQL should reference tenant_id, got: %s", capturedSQL)
 		}
 		if def.CreatedAt != fixedTime {
 			t.Errorf("CreatedAt = %v, want %v", def.CreatedAt, fixedTime)
@@ -936,12 +990,166 @@ func TestPostgresStore_Upsert(t *testing.T) {
 			},
 		}
 		store := NewPostgresStore(db)
-		err := store.Upsert(context.Background(), &NPCDefinition{ID: "x", Name: "X"})
+		err := store.Upsert(context.Background(), &NPCDefinition{ID: "x", TenantID: "t1", Name: "X"})
 		if err == nil {
 			t.Fatal("Upsert() expected error, got nil")
 		}
 		if !strings.Contains(err.Error(), "npcstore: upsert:") {
 			t.Errorf("error = %q, want prefix 'npcstore: upsert:'", err.Error())
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Cross-tenant isolation tests
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_CrossTenantIsolation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Get scopes query by tenant_id", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedArgs []any
+		db := &mockDB{
+			queryRowFunc: func(_ context.Context, sql string, args ...any) pgx.Row {
+				capturedArgs = args
+				if !strings.Contains(sql, "tenant_id = $2") {
+					t.Error("Get SQL must include tenant_id in WHERE clause")
+				}
+				return &mockRow{
+					scanFunc: func(_ ...any) error { return pgx.ErrNoRows },
+				}
+			},
+		}
+
+		store := NewPostgresStore(db)
+		def, err := store.Get(context.Background(), "tenant-A", "npc-1", "")
+		if err != nil {
+			t.Fatalf("Get() unexpected error: %v", err)
+		}
+		if def != nil {
+			t.Error("Get() should return nil for non-matching tenant")
+		}
+		if len(capturedArgs) < 2 || capturedArgs[1] != "tenant-A" {
+			t.Errorf("tenant_id arg = %v, want 'tenant-A'", capturedArgs)
+		}
+	})
+
+	t.Run("List scopes query by tenant_id", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedArgs []any
+		db := &mockDB{
+			queryFunc: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedArgs = args
+				if !strings.Contains(sql, "tenant_id = $1") {
+					t.Error("List SQL must include tenant_id in WHERE clause")
+				}
+				return &mockRows{}, nil
+			},
+		}
+
+		store := NewPostgresStore(db)
+		_, err := store.List(context.Background(), "tenant-B", "")
+		if err != nil {
+			t.Fatalf("List() unexpected error: %v", err)
+		}
+		if len(capturedArgs) < 1 || capturedArgs[0] != "tenant-B" {
+			t.Errorf("tenant_id arg = %v, want 'tenant-B'", capturedArgs)
+		}
+	})
+
+	t.Run("Delete scopes query by tenant_id", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedArgs []any
+		db := &mockDB{
+			execFunc: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				capturedArgs = args
+				if !strings.Contains(sql, "tenant_id = $2") {
+					t.Error("Delete SQL must include tenant_id in WHERE clause")
+				}
+				return pgconn.CommandTag{}, nil
+			},
+		}
+
+		store := NewPostgresStore(db)
+		err := store.Delete(context.Background(), "tenant-C", "npc-1", "camp-1")
+		if err != nil {
+			t.Fatalf("Delete() unexpected error: %v", err)
+		}
+		if len(capturedArgs) < 2 || capturedArgs[1] != "tenant-C" {
+			t.Errorf("tenant_id arg = %v, want 'tenant-C'", capturedArgs)
+		}
+	})
+
+	t.Run("Update scopes query by tenant_id", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedSQL string
+		db := &mockDB{
+			queryRowFunc: func(_ context.Context, sql string, args ...any) pgx.Row {
+				capturedSQL = sql
+				// Simulate not found because the tenant doesn't match.
+				return &mockRow{
+					scanFunc: func(_ ...any) error { return pgx.ErrNoRows },
+				}
+			},
+		}
+
+		store := NewPostgresStore(db)
+		err := store.Update(context.Background(), &NPCDefinition{
+			ID:       "npc-1",
+			TenantID: "wrong-tenant",
+			Name:     "Hack",
+		})
+		if err == nil {
+			t.Fatal("Update() should fail when tenant doesn't match")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("error = %q, want 'not found'", err.Error())
+		}
+		if !strings.Contains(capturedSQL, "tenant_id = $2") {
+			t.Errorf("Update SQL should contain tenant_id in WHERE, got: %s", capturedSQL)
+		}
+	})
+
+	t.Run("Create includes tenant_id in INSERT", func(t *testing.T) {
+		t.Parallel()
+
+		fixedTime := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+		var capturedSQL string
+		var capturedArgs []any
+		db := &mockDB{
+			queryRowFunc: func(_ context.Context, sql string, args ...any) pgx.Row {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockRow{
+					scanFunc: func(dest ...any) error {
+						*(dest[0].(*time.Time)) = fixedTime
+						*(dest[1].(*time.Time)) = fixedTime
+						return nil
+					},
+				}
+			},
+		}
+
+		store := NewPostgresStore(db)
+		def := &NPCDefinition{
+			ID:       "npc-new",
+			TenantID: "tenant-X",
+			Name:     "NewNPC",
+		}
+		err := store.Create(context.Background(), def)
+		if err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+		if !strings.Contains(capturedSQL, "tenant_id") {
+			t.Errorf("Create SQL should reference tenant_id, got: %s", capturedSQL)
+		}
+		if capturedArgs[1] != "tenant-X" {
+			t.Errorf("tenant_id arg = %v, want 'tenant-X'", capturedArgs[1])
 		}
 	})
 }

@@ -28,7 +28,7 @@ func (s *Server) handleVoicePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	npcID := r.PathValue("npc_id")
-	npc, err := s.npcs.Get(r.Context(), npcID, "")
+	npc, err := s.npcs.Get(r.Context(), claims.TenantID, npcID, "")
 	if err != nil {
 		slog.Error("web: get npc for voice preview", "npc_id", npcID, "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "failed to get NPC")

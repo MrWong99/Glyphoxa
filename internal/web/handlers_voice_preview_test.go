@@ -19,6 +19,7 @@ func TestHandleVoicePreview_ReturnsAudio(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},
@@ -53,6 +54,7 @@ func TestHandleVoicePreview_DefaultText(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},
@@ -78,6 +80,7 @@ func TestHandleVoicePreview_TextTooLong(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},
@@ -119,6 +122,7 @@ func TestHandleVoicePreview_RateLimiting(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},
@@ -158,6 +162,7 @@ func TestHandleVoicePreview_NoProvider(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},
@@ -183,6 +188,7 @@ func TestHandleVoicePreview_WrongTenant(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},
@@ -224,6 +230,7 @@ func TestHandleVoicePreview_ExactMaxLength(t *testing.T) {
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "TestCampaign"}
 	ns.npcs["npc-1"] = &npcstore.NPCDefinition{
 		ID:         "npc-1",
+		TenantID:   "tenant-1",
 		CampaignID: "c1",
 		Name:       "TestNPC",
 		Voice:      npcstore.VoiceConfig{Provider: "elevenlabs", VoiceID: "v1"},

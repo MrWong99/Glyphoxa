@@ -17,7 +17,7 @@ func TestHandleLinkNPCToCampaign(t *testing.T) {
 
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "Campaign A"}
 	ws.campaigns["c2"] = &Campaign{ID: "c2", TenantID: "tenant-1", Name: "Campaign B"}
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "Traveler"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "Traveler"}
 
 	// Link npc-1 (home: c1) to c2.
 	req := authReq(t, http.MethodPost, "/api/v1/campaigns/c2/npcs/npc-1/link",
@@ -42,7 +42,7 @@ func TestHandleLinkNPCToCampaign_HomeFails(t *testing.T) {
 	srv.registerRoutes()
 
 	ws.campaigns["c1"] = &Campaign{ID: "c1", TenantID: "tenant-1", Name: "Campaign A"}
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "HomeNPC"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "HomeNPC"}
 
 	// Linking to home campaign should fail.
 	req := authReq(t, http.MethodPost, "/api/v1/campaigns/c1/npcs/npc-1/link",
@@ -80,7 +80,7 @@ func TestHandleListLinkedNPCs(t *testing.T) {
 	srv.registerRoutes()
 
 	ws.campaigns["c2"] = &Campaign{ID: "c2", TenantID: "tenant-1", Name: "Campaign B"}
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "Traveler"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "Traveler"}
 
 	// Seed a link.
 	ws.campaignNPCLinks["c2"] = []CampaignNPCLink{
@@ -148,7 +148,7 @@ func TestHandleLinkNPCToCampaign_CampaignNotFound(t *testing.T) {
 	srv, _, ns, secret := testServerWithStores(t)
 	srv.registerRoutes()
 
-	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", CampaignID: "c1", Name: "Traveler"}
+	ns.npcs["npc-1"] = &npcstore.NPCDefinition{ID: "npc-1", TenantID: "tenant-1", CampaignID: "c1", Name: "Traveler"}
 
 	// Campaign does not exist.
 	req := authReq(t, http.MethodPost, "/api/v1/campaigns/nonexistent/npcs/npc-1/link",
@@ -171,7 +171,7 @@ func TestHandleLinkNPCToCampaign_CrossTenantBlocked(t *testing.T) {
 	ws.campaigns["c2"] = &Campaign{ID: "c2", TenantID: "tenant-1", Name: "Campaign B"}
 	// NPC belongs to campaign owned by a different tenant.
 	ws.campaigns["c-other"] = &Campaign{ID: "c-other", TenantID: "tenant-2", Name: "Other"}
-	ns.npcs["npc-other"] = &npcstore.NPCDefinition{ID: "npc-other", CampaignID: "c-other", Name: "Cross-Tenant"}
+	ns.npcs["npc-other"] = &npcstore.NPCDefinition{ID: "npc-other", TenantID: "tenant-2", CampaignID: "c-other", Name: "Cross-Tenant"}
 
 	req := authReq(t, http.MethodPost, "/api/v1/campaigns/c1/npcs/npc-other/link",
 		nil, secret, "user-1", "tenant-1", "dm")
