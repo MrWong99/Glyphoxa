@@ -104,3 +104,51 @@ jobs:
           labels: ${{ steps.meta-web.outputs.labels }}
           cache-from: type=gha,scope=glyphoxa-web
           cache-to: type=gha,mode=max,scope=glyphoxa-web
+
+  # ---------------------------------------------------------------------------
+  # Glyphoxa web UI (Next.js frontend only)
+  # ---------------------------------------------------------------------------
+  docker-web-ui:
+    name: Build and push (glyphoxa-web-ui)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta-web-ui
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/mrwong99/glyphoxa-web-ui
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.web-ui
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-web-ui.outputs.tags }}
+          labels: ${{ steps.meta-web-ui.outputs.labels }}
+          cache-from: type=gha,scope=glyphoxa-web-ui
+          cache-to: type=gha,mode=max,scope=glyphoxa-web-ui

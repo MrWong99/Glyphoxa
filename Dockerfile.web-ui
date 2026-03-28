@@ -1,0 +1,56 @@
+# =============================================================================
+# Dockerfile for Glyphoxa Web UI (Next.js frontend only)
+# =============================================================================
+#
+# Standalone Next.js frontend image. Proxies /api/* requests to the Go backend
+# service via next.config.ts rewrites (configure API_BACKEND_URL at build time
+# or override HOSTNAME/PORT at runtime).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Install dependencies
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS deps
+
+WORKDIR /app
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+# ---------------------------------------------------------------------------
+# Stage 2: Build Next.js (standalone output)
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS build
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY web/ ./
+
+# Backend URL resolved at build time for Next.js rewrites.
+ARG API_BACKEND_URL=http://glyphoxa-web-api:8090
+ENV API_BACKEND_URL=${API_BACKEND_URL}
+
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 3: Production runtime
+# ---------------------------------------------------------------------------
+FROM node:22-slim
+
+RUN groupadd -r glyphoxa && useradd -r -g glyphoxa -m glyphoxa
+
+WORKDIR /app
+
+# Copy Next.js standalone server and static assets.
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+
+ENV HOSTNAME="0.0.0.0"
+ENV PORT=3000
+
+USER glyphoxa
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
