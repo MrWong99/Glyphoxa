@@ -630,20 +630,12 @@ func TestVoiceBridgeReceiver_SelfHearingGuard(t *testing.T) {
 	default:
 	}
 
-	// Drain toWorker to check the forwarded frame.
-	var received int
-	for {
-		select {
-		case <-bridge.Done():
-			t.Fatal("bridge closed unexpectedly")
-		default:
-		}
-		// SendToWorker is non-blocking, so the frame should be in toWorker.
-		// We can't read toWorker directly from SessionBridge, so we verify
-		// via frame count: the receiver only incremented for the player.
-		break
+	// Verify bridge is still alive (not closed unexpectedly).
+	select {
+	case <-bridge.Done():
+		t.Fatal("bridge closed unexpectedly")
+	default:
 	}
-	_ = received
 
 	// The receiver's frame counter should be 1 (only the player frame counted).
 	if got := receiver.frameCount.Load(); got != 1 {
