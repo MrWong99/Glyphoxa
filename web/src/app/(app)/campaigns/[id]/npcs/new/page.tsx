@@ -60,7 +60,7 @@ export default function NewNPCPage({
         behavior_rules: state.behaviorRules,
         address_only: state.addressOnly,
       } as Partial<NPC>);
-      router.push(`/campaigns/${campaignId}`);
+      router.push(`/campaigns/${campaignId}?tab=npcs`);
     } catch {
       // Error is handled by the mutation's onError callback.
     }

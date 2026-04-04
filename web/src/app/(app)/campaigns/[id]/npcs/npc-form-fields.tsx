@@ -142,7 +142,7 @@ export function NPCFormFields({ state, onChange, touched, errors, onTouch }: NPC
                   value={state.voiceId}
                   onChange={(e) => onChange("voiceId", e.target.value)}
                   onBlur={() => onTouch("voiceId")}
-                  placeholder="Helmut"
+                  placeholder="Enter voice ID..."
                   aria-invalid={touched.voiceId && !!errors.voiceId}
                   className="flex-1"
                 />

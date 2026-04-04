@@ -85,7 +85,7 @@ function NPCForm({ npc, campaignId, campaignName }: NPCFormProps) {
   async function handleDelete() {
     try {
       await deleteNPC.mutateAsync(npc.id);
-      router.push(`/campaigns/${campaignId}`);
+      router.push(`/campaigns/${campaignId}?tab=npcs`);
     } catch {
       // Error is handled by the mutation's onError callback.
     }

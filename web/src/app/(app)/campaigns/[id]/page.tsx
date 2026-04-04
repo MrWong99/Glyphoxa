@@ -2,7 +2,7 @@
 
 import { useState, use } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Save, Trash2, Users, ScrollText, Network } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -33,12 +33,13 @@ import { CampaignSessions } from "./sessions";
 import { GAME_SYSTEMS } from "@/lib/types";
 import type { Campaign } from "@/lib/types";
 
-function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId: string }) {
+function CampaignForm({ campaign, campaignId, initialTab }: { campaign: Campaign; campaignId: string; initialTab: string }) {
   const router = useRouter();
   const updateCampaign = useUpdateCampaign(campaignId);
   const deleteCampaign = useDeleteCampaign();
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const canEdit = useHasRole("dm");
+  const [activeTab, setActiveTab] = useState(initialTab);
 
   const [name, setName] = useState(campaign.name);
   const [gameSystem, setGameSystem] = useState(campaign.game_system);
@@ -96,7 +97,7 @@ function CampaignForm({ campaign, campaignId }: { campaign: Campaign; campaignId
         )}
       </div>
 
-      <Tabs defaultValue="details">
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as string)}>
         <TabsList>
           <TabsTrigger value="details">Details</TabsTrigger>
           <TabsTrigger value="npcs">
@@ -253,6 +254,8 @@ export default function CampaignDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const searchParams = useSearchParams();
+  const initialTab = searchParams.get("tab") ?? "details";
   const { data: campaign, isLoading, isError, error } = useCampaign(id);
 
   if (isLoading) {
@@ -289,5 +292,5 @@ export default function CampaignDetailPage({
     );
   }
 
-  return <CampaignForm key={campaign.id} campaign={campaign} campaignId={id} />;
+  return <CampaignForm key={campaign.id} campaign={campaign} campaignId={id} initialTab={initialTab} />;
 }
