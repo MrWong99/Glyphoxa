@@ -425,10 +425,13 @@ func runGateway(cfg *config.Config) int {
 		entityCmds := commands.NewEntityCommands(perms, func() entity.Store { return nil })
 		entityCmds.Register(router)
 
-		// Campaign commands — config is available on the gateway; entity
-		// store is nil because entities live on the worker.
+		// Campaign commands — DB-backed via CampaignReader + AdminStore.
+		campaignReader := gw.NewCampaignReader(pool)
 		campaignCmds := commands.NewCampaignCommandsFromConfig(commands.CampaignCommandsConfig{
 			Perms:    perms,
+			TenantID: tenant.ID,
+			Reader:   &campaignReaderAdapter{r: campaignReader},
+			Updater:  &tenantCampaignUpdaterAdapter{store: adminStore},
 			GetStore: func() entity.Store { return nil },
 			GetCfg:   func() *config.CampaignConfig { return &cfg.Campaign },
 			IsActive: func() bool { return sessionCtrl.IsActive("") },
@@ -1581,4 +1584,61 @@ func optFloat(opts map[string]any, key string) float64 {
 	default:
 		return 0
 	}
+}
+
+// ── Campaign DB adapters ─────────────────────────────────────────────────────
+// These adapt the gateway's CampaignReader and AdminStore to the interfaces
+// expected by the Discord campaign commands.
+
+// campaignReaderAdapter wraps gw.CampaignReader to satisfy commands.CampaignReader.
+type campaignReaderAdapter struct {
+	r *gw.CampaignReader
+}
+
+func (a *campaignReaderAdapter) ListForTenant(ctx context.Context, tenantID string) ([]commands.CampaignSummary, error) {
+	gwCampaigns, err := a.r.ListForTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]commands.CampaignSummary, len(gwCampaigns))
+	for i, c := range gwCampaigns {
+		out[i] = commands.CampaignSummary{
+			ID:          c.ID,
+			Name:        c.Name,
+			System:      c.System,
+			Description: c.Description,
+		}
+	}
+	return out, nil
+}
+
+func (a *campaignReaderAdapter) GetCampaign(ctx context.Context, tenantID, campaignID string) (*commands.CampaignSummary, error) {
+	c, found, err := a.r.Get(ctx, tenantID, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &commands.CampaignSummary{
+		ID:          c.ID,
+		Name:        c.Name,
+		System:      c.System,
+		Description: c.Description,
+	}, nil
+}
+
+// tenantCampaignUpdaterAdapter wraps gw.PostgresAdminStore to satisfy
+// commands.TenantCampaignUpdater.
+type tenantCampaignUpdaterAdapter struct {
+	store *gw.PostgresAdminStore
+}
+
+func (a *tenantCampaignUpdaterAdapter) SetActiveCampaign(ctx context.Context, tenantID, campaignID string) error {
+	t, err := a.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("set active campaign: get tenant: %w", err)
+	}
+	t.CampaignID = campaignID
+	return a.store.UpdateTenant(ctx, t)
 }
