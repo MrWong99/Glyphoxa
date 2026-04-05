@@ -376,6 +376,11 @@ func runGateway(cfg *config.Config) int {
 	// management service to dispatch session start/stop via gRPC.
 	ctrlRegistry := gw.NewSessionControllerRegistry()
 
+	// adminStoreRef is set after NewPostgresAdminStore but captured by
+	// the command setup closure below. Safe because the closure only runs
+	// during ReconnectAllBots which happens after the store is created.
+	var adminStoreRef *gw.PostgresAdminStore
+
 	// Configure per-tenant slash command wiring.
 	botConnector.SetCommandSetup(func(gwBot *gw.GatewayBot, tenant gw.Tenant) {
 		router := gwBot.Router()
@@ -426,12 +431,15 @@ func runGateway(cfg *config.Config) int {
 		entityCmds.Register(router)
 
 		// Campaign commands — DB-backed via CampaignReader + AdminStore.
+		// Note: adminStoreRef is captured by the closure and set after
+		// NewPostgresAdminStore (line ~491). The callback runs later
+		// during ReconnectAllBots, so the pointer is valid by then.
 		campaignReader := gw.NewCampaignReader(pool)
 		campaignCmds := commands.NewCampaignCommandsFromConfig(commands.CampaignCommandsConfig{
 			Perms:    perms,
 			TenantID: tenant.ID,
 			Reader:   &campaignReaderAdapter{r: campaignReader},
-			Updater:  &tenantCampaignUpdaterAdapter{store: adminStore},
+			Updater:  &tenantCampaignUpdaterAdapter{store: adminStoreRef},
 			GetStore: func() entity.Store { return nil },
 			GetCfg:   func() *config.CampaignConfig { return &cfg.Campaign },
 			IsActive: func() bool { return sessionCtrl.IsActive("") },
@@ -493,6 +501,7 @@ func runGateway(cfg *config.Config) int {
 		slog.Error("failed to create postgres admin store", "err", err)
 		return 1
 	}
+	adminStoreRef = adminStore
 	adminAPI := gw.NewAdminAPI(adminStore, adminKey, botConnector)
 
 	// ── Reconnect bots for existing tenants ──────────────────────────────────
