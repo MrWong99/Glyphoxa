@@ -68,13 +68,13 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{Name: "glyphoxa_oauth_state", Value: "", Path: "/", MaxAge: -1})
+	clearAuthCookie(w, "glyphoxa_oauth_state")
 
 	var inviteToken string
 	if ic, err := r.Cookie("glyphoxa_invite"); err == nil {
 		inviteToken = ic.Value
 	}
-	http.SetCookie(w, &http.Cookie{Name: "glyphoxa_invite", Value: "", Path: "/", MaxAge: -1})
+	clearAuthCookie(w, "glyphoxa_invite")
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -221,13 +221,13 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{Name: "glyphoxa_oauth_state", Value: "", Path: "/", MaxAge: -1})
+	clearAuthCookie(w, "glyphoxa_oauth_state")
 
 	var inviteToken string
 	if ic, err := r.Cookie("glyphoxa_invite"); err == nil {
 		inviteToken = ic.Value
 	}
-	http.SetCookie(w, &http.Cookie{Name: "glyphoxa_invite", Value: "", Path: "/", MaxAge: -1})
+	clearAuthCookie(w, "glyphoxa_invite")
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
