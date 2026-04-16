@@ -327,6 +327,78 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 }
 
+func TestBuildProviderURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		baseURL        string
+		defaultHostURL string
+		path           string
+		want           string
+	}{
+		{
+			name:           "empty baseURL uses default",
+			baseURL:        "",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://api.openai.com/v1/models",
+		},
+		{
+			name:           "baseURL host replaces default",
+			baseURL:        "https://proxy.example.com",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://proxy.example.com/v1/models",
+		},
+		{
+			name:           "baseURL path is preserved (Azure-style)",
+			baseURL:        "https://my.openai.azure.com/openai",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://my.openai.azure.com/openai/v1/models",
+		},
+		{
+			name:           "baseURL query string is stripped",
+			baseURL:        "https://proxy.example.com?foo=bar&x=y",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://proxy.example.com/v1/models",
+		},
+		{
+			name:           "baseURL fragment is stripped",
+			baseURL:        "https://proxy.example.com#evil",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://proxy.example.com/v1/models",
+		},
+		{
+			name:           "baseURL userinfo is stripped",
+			baseURL:        "https://user:pass@proxy.example.com",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://proxy.example.com/v1/models",
+		},
+		{
+			name:           "baseURL with port",
+			baseURL:        "https://proxy.example.com:8443",
+			defaultHostURL: "https://api.openai.com",
+			path:           "/v1/models",
+			want:           "https://proxy.example.com:8443/v1/models",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := buildProviderURL(tt.baseURL, tt.defaultHostURL, tt.path)
+			if got != tt.want {
+				t.Errorf("buildProviderURL(%q, %q, %q) = %q, want %q", tt.baseURL, tt.defaultHostURL, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsPrivateIP(t *testing.T) {
 	t.Parallel()
 

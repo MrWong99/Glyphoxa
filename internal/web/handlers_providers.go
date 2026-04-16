@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -82,29 +83,23 @@ func testProviderConnection(r *http.Request, providerType, provider, apiKey, bas
 }
 
 func testLLMProvider(r *http.Request, client *http.Client, provider, apiKey, baseURL string) error {
-	var url string
+	var endpoint string
 	var authHeader string
 
 	switch provider {
 	case "openai":
-		url = "https://api.openai.com/v1/models"
-		if baseURL != "" {
-			url = baseURL + "/v1/models"
-		}
+		endpoint = buildProviderURL(baseURL, "https://api.openai.com", "/v1/models")
 		authHeader = "Bearer " + apiKey
 	case "anthropic":
-		url = "https://api.anthropic.com/v1/models"
-		if baseURL != "" {
-			url = baseURL + "/v1/models"
-		}
+		endpoint = buildProviderURL(baseURL, "https://api.anthropic.com", "/v1/models")
 		authHeader = apiKey // Anthropic uses x-api-key header
 	case "google", "gemini":
-		url = fmt.Sprintf("https://generativelanguage.googleapis.com/v1/models?key=%s", apiKey)
+		endpoint = fmt.Sprintf("https://generativelanguage.googleapis.com/v1/models?key=%s", url.QueryEscape(apiKey))
 	default:
 		return fmt.Errorf("unsupported LLM provider: %s", provider)
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -133,23 +128,17 @@ func testLLMProvider(r *http.Request, client *http.Client, provider, apiKey, bas
 }
 
 func testSTTProvider(r *http.Request, client *http.Client, provider, apiKey, baseURL string) error {
-	var url string
+	var endpoint string
 	switch provider {
 	case "deepgram":
-		url = "https://api.deepgram.com/v1/projects"
-		if baseURL != "" {
-			url = baseURL + "/v1/projects"
-		}
+		endpoint = buildProviderURL(baseURL, "https://api.deepgram.com", "/v1/projects")
 	case "whisper", "openai":
-		url = "https://api.openai.com/v1/models"
-		if baseURL != "" {
-			url = baseURL + "/v1/models"
-		}
+		endpoint = buildProviderURL(baseURL, "https://api.openai.com", "/v1/models")
 	default:
 		return fmt.Errorf("unsupported STT provider: %s", provider)
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -176,23 +165,17 @@ func testSTTProvider(r *http.Request, client *http.Client, provider, apiKey, bas
 }
 
 func testTTSProvider(r *http.Request, client *http.Client, provider, apiKey, baseURL string) error {
-	var url string
+	var endpoint string
 	switch provider {
 	case "elevenlabs":
-		url = "https://api.elevenlabs.io/v1/voices"
-		if baseURL != "" {
-			url = baseURL + "/v1/voices"
-		}
+		endpoint = buildProviderURL(baseURL, "https://api.elevenlabs.io", "/v1/voices")
 	case "openai":
-		url = "https://api.openai.com/v1/models"
-		if baseURL != "" {
-			url = baseURL + "/v1/models"
-		}
+		endpoint = buildProviderURL(baseURL, "https://api.openai.com", "/v1/models")
 	default:
 		return fmt.Errorf("unsupported TTS provider: %s", provider)
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

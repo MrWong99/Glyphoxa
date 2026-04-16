@@ -86,6 +86,26 @@ func isBlockedCIDR(ip net.IP) bool {
 	return false
 }
 
+// buildProviderURL composes the outbound URL from an optional user-supplied
+// baseURL (already validated by validateBaseURL) plus a constant path suffix.
+// Query, fragment, and userinfo from baseURL are stripped so user-controlled
+// parts of the URL cannot reach the request beyond scheme/host/path.
+func buildProviderURL(baseURL, defaultHostURL, path string) string {
+	if baseURL == "" {
+		return defaultHostURL + path
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return defaultHostURL + path
+	}
+	clean := url.URL{
+		Scheme: parsed.Scheme,
+		Host:   parsed.Host,
+		Path:   parsed.Path + path,
+	}
+	return clean.String()
+}
+
 // validateBaseURL checks that a user-supplied base URL is safe to use
 // for outbound HTTP requests. It rejects private IPs, internal DNS
 // names, cloud metadata endpoints, and Kubernetes service addresses

@@ -68,19 +68,13 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear the state cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:   "glyphoxa_oauth_state",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+	clearAuthCookie(w, "glyphoxa_oauth_state")
 
 	var inviteToken string
 	if ic, err := r.Cookie("glyphoxa_invite"); err == nil {
 		inviteToken = ic.Value
 	}
-	http.SetCookie(w, &http.Cookie{Name: "glyphoxa_invite", Value: "", Path: "/", MaxAge: -1})
+	clearAuthCookie(w, "glyphoxa_invite")
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -318,4 +312,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+}
+
+// clearAuthCookie expires a cookie using the same security flags it was set
+// with, so the Set-Cookie response matches the original cookie's scope and
+// does not silently widen it.
+func clearAuthCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
