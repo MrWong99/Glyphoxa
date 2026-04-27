@@ -1,0 +1,16 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+formatters:
+  enable:
+    - goimports
+
+linters:
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - linters: [errcheck]
+        source: Close

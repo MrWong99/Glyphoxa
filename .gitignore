@@ -1,0 +1,54 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.bin
+/bin/
+/dist/
+
+# Test
+*.test
+*.out
+coverage.html
+
+# Vendor
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/build/
+/glyphoxa
+/glyphoxa-web
+deployments/compose/config.yaml
+
+# Helm dependency artifacts
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock
+
+# Worktrees
+.worktrees/
+
+# Zhi plugin build artifacts
+deploy/zhi/plugin/zhi-config-glyphoxa
+deploy/zhi/plugin/dist/
+
+# Web frontend
+web/node_modules/
+web/.next/
+.claude/
