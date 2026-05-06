@@ -1,4 +1,6 @@
-# Ubiquitous Language
+# Glyphoxa
+
+A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Character NPCs) join a Discord voice session, voice campaign NPCs and assist the GM via slash commands and tools, persisting transcripts and a per-campaign knowledge graph.
 
 ## Tenancy & People
 
