@@ -1,0 +1,36 @@
+# meta.yaml is pure documentation per ADR-0020. Assertions live in Go tests.
+clip: hello-test
+duration_seconds: 3.28
+sample_rate_hz: 16000
+channels: 1
+bits_per_sample: 16
+encoding: pcm_s16le
+
+source:
+  provider: elevenlabs
+  model_id: eleven_v3
+  voice_name: Mark
+  voice_id: UgBBYS2sOqTuMpoF3BR0
+  output_format: pcm_16000
+  generated: 2026-05-07
+
+script: |
+  [curious] Glyphoxa, [pause] roll a perception check for me.
+
+intent: |
+  Single-utterance fixture for the foundational TB1 tracer bullet.
+  A GM addresses the Butler ("Glyphoxa") and asks for a perception
+  check — exercises VAD on a clean speech-after-silence onset and,
+  in later slices, address detection (target = Butler) and tool
+  invocation (rules.lookup or dice.roll).
+
+  The [pause] audio tag introduces a short silence mid-utterance,
+  which is useful but not load-bearing for TB1 itself.
+
+expected_outcome: |
+  Silero VAD should detect speech onset within the first ~200ms of
+  audible content and emit exactly one VADSpeechStart, followed by
+  VADSpeechContinue events through the body of the utterance, and a
+  single VADSpeechEnd when the GM finishes speaking. The [pause] tag
+  may briefly drop probability but should not fall below the silence
+  threshold long enough to trigger a speech-end transition.
