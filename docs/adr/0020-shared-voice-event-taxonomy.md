@@ -2,7 +2,7 @@
 
 Voice tests and prod SSE consume the same in-process event channel. **One vocabulary, two transports.** The harness observes the channel directly; the SSE relay (per ADR-0014) forwards the same events to browsers.
 
-Test assertions live in `internal/voice/voicetest/` as imperative Go test functions, with primitives `AssertEventOccurred`, `AssertNoEvent`, `AssertEventCount`, `AssertTimingBetween`, `AssertOrder`, and `MustOne`. Per-clip `meta.yaml` is pure documentation (spoken script, intent, expected outcome in prose) — assertions live in Go, not YAML.
+Test assertions live in `pkg/voice/voicetest/` as imperative Go test functions, with primitives `AssertEventOccurred`, `AssertNoEvent`, `AssertEventCount`, `AssertTimingBetween`, `AssertOrder`, and `MustOne`. Per-clip `meta.yaml` is pure documentation (spoken script, intent, expected outcome in prose) — assertions live in Go, not YAML.
 
 **Considered options:**
 
