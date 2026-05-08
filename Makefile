@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs onnx-libs install-lint proto proto-check proto-lint
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint
 
 # Build voice engine
 build:
@@ -78,30 +78,18 @@ whisper-libs:
 	@echo "  export LIBRARY_PATH=$(WHISPER_DEST)/lib"
 	@echo "  export CGO_ENABLED=1"
 
-# Download ONNX Runtime shared library for Silero VAD.
-# After running this, set the environment before other targets:
-#   export LD_LIBRARY_PATH=/tmp/onnx-install/lib:$LD_LIBRARY_PATH
-ONNX_VERSION := 1.24.1
-ONNX_DEST    := /tmp/onnx-install
+# Refresh the embedded Silero VAD ONNX model from upstream. Run when bumping
+# silero versions; commit the updated file and the new SHA-256 in
+# pkg/voice/vad/silero/data/README.md.
+SILERO_MODEL_URL := https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+SILERO_MODEL_DST := pkg/voice/vad/silero/data/silero_vad.onnx
 
-onnx-libs:
-	@if [ -f "$(ONNX_DEST)/lib/libonnxruntime.so" ]; then \
-		echo "ONNX Runtime already installed at $(ONNX_DEST)"; \
-	else \
-		ONNX_ARCH="x64"; \
-		if [ "$$(uname -m)" = "aarch64" ]; then ONNX_ARCH="aarch64"; fi; \
-		echo "Downloading ONNX Runtime $(ONNX_VERSION) for $${ONNX_ARCH}..."; \
-		curl -fsL "https://github.com/microsoft/onnxruntime/releases/download/v$(ONNX_VERSION)/onnxruntime-linux-$${ONNX_ARCH}-$(ONNX_VERSION).tgz" \
-			-o /tmp/onnxruntime.tgz; \
-		mkdir -p $(ONNX_DEST); \
-		tar xzf /tmp/onnxruntime.tgz -C $(ONNX_DEST) --strip-components=1; \
-		rm -f /tmp/onnxruntime.tgz; \
-		echo "ONNX Runtime installed to $(ONNX_DEST)"; \
-	fi
-	@echo ""
-	@echo "ONNX Runtime is loaded at runtime via dlopen (no compile-time flags needed)."
-	@echo "Set LD_LIBRARY_PATH for runtime, or use options.onnx_lib_path in config:"
-	@echo "  export LD_LIBRARY_PATH=$(ONNX_DEST)/lib:\$$LD_LIBRARY_PATH"
+refresh-silero-model:
+	curl -fsSL "$(SILERO_MODEL_URL)" -o "$(SILERO_MODEL_DST)"
+	@echo "Updated $(SILERO_MODEL_DST)"
+	@echo "New SHA-256:"
+	@sha256sum "$(SILERO_MODEL_DST)"
+	@echo "Update the SHA-256 in pkg/voice/vad/silero/data/README.md before committing."
 
 # Install libdave shared library for DAVE (Discord Audio Video Encryption).
 # Required by github.com/disgoorg/godave/golibdave (CGO bindings).
