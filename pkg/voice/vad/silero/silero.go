@@ -12,13 +12,13 @@
 package silero
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 )
 
@@ -360,9 +360,9 @@ func newSession(cfg vad.Config, inf inferencer, minSpeech, minSilence int) *sess
 }
 
 // ProcessFrame analyses a single audio frame and returns the detection result.
-// frame must be raw little-endian signed 16-bit PCM at the SampleRate and
-// FrameSizeMs configured when the session was created.
-func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
+// The frame's SampleRate and FrameMs must match the values from the Config the
+// session was created with.
+func (s *session) ProcessFrame(frame audio.Frame) (vad.VADEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -370,16 +370,15 @@ func (s *session) ProcessFrame(frame []byte) (vad.VADEvent, error) {
 		return vad.VADEvent{}, fmt.Errorf("silero: ProcessFrame called on closed session")
 	}
 
-	chunkSize := s.cfg.SampleRate * s.cfg.FrameSizeMs / 1000
-	expectedBytes := chunkSize * 2 // int16 = 2 bytes per sample
-	if len(frame) != expectedBytes {
+	if frame.SampleRate() != s.cfg.SampleRate || frame.FrameMs() != s.cfg.FrameSizeMs {
 		return vad.VADEvent{}, fmt.Errorf(
-			"silero: frame is %d bytes, expected %d (sampleRate=%d, frameSizeMs=%d)",
-			len(frame), expectedBytes, s.cfg.SampleRate, s.cfg.FrameSizeMs,
+			"silero: frame is %d Hz/%d ms, want %d Hz/%d ms",
+			frame.SampleRate(), frame.FrameMs(),
+			s.cfg.SampleRate, s.cfg.FrameSizeMs,
 		)
 	}
 
-	samples := pcmToFloat32(frame)
+	samples := samplesToFloat32(frame.Samples())
 
 	prob, stateN, err := s.inf.infer(samples, int64(s.cfg.SampleRate), s.lstmState)
 	if err != nil {
@@ -461,15 +460,13 @@ func (s *session) Close() error {
 	return nil
 }
 
-// pcmToFloat32 converts raw little-endian signed 16-bit PCM bytes to float32
-// samples in the range [-1.0, 1.0].
-func pcmToFloat32(pcm []byte) []float32 {
-	n := len(pcm) / 2
-	out := make([]float32, n)
+// samplesToFloat32 scales signed 16-bit PCM samples to float32 in the range
+// [-1.0, 1.0], as expected by the Silero VAD v5 model.
+func samplesToFloat32(samples []int16) []float32 {
+	out := make([]float32, len(samples))
 	const scale = 1.0 / float32(math.MaxInt16+1) // 1.0 / 32768.0
-	for i := range n {
-		sample := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
-		out[i] = float32(sample) * scale
+	for i, s := range samples {
+		out[i] = float32(s) * scale
 	}
 	return out
 }

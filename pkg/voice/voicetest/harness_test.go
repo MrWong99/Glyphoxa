@@ -13,7 +13,20 @@ func TestHarness_AssertEventOccurred_FindsPublishedEvent(t *testing.T) {
 
 	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.92})
 
-	h.AssertEventOccurred(voiceevent.VADSpeechStart{})
+	voicetest.AssertEventOccurred[voiceevent.VADSpeechStart](t, h)
+}
+
+func TestHarness_AssertEvent_MatchesOnFieldValue(t *testing.T) {
+	t.Parallel()
+	h := voicetest.New(t)
+
+	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.4})
+	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.92})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.VADSpeechStart) bool { return e.Probability > 0.8 },
+		"VADSpeechStart with Probability > 0.8",
+	)
 }
 
 func TestHarness_Events_ReturnsObservedEventsInOrder(t *testing.T) {

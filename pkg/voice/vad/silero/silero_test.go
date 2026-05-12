@@ -1,11 +1,11 @@
 package silero
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sync"
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 )
 
@@ -83,10 +83,15 @@ func validConfig() vad.Config {
 	}
 }
 
-// silenceFrame returns a zero-filled PCM frame for the given config.
-func silenceFrame(cfg vad.Config) []byte {
+// silenceFrame returns a zero-filled audio.Frame matching cfg.
+func silenceFrame(t *testing.T, cfg vad.Config) audio.Frame {
+	t.Helper()
 	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
-	return make([]byte, chunkSize*2)
+	f, err := audio.NewFrame(make([]int16, chunkSize), cfg.SampleRate, cfg.FrameSizeMs)
+	if err != nil {
+		t.Fatalf("silenceFrame: %v", err)
+	}
+	return f
 }
 
 // makeSession builds a session with the provided mock (bypassing Engine so no
@@ -272,19 +277,22 @@ func TestValidateConfig_SpeechThresholdOutOfRange(t *testing.T) {
 
 // ─── ProcessFrame edge cases ────────────────────────────────────────────
 
-func TestProcessFrame_WrongFrameSize(t *testing.T) {
+func TestProcessFrame_FrameConfigMismatch(t *testing.T) {
 	t.Parallel()
 
-	cfg := validConfig()
+	cfg := validConfig() // 16 kHz / 32 ms
 	m := &mockInferencer{prob: 0.1}
 	sess := makeSession(t, cfg, m, 3, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	// Send a frame that's too short.
-	shortFrame := make([]byte, 10) // expected: chunkSize * 2
-	_, err := sess.ProcessFrame(shortFrame)
-	if err == nil {
-		t.Fatal("expected error for wrong frame size, got nil")
+	// Build a valid Frame at 8 kHz / 32 ms — structurally well-formed but
+	// not matching the session's Config.
+	misframe, err := audio.NewFrame(make([]int16, 256), 8000, 32)
+	if err != nil {
+		t.Fatalf("audio.NewFrame: %v", err)
+	}
+	if _, err := sess.ProcessFrame(misframe); err == nil {
+		t.Fatal("expected error for frame whose SampleRate/FrameMs do not match Config, got nil")
 	}
 }
 
@@ -300,7 +308,7 @@ func TestProcessFrame_SpeechCountResetOnLowProb(t *testing.T) {
 	sess := makeSession(t, cfg, m, minSpeech, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 
 	// Two high-prob frames, then one low-prob. Should reset speech count.
 	m.mu.Lock()
@@ -335,7 +343,7 @@ func TestProcessFrame_SilenceCountResetOnHighProb(t *testing.T) {
 	sess := makeSession(t, cfg, m, minSpeech, minSilence)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 
 	// Drive into speech state.
 	for range minSpeech {
@@ -406,26 +414,21 @@ func TestNewSession_InitialState(t *testing.T) {
 	_ = sess.Close()
 }
 
-// ─── PCM conversion additional ──────────────────────────────────────────
+// ─── Sample scaling ─────────────────────────────────────────────────────
 
-func TestPCMToFloat32_Empty(t *testing.T) {
+func TestSamplesToFloat32_Empty(t *testing.T) {
 	t.Parallel()
 
-	got := pcmToFloat32(nil)
+	got := samplesToFloat32(nil)
 	if len(got) != 0 {
 		t.Errorf("expected empty result for nil input, got len %d", len(got))
 	}
 }
 
-func TestPCMToFloat32_MultiSample(t *testing.T) {
+func TestSamplesToFloat32_MultiSample(t *testing.T) {
 	t.Parallel()
 
-	// Encode two samples: 0 and 16384
-	pcm := make([]byte, 4)
-	binary.LittleEndian.PutUint16(pcm[0:], 0)
-	binary.LittleEndian.PutUint16(pcm[2:], uint16(int16(16384)))
-
-	got := pcmToFloat32(pcm)
+	got := samplesToFloat32([]int16{0, 16384})
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
@@ -588,7 +591,7 @@ func TestProcessFrame_SilenceWithMock(t *testing.T) {
 	sess := makeSession(t, cfg, m, 3, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 	for i := range 10 {
 		evt, err := sess.ProcessFrame(frame)
 		if err != nil {
@@ -612,7 +615,7 @@ func TestProcessFrame_SpeechWithMock(t *testing.T) {
 	sess := makeSession(t, cfg, m, minSpeech, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 
 	// Frames 0 and 1 should still be VADSilence (not enough consecutive speech).
 	for i := range minSpeech - 1 {
@@ -678,7 +681,7 @@ func TestProcessFrame_StateTransitions(t *testing.T) {
 	sess := makeSession(t, cfg, m, minSpeech, minSilence)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 	for i, s := range steps {
 		m.mu.Lock()
 		m.prob = s.prob
@@ -706,7 +709,7 @@ func TestProcessFrame_LSTMStatePassthrough(t *testing.T) {
 	sess := makeSession(t, cfg, m, 3, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 
 	// First frame: state should be all zeros (initial state).
 	if _, err := sess.ProcessFrame(frame); err != nil {
@@ -740,7 +743,7 @@ func TestReset_ClearsState(t *testing.T) {
 	sess := makeSession(t, cfg, m, minSpeech, 15)
 	t.Cleanup(func() { _ = sess.Close() })
 
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 
 	// Drive the session into speech state.
 	for i := range minSpeech {
@@ -811,7 +814,7 @@ func TestClose_RejectsSubsequentCalls(t *testing.T) {
 	}
 
 	// ProcessFrame must return an error after Close.
-	frame := silenceFrame(cfg)
+	frame := silenceFrame(t, cfg)
 	_, err := sess.ProcessFrame(frame)
 	if err == nil {
 		t.Error("ProcessFrame after Close: expected error, got nil")
@@ -864,13 +867,7 @@ func TestPCMConversion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Encode int16 values as little-endian bytes.
-			pcm := make([]byte, len(tc.input)*2)
-			for i, v := range tc.input {
-				binary.LittleEndian.PutUint16(pcm[i*2:], uint16(v))
-			}
-
-			got := pcmToFloat32(pcm)
+			got := samplesToFloat32(tc.input)
 
 			if len(got) != tc.wantLen {
 				t.Fatalf("len = %d, want %d", len(got), tc.wantLen)

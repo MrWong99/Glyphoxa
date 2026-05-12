@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -46,7 +47,7 @@ func NewVAD(bus *voiceevent.Bus, session vad.SessionHandle) *VAD {
 // publishes a [voiceevent.VADSpeechStart] when the session reports the
 // onset of an utterance. Other event variants (speech_end, etc.) will be
 // added in subsequent tracer bullets.
-func (v *VAD) Process(frame []byte) error {
+func (v *VAD) Process(frame audio.Frame) error {
 	evt, err := v.session.ProcessFrame(frame)
 	if err != nil {
 		return fmt.Errorf("orchestrator.VAD.Process: %w", err)

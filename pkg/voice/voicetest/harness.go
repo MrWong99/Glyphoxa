@@ -3,7 +3,9 @@
 //
 // A test creates a [Harness] which owns a [voiceevent.Bus] and observes every
 // event published on it. Assertions run against the observed log via the
-// primitives on Harness ([Harness.AssertEventOccurred] etc.).
+// package-level helpers ([AssertEventOccurred], [AssertEvent], …) which take
+// the event type as a generic type parameter so tests can both restrict by
+// concrete event type and apply a value-level predicate.
 //
 // Voicetest deliberately uses no DSL: assertions are plain Go calls so they
 // participate in `go test` features (race, coverage, parallelism, IDE
@@ -12,7 +14,6 @@
 package voicetest
 
 import (
-	"reflect"
 	"sync"
 	"testing"
 
@@ -60,22 +61,40 @@ func (h *Harness) Events() []voiceevent.Event {
 	return out
 }
 
-// AssertEventOccurred fails the test if no observed event has the same Go
-// type as template. Field values on template are ignored; richer matching
-// belongs in dedicated primitives added later.
-func (h *Harness) AssertEventOccurred(template voiceevent.Event) {
-	h.t.Helper()
-	target := reflect.TypeOf(template)
+// AssertEventOccurred fails the test if no observed event has concrete type T.
+// Use [AssertEvent] when the assertion needs to inspect the event's field
+// values, not just its type.
+func AssertEventOccurred[T voiceevent.Event](t *testing.T, h *Harness) {
+	t.Helper()
+	AssertEvent(t, h, func(T) bool { return true }, "any "+eventTypeName[T]())
+}
+
+// AssertEvent fails the test if no observed event of concrete type T satisfies
+// match. desc names what was expected and is included in the failure message.
+func AssertEvent[T voiceevent.Event](t *testing.T, h *Harness, match func(T) bool, desc string) {
+	t.Helper()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, e := range h.seen {
-		if reflect.TypeOf(e) == target {
+		typed, ok := e.(T)
+		if !ok {
+			continue
+		}
+		if match(typed) {
 			return
 		}
 	}
-	h.t.Fatalf("AssertEventOccurred: no event of type %v observed; seen %d events: %v",
-		target, len(h.seen), eventNames(h.seen))
+	t.Fatalf("AssertEvent[%s]: no event matched %q; seen %d events: %v",
+		eventTypeName[T](), desc, len(h.seen), eventNames(h.seen))
+}
+
+// eventTypeName returns the wire name of the zero value of T, used for
+// diagnostics. Every voiceevent.Event implementation must satisfy EventName
+// on a zero value, which is true for the current value-typed events.
+func eventTypeName[T voiceevent.Event]() string {
+	var zero T
+	return zero.EventName()
 }
 
 // eventNames returns the wire names of every event in evs, for diagnostics.

@@ -49,11 +49,16 @@ func TestVAD_HelloTest_EmitsSpeechStart(t *testing.T) {
 	}
 
 	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
-	for i, frame := range clip.FramesOf(chunkSize) {
+	frames, tail := clip.FramesOf(t, chunkSize)
+	if tail != 0 {
+		t.Logf("hello-test: trailing %d samples (%d ms) not frame-aligned; discarded",
+			tail, tail*1000/cfg.SampleRate)
+	}
+	for i, frame := range frames {
 		if err := stage.Process(frame); err != nil {
 			t.Fatalf("frame %d: stage.Process: %v", i, err)
 		}
 	}
 
-	h.AssertEventOccurred(voiceevent.VADSpeechStart{})
+	voicetest.AssertEventOccurred[voiceevent.VADSpeechStart](t, h)
 }

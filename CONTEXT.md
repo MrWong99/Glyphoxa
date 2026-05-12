@@ -49,6 +49,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 
 | Term | Definition | Aliases to avoid |
 |------|------------|------------------|
+| **Audio Frame** | A fixed-duration window of single-channel signed-16-bit PCM samples that crosses voice pipeline stages (VAD, STT, …); modelled by `pkg/voice/audio.Frame` whose constructor enforces `len(samples) == SampleRate × FrameMs / 1000`. | Chunk, Packet (Packet is RTP/Opus), PCM (unqualified) |
 | **Bot** | The single Discord bot identity (one token) shared by the entire Glyphoxa deployment regardless of Tenant. | App, Application, Bot account |
 | **Guild** | A Discord server, identified by `guild_id`; a Tenant may have many Guilds linked. | Server, Discord server |
 | **Voice Session** | The Bot's presence in one Discord voice channel, bound to a (Guild, Campaign, GM) tuple at start and hosted by exactly one Voice Instance. | Session (alone), Call, Live session |

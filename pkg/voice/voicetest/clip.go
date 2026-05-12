@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 )
 
 // Clip is a decoded test audio clip from tests/voice-clips/<name>/audio.wav.
@@ -23,15 +25,40 @@ type Clip struct {
 	PCM []byte
 }
 
-// FramesOf splits the clip's PCM into back-to-back frames of n samples each
-// (per channel). The trailing partial frame is dropped.
-func (c *Clip) FramesOf(samplesPerFrame int) [][]byte {
-	bytesPerFrame := samplesPerFrame * c.Channels * (c.BitDepth / 8)
-	var out [][]byte
-	for i := 0; i+bytesPerFrame <= len(c.PCM); i += bytesPerFrame {
-		out = append(out, c.PCM[i:i+bytesPerFrame])
+// FramesOf splits the clip's PCM into back-to-back [audio.Frame]s of
+// samplesPerFrame samples each. Any trailing partial frame is reported via
+// tailSamples rather than silently dropped — callers must decide whether to
+// log it, fail the test, or pad it, so a clipped fixture cannot hide as a
+// passing test.
+//
+// The clip must be mono 16-bit PCM; otherwise the test is failed.
+func (c *Clip) FramesOf(t *testing.T, samplesPerFrame int) (frames []audio.Frame, tailSamples int) {
+	t.Helper()
+	if c.Channels != 1 {
+		t.Fatalf("voicetest.FramesOf(%q): clip has %d channels, want 1 (mono PCM only)", c.Name, c.Channels)
 	}
-	return out
+	if c.BitDepth != 16 {
+		t.Fatalf("voicetest.FramesOf(%q): clip is %d-bit, want 16-bit PCM", c.Name, c.BitDepth)
+	}
+	if samplesPerFrame <= 0 {
+		t.Fatalf("voicetest.FramesOf(%q): samplesPerFrame must be > 0, got %d", c.Name, samplesPerFrame)
+	}
+	bytesPerFrame := samplesPerFrame * 2
+	fullFrames := len(c.PCM) / bytesPerFrame
+	tailBytes := len(c.PCM) - fullFrames*bytesPerFrame
+	tailSamples = tailBytes / 2
+
+	frameMs := samplesPerFrame * 1000 / c.SampleRate
+	frames = make([]audio.Frame, 0, fullFrames)
+	for i := range fullFrames {
+		off := i * bytesPerFrame
+		f, err := audio.FromPCM16LE(c.PCM[off:off+bytesPerFrame], c.SampleRate, frameMs)
+		if err != nil {
+			t.Fatalf("voicetest.FramesOf(%q): decode frame %d: %v", c.Name, i, err)
+		}
+		frames = append(frames, f)
+	}
+	return frames, tailSamples
 }
 
 // LoadClip resolves and decodes tests/voice-clips/<name>/audio.wav, failing

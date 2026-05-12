@@ -3,6 +3,7 @@ package silero
 import (
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 )
 
@@ -33,7 +34,10 @@ func TestEngine_SmokeTest_RealONNX(t *testing.T) {
 
 	// Feed 20 silent frames; expect every event to be VADSilence.
 	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
-	frame := make([]byte, chunkSize*2)
+	frame, err := audio.NewFrame(make([]int16, chunkSize), cfg.SampleRate, cfg.FrameSizeMs)
+	if err != nil {
+		t.Fatalf("audio.NewFrame: %v", err)
+	}
 	for i := range 20 {
 		evt, err := sess.ProcessFrame(frame)
 		if err != nil {

@@ -13,6 +13,8 @@
 // implementation explicitly documents thread safety for that type.
 package vad
 
+import "github.com/MrWong99/Glyphoxa/pkg/voice/audio"
+
 // Config holds the parameters for a VAD session. All numeric thresholds are
 // expressed in the model's native scale; see each Engine's documentation for
 // recommended starting values.
@@ -47,13 +49,12 @@ type Config struct {
 // explicitly guarantees concurrent safety.
 type SessionHandle interface {
 	// ProcessFrame analyses a single audio frame and returns the detection result.
-	// The frame must be raw little-endian PCM at the SampleRate and FrameSizeMs
-	// configured when the session was created. Returns an error if the frame size
-	// is wrong or if the engine encounters an internal failure.
+	// The frame's SampleRate and FrameMs must match the values in the Config the
+	// session was created with; mismatches return an error.
 	//
 	// This method is designed to be called synchronously in the audio pipeline loop;
 	// it must not block.
-	ProcessFrame(frame []byte) (VADEvent, error)
+	ProcessFrame(frame audio.Frame) (VADEvent, error)
 
 	// Reset clears all accumulated detection state (ring buffers, speech-start
 	// counters) without closing the session. Use this when the audio stream is
