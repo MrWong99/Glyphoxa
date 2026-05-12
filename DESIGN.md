@@ -29,6 +29,8 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0019](docs/adr/0019-orchestrator-first-tdd-voice.md) | Orchestrator-first TDD voice pipeline | Q13 |
 | [0020](docs/adr/0020-shared-voice-event-taxonomy.md) | Shared event taxonomy across tests and SSE | Q13.2 |
 | [0021](docs/adr/0021-cassette-based-llm-determinism.md) | Cassette-based LLM determinism with tiered live runs | Q13.3 |
+| [0022](docs/adr/0022-tts-provider-interface.md) | TTS provider interface: small core, opt-in capabilities, opaque markup | TTS interlude (Q1–Q9) |
+| [0023](docs/adr/0023-tts-provider-matrix-elevenlabs-openai.md) | TTS provider matrix v1.0: ElevenLabs + OpenAI (amends ADR-0004) | TTS interlude |
 
 ## Open questions
 
