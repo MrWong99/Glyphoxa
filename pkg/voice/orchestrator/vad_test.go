@@ -185,3 +185,62 @@ func TestVAD_SilenceTest_EmitsNoSpeechStart(t *testing.T) {
 
 	voicetest.AssertNoEvent[voiceevent.VADSpeechStart](t, h)
 }
+
+// TestVAD_TwoUtteranceTest_EmitsTwoSpeechStarts is TB4: two utterances
+// separated by a silence gap must produce two distinct VADSpeechStart events.
+//
+// The two-utterance-test fixture (~5.66s) is two ElevenLabs renderings glued
+// together with 1.5s of zero PCM in between — well over the default silence
+// hysteresis window (minSilenceFrames=15 × 32ms = 480ms). If the VAD's
+// speech/silence state machine is correctly tuned, frame probabilities drop
+// below SilenceThreshold for long enough during the gap to return the state
+// machine to stateSilence, re-arming the onset path so the second utterance
+// fires a fresh speech_start.
+//
+// AssertEventCount makes the count itself the property under test: one event
+// (gap was swallowed) and three events (spurious onset inside an utterance)
+// are both failure modes.
+func TestVAD_TwoUtteranceTest_EmitsTwoSpeechStarts(t *testing.T) {
+	h := voicetest.New(t)
+
+	engine, err := silero.New()
+	if err != nil {
+		t.Fatalf("silero.New: %v", err)
+	}
+
+	cfg := vad.Config{
+		SampleRate:       16000,
+		FrameSizeMs:      32, // 512 samples — silero v5 valid chunk size
+		SpeechThreshold:  0.5,
+		SilenceThreshold: 0.35,
+	}
+	sess, err := engine.NewSession(cfg)
+	if err != nil {
+		t.Fatalf("engine.NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	stage := orchestrator.NewVAD(h.Bus, sess)
+
+	clip := voicetest.LoadClip(t, "two-utterance-test")
+	if clip.SampleRate != cfg.SampleRate {
+		t.Fatalf("clip sample rate %d Hz, want %d Hz", clip.SampleRate, cfg.SampleRate)
+	}
+	if clip.Channels != 1 || clip.BitDepth != 16 {
+		t.Fatalf("clip format %dch %d-bit, want 1ch 16-bit", clip.Channels, clip.BitDepth)
+	}
+
+	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
+	frames, tail := clip.FramesOf(t, chunkSize)
+	if tail != 0 {
+		t.Logf("two-utterance-test: trailing %d samples (%d ms) not frame-aligned; discarded",
+			tail, tail*1000/cfg.SampleRate)
+	}
+	for i, frame := range frames {
+		if err := stage.Process(frame); err != nil {
+			t.Fatalf("frame %d: stage.Process: %v", i, err)
+		}
+	}
+
+	voicetest.AssertEventCount[voiceevent.VADSpeechStart](t, h, 2)
+}

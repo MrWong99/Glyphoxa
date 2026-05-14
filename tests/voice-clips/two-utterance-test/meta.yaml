@@ -1,0 +1,42 @@
+# meta.yaml is pure documentation per ADR-0020. Assertions live in Go tests.
+clip: two-utterance-test
+duration_seconds: 5.66
+sample_rate_hz: 16000
+channels: 1
+bits_per_sample: 16
+encoding: pcm_s16le
+
+source:
+  provider: elevenlabs
+  model_id: eleven_v3
+  voice_name: Mark
+  voice_id: UgBBYS2sOqTuMpoF3BR0
+  output_format: pcm_16000
+  generated: 2026-05-14
+  composition: |
+    Two ElevenLabs renderings (utt1 ~2.56s, utt2 ~1.60s) concatenated with
+    a 1.5s zero-PCM silence gap between them. The gap is well over the
+    silence hysteresis window (minSilenceFrames=15 × 32ms = 480ms), so
+    VAD must observe two separate utterances rather than one.
+
+script: |
+  [curious] Glyphoxa, roll a perception check for me.
+  <1.5s of silence>
+  [determined] Alright, roll initiative now.
+
+intent: |
+  Two-utterance fixture for TB4. The fixture deliberately spans a silence
+  gap long enough to fall below the VAD silence threshold for more
+  consecutive frames than minSilenceFrames, so the speech/silence state
+  machine returns to stateSilence between utterances. The second utterance
+  must then re-arm the speech onset logic and emit a fresh speech_start.
+
+  This is the first fixture that stresses VAD hysteresis end-to-end: a
+  too-loose silence threshold or too-large minSilenceFrames would merge
+  the two utterances into one and TB4 would observe a single speech_start.
+
+expected_outcome: |
+  Silero VAD with SpeechThreshold=0.5 / SilenceThreshold=0.35 and the
+  default hysteresis (minSpeechFrames=3, minSilenceFrames=15) should emit
+  exactly two VADSpeechStart events — one for each utterance — separated
+  by a VADSpeechEnd transition during the silence gap.

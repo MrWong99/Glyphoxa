@@ -89,6 +89,28 @@ func AssertEvent[T voiceevent.Event](t *testing.T, h *Harness, match func(T) boo
 		eventTypeName[T](), desc, len(h.seen), eventNames(h.seen))
 }
 
+// AssertEventCount fails the test if the number of observed events of concrete
+// type T is not exactly want. Use this when the count itself is the property
+// under test — e.g. two utterances with a gap must produce exactly two
+// speech_start events, not one (hysteresis swallowed the gap) and not three
+// (a spurious onset slipped through).
+func AssertEventCount[T voiceevent.Event](t *testing.T, h *Harness, want int) {
+	t.Helper()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	got := 0
+	for _, e := range h.seen {
+		if _, ok := e.(T); ok {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("AssertEventCount[%s]: got %d, want %d; seen %d events total: %v",
+			eventTypeName[T](), got, want, len(h.seen), eventNames(h.seen))
+	}
+}
+
 // OrderMatcher is one step in an [AssertOrder] sequence: a predicate plus a
 // human-readable name used in failure messages. Construct one with [MatchType]
 // (and, in later tracer bullets, value-level helpers layered on top).

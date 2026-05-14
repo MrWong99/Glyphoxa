@@ -36,6 +36,23 @@ func TestHarness_AssertNoEvent_PassesWhenNoEventOfTypePublished(t *testing.T) {
 	voicetest.AssertNoEvent[voiceevent.VADSpeechStart](t, h)
 }
 
+func TestHarness_AssertEventCount_MatchesExactCount(t *testing.T) {
+	t.Parallel()
+	h := voicetest.New(t)
+
+	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.6})
+	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.9})
+
+	voicetest.AssertEventCount[voiceevent.VADSpeechStart](t, h, 2)
+}
+
+func TestHarness_AssertEventCount_Zero(t *testing.T) {
+	t.Parallel()
+	h := voicetest.New(t)
+
+	voicetest.AssertEventCount[voiceevent.VADSpeechStart](t, h, 0)
+}
+
 func TestHarness_Events_ReturnsObservedEventsInOrder(t *testing.T) {
 	t.Parallel()
 	h := voicetest.New(t)
