@@ -1,0 +1,28 @@
+# meta.yaml is pure documentation per ADR-0020. Assertions live in Go tests.
+clip: silence-test
+duration_seconds: 3.0
+sample_rate_hz: 16000
+channels: 1
+bits_per_sample: 16
+encoding: pcm_s16le
+
+source:
+  provider: generated
+  method: zero-filled PCM
+  generated: 2026-05-14
+
+script: |
+  (pure silence — every sample is 0)
+
+intent: |
+  Negative fixture for the TB3 tracer bullet. Feeds a clip that contains
+  no voiced content through the orchestrator's VAD stage to exercise the
+  "no speech" path that the hello-test fixture cannot: TB1's positive
+  assertion would pass on a noisy VAD that fires constantly, so we need a
+  silence clip to pin the other end of the contract.
+
+expected_outcome: |
+  Silero VAD should classify every frame as silence; the orchestrator
+  must publish zero VADSpeechStart events onto the bus. Any speech
+  event observed for this fixture is a regression (false positive in
+  the VAD stage or a leak in the orchestrator's gating logic).

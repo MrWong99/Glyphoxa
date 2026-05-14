@@ -29,6 +29,13 @@ func TestHarness_AssertEvent_MatchesOnFieldValue(t *testing.T) {
 	)
 }
 
+func TestHarness_AssertNoEvent_PassesWhenNoEventOfTypePublished(t *testing.T) {
+	t.Parallel()
+	h := voicetest.New(t)
+
+	voicetest.AssertNoEvent[voiceevent.VADSpeechStart](t, h)
+}
+
 func TestHarness_Events_ReturnsObservedEventsInOrder(t *testing.T) {
 	t.Parallel()
 	h := voicetest.New(t)

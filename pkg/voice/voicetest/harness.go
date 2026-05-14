@@ -146,6 +146,23 @@ func AssertOrder(t *testing.T, h *Harness, steps ...OrderMatcher) {
 		idx, len(steps), want, len(h.seen), eventNames(h.seen))
 }
 
+// AssertNoEvent fails the test if any observed event has concrete type T.
+// It is the negation of [AssertEventOccurred] and pins the "no speech"
+// half of stages whose behaviour is otherwise validated only by positive
+// fixtures.
+func AssertNoEvent[T voiceevent.Event](t *testing.T, h *Harness) {
+	t.Helper()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.seen {
+		if _, ok := e.(T); ok {
+			t.Fatalf("AssertNoEvent[%s]: observed forbidden event %#v; seen %d events: %v",
+				eventTypeName[T](), e, len(h.seen), eventNames(h.seen))
+		}
+	}
+}
+
 // eventTypeName returns the wire name of the zero value of T, used for
 // diagnostics. Every voiceevent.Event implementation must satisfy EventName
 // on a zero value, which is true for the current value-typed events.

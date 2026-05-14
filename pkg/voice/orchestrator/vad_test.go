@@ -77,7 +77,6 @@ func TestVAD_HelloTest_EmitsSpeechStart(t *testing.T) {
 // the assertion deterministic regardless of the fixture's exact tail length.
 func TestVAD_HelloTest_SpeechEndFollowsSpeechStart(t *testing.T) {
 	h := voicetest.New(t)
-
 	engine, err := silero.New()
 	if err != nil {
 		t.Fatalf("silero.New: %v", err)
@@ -135,4 +134,54 @@ func TestVAD_HelloTest_SpeechEndFollowsSpeechStart(t *testing.T) {
 		voicetest.MatchType[voiceevent.VADSpeechStart](),
 		voicetest.MatchType[voiceevent.VADSpeechEnd](),
 	)
+}
+
+// TestVAD_SilenceTest_EmitsNoSpeechStart is TB3: the negative-path
+// counterpart to TB1. The hello-test fixture alone cannot pin the VAD
+// stage's contract — a naive implementation that fires VADSpeechStart on
+// every frame would pass TB1 — so we feed a pure-silence fixture and
+// assert the bus stays silent of speech events.
+func TestVAD_SilenceTest_EmitsNoSpeechStart(t *testing.T) {
+	h := voicetest.New(t)
+
+	engine, err := silero.New()
+	if err != nil {
+		t.Fatalf("silero.New: %v", err)
+	}
+
+	cfg := vad.Config{
+		SampleRate:       16000,
+		FrameSizeMs:      32, // 512 samples — silero v5 valid chunk size
+		SpeechThreshold:  0.5,
+		SilenceThreshold: 0.35,
+	}
+	sess, err := engine.NewSession(cfg)
+	if err != nil {
+		t.Fatalf("engine.NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	stage := orchestrator.NewVAD(h.Bus, sess)
+
+	clip := voicetest.LoadClip(t, "silence-test")
+	if clip.SampleRate != cfg.SampleRate {
+		t.Fatalf("clip sample rate %d Hz, want %d Hz", clip.SampleRate, cfg.SampleRate)
+	}
+	if clip.Channels != 1 || clip.BitDepth != 16 {
+		t.Fatalf("clip format %dch %d-bit, want 1ch 16-bit", clip.Channels, clip.BitDepth)
+	}
+
+	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
+	frames, tail := clip.FramesOf(t, chunkSize)
+	if tail != 0 {
+		t.Logf("silence-test: trailing %d samples (%d ms) not frame-aligned; discarded",
+			tail, tail*1000/cfg.SampleRate)
+	}
+	for i, frame := range frames {
+		if err := stage.Process(frame); err != nil {
+			t.Fatalf("frame %d: stage.Process: %v", i, err)
+		}
+	}
+
+	voicetest.AssertNoEvent[voiceevent.VADSpeechStart](t, h)
 }
