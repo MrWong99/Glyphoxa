@@ -8,7 +8,6 @@
 # transcript is hand-authored from tests/voice-clips/hello-test/meta.yaml's
 # script. Re-record with a live STT provider (-tags=record) once a Deepgram
 # or whisper.cpp adapter ships.
-name: stt-hello-test
 audio_sha256: e1767e868f6c1997f297a4524afab77cd9398692a536bd6a5b385308c0d37ba2
 transcript: "Glyphoxa, roll a perception check for me."
 notes: |-

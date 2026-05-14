@@ -9,6 +9,11 @@
 //
 // The v1.0 plumbing covers STT — see [STTRecognizer] — and is shaped to
 // extend to LLM and TTS cassettes later (per ADR-0021's per-vendor policy).
+//
+// The -tags=record path is forward-looking: it lands with the first real
+// provider adapter. Until then cassettes
+// are hand-authored — the mismatch error still points at -tags=record so
+// the workflow is wired in advance.
 package voicecassette
 
 import (
@@ -33,11 +38,11 @@ import (
 // AudioSHA256 fingerprints the PCM samples the recognizer was fed — sha256
 // over the little-endian int16 stream, taken in frame order. A test that
 // feeds different audio produces a different hash and is told to re-record.
+//
+// The cassette's identity is its filename: LoadSTT(t, "stt-hello-test")
+// reads tests/voice-cassettes/stt-hello-test.yaml. There is no name field
+// on disk — one identity, one source of truth.
 type STTCassette struct {
-	// Name matches the cassette filename without the ".yaml" suffix; used
-	// only for error messages.
-	Name string `yaml:"name"`
-
 	// AudioSHA256 is the hex-encoded sha256 of the PCM sample stream the
 	// recognizer is expected to see.
 	AudioSHA256 string `yaml:"audio_sha256"`
@@ -58,6 +63,7 @@ type STTCassette struct {
 // the caller at the re-record workflow. On match it returns the cassette's
 // pinned transcript verbatim.
 type STTRecognizer struct {
+	name     string
 	cassette STTCassette
 }
 
@@ -74,13 +80,10 @@ func LoadSTT(t *testing.T, name string) *STTRecognizer {
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		t.Fatalf("voicecassette.LoadSTT(%q): unmarshal: %v", name, err)
 	}
-	if c.Name == "" {
-		c.Name = name
-	}
 	if c.AudioSHA256 == "" {
 		t.Fatalf("voicecassette.LoadSTT(%q): cassette has empty audio_sha256", name)
 	}
-	return &STTRecognizer{cassette: c}
+	return &STTRecognizer{name: name, cassette: c}
 }
 
 // Transcribe implements [stt.Recognizer]. Returns the pinned transcript on
@@ -91,7 +94,7 @@ func (r *STTRecognizer) Transcribe(_ context.Context, frames []audio.Frame) (stt
 	if got != r.cassette.AudioSHA256 {
 		return stt.Transcript{}, fmt.Errorf(
 			"voicecassette: audio hash mismatch for cassette %q (got %s, recorded %s); re-record with -tags=record",
-			r.cassette.Name, got, r.cassette.AudioSHA256,
+			r.name, got, r.cassette.AudioSHA256,
 		)
 	}
 	return stt.Transcript{Text: r.cassette.Transcript}, nil

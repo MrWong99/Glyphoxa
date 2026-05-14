@@ -36,6 +36,11 @@ func NewSTT(bus *voiceevent.Bus, recognizer stt.Recognizer) *STT {
 // Transcribe forwards frames to the recognizer and, on success, publishes
 // the resulting transcript as a [voiceevent.STTFinal]. Errors from the
 // recognizer are wrapped and returned without publishing.
+//
+// An empty transcript (Text == "") is still published. Downstream consumers
+// — not this stage — decide what to do with a "the recognizer heard nothing"
+// signal; the orchestrator's job is to faithfully relay whatever the
+// recognizer authoritatively returns.
 func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
 	t, err := s.recognizer.Transcribe(ctx, frames)
 	if err != nil {
