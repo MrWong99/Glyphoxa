@@ -14,6 +14,15 @@ func TestVADSpeechStart_EventName(t *testing.T) {
 	}
 }
 
+func TestVADSpeechEnd_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := VADSpeechEnd{}.EventName()
+	if got != "vad.speech_end" {
+		t.Errorf("EventName = %q, want %q", got, "vad.speech_end")
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 

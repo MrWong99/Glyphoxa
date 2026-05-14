@@ -89,6 +89,63 @@ func AssertEvent[T voiceevent.Event](t *testing.T, h *Harness, match func(T) boo
 		eventTypeName[T](), desc, len(h.seen), eventNames(h.seen))
 }
 
+// OrderMatcher is one step in an [AssertOrder] sequence: a predicate plus a
+// human-readable name used in failure messages. Construct one with [MatchType]
+// (and, in later tracer bullets, value-level helpers layered on top).
+type OrderMatcher struct {
+	Name  string
+	Match func(voiceevent.Event) bool
+}
+
+// MatchType returns an [OrderMatcher] that accepts any event of concrete type T.
+// Its Name is the wire name of T (e.g. "vad.speech_end") so failure messages
+// read in the same vocabulary the SSE relay (ADR-0014) uses on the wire.
+func MatchType[T voiceevent.Event]() OrderMatcher {
+	name := eventTypeName[T]()
+	return OrderMatcher{
+		Name: name,
+		Match: func(e voiceevent.Event) bool {
+			_, ok := e.(T)
+			return ok
+		},
+	}
+}
+
+// AssertOrder fails the test unless the observed event log contains a
+// subsequence of events that satisfies steps in order.
+//
+// Subsequence — not contiguous — matching is the right primitive for the voice
+// pipeline: between speech_start and speech_end the VAD stage emits any number
+// of frame-level events (and other stages will interleave their own), and the
+// ordering claim is "X happened, then later Y happened", not "X was immediately
+// followed by Y".
+func AssertOrder(t *testing.T, h *Harness, steps ...OrderMatcher) {
+	t.Helper()
+	if len(steps) == 0 {
+		t.Fatalf("AssertOrder: called with no matchers")
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	idx := 0
+	for _, e := range h.seen {
+		if steps[idx].Match(e) {
+			idx++
+			if idx == len(steps) {
+				return
+			}
+		}
+	}
+
+	want := make([]string, len(steps))
+	for i, s := range steps {
+		want[i] = s.Name
+	}
+	t.Fatalf("AssertOrder: matched %d/%d steps in order; want sequence %v; seen %d events: %v",
+		idx, len(steps), want, len(h.seen), eventNames(h.seen))
+}
+
 // eventTypeName returns the wire name of the zero value of T, used for
 // diagnostics. Every voiceevent.Event implementation must satisfy EventName
 // on a zero value, which is true for the current value-typed events.

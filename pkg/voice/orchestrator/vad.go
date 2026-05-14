@@ -44,16 +44,23 @@ func NewVAD(bus *voiceevent.Bus, session vad.SessionHandle) *VAD {
 }
 
 // Process feeds one PCM frame through the underlying VAD session and
-// publishes a [voiceevent.VADSpeechStart] when the session reports the
-// onset of an utterance. Other event variants (speech_end, etc.) will be
-// added in subsequent tracer bullets.
+// republishes the per-frame transitions onto the bus: speech_start at the
+// onset of an utterance, speech_end when the speaker has been quiet for the
+// session's silence-frame threshold. Per-frame "still speaking" / "still
+// silent" states stay inside the session and are not published.
 func (v *VAD) Process(frame audio.Frame) error {
 	evt, err := v.session.ProcessFrame(frame)
 	if err != nil {
 		return fmt.Errorf("orchestrator.VAD.Process: %w", err)
 	}
-	if evt.Type == vad.VADSpeechStart {
+	switch evt.Type {
+	case vad.VADSpeechStart:
 		v.bus.Publish(voiceevent.VADSpeechStart{
+			At:          time.Now(),
+			Probability: evt.Probability,
+		})
+	case vad.VADSpeechEnd:
+		v.bus.Publish(voiceevent.VADSpeechEnd{
 			At:          time.Now(),
 			Probability: evt.Probability,
 		})

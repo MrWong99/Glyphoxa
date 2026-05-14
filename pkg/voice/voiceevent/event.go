@@ -28,6 +28,17 @@ type VADSpeechStart struct {
 // EventName implements [Event].
 func (VADSpeechStart) EventName() string { return "vad.speech_start" }
 
+// VADSpeechEnd marks the end of an utterance as detected by the VAD stage:
+// the speech-active state has been left because probability stayed below the
+// silence threshold for the configured number of consecutive frames.
+type VADSpeechEnd struct {
+	At          time.Time
+	Probability float64
+}
+
+// EventName implements [Event].
+func (VADSpeechEnd) EventName() string { return "vad.speech_end" }
+
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
 //

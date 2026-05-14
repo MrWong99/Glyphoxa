@@ -47,3 +47,20 @@ func TestHarness_Events_ReturnsObservedEventsInOrder(t *testing.T) {
 	}
 }
 
+func TestHarness_AssertOrder_PassesOnSubsequence(t *testing.T) {
+	t.Parallel()
+	h := voicetest.New(t)
+
+	// speech_start, then noise (a second speech_start would not happen in
+	// real VAD output but stands in for any interleaved event), then
+	// speech_end. AssertOrder must accept a non-contiguous subsequence.
+	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.9})
+	h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.95})
+	h.Bus.Publish(voiceevent.VADSpeechEnd{Probability: 0.1})
+
+	voicetest.AssertOrder(t, h,
+		voicetest.MatchType[voiceevent.VADSpeechStart](),
+		voicetest.MatchType[voiceevent.VADSpeechEnd](),
+	)
+}
+
