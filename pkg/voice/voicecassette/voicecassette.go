@@ -7,8 +7,9 @@
 // and replays the recorded response. A mismatch fails the test with a
 // pointer to re-record under `-tags=record`.
 //
-// The v1.0 plumbing covers STT — see [STTRecognizer] — and is shaped to
-// extend to LLM and TTS cassettes later (per ADR-0021's per-vendor policy).
+// The v1.0 plumbing covers STT — see [STTRecognizer] — and TTS — see
+// [TTSSynthesizer]. The shape extends to LLM cassettes later per ADR-0021's
+// per-vendor policy.
 //
 // The -tags=record path is forward-looking: it lands with the first real
 // provider adapter. Until then cassettes
@@ -30,6 +31,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -98,6 +100,89 @@ func (r *STTRecognizer) Transcribe(_ context.Context, frames []audio.Frame) (stt
 		)
 	}
 	return stt.Transcript{Text: r.cassette.Transcript}, nil
+}
+
+// TTSCassette is the on-disk record of one TTS-dispatch sequence.
+//
+// Per ADR-0021's TTS cassette policy the cassette pins only the dispatched
+// sentences — synthesized audio is not fed back to tests. [TTSSynthesizer]
+// asserts that each Synthesize call's Sentence matches the next recorded
+// entry; a mismatch (or running past the end of the recorded list) fails
+// the test and points at the re-record workflow.
+type TTSCassette struct {
+	// Sentences is the ordered list of sentences the TTS provider is expected
+	// to be invoked with for this scenario. Matched positionally against
+	// incoming Synthesize calls.
+	Sentences []string `yaml:"sentences"`
+
+	// Notes is free-form provenance (provider, model, recording date). Not
+	// load-bearing; survives round-trip for human reviewers.
+	Notes string `yaml:"notes,omitempty"`
+}
+
+// TTSSynthesizer is a [tts.Synthesizer] that replays a single [TTSCassette].
+//
+// Each call to Synthesize checks the incoming Sentence against the next
+// recorded entry; on match it returns an immediately-closed audio channel
+// (the orchestrator's drain loop returns at once, per ADR-0022). On mismatch
+// — or after the cassette is exhausted — the call returns an error pointing
+// the caller at the re-record workflow.
+//
+// TTSSynthesizer also implements [tts.Synthesizer]'s AudioMarkupPrompt with a
+// neutral plain-prose instruction. Tests that need a provider-specific markup
+// prompt should construct their own stub.
+type TTSSynthesizer struct {
+	name      string
+	cassette  TTSCassette
+	nextIndex int
+}
+
+// LoadTTS reads tests/voice-cassettes/<name>.yaml and returns a synthesizer
+// that replays it. Missing, malformed, or empty cassettes fail the test.
+func LoadTTS(t *testing.T, name string) *TTSSynthesizer {
+	t.Helper()
+	path := filepath.Join(cassettesDir(), name+".yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("voicecassette.LoadTTS(%q): %v", name, err)
+	}
+	var c TTSCassette
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		t.Fatalf("voicecassette.LoadTTS(%q): unmarshal: %v", name, err)
+	}
+	if len(c.Sentences) == 0 {
+		t.Fatalf("voicecassette.LoadTTS(%q): cassette has empty sentences list", name)
+	}
+	return &TTSSynthesizer{name: name, cassette: c}
+}
+
+// Synthesize implements [tts.Synthesizer]. Returns a closed empty audio
+// channel on sentence match; otherwise an error that names both sentences so
+// the diff is obvious in test output.
+func (r *TTSSynthesizer) Synthesize(_ context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	if r.nextIndex >= len(r.cassette.Sentences) {
+		return nil, fmt.Errorf(
+			"voicecassette: TTS cassette %q exhausted at index %d (got sentence %q); re-record with -tags=record",
+			r.name, r.nextIndex, req.Sentence,
+		)
+	}
+	want := r.cassette.Sentences[r.nextIndex]
+	if req.Sentence != want {
+		return nil, fmt.Errorf(
+			"voicecassette: TTS sentence mismatch for cassette %q at index %d (got %q, recorded %q); re-record with -tags=record",
+			r.name, r.nextIndex, req.Sentence, want,
+		)
+	}
+	r.nextIndex++
+	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch, nil
+}
+
+// AudioMarkupPrompt implements [tts.Synthesizer]. Returns a neutral
+// plain-prose instruction; the cassette policy does not pin markup.
+func (r *TTSSynthesizer) AudioMarkupPrompt(tts.Voice) string {
+	return "Speak in plain prose. Do not include bracketed tags or SSML markup."
 }
 
 // HashFrames returns the hex-encoded sha256 of the concatenated little-endian

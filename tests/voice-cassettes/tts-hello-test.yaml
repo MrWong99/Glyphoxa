@@ -1,0 +1,18 @@
+# Cassette for TB6 — TTS dispatch stub, per ADR-0021's TTS cassette policy.
+#
+# Only "TTS was invoked with sentence N" is recorded: the sentences list pins
+# the ordered text the orchestrator is expected to dispatch to the provider.
+# Audio output is intentionally not fed back into the test (TTS audio is not
+# observable in cassette mode — see ADR-0021).
+#
+# A sentence mismatch or running past the end of this list fails the test and
+# points at -tags=record. Re-record with a live TTS provider (-tags=record)
+# once the ElevenLabs or OpenAI adapter ships.
+sentences:
+  - "Of course — roll a d20 and add your wisdom modifier."
+notes: |-
+  Hand-authored for TB6 plumbing bring-up; no live provider was hit. The
+  sentence is the canonical Butler reply to the hello-test prompt
+  ("Glyphoxa, roll a perception check for me.") and pairs with
+  stt-hello-test.yaml on the input side. Update on first -tags=record run
+  against a real TTS adapter.

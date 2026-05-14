@@ -50,6 +50,25 @@ type STTFinal struct {
 // EventName implements [Event].
 func (STTFinal) EventName() string { return "stt.final" }
 
+// TTSInvoked marks the dispatch of one sentence to the TTS stage.
+//
+// Per ADR-0021's TTS cassette policy the observable contract for TTS is "the
+// provider was invoked with sentence N" — synthesized audio is not fed back
+// to tests. The orchestrator publishes this event once the underlying
+// [tts.Synthesizer] has accepted the sentence (Synthesize returned without
+// error); whether audio chunks subsequently arrived is not observable here.
+//
+// Index is 0-based within the current turn and increments per successful
+// dispatch on the same stage.
+type TTSInvoked struct {
+	At       time.Time
+	Sentence string
+	Index    int
+}
+
+// EventName implements [Event].
+func (TTSInvoked) EventName() string { return "tts.invoked" }
+
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
 //

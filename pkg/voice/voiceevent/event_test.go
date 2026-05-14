@@ -32,6 +32,15 @@ func TestSTTFinal_EventName(t *testing.T) {
 	}
 }
 
+func TestTTSInvoked_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := TTSInvoked{}.EventName()
+	if got != "tts.invoked" {
+		t.Errorf("EventName = %q, want %q", got, "tts.invoked")
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 
