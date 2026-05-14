@@ -1,0 +1,16 @@
+# Cassette for TB5 — STT replay of the hello-test clip, per ADR-0021.
+#
+# audio_sha256 is the sha256 of the little-endian int16 PCM sample stream
+# the recognizer is fed; computed by voicecassette.HashFrames over the
+# 32 ms-framed hello-test clip (16 kHz, mono, 16-bit). A mismatch fails the
+# test and points at -tags=record.
+#
+# transcript is hand-authored from tests/voice-clips/hello-test/meta.yaml's
+# script. Re-record with a live STT provider (-tags=record) once a Deepgram
+# or whisper.cpp adapter ships.
+name: stt-hello-test
+audio_sha256: e1767e868f6c1997f297a4524afab77cd9398692a536bd6a5b385308c0d37ba2
+transcript: "Glyphoxa, roll a perception check for me."
+notes: |-
+  Hand-authored for TB5 plumbing bring-up; no live provider was hit. Update
+  on first -tags=record run against a real STT adapter.

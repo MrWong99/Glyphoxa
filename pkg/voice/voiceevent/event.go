@@ -39,6 +39,17 @@ type VADSpeechEnd struct {
 // EventName implements [Event].
 func (VADSpeechEnd) EventName() string { return "vad.speech_end" }
 
+// STTFinal is an authoritative transcript for one completed utterance, as
+// committed by the STT provider. Per ADR-0021 the same event is emitted on
+// the cassette-replay and live paths; the orchestrator does not distinguish.
+type STTFinal struct {
+	At   time.Time
+	Text string
+}
+
+// EventName implements [Event].
+func (STTFinal) EventName() string { return "stt.final" }
+
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
 //

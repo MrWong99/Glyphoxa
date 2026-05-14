@@ -23,6 +23,15 @@ func TestVADSpeechEnd_EventName(t *testing.T) {
 	}
 }
 
+func TestSTTFinal_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := STTFinal{}.EventName()
+	if got != "stt.final" {
+		t.Errorf("EventName = %q, want %q", got, "stt.final")
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 
