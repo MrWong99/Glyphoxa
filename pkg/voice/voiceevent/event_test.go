@@ -32,6 +32,15 @@ func TestSTTFinal_EventName(t *testing.T) {
 	}
 }
 
+func TestAddressRouted_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := AddressRouted{}.EventName()
+	if got != "address.routed" {
+		t.Errorf("EventName = %q, want %q", got, "address.routed")
+	}
+}
+
 func TestTTSInvoked_EventName(t *testing.T) {
 	t.Parallel()
 

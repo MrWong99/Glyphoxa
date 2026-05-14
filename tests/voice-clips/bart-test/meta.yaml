@@ -1,0 +1,36 @@
+# meta.yaml is pure documentation per ADR-0020. Assertions live in Go tests.
+clip: bart-test
+duration_seconds: 2.480
+sample_rate_hz: 16000
+channels: 1
+bits_per_sample: 16
+encoding: pcm_s16le
+
+source:
+  provider: elevenlabs
+  model_id: eleven_v3
+  voice_name: Mark
+  voice_id: UgBBYS2sOqTuMpoF3BR0
+  output_format: pcm_16000
+  generated: 2026-05-15
+
+script: |
+  [curious] Bart, [pause] what's the special tonight?
+
+intent: |
+  Single-utterance fixture for the TB8 address-detection tracer
+  bullet. A GM addresses the Character NPC "Bart" by name — the
+  Address Detection router (CONTEXT.md) must select the matching
+  Character NPC Agent rather than the default Butler. Pairs with
+  hello-test (no NPC named → routes to Butler) on the TB7 side.
+
+  The [pause] audio tag introduces a short silence after the
+  vocative, which is useful for VAD experiments but not load-bearing
+  for TB8 itself.
+
+expected_outcome: |
+  Once an STT cassette transcribes this clip to a string containing
+  "Bart" (whole-word, case-insensitive), the AddressDetector stage
+  routes the utterance to the Character NPC Agent registered under
+  the name "Bart" and publishes a voiceevent.AddressRouted with
+  Target.AgentRole == "character" and Target.Name == "Bart".

@@ -50,6 +50,42 @@ type STTFinal struct {
 // EventName implements [Event].
 func (STTFinal) EventName() string { return "stt.final" }
 
+// AddressTarget identifies the Agent the address detector selected for one
+// utterance — the Tenant's Butler or one of the Campaign's Character NPCs
+// per CONTEXT.md ("Address Detection", "Agent Role").
+//
+// AgentID is the stable identifier downstream stages (Hot Context assembly,
+// Persona injection, LLM dispatch) use to look up the Agent record. The
+// well-known value "butler" is reserved for the Butler default route;
+// Character NPCs carry their Agent record's primary key. Name is the
+// human-readable display name ("Butler", "Bart") — preserved on the wire
+// for SSE consumers and test diagnostics, but not load-bearing for routing.
+type AddressTarget struct {
+	AgentID   string
+	AgentRole string // "butler" or "character"
+	Name      string
+}
+
+// AddressRouted marks the routing decision for one [STTFinal] utterance.
+//
+// Per CONTEXT.md the address detector picks exactly one Agent per utterance:
+// a Character NPC if the speaker named one, otherwise the Butler. The
+// algorithm choice (regex / LLM judge / two-stage / v1 cherry-pick) is
+// Q13.4-open in DESIGN.md; this event pins only the resulting decision so
+// downstream stages can consume it without depending on the algorithm.
+//
+// Text carries the utterance text the detector was asked to route, so
+// downstream consumers (Hot Context, SSE relay) do not need to re-correlate
+// against the originating STTFinal.
+type AddressRouted struct {
+	At     time.Time
+	Text   string
+	Target AddressTarget
+}
+
+// EventName implements [Event].
+func (AddressRouted) EventName() string { return "address.routed" }
+
 // TTSInvoked marks the dispatch of one sentence to the TTS stage.
 //
 // Per ADR-0021's TTS cassette policy the observable contract for TTS is "the

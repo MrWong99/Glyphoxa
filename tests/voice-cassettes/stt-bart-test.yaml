@@ -1,0 +1,17 @@
+# Cassette for TB8 — STT replay of the bart-test clip, per ADR-0021.
+#
+# audio_sha256 is the sha256 of the little-endian int16 PCM sample stream
+# the recognizer is fed; computed by voicecassette.HashFrames over the
+# 32 ms-framed bart-test clip (16 kHz, mono, 16-bit). A mismatch fails the
+# test and points at -tags=record.
+#
+# transcript is hand-authored from tests/voice-clips/bart-test/meta.yaml's
+# script. Re-record with a live STT provider (-tags=record) once a Deepgram
+# or whisper.cpp adapter ships.
+audio_sha256: c49e6cc75851d37e8a1749ee6e420205f3839069c068c60d2dadb824106ae283
+transcript: "Bart, what's the special tonight?"
+notes: |-
+  Hand-authored for TB8 plumbing bring-up; no live STT provider was hit
+  (the audio was generated via ElevenLabs Mark/eleven_v3 to give the
+  address detector something to match "Bart" against). Update on first
+  -tags=record run against a real STT adapter.
