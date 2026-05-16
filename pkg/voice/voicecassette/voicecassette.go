@@ -8,13 +8,14 @@
 // pointer to re-record under `-tags=record`.
 //
 // The v1.0 plumbing covers STT — see [STTRecognizer] — and TTS — see
-// [TTSSynthesizer]. The shape extends to LLM cassettes later per ADR-0021's
-// per-vendor policy.
+// [TTSSynthesizer] (replay) and TTSRecorder (record). The shape extends to
+// LLM cassettes later per ADR-0021's per-vendor policy.
 //
-// The -tags=record path is forward-looking: it lands with the first real
-// provider adapter. Until then cassettes
-// are hand-authored — the mismatch error still points at -tags=record so
-// the workflow is wired in advance.
+// The TTS LoadTTS entry point has two build-tag-gated variants: the default
+// (-tags absent) returns a replay-only [TTSSynthesizer]; -tags=record returns
+// a recorder that forwards to a live [elevenlabs.Client], captures the
+// dispatched sentences, and rewrites the on-disk cassette at test cleanup.
+// Run `ELEVENLABS_API_KEY=… go test -tags=record ./...` to refresh.
 package voicecassette
 
 import (
@@ -137,9 +138,11 @@ type TTSSynthesizer struct {
 	nextIndex int
 }
 
-// LoadTTS reads tests/voice-cassettes/<name>.yaml and returns a synthesizer
-// that replays it. Missing, malformed, or empty cassettes fail the test.
-func LoadTTS(t *testing.T, name string) *TTSSynthesizer {
+// loadTTSCassetteForReplay reads tests/voice-cassettes/<name>.yaml and
+// returns the decoded cassette. Failure modes (missing file, malformed YAML,
+// empty sentences list) all fail the test — replay mode cannot proceed
+// without a complete fixture.
+func loadTTSCassetteForReplay(t *testing.T, name string) TTSCassette {
 	t.Helper()
 	path := filepath.Join(cassettesDir(), name+".yaml")
 	data, err := os.ReadFile(path)
@@ -153,7 +156,29 @@ func LoadTTS(t *testing.T, name string) *TTSSynthesizer {
 	if len(c.Sentences) == 0 {
 		t.Fatalf("voicecassette.LoadTTS(%q): cassette has empty sentences list", name)
 	}
-	return &TTSSynthesizer{name: name, cassette: c}
+	return c
+}
+
+// loadTTSCassetteIfExists reads tests/voice-cassettes/<name>.yaml when present
+// and returns its decoded form alongside ok=true; if the file does not exist
+// it returns ok=false (record mode may be writing a fresh cassette). Malformed
+// existing cassettes still fail the test so a corrupted file is never silently
+// overwritten.
+func loadTTSCassetteIfExists(t *testing.T, name string) (TTSCassette, bool) {
+	t.Helper()
+	path := filepath.Join(cassettesDir(), name+".yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return TTSCassette{}, false
+		}
+		t.Fatalf("voicecassette.LoadTTS(%q): %v", name, err)
+	}
+	var c TTSCassette
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		t.Fatalf("voicecassette.LoadTTS(%q): unmarshal: %v", name, err)
+	}
+	return c, true
 }
 
 // Synthesize implements [tts.Synthesizer]. Returns a closed empty audio
