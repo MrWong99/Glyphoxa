@@ -60,9 +60,16 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-          cache: false # the lint action manages its own cache
+          cache: true
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      # Install golangci-lint v2 from source rather than via the official
+      # action: the action's v6 release pins golangci-lint v1, which can't
+      # parse the v2 config in .golangci.yml and refuses to run against
+      # Go 1.26 modules. Building from source under the same Go toolchain
+      # used for the project sidesteps both problems and keeps the lint
+      # binary's "built with" version aligned with the project target.
+      - name: Install golangci-lint v2
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+
+      - name: Run golangci-lint
+        run: golangci-lint run ./...
