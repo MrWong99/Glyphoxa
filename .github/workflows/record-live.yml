@@ -8,7 +8,7 @@ name: record-live
 # wants to re-record cassettes from a feature branch.
 on:
   schedule:
-    - cron: "0 6 * * *" # 06:00 UTC — outside European working hours.
+    - cron: "0 6 * * 1" # Monday 06:00 UTC (08:00 CEST / 07:00 CET).
   workflow_dispatch:
     inputs:
       ref:
