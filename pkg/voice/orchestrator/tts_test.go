@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
@@ -30,7 +29,7 @@ func TestTTS_HelloTest_DispatchesSentence(t *testing.T) {
 	stage := orchestrator.NewTTS(h.Bus, synthesizer)
 
 	const sentence = "Of course — roll a d20 and add your wisdom modifier."
-	voice := tts.Voice{ProviderID: "elevenlabs", VoiceID: "butler-v1"}
+	voice := voicetest.LiveElevenLabsVoice()
 	if err := stage.Dispatch(context.Background(), sentence, voice); err != nil {
 		t.Fatalf("stage.Dispatch: %v", err)
 	}

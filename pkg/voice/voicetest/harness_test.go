@@ -87,4 +87,3 @@ func TestHarness_AssertOrder_PassesOnSubsequence(t *testing.T) {
 		voicetest.MatchType[voiceevent.VADSpeechEnd](),
 	)
 }
-

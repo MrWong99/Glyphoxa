@@ -1,0 +1,70 @@
+name: record-live
+
+# Nightly smoke test of the -tags=record path against the real ElevenLabs API,
+# per ADR-0021's "live (nightly)" cadence. Catches vendor drift between
+# cassette refreshes — voice removed, schema change, eleven_v3 deprecated, etc.
+#
+# Also runnable on demand via the Actions UI ("Run workflow") when a reviewer
+# wants to re-record cassettes from a feature branch.
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC — outside European working hours.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test against"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: live record + replay
+    runs-on: ubuntu-latest
+    # Belt-and-braces: skip silently on forks that don't have the secret
+    # configured. Avoids surfacing as a failed run on every PR sync from a
+    # fork. The actual key gate happens at job start; this just keeps the
+    # noise level low.
+    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Cache ONNX runtime
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/glyphoxa/onnxruntime
+          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
+
+      # Live record run — drives the real ElevenLabs API and rewrites the
+      # cassette in-place. Cassette diff is not committed back; this job
+      # verifies the workflow still works end-to-end.
+      - name: Record TTS cassette against live ElevenLabs API
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+        run: |
+          if [ -z "$ELEVENLABS_API_KEY" ]; then
+            echo "ELEVENLABS_API_KEY secret is not set — add it under repo Settings → Secrets and variables → Actions." >&2
+            exit 1
+          fi
+          go test -tags=record -run='^TestTTS_HelloTest_DispatchesSentence$' ./pkg/voice/orchestrator/
+
+      # Confirm the rewritten cassette replays clean — guards against the
+      # recorder writing a cassette the replay path can't read.
+      - name: Replay rewritten cassette
+        run: go test -run='^TestTTS_HelloTest_DispatchesSentence$' ./pkg/voice/orchestrator/
+
+      # Surface the cassette diff in the run log so a human can spot
+      # unexpected drift (sentence changed, schema shifted, etc.).
+      - name: Show cassette diff
+        if: always()
+        run: git diff --stat tests/voice-cassettes/ && git diff tests/voice-cassettes/
