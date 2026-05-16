@@ -18,6 +18,6 @@ import (
 // API, rebuild with `-tags=record` — see tts_record.go.
 func LoadTTS(t *testing.T, name string) tts.Synthesizer {
 	t.Helper()
-	c := loadTTSCassetteForReplay(t, name)
+	c, _ := loadTTSCassetteFromDisk(t, name, true)
 	return &TTSSynthesizer{name: name, cassette: c}
 }

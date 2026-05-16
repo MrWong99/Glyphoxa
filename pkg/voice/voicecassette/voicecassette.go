@@ -138,25 +138,34 @@ type TTSSynthesizer struct {
 	nextIndex int
 }
 
-// loadTTSCassetteForReplay reads tests/voice-cassettes/<name>.yaml and
-// returns the decoded cassette. Failure modes (missing file, malformed YAML,
-// empty sentences list) all fail the test — replay mode cannot proceed
-// without a complete fixture.
-func loadTTSCassetteForReplay(t *testing.T, name string) TTSCassette {
+// loadTTSCassetteFromDisk reads tests/voice-cassettes/<name>.yaml and returns
+// the decoded cassette. When mustExist is true (replay mode) every failure
+// path — missing file, malformed YAML, empty sentences list — is fatal. When
+// mustExist is false (record mode), a missing file yields (zero, false)
+// because the recorder will write a fresh cassette; malformed existing files
+// still fail so a corrupted fixture is never silently overwritten.
+//
+// One function instead of two so neither build configuration (default replay
+// vs -tags=record) sees an unused helper — only one of [LoadTTS]'s build-tag
+// variants is compiled at a time.
+func loadTTSCassetteFromDisk(t *testing.T, name string, mustExist bool) (TTSCassette, bool) {
 	t.Helper()
 	path := filepath.Join(cassettesDir(), name+".yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !mustExist && os.IsNotExist(err) {
+			return TTSCassette{}, false
+		}
 		t.Fatalf("voicecassette.LoadTTS(%q): %v", name, err)
 	}
 	var c TTSCassette
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		t.Fatalf("voicecassette.LoadTTS(%q): unmarshal: %v", name, err)
 	}
-	if len(c.Sentences) == 0 {
+	if mustExist && len(c.Sentences) == 0 {
 		t.Fatalf("voicecassette.LoadTTS(%q): cassette has empty sentences list", name)
 	}
-	return c
+	return c, true
 }
 
 // Synthesize implements [tts.Synthesizer]. Returns a closed empty audio
