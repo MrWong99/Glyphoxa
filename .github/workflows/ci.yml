@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same PR / branch so we don't burn minutes on
+# stale commits.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build + vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # pkg/voice/vad/silero downloads libonnxruntime.so on first use and
+      # extracts it under $XDG_CACHE_HOME/glyphoxa/onnxruntime/<version>.
+      # Caching saves ~30 MB and the GitHub-runner → upstream round-trip on
+      # every run. Keyed on the silero runtime.go file so a version bump
+      # invalidates automatically.
+      - name: Cache ONNX runtime
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/glyphoxa/onnxruntime
+          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet (default)
+        run: go vet ./...
+
+      - name: Vet (record tag)
+        run: go vet -tags=record ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false # the lint action manages its own cache
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
