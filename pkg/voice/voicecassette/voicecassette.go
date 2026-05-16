@@ -159,28 +159,6 @@ func loadTTSCassetteForReplay(t *testing.T, name string) TTSCassette {
 	return c
 }
 
-// loadTTSCassetteIfExists reads tests/voice-cassettes/<name>.yaml when present
-// and returns its decoded form alongside ok=true; if the file does not exist
-// it returns ok=false (record mode may be writing a fresh cassette). Malformed
-// existing cassettes still fail the test so a corrupted file is never silently
-// overwritten.
-func loadTTSCassetteIfExists(t *testing.T, name string) (TTSCassette, bool) {
-	t.Helper()
-	path := filepath.Join(cassettesDir(), name+".yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return TTSCassette{}, false
-		}
-		t.Fatalf("voicecassette.LoadTTS(%q): %v", name, err)
-	}
-	var c TTSCassette
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		t.Fatalf("voicecassette.LoadTTS(%q): unmarshal: %v", name, err)
-	}
-	return c, true
-}
-
 // Synthesize implements [tts.Synthesizer]. Returns a closed empty audio
 // channel on sentence match; otherwise an error that names both sentences so
 // the diff is obvious in test output.

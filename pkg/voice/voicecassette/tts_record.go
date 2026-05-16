@@ -15,6 +15,30 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// loadTTSCassetteIfExists reads tests/voice-cassettes/<name>.yaml when present
+// and returns its decoded form alongside ok=true; if the file does not exist
+// it returns ok=false (record mode may be writing a fresh cassette). Malformed
+// existing cassettes still fail the test so a corrupted file is never silently
+// overwritten. Lives in tts_record.go because only [LoadTTS] in record mode
+// needs the soft-on-missing semantic — the replay path uses
+// [loadTTSCassetteForReplay] which fails hard.
+func loadTTSCassetteIfExists(t *testing.T, name string) (TTSCassette, bool) {
+	t.Helper()
+	path := filepath.Join(cassettesDir(), name+".yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return TTSCassette{}, false
+		}
+		t.Fatalf("voicecassette.LoadTTS(%q): %v", name, err)
+	}
+	var c TTSCassette
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		t.Fatalf("voicecassette.LoadTTS(%q): unmarshal: %v", name, err)
+	}
+	return c, true
+}
+
 // LoadTTS in -tags=record builds returns a [TTSRecorder] that proxies every
 // Synthesize call to a live ElevenLabs eleven_v3 client, captures the
 // dispatched sentence, and rewrites tests/voice-cassettes/<name>.yaml at
