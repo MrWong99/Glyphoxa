@@ -34,4 +34,3 @@ func TestHashFrames_StableAcrossFraming(t *testing.T) {
 		t.Errorf("hash differs across reframings:\n  32ms x1: %s\n  16ms x2: %s", a, b)
 	}
 }
-
