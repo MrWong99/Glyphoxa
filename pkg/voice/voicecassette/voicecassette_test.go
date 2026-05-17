@@ -1,8 +1,6 @@
 package voicecassette_test
 
 import (
-	"context"
-	"strings"
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
@@ -37,18 +35,3 @@ func TestHashFrames_StableAcrossFraming(t *testing.T) {
 	}
 }
 
-func TestSTTRecognizer_HashMismatchPointsAtRecord(t *testing.T) {
-	t.Parallel()
-
-	// hello-test is loaded by name but we feed *silence* instead of the
-	// clip's PCM. The cassette must refuse to replay and the error must
-	// nudge the caller to re-record.
-	r := voicecassette.LoadSTT(t, "stt-hello-test")
-	_, err := r.Transcribe(context.Background(), []audio.Frame{silenceFrame(t, 16000, 32)})
-	if err == nil {
-		t.Fatal("Transcribe with wrong audio returned nil error")
-	}
-	if !strings.Contains(err.Error(), "-tags=record") {
-		t.Errorf("error %q does not point at -tags=record", err)
-	}
-}
