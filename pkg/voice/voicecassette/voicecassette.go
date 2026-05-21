@@ -70,23 +70,35 @@ type STTRecognizer struct {
 	cassette STTCassette
 }
 
-// LoadSTT reads tests/voice-cassettes/<name>.yaml and returns a recognizer
-// that replays it. Missing or malformed cassettes fail the test.
-func LoadSTT(t *testing.T, name string) *STTRecognizer {
+// loadSTTCassetteFromDisk reads tests/voice-cassettes/<name>.yaml and
+// returns the decoded cassette. When mustExist is true (replay mode) every
+// failure path — missing file, malformed YAML, empty audio_sha256 — is
+// fatal. When mustExist is false (record mode), a missing file yields
+// (zero, false) because the recorder will write a fresh cassette;
+// malformed existing files still fail so a corrupted fixture is never
+// silently overwritten.
+//
+// One function instead of two so neither build configuration (default
+// replay vs -tags=record) sees an unused helper — only one of LoadSTT's
+// build-tag variants is compiled at a time.
+func loadSTTCassetteFromDisk(t *testing.T, name string, mustExist bool) (STTCassette, bool) {
 	t.Helper()
 	path := filepath.Join(cassettesDir(), name+".yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !mustExist && os.IsNotExist(err) {
+			return STTCassette{}, false
+		}
 		t.Fatalf("voicecassette.LoadSTT(%q): %v", name, err)
 	}
 	var c STTCassette
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		t.Fatalf("voicecassette.LoadSTT(%q): unmarshal: %v", name, err)
 	}
-	if c.AudioSHA256 == "" {
+	if mustExist && c.AudioSHA256 == "" {
 		t.Fatalf("voicecassette.LoadSTT(%q): cassette has empty audio_sha256", name)
 	}
-	return &STTRecognizer{name: name, cassette: c}
+	return c, true
 }
 
 // Transcribe implements [stt.Recognizer]. Returns the pinned transcript on
