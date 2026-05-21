@@ -30,9 +30,13 @@ func (s stubRecognizer) Transcribe(context.Context, []audio.Frame) (stt.Transcri
 // [voiceevent.STTFinal] (ADR-0020).
 //
 // The cassette under tests/voice-cassettes/stt-hello-test.yaml pins both the
-// audio fingerprint and the expected transcript text. Re-recording will
-// happen under `-tags=record` once a real STT provider adapter lands; for
-// now the cassette is the authoritative expectation.
+// audio fingerprint and the transcript text; re-recording happens under
+// `-tags=record` against the live ElevenLabs scribe_v2 adapter (ADR-0021).
+// The assertion compares the bus event against the clip's known utterance
+// after normalization (see [voicetest.NormalizeTranscript]) so it pins the
+// transcribed words while tolerating provider-specific casing, spacing, and
+// punctuation — scribe_v2 drops this utterance's trailing period, which an
+// exact-match assertion would (and did) flag as a spurious failure.
 func TestSTT_HelloTest_EmitsFinal(t *testing.T) {
 	h := voicetest.New(t)
 
@@ -51,10 +55,10 @@ func TestSTT_HelloTest_EmitsFinal(t *testing.T) {
 		t.Fatalf("stage.Transcribe: %v", err)
 	}
 
-	const want = "Glyphoxa, roll a perception check for me."
+	want := voicetest.NormalizeTranscript(helloUtterance)
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.STTFinal) bool { return e.Text == want },
-		"stt.final with text "+want,
+		func(e voiceevent.STTFinal) bool { return voicetest.NormalizeTranscript(e.Text) == want },
+		"stt.final matching utterance "+helloUtterance,
 	)
 }
 

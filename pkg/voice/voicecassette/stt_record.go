@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
@@ -22,9 +21,10 @@ import (
 // at test cleanup with the captured (audio_sha256, transcript) pair. The
 // ELEVENLABS_API_KEY environment variable supplies credentials.
 //
-// Any existing cassette's Notes field is preserved (with a "Re-recorded
-// against ElevenLabs scribe_v2 on <date>" provenance line appended) so
-// reviewer-facing context survives the refresh.
+// Any existing cassette's Notes field and leading header comments are
+// preserved (with an idempotent dated "Re-recorded against ElevenLabs
+// scribe_v2 on <date>" provenance line appended) so reviewer-facing context
+// survives the refresh.
 func LoadSTT(t *testing.T, name string) stt.Recognizer {
 	t.Helper()
 	existing, _ := loadSTTCassetteFromDisk(t, name, false)
@@ -74,11 +74,13 @@ func (r *STTRecorder) Transcribe(ctx context.Context, frames []audio.Frame) (stt
 	return tr, nil
 }
 
-// write serialises the captured (hash, transcript) pair plus preserved
-// Notes + a fresh provenance line to tests/voice-cassettes/<name>.yaml. A
-// no-op if Transcribe was never called — recording a test that never
-// invoked the recognizer would clobber the existing fixture with an empty
-// audio_sha256.
+// write serialises the captured (hash, transcript) pair to
+// tests/voice-cassettes/<name>.yaml, preserving the existing Notes (with an
+// idempotent dated provenance line, see appendProvenance) and re-prepending
+// the hand-authored header comment block that yaml.Marshal drops (see
+// leadingComment). A no-op if Transcribe was never called — recording a test
+// that never invoked the recognizer would clobber the existing fixture with
+// an empty audio_sha256.
 func (r *STTRecorder) write() error {
 	if !r.captured {
 		return nil
@@ -86,19 +88,13 @@ func (r *STTRecorder) write() error {
 	out := STTCassette{
 		AudioSHA256: r.hash,
 		Transcript:  r.transcript,
-		Notes:       r.existing.Notes,
+		Notes:       appendProvenance(r.existing.Notes, "scribe_v2"),
 	}
-	stamp := time.Now().UTC().Format("2006-01-02")
-	provenance := fmt.Sprintf("Re-recorded against ElevenLabs scribe_v2 on %s.", stamp)
-	if out.Notes == "" {
-		out.Notes = provenance
-	} else {
-		out.Notes = out.Notes + "\n\n" + provenance
-	}
-	data, err := yaml.Marshal(out)
+	body, err := yaml.Marshal(out)
 	if err != nil {
 		return fmt.Errorf("marshal cassette: %w", err)
 	}
+	data := append([]byte(leadingComment(r.name)), body...)
 	path := filepath.Join(cassettesDir(), r.name+".yaml")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)

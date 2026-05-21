@@ -18,6 +18,16 @@ var (
 	bartTarget   = voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bart"}
 )
 
+// Canonical spoken text of each fixture clip — the meta.yaml script with its
+// audio tags removed. ADR-0020 keeps meta.yaml documentation-only, so the
+// ground truth lives here in Go. Transcript assertions compare against these
+// after [voicetest.NormalizeTranscript], so a re-recorded cassette only fails
+// when the transcribed words change, not when a provider tweaks punctuation.
+const (
+	helloUtterance = "Glyphoxa, roll a perception check for me."
+	bartUtterance  = "Bart, what's the special tonight?"
+)
+
 // transcribeClip wires the STT cassette for clipName through the orchestrator
 // STT stage attached to h.Bus. Used by TB7/TB8 to feed the bus a real
 // STTFinal — the surface the AddressDetector subscribes to — without
@@ -40,7 +50,7 @@ func transcribeClip(t *testing.T, h *voicetest.Harness, clipName, cassetteName s
 // TestAddressDetector_HelloTest_RoutesToButler is TB7: a GM utterance with
 // no Character NPC named must route to the Butler (CONTEXT.md "Address
 // Detection"). The hello-test clip's transcript ("Glyphoxa, roll a
-// perception check for me.") names the Butler — the detector still routes
+// perception check for me") names the Butler — the detector still routes
 // there because no Character NPC matched, not because it special-cased the
 // Butler's display Name.
 //
@@ -53,14 +63,14 @@ func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 
 	transcribeClip(t, h, "hello-test", "stt-hello-test")
 
-	const wantText = "Glyphoxa, roll a perception check for me."
+	want := voicetest.NormalizeTranscript(helloUtterance)
 	voicetest.AssertEvent(t, h,
 		func(e voiceevent.AddressRouted) bool {
-			return e.Text == wantText &&
+			return voicetest.NormalizeTranscript(e.Text) == want &&
 				e.Target.AgentRole == "butler" &&
 				e.Target.AgentID == butlerTarget.AgentID
 		},
-		"address.routed → Butler for utterance "+wantText,
+		"address.routed → Butler for utterance "+helloUtterance,
 	)
 }
 
@@ -76,14 +86,14 @@ func TestAddressDetector_BartTest_RoutesToCharacterNPC(t *testing.T) {
 
 	transcribeClip(t, h, "bart-test", "stt-bart-test")
 
-	const wantText = "Bart, what's the special tonight?"
+	want := voicetest.NormalizeTranscript(bartUtterance)
 	voicetest.AssertEvent(t, h,
 		func(e voiceevent.AddressRouted) bool {
-			return e.Text == wantText &&
+			return voicetest.NormalizeTranscript(e.Text) == want &&
 				e.Target.AgentRole == "character" &&
 				e.Target.AgentID == bartTarget.AgentID &&
 				e.Target.Name == bartTarget.Name
 		},
-		"address.routed → Bart (character) for utterance "+wantText,
+		"address.routed → Bart (character) for utterance "+bartUtterance,
 	)
 }
