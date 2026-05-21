@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -23,8 +22,9 @@ import (
 //
 // Per ADR-0021's TTS cassette policy only the dispatched sentences are
 // persisted; rendered audio is drained and discarded. Any existing cassette's
-// Notes field is preserved (with a "recorded against eleven_v3 on <date>"
-// provenance line appended) so reviewer-facing context survives the refresh.
+// Notes field and leading header comments are preserved (with an idempotent
+// dated "Re-recorded against ElevenLabs eleven_v3 on <date>" provenance line
+// appended) so reviewer-facing context survives the refresh.
 func LoadTTS(t *testing.T, name string) tts.Synthesizer {
 	t.Helper()
 	existing, _ := loadTTSCassetteFromDisk(t, name, false)
@@ -80,29 +80,25 @@ func (r *TTSRecorder) AudioMarkupPrompt(voice tts.Voice) string {
 	return r.client.AudioMarkupPrompt(voice)
 }
 
-// write serialises the captured sentences (plus preserved Notes + a fresh
-// provenance line) to tests/voice-cassettes/<name>.yaml. A no-op if
-// Synthesize was never called — recording a test that never dispatched a
-// sentence would clobber the existing fixture with an empty list.
+// write serialises the captured sentences to tests/voice-cassettes/<name>.yaml,
+// preserving the existing Notes (with an idempotent dated provenance line, see
+// appendProvenance) and re-prepending the hand-authored header comment block
+// that yaml.Marshal drops (see leadingComment). A no-op if Synthesize was
+// never called — recording a test that never dispatched a sentence would
+// clobber the existing fixture with an empty list.
 func (r *TTSRecorder) write() error {
 	if len(r.sentences) == 0 {
 		return nil
 	}
 	out := TTSCassette{
 		Sentences: r.sentences,
-		Notes:     r.existing.Notes,
+		Notes:     appendProvenance(r.existing.Notes, "eleven_v3"),
 	}
-	stamp := time.Now().UTC().Format("2006-01-02")
-	provenance := fmt.Sprintf("Re-recorded against ElevenLabs eleven_v3 on %s.", stamp)
-	if out.Notes == "" {
-		out.Notes = provenance
-	} else {
-		out.Notes = out.Notes + "\n\n" + provenance
-	}
-	data, err := yaml.Marshal(out)
+	body, err := yaml.Marshal(out)
 	if err != nil {
 		return fmt.Errorf("marshal cassette: %w", err)
 	}
+	data := append([]byte(leadingComment(r.name)), body...)
 	path := filepath.Join(cassettesDir(), r.name+".yaml")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)

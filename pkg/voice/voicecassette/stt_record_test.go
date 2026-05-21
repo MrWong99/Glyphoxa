@@ -97,6 +97,88 @@ func TestSTTRecorder_WriteOnCleanup(t *testing.T) {
 	}
 }
 
+// TestSTTRecorder_WritePreservesHeaderComment pins the comment-preservation
+// fix: yaml.Marshal drops comments, so a naive rewrite strips the
+// hand-authored header that explains what the cassette pins. write() must
+// re-prepend the existing file's leading comment block verbatim while still
+// refreshing the body with the captured values.
+func TestSTTRecorder_WritePreservesHeaderComment(t *testing.T) {
+	dir := t.TempDir()
+	orig := cassettesDir
+	cassettesDir = func() string { return dir }
+	t.Cleanup(func() { cassettesDir = orig })
+
+	name := "stt-headed-record"
+	header := "# Cassette for TBx — pins the headed clip.\n#\n# audio_sha256 fingerprints the PCM stream.\n"
+	seed := header + "audio_sha256: deadbeef\ntranscript: stale text\nnotes: prior note\n"
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed cassette: %v", err)
+	}
+
+	r := &STTRecorder{
+		name:       name,
+		hash:       "freshhash",
+		transcript: "fresh transcript",
+		captured:   true,
+		existing:   STTCassette{Notes: "prior note"},
+	}
+	if err := r.write(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, name+".yaml"))
+	if err != nil {
+		t.Fatalf("read written cassette: %v", err)
+	}
+	if !strings.HasPrefix(string(raw), header) {
+		t.Errorf("rewritten cassette dropped the header comment block; got:\n%s", raw)
+	}
+	var got STTCassette
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal written cassette: %v", err)
+	}
+	if got.AudioSHA256 != "freshhash" || got.Transcript != "fresh transcript" {
+		t.Errorf("body not refreshed: %+v", got)
+	}
+}
+
+// TestSTTRecorder_WriteProvenanceIdempotentSameDay pins the idempotency fix:
+// re-running -tags=record twice on the same date (the second run loads notes
+// the first run already stamped) must not accrete duplicate provenance lines.
+func TestSTTRecorder_WriteProvenanceIdempotentSameDay(t *testing.T) {
+	dir := t.TempDir()
+	orig := cassettesDir
+	cassettesDir = func() string { return dir }
+	t.Cleanup(func() { cassettesDir = orig })
+
+	name := "stt-idempotent-record"
+	// Notes as a prior same-day record would have left them: hand-authored
+	// text plus today's provenance stamp already appended.
+	existing := appendProvenance("hand-authored note", "scribe_v2")
+	r := &STTRecorder{
+		name:       name,
+		hash:       "h",
+		transcript: "tr",
+		captured:   true,
+		existing:   STTCassette{Notes: existing},
+	}
+	if err := r.write(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, name+".yaml"))
+	if err != nil {
+		t.Fatalf("read written cassette: %v", err)
+	}
+	var got STTCassette
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal written cassette: %v", err)
+	}
+	if n := strings.Count(got.Notes, "Re-recorded against ElevenLabs scribe_v2"); n != 1 {
+		t.Errorf("provenance stamp appears %d times, want 1; notes:\n%s", n, got.Notes)
+	}
+}
+
 // TestSTTRecorder_NoCallsNoWrite verifies the guard that prevents an empty
 // recording (test never invoked the recognizer) from clobbering the
 // existing fixture with an empty audio_sha256.

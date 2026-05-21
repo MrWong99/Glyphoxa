@@ -6,13 +6,14 @@
 # observable in cassette mode — see ADR-0021).
 #
 # A sentence mismatch or running past the end of this list fails the test and
-# points at -tags=record. Re-record with a live TTS provider (-tags=record)
-# once the ElevenLabs or OpenAI adapter ships.
+# points at -tags=record. Re-record against the live ElevenLabs eleven_v3
+# adapter with -tags=record to refresh it.
 sentences:
-  - "Of course — roll a d20 and add your wisdom modifier."
+    - Of course — roll a d20 and add your wisdom modifier.
 notes: |-
-  Hand-authored for TB6 plumbing bring-up; no live provider was hit. The
-  sentence is the canonical Butler reply to the hello-test prompt
-  ("Glyphoxa, roll a perception check for me.") and pairs with
-  stt-hello-test.yaml on the input side. Update on first -tags=record run
-  against a real TTS adapter.
+    Plumbing bring-up cassette for TB6 (ADR-0021). The sentence is the
+    canonical Butler reply to the hello-test prompt ("Glyphoxa, roll a
+    perception check for me") and pairs with stt-hello-test.yaml on the input
+    side.
+
+    Re-recorded against ElevenLabs eleven_v3 on 2026-05-21.
