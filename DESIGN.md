@@ -2,7 +2,7 @@
 
 Resume-from-here doc for the interactive design grilling. Decisions are recorded as ADRs under [docs/adr/](docs/adr/); domain language lives in [CONTEXT.md](CONTEXT.md).
 
-**Next:** Q13.4 — Address detection algorithm.
+**Next:** Q13.5 — Barge-in mechanic specifics.
 
 ## Decisions ledger
 
@@ -31,11 +31,12 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0021](docs/adr/0021-cassette-based-llm-determinism.md) | Cassette-based LLM determinism with tiered live runs | Q13.3 |
 | [0022](docs/adr/0022-tts-provider-interface.md) | TTS provider interface: small core, opt-in capabilities, opaque markup | TTS interlude (Q1–Q9) |
 | [0023](docs/adr/0023-tts-provider-matrix-elevenlabs-openai.md) | TTS provider matrix v1.0: ElevenLabs + OpenAI (amends ADR-0004) | TTS interlude |
+| [0024](docs/adr/0024-address-detection-deterministic-fuzzy-chain.md) | Address Detection: deterministic fuzzy chain on raw STT | Q13.4 |
+| [0025](docs/adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble turns: speculative lead + cross-talk reaction | Q13.4 |
 
 ## Open questions
 
-- **Q13.4 — Address detection algorithm.** Compare pure name matching (regex), LLM judge ("who is being addressed?"), two-stage (cheap heuristic + LLM fallback), and v1's existing approach (cherry-pick eligible per ADR-0007 if it's a tightly-scoped kernel).
-- **Q13.5 — Barge-in mechanic specifics.** VAD threshold for trigger (ms voiced energy from a participant during NPC TTS); interaction with the sentence-commit point in ADR-0012; recovery (does cancelled NPC re-attempt or stay silent?); soft-overlap edge case ("mhm" non-barge-in).
+- **Q13.5 — Barge-in mechanic specifics.** VAD threshold for trigger (ms voiced energy from a participant during NPC TTS); interaction with the sentence-commit point in ADR-0012; recovery (does cancelled NPC re-attempt or stay silent?); soft-overlap edge case ("mhm" non-barge-in); **and whether a human barge-in cancels a queued Ensemble-Turn Reaction (ADR-0025) or only the current Lead.**
 - **Q14 — MCP tool framework.** Built-in tool list, external tool support, sandboxing.
 - **Q15 — Migration / DB tooling.** Postgres migration framework, schema versioning.
 - **Q16 — Observability.** Metrics, traces, log structure (defer the v1 OTel sprawl?).

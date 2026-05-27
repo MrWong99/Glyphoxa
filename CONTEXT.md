@@ -23,6 +23,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Active Campaign** | The Campaign a GM is currently operating on; resolved automatically from a Voice Session binding when present, otherwise from the GM's profile. | Selected campaign, Current campaign |
 | **NPC** | A non-player character in the Campaign world, modeled as a Knowledge Graph Node and optionally as a Character NPC Agent. | Character (overloaded — Character is reserved for PCs) |
 | **System** | The TTRPG ruleset of a Campaign (D&D 5e, Pathfinder 2e, Call of Cthulhu, etc.); consumed by Tools that need rules context. | Ruleset, Game system |
+| **Campaign Language** | The natural language a Campaign is played in; selects the phonetic scheme used by Address Detection's name matching and the language hint for STT/TTS. | Locale, Lang |
 
 ## Knowledge Graph
 
@@ -43,7 +44,12 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Persona** | Markdown description of an Agent's personality, backstory, and speech style; injected into LLM prompts. | Personality, Character sheet, Profile |
 | **Voice** | The TTS Provider + voice-id configuration that produces an Agent's audio output. | Voice profile, TTS config |
 | **Tool Grant** | An explicit permission for an Agent to invoke a named MCP Tool, with optional per-grant configuration. | Capability, Permission |
-| **Address Detection** | The router logic deciding which Agent (if any) is the target of a given Transcript utterance. | Routing, Targeting |
+| **Address Detection** | The deterministic chain deciding which Agent(s), if any, a Transcript utterance targets: fuzzy name/alias match → last-speaker → single-NPC fallback → no target. Returns a set; multiple targets trigger an Ensemble Turn. | Routing, Targeting |
+| **Address-Only** | An Agent reachable only by explicit name/alias, excluded from last-speaker and single-NPC fallback. The Butler is Address-Only by default; Character NPCs are not. | Wake-word-only, Explicit-only |
+| **Ensemble Turn** | The turn taken when one utterance addresses two or more Agents: they generate in parallel, the fastest (the Lead) speaks, and at most one other Agent reacts to it. | Group response, Multi-response |
+| **Lead** | In an Ensemble Turn, the Agent whose response text is ready first; it takes the floor and speaks before the Reaction. | Primary speaker, Winner |
+| **Cross-talk** | The Lead's delivered text fed to another addressed Agent so it can react. Distinct from Barge-in: the receiving Agent has not spoken yet, so nothing is interrupted. | Barge-in (reserved), Interruption |
+| **Reaction** | A follow-up turn an Agent generates in response to the Lead's Cross-talk in an Ensemble Turn; may be a short affirmation, a longer disagreement, or silence. | Follow-up, Reply |
 
 ## Voice & Discord
 
@@ -114,3 +120,4 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 - **"Worker"** is a v1 term for what v2 calls a **Voice Instance**. Do not use "worker" in v2 — it implies the gateway/worker split that was explicitly removed.
 - **"Role"** is overloaded between **Member Role** (`owner`/`admin`/`gm`) and **Agent Role** (`butler`/`character`). Always qualify.
 - **"Player role"** is *not* a Member Role — Players are not Tenant Members. Don't add `player` to the Member Role enum.
+- **"Barge-in" vs "Cross-talk"** — **Barge-in** is a *human* interrupting a speaking Agent (VAD-triggered; cancels the Agent's turn). **Cross-talk** is one Agent's already-delivered text being fed to another addressed Agent during an Ensemble Turn — the second Agent has not spoken yet, so nothing is interrupted. Never use "barge-in" for the Agent-to-Agent case, and never use "cross-talk" for a human interruption.
