@@ -18,15 +18,18 @@ Naming convention: `<stage>-<clip-or-scenario>.yaml`. STT cassettes are prefixed
 ## STT cassette schema
 
 ```yaml
-audio_sha256: <hex>          # required — sha256 of the PCM sample stream
-transcript: "<text>"         # required — pinned recognizer output
+segments:                    # required — ordered list, one entry per Transcribe call
+  - audio_sha256: <hex>      #   required — sha256 of that utterance's PCM stream
+    transcript: "<text>"     #   required — pinned recognizer output for it
 notes: |                     # optional — provenance for human reviewers
   Free-form: provider, model, recording date, hand-authored vs live, etc.
 ```
 
+`segments` is matched **positionally** against incoming `Transcribe` calls (mirroring the TTS cassette): call N must hash to `segments[N].audio_sha256`, and replays `segments[N].transcript`. A single-utterance scenario records one segment; a VAD-segmented clip that drives several `Transcribe` calls records one segment per utterance, in call order. A hash mismatch, or a call past the end of the recorded list, fails the test and points at `-tags=record`.
+
 `audio_sha256` is computed by `voicecassette.HashFrames` over the little-endian int16 PCM stream the recognizer is fed, in frame order. The hash is stable across reframings of the same underlying samples (32 ms × 1 vs 16 ms × 2 at 16 kHz produce the same hex), so a test that changes only its framing does not need to re-record.
 
-`transcript` is the authoritative text. Empty strings are allowed (see the empty-transcript contract on [orchestrator.STT.Transcribe](../../pkg/voice/orchestrator/stt.go)), but `audio_sha256` must always be present.
+`transcript` is the authoritative text for its segment. Empty strings are allowed (see the empty-transcript contract on [orchestrator.STT.Transcribe](../../pkg/voice/orchestrator/stt.go)), but every segment's `audio_sha256` must always be present.
 
 ## TTS cassette schema
 
@@ -45,6 +48,6 @@ The TTS cassette intentionally does not pin Voice, provider, or settings — the
 
 **Replay (default).** `go test ./...` reads cassettes from this directory; the cassette is the authoritative expectation. Sub-second, free, deterministic.
 
-**Re-record.** Per ADR-0021, `ELEVENLABS_API_KEY=… go test -tags=record ./pkg/voice/orchestrator/` re-records TTS cassettes against the live ElevenLabs `eleven_v3` adapter ([pkg/voice/tts/elevenlabs](../../pkg/voice/tts/elevenlabs/)). The recorder forwards each dispatched sentence to the live API, drains the rendered PCM (per the TTS-cassette-policy "sentences only" rule), and rewrites the `<name>.yaml` file at test cleanup with the captured ordered list — preserving the existing `notes` block and appending a "recorded against eleven_v3 on YYYY-MM-DD" provenance line. Run `go test ./...` afterwards to confirm the refreshed cassette replays clean. STT re-record still lands with its first real STT adapter; until then STT cassettes are hand-authored from the paired clip's `meta.yaml` script — fingerprint the clip with `voicecassette.HashFrames`, paste the transcript by hand, commit the result.
+**Re-record.** Per ADR-0021, `ELEVENLABS_API_KEY=… go test -tags=record ./pkg/voice/orchestrator/` re-records TTS cassettes against the live ElevenLabs `eleven_v3` adapter ([pkg/voice/tts/elevenlabs](../../pkg/voice/tts/elevenlabs/)). The recorder forwards each dispatched sentence to the live API, drains the rendered PCM (per the TTS-cassette-policy "sentences only" rule), and rewrites the `<name>.yaml` file at test cleanup with the captured ordered list — preserving the existing `notes` block and appending a "recorded against eleven_v3 on YYYY-MM-DD" provenance line. Run `go test ./...` afterwards to confirm the refreshed cassette replays clean. STT cassettes re-record the same way against the live ElevenLabs `scribe_v2` adapter ([pkg/voice/stt/elevenlabs](../../pkg/voice/stt/elevenlabs/)): each `Transcribe` call is forwarded to the live API and appended as the next ordered segment, and the `<name>.yaml` is rewritten at cleanup with the captured `segments` list — preserving the existing `notes` block and appending a "recorded against scribe_v2 on YYYY-MM-DD" provenance line.
 
 **Live (nightly).** `go test -tags=live` will hit real APIs against ~5–10 canonical cases to catch vendor drift between cassette refreshes. Forward-looking — lands once the live cron is wired.

@@ -1,0 +1,8 @@
+segments:
+    - audio_sha256: aa438fa909fd11351b862e083e3830b78838caafe21438e910cf565d950d225c
+      transcript: Hey everyone. So let's start our session for today
+    - audio_sha256: f0323df6e9d32ed38826746506f737e5fdef6804c34129629ffaaefb1c1c6638
+      transcript: Okay. Glyphox or Butler, can you s- give us a quick
+    - audio_sha256: a8278255e2d04ab1197884aacc507cda1816b7e6a26f6e76ed70bf40fb8d0d15
+      transcript: Intro, what happened last session and what did we do? Where did we leave the session? What's the current status?
+notes: Re-recorded against ElevenLabs scribe_v2 on 2026-05-27.

@@ -1,16 +1,21 @@
 # Cassette for TB5 — STT replay of the hello-test clip, per ADR-0021.
 #
-# audio_sha256 is the sha256 of the little-endian int16 PCM sample stream
-# the recognizer is fed; computed by voicecassette.HashFrames over the
-# 32 ms-framed hello-test clip (16 kHz, mono, 16-bit). A mismatch fails the
-# test and points at -tags=record.
+# segments is an ordered list of (audio_sha256, transcript) pairs, one per
+# Transcribe call. The hello-test clip is a single utterance, so one segment.
+# audio_sha256 is the sha256 of the little-endian int16 PCM sample stream the
+# recognizer is fed; computed by voicecassette.HashFrames over the 32 ms-framed
+# hello-test clip (16 kHz, mono, 16-bit). A mismatch fails the test and points
+# at -tags=record.
 #
 # transcript is recorded from the live ElevenLabs scribe_v2 adapter under
 # -tags=record (ADR-0021); re-run that to refresh it. scribe_v2 returns this
 # utterance without a trailing period.
-audio_sha256: e1767e868f6c1997f297a4524afab77cd9398692a536bd6a5b385308c0d37ba2
-transcript: Glyphoxa, roll a perception check for me
+segments:
+    - audio_sha256: e1767e868f6c1997f297a4524afab77cd9398692a536bd6a5b385308c0d37ba2
+      transcript: Glyphoxa, roll a perception check for me
 notes: |-
     Plumbing bring-up cassette for TB5 (ADR-0021).
 
     Re-recorded against ElevenLabs scribe_v2 on 2026-05-21.
+
+    Re-recorded against ElevenLabs scribe_v2 on 2026-05-27.

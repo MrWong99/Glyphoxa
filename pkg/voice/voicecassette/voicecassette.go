@@ -36,23 +36,40 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// STTCassette is the on-disk record of one STT request/response pair.
+// STTSegment is one (audio fingerprint, transcript) pair within an
+// [STTCassette] — the recognizer's output for a single utterance the STT
+// stage was fed in one Transcribe call.
 //
-// AudioSHA256 fingerprints the PCM samples the recognizer was fed — sha256
-// over the little-endian int16 stream, taken in frame order. A test that
-// feeds different audio produces a different hash and is told to re-record.
+// AudioSHA256 fingerprints that utterance's PCM samples — sha256 over the
+// little-endian int16 stream, taken in frame order (see [HashFrames]). A
+// call that feeds different audio produces a different hash and is told to
+// re-record.
+type STTSegment struct {
+	// AudioSHA256 is the hex-encoded sha256 of the PCM sample stream the
+	// recognizer is expected to see for this segment.
+	AudioSHA256 string `yaml:"audio_sha256"`
+
+	// Transcript is the authoritative text the recognizer would return for
+	// this segment's audio.
+	Transcript string `yaml:"transcript"`
+}
+
+// STTCassette is the on-disk record of an STT scenario: an ordered list of
+// request/response pairs, one [STTSegment] per Transcribe call.
+//
+// A single-utterance scenario (TB5/TB7/TB8) records exactly one segment; a
+// VAD-segmented clip that drives several Transcribe calls records one segment
+// per utterance, matched positionally on replay. This mirrors the TTS
+// cassette's positional contract (see [TTSCassette]) so a clip whose
+// segmentation changes is told to re-record rather than silently passing.
 //
 // The cassette's identity is its filename: LoadSTT(t, "stt-hello-test")
 // reads tests/voice-cassettes/stt-hello-test.yaml. There is no name field
 // on disk — one identity, one source of truth.
 type STTCassette struct {
-	// AudioSHA256 is the hex-encoded sha256 of the PCM sample stream the
-	// recognizer is expected to see.
-	AudioSHA256 string `yaml:"audio_sha256"`
-
-	// Transcript is the authoritative text the recognizer would return for
-	// this audio.
-	Transcript string `yaml:"transcript"`
+	// Segments is the ordered list of (fingerprint, transcript) pairs the
+	// recognizer is expected to be driven through, one per Transcribe call.
+	Segments []STTSegment `yaml:"segments"`
 
 	// Notes is free-form provenance (provider, model, recording date). Not
 	// load-bearing; survives round-trip for human reviewers.
@@ -61,13 +78,15 @@ type STTCassette struct {
 
 // STTRecognizer is a [stt.Recognizer] that replays a single [STTCassette].
 //
-// Each call to Transcribe re-hashes the incoming frames and compares against
-// the cassette's AudioSHA256; on mismatch the call returns an error pointing
-// the caller at the re-record workflow. On match it returns the cassette's
-// pinned transcript verbatim.
+// Calls to Transcribe are matched positionally against the cassette's ordered
+// segments: the Nth call re-hashes its incoming frames and compares against
+// Segments[N].AudioSHA256, returning that segment's pinned transcript on
+// match. A hash mismatch, or a call past the end of the recorded list,
+// returns an error pointing the caller at the re-record workflow.
 type STTRecognizer struct {
-	name     string
-	cassette STTCassette
+	name      string
+	cassette  STTCassette
+	nextIndex int
 }
 
 // loadSTTCassetteFromDisk reads tests/voice-cassettes/<name>.yaml and
@@ -95,24 +114,41 @@ func loadSTTCassetteFromDisk(t *testing.T, name string, mustExist bool) (STTCass
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		t.Fatalf("voicecassette.LoadSTT(%q): unmarshal: %v", name, err)
 	}
-	if mustExist && c.AudioSHA256 == "" {
-		t.Fatalf("voicecassette.LoadSTT(%q): cassette has empty audio_sha256", name)
+	if mustExist {
+		if len(c.Segments) == 0 {
+			t.Fatalf("voicecassette.LoadSTT(%q): cassette has no segments", name)
+		}
+		for i, seg := range c.Segments {
+			if seg.AudioSHA256 == "" {
+				t.Fatalf("voicecassette.LoadSTT(%q): segment %d has empty audio_sha256", name, i)
+			}
+		}
 	}
 	return c, true
 }
 
-// Transcribe implements [stt.Recognizer]. Returns the pinned transcript on
-// hash match; otherwise an error that names both hashes so the diff is
-// obvious in test output.
+// Transcribe implements [stt.Recognizer]. Matches the call positionally
+// against the cassette's ordered segments: returns the pinned transcript on
+// hash match, otherwise an error that names both hashes — or reports the
+// cassette exhausted when called more times than were recorded — so the diff
+// is obvious in test output.
 func (r *STTRecognizer) Transcribe(_ context.Context, frames []audio.Frame) (stt.Transcript, error) {
-	got := HashFrames(frames)
-	if got != r.cassette.AudioSHA256 {
+	if r.nextIndex >= len(r.cassette.Segments) {
 		return stt.Transcript{}, fmt.Errorf(
-			"voicecassette: audio hash mismatch for cassette %q (got %s, recorded %s); re-record with -tags=record",
-			r.name, got, r.cassette.AudioSHA256,
+			"voicecassette: STT cassette %q exhausted at index %d (%d segment(s) recorded); re-record with -tags=record",
+			r.name, r.nextIndex, len(r.cassette.Segments),
 		)
 	}
-	return stt.Transcript{Text: r.cassette.Transcript}, nil
+	seg := r.cassette.Segments[r.nextIndex]
+	got := HashFrames(frames)
+	if got != seg.AudioSHA256 {
+		return stt.Transcript{}, fmt.Errorf(
+			"voicecassette: audio hash mismatch for cassette %q at index %d (got %s, recorded %s); re-record with -tags=record",
+			r.name, r.nextIndex, got, seg.AudioSHA256,
+		)
+	}
+	r.nextIndex++
+	return stt.Transcript{Text: seg.Transcript}, nil
 }
 
 // TTSCassette is the on-disk record of one TTS-dispatch sequence.

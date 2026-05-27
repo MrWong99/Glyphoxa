@@ -83,11 +83,14 @@ func TestSTTRecorder_WriteOnCleanup(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal written cassette: %v", err)
 	}
-	if got.AudioSHA256 != wantHash {
-		t.Errorf("AudioSHA256 = %q, want %q", got.AudioSHA256, wantHash)
+	if len(got.Segments) != 1 {
+		t.Fatalf("Segments len = %d, want 1; cassette:\n%s", len(got.Segments), raw)
 	}
-	if got.Transcript != "live transcription" {
-		t.Errorf("Transcript = %q, want %q", got.Transcript, "live transcription")
+	if got.Segments[0].AudioSHA256 != wantHash {
+		t.Errorf("Segments[0].AudioSHA256 = %q, want %q", got.Segments[0].AudioSHA256, wantHash)
+	}
+	if got.Segments[0].Transcript != "live transcription" {
+		t.Errorf("Segments[0].Transcript = %q, want %q", got.Segments[0].Transcript, "live transcription")
 	}
 	if !strings.Contains(got.Notes, "preserved provenance") {
 		t.Errorf("Notes lost preserved content: %q", got.Notes)
@@ -116,11 +119,9 @@ func TestSTTRecorder_WritePreservesHeaderComment(t *testing.T) {
 	}
 
 	r := &STTRecorder{
-		name:       name,
-		hash:       "freshhash",
-		transcript: "fresh transcript",
-		captured:   true,
-		existing:   STTCassette{Notes: "prior note"},
+		name:     name,
+		segments: []STTSegment{{AudioSHA256: "freshhash", Transcript: "fresh transcript"}},
+		existing: STTCassette{Notes: "prior note"},
 	}
 	if err := r.write(); err != nil {
 		t.Fatalf("write: %v", err)
@@ -137,7 +138,7 @@ func TestSTTRecorder_WritePreservesHeaderComment(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal written cassette: %v", err)
 	}
-	if got.AudioSHA256 != "freshhash" || got.Transcript != "fresh transcript" {
+	if len(got.Segments) != 1 || got.Segments[0].AudioSHA256 != "freshhash" || got.Segments[0].Transcript != "fresh transcript" {
 		t.Errorf("body not refreshed: %+v", got)
 	}
 }
@@ -156,11 +157,9 @@ func TestSTTRecorder_WriteProvenanceIdempotentSameDay(t *testing.T) {
 	// text plus today's provenance stamp already appended.
 	existing := appendProvenance("hand-authored note", "scribe_v2")
 	r := &STTRecorder{
-		name:       name,
-		hash:       "h",
-		transcript: "tr",
-		captured:   true,
-		existing:   STTCassette{Notes: existing},
+		name:     name,
+		segments: []STTSegment{{AudioSHA256: "h", Transcript: "tr"}},
+		existing: STTCassette{Notes: existing},
 	}
 	if err := r.write(); err != nil {
 		t.Fatalf("write: %v", err)

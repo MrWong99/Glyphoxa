@@ -1,0 +1,28 @@
+# meta.yaml is pure documentation per ADR-0020. Assertions live in Go tests.
+clip: ttrpg-intro-en
+duration_seconds: 39.55
+sample_rate_hz: 16000
+channels: 1
+bits_per_sample: 16
+encoding: pcm_s16le
+
+source:
+  provider: self
+  model_id:
+  voice_name: MrWong99
+  voice_id:
+  output_format: pcm_16000
+  generated: 2026-05-27
+
+script: |
+  Hey everyone, so let's start our session for today. [Intro Music]
+  Okay, Glyphoxa Butler, can you give us a quick intro what happend last session
+  and what did we do, where did we leave the session? What's the current status?
+
+intent: |
+  A deliberate "real world" scenario for starting a TTRPG session. Contains some room
+  noise and background music. Also directly addresses the "Glyphoxa Butler" at the end.
+
+expected_outcome: |
+  The transcript should be interpreted correctly, with the name "Glyphoxa Butler" in the last sentence.
+  Background noise and music should be ignored.

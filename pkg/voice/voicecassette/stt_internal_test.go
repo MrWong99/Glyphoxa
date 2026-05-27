@@ -33,8 +33,7 @@ func TestSTTRecognizer_HashMismatchPointsAtRecord(t *testing.T) {
 	r := &STTRecognizer{
 		name: "stt-fixture",
 		cassette: STTCassette{
-			AudioSHA256: "deadbeef",
-			Transcript:  "ignored",
+			Segments: []STTSegment{{AudioSHA256: "deadbeef", Transcript: "ignored"}},
 		},
 	}
 	_, err := r.Transcribe(context.Background(), []audio.Frame{silenceFrame(t, 16000, 32)})
