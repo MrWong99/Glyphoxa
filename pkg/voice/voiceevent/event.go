@@ -153,3 +153,19 @@ func (b *Bus) Subscribe(fn func(Event)) (unsubscribe func()) {
 		b.mu.Unlock()
 	}
 }
+
+// On registers fn for every subsequent Publish of an event whose concrete type
+// is E, narrowing the bus's untyped delivery to a single event type. Events of
+// any other type are ignored. The returned function removes the subscription;
+// calling it more than once is a no-op.
+//
+// On is the typed building block the orchestrator's reactive wiring is composed
+// from: it replaces the switch-on-e.(type) a raw [Bus.Subscribe] callback would
+// otherwise spell out, the same way one net/http handler binds one route.
+func On[E Event](bus *Bus, fn func(E)) (unsubscribe func()) {
+	return bus.Subscribe(func(e Event) {
+		if typed, ok := e.(E); ok {
+			fn(typed)
+		}
+	})
+}

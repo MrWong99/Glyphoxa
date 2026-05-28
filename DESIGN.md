@@ -33,6 +33,7 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0023](docs/adr/0023-tts-provider-matrix-elevenlabs-openai.md) | TTS provider matrix v1.0: ElevenLabs + OpenAI (amends ADR-0004) | TTS interlude |
 | [0024](docs/adr/0024-address-detection-deterministic-fuzzy-chain.md) | Address Detection: deterministic fuzzy chain on raw STT | Q13.4 |
 | [0025](docs/adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble turns: speculative lead + cross-talk reaction | Q13.4 |
+| [0026](docs/adr/0026-bus-wiring-reactors-and-conversation.md) | Voice bus wiring: typed reactors composed into a Conversation | slice 1 wiring |
 
 ## Open questions
 
