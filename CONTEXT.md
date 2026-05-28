@@ -43,7 +43,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Character NPC** | A Campaign-scoped Agent (`agent_role=character`) that voices a single in-world persona during a Voice Session. | NPC agent, In-world agent |
 | **Persona** | Markdown description of an Agent's personality, backstory, and speech style; injected into LLM prompts. | Personality, Character sheet, Profile |
 | **Voice** | The TTS Provider + voice-id configuration that produces an Agent's audio output. | Voice profile, TTS config |
-| **Tool Grant** | An explicit permission for an Agent to invoke a named MCP Tool, with optional per-grant configuration. | Capability, Permission |
+| **Tool Grant** | An explicit permission for an Agent to invoke a named Tool, with optional per-grant configuration that may **narrow the Tool's authority** for that Agent. The same Tool granted to two Agents can carry different scope (e.g. an NPC granted `remember_knowledge` scoped to its own facts vs the Butler granted it campaign-wide). The scope is enforced in the Tool handler, never by the LLM. | Capability, Permission |
 | **Address Detection** | The deterministic chain deciding which Agent(s), if any, a Transcript utterance targets: fuzzy name/alias match → last-speaker → single-NPC fallback → no target. Returns a set; multiple targets trigger an Ensemble Turn. | Routing, Targeting |
 | **Address-Only** | An Agent reachable only by explicit name/alias, excluded from last-speaker and single-NPC fallback. The Butler is Address-Only by default; Character NPCs are not. | Wake-word-only, Explicit-only |
 | **Ensemble Turn** | The turn taken when one utterance addresses two or more Agents: they generate in parallel, the fastest (the Lead) speaks, and at most one other Agent reacts to it. | Group response, Multi-response |
@@ -74,7 +74,8 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Component** | A Provider category: `llm`, `stt`, `tts`, `embeddings`, `s2s`. | Capability, Type |
 | **Provider Config** | A Tenant-scoped, encrypted record binding a Component to a Provider with credentials and model/voice selection. | Credentials, Key, API key |
 | **BYOK** | Bring-Your-Own-Keys — the v1.0 Provider Config source where the Tenant supplies their own credentials. | Self-supplied, Customer keys |
-| **MCP Tool** | A named callable function (built-in or external) invoked by an Agent via a Tool Grant; speaks the Model Context Protocol. | Function, Action, Plugin |
+| **Tool** | A named callable function invoked by an Agent via a Tool Grant. Its backing is either **built-in** (runs in-process, lowest latency) or an **MCP Server** (out-of-process). The Agent only ever sees the uniform Tool interface; the backing is an implementation detail. | MCP Tool (the protocol is one backing, not the category), Function, Action, Plugin |
+| **MCP Server** | An out-of-process backing that exposes one or more Tools over the Model Context Protocol (stdio or streamable-HTTP). A Tool source differentiated from built-ins by running in a separate process; pays serialization/IPC cost in exchange for isolation and third-party extensibility. | External tool, Plugin, MCP Tool |
 | **Hot Context** | The recent-Transcript + KG-facts + Persona bundle assembled per-utterance to prime an Agent's LLM call (target <50ms). | Context, Prompt context |
 
 ## Process & Deployment
@@ -93,17 +94,17 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 - A **Character NPC** belongs to exactly one **Campaign**.
 - A **Voice Session** binds (**Guild**, voice channel, **GM**, **Campaign**) and is hosted by exactly one **Voice Instance**.
 - A **Transcript** belongs to exactly one **Voice Session** and transitively to one **Campaign**.
-- An **Agent**'s **Tool Grants** reference **MCP Tools**; tool invocations resolve **Active Campaign** for campaign-scoped Tools.
+- An **Agent**'s **Tool Grants** reference **Tools**; tool invocations resolve **Active Campaign** for campaign-scoped Tools. A Tool's backing is built-in (in-process) or an **MCP Server** (out-of-process).
 
 ## Example dialogue
 
 > **Dev:** "When the **GM** says 'Glyphoxa, roll a d20' inside a **Voice Session**, what handles the utterance?"
 
-> **Domain expert:** "**Address Detection** routes it to the **Butler** because the **GM** spoke without naming a target. The **Butler** invokes the `dice` **MCP Tool** via its **Tool Grant**."
+> **Domain expert:** "**Address Detection** routes it to the **Butler** because the **GM** spoke without naming a target. The **Butler** invokes the `dice` **Tool** via its **Tool Grant**."
 
 > **Dev:** "And if the **GM** runs `/roll 1d20` as a **Slash Command** outside a **Voice Session**?"
 
-> **Domain expert:** "Same **Butler** — there is exactly one per **Campaign**. **Active Campaign** is resolved from the **GM**'s profile rather than a **Voice Session** binding. The **Bot** acks the interaction; the **Butler** runs the **MCP Tool**; the **Bot** posts the follow-up."
+> **Domain expert:** "Same **Butler** — there is exactly one per **Campaign**. **Active Campaign** is resolved from the **GM**'s profile rather than a **Voice Session** binding. The **Bot** acks the interaction; the **Butler** runs the **Tool**; the **Bot** posts the follow-up."
 
 > **Dev:** "When 'Bart the innkeeper' speaks, what's that?"
 

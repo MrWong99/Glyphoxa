@@ -2,7 +2,7 @@
 
 Resume-from-here doc for the interactive design grilling. Decisions are recorded as ADRs under [docs/adr/](docs/adr/); domain language lives in [CONTEXT.md](CONTEXT.md).
 
-**Next:** Q14 — MCP tool framework.
+**Next:** Q15 — Migration / DB tooling.
 
 ## Decisions ledger
 
@@ -35,10 +35,12 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0025](docs/adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble turns: speculative lead + cross-talk reaction | Q13.4 |
 | [0026](docs/adr/0026-bus-wiring-reactors-and-conversation.md) | Voice bus wiring: typed reactors composed into a Conversation | slice 1 wiring |
 | [0027](docs/adr/0027-barge-in-confirm-window-cancels-turn.md) | Barge-in: per-participant confirm window cancels the whole turn | Q13.5 |
+| [0028](docs/adr/0028-tool-framework-internal-interface-simple-registry.md) | Tool framework: one internal Tool interface, simple registry, MCP Server as a backing | Q14.1–Q14.3 |
+| [0029](docs/adr/0029-tool-grants-least-privilege-scoping-config.md) | Tool Grants: least-privilege, per-grant scoping config enforced in handler | Q14.4 |
+| [0030](docs/adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Tool side effects: read-only inline, side-effecting flush at turn-commit | Q14.5 |
 
 ## Open questions
 
-- **Q14 — MCP tool framework.** Built-in tool list, external tool support, sandboxing.
 - **Q15 — Migration / DB tooling.** Postgres migration framework, schema versioning.
 - **Q16 — Observability.** Metrics, traces, log structure (defer the v1 OTel sprawl?).
 - **Q17 — CI / test strategy.** Tight reviews + small commits → test patterns and gates.
