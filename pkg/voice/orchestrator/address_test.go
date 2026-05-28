@@ -58,8 +58,8 @@ func transcribeClip(t *testing.T, h *voicetest.Harness, clipName, cassetteName s
 // detector's coupling is the STTFinal subscription, not an imperative call.
 func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 	h := voicetest.New(t)
-	d := orchestrator.NewAddressDetector(h.Bus, butlerTarget, []voiceevent.AddressTarget{bartTarget})
-	t.Cleanup(d.Close)
+	d := orchestrator.NewAddressDetector(butlerTarget, []voiceevent.AddressTarget{bartTarget})
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	transcribeClip(t, h, "hello-test", "stt-hello-test")
 
@@ -81,8 +81,8 @@ func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 // default Butler route.
 func TestAddressDetector_BartTest_RoutesToCharacterNPC(t *testing.T) {
 	h := voicetest.New(t)
-	d := orchestrator.NewAddressDetector(h.Bus, butlerTarget, []voiceevent.AddressTarget{bartTarget})
-	t.Cleanup(d.Close)
+	d := orchestrator.NewAddressDetector(butlerTarget, []voiceevent.AddressTarget{bartTarget})
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	transcribeClip(t, h, "bart-test", "stt-bart-test")
 

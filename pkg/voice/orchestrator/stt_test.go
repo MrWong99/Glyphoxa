@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
@@ -63,8 +64,12 @@ func TestSTT_HelloTest_EmitsFinal(t *testing.T) {
 	)
 }
 
-// TestSTT_TTRPGIntro_TranscribesBothLanguages tests that the STT stage can transcribe the TTRPG intro clip in both languages.
-// It includes the full audio pipeline with audio -> VAD -> STT -> AddressDetection -> TTS
+// TestSTT_TTRPGIntro_TranscribesBothLanguages drives the full slice-1 voice
+// pipeline — audio → VAD → STT → address detection → TTS — through the
+// [orchestrator.Conversation] façade (ADR-0026) rather than spelling the bus
+// wiring out inline. Feeding frames is all the test does imperatively; the
+// conversation segments utterances, transcribes, routes, and replies on the
+// bus. The assertions read the recorded event log the same way as before.
 func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 	for _, testCase := range []struct {
 		clipName string
@@ -90,98 +95,73 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.clipName, func(t *testing.T) {
-			// VAD and loading of audio sample + test harness
+			// VAD + audio sample + test harness.
 			vadStage, h, frames := voicetest.NewVADRig(t, testCase.clipName)
 
-			// Address detection
-			detector := orchestrator.NewAddressDetector(h.Bus, voiceevent.AddressTarget{
-				AgentID:   "but1",
-				AgentRole: "butler",
-				Name:      "Glyphoxa Butler",
-			}, []voiceevent.AddressTarget{
-				{
-					AgentID:   "distraction",
-					AgentRole: "character",
-					Name:      "Jamalaka",
-				},
-			})
-			t.Cleanup(detector.Close)
-
-			// STT to transcribe audio chunks
+			// STT transcribes each VAD-segmented utterance.
 			recognizer := voicecassette.LoadSTT(t, "stt-"+testCase.clipName)
 			sttStage := orchestrator.NewSTT(h.Bus, recognizer)
 
-			// TTS to generate response when butler is addressed
+			// TTS speaks the Butler's reply.
 			synthesizer := voicecassette.LoadTTS(t, "tts-"+testCase.clipName)
 			ttsStage := orchestrator.NewTTS(h.Bus, synthesizer)
 			voice := voicetest.LiveElevenLabsVoice()
-			dispatchOnce := sync.Once{}
 
-			// Full voice pipeline via bus subscription.
-			// 1. When VAD detects voice it collects the played frames.
-			// 2. Once VAD turns off again all collected samples are processed in STT
-			// 3. All STTFinal events are collected to a full transcript
-			// 4. If the address detection picks up a message targeted at the butler a TTS response is generated
-			listening := false
-			allTranscripts := ""
-			t.Cleanup(h.Bus.Subscribe(func(e voiceevent.Event) {
-				switch event := e.(type) {
-				case voiceevent.VADSpeechStart:
-					listening = true
-				case voiceevent.VADSpeechEnd:
-					listening = false
-				case voiceevent.STTFinal:
-					if allTranscripts == "" {
-						allTranscripts = event.Text
-					} else {
-						allTranscripts += " " + event.Text
-					}
-				case voiceevent.AddressRouted:
-					if event.Target.AgentRole != "butler" {
-						t.Error("address detection tried to route to npc")
-						return
-					}
-					dispatchOnce.Do(func() {
-						if err := ttsStage.Dispatch(t.Context(), testCase.response, voice); err != nil {
-							t.Fatalf("tts failed to generate response: %v", err)
-						}
+			// Address detection: the Butler is the default route; Jamalaka is an
+			// active NPC who is never named, so every utterance routes to the Butler.
+			detector := orchestrator.NewAddressDetector(
+				voiceevent.AddressTarget{AgentID: "but1", AgentRole: "butler", Name: "Glyphoxa Butler"},
+				[]voiceevent.AddressTarget{
+					{AgentID: "distraction", AgentRole: "character", Name: "Jamalaka"},
+				},
+			)
+
+			// Reply strategy: answer the Butler exactly once per turn. The single
+			// TTS cassette segment is matched positionally, so a second dispatch
+			// would exhaust it — sync.Once pins "one reply".
+			var answered sync.Once
+			reply := func(e voiceevent.AddressRouted) []orchestrator.Reply {
+				var out []orchestrator.Reply
+				if e.Target.AgentRole == "butler" {
+					answered.Do(func() {
+						out = []orchestrator.Reply{{Sentence: testCase.response, Voice: voice}}
 					})
 				}
-			}))
-
-			framesSinceLastVad := make([]audio.Frame, 0, len(frames))
-			for _, frame := range frames {
-				if err := vadStage.Process(frame); err != nil {
-					t.Fatalf("unexpected error during vad processing: %v", err)
-				}
-				if listening {
-					framesSinceLastVad = append(framesSinceLastVad, frame)
-				} else if len(framesSinceLastVad) > 0 {
-					// Listening must have switched off since we have leftover frames with listening == false.
-					// This signals a finished utterance to give to STT.
-					if err := sttStage.Transcribe(t.Context(), framesSinceLastVad); err != nil {
-						t.Fatalf("unexpected error during stt processing: %v", err)
-					}
-					framesSinceLastVad = make([]audio.Frame, 0, len(frames))
-				}
-			}
-			if listening {
-				t.Error("VAD should have emitted a VADSpeechEnd last")
+				return out
 			}
 
-			// VAD is the most basic thing that should have been noticed
+			// Wire the whole reactive pipeline onto the bus in one call.
+			conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+				orchestrator.WithDetector(detector),
+				orchestrator.WithReply(reply),
+				orchestrator.WithErrorHandler(func(err error) { t.Errorf("reply dispatch: %v", err) }),
+			)
+			t.Cleanup(conv.Register(t.Context()))
+
+			for i, frame := range frames {
+				if err := conv.Feed(frame); err != nil {
+					t.Fatalf("frame %d: conv.Feed: %v", i, err)
+				}
+			}
+
+			// VAD is the most basic thing that should have been noticed.
 			voicetest.AssertEventOccurred[voiceevent.VADSpeechStart](t, h)
 			voicetest.AssertEventOccurred[voiceevent.VADSpeechEnd](t, h)
 
-			// STT should have been triggered at least once and the transcripts should match
+			// STT should have been triggered at least once and the transcripts should match.
 			voicetest.AssertEventOccurred[voiceevent.STTFinal](t, h)
 			want := voicetest.NormalizeTranscript(testCase.want)
-			actual := voicetest.NormalizeTranscript(allTranscripts)
+			actual := voicetest.NormalizeTranscript(joinTranscripts(h))
 			if !voicetest.WordsMatch(want, actual, 0.7) {
 				t.Errorf("stt transcript diverged beyond tolerance (<70%% word overlap).\nwant: %q\ngot: %q", want, actual)
 			}
 
-			// Address detection should have found the butler
+			// Every routing decision went to the Butler — no NPC is named in the clip.
+			for _, e := range h.Events() {
+				if routed, ok := e.(voiceevent.AddressRouted); ok && routed.Target.AgentRole != "butler" {
+					t.Errorf("address detection routed to %q, want butler", routed.Target.AgentRole)
+				}
+			}
 			voicetest.AssertEvent(t, h,
 				func(e voiceevent.AddressRouted) bool {
 					return e.Target.AgentRole == "butler" && e.Target.Name == "Glyphoxa Butler"
@@ -189,7 +169,7 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 				"address.routed exists for Glyphoxa Butler",
 			)
 
-			// TTS should have been dispatched
+			// TTS should have been dispatched with the reply.
 			voicetest.AssertEvent(t, h,
 				func(e voiceevent.TTSInvoked) bool {
 					return e.Sentence == testCase.response
@@ -198,6 +178,23 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 			)
 		})
 	}
+}
+
+// joinTranscripts concatenates the text of every STTFinal observed by h, in
+// arrival order, into a single transcript for whole-utterance assertions.
+func joinTranscripts(h *voicetest.Harness) string {
+	var b strings.Builder
+	for _, e := range h.Events() {
+		final, ok := e.(voiceevent.STTFinal)
+		if !ok {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(final.Text)
+	}
+	return b.String()
 }
 
 // TestSTT_EmptyTranscript_StillPublishes pins the contract documented on

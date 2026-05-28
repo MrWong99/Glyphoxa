@@ -100,6 +100,42 @@ func TestBus_PublishFansOutToMultipleSubscribers(t *testing.T) {
 	}
 }
 
+func TestOn_DeliversOnlyMatchingType(t *testing.T) {
+	t.Parallel()
+
+	bus := NewBus()
+	var starts []VADSpeechStart
+	t.Cleanup(On(bus, func(e VADSpeechStart) { starts = append(starts, e) }))
+
+	bus.Publish(VADSpeechStart{Probability: 0.9})
+	bus.Publish(VADSpeechEnd{Probability: 0.1}) // ignored: different type
+	bus.Publish(STTFinal{Text: "hi"})           // ignored: different type
+	bus.Publish(VADSpeechStart{Probability: 0.8})
+
+	if len(starts) != 2 {
+		t.Fatalf("typed handler received %d events, want 2", len(starts))
+	}
+	if starts[0].Probability != 0.9 || starts[1].Probability != 0.8 {
+		t.Errorf("typed handler got %+v, want probabilities 0.9 then 0.8", starts)
+	}
+}
+
+func TestOn_UnsubscribeStopsDelivery(t *testing.T) {
+	t.Parallel()
+
+	bus := NewBus()
+	var n int
+	unsub := On(bus, func(VADSpeechStart) { n++ })
+
+	bus.Publish(VADSpeechStart{})
+	unsub()
+	bus.Publish(VADSpeechStart{})
+
+	if n != 1 {
+		t.Errorf("after unsubscribe got %d events, want 1", n)
+	}
+}
+
 func TestBus_ConcurrentPublishAndSubscribe(t *testing.T) {
 	t.Parallel()
 

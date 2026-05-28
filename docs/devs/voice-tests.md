@@ -107,6 +107,28 @@ func (s stubRecognizer) Transcribe(context.Context, []audio.Frame) (stt.Transcri
 }
 ```
 
+## Wire the full pipeline (VAD → STT → address → TTS)
+
+Don't hand-roll the cross-stage bus glue. `orchestrator.Conversation` bundles the
+reactive wiring (ADR-0026): `Register(ctx)` installs it and returns a teardown
+func, `Feed(frame)` is the audio loop, and the reply behaviour is injected as a
+`ReplyFunc`. Model on `TestSTT_TTRPGIntro_TranscribesBothLanguages` in
+[`stt_test.go`](../../pkg/voice/orchestrator/stt_test.go):
+
+```go
+conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+    orchestrator.WithDetector(detector),
+    orchestrator.WithReply(func(e voiceevent.AddressRouted) []orchestrator.Reply { /* … */ }),
+    orchestrator.WithErrorHandler(func(err error) { t.Errorf("reply dispatch: %v", err) }),
+)
+t.Cleanup(conv.Register(t.Context()))
+for _, f := range frames { conv.Feed(f) }
+```
+
+To exercise one interaction in isolation, drop to the `Reactor` layer and
+compose with `orchestrator.Bind(ctx, bus, reactors…)`; for an ad-hoc typed
+subscription use `voiceevent.On[E](bus, fn)` directly.
+
 ## Adding fixtures
 
 ### A new cassette — `tests/voice-cassettes/`

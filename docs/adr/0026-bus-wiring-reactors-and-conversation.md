@@ -1,0 +1,25 @@
+# Voice bus wiring: typed reactors composed into a Conversation
+
+The orchestrator stages publish onto a shared `voiceevent.Bus` (ADR-0020), but the *reactive glue* between them — "buffer frames between `vad.speech_start` and `vad.speech_end`, then transcribe"; "on `address.routed`, speak a reply" — lived inline in the slice-1 pipeline test. That made the cross-stage behaviour untyped (`switch e.(type)`), un-reusable, and impossible to change in one place. This ADR formalizes the wiring as a layered API so voice-interaction behaviour can be changed all at once or one interaction at a time, behind a stable seam.
+
+Three layers, smallest to largest:
+
+1. **`voiceevent.On[E](bus, func(E))`** — a typed subscription primitive. It narrows the bus's one-callback-receives-everything delivery to one callback per concrete event type, the way one `net/http` handler binds one route, and replaces the type switch a raw subscriber would write. Every reactor is built from it.
+
+2. **`orchestrator.Reactor`** — `Bind(ctx, bus) (cancel func())`: one self-contained bus interaction that subscribes on `Bind` and tears down via the returned `cancel`. The existing `AddressDetector` already had this shape (constructor-subscribe + `Close`) and is regularized to the interface (`STTFinal → AddressRouted`). Its siblings are `Segmenter` (speech transitions → `STT`, and the audio-frame sink via `Process`) and `Replier` (`address.routed → TTS`, behaviour injected as a `ReplyFunc`). `orchestrator.Bind(ctx, bus, reactors…)` composes any subset — the **"in parts"** knob.
+
+3. **`orchestrator.Conversation`** — the façade. It holds the stages, builds the default reactor set (segmenter + optional detector + optional replier), and exposes `Register(ctx) (cancel func())` to wire them all at once plus `Feed(frame)` for the audio loop. Behaviour is swapped with functional options (`WithDetector`, `WithReply`, `WithErrorHandler`) — the **"all at once"** knob.
+
+**Idioms borrowed.** Typed narrowing over an untyped channel (`On`, cf. `errors.As`); `Bind`/`Register` returning a `cancel func()` exactly like `Bus.Subscribe`, `context.WithCancel`, and `signal.NotifyContext`; handler composition like `net/http` and `io.MultiWriter`; functional options like `grpc.Dial`. No DSL and no framework — the wiring stays plain Go that participates in `go test` (ADR-0020).
+
+**Context & errors.** The `ctx` passed to `Register`/`Bind` governs the bound reactions and is the context handed to the STT/TTS calls a reactor triggers (so cancelling it lets an in-flight provider call unwind); teardown stays explicit — cancelling `ctx` does not unsubscribe, only the returned `cancel` does. A bus callback cannot return an error, so a stage call a reactor fires from inside a callback (the `Replier`'s `TTS.Dispatch`) reports failure through an optional `ErrorFunc`; the `Segmenter`'s `STT.Transcribe` runs inside `Process` and returns its error to the audio loop directly.
+
+**Synchronous, single bus.** `Bus.Publish` is synchronous and reentrant-safe — it copies subscribers under lock, then calls them unlocked — so a reactor publishing the next event from inside a callback (`STTFinal → AddressRouted → TTSInvoked`) works without deadlock. The flip side: a reactor doing slow work (a live `TTS.Dispatch`, a network STT) blocks the publishing goroutine, and ADR-0020's bus contract is "callbacks must not block". A production async-dispatch boundary is therefore left to a later tracer bullet; v1.0 keeps the synchronous wiring the existing tracer bullets rely on.
+
+**Considered options:**
+
+- **One manager struct with the policy baked in** — simplest, matches the original sketch, but bakes "what to say" and "how to segment" into branches; rejected as the *only* layer because changing one interaction means editing the struct. Kept as the `Conversation` façade, with the swappable bits injected as strategies/options.
+- **A typed event mux (`http.ServeMux` analogue)** — one subscription fanning out to many typed handlers by reflection. It only earns its keep when several handlers need the *same* event in a defined order; the voice chain is sequential republishing, not same-event fan-out, so the mux adds reflection for no gain yet. `On` covers the typed-dispatch need without it.
+- **Reactors only, no façade** — maximally à-la-carte, but every caller re-assembles the default pipeline by hand. Kept as the middle layer; the `Conversation` removes that boilerplate for the common case.
+
+**Why layered.** Primitive → unit → bundle lets a caller reach for exactly the level they need: `On` for an ad-hoc subscriber, a hand-picked `Bind(…)` to change one interaction, or `Conversation` to swap the whole reactive layer. Each layer is independently testable, and the slice-1 pipeline test now drives the `Conversation` end to end instead of spelling the wiring out inline.
