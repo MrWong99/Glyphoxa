@@ -62,6 +62,9 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **DAVE** | Discord's Audio & Video End-to-end Encryption protocol, mandatory since 2026-03-01; built on MLS. | E2EE, Encryption |
 | **Transcript** | The persisted text record of a Voice Session, with speaker attribution by Discord User. | Log, Recording (recording is audio) |
 | **Slash Command** | A Discord interaction registered by the Bot; handled by the Butler when reasoning is required, otherwise directly by the Bot binary. | Command, Interaction |
+| **Barge-in** | A human participant reclaiming the floor while an Agent is speaking: per-participant voiced speech crossing the Barge-in Confirm Window cancels the Agent's whole turn (the entire Ensemble Turn, if one is running). Distinct from Cross-talk. | Interruption, Cut-in |
+| **Barge-in Confirm Window** | The duration of continuous voiced speech from one participant required before a Barge-in cancels the Agent (default ~250ms). A per-Agent tunable: longer = harder to interrupt. Voiced bursts shorter than the window are Soft-overlap. | Barge threshold, Interrupt delay |
+| **Soft-overlap** | A participant's voiced burst shorter than the Barge-in Confirm Window (a backchannel: "mhm", "yeah", a cough). Does not cancel the Agent, but is still transcribed and committed normally. | Backchannel (use in prose only), Filler |
 
 ## Providers & Pipeline
 
@@ -120,4 +123,4 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 - **"Worker"** is a v1 term for what v2 calls a **Voice Instance**. Do not use "worker" in v2 — it implies the gateway/worker split that was explicitly removed.
 - **"Role"** is overloaded between **Member Role** (`owner`/`admin`/`gm`) and **Agent Role** (`butler`/`character`). Always qualify.
 - **"Player role"** is *not* a Member Role — Players are not Tenant Members. Don't add `player` to the Member Role enum.
-- **"Barge-in" vs "Cross-talk"** — **Barge-in** is a *human* interrupting a speaking Agent (VAD-triggered; cancels the Agent's turn). **Cross-talk** is one Agent's already-delivered text being fed to another addressed Agent during an Ensemble Turn — the second Agent has not spoken yet, so nothing is interrupted. Never use "barge-in" for the Agent-to-Agent case, and never use "cross-talk" for a human interruption.
+- **"Barge-in" vs "Cross-talk"** — **Barge-in** is a *human* interrupting a speaking Agent (VAD-triggered via the Barge-in Confirm Window; cancels the Agent's whole turn — see ADR-0026). **Cross-talk** is one Agent's already-delivered text being fed to another addressed Agent during an Ensemble Turn — the second Agent has not spoken yet, so nothing is interrupted. Never use "barge-in" for the Agent-to-Agent case, and never use "cross-talk" for a human interruption.

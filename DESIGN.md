@@ -2,7 +2,7 @@
 
 Resume-from-here doc for the interactive design grilling. Decisions are recorded as ADRs under [docs/adr/](docs/adr/); domain language lives in [CONTEXT.md](CONTEXT.md).
 
-**Next:** Q13.5 — Barge-in mechanic specifics.
+**Next:** Q14 — MCP tool framework.
 
 ## Decisions ledger
 
@@ -34,10 +34,10 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0024](docs/adr/0024-address-detection-deterministic-fuzzy-chain.md) | Address Detection: deterministic fuzzy chain on raw STT | Q13.4 |
 | [0025](docs/adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble turns: speculative lead + cross-talk reaction | Q13.4 |
 | [0026](docs/adr/0026-bus-wiring-reactors-and-conversation.md) | Voice bus wiring: typed reactors composed into a Conversation | slice 1 wiring |
+| [0027](docs/adr/0027-barge-in-confirm-window-cancels-turn.md) | Barge-in: per-participant confirm window cancels the whole turn | Q13.5 |
 
 ## Open questions
 
-- **Q13.5 — Barge-in mechanic specifics.** VAD threshold for trigger (ms voiced energy from a participant during NPC TTS); interaction with the sentence-commit point in ADR-0012; recovery (does cancelled NPC re-attempt or stay silent?); soft-overlap edge case ("mhm" non-barge-in); **and whether a human barge-in cancels a queued Ensemble-Turn Reaction (ADR-0025) or only the current Lead.**
 - **Q14 — MCP tool framework.** Built-in tool list, external tool support, sandboxing.
 - **Q15 — Migration / DB tooling.** Postgres migration framework, schema versioning.
 - **Q16 — Observability.** Metrics, traces, log structure (defer the v1 OTel sprawl?).
