@@ -145,6 +145,33 @@ func (s *Segmenter) Process(frame audio.Frame) error {
 	ctx := s.ctx
 	s.mu.Unlock()
 
+	return s.transcribe(ctx, seg)
+}
+
+// Flush transcribes any buffered utterance audio immediately, regardless of
+// whether speech is still active, and clears the buffer. It is the
+// end-of-stream counterpart to [Segmenter.Process]: when the audio loop stops
+// while the speaker is still mid-utterance (the call ends, a clip is cut off
+// before its trailing silence), the wrapped VAD never observes a speech-end
+// transition, so the buffered final utterance would otherwise be dropped. Call
+// Flush once after the last [Segmenter.Process]. With no buffered audio it is a
+// no-op; the recognizer error, if any, is returned.
+func (s *Segmenter) Flush() error {
+	s.mu.Lock()
+	seg := s.buf
+	s.buf = nil
+	s.listening = false
+	ctx := s.ctx
+	s.mu.Unlock()
+
+	return s.transcribe(ctx, seg)
+}
+
+// transcribe hands a flushed segment to STT under ctx. An empty segment is a
+// no-op (a speech-end with nothing buffered, or a redundant Flush). A nil ctx —
+// the segmenter was never bound, or was already torn down — falls back to a
+// background context so a late flush still completes rather than panicking.
+func (s *Segmenter) transcribe(ctx context.Context, seg []audio.Frame) error {
 	if len(seg) == 0 {
 		return nil
 	}

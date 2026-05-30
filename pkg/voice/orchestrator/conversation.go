@@ -95,3 +95,11 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 func (c *Conversation) Feed(frame audio.Frame) error {
 	return c.seg.Process(frame)
 }
+
+// Flush transcribes any utterance still buffered because the audio stream ended
+// while speech was active (see [Segmenter.Flush]). Call it once after the last
+// [Conversation.Feed] — at end of call, or when a clip is exhausted mid-speech —
+// so the final turn is not silently lost. With nothing buffered it is a no-op.
+func (c *Conversation) Flush() error {
+	return c.seg.Flush()
+}
