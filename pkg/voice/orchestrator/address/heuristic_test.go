@@ -66,6 +66,33 @@ func TestAmbientHeuristics_SuppressedByNameMatch(t *testing.T) {
 	}
 }
 
+// TestHeuristicNames pins each built-in heuristic's stable identifier. Name is a
+// documented part of the Heuristic contract (score breakdowns, logs, tests), so a
+// rename is a breaking change a regression test should catch rather than a free
+// refactor.
+func TestHeuristicNames(t *testing.T) {
+	cases := []struct {
+		h    Heuristic
+		want string
+	}{
+		{NameMatch{}, "name_match"},
+		{LastAddressed{}, "last_addressed"},
+		{RecentlyInterrupted{}, "recently_interrupted"},
+		{ExpertOnRecentWord{}, "expert_on_recent_word"},
+		{SoleActiveNPC{}, "sole_active_npc"},
+	}
+	seen := map[string]bool{}
+	for _, c := range cases {
+		if got := c.h.Name(); got != c.want {
+			t.Errorf("%T.Name() = %q, want %q", c.h, got, c.want)
+		}
+		if seen[c.want] {
+			t.Errorf("duplicate heuristic name %q", c.want)
+		}
+		seen[c.want] = true
+	}
+}
+
 func TestLastAddressed(t *testing.T) {
 	a := agentAt(0, "bart", nil)
 	h := LastAddressed{Weight: 0.6}
