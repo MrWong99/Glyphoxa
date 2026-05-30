@@ -128,7 +128,7 @@ func (TTSInvoked) EventName() string { return "tts.invoked" }
 // (e.g. SSE writers) must do their own buffering — and must not panic: a panic
 // propagates to the publisher and aborts delivery to the remaining subscribers.
 //
-// [Glyphoxa address matcher]: github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator/address
+// [Glyphoxa address matcher]: github.com/MrWong99/Glyphoxa/pkg/voice/address
 type Bus struct {
 	mu   sync.Mutex
 	subs []*subscription // subscribers in registration order; unsubscribe compacts

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
@@ -110,10 +111,12 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 			// Address detection: the Butler is the default route; Jamalaka is an
 			// active NPC who is never named, so every utterance routes to the Butler.
 			detector := orchestrator.NewAddressDetector(
-				voiceevent.AddressTarget{AgentID: "but1", AgentRole: "butler", Name: "Glyphoxa Butler"},
-				[]voiceevent.AddressTarget{
-					{AgentID: "distraction", AgentRole: "character", Name: "Jamalaka"},
-				},
+				address.NewWholeWordMatcher(
+					voiceevent.AddressTarget{AgentID: "but1", AgentRole: "butler", Name: "Glyphoxa Butler"},
+					[]voiceevent.AddressTarget{
+						{AgentID: "distraction", AgentRole: "character", Name: "Jamalaka"},
+					},
+				),
 			)
 
 			// Reply strategy: answer the Butler exactly once per turn. The single

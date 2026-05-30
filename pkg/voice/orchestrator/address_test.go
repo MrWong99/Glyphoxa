@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -59,7 +60,7 @@ func transcribeClip(t *testing.T, h *voicetest.Harness, clipName, cassetteName s
 // detector's coupling is the STTFinal subscription, not an imperative call.
 func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 	h := voicetest.New(t)
-	d := orchestrator.NewAddressDetector(butlerTarget, []voiceevent.AddressTarget{bartTarget})
+	d := orchestrator.NewAddressDetector(address.NewWholeWordMatcher(butlerTarget, []voiceevent.AddressTarget{bartTarget}))
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	transcribeClip(t, h, "hello-test", "stt-hello-test")
@@ -82,7 +83,7 @@ func TestAddressDetector_HelloTest_RoutesToButler(t *testing.T) {
 // default Butler route.
 func TestAddressDetector_BartTest_RoutesToCharacterNPC(t *testing.T) {
 	h := voicetest.New(t)
-	d := orchestrator.NewAddressDetector(butlerTarget, []voiceevent.AddressTarget{bartTarget})
+	d := orchestrator.NewAddressDetector(address.NewWholeWordMatcher(butlerTarget, []voiceevent.AddressTarget{bartTarget}))
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	transcribeClip(t, h, "bart-test", "stt-bart-test")
@@ -99,9 +100,9 @@ func TestAddressDetector_BartTest_RoutesToCharacterNPC(t *testing.T) {
 	)
 }
 
-// matchFunc adapts a plain function to [orchestrator.TargetMatcher] without
-// implementing [orchestrator.TargetIniter]. Used by the WithMatcher tests to
-// stand in a custom algorithm whose output is fully under the test's control.
+// matchFunc adapts a plain function to [orchestrator.TargetMatcher]. Used by the
+// custom-matcher tests to stand in an algorithm whose output is fully under the
+// test's control.
 type matchFunc func(text string) []voiceevent.AddressRouted
 
 func (f matchFunc) TargetMatch(text string) []voiceevent.AddressRouted { return f(text) }
@@ -110,13 +111,12 @@ func (f matchFunc) TargetMatch(text string) []voiceevent.AddressRouted { return 
 // keep them independent of the default matcher's name-matching fixtures.
 var goblinTarget = voiceevent.AddressTarget{AgentID: "npc-goblin", AgentRole: "character", Name: "Goblin"}
 
-// TestAddressDetector_WithMatcher_PublishesDecisionVerbatim proves WithMatcher
-// swaps the algorithm and that the detector publishes the matcher's
-// [voiceevent.AddressRouted] unchanged — including its Text. The matcher
-// returns a Text that differs from the STTFinal it was handed, so a passing
-// assertion can only mean the detector forwarded the matcher's event rather
-// than re-stamping it from the transcript.
-func TestAddressDetector_WithMatcher_PublishesDecisionVerbatim(t *testing.T) {
+// TestAddressDetector_PublishesDecisionVerbatim proves the detector publishes
+// its matcher's [voiceevent.AddressRouted] unchanged — including its Text. The
+// matcher returns a Text that differs from the STTFinal it was handed, so a
+// passing assertion can only mean the detector forwarded the matcher's event
+// rather than re-stamping it from the transcript.
+func TestAddressDetector_PublishesDecisionVerbatim(t *testing.T) {
 	h := voicetest.New(t)
 	decided := voiceevent.AddressRouted{
 		At:     time.Now(),
@@ -126,7 +126,7 @@ func TestAddressDetector_WithMatcher_PublishesDecisionVerbatim(t *testing.T) {
 	m := matchFunc(func(string) []voiceevent.AddressRouted {
 		return []voiceevent.AddressRouted{decided}
 	})
-	d := orchestrator.NewAddressDetector(butlerTarget, nil, orchestrator.WithMatcher(m))
+	d := orchestrator.NewAddressDetector(m)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "irrelevant transcript"})
@@ -139,11 +139,11 @@ func TestAddressDetector_WithMatcher_PublishesDecisionVerbatim(t *testing.T) {
 	)
 }
 
-// TestAddressDetector_WithMatcher_PublishesEveryDecision pins the multi-target
-// half of the TargetMatcher contract: when one utterance addresses several
-// Agents the matcher returns several decisions and the detector publishes each
-// of them, not just the first.
-func TestAddressDetector_WithMatcher_PublishesEveryDecision(t *testing.T) {
+// TestAddressDetector_PublishesEveryDecision pins the multi-target half of the
+// TargetMatcher contract: when one utterance addresses several Agents the
+// matcher returns several decisions and the detector publishes each of them,
+// not just the first.
+func TestAddressDetector_PublishesEveryDecision(t *testing.T) {
 	h := voicetest.New(t)
 	m := matchFunc(func(text string) []voiceevent.AddressRouted {
 		return []voiceevent.AddressRouted{
@@ -151,7 +151,7 @@ func TestAddressDetector_WithMatcher_PublishesEveryDecision(t *testing.T) {
 			{At: time.Now(), Text: text, Target: goblinTarget},
 		}
 	})
-	d := orchestrator.NewAddressDetector(butlerTarget, nil, orchestrator.WithMatcher(m))
+	d := orchestrator.NewAddressDetector(m)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start fighting."})
@@ -167,14 +167,14 @@ func TestAddressDetector_WithMatcher_PublishesEveryDecision(t *testing.T) {
 	)
 }
 
-// TestAddressDetector_WithMatcher_EmptyResultPublishesNothing pins the empty
-// half of the contract: a matcher that addresses no one returns an empty slice
-// and the detector stays silent rather than inventing a fallback route. The
-// Butler-fallback behaviour belongs to the default matcher, not the detector.
-func TestAddressDetector_WithMatcher_EmptyResultPublishesNothing(t *testing.T) {
+// TestAddressDetector_EmptyResultPublishesNothing pins the empty half of the
+// contract: a matcher that addresses no one returns an empty slice and the
+// detector stays silent rather than inventing a fallback route. The
+// Butler-fallback behaviour belongs to the matcher, not the detector.
+func TestAddressDetector_EmptyResultPublishesNothing(t *testing.T) {
 	h := voicetest.New(t)
 	m := matchFunc(func(string) []voiceevent.AddressRouted { return nil })
-	d := orchestrator.NewAddressDetector(butlerTarget, nil, orchestrator.WithMatcher(m))
+	d := orchestrator.NewAddressDetector(m)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "nobody is being addressed here"})
@@ -182,68 +182,13 @@ func TestAddressDetector_WithMatcher_EmptyResultPublishesNothing(t *testing.T) {
 	voicetest.AssertNoEvent[voiceevent.AddressRouted](t, h)
 }
 
-// initingMatcher implements both [orchestrator.TargetMatcher] and the optional
-// [orchestrator.TargetIniter], recording what TargetInit was handed so the test
-// can assert the detector forwarded the Session's routing targets.
-type initingMatcher struct {
-	butler voiceevent.AddressTarget
-	npcs   []voiceevent.AddressTarget
-	inited bool
-}
-
-func (m *initingMatcher) TargetInit(butler voiceevent.AddressTarget, npcs []voiceevent.AddressTarget) {
-	m.inited = true
-	m.butler = butler
-	m.npcs = npcs
-}
-
-func (m *initingMatcher) TargetMatch(string) []voiceevent.AddressRouted { return nil }
-
-// TestAddressDetector_TargetIniter_ReceivesTargets proves the optional
-// convenience hook fires: a matcher implementing TargetIniter is handed the
-// Butler and NPC targets once at construction, before Bind.
-func TestAddressDetector_TargetIniter_ReceivesTargets(t *testing.T) {
-	m := &initingMatcher{}
-	npcs := []voiceevent.AddressTarget{bartTarget, goblinTarget}
-
-	orchestrator.NewAddressDetector(butlerTarget, npcs, orchestrator.WithMatcher(m))
-
-	if !m.inited {
-		t.Fatal("TargetInit was not called on the custom matcher")
-	}
-	if m.butler != butlerTarget {
-		t.Errorf("TargetInit butler = %+v, want %+v", m.butler, butlerTarget)
-	}
-	if len(m.npcs) != len(npcs) {
-		t.Fatalf("TargetInit npcs len = %d, want %d", len(m.npcs), len(npcs))
-	}
-	for i := range npcs {
-		if m.npcs[i] != npcs[i] {
-			t.Errorf("TargetInit npcs[%d] = %+v, want %+v", i, m.npcs[i], npcs[i])
+// TestAddressDetector_NilMatcher_Panics pins that the detector has no matching
+// algorithm to fall back to: construction requires a matcher.
+func TestAddressDetector_NilMatcher_Panics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewAddressDetector(nil) did not panic")
 		}
-	}
-}
-
-// TestAddressDetector_CustomMatcherWithoutIniter_SkipsDefaultValidation pins
-// the consequence of WithMatcher: target validation belongs to the matcher, not
-// the constructor. A matcher that does not implement TargetIniter never sees the
-// targets, so the default matcher's "butler must be valid" panics must not fire
-// — here construction succeeds despite a butler the default matcher would reject
-// (empty Name, wrong role), and routing still goes through the custom matcher.
-func TestAddressDetector_CustomMatcherWithoutIniter_SkipsDefaultValidation(t *testing.T) {
-	h := voicetest.New(t)
-	invalidButler := voiceevent.AddressTarget{} // empty Name, empty role: default matcher would panic
-	m := matchFunc(func(text string) []voiceevent.AddressRouted {
-		return []voiceevent.AddressRouted{{At: time.Now(), Text: text, Target: goblinTarget}}
-	})
-
-	d := orchestrator.NewAddressDetector(invalidButler, nil, orchestrator.WithMatcher(m))
-	t.Cleanup(d.Bind(t.Context(), h.Bus))
-
-	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "the Goblin attacks"})
-
-	voicetest.AssertEvent(t, h,
-		func(e voiceevent.AddressRouted) bool { return e.Target == goblinTarget },
-		"address.routed via custom matcher despite invalid butler",
-	)
+	}()
+	orchestrator.NewAddressDetector(nil)
 }

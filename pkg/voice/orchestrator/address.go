@@ -2,8 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"regexp"
-	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -16,41 +14,28 @@ import (
 // matcher is responsible for the whole event — including its Text — not just the
 // Target.
 //
-// The algorithm choice (regex / LLM judge / two-stage / v1 cherry-pick) is open
-// per Q13.4 in DESIGN.md; this seam lets the choice be swapped via [WithMatcher]
-// without touching the bus wiring. The default matcher (used when no [WithMatcher]
-// is given) is the minimal whole-word name match described on [NewAddressDetector].
+// The algorithm and the routing targets it scores against live entirely behind
+// this seam: the orchestrator holds no matching logic of its own. The voice/address
+// package ships two adapters — address.WholeWordMatcher (the dependency-free
+// whole-word default) and address.Matcher (the scoring fuzzy/phonetic engine,
+// ADR-0024) — and the algorithm choice (regex / LLM judge / two-stage / v1
+// cherry-pick) is open per Q13.4 in DESIGN.md. Construction-time validation of
+// the targets is the matcher's responsibility, not the detector's.
 type TargetMatcher interface {
 	TargetMatch(text string) []voiceevent.AddressRouted
 }
 
-// TargetIniter is an optional convenience interface a [TargetMatcher] may
-// implement to receive the Voice Session's routing targets at construction. If
-// the matcher passed to [NewAddressDetector] (or the default matcher) satisfies
-// it, TargetInit is called once with the Tenant's Butler and the active Character
-// NPCs before the detector is returned — giving the matcher a chance to validate
-// the targets and precompute whatever it needs. Matchers that derive their
-// targets some other way can simply not implement it.
-type TargetIniter interface {
-	TargetInit(butler voiceevent.AddressTarget, npcs []voiceevent.AddressTarget)
-}
-
 // AddressDetector is a [Reactor] that subscribes to [voiceevent.STTFinal]
-// events, decides which Agent(s) the utterance addresses, and republishes the
-// choice as [voiceevent.AddressRouted] using the shared event taxonomy
-// (ADR-0020).
+// events, asks its [TargetMatcher] which Agent(s) the utterance addresses, and
+// republishes each choice as [voiceevent.AddressRouted] using the shared event
+// taxonomy (ADR-0020).
 //
-// Per CONTEXT.md "Address Detection" the routing options are exactly the
-// Agents present in the Voice Session: a Character NPC if a participant
-// named one, otherwise the Tenant's Butler (the default route).
+// Per CONTEXT.md "Address Detection" the routing options are exactly the Agents
+// present in the Voice Session: a Character NPC if a participant named one,
+// otherwise the Tenant's Butler (the default route). Which of those a given
+// utterance resolves to is wholly the matcher's call.
 //
-// The matching algorithm lives behind a [TargetMatcher]. The default — used
-// when no [WithMatcher] option is given — is intentionally minimal:
-// case-insensitive whole-word match on each registered Character NPC's display
-// Name, the first NPC matched wins, and the Butler is the unconditional
-// fallback. Callers needing a different algorithm supply one via [WithMatcher].
-//
-// Per ADR-0026 the detector is a Reactor: construction sets up the matcher but
+// Per ADR-0026 the detector is a Reactor: construction holds the matcher but
 // touches no bus; [AddressDetector.Bind] installs the STTFinal subscription and
 // returns its teardown. This lets the whole reactive layer be wired uniformly —
 // standalone, in a hand-picked subset via [Bind], or bundled by a [Conversation].
@@ -58,41 +43,18 @@ type AddressDetector struct {
 	matcher TargetMatcher
 }
 
-// DetectorOption configures an [AddressDetector] at construction.
-type DetectorOption func(*AddressDetector)
-
-// WithMatcher replaces the default whole-word name matcher with a custom
-// matching algorithm. If the supplied matcher implements [TargetIniter] it is
-// still handed the Butler and NPC targets at construction.
-func WithMatcher(m TargetMatcher) DetectorOption {
-	return func(d *AddressDetector) { d.matcher = m }
-}
-
-// NewAddressDetector builds a detector for the given routing targets. It
+// NewAddressDetector builds a detector around matcher, which must be non-nil
+// (the detector has no matching algorithm of its own to fall back to). It
 // installs nothing — call [AddressDetector.Bind] to subscribe it to a bus.
 //
-// butler is the Tenant's Butler (the default route) and npcs is the list of
-// Character NPC Agents currently active in the Voice Session. With no options
-// the detector uses the default whole-word name matcher, which requires the
-// Butler to carry AgentRole "butler" with a non-empty Name and every NPC to
-// carry AgentRole "character" with a non-empty Name — an empty Butler Name, or
-// any NPC without a Name or with the wrong role, panics at wiring time.
-//
-// Supplying [WithMatcher] swaps in a different algorithm; the targets are then
-// only forwarded to that matcher when it implements [TargetIniter], so its own
-// validation rules apply instead of the default matcher's.
-func NewAddressDetector(butler voiceevent.AddressTarget, npcs []voiceevent.AddressTarget, opts ...DetectorOption) *AddressDetector {
-	d := &AddressDetector{}
-	for _, opt := range opts {
-		opt(d)
+// The matcher owns the Voice Session's routing targets and their validation;
+// construct it with the Tenant's Butler and the active Character NPCs (see
+// address.NewWholeWordMatcher or address.NewMatcher) before handing it here.
+func NewAddressDetector(matcher TargetMatcher) *AddressDetector {
+	if matcher == nil {
+		panic("orchestrator.NewAddressDetector: matcher must not be nil")
 	}
-	if d.matcher == nil {
-		d.matcher = &nameMatcher{}
-	}
-	if initer, ok := d.matcher.(TargetIniter); ok {
-		initer.TargetInit(butler, npcs)
-	}
-	return d
+	return &AddressDetector{matcher: matcher}
 }
 
 // Bind subscribes the detector to [voiceevent.STTFinal] on bus and returns a
@@ -111,56 +73,4 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			bus.Publish(routed)
 		}
 	})
-}
-
-// nameMatcher is the default [TargetMatcher]: case-insensitive whole-word match
-// on each NPC's display Name with the Butler as the unconditional fallback. The
-// first NPC matched wins — disambiguation across multiply-named utterances is
-// Q13.4 in DESIGN.md.
-type nameMatcher struct {
-	butler      voiceevent.AddressTarget
-	npcs        []voiceevent.AddressTarget
-	npcMatchers []*regexp.Regexp // parallel to npcs; one whole-word matcher per NPC name
-}
-
-// TargetInit validates the routing targets and compiles one whole-word matcher
-// per NPC name. The panics are construction errors caught at wiring time, not
-// runtime conditions.
-func (m *nameMatcher) TargetInit(butler voiceevent.AddressTarget, npcs []voiceevent.AddressTarget) {
-	if butler.AgentRole != "butler" {
-		panic(`orchestrator.NewAddressDetector: butler.AgentRole must be "butler"`)
-	}
-	if butler.Name == "" {
-		panic("orchestrator.NewAddressDetector: butler.Name must not be empty")
-	}
-	matchers := make([]*regexp.Regexp, len(npcs))
-	for i, npc := range npcs {
-		if npc.AgentRole != "character" {
-			panic(`orchestrator.NewAddressDetector: npc.AgentRole must be "character"`)
-		}
-		if npc.Name == "" {
-			panic("orchestrator.NewAddressDetector: npc.Name must not be empty")
-		}
-		matchers[i] = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(npc.Name) + `\b`)
-	}
-	m.butler = butler
-	m.npcs = npcs
-	m.npcMatchers = matchers
-}
-
-// TargetMatch routes to the first NPC whose name appears as a whole word in
-// text, falling back to the Butler. It always returns exactly one decision.
-func (m *nameMatcher) TargetMatch(text string) []voiceevent.AddressRouted {
-	target := m.butler
-	for i, re := range m.npcMatchers {
-		if re.MatchString(text) {
-			target = m.npcs[i]
-			break
-		}
-	}
-	return []voiceevent.AddressRouted{{
-		At:     time.Now(),
-		Text:   text,
-		Target: target,
-	}}
 }

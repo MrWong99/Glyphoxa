@@ -94,11 +94,11 @@ func DefaultHeuristics() []Heuristic {
 }
 
 // Matcher is the scoring Address Detection algorithm. It satisfies the
-// orchestrator's TargetMatcher seam and is installed with
-// orchestrator.WithMatcher:
+// orchestrator's TargetMatcher seam and is handed to
+// orchestrator.NewAddressDetector:
 //
 //	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
-//	d := orchestrator.NewAddressDetector(butler.Target, npcTargets, orchestrator.WithMatcher(m))
+//	d := orchestrator.NewAddressDetector(m)
 //
 // Per utterance it fuzzily scores every Agent's name, scores each Agent through
 // the heuristic stack, and returns the set whose total reaches the threshold
