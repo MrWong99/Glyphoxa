@@ -9,8 +9,10 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
 )
 
 // scriptedVAD is a [vad.SessionHandle] that returns a predetermined sequence of
@@ -171,6 +173,116 @@ func TestSegmenter_BufferClearedAfterFlushError(t *testing.T) {
 	if got := len(rec.calls[1]); got != 1 {
 		t.Errorf("second utterance had %d frames, want 1 (first utterance must not bleed in)", got)
 	}
+}
+
+// recordReactor is a [orchestrator.Reactor] whose teardown appends its name to
+// a shared log, so a test can observe Bind's teardown ordering.
+type recordReactor struct {
+	name string
+	log  *[]string
+}
+
+func (r recordReactor) Bind(context.Context, *voiceevent.Bus) func() {
+	return func() { *r.log = append(*r.log, r.name) }
+}
+
+// TestBind_TearsDownInReverseOrder pins the documented contract that Bind's
+// returned cancel tears reactors down in reverse registration order.
+func TestBind_TearsDownInReverseOrder(t *testing.T) {
+	bus := voiceevent.NewBus()
+	var log []string
+	cancel := orchestrator.Bind(t.Context(), bus,
+		recordReactor{name: "a", log: &log},
+		recordReactor{name: "b", log: &log},
+		recordReactor{name: "c", log: &log},
+	)
+	cancel()
+
+	want := []string{"c", "b", "a"}
+	if len(log) != len(want) {
+		t.Fatalf("teardown order = %v, want %v", log, want)
+	}
+	for i := range want {
+		if log[i] != want[i] {
+			t.Fatalf("teardown order = %v, want %v (reverse of registration)", log, want)
+		}
+	}
+}
+
+// TestReplier_BindCancelUnsubscribes proves the reactor stops reacting after
+// its returned cancel runs: an AddressRouted published post-teardown drives no
+// further TTS dispatch.
+func TestReplier_BindCancelUnsubscribes(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{{Sentence: "hi"}}
+	}
+	cancel := orchestrator.NewReplier(ttsStage, reply, nil).Bind(t.Context(), h.Bus)
+
+	h.Bus.Publish(voiceevent.AddressRouted{})
+	cancel()
+	h.Bus.Publish(voiceevent.AddressRouted{})
+
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+}
+
+// selectiveSynth is a [tts.Synthesizer] that fails Synthesize for sentences in
+// failOn and otherwise returns an already-closed audio channel.
+type selectiveSynth struct {
+	failOn map[string]bool
+}
+
+func (s selectiveSynth) Synthesize(_ context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	if s.failOn[req.Sentence] {
+		return nil, errors.New("synth failed")
+	}
+	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch, nil
+}
+
+func (selectiveSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestReplier_DispatchErrorReportedAndDoesNotStopRemaining pins the documented
+// error contract: a failing Dispatch is surfaced via the ErrorFunc and the
+// remaining replies in the same turn are still dispatched.
+func TestReplier_DispatchErrorReportedAndDoesNotStopRemaining(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{{Sentence: "boom"}, {Sentence: "ok"}}
+	}
+	var errs []error
+	replier := orchestrator.NewReplier(ttsStage, reply, func(e error) { errs = append(errs, e) })
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{})
+
+	if len(errs) != 1 {
+		t.Fatalf("ErrorFunc saw %d errors, want 1", len(errs))
+	}
+	// The first reply failed (no event); the second still dispatched.
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TTSInvoked) bool { return e.Sentence == "ok" },
+		"tts.invoked for the reply after the failed one",
+	)
+}
+
+// TestReplier_NilErrorFuncDropsErrorWithoutPanic pins that a nil ErrorFunc is
+// tolerated: a dispatch failure is dropped silently and later replies proceed.
+func TestReplier_NilErrorFuncDropsErrorWithoutPanic(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{{Sentence: "boom"}, {Sentence: "ok"}}
+	}
+	t.Cleanup(orchestrator.NewReplier(ttsStage, reply, nil).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{}) // must not panic on the dropped error
+
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
 }
 
 // TestSegmenter_ConcurrentFeedAndFlush is a -race probe: an audio loop feeding
