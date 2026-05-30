@@ -136,6 +136,94 @@ func TestOn_UnsubscribeStopsDelivery(t *testing.T) {
 	}
 }
 
+// TestBus_DeliversInSubscriptionOrder pins the ordering guarantee: subscribers
+// are invoked in the order Subscribe was called, every Publish, so a
+// deterministic pipeline stays deterministic.
+func TestBus_DeliversInSubscriptionOrder(t *testing.T) {
+	t.Parallel()
+
+	bus := NewBus()
+	var order []int
+	for i := range 5 {
+		id := i
+		t.Cleanup(bus.Subscribe(func(Event) { order = append(order, id) }))
+	}
+
+	for range 3 {
+		order = order[:0]
+		bus.Publish(VADSpeechStart{})
+		for i := range 5 {
+			if order[i] != i {
+				t.Fatalf("delivery order = %v, want 0..4 (subscription order)", order)
+			}
+		}
+	}
+}
+
+// TestBus_UnsubscribeDuringPublishKeepsSnapshot pins the snapshot guarantee: a
+// subscriber removed by another subscriber's callback mid-fan-out still
+// receives the in-flight event, and is gone from the next Publish.
+func TestBus_UnsubscribeDuringPublishKeepsSnapshot(t *testing.T) {
+	t.Parallel()
+
+	bus := NewBus()
+	var victimCalls int
+	var unsubVictim func()
+	// First subscriber removes the victim during the fan-out.
+	t.Cleanup(bus.Subscribe(func(Event) {
+		if unsubVictim != nil {
+			unsubVictim()
+		}
+	}))
+	unsubVictim = bus.Subscribe(func(Event) { victimCalls++ })
+
+	bus.Publish(VADSpeechStart{}) // victim was snapshotted before removal → still called
+	if victimCalls != 1 {
+		t.Fatalf("victim got %d calls on the publish that removed it, want 1 (snapshot)", victimCalls)
+	}
+
+	bus.Publish(VADSpeechStart{}) // now removed → not called
+	if victimCalls != 1 {
+		t.Errorf("victim got %d calls after removal, want 1", victimCalls)
+	}
+}
+
+// TestBus_ReentrantPublishCompletesDepthFirst pins re-entrancy: a callback that
+// publishes a second event (the live AddressDetector → AddressRouted path) does
+// not deadlock, and the nested delivery completes before the outer fan-out
+// continues to the next subscriber.
+func TestBus_ReentrantPublishCompletesDepthFirst(t *testing.T) {
+	t.Parallel()
+
+	bus := NewBus()
+	var log []string
+	// Subscriber A republishes a different event type on the first STTFinal.
+	published := false
+	t.Cleanup(On(bus, func(STTFinal) {
+		log = append(log, "A:stt")
+		if !published {
+			published = true
+			bus.Publish(AddressRouted{}) // nested
+		}
+	}))
+	t.Cleanup(On(bus, func(AddressRouted) { log = append(log, "B:routed") }))
+	// Subscriber C (registered after A) sees the outer STTFinal only after the
+	// nested AddressRouted fan-out has completed.
+	t.Cleanup(On(bus, func(STTFinal) { log = append(log, "C:stt") }))
+
+	bus.Publish(STTFinal{})
+
+	want := []string{"A:stt", "B:routed", "C:stt"}
+	if len(log) != len(want) {
+		t.Fatalf("delivery log = %v, want %v", log, want)
+	}
+	for i := range want {
+		if log[i] != want[i] {
+			t.Fatalf("delivery log = %v, want %v (nested publish must complete depth-first)", log, want)
+		}
+	}
+}
+
 func TestBus_ConcurrentPublishAndSubscribe(t *testing.T) {
 	t.Parallel()
 

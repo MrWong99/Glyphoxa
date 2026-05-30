@@ -108,11 +108,30 @@ func (TTSInvoked) EventName() string { return "tts.invoked" }
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
 //
+// Delivery guarantees:
+//   - Synchronous: Publish returns only after every callback has run.
+//   - Ordered: callbacks run in subscription order (the order Subscribe was
+//     called), so a deterministic pipeline stays deterministic — the same
+//     value the [Glyphoxa address matcher] is built around. Tests and the SSE
+//     relay therefore observe a stable fan-out order.
+//   - Re-entrant: a callback may itself call Publish; the nested delivery runs
+//     to completion (depth-first) before the outer fan-out continues. Note this
+//     means a subscriber listening to several event types can observe a caused
+//     event (e.g. AddressRouted) before the outer cause (STTFinal) finishes
+//     fanning out.
+//   - Snapshot: the subscriber set is snapshotted under lock at the start of
+//     each Publish. A subscriber added or removed concurrently with — or from
+//     inside — a Publish either sees that event or doesn't, atomically; one
+//     removed mid-fan-out still receives the in-flight event.
+//
 // Bus is safe for concurrent use. Callbacks must not block — slow consumers
-// (e.g. SSE writers) must do their own buffering.
+// (e.g. SSE writers) must do their own buffering — and must not panic: a panic
+// propagates to the publisher and aborts delivery to the remaining subscribers.
+//
+// [Glyphoxa address matcher]: github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator/address
 type Bus struct {
 	mu   sync.Mutex
-	subs map[*subscription]struct{}
+	subs []*subscription // subscribers in registration order; unsubscribe compacts
 }
 
 type subscription struct {
@@ -121,16 +140,16 @@ type subscription struct {
 
 // NewBus returns an empty Bus.
 func NewBus() *Bus {
-	return &Bus{subs: map[*subscription]struct{}{}}
+	return &Bus{}
 }
 
-// Publish delivers e to every current subscriber. Subscribers added or removed
-// concurrently with Publish either see e or don't, atomically.
+// Publish delivers e to every current subscriber, in subscription order, in the
+// calling goroutine. See [Bus] for the full delivery contract.
 func (b *Bus) Publish(e Event) {
 	b.mu.Lock()
-	fns := make([]func(Event), 0, len(b.subs))
-	for s := range b.subs {
-		fns = append(fns, s.fn)
+	fns := make([]func(Event), len(b.subs))
+	for i, s := range b.subs {
+		fns[i] = s.fn
 	}
 	b.mu.Unlock()
 
@@ -139,17 +158,25 @@ func (b *Bus) Publish(e Event) {
 	}
 }
 
-// Subscribe registers fn for every subsequent Publish. The returned function
-// removes the subscription; calling it more than once is a no-op.
+// Subscribe registers fn for every subsequent Publish, after any
+// already-registered subscribers. The returned function removes the
+// subscription; calling it more than once is a no-op.
 func (b *Bus) Subscribe(fn func(Event)) (unsubscribe func()) {
 	s := &subscription{fn: fn}
 	b.mu.Lock()
-	b.subs[s] = struct{}{}
+	b.subs = append(b.subs, s)
 	b.mu.Unlock()
 
 	return func() {
 		b.mu.Lock()
-		delete(b.subs, s)
+		for i, cur := range b.subs {
+			if cur == s {
+				// Compact in place; Publish has already copied the fn values it
+				// is mid-delivery on, so this never disturbs an in-flight fan-out.
+				b.subs = append(b.subs[:i], b.subs[i+1:]...)
+				break
+			}
+		}
 		b.mu.Unlock()
 	}
 }
