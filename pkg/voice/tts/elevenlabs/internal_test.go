@@ -1,9 +1,86 @@
 package elevenlabs
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"testing"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
+
+// oddChunkReader hands out at most chunk bytes per Read so read boundaries land
+// mid-sample, exercising streamPCM's odd-byte carry-over.
+type oddChunkReader struct {
+	data  []byte
+	chunk int
+}
+
+func (r *oddChunkReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := min(r.chunk, len(p), len(r.data))
+	copy(p, r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func (r *oddChunkReader) Close() error { return nil }
+
+// TestStreamPCM_OddSizedReadsReassembleExactly is the regression test for the
+// sample-desync bug: streamPCM used to mask off the trailing byte of every odd
+// read and discard it, shifting and corrupting all subsequent samples. With the
+// carry-over fix, an even-length stream delivered in odd-sized reads must
+// reassemble byte-for-byte.
+func TestStreamPCM_OddSizedReadsReassembleExactly(t *testing.T) {
+	t.Parallel()
+	// 1000 distinct bytes (even length = a whole number of int16 samples).
+	want := make([]byte, 1000)
+	for i := range want {
+		want[i] = byte(i % 251) // 251 is prime → no accidental period alignment
+	}
+
+	for _, chunk := range []int{1, 3, 5, 7, 4095} {
+		src := make([]byte, len(want))
+		copy(src, want)
+		r := &oddChunkReader{data: src, chunk: chunk}
+		ch := make(chan tts.AudioChunk)
+		go streamPCM(context.Background(), r, ch, 24000)
+
+		var got []byte
+		for c := range ch {
+			if len(c.PCM)%2 != 0 {
+				t.Errorf("chunk=%d: emitted an odd-length PCM chunk (%d bytes)", chunk, len(c.PCM))
+			}
+			got = append(got, c.PCM...)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("chunk=%d: reassembled stream differs from source (%d of %d bytes)",
+				chunk, len(got), len(want))
+		}
+	}
+}
+
+// TestStreamPCM_TrailingOddByteDropped pins the documented edge: a stream with
+// an odd total length (a truncated final sample) emits all whole samples and
+// drops only the single dangling byte — never more.
+func TestStreamPCM_TrailingOddByteDropped(t *testing.T) {
+	t.Parallel()
+	want := []byte{1, 2, 3, 4, 5} // 5 bytes: two whole samples + one dangling
+	r := &oddChunkReader{data: append([]byte(nil), want...), chunk: 2}
+	ch := make(chan tts.AudioChunk)
+	go streamPCM(context.Background(), r, ch, 24000)
+
+	var got []byte
+	for c := range ch {
+		got = append(got, c.PCM...)
+	}
+	if !bytes.Equal(got, want[:4]) {
+		t.Errorf("reassembled %v, want %v (final dangling byte dropped)", got, want[:4])
+	}
+}
 
 func TestSampleRateFromOutputFormat(t *testing.T) {
 	t.Parallel()

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -20,7 +21,9 @@ import (
 type TTS struct {
 	bus         *voiceevent.Bus
 	synthesizer tts.Synthesizer
-	nextIndex   int
+
+	mu        sync.Mutex
+	nextIndex int
 }
 
 // NewTTS wires synthesizer into bus. Both must be non-nil; passing nil panics.
@@ -63,12 +66,20 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	if err != nil {
 		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
 	}
+	// Assign the per-turn index under the lock so concurrent dispatches (an
+	// Ensemble Turn or a barge-in canceller, both anticipated below) get
+	// distinct, monotonically increasing indices. Only a successful synthesis
+	// consumes an index — the error path above returns before this.
+	s.mu.Lock()
+	index := s.nextIndex
+	s.nextIndex++
+	s.mu.Unlock()
+
 	s.bus.Publish(voiceevent.TTSInvoked{
 		At:       time.Now(),
 		Sentence: sentence,
-		Index:    s.nextIndex,
+		Index:    index,
 	})
-	s.nextIndex++
 	for range ch {
 	}
 	return nil

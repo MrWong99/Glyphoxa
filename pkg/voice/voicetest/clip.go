@@ -31,17 +31,37 @@ type Clip struct {
 // log it, fail the test, or pad it, so a clipped fixture cannot hide as a
 // passing test.
 //
-// The clip must be mono 16-bit PCM; otherwise the test is failed.
+// The clip must be mono 16-bit PCM and samplesPerFrame must be a whole number
+// of milliseconds at the clip's sample rate; otherwise the test is failed.
 func (c *Clip) FramesOf(t *testing.T, samplesPerFrame int) (frames []audio.Frame, tailSamples int) {
 	t.Helper()
+	frames, tailSamples, err := c.framesOf(samplesPerFrame)
+	if err != nil {
+		t.Fatalf("voicetest.FramesOf(%q): %v", c.Name, err)
+	}
+	return frames, tailSamples
+}
+
+// framesOf is the pure core of [Clip.FramesOf]: it validates the clip and frame
+// size and slices the PCM, returning an error instead of failing a test so the
+// logic is unit-testable without a *testing.T.
+func (c *Clip) framesOf(samplesPerFrame int) (frames []audio.Frame, tailSamples int, err error) {
 	if c.Channels != 1 {
-		t.Fatalf("voicetest.FramesOf(%q): clip has %d channels, want 1 (mono PCM only)", c.Name, c.Channels)
+		return nil, 0, fmt.Errorf("clip has %d channels, want 1 (mono PCM only)", c.Channels)
 	}
 	if c.BitDepth != 16 {
-		t.Fatalf("voicetest.FramesOf(%q): clip is %d-bit, want 16-bit PCM", c.Name, c.BitDepth)
+		return nil, 0, fmt.Errorf("clip is %d-bit, want 16-bit PCM", c.BitDepth)
 	}
 	if samplesPerFrame <= 0 {
-		t.Fatalf("voicetest.FramesOf(%q): samplesPerFrame must be > 0, got %d", c.Name, samplesPerFrame)
+		return nil, 0, fmt.Errorf("samplesPerFrame must be > 0, got %d", samplesPerFrame)
+	}
+	// audio.NewFrame validates len(samples) == SampleRate*frameMs/1000, so the
+	// frame duration must be a whole number of milliseconds. Reject a frame size
+	// that isn't, rather than deriving a truncated frameMs below and failing the
+	// decode with a confusing per-frame error.
+	if samplesPerFrame*1000%c.SampleRate != 0 {
+		return nil, 0, fmt.Errorf("samplesPerFrame=%d at %d Hz is %.4g ms, not a whole number of milliseconds; choose a frame size that divides evenly",
+			samplesPerFrame, c.SampleRate, float64(samplesPerFrame)*1000/float64(c.SampleRate))
 	}
 	bytesPerFrame := samplesPerFrame * 2
 	fullFrames := len(c.PCM) / bytesPerFrame
@@ -52,13 +72,13 @@ func (c *Clip) FramesOf(t *testing.T, samplesPerFrame int) (frames []audio.Frame
 	frames = make([]audio.Frame, 0, fullFrames)
 	for i := range fullFrames {
 		off := i * bytesPerFrame
-		f, err := audio.FromPCM16LE(c.PCM[off:off+bytesPerFrame], c.SampleRate, frameMs)
-		if err != nil {
-			t.Fatalf("voicetest.FramesOf(%q): decode frame %d: %v", c.Name, i, err)
+		f, e := audio.FromPCM16LE(c.PCM[off:off+bytesPerFrame], c.SampleRate, frameMs)
+		if e != nil {
+			return nil, 0, fmt.Errorf("decode frame %d: %w", i, e)
 		}
 		frames = append(frames, f)
 	}
-	return frames, tailSamples
+	return frames, tailSamples, nil
 }
 
 // LoadClip resolves and decodes tests/voice-clips/<name>/audio.wav, failing
