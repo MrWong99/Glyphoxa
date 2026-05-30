@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator/address"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 

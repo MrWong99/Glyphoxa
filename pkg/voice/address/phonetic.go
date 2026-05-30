@@ -1,8 +1,10 @@
-// Package address is the scoring Address Detection matcher (ADR-0024): a
-// deterministic, fuzzy, heuristic-scored alternative to the orchestrator's
-// minimal whole-word [nameMatcher].
+// Package address holds the Voice Session's Address Detection matchers — the
+// algorithms behind the orchestrator's TargetMatcher seam that decide which
+// Agent(s) an utterance targets. It ships two: [WholeWordMatcher], the
+// dependency-free whole-word default, and [Matcher], the scoring engine
+// (ADR-0024) — a deterministic, fuzzy, heuristic-scored alternative.
 //
-// Where the default matcher does a case-insensitive whole-word match on each
+// Where the WholeWordMatcher does a case-insensitive whole-word match on each
 // Character NPC's display Name and falls back to the Butler unconditionally,
 // this package matches every Agent — Butler included — fuzzily (phonetic +
 // edit-distance), then scores each candidate with a stack of pluggable
@@ -15,8 +17,8 @@
 // recent interruptions). It uses no LLM and no vendor in the hot path, so it
 // stays sub-millisecond and fully unit-testable (ADR-0024 "Why deterministic").
 //
-// A [Matcher] satisfies the orchestrator's TargetMatcher seam and is wired in
-// via orchestrator.WithMatcher; see [Matcher].
+// Both adapters satisfy the orchestrator's TargetMatcher seam and are handed to
+// orchestrator.NewAddressDetector; see [WholeWordMatcher] and [Matcher].
 package address
 
 import (

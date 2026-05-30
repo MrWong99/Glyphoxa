@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
 )
@@ -26,7 +26,7 @@ func scoringAgents() (butlerAg, bartAg, goblinAg address.Agent) {
 // matcher.
 func newScoringDetector(agents ...address.Agent) *orchestrator.AddressDetector {
 	m := address.NewMatcher(address.Config{Language: "en"}, agents...)
-	return orchestrator.NewAddressDetector(butlerTarget, []voiceevent.AddressTarget{bartTarget}, orchestrator.WithMatcher(m))
+	return orchestrator.NewAddressDetector(m)
 }
 
 // TestScoringMatcher_HelloTest_RoutesToButler is TB7 through the scoring
