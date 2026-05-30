@@ -113,28 +113,47 @@ func streamPCM(ctx context.Context, r io.ReadCloser, ch chan<- tts.AudioChunk, s
 	defer r.Close()
 
 	buf := make([]byte, streamReadBuffer)
+	carried := false // buf[0] holds the low byte of a sample split across reads
 	for {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		n, err := r.Read(buf)
-		if n > 0 {
-			// Defensively drop any trailing byte that would make the chunk an
-			// odd byte count — downstream [audio.FromPCM16LE] requires even.
-			n &^= 1
-			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
+		// Reserve buf[0] for a byte carried over from the previous read so a
+		// sample straddling a read boundary stays aligned (each int16 PCM sample
+		// is two bytes; downstream [audio.FromPCM16LE] requires an even count).
+		off := 0
+		if carried {
+			off = 1
+		}
+		n, err := r.Read(buf[off:])
+		total := off + n
+		if total > 0 {
+			// Emit a whole number of samples; hold any trailing odd byte for the
+			// next read instead of dropping it (dropping would shift — and so
+			// corrupt — every subsequent sample).
+			emit := total &^ 1
+			if emit > 0 {
+				chunk := make([]byte, emit)
+				copy(chunk, buf[:emit])
 				select {
 				case <-ctx.Done():
 					return
 				case ch <- tts.AudioChunk{PCM: chunk, SampleRate: sampleRate, Channels: 1}:
 				}
 			}
+			// Carry the leftover low byte to the front for the next read. Done
+			// after the copy above so the emitted chunk keeps its first byte.
+			if emit < total {
+				buf[0] = buf[emit]
+				carried = true
+			} else {
+				carried = false
+			}
 		}
 		if err != nil {
 			// Includes io.EOF for normal completion and any mid-stream error;
-			// per ADR-0022 we close the channel early either way.
+			// per ADR-0022 we close the channel early either way. A final
+			// dangling byte (a truncated last sample) is intentionally dropped.
 			return
 		}
 	}
