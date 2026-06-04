@@ -1,9 +1,9 @@
 # Running the live NPC (`voice` mode)
 
 The `glyphoxa` binary's `voice` mode joins a Discord voice channel and gives one
-Character NPC ("Bart", the innkeeper) a live voice loop. The NPC can be the
-in-code default or loaded from Postgres (`-db`, see "Loading the NPC from the
-database" below):
+Character NPC ("Bart", the innkeeper) a live voice loop. By default the NPC is
+**loaded from Postgres** (seed it first — see "Loading the NPC from the database"
+below); pass `-hardcoded` to use the in-code NPC without a database:
 
 ```
 Session.Inbound (Opus) → [codec] → VAD (Silero) → STT (ElevenLabs)
@@ -52,29 +52,16 @@ make dave-libs
 CGO_ENABLED=1 go build -tags dave -o glyphoxa ./cmd/glyphoxa
 ```
 
-## Run
+## Run (DB-loaded NPC — the default)
+
+`voice` mode loads the NPC from Postgres by default, so apply the schema and seed
+the NPC once, then run:
 
 ```sh
 export DISCORD_BOT_TOKEN="<bot token>"
 export ANTHROPIC_API_KEY="<claude key>"
 export ELEVENLABS_API_KEY="<elevenlabs key>"
 
-./glyphoxa -mode voice \
-  -guild   <guild-snowflake-id> \
-  -channel <voice-channel-snowflake-id>
-```
-
-The bot opens the Discord gateway, joins the channel, and logs
-`joined voice channel … npc=Bart`. Stop with Ctrl-C (SIGINT) — it leaves the
-channel and closes the session cleanly.
-
-## Loading the NPC from the database (`-db`)
-
-By default `voice` mode uses the in-code NPC. To load Bart's Persona / Voice /
-identity from Postgres instead (task #5), apply the schema, seed the NPC, then
-run with `-db`:
-
-```sh
 # Postgres connection string and the app credential-encryption secret.
 export GLYPHOXA_DATABASE_URL="postgres://user:pass@host:5432/glyphoxa?sslmode=disable"
 export GLYPHOXA_SECRET="<app secret>"   # ADR-0004 single app secret
@@ -82,14 +69,30 @@ export GLYPHOXA_SECRET="<app secret>"   # ADR-0004 single app secret
 ./glyphoxa migrate up          # apply the schema (idempotent)
 ./glyphoxa seed                # create the demo Tenant/Campaign + Bart (idempotent)
 
-./glyphoxa -mode voice -db \
+./glyphoxa -mode voice \
   -guild   <guild-snowflake-id> \
   -channel <voice-channel-snowflake-id>
 ```
 
-`-db` logs `loaded NPC from DB npc=Bart …` instead of using the in-code default;
-the assembled pipeline is otherwise identical. The seed is idempotent (it no-ops
-if the demo Tenant already exists), so re-running it on every boot is safe.
+It logs `loaded NPC from DB npc=Bart …`. The bot opens the Discord gateway,
+joins the channel, and logs `joined voice channel … npc=Bart`. Stop with Ctrl-C
+(SIGINT) — it leaves the channel and closes the session cleanly. The seed is
+idempotent (it no-ops if the demo Tenant already exists), so re-running it on
+every boot is safe.
+
+## Running without a database (`-hardcoded`)
+
+To smoke-test audio without Postgres, `-hardcoded` uses the in-code NPC instead
+of loading from the DB (no `migrate`/`seed`, no `$GLYPHOXA_DATABASE_URL`):
+
+```sh
+./glyphoxa -mode voice -hardcoded \
+  -guild   <guild-snowflake-id> \
+  -channel <voice-channel-snowflake-id>
+```
+
+The assembled pipeline is identical either way; only the *source* of the NPC's
+Persona/Voice/identity differs.
 
 ### Credential home (the `provider_config` ciphertext is *not* the live key)
 

@@ -44,12 +44,12 @@ func main() {
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
-	fromDB := flag.Bool("db", false, "load the NPC from the database (seed it first with `glyphoxa seed`) instead of the in-code default")
+	hardcoded := flag.Bool("hardcoded", false, "use the in-code NPC instead of loading from the database — no Postgres needed, for smoke-testing audio without a seeded DB")
 	flag.Parse()
 
 	switch *mode {
 	case "voice":
-		if err := runVoice(log, cfg, *fromDB); err != nil {
+		if err := runVoice(log, cfg, *hardcoded); err != nil {
 			log.Error("voice mode exited with error", "err", err)
 			os.Exit(1)
 		}
@@ -65,9 +65,10 @@ func main() {
 // adapters read from their own env vars / keyring (the encrypted provider_config
 // credential is the web-app BYOK path, not the self-host voice path).
 //
-// When fromDB is set, the NPC's Persona/Voice/identity load from Postgres
-// ($GLYPHOXA_DATABASE_URL) via the task-#5 path; otherwise the in-code NPC runs.
-func runVoice(log *slog.Logger, cfg wirenpc.Config, fromDB bool) error {
+// By default the NPC's Persona/Voice/identity load from Postgres
+// ($GLYPHOXA_DATABASE_URL) via the task-#5 path. The -hardcoded escape hatch
+// uses the in-code NPC instead, so audio can be smoke-tested without a seeded DB.
+func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool) error {
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
 	if cfg.Token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set")
@@ -80,12 +81,12 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, fromDB bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if fromDB {
-		dsn := databaseURL()
-		if dsn == "" {
-			return fmt.Errorf("-db requires $GLYPHOXA_DATABASE_URL (or $DATABASE_URL)")
-		}
-		return wirenpc.RunFromDB(ctx, cfg, dsn)
+	if hardcoded {
+		return wirenpc.Run(ctx, cfg)
 	}
-	return wirenpc.Run(ctx, cfg)
+	dsn := databaseURL()
+	if dsn == "" {
+		return fmt.Errorf("voice mode loads the NPC from the DB by default; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL), or pass -hardcoded to use the in-code NPC")
+	}
+	return wirenpc.RunFromDB(ctx, cfg, dsn)
 }
