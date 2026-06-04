@@ -1,0 +1,24 @@
+# LLM cassette (ADR-0021): the tool-use-loop scenario — the most important
+# thing this cassette pins is tool-call ROUTING.
+#
+# Two exchanges, one per Provider.Complete call the tool-use loop makes:
+#   1. The model, shown the dice Tool, emits a tool_call for it (stop=tool_use).
+#      The loop executes the REAL dice tool (seeded rng → "Rolled 1d20: 8.") and
+#      feeds the result back.
+#   2. With the result in context, the model returns the final spoken text.
+#
+# Each is keyed by prompt_hash. The second hash depends on the first exchange's
+# tool_call id ("toolu_roll1") and args AND on the live dice result, so those
+# must replay verbatim — change any and exchange 2 misses. Re-record against a
+# live LLM with `-tags=record` (the dice seed stays fixed in the test).
+exchanges:
+  - prompt_hash: 5056cd6d46898b2739ef3d972d378a67d37e7e4010436bba0a537792da26c76d
+    tool_calls:
+      - id: toolu_roll1
+        name: dice
+        input: '{"count":1,"sides":20}'
+    stop_reason: tool_use
+  - prompt_hash: 7ebd62378001b170acfe4ac2070a0ccd3dc98c828cdd2b274f15963617a3b747
+    text: "The bones favor you tonight, traveler."
+    stop_reason: end_turn
+notes: Hand-authored fixture for the tool-use-loop replay test; dice rng seeded PCG(42,99), first draw.
