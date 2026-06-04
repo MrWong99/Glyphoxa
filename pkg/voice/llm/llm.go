@@ -64,9 +64,13 @@ type Message struct {
 	// only spoke. The tool-use loop (ADR-0028) is the consumer.
 	ToolCalls []ToolCall
 
-	// ToolResult is the outcome of one executed [ToolCall], set only on a
-	// [RoleTool] Message. Nil otherwise.
-	ToolResult *ToolResult
+	// ToolResults are the outcomes of the [ToolCall]s executed in response to
+	// one assistant turn, set only on a [RoleTool] Message. A slice, not a
+	// single result, because one assistant turn may request several tools in
+	// parallel and the wire protocols (e.g. Anthropic) require all their
+	// results carried in the one following tool-role Message — symmetric with
+	// [Message.ToolCalls]. Nil on every non-[RoleTool] Message.
+	ToolResults []ToolResult
 }
 
 // ToolCall is the model's request to invoke one named Tool, decoded from the

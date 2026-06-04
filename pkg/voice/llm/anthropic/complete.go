@@ -181,18 +181,23 @@ func assistantBlocks(m llm.Message) []contentBlock {
 	return blocks
 }
 
-// toolResultBlocks renders a [llm.RoleTool] message as a single Anthropic
-// tool_result block carried on a user-role message.
+// toolResultBlocks renders a [llm.RoleTool] message as one Anthropic
+// tool_result block per result, all carried on the single user-role message
+// the API expects after a parallel-tool-call assistant turn (ADR-0028).
 func toolResultBlocks(m llm.Message) []contentBlock {
-	if m.ToolResult == nil {
+	if len(m.ToolResults) == 0 {
 		return nil
 	}
-	return []contentBlock{{
-		Type:      "tool_result",
-		ToolUseID: m.ToolResult.CallID,
-		Content:   m.ToolResult.Content,
-		IsError:   m.ToolResult.IsError,
-	}}
+	blocks := make([]contentBlock, len(m.ToolResults))
+	for i, tr := range m.ToolResults {
+		blocks[i] = contentBlock{
+			Type:      "tool_result",
+			ToolUseID: tr.CallID,
+			Content:   tr.Content,
+			IsError:   tr.IsError,
+		}
+	}
+	return blocks
 }
 
 // toWireTools maps the [llm.ToolDef]s onto the Anthropic tools array. Returns

@@ -287,11 +287,14 @@ func TestComplete_RequestShape_PinsBodyAndHeaders(t *testing.T) {
 	}
 }
 
-// TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlock pins the ADR-0028
-// return path: a [llm.RoleTool] message (the result the tool-use loop appends
-// after executing a call) must serialize as a user-role message carrying a
-// tool_result block with the matching tool_use_id — Anthropic's protocol shape.
-func TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlock(t *testing.T) {
+// TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlocks pins the ADR-0028
+// return path: a [llm.RoleTool] message (the results the tool-use loop appends
+// after executing an assistant turn's calls) must serialize as one user-role
+// message carrying a tool_result block PER result, each with the matching
+// tool_use_id — Anthropic's protocol shape for parallel tool calls. The slice
+// (not a single result) is the seam agreed with tool-framework so a multi-call
+// turn feeds all results back in the one following message the API expects.
+func TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlocks(t *testing.T) {
 	var capture atomic.Value
 	srv := sseServer(t, &capture,
 		sse(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`),
@@ -301,9 +304,16 @@ func TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlock(t *testing.T) {
 	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
 	ch, err := c.Complete(context.Background(), llm.Request{
 		Messages: []llm.Message{
-			{Role: llm.RoleUser, Text: "roll a d20"},
-			{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "toolu_9", Name: "dice", Input: json.RawMessage(`{"notation":"1d20"}`)}}},
-			{Role: llm.RoleTool, ToolResult: &llm.ToolResult{CallID: "toolu_9", Content: "17"}},
+			{Role: llm.RoleUser, Text: "roll a d20 and a d6"},
+			{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+				{ID: "toolu_9", Name: "dice", Input: json.RawMessage(`{"notation":"1d20"}`)},
+				{ID: "toolu_10", Name: "dice", Input: json.RawMessage(`{"notation":"1d6"}`)},
+			}},
+			// Two parallel calls → both results in ONE tool-role message.
+			{Role: llm.RoleTool, ToolResults: []llm.ToolResult{
+				{CallID: "toolu_9", Content: "17"},
+				{CallID: "toolu_10", Content: "4"},
+			}},
 		},
 	})
 	if err != nil {
@@ -332,11 +342,19 @@ func TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlock(t *testing.T) {
 	if last.Role != "user" {
 		t.Errorf("tool-result message role = %q, want user (Anthropic carries tool_result on a user turn)", last.Role)
 	}
-	if len(last.Content) != 1 || last.Content[0].Type != "tool_result" {
-		t.Fatalf("tool-result content = %+v, want one tool_result block", last.Content)
+	// Both parallel results must ride the single tool-role message as two blocks.
+	if len(last.Content) != 2 {
+		t.Fatalf("tool-result content = %+v, want two tool_result blocks in one message", last.Content)
 	}
-	if last.Content[0].ToolUseID != "toolu_9" || last.Content[0].Content != "17" {
-		t.Errorf("tool_result = %+v, want tool_use_id toolu_9 content 17", last.Content[0])
+	got := map[string]string{}
+	for _, b := range last.Content {
+		if b.Type != "tool_result" {
+			t.Errorf("block type = %q, want tool_result", b.Type)
+		}
+		got[b.ToolUseID] = b.Content
+	}
+	if got["toolu_9"] != "17" || got["toolu_10"] != "4" {
+		t.Errorf("tool_result blocks = %v, want {toolu_9:17, toolu_10:4}", got)
 	}
 }
 
