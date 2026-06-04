@@ -1,5 +1,7 @@
 package tool
 
+import "sort"
+
 // Grant is an Agent's explicit permission to invoke one named Tool, with
 // optional per-grant Config that may narrow the Tool's authority for that Agent
 // (ADR-0029). It is modeled as a struct, not a bare name string, so the
@@ -63,10 +65,11 @@ func (gs *GrantSet) resolve(name string) (t Tool, config any, ok bool) {
 }
 
 // Declarations returns the [Decl] for every granted Tool that is registered,
-// in grant order is not guaranteed (map iteration); callers that need a stable
-// order should sort by Name. This is the grant-stripped tool list handed to the
-// LLM — ungranted Tools never appear, so the model cannot call what it cannot
-// see (ADR-0029).
+// sorted by Name. This is the grant-stripped tool list handed to the LLM —
+// ungranted Tools never appear, so the model cannot call what it cannot see
+// (ADR-0029). The order is stable (sorted, not map-iteration order) so the
+// rendered prompt — and thus the ADR-0021 cassette prompt_hash — does not
+// thrash between runs when more than one Tool is granted.
 func (gs *GrantSet) Declarations() []Decl {
 	decls := make([]Decl, 0, len(gs.grants))
 	for name := range gs.grants {
@@ -80,5 +83,6 @@ func (gs *GrantSet) Declarations() []Decl {
 			InputSchema: t.InputSchema(),
 		})
 	}
+	sort.Slice(decls, func(i, j int) bool { return decls[i].Name < decls[j].Name })
 	return decls
 }

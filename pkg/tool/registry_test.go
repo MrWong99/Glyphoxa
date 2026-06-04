@@ -89,6 +89,26 @@ func TestGrantSetSkipsUnregisteredGrant(t *testing.T) {
 	}
 }
 
+func TestGrantSetDeclarationsSorted(t *testing.T) {
+	// Declarations must come out sorted by Name so the rendered prompt — and
+	// the ADR-0021 cassette prompt_hash — is stable across runs regardless of
+	// grant/map order.
+	r := NewRegistry()
+	for _, n := range []string{"charlie", "alpha", "bravo"} {
+		r.MustRegister(stubTool{name: n, readOnly: true})
+	}
+	gs := NewGrantSet(r,
+		Grant{ToolName: "charlie"}, Grant{ToolName: "alpha"}, Grant{ToolName: "bravo"})
+	decls := gs.Declarations()
+	got := []string{decls[0].Name, decls[1].Name, decls[2].Name}
+	want := []string{"alpha", "bravo", "charlie"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Declarations order = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestGrantSetPassesConfig(t *testing.T) {
 	r := NewRegistry()
 	r.MustRegister(stubTool{name: "scoped", readOnly: true})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 )
 
 // Dice is the one built-in Tool v1.0 ships (ADR-0028): it rolls NdM — N dice of
@@ -16,7 +17,13 @@ import (
 // asserting the model's routing must not be flaky on a global RNG. Construct
 // with [NewDice] for a seeded production roller or [NewDiceWithRand] for a test
 // roller.
+//
+// One [Dice] is shared across the [Registry] and may be rolled concurrently:
+// ADR-0030 runs read-only Tools inline during generation and speculation, and
+// ADR-0025 generates all addressed Agents in parallel. A *rand.Rand is not safe
+// for concurrent use, so the roll is guarded by mu.
 type Dice struct {
+	mu  sync.Mutex
 	rng *rand.Rand
 }
 
@@ -105,11 +112,13 @@ func (d *Dice) Execute(ctx context.Context, args json.RawMessage, _ any) (string
 
 	rolls := make([]int, a.Count)
 	sum := 0
+	d.mu.Lock()
 	for i := range rolls {
 		r := d.rng.IntN(a.Sides) + 1 // 1..Sides
 		rolls[i] = r
 		sum += r
 	}
+	d.mu.Unlock()
 
 	if a.Count == 1 {
 		return fmt.Sprintf("Rolled 1d%d: %d.", a.Sides, sum), nil

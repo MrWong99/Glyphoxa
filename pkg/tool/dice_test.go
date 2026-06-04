@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -100,6 +101,24 @@ func TestDiceExecuteRejectsBadArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDiceConcurrentRolls(t *testing.T) {
+	// One shared Dice rolled in parallel — the documented execution model
+	// (ADR-0030 inline-during-speculation + ADR-0025 parallel agents). Run
+	// under -race to catch an unguarded *rand.Rand.
+	d := NewDice()
+	var wg sync.WaitGroup
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := d.Execute(context.Background(), json.RawMessage(`{"count":5,"sides":20}`), nil); err != nil {
+				t.Errorf("concurrent Execute: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestDiceExecuteHonorsCanceledContext(t *testing.T) {
