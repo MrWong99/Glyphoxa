@@ -63,9 +63,11 @@ channel and closes the session cleanly.
 
 ## What to expect (once the codec is wired)
 
-1. Speak in the channel and **name the NPC**: e.g. *"Bart, do you have a room?"*
-   Address Detection routes utterances that name Bart (or, as the single-NPC
-   fallback, any utterance) to his Agent loop.
+1. Speak in the channel. Address Detection (the ADR-0024 scoring matcher) routes
+   to Bart both when you **name him** — *"Bart, do you have a room?"* (or an
+   alias: "innkeeper", "barkeep") — and, because he is the lone Character NPC
+   and not Address-Only, when you say nothing addressed at all (the single-NPC
+   fallback). Either way the utterance reaches his Agent loop.
 2. The Agent loop assembles Hot Context (Bart's Persona + the recent transcript)
    and calls Claude; the reply is spoken back through ElevenLabs in Bart's
    voice.

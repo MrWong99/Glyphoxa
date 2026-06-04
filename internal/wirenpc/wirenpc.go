@@ -136,6 +136,27 @@ func Run(ctx context.Context, cfg Config) error {
 	return pipe.Run(ctx, sess)
 }
 
+// npcMatcher builds the Address Detection matcher for the hardcoded NPC. This
+// Campaign has one Character NPC and no Butler in this slice, so it uses the
+// scoring Matcher (ADR-0024): Bart gets a name/alias match AND the single-NPC
+// fallback, so both a named utterance ("Bart, …") and an unnamed one route to
+// him — a non-Address-Only lone NPC catches unaddressed speech. The whole-word
+// matcher is deliberately not used: it requires a Butler as its unconditional
+// fallback, which this slice does not have, and would leave Bart silent on
+// every unnamed utterance.
+func npcMatcher() *address.Matcher {
+	return address.NewMatcher(address.Config{Language: "en"},
+		address.Agent{
+			Target: voiceevent.AddressTarget{
+				AgentID:   npcAgentID,
+				AgentRole: "character",
+				Name:      npcName,
+			},
+			Aliases: []string{"innkeeper", "barkeep"},
+		},
+	)
+}
+
 // npcVoice is the hardcoded NPC's TTS Voice.
 func npcVoice() tts.Voice {
 	return tts.Voice{
@@ -172,17 +193,7 @@ func buildConversation(log *slog.Logger) (*orchestrator.Conversation, error) {
 	sttStage := orchestrator.NewSTT(bus, stteleven.New(""))
 	ttsStage := orchestrator.NewTTS(bus, ttseleven.New(""))
 
-	// Address detection: this Campaign has one Character NPC and no Butler in
-	// this slice, so a butler default route is not wired; Bart answers when
-	// named (or as the single-NPC fallback).
-	detector := orchestrator.NewAddressDetector(
-		address.NewWholeWordMatcher(
-			voiceevent.AddressTarget{},
-			[]voiceevent.AddressTarget{
-				{AgentID: npcAgentID, AgentRole: "character", Name: npcName},
-			},
-		),
-	)
+	detector := orchestrator.NewAddressDetector(npcMatcher())
 
 	// Production ReplyFunc: the Agent loop. The tool-use loop (with the dice
 	// Tool granted) is the Engine, so the NPC can roll dice; an Agent with no
