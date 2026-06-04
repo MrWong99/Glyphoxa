@@ -50,13 +50,36 @@ type Persona struct {
 	Voice tts.Voice
 }
 
+// Engine turns the Hot Context the [Replier] assembled into the Agent's final
+// spoken text. It is the seam where tool use plugs in without the agent package
+// learning about Tools: the default engine ([providerEngine]) makes one
+// [llm.Provider] completion and returns the streamed text; a tool-backed engine
+// (the wiring-phase bridge that owns both [llm] and pkg/tool) instead drives
+// the tool-use loop (ADR-0028) — Generate, execute granted Tools, feed results
+// back, Generate again — and returns the model's final text. Either way the
+// Replier's contract is unchanged: assemble messages, get one answer back.
+//
+// messages is the assembled conversation (system prompt + bounded recent
+// Transcript). The returned string is the spoken reply; "" means say nothing.
+type Engine interface {
+	Generate(ctx context.Context, messages []llm.Message) (string, error)
+}
+
 // Config configures a [Replier].
 type Config struct {
 	// Persona is the Agent this loop voices.
 	Persona Persona
 
-	// Provider is the LLM the loop calls. Required.
+	// Provider is the LLM the default [Engine] calls. Required unless a custom
+	// Engine is supplied; with a custom Engine, Provider may be nil.
 	Provider llm.Provider
+
+	// Engine turns assembled Hot Context into final spoken text. Optional: when
+	// nil, the Replier builds the default single-completion engine from
+	// Provider (the no-tool v1.0 path). Supply a tool-backed Engine (built by
+	// the wiring bridge) to give the Agent Tool use without this package
+	// importing pkg/tool.
+	Engine Engine
 
 	// Synthesizer supplies the audio-markup instruction for the system prompt
 	// via [tts.Synthesizer.AudioMarkupPrompt]. Required: ADR-0022 makes the
@@ -64,10 +87,12 @@ type Config struct {
 	// format, and that instruction is sourced here.
 	Synthesizer tts.Synthesizer
 
-	// Model overrides the Provider's default model for this Agent. Optional.
+	// Model overrides the Provider's default model for this Agent. Used only by
+	// the default Engine; a custom Engine bakes its own model in. Optional.
 	Model string
 
-	// MaxTokens caps each completion. Zero lets the Provider choose. Optional.
+	// MaxTokens caps each completion. Used only by the default Engine. Zero
+	// lets the Provider choose. Optional.
 	MaxTokens int
 
 	// HistoryTurns bounds the recent Transcript carried into Hot Context: the
@@ -95,23 +120,30 @@ type Config struct {
 // overlap; the mutex guards the history against a concurrent reader and the
 // race detector.
 type Replier struct {
-	cfg Config
+	cfg    Config
+	engine Engine // resolved at construction: cfg.Engine, or the default built from cfg.Provider
 
 	mu      sync.Mutex
 	history []llm.Message // user/assistant turns only; system prompt is rebuilt each call
 }
 
-// NewReplier constructs a [Replier]. cfg.Provider and cfg.Synthesizer must be
-// non-nil; passing nil for either panics, mirroring the orchestrator stages'
-// fail-fast constructors.
+// NewReplier constructs a [Replier]. cfg.Synthesizer must be non-nil, and one
+// of cfg.Engine or cfg.Provider must be set (Engine wins; otherwise the default
+// single-completion engine is built from Provider). Passing neither, or a nil
+// Synthesizer, panics — these are wiring requirements, mirroring the
+// orchestrator stages' fail-fast constructors.
 func NewReplier(cfg Config) *Replier {
-	if cfg.Provider == nil {
-		panic("agent.NewReplier: Provider must not be nil")
-	}
 	if cfg.Synthesizer == nil {
 		panic("agent.NewReplier: Synthesizer must not be nil")
 	}
-	return &Replier{cfg: cfg}
+	engine := cfg.Engine
+	if engine == nil {
+		if cfg.Provider == nil {
+			panic("agent.NewReplier: one of Engine or Provider must be set")
+		}
+		engine = providerEngine{provider: cfg.Provider, model: cfg.Model, maxTokens: cfg.MaxTokens}
+	}
+	return &Replier{cfg: cfg, engine: engine}
 }
 
 // Reply returns the [orchestrator.ReplyFunc] that drives this loop. Install it
@@ -130,29 +162,25 @@ func (r *Replier) Reply() orchestrator.ReplyFunc {
 }
 
 // turn runs one Agent turn for the given utterance text: it appends the user
-// message, assembles the [llm.Request] (system prompt + bounded history), calls
-// the Provider, accumulates the streamed text, records the assistant reply, and
-// returns it as a single [orchestrator.Reply] in the Agent's Voice. An empty
-// completion or a Provider error yields no reply (the error is reported via
-// OnError).
+// message, assembles Hot Context (system prompt + bounded history), hands it to
+// the [Engine] for the final text, records the assistant reply, and returns it
+// as a single [orchestrator.Reply] in the Agent's Voice. An empty completion or
+// an Engine error yields no reply (the error is reported via OnError).
 func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 	r.mu.Lock()
 	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
 	r.trimHistoryLocked()
-	req := llm.Request{
-		Model:     r.cfg.Model,
-		MaxTokens: r.cfg.MaxTokens,
-		Messages:  r.hotContextLocked(),
-	}
+	messages := r.hotContextLocked()
 	r.mu.Unlock()
 
-	reply, err := r.complete(ctx, req)
+	reply, err := r.engine.Generate(ctx, messages)
 	if err != nil {
 		if r.cfg.OnError != nil {
 			r.cfg.OnError(err)
 		}
 		return nil
 	}
+	reply = strings.TrimSpace(reply)
 	if reply == "" {
 		return nil
 	}
@@ -164,12 +192,25 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 	return []orchestrator.Reply{{Sentence: reply, Voice: r.cfg.Persona.Voice}}
 }
 
-// complete drives one Provider stream to completion, concatenating the text
-// deltas into the spoken reply. Tool-call events are ignored in v1.0 — the
-// Agent loop requests no tools, so the model emits none; when the tool-use loop
-// (ADR-0028) takes over it will own this drain and act on [llm.EventToolCall].
-func (r *Replier) complete(ctx context.Context, req llm.Request) (string, error) {
-	stream, err := r.cfg.Provider.Complete(ctx, req)
+// providerEngine is the default [Engine]: one [llm.Provider] completion per
+// turn, concatenating the streamed text deltas. It requests no Tools, so the
+// model emits none and tool-call events do not arise — the no-tool v1.0 path.
+// The tool-backed engine lives in the wiring bridge so this package stays free
+// of pkg/tool.
+type providerEngine struct {
+	provider  llm.Provider
+	model     string
+	maxTokens int
+}
+
+// Generate implements [Engine]. It runs one completion and returns the
+// accumulated assistant text.
+func (e providerEngine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
+	stream, err := e.provider.Complete(ctx, llm.Request{
+		Model:     e.model,
+		MaxTokens: e.maxTokens,
+		Messages:  messages,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +220,7 @@ func (r *Replier) complete(ctx context.Context, req llm.Request) (string, error)
 			b.WriteString(ev.Text)
 		}
 	}
-	return strings.TrimSpace(b.String()), nil
+	return b.String(), nil
 }
 
 // hotContextLocked assembles the Hot Context message list for one call: the
