@@ -23,7 +23,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -198,11 +198,19 @@ func buildConversation(log *slog.Logger) (*orchestrator.Conversation, error) {
 	// Production ReplyFunc: the Agent loop. The tool-use loop (with the dice
 	// Tool granted) is the Engine, so the NPC can roll dice; an Agent with no
 	// grants would degrade to a single completion through the same path.
-	provider := anthropic.New("")
+	//
+	// Gemini is the live LLM provider — it matches the actual deployment
+	// (providers.llm.name "gemini", model gemini-2.5-flash; there is no
+	// Anthropic key). The adapter reads GEMINI_API_KEY at request time (BYOK,
+	// ADR-0004); export it from the keyring before a live run (see
+	// docs/agents/live-npc-run.md). The keyless cassette tests still use the
+	// anthropic adapter behind the same llm.Provider interface, so this swap is
+	// provider-only — no rework of the loop, bridge, or persona path.
+	provider := gemini.New("")
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
-	toolEngine := agenttool.NewEngine(provider, grants, anthropic.DefaultModel, 0, 0)
+	toolEngine := agenttool.NewEngine(provider, grants, gemini.DefaultModel, 0, 0)
 
 	replier := agent.NewReplier(agent.Config{
 		Persona: agent.Persona{
