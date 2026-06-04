@@ -48,13 +48,14 @@ type Message struct {
 }
 
 // ToolCall is one tool invocation the LLM emitted: the Tool to call (Name), the
-// arguments (Args, raw JSON validated against the Tool's input schema by the
+// arguments (Input, raw JSON validated against the Tool's input schema by the
 // model), and an ID the provider assigns so the matching [ToolResult] can be
-// correlated back.
+// correlated back. The field is named Input to match the Anthropic-native
+// wording and the llm.ToolCall shape on the provider side of the seam (task #2).
 type ToolCall struct {
-	ID   string
-	Name string
-	Args json.RawMessage
+	ID    string
+	Name  string
+	Input json.RawMessage
 }
 
 // ToolResult is the outcome of executing one [ToolCall], fed back to the LLM as

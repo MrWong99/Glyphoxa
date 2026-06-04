@@ -61,7 +61,7 @@ func TestLoopExecutesToolAndFeedsResultBack(t *testing.T) {
 		steps: []scriptStep{
 			// Round 1: model calls dice.
 			{reply: AssistantMessage{ToolCalls: []ToolCall{
-				{ID: "call-1", Name: "dice", Args: json.RawMessage(`{"count":1,"sides":20}`)},
+				{ID: "call-1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)},
 			}}},
 			// Round 2 (after result fed back): model speaks final text.
 			{reply: AssistantMessage{Text: "You rolled it."}},
@@ -126,7 +126,7 @@ func TestLoopFeedsHandlerErrorBackNotAbort(t *testing.T) {
 		steps: []scriptStep{
 			// Bad args → dice handler errors.
 			{reply: AssistantMessage{ToolCalls: []ToolCall{
-				{ID: "c1", Name: "dice", Args: json.RawMessage(`{"count":0,"sides":6}`)},
+				{ID: "c1", Name: "dice", Input: json.RawMessage(`{"count":0,"sides":6}`)},
 			}}},
 			{reply: AssistantMessage{Text: "recovered"}},
 		},
@@ -151,7 +151,7 @@ func TestLoopRejectsUngrantedToolName(t *testing.T) {
 		t: t,
 		steps: []scriptStep{
 			{reply: AssistantMessage{ToolCalls: []ToolCall{
-				{ID: "c1", Name: "secret", Args: json.RawMessage(`{}`)},
+				{ID: "c1", Name: "secret", Input: json.RawMessage(`{}`)},
 			}}},
 			{reply: AssistantMessage{Text: "ok"}},
 		},
@@ -175,7 +175,7 @@ func TestLoopRefusesSideEffectingTool(t *testing.T) {
 		t: t,
 		steps: []scriptStep{
 			{reply: AssistantMessage{ToolCalls: []ToolCall{
-				{ID: "w1", Name: "writer", Args: json.RawMessage(`{}`)},
+				{ID: "w1", Name: "writer", Input: json.RawMessage(`{}`)},
 			}}},
 			{reply: AssistantMessage{Text: "done"}},
 		},
@@ -204,7 +204,7 @@ func TestLoopMaxRoundsGuard(t *testing.T) {
 	steps := make([]scriptStep, 20)
 	for i := range steps {
 		steps[i] = scriptStep{reply: AssistantMessage{ToolCalls: []ToolCall{
-			{ID: "c", Name: "dice", Args: json.RawMessage(`{"count":1,"sides":6}`)},
+			{ID: "c", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":6}`)},
 		}}}
 	}
 	p := &scriptedProvider{t: t, steps: steps}
@@ -249,7 +249,7 @@ func TestLoopDoesNotMutateCallerMessages(t *testing.T) {
 		t: t,
 		steps: []scriptStep{
 			{reply: AssistantMessage{ToolCalls: []ToolCall{
-				{ID: "c1", Name: "dice", Args: json.RawMessage(`{"count":1,"sides":6}`)},
+				{ID: "c1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":6}`)},
 			}}},
 			{reply: AssistantMessage{Text: "done"}},
 		},

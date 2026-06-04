@@ -132,7 +132,7 @@ func (l *Loop) execute(ctx context.Context, call ToolCall) ToolResult {
 			"tool %q is not read-only; side-effecting tools are not supported in this version", call.Name))
 	}
 
-	out, err := t.Execute(ctx, call.Args, config)
+	out, err := t.Execute(ctx, call.Input, config)
 	if err != nil {
 		return errResult(call.ID, err.Error())
 	}
