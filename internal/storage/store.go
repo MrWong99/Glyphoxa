@@ -14,20 +14,53 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ErrNotFound is returned when a query matches no row.
 var ErrNotFound = errors.New("storage: not found")
 
-// Store reads and writes the core tables over a pgx connection pool.
+// querier is the subset of the pgx API the Store needs; both *pgxpool.Pool and
+// pgx.Tx satisfy it, so a Store can run against a pool directly or inside a
+// transaction (see [Store.InTx]).
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// Store reads and writes the core tables over a pgx connection pool (or a
+// transaction, when created by [Store.InTx]).
 type Store struct {
-	pool *pgxpool.Pool
+	db   querier
+	pool *pgxpool.Pool // nil for a tx-bound Store; used only to begin transactions
 }
 
 // New wraps a pgx pool in a Store. The caller owns the pool's lifecycle.
 func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+	return &Store{db: pool, pool: pool}
+}
+
+// InTx runs fn against a Store bound to a single transaction, committing if fn
+// returns nil and rolling back otherwise. Used by multi-row operations that must
+// be atomic (e.g. the live-NPC seed). Not available on a tx-bound Store.
+func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
+	if s.pool == nil {
+		return errors.New("storage: InTx requires a pool-backed Store")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("storage: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
+	if err := fn(&Store{db: tx}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("storage: commit tx: %w", err)
+	}
+	return nil
 }
 
 const agentColumns = `
@@ -47,7 +80,7 @@ func scanAgent(row pgx.Row) (Agent, error) {
 
 // GetAgent loads one Agent by id.
 func (s *Store) GetAgent(ctx context.Context, id uuid.UUID) (Agent, error) {
-	row := s.pool.QueryRow(ctx,
+	row := s.db.QueryRow(ctx,
 		`SELECT `+agentColumns+` FROM agents WHERE id = $1`, id)
 	a, err := scanAgent(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -61,7 +94,7 @@ func (s *Store) GetAgent(ctx context.Context, id uuid.UUID) (Agent, error) {
 
 // GetButler loads a Campaign's Butler (exactly one per Campaign, ADR-0009).
 func (s *Store) GetButler(ctx context.Context, campaignID uuid.UUID) (Agent, error) {
-	row := s.pool.QueryRow(ctx,
+	row := s.db.QueryRow(ctx,
 		`SELECT `+agentColumns+`
 		   FROM agents
 		  WHERE campaign_id = $1 AND agent_role = 'butler'`, campaignID)
@@ -77,7 +110,7 @@ func (s *Store) GetButler(ctx context.Context, campaignID uuid.UUID) (Agent, err
 
 // ListAgents returns all Agents in a Campaign (Butler + Character NPCs).
 func (s *Store) ListAgents(ctx context.Context, campaignID uuid.UUID) ([]Agent, error) {
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.db.Query(ctx,
 		`SELECT `+agentColumns+`
 		   FROM agents
 		  WHERE campaign_id = $1
@@ -116,7 +149,7 @@ func scanProviderConfig(row pgx.Row) (ProviderConfig, error) {
 
 // GetProviderConfig loads one Provider Config by id.
 func (s *Store) GetProviderConfig(ctx context.Context, id uuid.UUID) (ProviderConfig, error) {
-	row := s.pool.QueryRow(ctx,
+	row := s.db.QueryRow(ctx,
 		`SELECT `+providerConfigColumns+` FROM provider_config WHERE id = $1`, id)
 	p, err := scanProviderConfig(row)
 	if errors.Is(err, pgx.ErrNoRows) {

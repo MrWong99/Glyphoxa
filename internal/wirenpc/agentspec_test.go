@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"io"
+	"log/slog"
 	"os"
 	"reflect"
 	"testing"
@@ -124,13 +126,25 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 		t.Error("loaded agentID is empty; address detection needs a stable identity")
 	}
 
-	// The DB-loaded spec must build a Conversation just like the in-code one,
-	// and a matcher whose target AgentID matches the Persona's. Build the
-	// matcher and confirm it carries the loaded identity (so a "Bart, ..."
-	// utterance routes to the same Agent the Persona answers for).
-	m := npcMatcher(loaded)
-	if m == nil {
-		t.Fatal("npcMatcher returned nil for the DB-loaded NPC")
+	// The DB-loaded spec must actually build a routable Conversation — not just
+	// reconstruct the fields. buildConversation is the live loop's constructor;
+	// assert it succeeds, and that the matcher routes a named utterance to the
+	// loaded Agent's identity (so the Persona the reply loop answers for and the
+	// Address Detection target agree — the chain that makes the NPC speak).
+	conv, err := buildConversation(slog.New(slog.NewTextHandler(io.Discard, nil)), loaded)
+	if err != nil {
+		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
+	}
+	if conv == nil {
+		t.Fatal("buildConversation returned a nil Conversation")
+	}
+
+	routed := npcMatcher(loaded).TargetMatch("Bart, do you have a room?")
+	if len(routed) == 0 {
+		t.Fatal("named utterance routed to nobody for the DB-loaded NPC")
+	}
+	if got := routed[0].Target.AgentID; got != loaded.agentID {
+		t.Errorf("routed AgentID = %q, want loaded agentID %q (matcher/Persona disagree)", got, loaded.agentID)
 	}
 }
 

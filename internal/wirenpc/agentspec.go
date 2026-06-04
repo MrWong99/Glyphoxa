@@ -36,8 +36,9 @@ const (
 	llmProvider = "gemini"
 	llmModel    = "gemini-2.0-flash"
 
-	// ttsModel is the ElevenLabs model the NPC's Voice config records.
+	// ttsModel / sttModel are the ElevenLabs models the Voice / STT configs record.
 	ttsModel = "eleven_multilingual_v2"
+	sttModel = "scribe_v1"
 
 	// credPlaceholderLast4 marks a provider_config whose real key is NOT in the
 	// DB: the self-host voice binary reads it from the OS keyring (#10). The
@@ -69,21 +70,9 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 
 	npc := hardcodedNPC()
 
-	tenantID, err := st.CreateTenant(ctx, SeedTenantName)
+	voiceJSON, err := json.Marshal(npc.voice)
 	if err != nil {
-		return err
-	}
-
-	// Creating the Campaign fires the auto-Butler trigger: a 'Glyphoxa' Butler
-	// row appears here without an explicit insert (ADR-0009).
-	campaignID, err := st.CreateCampaign(ctx, storage.NewCampaign{
-		TenantID: tenantID,
-		Name:     SeedCampaignName,
-		System:   "dnd5e",
-		Language: "en",
-	})
-	if err != nil {
-		return err
+		return fmt.Errorf("wirenpc: marshal voice: %w", err)
 	}
 
 	// Sealed placeholder credential — never a real key (see credPlaceholderLast4).
@@ -92,57 +81,77 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 		return fmt.Errorf("wirenpc: seal credential placeholder: %w", err)
 	}
 
-	llmCfgID, err := st.CreateProviderConfig(ctx, storage.NewProviderConfig{
-		TenantID:              tenantID,
-		Component:             storage.ComponentLLM,
-		Provider:              llmProvider,
-		Model:                 llmModel,
-		CredentialsCiphertext: placeholder,
-		CredentialsLast4:      credPlaceholderLast4,
+	// All inserts run in one transaction so a partial failure can't leave a
+	// half-seeded DB (which the FindTenantByName precheck would then treat as
+	// already-seeded and skip forever).
+	err = st.InTx(ctx, func(tx *storage.Store) error {
+		tenantID, err := tx.CreateTenant(ctx, SeedTenantName)
+		if err != nil {
+			return err
+		}
+
+		// Creating the Campaign fires the auto-Butler trigger: a 'Glyphoxa'
+		// Butler row appears here without an explicit insert (ADR-0009).
+		campaignID, err := tx.CreateCampaign(ctx, storage.NewCampaign{
+			TenantID: tenantID,
+			Name:     SeedCampaignName,
+			System:   "dnd5e",
+			Language: "en",
+		})
+		if err != nil {
+			return err
+		}
+
+		llmCfgID, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             storage.ComponentLLM,
+			Provider:              llmProvider,
+			Model:                 llmModel,
+			CredentialsCiphertext: placeholder,
+			CredentialsLast4:      credPlaceholderLast4,
+		})
+		if err != nil {
+			return err
+		}
+
+		ttsCfgID, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             storage.ComponentTTS,
+			Provider:              ttseleven.ProviderID,
+			Model:                 ttsModel,
+			CredentialsCiphertext: placeholder,
+			CredentialsLast4:      credPlaceholderLast4,
+		})
+		if err != nil {
+			return err
+		}
+
+		// STT shares the ElevenLabs key; recorded as its own Component row.
+		if _, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             storage.ComponentSTT,
+			Provider:              ttseleven.ProviderID,
+			Model:                 sttModel,
+			CredentialsCiphertext: placeholder,
+			CredentialsLast4:      credPlaceholderLast4,
+		}); err != nil {
+			return err
+		}
+
+		_, err = tx.CreateAgent(ctx, storage.NewAgent{
+			CampaignID:            campaignID,
+			Role:                  storage.AgentRoleCharacter,
+			Name:                  npc.name,
+			Persona:               npc.persona,
+			Voice:                 voiceJSON,
+			VoiceProviderConfigID: uuid.NullUUID{UUID: ttsCfgID, Valid: true},
+			LLMProviderConfigID:   uuid.NullUUID{UUID: llmCfgID, Valid: true},
+			AddressOnly:           false, // a lone Character NPC catches unaddressed speech
+			Aliases:               npc.aliases,
+		})
+		return err
 	})
 	if err != nil {
-		return err
-	}
-
-	ttsCfgID, err := st.CreateProviderConfig(ctx, storage.NewProviderConfig{
-		TenantID:              tenantID,
-		Component:             storage.ComponentTTS,
-		Provider:              ttseleven.ProviderID,
-		Model:                 ttsModel,
-		CredentialsCiphertext: placeholder,
-		CredentialsLast4:      credPlaceholderLast4,
-	})
-	if err != nil {
-		return err
-	}
-
-	// STT shares the ElevenLabs key; recorded as its own Component row.
-	if _, err := st.CreateProviderConfig(ctx, storage.NewProviderConfig{
-		TenantID:              tenantID,
-		Component:             storage.ComponentSTT,
-		Provider:              ttseleven.ProviderID,
-		CredentialsCiphertext: placeholder,
-		CredentialsLast4:      credPlaceholderLast4,
-	}); err != nil {
-		return err
-	}
-
-	voiceJSON, err := json.Marshal(npc.voice)
-	if err != nil {
-		return fmt.Errorf("wirenpc: marshal voice: %w", err)
-	}
-
-	if _, err := st.CreateAgent(ctx, storage.NewAgent{
-		CampaignID:            campaignID,
-		Role:                  storage.AgentRoleCharacter,
-		Name:                  npc.name,
-		Persona:               npc.persona,
-		Voice:                 voiceJSON,
-		VoiceProviderConfigID: uuid.NullUUID{UUID: ttsCfgID, Valid: true},
-		LLMProviderConfigID:   uuid.NullUUID{UUID: llmCfgID, Valid: true},
-		AddressOnly:           false, // a lone Character NPC catches unaddressed speech
-		Aliases:               npc.aliases,
-	}); err != nil {
 		return err
 	}
 
