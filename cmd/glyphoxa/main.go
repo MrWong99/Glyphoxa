@@ -1,6 +1,7 @@
 // Command glyphoxa is the Glyphoxa v2 binary. In v1.0 it runs one Mode at a
 // time; this MVP slice ships the `voice` mode that joins a Discord voice
-// channel and gives one hardcoded Character NPC a live voice loop (issue #1–#4).
+// channel and gives one Character NPC a live voice loop (issue #1–#5), plus the
+// `migrate` subcommand (ADR-0031) that applies the schema migrations.
 package main
 
 import (
@@ -17,6 +18,18 @@ import (
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// `migrate` is a subcommand with its own argument grammar, dispatched before
+	// flag parsing (ADR-0031). The full Mode dispatcher (all/web) and root
+	// command surface belong to the control-plane task (#6); this slice wires
+	// `migrate` + `voice`.
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := RunMigrate(context.Background(), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	mode := flag.String("mode", "voice", "process mode: voice")
 	var cfg wirenpc.Config
@@ -39,7 +52,7 @@ func main() {
 // runVoice resolves runtime credentials from the environment, builds the live
 // NPC voice loop, and runs it until SIGINT/SIGTERM. Credentials are never
 // compiled in: DISCORD_BOT_TOKEN, plus the provider keys the STT/TTS/LLM
-// adapters read from their own env vars (ELEVENLABS_API_KEY, ANTHROPIC_API_KEY).
+// adapters read from their own env vars (ELEVENLABS_API_KEY, the LLM key).
 func runVoice(log *slog.Logger, cfg wirenpc.Config) error {
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
 	if cfg.Token == "" {
