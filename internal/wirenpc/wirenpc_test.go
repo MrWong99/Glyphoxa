@@ -1,8 +1,35 @@
 package wirenpc
 
 import (
+	"encoding/json"
 	"testing"
+
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
+
+// TestNPCVoice_Emits48kPCM pins the live NPC's TTS output format at pcm_48000 so
+// the outbound codec path stays encode-only (Discord's Opus encoder runs at
+// 48 kHz; matching the TTS rate avoids a resampler on the live demo). It also
+// guards that the Settings blob round-trips as valid ElevenLabs Settings and
+// keeps the conversational eleven_v3 model — a regression to the 24 kHz default
+// (or a malformed blob) would silently re-introduce the resampler / break
+// synthesis.
+func TestNPCVoice_Emits48kPCM(t *testing.T) {
+	v := npcVoice()
+	if len(v.Settings) == 0 {
+		t.Fatal("npcVoice has no Settings; output format would fall back to the 24 kHz default")
+	}
+	var s ttseleven.Settings
+	if err := json.Unmarshal(v.Settings, &s); err != nil {
+		t.Fatalf("Voice.Settings is not valid ElevenLabs Settings JSON: %v", err)
+	}
+	if s.OutputFormat != "pcm_48000" {
+		t.Errorf("output_format = %q, want pcm_48000 (encode-only outbound path)", s.OutputFormat)
+	}
+	if s.ModelID != ttseleven.ModelV3 {
+		t.Errorf("model_id = %q, want the conversational %q default to be preserved", s.ModelID, ttseleven.ModelV3)
+	}
+}
 
 // TestNPCMatcher_RoutesNamedAndUnnamedToNPC pins the address-routing intent the
 // live loop depends on: with one Character NPC and no Butler, BOTH a named

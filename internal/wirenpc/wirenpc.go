@@ -11,6 +11,7 @@ package wirenpc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -158,12 +159,28 @@ func npcMatcher() *address.Matcher {
 }
 
 // npcVoice is the hardcoded NPC's TTS Voice.
+//
+// Settings overrides the ElevenLabs output format to pcm_48000 (keeping the rest
+// of the conversational eleven_v3 defaults). Discord's Opus encoder runs at
+// 48 kHz, so emitting 48 kHz PCM makes the outbound codec path encode-only — no
+// resampling on the live demo, which removes a resampler quality/artefact risk.
+// The codec still resamples arbitrary AudioChunk.SampleRate for tests and other
+// voices; this voice simply does not exercise it.
 func npcVoice() tts.Voice {
+	settings := ttseleven.DefaultV3Settings()
+	settings.OutputFormat = "pcm_48000"
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		// DefaultV3Settings is a fixed, marshalable struct; a failure here is a
+		// programming error, not a runtime condition.
+		panic(fmt.Sprintf("wirenpc.npcVoice: marshal voice settings: %v", err))
+	}
 	return tts.Voice{
 		ProviderID: ttseleven.ProviderID,
 		VoiceID:    elevenGeorgeVoiceID,
 		Name:       npcName,
 		Language:   "en",
+		Settings:   raw,
 	}
 }
 
