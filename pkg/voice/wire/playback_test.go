@@ -1,257 +1,184 @@
-package wire_test
+package wire
 
 import (
 	"context"
 	"errors"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
 
-// fakeSynth is a minimal [tts.Synthesizer]: it streams a fixed list of chunks
-// (one per Synthesize call), or returns startErr without opening a stream. It
-// records the AudioMarkupPrompt voice so the pass-through can be asserted.
-type fakeSynth struct {
-	chunks   []tts.AudioChunk
-	startErr error
-
-	mu         sync.Mutex
-	markupSeen tts.Voice
-	markupRet  string
+// fakePlayback is a programmable playback: the test closes done with a chosen
+// error to drive PlaySentence's block-until-Done path.
+type fakePlayback struct {
+	done chan struct{}
+	err  error
 }
 
-func (f *fakeSynth) Synthesize(ctx context.Context, _ tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
-	if f.startErr != nil {
-		return nil, f.startErr
-	}
-	ch := make(chan tts.AudioChunk)
-	go func() {
-		defer close(ch)
-		for _, c := range f.chunks {
-			select {
-			case ch <- c:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return ch, nil
+func (f *fakePlayback) Done() <-chan struct{} { return f.done }
+func (f *fakePlayback) Err() error            { return f.err }
+
+func (f *fakePlayback) finish(err error) {
+	f.err = err
+	close(f.done)
 }
 
-func (f *fakeSynth) AudioMarkupPrompt(v tts.Voice) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.markupSeen = v
-	return f.markupRet
+// fakePlayer records each Play and publishes the created playback over a
+// buffered channel, so the test goroutine observes it without racing the Play
+// goroutine on a shared field.
+type fakePlayer struct {
+	err     error // if set, Play fails
+	started chan *fakePlayback
+	plays   atomic.Int64
 }
 
-// drainAll reads every chunk from ch into a slice; used to consume one side of
-// the tee concurrently with the other so the lockstep forward does not deadlock.
-func drainAll(ch <-chan tts.AudioChunk) []tts.AudioChunk {
-	var out []tts.AudioChunk
-	for c := range ch {
-		out = append(out, c)
-	}
-	return out
+func newFakePlayer() *fakePlayer {
+	return &fakePlayer{started: make(chan *fakePlayback, 8)}
 }
 
-func chunk(n byte, rate int) tts.AudioChunk {
-	return tts.AudioChunk{PCM: []byte{n, n}, SampleRate: rate, Channels: 1}
+func (p *fakePlayer) Play(_ context.Context, _ gxvoice.Source) (playback, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	p.plays.Add(1)
+	pb := &fakePlayback{done: make(chan struct{})}
+	p.started <- pb
+	return pb, nil
 }
 
-// TestTee_ForwardsToBothSides pins the core tee behaviour: every chunk reaches
-// BOTH the orchestrator-side channel (drained-and-dropped in production) and the
-// per-sentence playback sink, in order, and both channels close when the wrapped
-// stream ends. This is the contract the outbound path depends on.
-func TestTee_ForwardsToBothSides(t *testing.T) {
-	want := []tts.AudioChunk{chunk(1, 24000), chunk(2, 24000), chunk(3, 24000)}
-	inner := &fakeSynth{chunks: want}
-
-	var sinkChunks []tts.AudioChunk
-	var sinkCh <-chan tts.AudioChunk
-	var sinkWG sync.WaitGroup
-	sinkWG.Add(1)
-	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
-		sinkCh = chunks
-		go func() {
-			defer sinkWG.Done()
-			sinkChunks = drainAll(chunks)
-		}()
-	})
-
-	tee := wire.NewTeeSynthesizer(inner, sink)
-	out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "hello"})
-	if err != nil {
-		t.Fatalf("Synthesize: %v", err)
-	}
-	if sinkCh == nil {
-		t.Fatal("sink was not handed a channel before chunks flowed")
-	}
-
-	// Drain the orchestrator side (production: drop). The sink drains concurrently.
-	orchChunks := drainAll(out)
-	sinkWG.Wait()
-
-	if len(orchChunks) != len(want) {
-		t.Fatalf("orchestrator got %d chunks, want %d", len(orchChunks), len(want))
-	}
-	if len(sinkChunks) != len(want) {
-		t.Fatalf("sink got %d chunks, want %d", len(sinkChunks), len(want))
-	}
-	for i := range want {
-		if orchChunks[i].SampleRate != want[i].SampleRate || string(orchChunks[i].PCM) != string(want[i].PCM) {
-			t.Errorf("orchestrator chunk %d = %+v, want %+v", i, orchChunks[i], want[i])
-		}
-		if sinkChunks[i].SampleRate != want[i].SampleRate || string(sinkChunks[i].PCM) != string(want[i].PCM) {
-			t.Errorf("sink chunk %d = %+v, want %+v", i, sinkChunks[i], want[i])
-		}
-	}
-}
-
-// TestTee_FreshChannelPerSentence pins the per-Dispatch granularity the codec's
-// PlaybackSource consumes: each Synthesize call hands the sink its OWN channel,
-// closed at that sentence's end — not one long-lived stream across sentences.
-func TestTee_FreshChannelPerSentence(t *testing.T) {
-	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000)}}
-
-	var got []<-chan tts.AudioChunk
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
-		mu.Lock()
-		got = append(got, chunks)
-		mu.Unlock()
-		wg.Add(1)
-		go func() { defer wg.Done(); drainAll(chunks) }()
-	})
-
-	tee := wire.NewTeeSynthesizer(inner, sink)
-	for i := 0; i < 2; i++ {
-		out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "s"})
-		if err != nil {
-			t.Fatalf("Synthesize %d: %v", i, err)
-		}
-		drainAll(out)
-	}
-	wg.Wait()
-
-	if len(got) != 2 {
-		t.Fatalf("sink handed %d channels, want 2 (one per sentence)", len(got))
-	}
-	if got[0] == got[1] {
-		t.Error("the two sentences shared one channel; each Dispatch must get a fresh channel")
-	}
-}
-
-// TestTee_BargeInClosesPlayback pins barge-in (ADR-0027): cancelling the
-// synthesis context ends the sentence — the playback channel closes so the
-// pump's Source ends and Session.Play stops, rather than hanging.
-func TestTee_BargeInClosesPlayback(t *testing.T) {
-	// A synth that blocks after the first chunk until ctx is cancelled, so the
-	// tee is mid-stream when barge-in fires.
-	blockUntilCancel := make(chan struct{})
-	inner := &blockingSynth{first: chunk(1, 24000), release: blockUntilCancel}
-
-	closed := make(chan struct{})
-	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
-		go func() {
-			drainAll(chunks) // returns when the channel closes
-			close(closed)
-		}()
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	tee := wire.NewTeeSynthesizer(inner, sink)
-	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "interrupt me"})
-	if err != nil {
-		t.Fatalf("Synthesize: %v", err)
-	}
-
-	// Consume the orchestrator side in the background so the lockstep forward can
-	// deliver the first chunk and then block on the inner stream.
-	go drainAll(out)
-
-	cancel() // barge-in
-	close(blockUntilCancel)
-
+// waitPlay returns the next playback the fake handed out, failing on timeout.
+func (p *fakePlayer) waitPlay(t *testing.T) *fakePlayback {
+	t.Helper()
 	select {
-	case <-closed:
-		// playback channel closed — Source would end, Play would stop.
-	case <-time.After(2 * time.Second):
-		t.Fatal("playback channel did not close after barge-in (ctx cancel)")
+	case pb := <-p.started:
+		return pb
+	case <-time.After(time.Second):
+		t.Fatal("Play was never called")
+		return nil
 	}
 }
 
-// blockingSynth emits one chunk then blocks the stream goroutine until either
-// release is closed or ctx is cancelled, leaving the tee mid-sentence.
-type blockingSynth struct {
-	first   tts.AudioChunk
-	release chan struct{}
+// fakeSource is a no-op gxvoice.Source; PlaySentence never pulls it (the fake
+// player does not run disgo's sender), it only needs to exist.
+type fakeSource struct{}
+
+func (fakeSource) NextFrame(context.Context) ([]byte, error) { return nil, nil }
+
+// fakeCodec returns a fakeSource for PlaybackSource, standing in for the real
+// transcoder so the pump is testable without libopus.
+type fakeCodec struct{ err error }
+
+func (c fakeCodec) DecodeInbound(gxvoice.Frame) ([]audio.Frame, error) { return nil, nil }
+func (c fakeCodec) PlaybackSource(<-chan tts.AudioChunk) (gxvoice.Source, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return fakeSource{}, nil
 }
 
-func (b *blockingSynth) Synthesize(ctx context.Context, _ tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+func chunkChan() <-chan tts.AudioChunk {
 	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch
+}
+
+// TestPlaySentence_BlocksUntilDone is the load-bearing test: PlaySentence must
+// not return until the playback's Done closes, or sequential sentences would
+// auto-interrupt each other (Session.Play stops the current playback).
+func TestPlaySentence_BlocksUntilDone(t *testing.T) {
+	p := newFakePlayer()
+	errc := make(chan error, 1)
 	go func() {
-		defer close(ch)
-		select {
-		case ch <- b.first:
-		case <-ctx.Done():
-			return
-		}
-		select {
-		case <-b.release:
-		case <-ctx.Done():
-		}
+		errc <- playSentence(context.Background(), p, fakeCodec{}, chunkChan())
 	}()
-	return ch, nil
-}
+	pb := p.waitPlay(t)
 
-func (b *blockingSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
-
-// TestTee_StartErrorOpensNoPlayback pins that a failed Synthesize start returns
-// the error untouched and does NOT hand the sink a channel — the sentence never
-// speaks, and no goroutine/channel leaks.
-func TestTee_StartErrorOpensNoPlayback(t *testing.T) {
-	wantErr := errors.New("synth boom")
-	inner := &fakeSynth{startErr: wantErr}
-
-	var handed bool
-	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) { handed = true })
-
-	tee := wire.NewTeeSynthesizer(inner, sink)
-	out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "x"})
-	if !errors.Is(err, wantErr) {
-		t.Errorf("err = %v, want %v", err, wantErr)
+	// While Done is open, PlaySentence must still be blocked.
+	select {
+	case <-errc:
+		t.Fatal("PlaySentence returned before playback Done closed")
+	case <-time.After(50 * time.Millisecond):
 	}
-	if out != nil {
-		t.Error("returned a non-nil channel on start error")
+
+	// Finish the playback cleanly; PlaySentence must now return nil.
+	pb.finish(nil)
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("clean sentence: got %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PlaySentence did not return after Done closed")
 	}
-	if handed {
-		t.Error("sink was handed a channel despite the synth failing to start")
+	if p.plays.Load() != 1 {
+		t.Fatalf("Play called %d times, want 1", p.plays.Load())
 	}
 }
 
-// TestTee_AudioMarkupPromptPassesThrough pins that the decorator only intercepts
-// Synthesize — AudioMarkupPrompt (used to build the Persona/system prompt)
-// delegates to the wrapped Synthesizer unchanged.
-func TestTee_AudioMarkupPromptPassesThrough(t *testing.T) {
-	inner := &fakeSynth{markupRet: "use [brackets]"}
-	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) {})
-	tee := wire.NewTeeSynthesizer(inner, sink)
-
-	v := tts.Voice{ProviderID: "elevenlabs", VoiceID: "george"}
-	if got := tee.AudioMarkupPrompt(v); got != "use [brackets]" {
-		t.Errorf("AudioMarkupPrompt = %q, want the inner value", got)
-	}
-	inner.mu.Lock()
-	defer inner.mu.Unlock()
-	if inner.markupSeen.VoiceID != "george" {
-		t.Errorf("inner saw voice %+v, want the one passed through", inner.markupSeen)
+func TestPlaySentence_InterruptedReturnsErrInterrupted(t *testing.T) {
+	p := newFakePlayer()
+	errc := make(chan error, 1)
+	go func() {
+		errc <- playSentence(context.Background(), p, fakeCodec{}, chunkChan())
+	}()
+	// Wait for Play to register, then finish as interrupted (barge-in).
+	p.waitPlay(t).finish(gxvoice.ErrInterrupted)
+	select {
+	case err := <-errc:
+		if !errors.Is(err, gxvoice.ErrInterrupted) {
+			t.Fatalf("got %v, want ErrInterrupted (unwrapped)", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PlaySentence did not return")
 	}
 }
 
-// Compile-time assertion: the decorator is a drop-in [tts.Synthesizer].
-var _ tts.Synthesizer = (*wire.TeeSynthesizer)(nil)
+func TestPlaySentence_UnderlyingErrorWrapped(t *testing.T) {
+	sentinel := errors.New("encoder blew up")
+	p := newFakePlayer()
+	errc := make(chan error, 1)
+	go func() {
+		errc <- playSentence(context.Background(), p, fakeCodec{}, chunkChan())
+	}()
+	p.waitPlay(t).finish(sentinel)
+	select {
+	case err := <-errc:
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("got %v, want wrapped sentinel", err)
+		}
+		if errors.Is(err, gxvoice.ErrInterrupted) {
+			t.Fatal("a real error must not read as ErrInterrupted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PlaySentence did not return")
+	}
+}
+
+func TestPlaySentence_CodecUnavailableSurfaces(t *testing.T) {
+	// The default-build stub Codec reports ErrCodecUnavailable; PlaySentence must
+	// surface it (fail-fast) rather than silently play nothing.
+	err := playSentence(context.Background(), newFakePlayer(), UnavailableCodec(), chunkChan())
+	if !errors.Is(err, ErrCodecUnavailable) {
+		t.Fatalf("got %v, want ErrCodecUnavailable", err)
+	}
+}
+
+func TestPlaySentence_PlayErrorSurfaces(t *testing.T) {
+	boom := errors.New("session closed")
+	p := newFakePlayer()
+	p.err = boom
+	err := playSentence(context.Background(), p, fakeCodec{}, chunkChan())
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v, want wrapped play error", err)
+	}
+}
+
+func TestPlaySentence_NilChunksRejected(t *testing.T) {
+	if err := playSentence(context.Background(), newFakePlayer(), fakeCodec{}, nil); err == nil {
+		t.Fatal("nil chunks should be rejected")
+	}
+}

@@ -12,6 +12,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
+
 require (
 	github.com/disgoorg/godave v0.1.0 // indirect
 	github.com/disgoorg/godave/libdave v0.1.0 // indirect
