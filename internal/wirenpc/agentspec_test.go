@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -77,6 +78,20 @@ func dsnFromEnvOrContainer(t *testing.T) string {
 	return dsn
 }
 
+// equalJSON reports whether two JSON blobs are semantically equal, ignoring
+// whitespace and key order (Postgres jsonb re-serializes both).
+func equalJSON(t *testing.T, a, b []byte) bool {
+	t.Helper()
+	var av, bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		t.Fatalf("equalJSON: unmarshal a (%s): %v", a, err)
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		t.Fatalf("equalJSON: unmarshal b (%s): %v", b, err)
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
 func testCipher(t *testing.T) *crypto.Cipher {
 	t.Helper()
 	key := make([]byte, 32)
@@ -116,8 +131,17 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	if loaded.persona != want.persona {
 		t.Errorf("persona mismatch:\n got %q\nwant %q", loaded.persona, want.persona)
 	}
-	if !reflect.DeepEqual(loaded.voice, want.voice) {
-		t.Errorf("voice mismatch:\n got %+v\nwant %+v", loaded.voice, want.voice)
+	// Compare Voice field-by-field; Settings is json.RawMessage and the DB
+	// round-trip through Postgres jsonb re-serializes it (whitespace differs),
+	// so compare it as normalized JSON rather than raw bytes.
+	if loaded.voice.ProviderID != want.voice.ProviderID ||
+		loaded.voice.VoiceID != want.voice.VoiceID ||
+		loaded.voice.Name != want.voice.Name ||
+		loaded.voice.Language != want.voice.Language {
+		t.Errorf("voice identity mismatch:\n got %+v\nwant %+v", loaded.voice, want.voice)
+	}
+	if !equalJSON(t, loaded.voice.Settings, want.voice.Settings) {
+		t.Errorf("voice Settings mismatch:\n got %s\nwant %s", loaded.voice.Settings, want.voice.Settings)
 	}
 	if !reflect.DeepEqual(loaded.aliases, want.aliases) {
 		t.Errorf("aliases = %v, want %v", loaded.aliases, want.aliases)

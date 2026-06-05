@@ -11,6 +11,7 @@ package wirenpc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -82,9 +83,27 @@ func hardcodedNPC() npcSpec {
 			VoiceID:    elevenGeorgeVoiceID,
 			Name:       "Bart",
 			Language:   "en",
+			// Request 48 kHz PCM so the outbound codec path is encode-only —
+			// Discord Opus is 48 kHz, so this avoids the 24k→48k resampler (the
+			// ElevenLabs default is pcm_24000). Matches the #14 live voice.
+			Settings: elevenVoiceSettings(),
 		},
 		aliases: []string{"innkeeper", "barkeep"},
 	}
+}
+
+// elevenVoiceSettings is the ElevenLabs Settings blob carried in the NPC's
+// Voice: eleven_v3 at 48 kHz PCM. Marshaled here so the seeded JSONB and the
+// in-code Voice are byte-identical (the equivalence test depends on it).
+func elevenVoiceSettings() json.RawMessage {
+	b, err := json.Marshal(ttseleven.Settings{
+		ModelID:      ttseleven.ModelV3,
+		OutputFormat: "pcm_48000",
+	})
+	if err != nil {
+		panic(fmt.Sprintf("wirenpc: marshal elevenlabs voice settings: %v", err)) // static input; cannot fail
+	}
+	return b
 }
 
 // Config configures a [Run] of the live NPC voice loop.
