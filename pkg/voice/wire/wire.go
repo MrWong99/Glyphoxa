@@ -136,10 +136,16 @@ func (p *Pipeline) Run(ctx context.Context, sess *gxvoice.Session) error {
 			}
 			pcm, err := p.codec.DecodeInbound(frame)
 			if err != nil {
-				// The only expected error today is the unavailable codec; fail
-				// fast so a codec-less build does not look like a working but
-				// deaf NPC.
-				return fmt.Errorf("wire.Run: decode inbound: %w", err)
+				// A codec-less build can never decode anything: fail fast so it
+				// does not masquerade as a working but deaf NPC.
+				if errors.Is(err, ErrCodecUnavailable) {
+					return fmt.Errorf("wire.Run: decode inbound: %w", err)
+				}
+				// A single undecodable packet (e.g. a corrupt/transitional frame
+				// during the DAVE/MLS key handshake) must not tear down the whole
+				// voice session — skip it and keep listening.
+				p.log.Warn("skipping undecodable inbound frame", "user", frame.UserID, "err", err)
+				continue
 			}
 			for _, f := range pcm {
 				if err := p.conv.Feed(f); err != nil {
