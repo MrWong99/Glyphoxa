@@ -1,3 +1,9 @@
+//go:build integration
+
+// These tests stand up a real Postgres (testcontainers) and are tag-isolated
+// behind `integration` so the default `go test ./...` stays Docker-free and
+// fast (ADR-0021 / ADR-0033). Run them with `go test -tags=integration`.
+
 package storage_test
 
 import (
