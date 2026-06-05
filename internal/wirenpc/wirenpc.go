@@ -33,6 +33,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad/silero"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec"
 )
 
 const (
@@ -75,14 +76,16 @@ type Config struct {
 
 // Run builds and runs the live NPC voice loop until ctx is cancelled. It joins
 // the configured voice channel, wires the orchestrator pipeline with the
-// production Agent loop, and pumps audio through [wire.Pipeline].
+// production Agent loop, and pumps audio through [wire.Pipeline] in both
+// directions: inbound Opus → DecodeInbound → VAD/STT (hear), and synthesized TTS
+// → tee → serial playback → Opus → Session.Play (speak).
 //
-// The Opus↔PCM codec is not yet built (see [wire.Codec]); Run wires
-// [wire.UnavailableCodec], so it connects and constructs the full pipeline but
-// the audio loop fails fast with [wire.ErrCodecUnavailable] on the first inbound
-// frame. That makes the wiring complete and runnable while the transcoder is a
-// separate piece of work; once a real Codec is available, pass it to
-// [wire.NewPipeline] and the same loop drives a hearing, speaking NPC.
+// Audio requires the real Opus↔PCM [codec]; it is compiled in only under
+// -tags opus (system libopus). A default build links the codec stub, so Run
+// still connects and constructs the whole pipeline but the audio loop fails fast
+// with [wire.ErrCodecUnavailable] on the first inbound frame — the binary is
+// runnable and the wiring complete without the native dependency. Build with
+// -tags "opus dave nolibopusfile" for a hearing, speaking, encrypted NPC.
 func Run(ctx context.Context, cfg Config) error {
 	log := cfg.Logger
 	if log == nil {
@@ -128,12 +131,33 @@ func Run(ctx context.Context, cfg Config) error {
 	defer sess.Close()
 	log.Info("joined voice channel", "guild", guild, "channel", channel, "npc", npcName)
 
-	conv, err := buildConversation(log)
+	// One Codec instance serves both directions: DecodeInbound (called from the
+	// single Pipeline.Run goroutine) and PlaybackSource (called from the playback
+	// worker) — the codec documents this split as concurrency-safe. codec.New()
+	// is the real Opus transcoder under -tags opus and a fail-fast stub
+	// (ErrCodecUnavailable) otherwise, so this binary needs no build-tag
+	// knowledge: a default build still constructs and runs, just deaf+mute.
+	cdc := codec.New()
+
+	// Outbound (speak): a serial playback sink drives the codec's PlaybackSource
+	// onto the Session, one sentence at a time (Session.Play auto-interrupts, so
+	// overlapping playback would clip sentences). The TeeSynthesizer wraps the
+	// real ElevenLabs synthesizer and tees each synthesized chunk to this sink
+	// while the orchestrator's TTS stage keeps draining-and-dropping it (ADR-0021
+	// intact). ctx scopes the worker so it unwinds on shutdown.
+	sink := wire.NewSequentialSink(ctx, wire.NewSessionPlayer(sess, cdc), func(err error) {
+		log.Warn("sentence playback failed", "npc", npcName, "err", err)
+	})
+	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), sink)
+
+	conv, err := buildConversation(log, teeSynth)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
 
-	pipe := wire.NewPipeline(conv, wire.UnavailableCodec(), log)
+	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
+	// DecodeInbound into the orchestrator.
+	pipe := wire.NewPipeline(conv, cdc, log)
 	return pipe.Run(ctx, sess)
 }
 
@@ -186,10 +210,16 @@ func npcVoice() tts.Voice {
 
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
 // → STT (ElevenLabs) → Address Detection → production Reply (the Agent loop over
-// Anthropic, with the dice Tool granted via the tool-use loop) → TTS
-// (ElevenLabs). Provider API keys are read by each adapter from its own env var
-// at request time (BYOK, ADR-0004), so construction here needs no secrets.
-func buildConversation(log *slog.Logger) (*orchestrator.Conversation, error) {
+// Gemini, with the dice Tool granted via the tool-use loop) → TTS (synth).
+// Provider API keys are read by each adapter from its own env var at request
+// time (BYOK, ADR-0004), so construction here needs no secrets.
+//
+// synth is the [tts.Synthesizer] the TTS stage drives. [Run] passes a
+// [wire.TeeSynthesizer] wrapping the real ElevenLabs synthesizer so the
+// synthesized audio is tee'd to the playback path while the orchestrator keeps
+// draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
+// (no audio is played). It must not be nil.
+func buildConversation(log *slog.Logger, synth tts.Synthesizer) (*orchestrator.Conversation, error) {
 	bus := voiceevent.NewBus()
 
 	engine, err := silero.New()
@@ -208,7 +238,7 @@ func buildConversation(log *slog.Logger) (*orchestrator.Conversation, error) {
 	vadStage := orchestrator.NewVAD(bus, vadSession)
 
 	sttStage := orchestrator.NewSTT(bus, stteleven.New(""))
-	ttsStage := orchestrator.NewTTS(bus, ttseleven.New(""))
+	ttsStage := orchestrator.NewTTS(bus, synth)
 
 	detector := orchestrator.NewAddressDetector(npcMatcher())
 

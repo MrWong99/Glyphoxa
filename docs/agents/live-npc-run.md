@@ -11,12 +11,18 @@ Session.Inbound (Opus) → [codec] → VAD (Silero) → STT (ElevenLabs)
 
 The reasoning pipeline (VAD → STT → routing → Agent loop → TTS) is wired and
 covered by keyless cassette tests. The **audio codec** — Opus↔PCM transcoding,
-48 kHz↔16 kHz resampling, and 20 ms reframing on both directions — is **not yet
-built** (tracked separately). Until it lands, the binary connects and
+48 kHz↔16 kHz resampling, and 20 ms reframing on both directions — is built and
+wired: inbound frames are decoded to PCM for VAD/STT, and synthesized speech is
+tee'd from the TTS stage, played one sentence at a time, and Opus-encoded back to
+the channel (`internal/wirenpc.Run` shares one `codec.New()` between
+`wire.NewPipeline` for hearing and the playback path for speaking).
+
+The codec links **libopus** and is compiled in only under **`-tags opus`**. A
+default build (no tag) links the codec stub, so the binary still connects and
 constructs the whole pipeline but the audio loop exits immediately with
-`wire: audio codec unavailable …` on the first inbound frame. The steps below
-are the procedure to follow once a real `wire.Codec` is wired into
-`internal/wirenpc` (replace `wire.UnavailableCodec()` in `wirenpc.Run`).
+`wire: audio codec unavailable …` on the first inbound frame — useful for
+checking wiring without the native dependency. **For an audible run you must
+build with the audio tags** (see Build below).
 
 ## Prerequisites
 
@@ -42,16 +48,30 @@ are the procedure to follow once a real `wire.Codec` is wired into
 
 ## Build
 
+The audio codec (libopus) and DAVE/MLS encryption are opt-in native dependencies
+selected by build tags. For an **audible** run you need `opus`; for a real
+encrypted Discord session you also need `dave`.
+
 ```sh
-# Default build: DAVE/MLS is a stub (DaveAvailable() == false); voice is
-# unencrypted. Fine for local testing.
+# Default build: codec + DAVE are stubs. The pipeline constructs and the gateway
+# connects, but the audio loop exits with `wire: audio codec unavailable` on the
+# first inbound frame — useful for wiring checks, NOT audible. Needs no native libs.
 CGO_ENABLED=1 go build -o glyphoxa ./cmd/glyphoxa
 
-# Real end-to-end DAVE/MLS encryption (mandatory on Discord since 2026-03-01 for
-# production) needs the libdave native libs and the build tag:
+# Audible + encrypted live run. Prereqs: system libopus (e.g. `libopus` 1.6.1)
+# and the libdave native libs (`make dave-libs`, which prints the PKG_CONFIG_PATH
+# / LD_LIBRARY_PATH exports to add).
 make dave-libs
-CGO_ENABLED=1 go build -tags dave -o glyphoxa ./cmd/glyphoxa
+export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
+CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
 ```
+
+- `opus` — real Opus↔PCM codec (else the stub: no audio).
+- `dave` — real DAVE/MLS encryption (mandatory on Discord since 2026-03-01 for
+  production; else the stub, `DaveAvailable() == false`, unencrypted).
+- `nolibopusfile` — compiles out the libopusfile dependency of the Opus binding
+  (Glyphoxa does not use file decoding). **Required whenever `opus` is set.**
 
 ## Keys: keyring → env (never printed)
 
@@ -87,7 +107,7 @@ The bot opens the Discord gateway, joins the channel, and logs
 `joined voice channel … npc=Bart`. Stop with Ctrl-C (SIGINT) — it leaves the
 channel and closes the session cleanly.
 
-## What to expect (once the codec is wired)
+## What to expect (audible build)
 
 1. Speak in the channel. Address Detection (the ADR-0024 scoring matcher) routes
    to Bart both when you **name him** — *"Bart, do you have a room?"* (or an
