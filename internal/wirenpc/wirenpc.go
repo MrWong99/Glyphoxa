@@ -79,8 +79,10 @@ func hardcodedNPC() npcSpec {
 		agentID: "bart",
 		name:    "Bart",
 		persona: BartPersona,
-		// npcVoice() carries the pcm_48000 output format so the hardcoded path's
-		// outbound audio is encode-only, matching the live demo.
+		// npcVoice() carries pcm_48000 plus the conversational eleven_v3 defaults
+		// (DefaultV3Settings: stability/similarity/speaker-boost). It is both the
+		// seed source for the DB row and the #14 live-voice value, so the outbound
+		// codec path is encode-only (Discord Opus is 48 kHz — no resampler).
 		voice:   npcVoice(),
 		aliases: []string{"innkeeper", "barkeep"},
 	}
