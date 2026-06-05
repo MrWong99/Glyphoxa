@@ -210,6 +210,13 @@ type Replier struct {
 	tts     *TTS
 	reply   ReplyFunc
 	onError ErrorFunc
+
+	// floor, when non-nil, makes each turn run on its own goroutine under a
+	// cancelable per-turn context taken from the floor — so the inbound loop is
+	// not blocked for the turn's real-time playback and a [BargeIn] can cancel it
+	// mid-sentence (ADR-0027). Nil keeps the default synchronous dispatch. Set
+	// only via the orchestrator wiring ([WithBargeIn]); not part of [NewReplier].
+	floor *Floor
 }
 
 // NewReplier wires ttsStage and reply together. Both must be non-nil; passing
@@ -235,10 +242,33 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		panic("orchestrator.Replier.Bind: bus must not be nil")
 	}
 	return voiceevent.On(bus, func(e voiceevent.AddressRouted) {
-		for _, rep := range r.reply(e) {
-			if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil && r.onError != nil {
-				r.onError(err)
-			}
+		// Default (no floor): dispatch synchronously on the bus goroutine — the
+		// behaviour every non-barge-in caller relies on.
+		if r.floor == nil {
+			r.dispatchAll(ctx, e)
+			return
 		}
+		// Barge-in: take the floor and run the turn on its own goroutine so the
+		// inbound loop keeps feeding VAD during playback. A barge cancels turnCtx,
+		// which unwinds TTS synthesis and playback and breaks the dispatch loop.
+		turnCtx, release := r.floor.Take(ctx)
+		go func() {
+			defer release()
+			r.dispatchAll(turnCtx, e)
+		}()
 	})
+}
+
+// dispatchAll renders every Reply for one routing decision in order under ctx,
+// stopping early if ctx is cancelled (a barge-in yielded the floor mid-turn). A
+// dispatch failure is reported through the ErrorFunc and does not stop the rest.
+func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) {
+	for _, rep := range r.reply(e) {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil && r.onError != nil {
+			r.onError(err)
+		}
+	}
 }

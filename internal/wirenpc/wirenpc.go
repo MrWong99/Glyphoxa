@@ -173,7 +173,7 @@ func Run(ctx context.Context, cfg Config) error {
 		// segfaulting disgo's voice gateway on the VoiceServerUpdate join path.
 		// GuildVoiceStates (+Guilds) is the minimum to populate that state.
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
-			gateway.IntentGuilds | gateway.IntentGuildVoiceStates,
+			gateway.IntentGuilds|gateway.IntentGuildVoiceStates,
 		)),
 		gxvoice.DaveOption(),
 	)
@@ -361,6 +361,10 @@ func buildConversation(log *slog.Logger, npc npcSpec, synth tts.Synthesizer) (*o
 	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
 		orchestrator.WithReply(replier.Reply()),
+		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. Start
+		// with an instant cut (0 confirm window) to validate the async-turn path
+		// live; the ~250ms confirm window is the next tuning step.
+		orchestrator.WithBargeIn(0),
 		orchestrator.WithErrorHandler(func(err error) {
 			log.Warn("reply dispatch failed", "err", err)
 		}),
