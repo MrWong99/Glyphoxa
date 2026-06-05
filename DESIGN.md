@@ -2,7 +2,7 @@
 
 Resume-from-here doc for the interactive design grilling. Decisions are recorded as ADRs under [docs/adr/](docs/adr/); domain language lives in [CONTEXT.md](CONTEXT.md).
 
-**Next:** Q15 — Migration / DB tooling.
+**Next:** Q19 — First sprint scope (held until the live demo runs).
 
 ## Decisions ledger
 
@@ -38,14 +38,14 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0028](docs/adr/0028-tool-framework-internal-interface-simple-registry.md) | Tool framework: one internal Tool interface, simple registry, MCP Server as a backing | Q14.1–Q14.3 |
 | [0029](docs/adr/0029-tool-grants-least-privilege-scoping-config.md) | Tool Grants: least-privilege, per-grant scoping config enforced in handler | Q14.4 |
 | [0030](docs/adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Tool side effects: read-only inline, side-effecting flush at turn-commit | Q14.5 |
+| [0031](docs/adr/0031-postgres-migration-tooling.md) | Postgres migration tooling: goose with embedded SQL migrations | Q15 |
+| [0032](docs/adr/0032-observability-slog-prometheus-deferred-tracing.md) | Observability: structured slog + thin Prometheus; tracing deferred behind a flag | Q16 |
+| [0033](docs/adr/0033-ci-test-strategy.md) | CI/test: keyless-default suite, build-tag-isolated heavy tests, tiered live | Q17 |
+| [0034](docs/adr/0034-deployment-artifacts.md) | Deployment: one image (mode as arg), Helm for k8s, systemd for self-host | Q18 |
 
 ## Open questions
 
-- **Q15 — Migration / DB tooling.** Postgres migration framework, schema versioning.
-- **Q16 — Observability.** Metrics, traces, log structure (defer the v1 OTel sprawl?).
-- **Q17 — CI / test strategy.** Tight reviews + small commits → test patterns and gates.
-- **Q18 — Deployment artifacts.** Docker image, Helm chart, systemd?
-- **Q19 — First sprint scope.** What's shipped in week 1, week 2, week 3?
+- **Q19 — First sprint scope.** Retrospective / next-sprint planning given what shipped. Held until the live demo runs (needs to see what shipped audibly).
 
 ## Methodology notes
 
