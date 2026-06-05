@@ -6,7 +6,7 @@ The buffer is an in-process ring per active Voice Session held in the Voice Inst
 
 The embedding pipeline is async and eventually consistent: insert chunk with `embedding=NULL`, a background worker embeds and `UPDATE`s. Retrieval queries filter `WHERE embedding IS NOT NULL`; the HNSW index is partial on non-null embeddings.
 
-Default embedding model: Ollama `nomic-embed-text` (1024-dim, local). Switching models requires a backfill.
+Default embedding model: Ollama `nomic-embed-text` (768-dim, local) → `vector(768)`. Switching models (or Matryoshka dimensions) requires a backfill.
 
 User-facing transcript search in v1.0 is tsvector-only; embedding-augmented overlay is possible later. NPC retrieval (Hot Context assembly) uses ANN similarity with hard filters on `participated_agent_ids` (NPC-knowledge) vs `campaign_id` only (topical/world context, marked "may not personally know"). Mentioned-entity extraction is case-insensitive name matching against the Campaign's Agents and KG Nodes at chunk-finalize; NER is deferred.
 
