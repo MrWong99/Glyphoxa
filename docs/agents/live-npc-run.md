@@ -1,7 +1,9 @@
 # Running the live NPC (`voice` mode)
 
 The `glyphoxa` binary's `voice` mode joins a Discord voice channel and gives one
-hardcoded Character NPC ("Bart", the innkeeper) a live voice loop:
+Character NPC ("Bart", the innkeeper) a live voice loop. By default the NPC is
+**loaded from Postgres** (seed it first — see "Loading the NPC from the database"
+below); pass `-hardcoded` to use the in-code NPC without a database:
 
 ```
 Session.Inbound (Opus) → [codec] → VAD (Silero) → STT (ElevenLabs)
@@ -35,7 +37,9 @@ build with the audio tags** (see Build below).
   `providers.llm.name "gemini"`, model `gemini-2.5-flash`; there is no Anthropic
   key). The binary reads, at request time:
   - `GEMINI_API_KEY` — the LLM the Agent loop calls (Gemini, via its
-    OpenAI-compatibility endpoint).
+    OpenAI-compatibility endpoint). The wired adapter is Gemini for any NPC; a
+    DB-loaded Agent's `provider_config` provider/model is recorded but does not
+    yet drive adapter selection.
   - `ELEVENLABS_API_KEY` — STT (scribe) and TTS (eleven_v3).
   - `DISCORD_BOT_TOKEN` — the Discord gateway/voice connection.
 
@@ -94,18 +98,65 @@ The `gemini` key backs the LLM here and also the deployment's S2S/embeddings.)
 Do **not** `echo`/`cat` a key; to spot-check, use the exit code only:
 `secret-tool lookup service glyphoxa key gemini >/dev/null; echo $?`.
 
-## Run
+## Run (DB-loaded NPC — the default)
+
+`voice` mode loads the NPC from Postgres by default, so apply the schema and seed
+the NPC once (in addition to the three keyring keys above), then run:
 
 ```sh
-# (after exporting the three keys from the keyring as above)
+# Postgres connection string and the app credential-encryption secret.
+export GLYPHOXA_DATABASE_URL="postgres://user:pass@host:5432/glyphoxa?sslmode=disable"
+export GLYPHOXA_SECRET="<app secret>"   # ADR-0004 single app secret
+
+./glyphoxa migrate up          # apply the schema (idempotent)
+./glyphoxa seed                # create the demo Tenant/Campaign + Bart (idempotent)
+
 ./glyphoxa -mode voice \
   -guild   <guild-snowflake-id> \
   -channel <voice-channel-snowflake-id>
 ```
 
-The bot opens the Discord gateway, joins the channel, and logs
-`joined voice channel … npc=Bart`. Stop with Ctrl-C (SIGINT) — it leaves the
-channel and closes the session cleanly.
+For an **audio smoke test without Postgres**, use the `-hardcoded` escape hatch —
+it voices the in-code Bart (Gemini + ElevenLabs at pcm_48000) and needs no DB,
+`migrate`, or `seed`:
+
+```sh
+./glyphoxa -mode voice -hardcoded \
+  -guild <guild-snowflake-id> -channel <voice-channel-snowflake-id>
+```
+
+It logs `loaded NPC from DB npc=Bart …`. The bot opens the Discord gateway,
+joins the channel, and logs `joined voice channel … npc=Bart`. Stop with Ctrl-C
+(SIGINT) — it leaves the channel and closes the session cleanly. The seed is
+idempotent (it no-ops if the demo Tenant already exists), so re-running it on
+every boot is safe.
+
+## Running without a database (`-hardcoded`)
+
+To smoke-test audio without Postgres, `-hardcoded` uses the in-code NPC instead
+of loading from the DB (no `migrate`/`seed`, no `$GLYPHOXA_DATABASE_URL`):
+
+```sh
+./glyphoxa -mode voice -hardcoded \
+  -guild   <guild-snowflake-id> \
+  -channel <voice-channel-snowflake-id>
+```
+
+The assembled pipeline is identical either way; only the *source* of the NPC's
+Persona/Voice/identity differs.
+
+### Credential home (the `provider_config` ciphertext is *not* the live key)
+
+The seed writes a `provider_config` row per Component (LLM=gemini, TTS/STT=
+elevenlabs) with **encrypted placeholder** credentials and `last4="env"` — it
+never stores a real provider key. For the self-host `voice` binary the real keys
+come from the environment (above) / the OS keyring (task #10); the encrypted
+`provider_config.credentials_ciphertext` column is the **web-app BYOK path**
+(ADR-0004), which the control-plane (task #6) will populate and decrypt. So
+seeding the NPC does **not** put any secret in the database.
+
+`GLYPHOXA_SECRET` is only used to seal/open those placeholders; any string works
+locally (it is SHA-256'd to a 32-byte AES key).
 
 ## What to expect (audible build)
 

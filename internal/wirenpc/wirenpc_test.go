@@ -38,7 +38,8 @@ func TestNPCVoice_Emits48kPCM(t *testing.T) {
 // to an absent Butler), the NPC would be silent and the whole live loop would
 // look broken on top of brand-new audio code. Keyless: no LLM, no Session.
 func TestNPCMatcher_RoutesNamedAndUnnamedToNPC(t *testing.T) {
-	m := npcMatcher()
+	npc := hardcodedNPC()
+	m := npcMatcher(npc)
 
 	cases := []struct {
 		name string
@@ -56,8 +57,8 @@ func TestNPCMatcher_RoutesNamedAndUnnamedToNPC(t *testing.T) {
 			}
 			// The lead (highest-scored) target must be the NPC; a stray Butler
 			// or empty AgentID would leave the production ReplyFunc silent.
-			if got := routed[0].Target.AgentID; got != npcAgentID {
-				t.Errorf("utterance %q routed to AgentID %q, want %q", tc.text, got, npcAgentID)
+			if got := routed[0].Target.AgentID; got != npc.agentID {
+				t.Errorf("utterance %q routed to AgentID %q, want %q", tc.text, got, npc.agentID)
 			}
 		})
 	}
@@ -69,7 +70,7 @@ func TestNPCMatcher_RoutesNamedAndUnnamedToNPC(t *testing.T) {
 // startup — the bug this test was written to prevent (an earlier draft passed
 // an empty Butler to a matcher that panics on it).
 func TestNPCMatcher_Constructs(t *testing.T) {
-	if npcMatcher() == nil {
+	if npcMatcher(hardcodedNPC()) == nil {
 		t.Fatal("npcMatcher returned nil")
 	}
 }

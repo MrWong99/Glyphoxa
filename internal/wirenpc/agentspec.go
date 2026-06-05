@@ -1,0 +1,220 @@
+package wirenpc
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
+)
+
+// This file is the task-#5 DB integration: it seeds the live NPC into Postgres
+// using the task-#8 schema, and loads it back so the voice loop is built from a
+// DB row instead of the in-code consts. The storage layer stays vendor-neutral;
+// the storage.Agent → npcSpec / tts.Voice mapping is voice-domain knowledge and
+// lives here.
+
+const (
+	// SeedTenantName / SeedCampaignName identify the demo Tenant/Campaign the
+	// seed creates. The seed is idempotent on the Tenant name.
+	SeedTenantName   = "Glyphoxa Demo"
+	SeedCampaignName = "The Prancing Pony"
+
+	// llmProvider / llmModel record the DEPLOYMENT LLM in provider_config.
+	// Deployment is Gemini (no Anthropic key exists); the live adapter is task
+	// #13. buildConversation still wires the Anthropic adapter (the only one in
+	// this tree) — this DB data is recorded but not yet consumed by adapter
+	// selection. See the #5 seam note in wirenpc.go.
+	llmProvider = "gemini"
+	llmModel    = "gemini-2.0-flash"
+
+	// ttsModel / sttModel are the ElevenLabs models the Voice / STT configs record.
+	ttsModel = "eleven_multilingual_v2"
+	sttModel = "scribe_v1"
+
+	// credPlaceholderLast4 marks a provider_config whose real key is NOT in the
+	// DB: the self-host voice binary reads it from the OS keyring (#10). The
+	// encrypted-cred column is the web-app BYOK path (ADR-0004, #6); the seed
+	// stores a sealed placeholder so the NOT NULL column is satisfied without
+	// persisting a secret.
+	credPlaceholderLast4 = "env"
+)
+
+// SeedNPC creates the demo Tenant, Campaign (which auto-creates its Butler via
+// the ADR-0009 trigger), the Gemini-LLM + ElevenLabs-TTS/STT Provider Configs,
+// and the "Bart" Character NPC bound to them. It is idempotent: if a Tenant
+// named [SeedTenantName] already exists, it does nothing and reports that.
+//
+// cipher seals the credential placeholders written to provider_config (real
+// keys live in the keyring, not the DB — see [credPlaceholderLast4]).
+func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log *slog.Logger) error {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(discard{}, nil))
+	}
+	st := storage.New(pool)
+
+	if _, err := st.FindTenantByName(ctx, SeedTenantName); err == nil {
+		log.Info("seed: tenant already present, skipping", "tenant", SeedTenantName)
+		return nil
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("wirenpc: seed precheck: %w", err)
+	}
+
+	npc := hardcodedNPC()
+
+	voiceJSON, err := json.Marshal(npc.voice)
+	if err != nil {
+		return fmt.Errorf("wirenpc: marshal voice: %w", err)
+	}
+
+	// Sealed placeholder credential — never a real key (see credPlaceholderLast4).
+	placeholder, err := cipher.Seal([]byte("placeholder: real key in OS keyring"))
+	if err != nil {
+		return fmt.Errorf("wirenpc: seal credential placeholder: %w", err)
+	}
+
+	// All inserts run in one transaction so a partial failure can't leave a
+	// half-seeded DB (which the FindTenantByName precheck would then treat as
+	// already-seeded and skip forever).
+	err = st.InTx(ctx, func(tx *storage.Store) error {
+		tenantID, err := tx.CreateTenant(ctx, SeedTenantName)
+		if err != nil {
+			return err
+		}
+
+		// Creating the Campaign fires the auto-Butler trigger: a 'Glyphoxa'
+		// Butler row appears here without an explicit insert (ADR-0009).
+		campaignID, err := tx.CreateCampaign(ctx, storage.NewCampaign{
+			TenantID: tenantID,
+			Name:     SeedCampaignName,
+			System:   "dnd5e",
+			Language: "en",
+		})
+		if err != nil {
+			return err
+		}
+
+		llmCfgID, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             storage.ComponentLLM,
+			Provider:              llmProvider,
+			Model:                 llmModel,
+			CredentialsCiphertext: placeholder,
+			CredentialsLast4:      credPlaceholderLast4,
+		})
+		if err != nil {
+			return err
+		}
+
+		ttsCfgID, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             storage.ComponentTTS,
+			Provider:              ttseleven.ProviderID,
+			Model:                 ttsModel,
+			CredentialsCiphertext: placeholder,
+			CredentialsLast4:      credPlaceholderLast4,
+		})
+		if err != nil {
+			return err
+		}
+
+		// STT shares the ElevenLabs key; recorded as its own Component row.
+		if _, err := tx.CreateProviderConfig(ctx, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             storage.ComponentSTT,
+			Provider:              ttseleven.ProviderID,
+			Model:                 sttModel,
+			CredentialsCiphertext: placeholder,
+			CredentialsLast4:      credPlaceholderLast4,
+		}); err != nil {
+			return err
+		}
+
+		_, err = tx.CreateAgent(ctx, storage.NewAgent{
+			CampaignID:            campaignID,
+			Role:                  storage.AgentRoleCharacter,
+			Name:                  npc.name,
+			Persona:               npc.persona,
+			Voice:                 voiceJSON,
+			VoiceProviderConfigID: uuid.NullUUID{UUID: ttsCfgID, Valid: true},
+			LLMProviderConfigID:   uuid.NullUUID{UUID: llmCfgID, Valid: true},
+			AddressOnly:           false, // a lone Character NPC catches unaddressed speech
+			Aliases:               npc.aliases,
+		})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Info("seed: created NPC",
+		"tenant", SeedTenantName, "campaign", SeedCampaignName, "npc", npc.name)
+	return nil
+}
+
+// loadSeededNPC reads the demo Campaign's single Character NPC from the DB and
+// maps it to the npcSpec the voice loop builds from. The auto-created Butler is
+// ignored (it is the slash-command Agent for #6, not voiced here); this slice
+// expects exactly one Character NPC in the Campaign.
+//
+// AgentID is the Agent's DB UUID as a string — the stable identity Address
+// Detection routes on (the in-code path used "bart"; the value only has to be
+// consistent between the matcher and the Persona, which it is).
+func loadSeededNPC(ctx context.Context, st *storage.Store) (npcSpec, error) {
+	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
+	if err != nil {
+		return npcSpec{}, fmt.Errorf("wirenpc: load NPC: find tenant: %w", err)
+	}
+
+	campaignID, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	if err != nil {
+		return npcSpec{}, fmt.Errorf("wirenpc: load NPC: find campaign: %w", err)
+	}
+
+	chars, err := st.CharacterAgents(ctx, campaignID)
+	if err != nil {
+		return npcSpec{}, err
+	}
+	if len(chars) != 1 {
+		return npcSpec{}, fmt.Errorf("wirenpc: load NPC: expected exactly 1 Character NPC in %q, found %d",
+			SeedCampaignName, len(chars))
+	}
+
+	loaded, err := st.LoadAgent(ctx, chars[0].ID)
+	if err != nil {
+		return npcSpec{}, err
+	}
+	return npcSpecFromAgent(loaded.Agent)
+}
+
+// npcSpecFromAgent maps a storage.Agent (vendor-neutral) to the voice-domain
+// npcSpec, deserializing the opaque Voice JSONB into a tts.Voice.
+func npcSpecFromAgent(a storage.Agent) (npcSpec, error) {
+	var voice tts.Voice
+	if len(a.Voice) > 0 {
+		if err := json.Unmarshal(a.Voice, &voice); err != nil {
+			return npcSpec{}, fmt.Errorf("wirenpc: unmarshal voice for agent %s: %w", a.ID, err)
+		}
+	}
+	// A nil Settings serializes to the JSON literal `null`, which unmarshals
+	// back into a non-nil json.RawMessage("null"). Normalize it to nil so a
+	// settings-less Voice round-trips identically.
+	if string(voice.Settings) == "null" {
+		voice.Settings = nil
+	}
+	return npcSpec{
+		agentID: a.ID.String(),
+		name:    a.Name,
+		persona: a.Persona,
+		voice:   voice,
+		aliases: a.Aliases,
+	}, nil
+}

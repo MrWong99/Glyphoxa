@@ -18,7 +18,9 @@ import (
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
@@ -44,23 +46,45 @@ const (
 	// Discord's 48 kHz Opus to this 16 kHz / 32 ms (512-sample) cadence.
 	vadFrameMs = 32
 
-	// npcAgentID is the hardcoded NPC's Agent identifier; the production
-	// ReplyFunc answers only routes targeting it.
-	npcAgentID = "bart"
-	// npcName is the NPC's display name and the address-detection alias.
-	npcName = "Bart"
-
 	// elevenGeorgeVoiceID is the ElevenLabs "George" public preset — a neutral
-	// stand-in voice for the hardcoded NPC.
+	// stand-in voice for the NPC.
 	elevenGeorgeVoiceID = "JBFqnCBsd6RMkjVDRZzb"
 )
 
-// npcPersona is the hardcoded Character NPC Persona (CONTEXT.md "Persona") for
-// the MVP slice. Task #5 replaces this with a DB-loaded Agent record.
-const npcPersona = `You are Bart, the gruff but warm-hearted innkeeper of the Prancing Pony.
+// BartPersona is the Character NPC Persona (CONTEXT.md "Persona") for the MVP
+// slice. Exported so the `seed` command writes the same Persona text the in-code
+// NPC used, and the DB-load equivalence test can compare against it.
+const BartPersona = `You are Bart, the gruff but warm-hearted innkeeper of the Prancing Pony.
 You speak in short, vivid sentences with a tavern-keeper's cadence. You know the
 local rumors, the regulars, and the price of a room. Stay in character; never
 mention being an AI.`
+
+// npcSpec is everything needed to bring one Character NPC to life: its
+// addressable identity, Persona, Voice, and aliases. The hardcoded slice (#4)
+// built this from consts; task #5 loads it from the DB (see agentspec.go), and
+// both paths produce the same Conversation.
+type npcSpec struct {
+	agentID string
+	name    string
+	persona string
+	voice   tts.Voice
+	aliases []string
+}
+
+// hardcodedNPC is the original in-code "Bart" definition. It is the seed source
+// for the DB row (the `seed` command) and the equivalence target for the
+// DB-load path: loading Bart from a seeded DB must reproduce exactly this.
+func hardcodedNPC() npcSpec {
+	return npcSpec{
+		agentID: "bart",
+		name:    "Bart",
+		persona: BartPersona,
+		// npcVoice() carries the pcm_48000 output format so the hardcoded path's
+		// outbound audio is encode-only, matching the live demo.
+		voice:   npcVoice(),
+		aliases: []string{"innkeeper", "barkeep"},
+	}
+}
 
 // Config configures a [Run] of the live NPC voice loop.
 type Config struct {
@@ -72,6 +96,36 @@ type Config struct {
 	Channel string
 	// Logger receives structured logs; nil discards them.
 	Logger *slog.Logger
+	// npc is the Character NPC this loop voices. Run resolves it; RunFromDB
+	// loads it from storage, the env-only Run path uses the hardcoded NPC.
+	npc npcSpec
+}
+
+// RunFromDB loads the seeded Character NPC from Postgres (via the task-#8
+// storage layer) and runs the live voice loop with it, instead of the in-code
+// NPC. dsn is the Postgres connection string. This is the task-#5 DB-load path:
+// the only thing it changes versus [Run] is the *source* of the NPC's Persona/
+// Voice/identity — the assembled pipeline is identical.
+func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
+	log := cfg.Logger
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(discard{}, nil))
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("wirenpc: open DB pool: %w", err)
+	}
+	defer pool.Close()
+
+	npc, err := loadSeededNPC(ctx, storage.New(pool))
+	if err != nil {
+		return err
+	}
+	log.Info("loaded NPC from DB", "npc", npc.name, "agentID", npc.agentID)
+
+	cfg.npc = npc
+	return Run(ctx, cfg)
 }
 
 // Run builds and runs the live NPC voice loop until ctx is cancelled. It joins
@@ -87,6 +141,10 @@ type Config struct {
 // runnable and the wiring complete without the native dependency. Build with
 // -tags "opus dave nolibopusfile" for a hearing, speaking, encrypted NPC.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.npc.agentID == "" {
+		cfg.npc = hardcodedNPC()
+	}
+
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(discard{}, nil))
@@ -129,7 +187,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("wirenpc: join voice channel: %w", err)
 	}
 	defer sess.Close()
-	log.Info("joined voice channel", "guild", guild, "channel", channel, "npc", npcName)
+	log.Info("joined voice channel", "guild", guild, "channel", channel, "npc", cfg.npc.name)
 
 	// One Codec instance serves both directions: DecodeInbound (called from the
 	// single Pipeline.Run goroutine) and PlaybackSource (called from the playback
@@ -137,6 +195,8 @@ func Run(ctx context.Context, cfg Config) error {
 	// is the real Opus transcoder under -tags opus and a fail-fast stub
 	// (ErrCodecUnavailable) otherwise, so this binary needs no build-tag
 	// knowledge: a default build still constructs and runs, just deaf+mute.
+	// Living in the shared Run core, this audio path covers BOTH the hardcoded
+	// and the RunFromDB paths (RunFromDB resolves the NPC then delegates here).
 	cdc := codec.New()
 
 	// Outbound (speak): a serial playback sink drives the codec's PlaybackSource
@@ -146,11 +206,11 @@ func Run(ctx context.Context, cfg Config) error {
 	// while the orchestrator's TTS stage keeps draining-and-dropping it (ADR-0021
 	// intact). ctx scopes the worker so it unwinds on shutdown.
 	sink := wire.NewSequentialSink(ctx, wire.NewSessionPlayer(sess, cdc), func(err error) {
-		log.Warn("sentence playback failed", "npc", npcName, "err", err)
+		log.Warn("sentence playback failed", "npc", cfg.npc.name, "err", err)
 	})
 	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), sink)
 
-	conv, err := buildConversation(log, teeSynth)
+	conv, err := buildConversation(log, cfg.npc, teeSynth)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -161,28 +221,30 @@ func Run(ctx context.Context, cfg Config) error {
 	return pipe.Run(ctx, sess)
 }
 
-// npcMatcher builds the Address Detection matcher for the hardcoded NPC. This
-// Campaign has one Character NPC and no Butler in this slice, so it uses the
-// scoring Matcher (ADR-0024): Bart gets a name/alias match AND the single-NPC
+// npcMatcher builds the Address Detection matcher for the NPC. This Campaign has
+// one Character NPC and no addressable Butler in this slice, so it uses the
+// scoring Matcher (ADR-0024): the NPC gets a name/alias match AND the single-NPC
 // fallback, so both a named utterance ("Bart, …") and an unnamed one route to
 // him — a non-Address-Only lone NPC catches unaddressed speech. The whole-word
 // matcher is deliberately not used: it requires a Butler as its unconditional
-// fallback, which this slice does not have, and would leave Bart silent on
+// fallback, which this slice does not have, and would leave the NPC silent on
 // every unnamed utterance.
-func npcMatcher() *address.Matcher {
+func npcMatcher(npc npcSpec) *address.Matcher {
 	return address.NewMatcher(address.Config{Language: "en"},
 		address.Agent{
 			Target: voiceevent.AddressTarget{
-				AgentID:   npcAgentID,
+				AgentID:   npc.agentID,
 				AgentRole: "character",
-				Name:      npcName,
+				Name:      npc.name,
 			},
-			Aliases: []string{"innkeeper", "barkeep"},
+			Aliases: npc.aliases,
 		},
 	)
 }
 
-// npcVoice is the hardcoded NPC's TTS Voice.
+// npcVoice is the hardcoded NPC's TTS Voice (the [hardcodedNPC] seed source).
+// The DB-loaded NPC carries its own Voice from the seed; this is only used by
+// the `-hardcoded` escape path.
 //
 // Settings overrides the ElevenLabs output format to pcm_48000 (keeping the rest
 // of the conversational eleven_v3 defaults). Discord's Opus encoder runs at
@@ -202,7 +264,7 @@ func npcVoice() tts.Voice {
 	return tts.Voice{
 		ProviderID: ttseleven.ProviderID,
 		VoiceID:    elevenGeorgeVoiceID,
-		Name:       npcName,
+		Name:       "Bart",
 		Language:   "en",
 		Settings:   raw,
 	}
@@ -214,12 +276,21 @@ func npcVoice() tts.Voice {
 // Provider API keys are read by each adapter from its own env var at request
 // time (BYOK, ADR-0004), so construction here needs no secrets.
 //
+// npc supplies the addressable identity, Persona, and Voice (from the in-code
+// seed or, via [RunFromDB], the database). The `dice` Tool grant stays in code
+// (Tool Grants are a #6 table, not yet seeded). The LLM provider is Gemini — it
+// matches the live deployment (providers.llm "gemini", model gemini-2.5-flash;
+// there is no Anthropic key). The DB Agent's provider_config provider/model is
+// recorded but adapter selection is not yet driven by it; the wired adapter is
+// Gemini for any NPC in this tree. Keyless cassette tests replay the Anthropic
+// adapter behind the same llm.Provider interface.
+//
 // synth is the [tts.Synthesizer] the TTS stage drives. [Run] passes a
 // [wire.TeeSynthesizer] wrapping the real ElevenLabs synthesizer so the
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(log *slog.Logger, synth tts.Synthesizer) (*orchestrator.Conversation, error) {
+func buildConversation(log *slog.Logger, npc npcSpec, synth tts.Synthesizer) (*orchestrator.Conversation, error) {
 	bus := voiceevent.NewBus()
 
 	engine, err := silero.New()
@@ -240,19 +311,17 @@ func buildConversation(log *slog.Logger, synth tts.Synthesizer) (*orchestrator.C
 	sttStage := orchestrator.NewSTT(bus, stteleven.New(""))
 	ttsStage := orchestrator.NewTTS(bus, synth)
 
-	detector := orchestrator.NewAddressDetector(npcMatcher())
+	detector := orchestrator.NewAddressDetector(npcMatcher(npc))
 
-	// Production ReplyFunc: the Agent loop. The tool-use loop (with the dice
-	// Tool granted) is the Engine, so the NPC can roll dice; an Agent with no
-	// grants would degrade to a single completion through the same path.
+	// grants would degrade to a single completion through the same path. The
+	// `dice` grant stays in code: Tool Grants are a #6 table, not yet seeded.
 	//
-	// Gemini is the live LLM provider — it matches the actual deployment
-	// (providers.llm.name "gemini", model gemini-2.5-flash; there is no
-	// Anthropic key). The adapter reads GEMINI_API_KEY at request time (BYOK,
-	// ADR-0004); export it from the keyring before a live run (see
-	// docs/agents/live-npc-run.md). The keyless cassette tests still use the
-	// anthropic adapter behind the same llm.Provider interface, so this swap is
-	// provider-only — no rework of the loop, bridge, or persona path.
+	// Gemini is the live LLM provider (see the function doc): it reads
+	// GEMINI_API_KEY at request time (BYOK, ADR-0004); export it from the keyring
+	// before a live run (docs/agents/live-npc-run.md). There is no Anthropic key,
+	// so wiring the Anthropic adapter here would pass the keyless cassette tests
+	// (which replay Anthropic) but fail the live run — Gemini is the only correct
+	// default for a runnable NPC.
 	provider := gemini.New("")
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
@@ -261,15 +330,15 @@ func buildConversation(log *slog.Logger, synth tts.Synthesizer) (*orchestrator.C
 
 	replier := agent.NewReplier(agent.Config{
 		Persona: agent.Persona{
-			AgentID:  npcAgentID,
-			Markdown: npcPersona,
-			Voice:    npcVoice(),
+			AgentID:  npc.agentID,
+			Markdown: npc.persona,
+			Voice:    npc.voice,
 		},
 		Engine:       toolEngine,
 		Synthesizer:  ttseleven.New(""),
 		HistoryTurns: 16,
 		OnError: func(err error) {
-			log.Warn("agent reply failed", "npc", npcName, "err", err)
+			log.Warn("agent reply failed", "npc", npc.name, "err", err)
 		},
 	})
 
