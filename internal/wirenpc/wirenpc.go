@@ -17,6 +17,7 @@ import (
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -167,6 +168,13 @@ func Run(ctx context.Context, cfg Config) error {
 	// if encryption was expected but unavailable.
 	client, err := disgo.New(cfg.Token,
 		bot.WithDefaultGateway(),
+		// disgo's default intents are IntentsNone, so the bot never receives its
+		// own VoiceStateUpdate — leaving the voice conn's ChannelID nil and
+		// segfaulting disgo's voice gateway on the VoiceServerUpdate join path.
+		// GuildVoiceStates (+Guilds) is the minimum to populate that state.
+		bot.WithGatewayConfigOpts(gateway.WithIntents(
+			gateway.IntentGuilds | gateway.IntentGuildVoiceStates,
+		)),
 		gxvoice.DaveOption(),
 	)
 	if err != nil {
