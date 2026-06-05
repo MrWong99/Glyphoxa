@@ -201,16 +201,22 @@ func Run(ctx context.Context, cfg Config) error {
 	// and the RunFromDB paths (RunFromDB resolves the NPC then delegates here).
 	cdc := codec.New()
 
-	// Outbound (speak): a serial playback sink drives the codec's PlaybackSource
-	// onto the Session, one sentence at a time (Session.Play auto-interrupts, so
+	// Outbound (speak): the PlaybackPump drives the codec's PlaybackSource onto
+	// the Session, one sentence at a time (Session.Play auto-interrupts, so
 	// overlapping playback would clip sentences). The TeeSynthesizer wraps the
-	// real ElevenLabs synthesizer and tees each synthesized chunk to this sink
+	// real ElevenLabs synthesizer and tees each synthesized chunk to the pump
 	// while the orchestrator's TTS stage keeps draining-and-dropping it (ADR-0021
-	// intact). ctx scopes the worker so it unwinds on shutdown.
-	sink := wire.NewSequentialSink(ctx, wire.NewSessionPlayer(sess, cdc), func(err error) {
-		log.Warn("sentence playback failed", "npc", cfg.npc.name, "err", err)
-	})
-	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), sink)
+	// intact).
+	//
+	// pump.Close() blocks until the playback worker has exited; the deferred
+	// Close must run BEFORE sess.Close() so a mid-flight Play cannot race the
+	// Session teardown. defers run LIFO and this registers after sess.Close()
+	// (line above), and pipe.Run's own deferred cancel stops the Conversation
+	// first — so teardown order is conv-stop → pump.Close() → sess.Close(), which
+	// is the deterministic ordering the pump's Close() contract requires.
+	pump := wire.NewPlaybackPump(sess, cdc)
+	defer pump.Close()
+	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump)
 
 	conv, err := buildConversation(log, cfg.npc, teeSynth)
 	if err != nil {

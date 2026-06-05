@@ -1,3 +1,12 @@
+//go:build integration
+
+// These tests stand up a real Postgres (testcontainers) to exercise the seed →
+// DB → loadSeededNPC → buildConversation round-trip, so they are tag-isolated
+// behind `integration` (ADR-0033): the default `go test ./...` stays Docker-free
+// per ADR-0021, and a dedicated `-tags=integration` CI job runs these with
+// Docker. The runtime t.Skip on a missing Postgres remains for local
+// convenience. The keyless wirenpc tests (address routing, npcVoice) live in
+// wirenpc_test.go and stay in the default suite.
 package wirenpc
 
 import (

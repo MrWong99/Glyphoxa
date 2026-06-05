@@ -47,8 +47,37 @@ jobs:
       - name: Vet (record tag)
         run: go vet -tags=record ./...
 
+      # Default suite stays Docker-free and fast (ADR-0021): the persistence
+      # testcontainers tests are tag-isolated behind `integration` (ADR-0033)
+      # and excluded here. They run in the separate `integration` job below.
       - name: Test
         run: go test -race ./...
+
+  integration:
+    name: integration (Postgres / testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Cache ONNX runtime
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/glyphoxa/onnxruntime
+          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
+
+      # The DB tests (ADR-0033, `//go:build integration`) stand up a real
+      # Postgres via testcontainers — the ubuntu-latest runner ships a Docker
+      # daemon, which testcontainers-go drives directly (no `services:` block
+      # needed). This job is the auditable "did the DB tests actually run?"
+      # gate the ADR requires, kept off the default PR suite.
+      - name: Integration test (with Docker)
+        run: go test -race -tags=integration ./...
 
   lint:
     name: golangci-lint
