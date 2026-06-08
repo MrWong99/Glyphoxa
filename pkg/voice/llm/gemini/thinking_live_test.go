@@ -36,14 +36,22 @@ var abPrompts = []struct {
 	{"reasoning-bait", "You are Bart, a gruff but warm tavern innkeeper. Reply in one short spoken line.", "Bart, if three travelers split a 17-copper tab evenly but one only drank half, what does each owe?"},
 }
 
-// TestLive_ThinkingCap_AB runs an INTERLEAVED A/B of the uncapped default vs.
-// reasoning_effort:"low" and prints the wall-time distribution: time-to-first-
-// content-token (the cleanest H1 / thinking signal) and total completion time.
+// TestLive_ThinkingCap_AB runs an INTERLEAVED A/B over three arms — uncapped
+// default, reasoning_effort:"low", reasoning_effort:"medium" — printing the
+// wall-time distribution per (arm, prompt): time-to-first-content-token (the
+// cleanest H1 / thinking signal) and total completion time.
 //
-// Pacing & interleaving matter on the free-tier key (5 req/min RPM throttle):
-//   - a per-call sleep (GX_AB_DELAY, default 13s) keeps us under the RPM limit;
-//   - arms alternate per iteration so neither eats a whole minute's quota and
-//     so server-load drift is shared, not confounded into one arm.
+// These are ISOLATED Gemini calls (one-line system prompt, no history, no
+// tools, no orchestrator), so they prove the H1 MECHANISM — capping thinking
+// cuts the pre-token stall — but are NOT the in-pipeline glyphoxa_voice_llm_round
+// series (that's higher: real context + tool rounds, measured by C1/the nightly
+// tier). Don't conflate the two.
+//
+// Pacing & interleaving:
+//   - a per-call sleep (GX_AB_DELAY) keeps us under the provider RPM throttle
+//     (free tier is 5/min; a paid key tolerates a shorter delay);
+//   - arms alternate per iteration so server-load drift is shared across arms,
+//     not confounded into one.
 //
 // Reporting is bucketed PER (arm, prompt): trivial never triggers thinking, so
 // pooling it with reasoning-bait would dilute the very effect B2 measures. The
