@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -26,6 +27,12 @@ type Conversation struct {
 	detector *AddressDetector
 	reply    ReplyFunc
 	onError  ErrorFunc
+
+	// floor is non-nil when barge-in is enabled ([WithBargeIn]): the replier runs
+	// turns on it (async, cancelable) and a [BargeIn] reactor yields it on a human
+	// interruption. bargeConfirm is that reactor's confirm window (0 = instant).
+	floor        *Floor
+	bargeConfirm time.Duration
 }
 
 // Option configures a [Conversation] at construction.
@@ -43,6 +50,19 @@ func WithDetector(d *AddressDetector) Option {
 // panics otherwise. Without it the conversation routes but never speaks.
 func WithReply(fn ReplyFunc) Option {
 	return func(c *Conversation) { c.reply = fn }
+}
+
+// WithBargeIn enables human barge-in (ADR-0027): replies run on their own
+// goroutine under a cancelable per-turn floor, and a [BargeIn] reactor yields
+// that floor when a participant speaks while the Agent is talking — cancelling
+// the turn's TTS and playback. confirmWindow is how long continuous speech must
+// persist before it counts as a barge (0 yields instantly on onset). It requires
+// [WithReply]; without a replier there is no turn to interrupt.
+func WithBargeIn(confirmWindow time.Duration) Option {
+	return func(c *Conversation) {
+		c.floor = NewFloor()
+		c.bargeConfirm = confirmWindow
+	}
 }
 
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
@@ -83,7 +103,16 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		if c.tts == nil {
 			panic("orchestrator.Conversation.Register: WithReply set but no TTS stage was provided")
 		}
-		reactors = append(reactors, NewReplier(c.tts, c.reply, c.onError))
+		replier := NewReplier(c.tts, c.reply, c.onError)
+		if c.floor != nil {
+			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
+			// reactor yields it on a human interruption. Bind BargeIn before the
+			// replier so a speech_start is evaluated for a yield ahead of any new
+			// turn it might otherwise route.
+			replier.floor = c.floor
+			reactors = append(reactors, NewBargeIn(c.floor, c.bargeConfirm))
+		}
+		reactors = append(reactors, replier)
 	}
 	return Bind(ctx, c.bus, reactors...)
 }

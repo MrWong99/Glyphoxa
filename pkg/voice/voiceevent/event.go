@@ -105,6 +105,21 @@ type TTSInvoked struct {
 // EventName implements [Event].
 func (TTSInvoked) EventName() string { return "tts.invoked" }
 
+// BargeDetected marks a confirmed human barge-in: a participant reclaimed the
+// floor while an Agent was speaking, so the Agent's turn was torn down (ADR-0027).
+// It is the observability signal for a yield that actually cancelled an active
+// turn — speech that finds no Agent speaking does not emit it.
+//
+// Per-participant attribution (interrupted_by_user_id) is deferred until the VAD
+// stage republishes per-participant speech events (ADR-0019); this slice runs a
+// single VAD session, so the event carries only the moment of the cut.
+type BargeDetected struct {
+	At time.Time
+}
+
+// EventName implements [Event].
+func (BargeDetected) EventName() string { return "barge.detected" }
+
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
 //

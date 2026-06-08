@@ -1,0 +1,270 @@
+// Package agent assembles an Agent's spoken turn: the production
+// [orchestrator.ReplyFunc] the voice pipeline stubs with a cassette in tests.
+//
+// Per ADR-0019 the production ReplyFunc is "the Agent loop" — Hot Context
+// assembly (recent Transcript + KG-facts placeholder + Persona) plus the LLM
+// dispatch. This package builds that loop on top of [llm.Provider] and a
+// [tts.Synthesizer] (for the Voice's audio-markup instruction), and exposes it
+// as a ReplyFunc consumable by [orchestrator.WithReply].
+//
+// Tool-use seam (ADR-0028): the loop does ONE LLM call per turn in v1.0 and
+// returns the spoken text. It does not execute tools — that is the tool-use
+// loop owned by the tool framework. The seam is the [llm] message vocabulary:
+// the [Replier] holds the running conversation as a []llm.Message, which is
+// exactly where the tool-use loop will later insert assistant tool_use turns
+// and tool-role result turns between this turn's user message and the final
+// assistant reply.
+package agent
+
+import (
+	"context"
+	"strings"
+	"sync"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
+)
+
+// Persona is the Markdown description of an Agent's personality, backstory, and
+// speech style injected into the LLM system prompt (CONTEXT.md "Persona"),
+// paired with the AgentID this loop answers for and the Voice its replies are
+// spoken with.
+//
+// The loop answers only routes whose [voiceevent.AddressTarget.AgentID] equals
+// AgentID; a route for any other Agent yields no reply, so several Agents'
+// loops can share one bus and each speak only when addressed (the Ensemble
+// Turn building block, ADR-0025).
+type Persona struct {
+	// AgentID is the stable Agent identifier this loop answers for, matched
+	// against [voiceevent.AddressTarget.AgentID].
+	AgentID string
+
+	// Markdown is the Persona text injected verbatim into the system prompt.
+	Markdown string
+
+	// Voice selects the TTS voice the replies are rendered with and is the
+	// Voice handed to [tts.Synthesizer.AudioMarkupPrompt] when building the
+	// system prompt, so the LLM learns the provider-appropriate markup syntax.
+	Voice tts.Voice
+}
+
+// Engine turns the Hot Context the [Replier] assembled into the Agent's final
+// spoken text. It is the seam where tool use plugs in without the agent package
+// learning about Tools: the default engine ([providerEngine]) makes one
+// [llm.Provider] completion and returns the streamed text; a tool-backed engine
+// (the wiring-phase bridge that owns both [llm] and pkg/tool) instead drives
+// the tool-use loop (ADR-0028) — Generate, execute granted Tools, feed results
+// back, Generate again — and returns the model's final text. Either way the
+// Replier's contract is unchanged: assemble messages, get one answer back.
+//
+// messages is the assembled conversation (system prompt + bounded recent
+// Transcript). The returned string is the spoken reply; "" means say nothing.
+type Engine interface {
+	Generate(ctx context.Context, messages []llm.Message) (string, error)
+}
+
+// Config configures a [Replier].
+type Config struct {
+	// Persona is the Agent this loop voices.
+	Persona Persona
+
+	// Provider is the LLM the default [Engine] calls. Required unless a custom
+	// Engine is supplied; with a custom Engine, Provider may be nil.
+	Provider llm.Provider
+
+	// Engine turns assembled Hot Context into final spoken text. Optional: when
+	// nil, the Replier builds the default single-completion engine from
+	// Provider (the no-tool v1.0 path). Supply a tool-backed Engine (built by
+	// the wiring bridge) to give the Agent Tool use without this package
+	// importing pkg/tool.
+	Engine Engine
+
+	// Synthesizer supplies the audio-markup instruction for the system prompt
+	// via [tts.Synthesizer.AudioMarkupPrompt]. Required: ADR-0022 makes the
+	// Persona/LLM layer responsible for emitting text in the Voice's provider
+	// format, and that instruction is sourced here.
+	Synthesizer tts.Synthesizer
+
+	// Model overrides the Provider's default model for this Agent. Used only by
+	// the default Engine; a custom Engine bakes its own model in. Optional.
+	Model string
+
+	// MaxTokens caps each completion. Used only by the default Engine. Zero
+	// lets the Provider choose. Optional.
+	MaxTokens int
+
+	// HistoryTurns bounds the recent Transcript carried into Hot Context: the
+	// last HistoryTurns user/assistant messages are kept, older ones dropped.
+	// Zero means unbounded (keep the whole conversation). This is the recent-
+	// Transcript half of Hot Context (CONTEXT.md "Hot Context") — the loop owns
+	// it because a [orchestrator.ReplyFunc] is handed only the current
+	// utterance, not the history.
+	HistoryTurns int
+
+	// OnError reports an LLM failure. A [orchestrator.ReplyFunc] cannot return
+	// an error (it runs inside a bus callback), so a failed completion returns
+	// no reply and is surfaced here. A nil OnError drops the error silently.
+	OnError func(error)
+}
+
+// Replier is the stateful Agent loop. Each addressed utterance appends a user
+// message and the assistant's reply to a running conversation, so the recent
+// Transcript lives in the loop rather than in the per-utterance
+// [voiceevent.AddressRouted] (which carries only the current text). Construct
+// with [NewReplier]; obtain the [orchestrator.ReplyFunc] with [Replier.Reply].
+//
+// Safe for sequential turns. The bus delivers [voiceevent.AddressRouted]
+// synchronously in one goroutine (see [voiceevent.Bus]), so turns do not
+// overlap; the mutex guards the history against a concurrent reader and the
+// race detector.
+type Replier struct {
+	cfg    Config
+	engine Engine // resolved at construction: cfg.Engine, or the default built from cfg.Provider
+
+	mu      sync.Mutex
+	history []llm.Message // user/assistant turns only; system prompt is rebuilt each call
+}
+
+// NewReplier constructs a [Replier]. cfg.Synthesizer must be non-nil, and one
+// of cfg.Engine or cfg.Provider must be set (Engine wins; otherwise the default
+// single-completion engine is built from Provider). Passing neither, or a nil
+// Synthesizer, panics — these are wiring requirements, mirroring the
+// orchestrator stages' fail-fast constructors.
+func NewReplier(cfg Config) *Replier {
+	if cfg.Synthesizer == nil {
+		panic("agent.NewReplier: Synthesizer must not be nil")
+	}
+	engine := cfg.Engine
+	if engine == nil {
+		if cfg.Provider == nil {
+			panic("agent.NewReplier: one of Engine or Provider must be set")
+		}
+		engine = providerEngine{provider: cfg.Provider, model: cfg.Model, maxTokens: cfg.MaxTokens}
+	}
+	return &Replier{cfg: cfg, engine: engine}
+}
+
+// Reply returns the [orchestrator.ReplyFunc] that drives this loop. Install it
+// with [orchestrator.WithReply]. The returned closure runs synchronously inside
+// the reply reactor's bus callback (ADR-0026): it assembles Hot Context, makes
+// one blocking LLM call, and returns the spoken reply. On a route for a
+// different Agent it returns nil (says nothing); on an LLM failure it returns
+// nil and reports via [Config.OnError].
+func (r *Replier) Reply() orchestrator.ReplyFunc {
+	return func(e voiceevent.AddressRouted) []orchestrator.Reply {
+		if e.Target.AgentID != r.cfg.Persona.AgentID {
+			return nil // not addressed to this Agent
+		}
+		return r.turn(context.Background(), e.Text)
+	}
+}
+
+// turn runs one Agent turn for the given utterance text: it appends the user
+// message, assembles Hot Context (system prompt + bounded history), hands it to
+// the [Engine] for the final text, records the assistant reply, and returns it
+// as a single [orchestrator.Reply] in the Agent's Voice. An empty completion or
+// an Engine error yields no reply (the error is reported via OnError).
+func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
+	r.mu.Lock()
+	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
+	r.trimHistoryLocked()
+	messages := r.hotContextLocked()
+	r.mu.Unlock()
+
+	reply, err := r.engine.Generate(ctx, messages)
+	if err != nil {
+		if r.cfg.OnError != nil {
+			r.cfg.OnError(err)
+		}
+		return nil
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return nil
+	}
+
+	r.mu.Lock()
+	r.history = append(r.history, llm.Message{Role: llm.RoleAssistant, Text: reply})
+	r.mu.Unlock()
+
+	return []orchestrator.Reply{{Sentence: reply, Voice: r.cfg.Persona.Voice}}
+}
+
+// providerEngine is the default [Engine]: one [llm.Provider] completion per
+// turn, concatenating the streamed text deltas. It requests no Tools, so the
+// model emits none and tool-call events do not arise — the no-tool v1.0 path.
+// The tool-backed engine lives in the wiring bridge so this package stays free
+// of pkg/tool.
+type providerEngine struct {
+	provider  llm.Provider
+	model     string
+	maxTokens int
+}
+
+// Generate implements [Engine]. It runs one completion and returns the
+// accumulated assistant text.
+func (e providerEngine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
+	stream, err := e.provider.Complete(ctx, llm.Request{
+		Model:     e.model,
+		MaxTokens: e.maxTokens,
+		Messages:  messages,
+	})
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for ev := range stream {
+		if ev.Type == llm.EventText {
+			b.WriteString(ev.Text)
+		}
+	}
+	return b.String(), nil
+}
+
+// hotContextLocked assembles the Hot Context message list for one call: the
+// system prompt (Persona + KG-facts placeholder + audio-markup instruction)
+// followed by the recent Transcript (the bounded history). Caller holds r.mu.
+func (r *Replier) hotContextLocked() []llm.Message {
+	msgs := make([]llm.Message, 0, len(r.history)+1)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
+	msgs = append(msgs, r.history...)
+	return msgs
+}
+
+// systemPrompt builds the system prompt from the three Hot Context inputs:
+// the Persona, a KG-facts placeholder (the KG layer lands later — ADR-0008),
+// and the Voice's provider-specific audio-markup instruction from
+// [tts.Synthesizer.AudioMarkupPrompt] (required by ADR-0022).
+func (r *Replier) systemPrompt() string {
+	var b strings.Builder
+	if p := strings.TrimSpace(r.cfg.Persona.Markdown); p != "" {
+		b.WriteString(p)
+	}
+	// KG facts placeholder: the per-Campaign knowledge graph is wired in later
+	// (ADR-0008). Hot Context reserves the slot now so the prompt shape is
+	// stable when facts arrive.
+	if markup := r.cfg.Synthesizer.AudioMarkupPrompt(r.cfg.Persona.Voice); markup != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(markup)
+	}
+	return b.String()
+}
+
+// trimHistoryLocked drops the oldest user/assistant turns so at most
+// HistoryTurns remain, keeping the most recent. A zero or negative
+// HistoryTurns means unbounded. Caller holds r.mu.
+func (r *Replier) trimHistoryLocked() {
+	if r.cfg.HistoryTurns <= 0 || len(r.history) <= r.cfg.HistoryTurns {
+		return
+	}
+	// Re-slice onto a fresh backing array so the dropped turns can be GC'd and
+	// the retained slice does not pin the whole conversation.
+	keep := r.cfg.HistoryTurns
+	trimmed := make([]llm.Message, keep)
+	copy(trimmed, r.history[len(r.history)-keep:])
+	r.history = trimmed
+}

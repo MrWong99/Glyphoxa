@@ -1,0 +1,94 @@
+package wire
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+)
+
+// playback and sessionPlayer are the seam over the concrete [gxvoice.Session]/
+// [gxvoice.Playback] so the block-until-Done discipline below can be unit-tested
+// without a live Discord connection (the same internal-interface pattern the
+// pkg/voice Manager uses over disgo). realPlayer adapts a real Session.
+type playback interface {
+	Done() <-chan struct{}
+	Err() error
+}
+
+type sessionPlayer interface {
+	Play(ctx context.Context, src gxvoice.Source) (playback, error)
+}
+
+// realPlayer adapts a *gxvoice.Session to sessionPlayer. The adapter is needed
+// because Go has no return-type covariance: Session.Play returns *Playback, not
+// the playback interface.
+type realPlayer struct{ sess *gxvoice.Session }
+
+func (r realPlayer) Play(ctx context.Context, src gxvoice.Source) (playback, error) {
+	pb, err := r.sess.Play(ctx, src)
+	if err != nil {
+		// Return an untyped nil, never the nil *Playback: a nil pointer in a
+		// non-nil interface would defeat the caller's err check.
+		return nil, err
+	}
+	return pb, nil
+}
+
+// PlaySentence speaks one synthesized sentence on the voice Session: it turns the
+// sentence's [tts.AudioChunk] stream into Opus frames via the [Codec] and plays
+// them to completion, blocking until the sentence finishes or is interrupted.
+//
+// It MUST block until [gxvoice.Playback.Done] before returning, because
+// [gxvoice.Session.Play] auto-interrupts the current playback: firing the next
+// sentence's Play before this one finishes would cut it off, so a reply's
+// sentences are spoken by calling PlaySentence sequentially, each awaiting the
+// previous. The orchestrator dispatches one sentence at a time (a fresh chunk
+// channel per TTS Dispatch), which maps 1:1 onto one PlaySentence call.
+//
+// ctx scopes this sentence: a barge-in (ADR-0027) cancels it, the Source ends,
+// the playback stops, and PlaySentence returns [gxvoice.ErrInterrupted] — the
+// caller then abandons the rest of the turn. A clean end-of-sentence returns nil.
+//
+// chunks is the sentence's audio as the synthesizer emits it; the [Codec] reads
+// each chunk's own SampleRate/Channels (no rate is assumed). chunks must be
+// produced on a different goroutine than the one calling PlaySentence: the
+// playback pulls from it as disgo's sender paces frames, so synthesis and
+// playback run concurrently. A nil Session or nil chunks is a programming error.
+func PlaySentence(ctx context.Context, sess *gxvoice.Session, codec Codec, chunks <-chan tts.AudioChunk) error {
+	if sess == nil {
+		return fmt.Errorf("wire.PlaySentence: session must not be nil")
+	}
+	return playSentence(ctx, realPlayer{sess}, codec, chunks)
+}
+
+// playSentence is the testable core: it depends on the sessionPlayer seam, not a
+// concrete Session, so the block-until-Done discipline can be exercised with a
+// fake player and no live connection.
+func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk) error {
+	if chunks == nil {
+		return fmt.Errorf("wire.PlaySentence: chunks must not be nil")
+	}
+
+	src, err := codec.PlaybackSource(chunks)
+	if err != nil {
+		// A codec-less build reports ErrCodecUnavailable here; surface it so the
+		// caller fails visibly rather than silently muting the NPC.
+		return fmt.Errorf("wire.PlaySentence: build playback source: %w", err)
+	}
+
+	pb, err := p.Play(ctx, src)
+	if err != nil {
+		return fmt.Errorf("wire.PlaySentence: play: %w", err)
+	}
+
+	// Block until this sentence has fully played (or been interrupted) before
+	// returning, so the caller's next PlaySentence does not auto-interrupt it.
+	<-pb.Done()
+	if err := pb.Err(); err != nil && !errors.Is(err, gxvoice.ErrInterrupted) {
+		return fmt.Errorf("wire.PlaySentence: playback: %w", err)
+	}
+	return pb.Err() // nil on clean end, ErrInterrupted on barge-in
+}
