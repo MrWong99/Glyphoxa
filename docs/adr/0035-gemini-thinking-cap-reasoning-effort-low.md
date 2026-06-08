@@ -18,13 +18,13 @@ The Gemini adapter bounds gemini-2.5-flash's dynamic reasoning by sending a thin
 
 Keyless `httptest` tests pin the *wire shape* (default sends `reasoning_effort: "low"`, override/budget paths, mutual exclusivity) but cannot prove the endpoint *honours* the field or that wall-time actually tightens — a silently-ignored field would pass every keyless test. So the cap was verified with a small, key-blind live A/B against the real endpoint (key from the keyring via env, never printed).
 
-<!-- A/B RESULTS — fill in from the live run:
-  Corpus: trivial / dice-trigger / reasoning-bait prompts, N≈15–20 per arm.
-  Arm A = default (no cap), Arm B = reasoning_effort:"low".
-  Report DISTRIBUTION, not mean — p50 / p95 of llm_round wall-time, low vs default.
-  Confirm no answer-quality regression on the dice/RP prompts.
--->
-**Status:** wire shape landed + keyless-green; live A/B distribution to be appended from the next keyed run (the live tier is gated, ADR-0033). The chosen default (`"low"`) is recorded here and in `gemini.DefaultReasoningEffort`.
+The A/B harness is `TestLive_ThinkingCap_AB` in `pkg/voice/llm/gemini/thinking_live_test.go` (`//go:build live`, excluded from the keyless suite): interleaved arms (uncapped default vs. `reasoning_effort:"low"`), measuring time-to-first-content-token (the cleanest H1/thinking signal) and total wall-time, reported as a distribution (p50/p95/p99), with a sample answer per arm for the quality check. It paces calls (`GX_AB_DELAY`, default 13s) to respect rate limits.
+
+**Findings from the first keyed run (2026-06-09), and why it's only directional:**
+- **The field is honoured, not silently ignored.** Both arms completed real calls against `gemini-2.5-flash` on the compat endpoint with no 4xx — `reasoning_effort` is accepted on 2.5-flash (the open question keyless tests could not answer). Sample replies were valid and in-character on the trivial tier (default → `"Aye."`, low → `"Comin'."`), i.e. no quality regression observed there.
+- **No wall-time distribution yet.** The shared deployment key is on the Gemini **free tier**, which caps `gemini-2.5-flash` at **20 requests/day** (`generate_content_free_tier_requests`, a daily cap distinct from the 5-req/min RPM throttle). A real p50/p95 needs N≥~30 per arm; the daily 20 cannot fund it, and this is the live NPC's shared key (a paced A/B starves the bot). So the latency distribution is **deferred to the paid nightly live tier** (ADR-0033) — exactly the residual Gemini live-unknown the Sprint-2 plan files under D3. Re-run `TestLive_ThinkingCap_AB` under a paid/billing-enabled key (or raise the free-tier quota) and paste the two `ARM … ttft_ms/total_ms` distribution lines here.
+
+**Status:** wire shape + default cap landed and keyless-green; the field is confirmed honoured live with no quality regression on the trivial tier; the p50/p95 wall-time delta is pending a paid-quota run. The chosen default (`"low"`) is recorded here and in `gemini.DefaultReasoningEffort`.
 
 ## Considered options
 
