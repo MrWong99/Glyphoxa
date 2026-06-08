@@ -7,7 +7,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
@@ -156,6 +158,117 @@ func TestEngine_ToolUseRoundTrip_RunsDiceAndReturnsFinalText(t *testing.T) {
 	}
 	if !sawToolResult {
 		t.Error("second request missing the fed-back dice tool result")
+	}
+}
+
+// llmRound is one captured LLMRound span: the labels the metric carries.
+type llmRound struct {
+	provider    observe.Provider
+	roundIndex  int
+	hadToolCall bool
+}
+
+// recordingStage is a [observe.StageRecorder] that captures LLMRound and
+// provider-call invocations so the A3 instrumentation can be asserted without a
+// Prometheus backend. Embeds observe.Discard so the unexercised methods are
+// no-ops. Safe for the loop's single-goroutine use plus the race detector.
+type recordingStage struct {
+	observe.Discard
+	mu       sync.Mutex
+	rounds   []llmRound
+	callsOK  int
+	callsErr int
+}
+
+func (r *recordingStage) LLMRound(p observe.Provider, idx int, hadToolCall bool, _ time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rounds = append(r.rounds, llmRound{provider: p, roundIndex: idx, hadToolCall: hadToolCall})
+}
+
+func (r *recordingStage) ProviderCall(_ observe.Stage, _ observe.Provider, outcome observe.Outcome) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if outcome == observe.OutcomeOK {
+		r.callsOK++
+	} else {
+		r.callsErr++
+	}
+}
+
+func (r *recordingStage) snapshot() ([]llmRound, int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]llmRound(nil), r.rounds...), r.callsOK, r.callsErr
+}
+
+// TestEngine_LLMRoundSpans_IndexAndToolCallPerRound pins the A3 per-round
+// instrumentation: each Provider.Complete inside the tool loop emits one
+// LLMRound span with a 0-based round_index and the had_tool_call flag that
+// separates H1 thinking from H2 extra rounds. The dice round-trip is exactly
+// two rounds: round 0 requests the tool (had_tool_call=true), round 1 answers
+// (had_tool_call=false).
+func TestEngine_LLMRoundSpans_IndexAndToolCallPerRound(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled well, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderAnthropic))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Roll a d20 for me."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	rounds, callsOK, callsErr := rec.snapshot()
+	if len(rounds) != 2 {
+		t.Fatalf("recorded %d LLMRound spans, want 2 (request + answer)", len(rounds))
+	}
+	if rounds[0].roundIndex != 0 || !rounds[0].hadToolCall {
+		t.Errorf("round 0 = %+v, want index 0 with had_tool_call=true", rounds[0])
+	}
+	if rounds[1].roundIndex != 1 || rounds[1].hadToolCall {
+		t.Errorf("round 1 = %+v, want index 1 with had_tool_call=false", rounds[1])
+	}
+	if rounds[0].provider != observe.ProviderAnthropic {
+		t.Errorf("round provider = %q, want the injected label", rounds[0].provider)
+	}
+	if callsOK != 2 || callsErr != 0 {
+		t.Errorf("provider calls ok=%d err=%d, want 2/0", callsOK, callsErr)
+	}
+}
+
+// TestEngine_LLMRoundSpans_IndexResetsPerTurn pins that round_index is scoped to
+// one turn: a second Generate on the same Engine starts again at 0, never
+// continuing the previous turn's count (the per-turn ctx counter, not a shared
+// adapter field — which would bleed across the concurrent turns barge-in
+// allows).
+func TestEngine_LLMRoundSpans_IndexResetsPerTurn(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "First answer.", stop: "end_turn"},
+		{text: "Second answer.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGemini))
+
+	for i := 0; i < 2; i++ {
+		if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hi."}}); err != nil {
+			t.Fatalf("Generate %d: %v", i, err)
+		}
+	}
+
+	rounds, _, _ := rec.snapshot()
+	if len(rounds) != 2 {
+		t.Fatalf("recorded %d spans, want 2 (one per turn)", len(rounds))
+	}
+	for i, r := range rounds {
+		if r.roundIndex != 0 {
+			t.Errorf("turn %d round_index = %d, want 0 (per-turn reset)", i, r.roundIndex)
+		}
 	}
 }
 

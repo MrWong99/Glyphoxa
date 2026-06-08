@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
 
@@ -82,7 +83,7 @@ func TestTee_ForwardsToBothSides(t *testing.T) {
 		}()
 	})
 
-	tee := wire.NewTeeSynthesizer(inner, sink)
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
 	out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "hello"})
 	if err != nil {
 		t.Fatalf("Synthesize: %v", err)
@@ -128,7 +129,7 @@ func TestTee_FreshChannelPerSentence(t *testing.T) {
 		go func() { defer wg.Done(); drainAll(chunks) }()
 	})
 
-	tee := wire.NewTeeSynthesizer(inner, sink)
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
 	for i := 0; i < 2; i++ {
 		out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "s"})
 		if err != nil {
@@ -164,7 +165,7 @@ func TestTee_BargeInClosesPlayback(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tee := wire.NewTeeSynthesizer(inner, sink)
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
 	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "interrupt me"})
 	if err != nil {
 		t.Fatalf("Synthesize: %v", err)
@@ -221,7 +222,7 @@ func TestTee_StartErrorOpensNoPlayback(t *testing.T) {
 	var handed bool
 	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) { handed = true })
 
-	tee := wire.NewTeeSynthesizer(inner, sink)
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
 	out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "x"})
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want %v", err, wantErr)
@@ -240,7 +241,7 @@ func TestTee_StartErrorOpensNoPlayback(t *testing.T) {
 func TestTee_AudioMarkupPromptPassesThrough(t *testing.T) {
 	inner := &fakeSynth{markupRet: "use [brackets]"}
 	sink := wire.PlaybackSinkFunc(func(context.Context, <-chan tts.AudioChunk) {})
-	tee := wire.NewTeeSynthesizer(inner, sink)
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
 
 	v := tts.Voice{ProviderID: "elevenlabs", VoiceID: "george"}
 	if got := tee.AudioMarkupPrompt(v); got != "use [brackets]" {
@@ -251,6 +252,93 @@ func TestTee_AudioMarkupPromptPassesThrough(t *testing.T) {
 	if inner.markupSeen.VoiceID != "george" {
 		t.Errorf("inner saw voice %+v, want the one passed through", inner.markupSeen)
 	}
+}
+
+// TestTee_PublishesFirstAudioOncePerSentence pins A3 hook 1: a sentence with
+// several chunks publishes exactly ONE voiceevent.FirstAudio, carrying the turn
+// id installed on the synthesis context, at the moment the first chunk crosses
+// to the sink — not one per chunk.
+func TestTee_PublishesFirstAudioOncePerSentence(t *testing.T) {
+	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000), chunk(2, 24000), chunk(3, 24000)}}
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go drainAll(chunks)
+	})
+
+	bus := voiceevent.NewBus()
+	var mu sync.Mutex
+	var got []voiceevent.FirstAudio
+	voiceevent.On(bus, func(e voiceevent.FirstAudio) {
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	ctx := voiceevent.WithTurnID(context.Background(), "turn-abc")
+	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "three chunks"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	drainAll(out) // run the forward goroutine to completion
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("published %d FirstAudio events, want exactly 1 per sentence", len(got))
+	}
+	if got[0].TurnID != "turn-abc" {
+		t.Errorf("FirstAudio.TurnID = %q, want the ctx turn id", got[0].TurnID)
+	}
+	if got[0].At.IsZero() {
+		t.Error("FirstAudio.At is zero, want the first-chunk timestamp")
+	}
+}
+
+// TestTee_NoFirstAudioWhenNoChunks pins that a sentence whose stream yields no
+// chunk — a barge-in cancelled before the first chunk — publishes NO FirstAudio,
+// so a turn that never produced audio never reports a response latency.
+func TestTee_NoFirstAudioWhenNoChunks(t *testing.T) {
+	inner := &fakeSynth{chunks: nil} // empty stream, closes immediately
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go drainAll(chunks)
+	})
+
+	bus := voiceevent.NewBus()
+	var count int
+	var mu sync.Mutex
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		count++
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	out, err := tee.Synthesize(voiceevent.WithTurnID(context.Background(), "turn-x"), tts.SynthesizeRequest{Sentence: "silent"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	drainAll(out)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 0 {
+		t.Errorf("published %d FirstAudio events for a chunkless sentence, want 0", count)
+	}
+}
+
+// TestTee_NilBusPublishesNothing pins that the no-metrics path (nil bus) is
+// inert: the tee still tees audio but publishes no FirstAudio and does not panic.
+func TestTee_NilBusPublishesNothing(t *testing.T) {
+	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000)}}
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go drainAll(chunks)
+	})
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
+	out, err := tee.Synthesize(context.Background(), tts.SynthesizeRequest{Sentence: "no bus"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	drainAll(out) // must not panic on a nil bus
 }
 
 // Compile-time assertion: the decorator is a drop-in [tts.Synthesizer].

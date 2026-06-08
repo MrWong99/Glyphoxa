@@ -21,6 +21,7 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -99,6 +100,19 @@ type Config struct {
 	Channel string
 	// Logger receives structured logs; nil discards them.
 	Logger *slog.Logger
+	// Metrics receives the hot-path voice counters/gauges (A2): inbound frame
+	// drops/undecodables and the sessions gauge. nil discards them. The same
+	// recorder is handed to the audio Manager (Session open/close, playback) and
+	// the inbound [wire.Pipeline] (undecodable frames) so one run's counters share
+	// a single sink. The orchestrator-sibling latency recorder (the SLO
+	// histograms) is wired separately off the bus — see buildConversation.
+	Metrics gxvoice.MetricsRecorder
+	// StageMetrics receives the orchestrator-side per-stage / per-turn latency
+	// spans (A3): the per-LLM-round span from the agenttool adapter, and (once
+	// the bus subscriber lands) the derived stage histograms. nil records
+	// nothing. The live binary injects the Prometheus adapter; the benchmark
+	// injects its own; the keyless default is the no-op recorder.
+	StageMetrics observe.StageRecorder
 	// npc is the Character NPC this loop voices. Run resolves it; RunFromDB
 	// loads it from storage, the env-only Run path uses the hardcoded NPC.
 	npc npcSpec
@@ -189,6 +203,7 @@ func Run(ctx context.Context, cfg Config) error {
 	mgr := gxvoice.NewManager(client,
 		gxvoice.WithLogger(log),
 		gxvoice.WithDave(gxvoice.DaveAvailable()),
+		gxvoice.WithMetrics(cfg.Metrics),
 	)
 	defer mgr.Close()
 
@@ -224,16 +239,22 @@ func Run(ctx context.Context, cfg Config) error {
 	// is the deterministic ordering the pump's Close() contract requires.
 	pump := wire.NewPlaybackPump(sess, cdc)
 	defer pump.Close()
-	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump)
 
-	conv, err := buildConversation(log, cfg.npc, teeSynth)
+	// The orchestrator bus is created here (not inside buildConversation) so the
+	// tee can publish FirstAudio (A3 hook 1) onto the same bus the conversation's
+	// stages publish on and the metrics subscriber reads.
+	bus := voiceevent.NewBus()
+	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
+
+	conv, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
 
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
-	// DecodeInbound into the orchestrator.
-	pipe := wire.NewPipeline(conv, cdc, log)
+	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with
+	// the guild and shares the run's MetricsRecorder.
+	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics)
 	return pipe.Run(ctx, sess)
 }
 
@@ -306,8 +327,10 @@ func npcVoice() tts.Voice {
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(log *slog.Logger, npc npcSpec, synth tts.Synthesizer) (*orchestrator.Conversation, error) {
-	bus := voiceevent.NewBus()
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, error) {
+	if stageMetrics == nil {
+		stageMetrics = observe.Discard{}
+	}
 
 	engine, err := silero.New()
 	if err != nil {
@@ -342,7 +365,11 @@ func buildConversation(log *slog.Logger, npc npcSpec, synth tts.Synthesizer) (*o
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
-	toolEngine := agenttool.NewEngine(provider, grants, gemini.DefaultModel, 0, 0)
+	toolEngine := agenttool.NewEngine(provider, grants, gemini.DefaultModel, 0, 0,
+		// Gemini is the wired provider (see the function doc), so the per-round
+		// LLM spans (A3) are labelled gemini. The no-op recorder keeps the keyless
+		// path silent; the live binary / benchmark inject a real one.
+		agenttool.WithMetrics(stageMetrics, observe.ProviderGemini))
 
 	replier := agent.NewReplier(agent.Config{
 		Persona: agent.Persona{

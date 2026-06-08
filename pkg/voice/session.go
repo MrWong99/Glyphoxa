@@ -87,6 +87,9 @@ func newSession(ctx context.Context, guild snowflake.ID, channel snowflake.ID, c
 	conn.SetOpusFrameProvider(s.provider)
 	conn.SetOpusFrameReceiver(s.dispatcher)
 	s.state.Store(uint32(Ready))
+	// The session is live: bump the sessions gauge (A2). Paired with the
+	// SessionClosed in Close, which the closeOnce guards to fire exactly once.
+	s.metrics.SessionOpened(guild.String())
 	logger.Debug("voice session ready")
 	return s, nil
 }
@@ -164,6 +167,9 @@ func (s *Session) Close() error {
 		s.conn.Close(context.WithoutCancel(context.Background()))
 		s.provider.Close()
 		s.dispatcher.Close()
+		// Sessions gauge -1 (A2), inside closeOnce so it pairs exactly once with
+		// the SessionOpened in newSession.
+		s.metrics.SessionClosed(s.guild.String())
 		s.logger.Debug("voice session closed")
 	})
 	return nil

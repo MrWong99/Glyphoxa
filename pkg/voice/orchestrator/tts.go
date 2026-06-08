@@ -79,6 +79,7 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 		At:       time.Now(),
 		Sentence: sentence,
 		Index:    index,
+		TurnID:   voiceevent.TurnIDFrom(ctx),
 	})
 	for range ch {
 	}

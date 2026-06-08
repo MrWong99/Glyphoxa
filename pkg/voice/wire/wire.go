@@ -78,16 +78,20 @@ func UnavailableCodec() Codec { return unavailableCodec{} }
 // production Reply → TTS) plus the [Codec] that bridges it to Discord audio.
 // Build it with [NewPipeline]; feed a [gxvoice.Session] to [Pipeline.Run].
 type Pipeline struct {
-	conv  *orchestrator.Conversation
-	codec Codec
-	log   *slog.Logger
+	conv    *orchestrator.Conversation
+	codec   Codec
+	log     *slog.Logger
+	metrics gxvoice.MetricsRecorder
+	guild   string
 }
 
 // NewPipeline wires the reactive Conversation to the Codec. conv is the fully
 // configured orchestrator pipeline (built by the caller with the production
 // ReplyFunc — see the cmd wiring); codec bridges Opus↔PCM (use
-// [UnavailableCodec] until the transcoder lands). A nil logger discards logs.
-func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger) *Pipeline {
+// [UnavailableCodec] until the transcoder lands). guild is the Discord guild ID
+// the inbound counters are tagged with (A2); a nil logger discards logs and a
+// nil metrics recorder discards counters.
+func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger, guild string, metrics gxvoice.MetricsRecorder) *Pipeline {
 	if conv == nil {
 		panic("wire.NewPipeline: conv must not be nil")
 	}
@@ -97,7 +101,10 @@ func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger)
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(nopWriter{}, nil))
 	}
-	return &Pipeline{conv: conv, codec: codec, log: log}
+	if metrics == nil {
+		metrics = discardMetrics{}
+	}
+	return &Pipeline{conv: conv, codec: codec, log: log, guild: guild, metrics: metrics}
 }
 
 // Run registers the conversation's reactors on its bus and pumps the Session's
@@ -143,13 +150,18 @@ func (p *Pipeline) Run(ctx context.Context, sess *gxvoice.Session) error {
 				}
 				// A single undecodable packet (e.g. a corrupt/transitional frame
 				// during the DAVE/MLS key handshake) must not tear down the whole
-				// voice session — skip it and keep listening.
-				p.log.Warn("skipping undecodable inbound frame", "user", frame.UserID, "err", err)
+				// voice session — skip it and keep listening. This is a per-packet
+				// event that fires routinely on a healthy call (A1), so it logs at
+				// Debug, not Warn, and bumps a counter so its volume stays observable
+				// without flooding the operator's console.
+				p.log.Debug("skipping undecodable inbound frame", "user", frame.UserID, "err", err)
+				p.metrics.InboundUndecodableFrame(p.guild)
 				continue
 			}
 			for _, f := range pcm {
 				if err := p.conv.Feed(f); err != nil {
-					p.log.Warn("feed frame", "err", err)
+					// Also a benign per-packet event on a healthy call (A1): Debug.
+					p.log.Debug("feed frame", "err", err)
 				}
 			}
 		}
@@ -160,3 +172,17 @@ func (p *Pipeline) Run(ctx context.Context, sess *gxvoice.Session) error {
 type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// discardMetrics is the wire-local no-op [gxvoice.MetricsRecorder] used when
+// [NewPipeline] is handed a nil recorder, so the inbound loop never nil-checks.
+// Only the inbound counters the Pipeline emits are implemented; the rest satisfy
+// the interface as no-ops.
+type discardMetrics struct{}
+
+func (discardMetrics) InboundFramesDropped(string, int) {}
+func (discardMetrics) InboundUndecodableFrame(string)   {}
+func (discardMetrics) SessionOpened(string)             {}
+func (discardMetrics) SessionClosed(string)             {}
+func (discardMetrics) PlaybackStarted(string)           {}
+func (discardMetrics) PlaybackFinished(string, bool)    {}
+func (discardMetrics) BargeCancelled(string)            {}

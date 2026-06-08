@@ -5,11 +5,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
@@ -180,6 +183,161 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 				"tts.invoked should have TTS input",
 			)
 		})
+	}
+}
+
+// TestTurnID_PropagatesThroughStages pins the A3 correlation spine: a single
+// turn driven through STT → address → reply → TTS produces an STTFinal,
+// AddressRouted and TTSInvoked that all carry the SAME non-empty TurnID, so the
+// metrics subscriber can join the turn's stage spans.
+func TestTurnID_PropagatesThroughStages(t *testing.T) {
+	h := voicetest.New(t)
+
+	sttStage := orchestrator.NewSTT(h.Bus, stubRecognizer{transcript: stt.Transcript{Text: "roll a d20"}})
+	ttsStage := orchestrator.NewTTS(h.Bus, closedChanSynth{})
+	voice := tts.Voice{ProviderID: "elevenlabs", VoiceID: "george"}
+
+	// Lone-NPC route: every utterance routes to bart (the scoring matcher's
+	// single-NPC fallback catches an unnamed utterance).
+	detector := orchestrator.NewAddressDetector(
+		address.NewMatcher(address.Config{Language: "en"},
+			address.Agent{Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}}),
+	)
+	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{{Sentence: "Aye.", Voice: voice}}
+	}
+
+	// Bind the reply chain (detector → replier → TTS) directly; driving STT via
+	// the stage is enough to mint the TurnID and fan the turn out across the bus.
+	t.Cleanup(orchestrator.Bind(t.Context(), h.Bus,
+		detector,
+		orchestrator.NewReplier(ttsStage, reply, func(err error) { t.Errorf("dispatch: %v", err) }),
+	))
+
+	if err := sttStage.Transcribe(context.Background(), nil); err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+
+	var sttID, routedID, ttsID string
+	for _, e := range h.Events() {
+		switch ev := e.(type) {
+		case voiceevent.STTFinal:
+			sttID = ev.TurnID
+		case voiceevent.AddressRouted:
+			routedID = ev.TurnID
+		case voiceevent.TTSInvoked:
+			ttsID = ev.TurnID
+		}
+	}
+	if sttID == "" {
+		t.Fatal("STTFinal carried no TurnID")
+	}
+	if routedID != sttID {
+		t.Errorf("AddressRouted.TurnID = %q, want STTFinal's %q", routedID, sttID)
+	}
+	if ttsID != sttID {
+		t.Errorf("TTSInvoked.TurnID = %q, want STTFinal's %q", ttsID, sttID)
+	}
+}
+
+// TestTurnID_PropagatesThroughBargeInFloor is the production-path twin of
+// TestTurnID_PropagatesThroughStages: with WithBargeIn(0) the turn runs on the
+// floor's per-turn context (a goroutine), not synchronously. The TurnID is
+// installed before Floor.Take, so it must survive the floor's WithCancel-derived
+// context and reach TTSInvoked — the only configuration that actually ships.
+func TestTurnID_PropagatesThroughBargeInFloor(t *testing.T) {
+	h := voicetest.New(t)
+
+	sttStage := orchestrator.NewSTT(h.Bus, stubRecognizer{transcript: stt.Transcript{Text: "hi bart"}})
+	ttsStage := orchestrator.NewTTS(h.Bus, closedChanSynth{})
+	voice := tts.Voice{ProviderID: "elevenlabs", VoiceID: "george"}
+
+	detector := orchestrator.NewAddressDetector(
+		address.NewMatcher(address.Config{Language: "en"},
+			address.Agent{Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}}),
+	)
+	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{{Sentence: "Aye.", Voice: voice}}
+	}
+
+	// VAD stage is unused here (we drive STT directly), but the Conversation
+	// requires one; the scripted VAD with no script reports only silence.
+	vadStage := orchestrator.NewVAD(h.Bus, &scriptedVAD{})
+	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithDetector(detector),
+		orchestrator.WithReply(reply),
+		orchestrator.WithBargeIn(0), // production wiring: turn runs on the floor goroutine
+		orchestrator.WithErrorHandler(func(err error) { t.Errorf("dispatch: %v", err) }),
+	)
+	t.Cleanup(conv.Register(t.Context()))
+
+	if err := sttStage.Transcribe(context.Background(), nil); err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+
+	// The turn dispatches on a goroutine; wait for the TTSInvoked it produces.
+	var sttID, ttsID string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sttID, ttsID = "", ""
+		for _, e := range h.Events() {
+			switch ev := e.(type) {
+			case voiceevent.STTFinal:
+				sttID = ev.TurnID
+			case voiceevent.TTSInvoked:
+				ttsID = ev.TurnID
+			}
+		}
+		if ttsID != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if sttID == "" {
+		t.Fatal("STTFinal carried no TurnID")
+	}
+	if ttsID == "" {
+		t.Fatal("no TTSInvoked observed (turn never dispatched through the floor)")
+	}
+	if ttsID != sttID {
+		t.Errorf("TTSInvoked.TurnID = %q, want STTFinal's %q — the floor's context dropped the turn id", ttsID, sttID)
+	}
+}
+
+// TestSTT_CarriesSpeechEndAt pins that an utterance segmented by the Segmenter
+// carries the turn's VADSpeechEnd time onto the published STTFinal (A3), so the
+// headline response-latency span is anchored at the true end-of-speech — and a
+// non-empty TurnID is minted. Driven through the scripted-VAD segmenter rig so
+// the speech-end transition fires through the real stage.
+func TestSTT_CarriesSpeechEndAt(t *testing.T) {
+	bus := voiceevent.NewBus()
+	var speechEnd time.Time
+	voiceevent.On(bus, func(e voiceevent.VADSpeechEnd) { speechEnd = e.At })
+	var final voiceevent.STTFinal
+	var sawFinal bool
+	voiceevent.On(bus, func(e voiceevent.STTFinal) { final, sawFinal = e, true })
+
+	sttStage := orchestrator.NewSTT(bus, stubRecognizer{transcript: stt.Transcript{Text: "hi"}})
+	// Script: start, continue (buffered), end → the frame after end flushes.
+	vadStage := orchestrator.NewVAD(bus, &scriptedVAD{events: []vad.VADEventType{
+		vad.VADSpeechStart, vad.VADSpeechContinue, vad.VADSpeechEnd,
+	}})
+	seg := orchestrator.NewSegmenter(vadStage, sttStage)
+	t.Cleanup(seg.Bind(t.Context(), bus))
+
+	feed(t, seg, 4) // start, continue, end, (flush)
+
+	if speechEnd.IsZero() {
+		t.Fatal("no VADSpeechEnd was published")
+	}
+	if !sawFinal {
+		t.Fatal("no STTFinal was published")
+	}
+	if !final.SpeechEndAt.Equal(speechEnd) {
+		t.Errorf("STTFinal.SpeechEndAt = %v, want the VADSpeechEnd time %v", final.SpeechEndAt, speechEnd)
+	}
+	if final.TurnID == "" {
+		t.Error("STTFinal carried no TurnID")
 	}
 }
 

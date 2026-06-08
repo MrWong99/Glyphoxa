@@ -42,9 +42,23 @@ func (VADSpeechEnd) EventName() string { return "vad.speech_end" }
 // STTFinal is an authoritative transcript for one completed utterance, as
 // committed by the STT provider. Per ADR-0021 the same event is emitted on
 // the cassette-replay and live paths; the orchestrator does not distinguish.
+//
+// TurnID is the per-turn correlation id (A3): it originates here, at the start
+// of a turn, and propagates through [AddressRouted] → [TTSInvoked] →
+// [FirstAudio] so one turn's stage spans join up. It is a log/exemplar
+// correlation id only — never a metric label (ADR-0032 §2.1).
+//
+// SpeechEndAt is the [VADSpeechEnd.At] of the utterance this transcript came
+// from, carried forward so the headline response-latency span
+// (speech-end → first audio) is self-contained per TurnID — the metrics
+// subscriber need not guess which speech-end belongs to this turn under
+// concurrent speech. Zero when the utterance was flushed without a speech-end
+// transition (end-of-stream).
 type STTFinal struct {
-	At   time.Time
-	Text string
+	At          time.Time
+	Text        string
+	TurnID      string
+	SpeechEndAt time.Time
 }
 
 // EventName implements [Event].
@@ -81,6 +95,9 @@ type AddressRouted struct {
 	At     time.Time
 	Text   string
 	Target AddressTarget
+	// TurnID is the correlation id copied from the [STTFinal] this routing
+	// decision answers (A3); see [STTFinal.TurnID].
+	TurnID string
 }
 
 // EventName implements [Event].
@@ -100,10 +117,31 @@ type TTSInvoked struct {
 	At       time.Time
 	Sentence string
 	Index    int
+	// TurnID is the correlation id of the turn this sentence belongs to (A3),
+	// threaded from the reply reactor; see [STTFinal.TurnID].
+	TurnID string
 }
 
 // EventName implements [Event].
 func (TTSInvoked) EventName() string { return "tts.invoked" }
+
+// FirstAudio marks the moment the first synthesized [tts.AudioChunk] of a
+// sentence crosses the TeeSynthesizer→PlaybackPump boundary — the headline SLO
+// boundary, "first audio handed to the pump" (A3 hook 1). It is published by the
+// wire tee, off its forward goroutine, so a metrics subscriber may receive it
+// concurrently with other turns and must lock its per-turn state.
+//
+// There is no sentence index: the metrics subscriber keys on TurnID. The
+// headline response-latency uses the FIRST FirstAudio per TurnID; per-sentence
+// TTS time-to-first-byte pairs [TTSInvoked]↔FirstAudio within a TurnID by
+// arrival order (dispatch is sequential, so the interleave is clean).
+type FirstAudio struct {
+	At     time.Time
+	TurnID string
+}
+
+// EventName implements [Event].
+func (FirstAudio) EventName() string { return "voice.first_audio" }
 
 // BargeDetected marks a confirmed human barge-in: a participant reclaimed the
 // floor while an Agent was speaking, so the Agent's turn was torn down (ADR-0027).
