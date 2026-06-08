@@ -13,11 +13,20 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// ADR-0032: mode-selected handler (JSON prod / text dev) replacing the old
+	// hardcoded TextHandler/Info, with the disgo DAVE-decrypt noise filtered
+	// (A1). slog.SetDefault routes ANY library on the default logger — not just
+	// disgo's bot logger — through the same handler (observability.md §1.5); the
+	// metric hook for glyphoxa_voice_dave_decrypt_errors_total is wired by the
+	// Prometheus adapter in task #3 (nil = no-op until then).
+	format := observe.ParseLogFormat(os.Getenv("GLYPHOXA_LOG_FORMAT"))
+	log := observe.NewLogger(os.Stderr, format, slog.LevelInfo, nil)
+	slog.SetDefault(log)
 
 	// `migrate` and `seed` are subcommands with their own argument grammar,
 	// dispatched before flag parsing. The full Mode dispatcher (all/web) and
