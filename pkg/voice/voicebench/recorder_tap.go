@@ -54,6 +54,19 @@ func (t *recorderTap) samples(stage Stage) []time.Duration {
 	return out
 }
 
+// drain returns all captured stage samples and resets the tap, so the next
+// turn's recorder spans start clean. The Driver calls it once per clip to
+// attribute each turn's recorder-emitted stages to that turn. The orchestrator
+// must be quiescent for this clip when drain is called (the Driver calls it
+// after Flush, when no stage goroutine is still recording).
+func (t *recorderTap) drain() map[Stage][]time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := t.byStage
+	t.byStage = map[Stage][]time.Duration{}
+	return out
+}
+
 // observe.StageRecorder implementation. Each method maps to its locked Stage.
 func (t *recorderTap) ResponseLatency(_ observe.AgentRole, d time.Duration) {
 	t.add(StageResponseLatency, d)

@@ -93,10 +93,43 @@ func NewAccumulator(tier string, corpus []string) *Accumulator {
 	return &Accumulator{tier: tier, corpus: corpus, byStage: map[Stage][]time.Duration{}}
 }
 
-// AddTurn folds one turn's event log into the accumulator.
+// AddTurn folds one turn's bus event log into the accumulator (the bus-derived
+// stages: response_latency, address_detect, llm_turn). Use
+// [Accumulator.AddTurnWithRecorder] on a tier that also has a [recorderTap] so
+// the recorder-only stages (llm_round, vad_hangover, stt_request, tts_*,
+// codec_*) are included.
 func (a *Accumulator) AddTurn(events []voiceevent.Event) {
 	a.turns++
 	for stage, d := range extractTurn(events) {
+		a.byStage[stage] = append(a.byStage[stage], d)
+	}
+}
+
+// AddTurnWithRecorder folds both sources for one turn: the bus-derived stages
+// from events, plus every recorder-emitted stage captured by tap since the last
+// call (drained, so each turn's recorder spans are attributed to that turn). The
+// recorder is the authoritative source for the stages it emits; the bus owns the
+// event-only ones. When a stage appears in BOTH (the recorder also emits
+// response_latency/address_detect/llm_turn), the recorder's value wins to keep
+// one consistent source — the bus copy is the cassette-tier fallback for when no
+// recorder is wired. tap may be nil (then this is just [Accumulator.AddTurn]).
+func (a *Accumulator) AddTurnWithRecorder(events []voiceevent.Event, tap *recorderTap) {
+	a.turns++
+	bus := extractTurn(events)
+
+	var rec map[Stage][]time.Duration
+	if tap != nil {
+		rec = tap.drain()
+	}
+	// Recorder stages first (authoritative); then bus stages only for those the
+	// recorder did not emit this turn.
+	for stage, samples := range rec {
+		a.byStage[stage] = append(a.byStage[stage], samples...)
+	}
+	for stage, d := range bus {
+		if _, fromRecorder := rec[stage]; fromRecorder {
+			continue
+		}
 		a.byStage[stage] = append(a.byStage[stage], d)
 	}
 }
