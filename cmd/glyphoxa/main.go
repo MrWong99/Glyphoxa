@@ -18,14 +18,18 @@ import (
 )
 
 func main() {
+	// The Prometheus adapter is built first so its DAVE-decrypt counter hook can
+	// feed the slog filter: A1 suppresses the benign disgo noise from the console
+	// but preserves the information as glyphoxa_voice_dave_decrypt_errors_total
+	// (observability.md §1 — "nothing is actually lost").
+	metrics := observe.NewPrometheusRecorder()
+
 	// ADR-0032: mode-selected handler (JSON prod / text dev) replacing the old
-	// hardcoded TextHandler/Info, with the disgo DAVE-decrypt noise filtered
-	// (A1). slog.SetDefault routes ANY library on the default logger — not just
-	// disgo's bot logger — through the same handler (observability.md §1.5); the
-	// metric hook for glyphoxa_voice_dave_decrypt_errors_total is wired by the
-	// Prometheus adapter in task #3 (nil = no-op until then).
+	// hardcoded TextHandler/Info, with the disgo DAVE-decrypt noise filtered (A1).
+	// slog.SetDefault routes ANY library on the default logger — not just disgo's
+	// bot logger — through the same handler (observability.md §1.5).
 	format := observe.ParseLogFormat(os.Getenv("GLYPHOXA_LOG_FORMAT"))
-	log := observe.NewLogger(os.Stderr, format, slog.LevelInfo, nil)
+	log := observe.NewLogger(os.Stderr, format, slog.LevelInfo, metrics.DAVEDecryptHook())
 	slog.SetDefault(log)
 
 	// `migrate` and `seed` are subcommands with their own argument grammar,
@@ -54,11 +58,12 @@ func main() {
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
 	hardcoded := flag.Bool("hardcoded", false, "use the in-code NPC instead of loading from the database — no Postgres needed, for smoke-testing audio without a seeded DB")
+	metricsAddr := flag.String("metrics-addr", ":9090", "address for the voice-mode /metrics listener (ADR-0032); empty disables it")
 	flag.Parse()
 
 	switch *mode {
 	case "voice":
-		if err := runVoice(log, cfg, *hardcoded); err != nil {
+		if err := runVoice(log, cfg, *hardcoded, metrics, *metricsAddr); err != nil {
 			log.Error("voice mode exited with error", "err", err)
 			os.Exit(1)
 		}
@@ -77,7 +82,12 @@ func main() {
 // By default the NPC's Persona/Voice/identity load from Postgres
 // ($GLYPHOXA_DATABASE_URL) via the task-#5 path. The -hardcoded escape hatch
 // uses the in-code NPC instead, so audio can be smoke-tested without a seeded DB.
-func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool) error {
+//
+// metrics is the process Prometheus adapter; when metricsAddr is non-empty a
+// metrics-only /metrics listener is served for its lifetime (ADR-0032 §2.3,
+// voice mode). The adapter's injection into the voice Manager (WithMetrics) is
+// wired inside wirenpc once Config carries the recorder.
+func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *observe.PrometheusRecorder, metricsAddr string) error {
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
 	if cfg.Token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set")
@@ -89,6 +99,10 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if metricsAddr != "" {
+		observe.NewMetricsServer(metricsAddr, metrics, log).Start(ctx)
+	}
 
 	if hardcoded {
 		return wirenpc.Run(ctx, cfg)
