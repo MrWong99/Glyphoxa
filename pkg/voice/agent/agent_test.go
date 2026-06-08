@@ -425,6 +425,84 @@ func TestReplyStream_BargeMidStream_CommitsOnlySpoken(t *testing.T) {
 	}
 }
 
+// delayStreamEngine streams sentences with a fixed delay BEFORE each one,
+// modelling the LLM taking perSentence to produce each sentence. Its Generate
+// (the batch path) blocks for ALL sentences before returning, so a batch reply
+// cannot dispatch until the whole completion is ready — exactly the B1 problem.
+type delayStreamEngine struct {
+	sentences   []string
+	perSentence time.Duration
+}
+
+func (e *delayStreamEngine) Generate(ctx context.Context, _ []llm.Message) (string, error) {
+	for range e.sentences {
+		select {
+		case <-time.After(e.perSentence):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return strings.Join(e.sentences, " "), nil
+}
+
+func (e *delayStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, onText func(string) error) (string, error) {
+	var full strings.Builder
+	for _, s := range e.sentences {
+		select {
+		case <-time.After(e.perSentence):
+		case <-ctx.Done():
+			return full.String(), ctx.Err()
+		}
+		chunk := s + " "
+		full.WriteString(chunk)
+		if err := onText(chunk); err != nil {
+			return full.String(), err
+		}
+	}
+	return full.String(), nil
+}
+
+// TestReplyStream_FirstAudioBeatsBatch is the B1 before/after number (preliminary,
+// off the dispatch boundary the A3 FirstAudio hook stamps in production): with a
+// model that takes ~perSentence per sentence, the STREAMING path dispatches the
+// first sentence after ~1×perSentence, while the BATCH path cannot dispatch
+// anything until the whole completion (~N×perSentence) is ready. The win is the
+// (N−1)×perSentence the user no longer waits before hearing the first word.
+func TestReplyStream_FirstAudioBeatsBatch(t *testing.T) {
+	const per = 40 * time.Millisecond
+	sentences := []string{"Aye, traveler.", "Two rooms upstairs.", "Anything else for ye?"}
+
+	// Streaming: time to the FIRST dispatch.
+	streamEng := &delayStreamEngine{sentences: sentences, perSentence: per}
+	rs := streamReplier(t, streamEng)
+	startS := time.Now()
+	var firstStream time.Duration
+	var once sync.Once
+	_ = rs.ReplyStream()(context.Background(), routed("bart", "rooms?"), func(orchestrator.Reply) error {
+		once.Do(func() { firstStream = time.Since(startS) })
+		return nil
+	})
+
+	// Batch: time until the (single, full-text) Reply is returned and dispatchable.
+	batchEng := &delayStreamEngine{sentences: sentences, perSentence: per}
+	rb := streamReplier(t, batchEng)
+	startB := time.Now()
+	_ = rb.Reply()(routed("bart", "rooms?")) // batch path blocks for the whole completion
+	firstBatch := time.Since(startB)
+
+	t.Logf("B1 first-audio (preliminary): streaming first dispatch=%v, batch first dispatch=%v, saved≈%v",
+		firstStream, firstBatch, firstBatch-firstStream)
+
+	// Streaming must reach the first sentence well before the whole completion.
+	if firstStream >= firstBatch {
+		t.Errorf("streaming first dispatch %v not earlier than batch %v — B1 gave no win", firstStream, firstBatch)
+	}
+	// First streamed dispatch should land near one sentence's time, not three.
+	if firstStream > 2*per {
+		t.Errorf("streaming first dispatch %v > 2×perSentence (%v); expected ≈1×", firstStream, 2*per)
+	}
+}
+
 // Compile-time assertion: the loop produces a value usable by the orchestrator
 // reply seam without an adapter.
 var _ orchestrator.ReplyFunc = (&agent.Replier{}).Reply()
