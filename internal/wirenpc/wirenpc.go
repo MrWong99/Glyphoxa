@@ -387,10 +387,15 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 
 	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
-		orchestrator.WithReply(replier.Reply()),
+		// B1: stream the reply sentence-by-sentence so first audio begins after the
+		// first sentence, not the whole completion. The agenttool Engine implements
+		// agent.StreamingEngine (it streams the final answer round), so ReplyStream
+		// dispatches each sentence as it lands.
+		orchestrator.WithReplyStream(replier.ReplyStream()),
 		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. Start
 		// with an instant cut (0 confirm window) to validate the async-turn path
-		// live; the ~250ms confirm window is the next tuning step.
+		// live; the ~250ms confirm window is the next tuning step. With B1 a barge
+		// now cancels mid-generation, not just pending dispatch.
 		orchestrator.WithBargeIn(0),
 		orchestrator.WithErrorHandler(func(err error) {
 			log.Warn("reply dispatch failed", "err", err)

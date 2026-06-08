@@ -218,13 +218,31 @@ type Reply struct {
 // same seam.
 type ReplyFunc func(voiceevent.AddressRouted) []Reply
 
-// Replier is the [Reactor] that runs a [ReplyFunc] on every
+// StreamReplyFunc is the streaming counterpart to [ReplyFunc] (B1): instead of
+// returning all of a turn's [Reply]s up front, it produces them incrementally —
+// calling dispatch with each sentence the moment it is ready — so the first
+// sentence reaches TTS (and audio begins) before the whole completion is
+// generated. dispatch sends one sentence through the TTS stage and blocks until
+// that sentence is synthesized (the serial, one-at-a-time contract the
+// [PlaybackPump] depends on); it returns ctx.Err() if the turn was cancelled, so
+// the producer can stop generating and emitting pending sentences (a mid-stream
+// barge-in now cancels generation itself, not just post-hoc dispatch).
+//
+// ctx is the per-turn context (the barge-in floor's, under [WithBargeIn]); the
+// producer must thread it into its LLM call so a cancel tears generation down.
+// Returning an error reports a turn-level failure via the [ErrorFunc]; a nil
+// error with no dispatch calls says nothing.
+type StreamReplyFunc func(ctx context.Context, e voiceevent.AddressRouted, dispatch func(Reply) error) error
+
+// Replier is the [Reactor] that runs a reply strategy on every
 // [voiceevent.AddressRouted] and dispatches each resulting [Reply] through the
-// TTS stage.
+// TTS stage. It drives the streaming strategy ([StreamReplyFunc]) when one is
+// set, else the batch [ReplyFunc].
 type Replier struct {
-	tts     *TTS
-	reply   ReplyFunc
-	onError ErrorFunc
+	tts         *TTS
+	reply       ReplyFunc
+	replyStream StreamReplyFunc
+	onError     ErrorFunc
 
 	// floor, when non-nil, makes each turn run on its own goroutine under a
 	// cancelable per-turn context taken from the floor — so the inbound loop is
@@ -245,6 +263,20 @@ func NewReplier(ttsStage *TTS, reply ReplyFunc, onError ErrorFunc) *Replier {
 		panic("orchestrator.NewReplier: reply must not be nil")
 	}
 	return &Replier{tts: ttsStage, reply: reply, onError: onError}
+}
+
+// NewStreamReplier wires ttsStage and a streaming reply strategy together (B1).
+// Both must be non-nil; onError may be nil. It is the streaming twin of
+// [NewReplier]: the strategy dispatches sentences as they are produced rather
+// than returning them all at once.
+func NewStreamReplier(ttsStage *TTS, reply StreamReplyFunc, onError ErrorFunc) *Replier {
+	if ttsStage == nil {
+		panic("orchestrator.NewStreamReplier: tts must not be nil")
+	}
+	if reply == nil {
+		panic("orchestrator.NewStreamReplier: reply must not be nil")
+	}
+	return &Replier{tts: ttsStage, replyStream: reply, onError: onError}
 }
 
 // Bind subscribes the replier to [voiceevent.AddressRouted] on bus and returns a
@@ -280,10 +312,16 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 	})
 }
 
-// dispatchAll renders every Reply for one routing decision in order under ctx,
-// stopping early if ctx is cancelled (a barge-in yielded the floor mid-turn). A
-// dispatch failure is reported through the ErrorFunc and does not stop the rest.
+// dispatchAll renders one routing decision under ctx. With a streaming strategy
+// it drives the producer, dispatching each sentence as it arrives; otherwise it
+// renders every [Reply] the batch [ReplyFunc] returns, in order. Both stop early
+// if ctx is cancelled (a barge-in yielded the floor mid-turn). A dispatch
+// failure is reported through the ErrorFunc and does not stop the rest.
 func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) {
+	if r.replyStream != nil {
+		r.dispatchStream(ctx, e)
+		return
+	}
 	for _, rep := range r.reply(e) {
 		if ctx.Err() != nil {
 			return
@@ -291,5 +329,35 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) {
 		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil && r.onError != nil {
 			r.onError(err)
 		}
+	}
+}
+
+// dispatchStream drives the streaming reply strategy for one routing decision
+// (B1). It hands the producer a dispatch callback that synthesizes one sentence
+// at a time under ctx — serially, so the [PlaybackPump]'s single-in-flight
+// contract and the per-sentence FirstAudio ordering both hold — and returns
+// ctx.Err() once the turn is cancelled so the producer stops generating. A
+// dispatch failure is reported via the ErrorFunc but does not abort the turn
+// (one bad sentence must not silence the rest); a producer-level error is
+// likewise surfaced.
+func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted) {
+	dispatch := func(rep Reply) error {
+		if err := ctx.Err(); err != nil {
+			return err // barge-in cancelled the turn: stop the producer
+		}
+		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil {
+			if r.onError != nil {
+				r.onError(err)
+			}
+			// A synth failure on one sentence is non-fatal to the turn, but a
+			// cancelled ctx surfaced as a Dispatch error must still stop the producer.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil && r.onError != nil {
+		r.onError(err)
 	}
 }

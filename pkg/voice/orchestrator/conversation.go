@@ -23,10 +23,11 @@ type Conversation struct {
 	bus *voiceevent.Bus
 	tts *TTS
 
-	seg      *Segmenter
-	detector *AddressDetector
-	reply    ReplyFunc
-	onError  ErrorFunc
+	seg         *Segmenter
+	detector    *AddressDetector
+	reply       ReplyFunc
+	replyStream StreamReplyFunc
+	onError     ErrorFunc
 
 	// floor is non-nil when barge-in is enabled ([WithBargeIn]): the replier runs
 	// turns on it (async, cancelable) and a [BargeIn] reactor yields it on a human
@@ -48,8 +49,19 @@ func WithDetector(d *AddressDetector) Option {
 // WithReply adds a reply reactor driven by fn, wiring AddressRouted → TTS. It
 // requires the conversation to have been given a non-nil TTS stage; Register
 // panics otherwise. Without it the conversation routes but never speaks.
+//
+// Mutually exclusive with [WithReplyStream]; setting both panics at Register.
 func WithReply(fn ReplyFunc) Option {
 	return func(c *Conversation) { c.reply = fn }
+}
+
+// WithReplyStream adds a streaming reply reactor (B1): the strategy dispatches a
+// turn's sentences to TTS as they are produced, so first audio begins after the
+// first sentence rather than the whole completion. Like [WithReply] it requires
+// a non-nil TTS stage. Mutually exclusive with [WithReply]; setting both panics
+// at Register.
+func WithReplyStream(fn StreamReplyFunc) Option {
+	return func(c *Conversation) { c.replyStream = fn }
 }
 
 // WithBargeIn enables human barge-in (ADR-0027): replies run on their own
@@ -99,11 +111,19 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	if c.detector != nil {
 		reactors = append(reactors, c.detector)
 	}
-	if c.reply != nil {
+	if c.reply != nil && c.replyStream != nil {
+		panic("orchestrator.Conversation.Register: WithReply and WithReplyStream are mutually exclusive")
+	}
+	if c.reply != nil || c.replyStream != nil {
 		if c.tts == nil {
-			panic("orchestrator.Conversation.Register: WithReply set but no TTS stage was provided")
+			panic("orchestrator.Conversation.Register: a reply strategy was set but no TTS stage was provided")
 		}
-		replier := NewReplier(c.tts, c.reply, c.onError)
+		var replier *Replier
+		if c.replyStream != nil {
+			replier = NewStreamReplier(c.tts, c.replyStream, c.onError)
+		} else {
+			replier = NewReplier(c.tts, c.reply, c.onError)
+		}
 		if c.floor != nil {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the

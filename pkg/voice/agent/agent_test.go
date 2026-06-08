@@ -273,6 +273,158 @@ func TestReply_EmptyCompletion_ReturnsNil(t *testing.T) {
 	}
 }
 
+// fakeStreamEngine is a [agent.StreamingEngine] that streams a scripted reply
+// delta-by-delta through onText, honouring ctx cancellation between deltas so a
+// barge-in can be simulated mid-stream. Its Generate is the non-streaming
+// fallback (the whole reply at once).
+type fakeStreamEngine struct {
+	deltas []string // streamed in order through onText
+	// pause, if non-nil, is closed by the test to release the stream after the
+	// first delta — so a barge-in cancel can land deterministically mid-stream.
+	pauseAfter int
+	pause      chan struct{}
+}
+
+func (e *fakeStreamEngine) Generate(_ context.Context, _ []llm.Message) (string, error) {
+	return strings.TrimSpace(strings.Join(e.deltas, "")), nil
+}
+
+func (e *fakeStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, onText func(string) error) (string, error) {
+	var full strings.Builder
+	for i, d := range e.deltas {
+		if err := ctx.Err(); err != nil {
+			return full.String(), err
+		}
+		full.WriteString(d)
+		if err := onText(d); err != nil {
+			return full.String(), err
+		}
+		if e.pause != nil && i == e.pauseAfter {
+			select {
+			case <-e.pause:
+			case <-ctx.Done():
+				return full.String(), ctx.Err()
+			}
+		}
+	}
+	return full.String(), nil
+}
+
+// streamReplier builds a Replier over a streaming engine, with a recording
+// dispatch that captures the sentences in order.
+func streamReplier(t *testing.T, eng agent.Engine) *agent.Replier {
+	t.Helper()
+	return agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+	})
+}
+
+// TestReplyStream_DispatchesSentencesInOrder pins the B1 win: a streamed reply is
+// dispatched sentence-by-sentence, in order, as the deltas arrive — not as one
+// blob after the whole completion.
+func TestReplyStream_DispatchesSentencesInOrder(t *testing.T) {
+	eng := &fakeStreamEngine{deltas: []string{"First one. ", "Second two! ", "Third three?"}}
+	r := streamReplier(t, eng)
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("bart", "go"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+	want := []string{"First one.", "Second two!", "Third three?"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("dispatched %q, want %q", got, want)
+	}
+}
+
+// TestReplyStream_NotAddressed_NoDispatch pins the AgentID gate on the streaming
+// path (mirrors the batch gate).
+func TestReplyStream_NotAddressed_NoDispatch(t *testing.T) {
+	eng := &fakeStreamEngine{deltas: []string{"Should not speak."}}
+	r := streamReplier(t, eng)
+	var dispatched int
+	err := r.ReplyStream()(context.Background(), routed("someone-else", "hi"), func(orchestrator.Reply) error {
+		dispatched++
+		return nil
+	})
+	if err != nil || dispatched != 0 {
+		t.Errorf("not-addressed stream: dispatched=%d err=%v, want 0/nil", dispatched, err)
+	}
+}
+
+// TestReplyStream_BargeMidStream_CommitsOnlySpoken pins the ADR-0012 deliver-
+// then-commit rule under barge-in: when the turn is cancelled after the first
+// sentence is spoken, only that sentence is committed to history — not the
+// untruncated completion — and the next turn's user message is appended AFTER
+// it, so history reads user1 → assistant1(partial) → user2 in order.
+func TestReplyStream_BargeMidStream_CommitsOnlySpoken(t *testing.T) {
+	eng := &fakeStreamEngine{
+		deltas:     []string{"Aye. ", "Two rooms. ", "Anything else?"},
+		pauseAfter: 0, // pause after the first delta so we can cancel mid-stream
+		pause:      make(chan struct{}),
+	}
+	r := streamReplier(t, eng)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var mu sync.Mutex
+	var spoken []string
+	spokenLen := func() int { mu.Lock(); defer mu.Unlock(); return len(spoken) }
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.ReplyStream()(ctx, routed("bart", "rooms?"), func(rep orchestrator.Reply) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			mu.Lock()
+			spoken = append(spoken, rep.Sentence)
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	// Wait until the first sentence dispatched, then barge-in.
+	deadline := time.Now().Add(2 * time.Second)
+	for spokenLen() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+	close(eng.pause) // release the paused stream so the goroutine unwinds
+	<-done
+
+	if len(spoken) != 1 || spoken[0] != "Aye." {
+		t.Fatalf("spoken before barge = %q, want exactly [\"Aye.\"]", spoken)
+	}
+
+	// A follow-up turn appends its user message; history must remain ordered.
+	if err := r.ReplyStream()(context.Background(), routed("bart", "second turn"), func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	hist := r.HistorySnapshot()
+	wantSeq := []struct{ role, contains string }{
+		{"user", "rooms?"},
+		{"assistant", "Aye."},
+		{"user", "second turn"},
+	}
+	if len(hist) < len(wantSeq) {
+		t.Fatalf("history has %d messages, want >= %d: %+v", len(hist), len(wantSeq), hist)
+	}
+	for i, w := range wantSeq {
+		if string(hist[i].Role) != w.role || !strings.Contains(hist[i].Text, w.contains) {
+			t.Errorf("history[%d] = {%s %q}, want role %s containing %q", i, hist[i].Role, hist[i].Text, w.role, w.contains)
+		}
+	}
+	// The untruncated 2nd/3rd sentences must NOT be in the committed assistant turn.
+	if strings.Contains(hist[1].Text, "Two rooms") || strings.Contains(hist[1].Text, "Anything else") {
+		t.Errorf("committed assistant turn = %q, want only the spoken first sentence", hist[1].Text)
+	}
+}
+
 // Compile-time assertion: the loop produces a value usable by the orchestrator
 // reply seam without an adapter.
 var _ orchestrator.ReplyFunc = (&agent.Replier{}).Reply()

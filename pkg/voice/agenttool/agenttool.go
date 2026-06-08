@@ -85,6 +85,24 @@ type providerAdapter struct {
 // per-turn counter in ctx (see [withRoundCounter]); had_tool_call is known once
 // the stream is drained.
 func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, tools []tool.Decl) (tool.AssistantMessage, error) {
+	return a.complete(ctx, messages, tools, nil)
+}
+
+// GenerateStream implements [tool.StreamingProvider]: same as [Generate], but it
+// forwards each prose delta to onText as it streams (B1) — tool-call arguments
+// are not forwarded. The A3 per-round instrumentation is identical to Generate's
+// (see [complete]), so the streaming production path does not lose the LLMRound /
+// provider-call metrics.
+func (a providerAdapter) GenerateStream(ctx context.Context, messages []tool.Message, tools []tool.Decl, onText func(delta string) error) (tool.AssistantMessage, error) {
+	return a.complete(ctx, messages, tools, onText)
+}
+
+// complete issues one streaming completion, drains it, and records the A3
+// per-round span + provider-call counter. When onText is non-nil, each
+// [llm.EventText] delta is forwarded as it arrives (the streaming path); an error
+// onText returns aborts the drain and propagates. The accumulated text and tool
+// calls are returned as the [tool.AssistantMessage] the loop expects either way.
+func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, tools []tool.Decl, onText func(delta string) error) (tool.AssistantMessage, error) {
 	round := nextRound(ctx)
 	start := time.Now()
 
@@ -113,6 +131,15 @@ func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, 
 		switch ev.Type {
 		case llm.EventText:
 			text = append(text, ev.Text...)
+			if onText != nil {
+				if err := onText(ev.Text); err != nil {
+					// Downstream cancel (barge-in): record the round we did and stop.
+					out.Text = string(text)
+					a.rec.LLMRound(a.provName, round, len(out.ToolCalls) > 0, time.Since(start))
+					a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
+					return out, err
+				}
+			}
 		case llm.EventToolCall:
 			out.ToolCalls = append(out.ToolCalls, tool.ToolCall{
 				ID:    ev.ToolCall.ID,
@@ -191,6 +218,16 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 // for this turn and never share state with a concurrent turn (barge-in).
 func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
 	return e.loop.Run(withRoundCounter(ctx), toToolMessages(messages))
+}
+
+// GenerateStream implements [agent.StreamingEngine] (B1): it runs the same
+// tool-use loop but streams the final answer's prose deltas to onText as they
+// arrive, so the voice loop can segment and dispatch sentences before the
+// completion finishes. It installs the same per-turn round counter as
+// [Engine.Generate], so the A3 LLMRound / provider-call metrics are recorded
+// identically on the streaming production path. Returns the full final text.
+func (e *Engine) GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (string, error) {
+	return e.loop.RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
 }
 
 // toToolMessages converts the agent loop's [llm.Message]s into [tool.Message]s.

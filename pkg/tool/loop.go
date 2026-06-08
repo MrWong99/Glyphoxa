@@ -48,6 +48,99 @@ func NewLoop(provider Provider, grants *GrantSet) *Loop {
 	return &Loop{provider: provider, grants: grants}
 }
 
+// StreamingProvider is the optional streaming extension of [Provider]: a
+// provider that implements it can forward the assistant's prose deltas to onText
+// as they arrive, while still returning the same complete [AssistantMessage]
+// Generate would. [Loop.RunStream] uses it to stream the final answer round to
+// TTS (B1) without changing the non-streaming [Provider] contract every existing
+// caller relies on (ADR-0028).
+//
+// GenerateStream must call onText in order on the calling goroutine for each
+// prose delta; an error onText returns (a downstream barge-in cancel) aborts the
+// completion promptly and is returned. Tool-call arguments are NOT forwarded to
+// onText — only spoken prose.
+type StreamingProvider interface {
+	Provider
+	GenerateStream(ctx context.Context, messages []Message, tools []Decl, onText func(delta string) error) (AssistantMessage, error)
+}
+
+// RunStream is the streaming counterpart of [Loop.Run] (B1): it drives the same
+// tool-use rounds, but when the provider implements [StreamingProvider] it
+// forwards the assistant's prose deltas to onText as they stream, so the caller
+// can segment and dispatch sentences before the completion finishes. It returns
+// the model's final text, identical to [Loop.Run].
+//
+// onText receives prose deltas from every round in order. Because the loop
+// cannot know in advance whether a round will end in a tool call (that is only
+// certain at the end of the round), a round's prose is forwarded live; for the
+// granted dice Tool the model emits the call with no prose preamble, so in
+// practice only the final answer's prose is spoken. A round that emits a
+// COMPLETE sentence before its tool call would have that sentence forwarded —
+// the caller's sentence splitter only emits on a terminator, so partial
+// preambles are never spoken; a fully-terminated preamble is the documented
+// residual. If the provider does not implement [StreamingProvider], RunStream
+// falls back to [Loop.Run] and forwards the whole final text once.
+//
+// ctx governs generation and tool execution exactly as [Loop.Run]; cancelling it
+// (barge-in) aborts the in-flight generation and the loop.
+func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(delta string) error) (string, error) {
+	streamer, ok := l.provider.(StreamingProvider)
+	if !ok {
+		// Non-streaming provider: run to completion, then forward the whole answer.
+		full, err := l.Run(ctx, messages)
+		if err != nil {
+			return "", err
+		}
+		if onText != nil && full != "" {
+			if err := onText(full); err != nil {
+				return "", err
+			}
+		}
+		return full, nil
+	}
+
+	maxRounds := l.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = DefaultMaxRounds
+	}
+
+	convo := make([]Message, len(messages), len(messages)+2*maxRounds)
+	copy(convo, messages)
+
+	decls := l.grants.Declarations()
+
+	for round := 0; ; round++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
+		asst, err := streamer.GenerateStream(ctx, convo, decls, onText)
+		if err != nil {
+			return "", fmt.Errorf("tool: provider generate stream (round %d): %w", round, err)
+		}
+
+		if len(asst.ToolCalls) == 0 {
+			return asst.Text, nil
+		}
+
+		if round >= maxRounds {
+			return "", fmt.Errorf("%w (%d rounds)", ErrMaxRoundsExceeded, maxRounds)
+		}
+
+		convo = append(convo, Message{
+			Role:      RoleAssistant,
+			Text:      asst.Text,
+			ToolCalls: asst.ToolCalls,
+		})
+
+		results := make([]ToolResult, len(asst.ToolCalls))
+		for i, call := range asst.ToolCalls {
+			results[i] = l.execute(ctx, call)
+		}
+		convo = append(convo, Message{Role: RoleTool, ToolResults: results})
+	}
+}
+
 // Run drives the conversation to completion and returns the model's final text.
 // messages is the prompt the Agent loop assembled (system/user/...); Run
 // appends the assistant tool_call turns and the tool-role result turns as it

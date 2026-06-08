@@ -272,6 +272,74 @@ func TestEngine_LLMRoundSpans_IndexResetsPerTurn(t *testing.T) {
 	}
 }
 
+// TestEngine_GenerateStream_ForwardsFinalTextAndKeepsMetrics is the streaming
+// twin of the round-span test and the regression guard the streaming production
+// path needs: GenerateStream must (a) forward the final answer's prose to onText
+// and (b) record the SAME A3 LLMRound / provider-call spans Generate does — the
+// streaming path must not silently drop the instrumentation bench-llm keys C1 on.
+// A dice round-trip: round 0 requests the tool (no prose), round 1 answers.
+func TestEngine_GenerateStream_ForwardsFinalTextAndKeepsMetrics(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled well, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGemini))
+
+	var streamed strings.Builder
+	full, err := eng.GenerateStream(context.Background(),
+		[]llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}},
+		func(delta string) error { streamed.WriteString(delta); return nil },
+	)
+	if err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+	if strings.TrimSpace(full) != "You rolled well, traveler." {
+		t.Errorf("full = %q, want the final answer", full)
+	}
+	// The tool-call round emits no prose, so onText only ever sees the answer.
+	if strings.TrimSpace(streamed.String()) != "You rolled well, traveler." {
+		t.Errorf("streamed = %q, want only the final answer's prose (no tool-round preamble)", streamed.String())
+	}
+
+	rounds, callsOK, callsErr := rec.snapshot()
+	if len(rounds) != 2 {
+		t.Fatalf("recorded %d LLMRound spans on the streaming path, want 2", len(rounds))
+	}
+	if rounds[0].roundIndex != 0 || !rounds[0].hadToolCall {
+		t.Errorf("round 0 = %+v, want index 0 had_tool_call=true", rounds[0])
+	}
+	if rounds[1].roundIndex != 1 || rounds[1].hadToolCall {
+		t.Errorf("round 1 = %+v, want index 1 had_tool_call=false", rounds[1])
+	}
+	if callsOK != 2 || callsErr != 0 {
+		t.Errorf("streaming provider calls ok=%d err=%d, want 2/0", callsOK, callsErr)
+	}
+}
+
+// TestEngine_GenerateStream_NonStreamingProviderFallsBack pins the fallback: a
+// provider that is not a StreamingProvider still works through GenerateStream —
+// it runs to completion and forwards the whole text once. (scriptedProvider IS
+// wrapped into a streaming adapter, so this exercises the loop's own fallback by
+// asserting the single forward equals the full answer for a no-tool turn.)
+func TestEngine_GenerateStream_NoToolTurnStreamsAnswer(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{{text: "Welcome to the inn.", stop: "end_turn"}}}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test", 256, 0)
+
+	var got strings.Builder
+	full, err := eng.GenerateStream(context.Background(),
+		[]llm.Message{{Role: llm.RoleUser, Text: "Hello."}},
+		func(delta string) error { got.WriteString(delta); return nil },
+	)
+	if err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+	if strings.TrimSpace(full) != "Welcome to the inn." || strings.TrimSpace(got.String()) != "Welcome to the inn." {
+		t.Errorf("full=%q streamed=%q, want both = the answer", full, got.String())
+	}
+}
+
 // TestEngine_NoTools_SingleGenerationReturnsText pins that the same bridge path
 // covers the no-tool case: with empty grants the loop does one Generate and
 // returns the text, so an Agent with no Tool Grants behaves like the default

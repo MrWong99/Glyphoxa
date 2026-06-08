@@ -65,6 +65,24 @@ type Engine interface {
 	Generate(ctx context.Context, messages []llm.Message) (string, error)
 }
 
+// StreamingEngine is the optional streaming extension of [Engine] (B1): an
+// Engine that can implement it surfaces the final answer's text incrementally,
+// calling onText with each delta as it streams, so the [Replier] can segment the
+// text into sentences and dispatch them to TTS before the whole completion is
+// done. The tool-backed engine implements this by streaming the final
+// (no-tool-call) round; tool-call rounds happen first and produce no spoken text.
+//
+// GenerateStream returns the full accumulated answer text (for the history /
+// fallback). onText is called on the calling goroutine, in order; an error it
+// returns (a barge-in cancel surfaced through the dispatch callback) aborts
+// generation promptly. A nil onText is treated as a plain [Engine.Generate].
+// When an Engine does not implement this, the Replier falls back to the batch
+// path and segments the complete text after the fact.
+type StreamingEngine interface {
+	Engine
+	GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (full string, err error)
+}
+
 // Config configures a [Replier].
 type Config struct {
 	// Persona is the Agent this loop voices.
@@ -190,6 +208,134 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 	r.mu.Unlock()
 
 	return []orchestrator.Reply{{Sentence: reply, Voice: r.cfg.Persona.Voice}}
+}
+
+// ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop
+// in streaming mode (B1): it dispatches each sentence of the reply to TTS the
+// moment it is ready, so first audio begins after the first sentence rather than
+// the whole completion. Install it with [orchestrator.WithReplyStream].
+//
+// It requires the configured [Engine] to implement [StreamingEngine]; if it does
+// not, every turn falls back to a single post-completion dispatch (the behaviour
+// of [Replier.Reply]) so the wiring is always safe, just not incremental.
+func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
+	return func(ctx context.Context, e voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		if e.Target.AgentID != r.cfg.Persona.AgentID {
+			return nil // not addressed to this Agent
+		}
+		return r.streamTurn(ctx, e.Text, dispatch)
+	}
+}
+
+// streamTurn runs one streaming Agent turn: it assembles Hot Context, drives the
+// [StreamingEngine] over ctx, segments the streamed text into sentences, and
+// hands each to dispatch as it completes. ctx is the per-turn context, so a
+// barge-in cancel both ends the LLM generation and stops further dispatch.
+//
+// History (ADR-0012, deliver-then-commit): only the text actually emitted to the
+// pump is committed to the conversation history. A turn cut mid-stream by a
+// barge-in records what Bart already said, not the untruncated completion he
+// would have said — so the next turn's Hot Context reflects what the user heard.
+func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orchestrator.Reply) error) error {
+	r.mu.Lock()
+	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
+	r.trimHistoryLocked()
+	messages := r.hotContextLocked()
+	r.mu.Unlock()
+
+	streamer, ok := r.engine.(StreamingEngine)
+	if !ok {
+		// Non-streaming engine: fall back to one completion, then dispatch it whole.
+		return r.fallbackTurn(ctx, messages, dispatch)
+	}
+
+	var split sentenceSplitter
+	var spoken strings.Builder // what actually reached the pump — the history commit
+	voice := r.cfg.Persona.Voice
+
+	emit := func(sentence string) error {
+		if spoken.Len() > 0 {
+			spoken.WriteByte(' ')
+		}
+		spoken.WriteString(sentence)
+		return dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice})
+	}
+
+	onText := func(delta string) error {
+		for _, sentence := range split.Push(delta) {
+			if err := emit(sentence); err != nil {
+				return err // ctx cancelled (barge-in) or a hard dispatch failure
+			}
+		}
+		return nil
+	}
+
+	_, genErr := streamer.GenerateStream(ctx, messages, onText)
+
+	// Flush the trailing unterminated sentence — unless generation was cancelled,
+	// in which case the partial tail was never spoken and must not be dispatched.
+	if genErr == nil && ctx.Err() == nil {
+		if tail := split.Flush(); tail != "" {
+			if err := emit(tail); err != nil {
+				genErr = err
+			}
+		}
+	}
+
+	r.commitSpoken(spoken.String())
+
+	// A cancellation is the expected barge-in path, not a turn failure: report
+	// only a genuine engine error.
+	if genErr != nil && ctx.Err() == nil {
+		if r.cfg.OnError != nil {
+			r.cfg.OnError(genErr)
+		}
+		return genErr
+	}
+	return nil
+}
+
+// fallbackTurn handles a streaming reply when the engine cannot stream: it runs
+// one completion and dispatches the whole reply as a single sentence, mirroring
+// the batch [Replier.turn] so a non-streaming engine still speaks.
+func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
+	reply, err := r.engine.Generate(ctx, messages)
+	if err != nil {
+		if ctx.Err() == nil && r.cfg.OnError != nil {
+			r.cfg.OnError(err)
+		}
+		return err
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return nil
+	}
+	r.commitSpoken(reply)
+	return dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice})
+}
+
+// HistorySnapshot returns a copy of the running conversation history (the recent
+// Transcript half of Hot Context) in order. It is a point-in-time read for
+// diagnostics and tests — the slice is a copy, so callers may keep it without
+// pinning or racing the loop's live history.
+func (r *Replier) HistorySnapshot() []llm.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]llm.Message(nil), r.history...)
+}
+
+// commitSpoken records the text actually delivered to the pump as the assistant
+// turn in history (ADR-0012). An empty string — a turn cancelled before any
+// sentence was spoken — records nothing, so a barged-out turn leaves no phantom
+// assistant message.
+func (r *Replier) commitSpoken(spoken string) {
+	spoken = strings.TrimSpace(spoken)
+	if spoken == "" {
+		return
+	}
+	r.mu.Lock()
+	r.history = append(r.history, llm.Message{Role: llm.RoleAssistant, Text: spoken})
+	r.mu.Unlock()
 }
 
 // providerEngine is the default [Engine]: one [llm.Provider] completion per
