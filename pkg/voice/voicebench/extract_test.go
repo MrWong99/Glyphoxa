@@ -14,24 +14,29 @@ func at(ms int) time.Time {
 	return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(ms) * time.Millisecond)
 }
 
-// TestAccumulator_DerivableStages pins the stages the bench computes TODAY from
-// existing bus timestamps — the boundaries that must stay reconciled with A3's
-// subscriber (#4): address_detect and llm_turn. One synthetic turn with known
-// offsets yields exact spans. vad_hangover, response_latency and llm_round are
-// NOT derivable from today's events (vad_hangover would be utterance duration,
-// not the trailing-silence wait; the other two need #4's hooks) so they must be
-// absent — Check skips them rather than asserting a wrong number.
-func TestAccumulator_DerivableStages(t *testing.T) {
-	// stt.final@700, address.routed@760 (address_detect 60), first
-	// tts.invoked@1300 (llm_turn 540 from route). VAD events are present but do
-	// NOT produce a hangover span — that's the whole point of this assertion.
+// TestAccumulator_BusDerivedStages pins the stages the bench derives from the
+// bus event log, reconciled 1:1 with observe's A3 subscriber:
+//   - response_latency (HEADLINE) = FirstAudio.At − STTFinal.SpeechEndAt, keyed
+//     by TurnID off the FIRST FirstAudio (observe's exact derivation).
+//   - address_detect = AddressRouted.At − STTFinal.At
+//   - llm_turn       = first TTSInvoked.At − AddressRouted.At
+//
+// llm_round and vad_hangover are recorder-only (not bus events) so they must be
+// ABSENT from the bus-derived report — they arrive via the recorderTap, and
+// vad_hangover specifically is NOT VADSpeechEnd−VADSpeechStart (that's utterance
+// duration).
+func TestAccumulator_BusDerivedStages(t *testing.T) {
+	// SpeechEndAt@500, first FirstAudio@1400 (response_latency 900). stt.final@700,
+	// address.routed@760 (address_detect 60), first tts.invoked@1300 (llm_turn 540).
 	events := []voiceevent.Event{
 		voiceevent.VADSpeechStart{At: at(100)},
 		voiceevent.VADSpeechEnd{At: at(600)},
-		voiceevent.STTFinal{At: at(700)},
-		voiceevent.AddressRouted{At: at(760)},
-		voiceevent.TTSInvoked{At: at(1300), Index: 0},
-		voiceevent.TTSInvoked{At: at(1500), Index: 1}, // later sentences ignored for llm_turn
+		voiceevent.STTFinal{At: at(700), TurnID: "turn-1", SpeechEndAt: at(500)},
+		voiceevent.AddressRouted{At: at(760), TurnID: "turn-1"},
+		voiceevent.TTSInvoked{At: at(1300), Index: 0, TurnID: "turn-1"},
+		voiceevent.FirstAudio{At: at(1400), TurnID: "turn-1"},
+		voiceevent.FirstAudio{At: at(1600), TurnID: "turn-1"}, // later chunks ignored
+		voiceevent.TTSInvoked{At: at(1500), Index: 1},         // later sentences ignored for llm_turn
 	}
 
 	acc := voicebench.NewAccumulator("cassette", []string{"trivial"})
@@ -39,8 +44,9 @@ func TestAccumulator_DerivableStages(t *testing.T) {
 	r := acc.Build()
 
 	want := map[voicebench.Stage]float64{
-		voicebench.StageAddressDetect: 60,
-		voicebench.StageLLMTurn:       540,
+		voicebench.StageResponseLatency: 900, // 1400 − 500
+		voicebench.StageAddressDetect:   60,
+		voicebench.StageLLMTurn:         540,
 	}
 	for stage, ms := range want {
 		d, ok := r.Stages[stage]
@@ -52,19 +58,41 @@ func TestAccumulator_DerivableStages(t *testing.T) {
 			t.Errorf("stage %q p50 = %v ms, want %v ms", stage, d.P50, ms)
 		}
 	}
-	// Stages that need #4's hooks (or a hangover derivation we don't have) must
-	// be absent, not a misleading zero/duration.
-	for _, notYet := range []voicebench.Stage{
-		voicebench.StageResponseLatency,
+	// Recorder-only stages must be absent from the bus-derived report.
+	for _, recorderOnly := range []voicebench.Stage{
 		voicebench.StageLLMRound,
 		voicebench.StageVADHangover,
 	} {
-		if _, ok := r.Stages[notYet]; ok {
-			t.Errorf("stage %q present before its A3 derivation landed; want absent", notYet)
+		if _, ok := r.Stages[recorderOnly]; ok {
+			t.Errorf("stage %q present in bus-derived report; it is recorder-only", recorderOnly)
 		}
 	}
 	if r.N != 1 || r.Tier != "cassette" {
 		t.Errorf("report header = N %d tier %q, want 1/cassette", r.N, r.Tier)
+	}
+}
+
+// TestAccumulator_ResponseLatency_NeedsBothEnds pins the headline span's guard:
+// a turn missing SpeechEndAt (STT didn't stamp it) or missing FirstAudio (no
+// audio reached the pump) yields NO response_latency sample — never a wrong
+// number from a half-present span.
+func TestAccumulator_ResponseLatency_NeedsBothEnds(t *testing.T) {
+	// FirstAudio present but STTFinal has no SpeechEndAt → no span.
+	noSpeechEnd := voicebench.NewAccumulator("cassette", nil)
+	noSpeechEnd.AddTurn([]voiceevent.Event{
+		voiceevent.STTFinal{At: at(700), TurnID: "t"},
+		voiceevent.FirstAudio{At: at(1400), TurnID: "t"},
+	})
+	if _, ok := noSpeechEnd.Build().Stages[voicebench.StageResponseLatency]; ok {
+		t.Error("response_latency present with no SpeechEndAt; want absent")
+	}
+	// SpeechEndAt present but no FirstAudio → no span.
+	noAudio := voicebench.NewAccumulator("cassette", nil)
+	noAudio.AddTurn([]voiceevent.Event{
+		voiceevent.STTFinal{At: at(700), TurnID: "t", SpeechEndAt: at(500)},
+	})
+	if _, ok := noAudio.Build().Stages[voicebench.StageResponseLatency]; ok {
+		t.Error("response_latency present with no FirstAudio; want absent")
 	}
 }
 

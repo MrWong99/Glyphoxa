@@ -12,51 +12,61 @@ import (
 type turnSpans map[Stage]time.Duration
 
 // extractTurn reduces one turn's ordered event slice to its stage spans. It is
-// the bench's read of the SAME bus timestamps task A3's metric subscriber uses,
-// so a bench number equals a Prometheus series — the boundaries below MUST stay
-// reconciled with A3 (#4). Events are assumed in publish order (the Bus delivers
-// them so; [voicetest.Harness.Events] preserves it).
+// the bench's read of the SAME bus timestamps observe's A3 subscriber uses, so a
+// bench number equals a Prometheus series — the boundaries below are reconciled
+// 1:1 with internal/observe (#4/#10). Events are assumed in publish order (the
+// Bus delivers them so; [voicetest.Harness.Events] preserves it).
 //
-// DERIVABLE TODAY (from existing bus At: timestamps):
+// FROM BUS EVENTS:
+//   - response_latency (HEADLINE) = (first FirstAudio for the turn's TurnID).At −
+//     STTFinal.SpeechEndAt. This is observe's exact derivation (#4 LOCKED seam):
+//     keyed off STTFinal.SpeechEndAt, NOT a VADSpeechEnd lookup, and off the
+//     FIRST FirstAudio per TurnID. The turn's TurnID comes from its STTFinal.
 //   - address_detect = AddressRouted.At − STTFinal.At
-//   - llm_turn       = first TTSInvoked.At − AddressRouted.At   (route → first
+//   - llm_turn       = first TTSInvoked.At − AddressRouted.At (route → first
 //     sentence dispatched; the whole LLM turn incl. tool rounds)
 //
-// SEAMED — needs A3 (#4) hooks/derivation, intentionally left unset so Check()
-// skips them rather than asserting a wrong number:
-//   - response_latency (HEADLINE) = first-audio-out.At − VADSpeechEnd.At
-//   - llm_round (per Provider.Complete, round_index/had_tool_call)
-//   - vad_hangover — NOT derivable from VADSpeechStart/End: that delta is the
-//     utterance DURATION, not the trailing-silence wait. The hangover is the
-//     fixed minSilenceFrames×32ms cost between true-end-of-speech (no bus event)
-//     and the speech_end declaration. Take it from A3's subscriber definition or
-//     a dedicated hook; do not reconstruct it from the two VAD timestamps.
-//   - tts_ttfb / tts_total / stt_request / codec_* (some need the codec/TTS taps)
-//
-// When #4 publishes the first-audio and per-round events, add their cases here
-// keyed on pipeline's concrete event types and the stage map fills in — no
-// change to the reducer/report/SLO layers.
+// NOT FROM BUS EVENTS — captured via the StageRecorder tap instead (see
+// recorderTap), because A3 emits them as recorder calls, not bus events:
+//   - llm_round (observe.StageRecorder.LLMRound, per Provider.Complete)
+//   - vad_hangover, stt_request, tts_ttfb/total, codec_* (recorder-only).
+//     vad_hangover specifically is the fixed minSilenceFrames×32ms trailing
+//     wait, NOT VADSpeechEnd−VADSpeechStart (that's utterance duration) — only
+//     the recorder knows it.
 func extractTurn(events []voiceevent.Event) turnSpans {
 	spans := turnSpans{}
 
-	var sttFinal, addrRouted, firstTTS time.Time
-	var haveSTT, haveAddr, haveTTS bool
+	var sttFinal, addrRouted, firstTTS, speechEnd time.Time
+	var turnID string
+	var firstAudio time.Time
+	var haveSTT, haveAddr, haveTTS, haveSpeechEnd, haveFirstAudio bool
 
 	for _, e := range events {
 		switch ev := e.(type) {
 		case voiceevent.STTFinal:
 			sttFinal, haveSTT = ev.At, true
+			turnID = ev.TurnID
+			if !ev.SpeechEndAt.IsZero() {
+				speechEnd, haveSpeechEnd = ev.SpeechEndAt, true
+			}
 		case voiceevent.AddressRouted:
 			addrRouted, haveAddr = ev.At, true
 		case voiceevent.TTSInvoked:
 			if !haveTTS { // first sentence dispatched this turn
 				firstTTS, haveTTS = ev.At, true
 			}
+		case voiceevent.FirstAudio:
+			// First FirstAudio matching this turn's TurnID closes the headline
+			// span. Guard on TurnID so a stray cross-turn event can't bleed in.
+			if !haveFirstAudio && (turnID == "" || ev.TurnID == turnID) {
+				firstAudio, haveFirstAudio = ev.At, true
+			}
 		}
-		// NOTE(#4 seam): first-audio-out and per-LLM-round events land here once
-		// pipeline defines them; wire response_latency + llm_round at that point.
 	}
 
+	if haveFirstAudio && haveSpeechEnd {
+		spans[StageResponseLatency] = firstAudio.Sub(speechEnd)
+	}
 	if haveAddr && haveSTT {
 		spans[StageAddressDetect] = addrRouted.Sub(sttFinal)
 	}
