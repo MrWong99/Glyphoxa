@@ -388,6 +388,108 @@ func TestComplete_Non2xx_WrapsOpAndStatus(t *testing.T) {
 	}
 }
 
+// thinkingBody is the subset of the request body the thinking-cap tests inspect.
+type thinkingBody struct {
+	ReasoningEffort string `json:"reasoning_effort"`
+	ExtraBody       *struct {
+		Google struct {
+			ThinkingConfig struct {
+				ThinkingBudget int `json:"thinking_budget"`
+			} `json:"thinking_config"`
+		} `json:"google"`
+	} `json:"extra_body"`
+}
+
+// captureThinking runs one drained completion against a capturing server built
+// from opts and returns the decoded thinking-cap fields of the request body.
+func captureThinking(t *testing.T, opts ...gemini.Option) thinkingBody {
+	t.Helper()
+	var capture atomic.Value
+	srv := sseServer(t, &capture,
+		sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`),
+	)
+	defer srv.Close()
+
+	allOpts := append([]gemini.Option{gemini.WithBaseURL(srv.URL)}, opts...)
+	c := gemini.New("k", allOpts...)
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	collect(t, ch)
+
+	raw, _ := capture.Load().([]byte)
+	var body thinkingBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("request body not JSON: %v\nbody: %s", err, raw)
+	}
+	return body
+}
+
+// TestComplete_DefaultCapsThinking pins the B2 default: a client built with no
+// thinking Option still sends reasoning_effort "low" to bound 2.5-flash's
+// dynamic thinking wall-time — so prod gets the cap without opting in — and does
+// NOT send an extra_body thinking_budget (the two are mutually exclusive on the
+// wire). This is the regression guard for "the cap silently stops shipping".
+func TestComplete_DefaultCapsThinking(t *testing.T) {
+	body := captureThinking(t)
+	if body.ReasoningEffort != gemini.DefaultReasoningEffort {
+		t.Errorf("reasoning_effort = %q, want default %q", body.ReasoningEffort, gemini.DefaultReasoningEffort)
+	}
+	if body.ReasoningEffort != "low" {
+		t.Errorf("default reasoning_effort = %q, want low", body.ReasoningEffort)
+	}
+	if body.ExtraBody != nil {
+		t.Errorf("extra_body = %+v, want omitted when reasoning_effort drives the cap", body.ExtraBody)
+	}
+}
+
+// TestComplete_WithReasoningEffort pins the override: a non-empty effort rides as
+// the top-level reasoning_effort field, empty sends neither field (model's old
+// time-unbounded default), and either way no extra_body is emitted.
+func TestComplete_WithReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"none", "high"} {
+		body := captureThinking(t, gemini.WithReasoningEffort(effort))
+		if body.ReasoningEffort != effort {
+			t.Errorf("reasoning_effort = %q, want %q", body.ReasoningEffort, effort)
+		}
+		if body.ExtraBody != nil {
+			t.Errorf("effort %q: extra_body = %+v, want omitted", effort, body.ExtraBody)
+		}
+	}
+
+	// Empty effort disables the cap: neither field is sent.
+	body := captureThinking(t, gemini.WithReasoningEffort(""))
+	if body.ReasoningEffort != "" {
+		t.Errorf("empty effort sent reasoning_effort = %q, want omitted", body.ReasoningEffort)
+	}
+	if body.ExtraBody != nil {
+		t.Errorf("empty effort sent extra_body = %+v, want omitted", body.ExtraBody)
+	}
+}
+
+// TestComplete_WithThinkingBudget pins the explicit-budget path and its mutual
+// exclusivity: a budget rides under extra_body.google.thinking_config.thinking_
+// budget and SUPPRESSES reasoning_effort, so the endpoint never receives both
+// (it rejects that). A budget of 0 (thinking off) must still be emitted — the
+// nil/0 distinction is load-bearing.
+func TestComplete_WithThinkingBudget(t *testing.T) {
+	for _, budget := range []int{0, 512, -1} {
+		body := captureThinking(t, gemini.WithThinkingBudget(budget))
+		if body.ReasoningEffort != "" {
+			t.Errorf("budget %d: reasoning_effort = %q, want omitted (mutually exclusive)", budget, body.ReasoningEffort)
+		}
+		if body.ExtraBody == nil {
+			t.Fatalf("budget %d: extra_body omitted, want thinking_config", budget)
+		}
+		if got := body.ExtraBody.Google.ThinkingConfig.ThinkingBudget; got != budget {
+			t.Errorf("thinking_budget = %d, want %d", got, budget)
+		}
+	}
+}
+
 // sse formats one JSON payload as an OpenAI-compatible SSE "data:" frame.
 func sse(data string) string {
 	return "data: " + data + "\n\n"

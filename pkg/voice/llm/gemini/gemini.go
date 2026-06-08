@@ -51,6 +51,22 @@ const (
 	// this ceiling, so the headroom is more generous than the anthropic adapter's
 	// to keep a short spoken NPC turn from being truncated by thinking.
 	DefaultMaxTokens = 2048
+
+	// DefaultReasoningEffort caps gemini-2.5-flash's dynamic "thinking" by
+	// default (Sprint 2 / B2 — latency.md H1). On the OpenAI-compat endpoint the
+	// max_tokens ceiling bounds thinking *tokens* but NOT wall-time: by default
+	// thinking is dynamic, so a reasoning-bait input can spend several seconds
+	// before the first content token streams — the best match for the
+	// "manchmal sehr spät" tail. reasoning_effort is the documented compat knob;
+	// for gemini-2.5 it maps to an internal thinking_budget. "low" keeps a small
+	// reasoning allowance (a short NPC turn rarely needs more) while bounding the
+	// tail; override with [WithReasoningEffort] / [WithThinkingBudget]. Empirically
+	// pinned against the default via a live A/B — see docs/adr/0035.
+	//
+	// Accepted values (compat endpoint): "none", "minimal", "low", "medium",
+	// "high". "none" disables thinking on 2.5-flash; "" lets the model choose
+	// (the old time-unbounded default).
+	DefaultReasoningEffort = "low"
 )
 
 // Client is the Gemini LLM adapter. Construct with [New]; the zero value is not
@@ -61,6 +77,17 @@ type Client struct {
 	baseURL string
 	model   string
 	http    *http.Client
+
+	// reasoningEffort, when non-empty, is sent as the OpenAI-compat
+	// reasoning_effort field to bound thinking wall-time (B2). Mutually exclusive
+	// with thinkingBudget: if thinkingBudget is set (non-nil) it wins and
+	// reasoning_effort is omitted, since the endpoint rejects both at once.
+	reasoningEffort string
+	// thinkingBudget, when non-nil, is sent as the explicit 2.5 thinking-token
+	// cap under extra_body.google.thinking_config.thinking_budget (0 = thinking
+	// off, -1 = dynamic/unbounded, N = at most N reasoning tokens). The precise
+	// escape hatch when "low" is too coarse; takes precedence over reasoningEffort.
+	thinkingBudget *int
 }
 
 // Option mutates a [Client] during construction.
@@ -78,6 +105,31 @@ func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h
 // WithModel sets the default model used when [llm.Request.Model] is empty.
 func WithModel(m string) Option { return func(c *Client) { c.model = m } }
 
+// WithReasoningEffort overrides the reasoning_effort sent to the compat endpoint
+// (B2 — bound thinking wall-time). Accepted: "none", "minimal", "low", "medium",
+// "high"; "" disables the cap (model chooses, the old time-unbounded behaviour).
+// Setting a non-empty effort clears any [WithThinkingBudget] (the two are
+// mutually exclusive on the wire); pass "" to fall back to a budget instead.
+func WithReasoningEffort(effort string) Option {
+	return func(c *Client) {
+		c.reasoningEffort = effort
+		c.thinkingBudget = nil
+	}
+}
+
+// WithThinkingBudget pins the explicit 2.5 thinking-token cap
+// (extra_body.google.thinking_config.thinking_budget): 0 turns thinking off,
+// -1 restores dynamic/unbounded thinking, N caps reasoning at N tokens. The
+// precise alternative to [WithReasoningEffort]'s coarse buckets; it takes
+// precedence and suppresses reasoning_effort, since the endpoint rejects both
+// at once.
+func WithThinkingBudget(tokens int) Option {
+	return func(c *Client) {
+		t := tokens
+		c.thinkingBudget = &t
+	}
+}
+
 // New constructs a [Client]. If apiKey is empty it falls back to the
 // GEMINI_API_KEY environment variable; if that is also empty, the returned
 // client still links — calls return a "missing API key" error rather than
@@ -88,10 +140,11 @@ func New(apiKey string, opts ...Option) *Client {
 		apiKey = os.Getenv(APIKeyEnv)
 	}
 	c := &Client{
-		apiKey:  apiKey,
-		baseURL: DefaultBaseURL,
-		model:   DefaultModel,
-		http:    &http.Client{},
+		apiKey:          apiKey,
+		baseURL:         DefaultBaseURL,
+		model:           DefaultModel,
+		http:            &http.Client{},
+		reasoningEffort: DefaultReasoningEffort,
 	}
 	for _, opt := range opts {
 		opt(c)

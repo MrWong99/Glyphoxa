@@ -24,6 +24,30 @@ type chatBody struct {
 	Tools      []wireTool    `json:"tools,omitempty"`
 	ToolChoice string        `json:"tool_choice,omitempty"`
 	Stream     bool          `json:"stream"`
+	// ReasoningEffort bounds gemini-2.5-flash's dynamic thinking wall-time (B2):
+	// "none"/"minimal"/"low"/"medium"/"high". Omitted when empty so the model
+	// keeps its (time-unbounded) default. Mutually exclusive with ExtraBody's
+	// thinking_config — the adapter never sets both.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ExtraBody carries Gemini-only knobs the OpenAI schema has no slot for. Used
+	// for the explicit thinking_budget cap; nil (the common case) omits it.
+	ExtraBody *extraBody `json:"extra_body,omitempty"`
+}
+
+// extraBody is the OpenAI-compat passthrough for Gemini-native fields. The
+// thinking cap lives at extra_body.google.thinking_config.thinking_budget.
+type extraBody struct {
+	Google googleExtra `json:"google"`
+}
+
+type googleExtra struct {
+	ThinkingConfig thinkingConfig `json:"thinking_config"`
+}
+
+// thinkingConfig caps reasoning for gemini-2.5 via an explicit token budget:
+// 0 = off, -1 = dynamic/unbounded, N = at most N reasoning tokens.
+type thinkingConfig struct {
+	ThinkingBudget int `json:"thinking_budget"`
 }
 
 // wireMessage is one OpenAI-compatible chat message. Assistant turns that
@@ -105,6 +129,17 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	}
 	if len(body.Tools) > 0 {
 		body.ToolChoice = "auto"
+	}
+	// Apply the thinking cap (B2). thinking_budget and reasoning_effort overlap
+	// and the endpoint rejects both, so an explicit budget wins and suppresses
+	// reasoning_effort; otherwise the configured effort (default "low") rides as
+	// the top-level field, and an empty effort sends neither (model's default).
+	if c.thinkingBudget != nil {
+		body.ExtraBody = &extraBody{Google: googleExtra{
+			ThinkingConfig: thinkingConfig{ThinkingBudget: *c.thinkingBudget},
+		}}
+	} else if c.reasoningEffort != "" {
+		body.ReasoningEffort = c.reasoningEffort
 	}
 
 	payload, err := json.Marshal(body)
