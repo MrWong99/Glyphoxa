@@ -85,8 +85,10 @@ func main() {
 //
 // metrics is the process Prometheus adapter; when metricsAddr is non-empty a
 // metrics-only /metrics listener is served for its lifetime (ADR-0032 §2.3,
-// voice mode). The adapter's injection into the voice Manager (WithMetrics) is
-// wired inside wirenpc once Config carries the recorder.
+// voice mode). The single adapter satisfies both recorder interfaces, so it
+// drives the hot-path plumbing counters (Config.Metrics → Manager) AND the
+// orchestrator stage/turn latency + provider series (Config.StageMetrics →
+// buildConversation: the bus subscriber + the agenttool provider adapter).
 func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *observe.PrometheusRecorder, metricsAddr string) error {
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
 	if cfg.Token == "" {
@@ -96,6 +98,11 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		return fmt.Errorf("-guild and -channel are required for voice mode")
 	}
 	cfg.Logger = log
+	// Inject the recorder into the pipeline; without this the live Manager + stage
+	// recorders get the nil zero-value and every glyphoxa_voice_* series stays
+	// empty except the DAVE counter and the process collectors.
+	cfg.Metrics = metrics
+	cfg.StageMetrics = metrics
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

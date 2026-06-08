@@ -1,6 +1,7 @@
 package observe
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -186,10 +187,32 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 	s.rec.ResponseLatency(t.role, e.At.Sub(t.speechEndAt))
 }
 
+// Start runs the TTL [StageSubscriber.Sweep] on a ticker until ctx is cancelled,
+// so abandoned turns are reaped on a live node without the caller wiring its own
+// loop. The run wiring calls Subscribe (attach handlers) AND Start (reap) — the
+// leak guard the no-barge design relies on is only real once Start runs. The
+// sweep interval is the TTL itself: reaping at most one TTL late is fine for a
+// liveness guard. Mirrors [MetricsServer.Start].
+func (s *StageSubscriber) Start(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(s.ttl)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.Sweep()
+			}
+		}
+	}()
+}
+
 // Sweep reaps per-turn state untouched for longer than the TTL, so abandoned
-// turns (barged before audio, errored, never synthesized) don't accumulate. Call
-// it periodically from the run loop; it is safe for concurrent use. Returns the
-// number of turns reaped (for tests / a debug gauge).
+// turns (barged before audio, errored, never synthesized) don't accumulate.
+// [StageSubscriber.Start] calls it on a ticker; it is also callable directly
+// (tests). Safe for concurrent use. Returns the number of turns reaped (for
+// tests / a debug gauge).
 func (s *StageSubscriber) Sweep() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

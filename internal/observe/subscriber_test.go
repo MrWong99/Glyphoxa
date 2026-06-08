@@ -1,6 +1,8 @@
 package observe
 
 import (
+	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -209,4 +211,61 @@ func TestStageSubscriberConcurrentFirstAudioRace(t *testing.T) {
 
 func turnID(i int) string {
 	return "turn-" + string(rune('A'+i/26)) + string(rune('a'+i%26))
+}
+
+func TestStageSubscriberStartReapsOnTicker(t *testing.T) {
+	// Start runs Sweep on a ticker; with a short TTL an abandoned turn is reaped
+	// without anyone calling Sweep directly (the live leak guard).
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec)
+	sub.ttl = 20 * time.Millisecond
+	sub.Subscribe(bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub.Start(ctx)
+
+	bus.Publish(voiceevent.STTFinal{At: base, TurnID: "dead", SpeechEndAt: base})
+	bus.Publish(voiceevent.TTSInvoked{At: base, TurnID: "dead"}) // no FirstAudio ⇒ abandoned
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sub.mu.Lock()
+		n := len(sub.turns)
+		sub.mu.Unlock()
+		if n == 0 {
+			return // reaped by the ticker
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Start ticker never reaped the abandoned turn")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStageSubscriberEndToEndPrometheus(t *testing.T) {
+	// Gate wording literally: drive a real Bus into the real Prometheus adapter and
+	// assert the response_latency histogram actually gains a sample on scrape (also
+	// guards against a label-cardinality mismatch at the subscriber→adapter seam).
+	rec := NewPrometheusRecorder()
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	bus.Publish(voiceevent.STTFinal{At: base, TurnID: "T", SpeechEndAt: base})
+	bus.Publish(voiceevent.AddressRouted{At: base.Add(40 * time.Millisecond), TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(900 * time.Millisecond), TurnID: "T"})
+	bus.Publish(voiceevent.FirstAudio{At: base.Add(1100 * time.Millisecond), TurnID: "T"})
+
+	out := scrape(t, rec)
+	wants := []string{
+		`glyphoxa_voice_response_latency_seconds_count{agent_role="character"} 1`,
+		`glyphoxa_voice_address_detect_seconds_count 1`,
+		`glyphoxa_voice_tts_ttfb_seconds_count{provider="elevenlabs"} 1`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("scrape missing %q\n%s", w, filterGlyphoxa(out))
+		}
+	}
 }
