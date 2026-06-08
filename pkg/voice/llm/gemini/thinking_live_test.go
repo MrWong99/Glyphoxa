@@ -63,6 +63,10 @@ func TestLive_ThinkingCap_AB(t *testing.T) {
 			delay = d
 		}
 	}
+	// GX_AB_LOG_ALL=1 logs EVERY answer (not just the first per arm/prompt) so a
+	// quality re-run can eyeball the full set — capping thinking can muddle the
+	// reasoning-bait answers, and one sample per arm can't show that.
+	logAll := os.Getenv("GX_AB_LOG_ALL") == "1"
 
 	type arm struct {
 		name   string
@@ -90,8 +94,8 @@ func TestLive_ThinkingCap_AB(t *testing.T) {
 				}
 				a.ttft = append(a.ttft, first)
 				a.total = append(a.total, tot)
-				if i == 0 { // one sample answer per (arm,prompt) for the quality check.
-					t.Logf("[%s/%s] sample: %q", a.name, p.name, trim(text, 160))
+				if logAll || i == 0 { // answer(s) for the quality check.
+					t.Logf("[%s/%s #%d] %q", a.name, p.name, i, trim(text, 200))
 				}
 			}
 		}
