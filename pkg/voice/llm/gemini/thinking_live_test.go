@@ -45,10 +45,16 @@ var abPrompts = []struct {
 //   - arms alternate per iteration so neither eats a whole minute's quota and
 //     so server-load drift is shared, not confounded into one arm.
 //
-// On free tier N is small, so the printed p50/p95 is DIRECTIONAL (does low cut
-// the bait tail, y/n) — a true distribution belongs to the paid nightly live
-// tier. The test asserts only that at least one arm produced samples; the
-// latency verdict is the printed numbers (fold into ADR-0035).
+// Reporting is bucketed PER (arm, prompt): trivial never triggers thinking, so
+// pooling it with reasoning-bait would dilute the very effect B2 measures. The
+// bait tier carries the latency story (does low/medium cut the tail?) and the
+// quality check (set GX_AB_LOG_ALL=1 to log every answer and eyeball it). The
+// three arms — uncapped default, low, medium — let the chosen default be picked
+// from evidence: if "low" muddles hard reasoning, "medium" is the next notch
+// before abandoning the cap.
+//
+// The test asserts only that some arm produced samples; the verdict is the
+// printed per-(arm,prompt) distributions (fold into ADR-0035).
 func TestLive_ThinkingCap_AB(t *testing.T) {
 	if os.Getenv("GEMINI_API_KEY") == "" {
 		t.Skip("GEMINI_API_KEY not set; skipping paid live A/B")
@@ -71,18 +77,28 @@ func TestLive_ThinkingCap_AB(t *testing.T) {
 	type arm struct {
 		name   string
 		client *gemini.Client
-		ttft   []float64
-		total  []float64
+		// samples bucketed by prompt name → the per-tier distribution.
+		ttft  map[string][]float64
+		total map[string][]float64
+	}
+	newArm := func(name, effort string) *arm {
+		return &arm{
+			name:   name,
+			client: gemini.New("", gemini.WithReasoningEffort(effort)),
+			ttft:   map[string][]float64{},
+			total:  map[string][]float64{},
+		}
 	}
 	arms := []*arm{
-		{name: "default-uncapped", client: gemini.New("", gemini.WithReasoningEffort(""))},
-		{name: "effort-low", client: gemini.New("", gemini.WithReasoningEffort("low"))},
+		newArm("default-uncapped", ""),
+		newArm("effort-low", "low"),
+		newArm("effort-medium", "medium"),
 	}
 
 	var calls int
 	for _, p := range abPrompts {
 		for i := 0; i < n; i++ {
-			for _, a := range arms { // interleave: default, low, default, low…
+			for _, a := range arms { // interleave arms so server drift is shared.
 				if calls > 0 {
 					time.Sleep(delay)
 				}
@@ -92,8 +108,8 @@ func TestLive_ThinkingCap_AB(t *testing.T) {
 					t.Logf("[%s/%s #%d] %v", a.name, p.name, i, err)
 					continue
 				}
-				a.ttft = append(a.ttft, first)
-				a.total = append(a.total, tot)
+				a.ttft[p.name] = append(a.ttft[p.name], first)
+				a.total[p.name] = append(a.total[p.name], tot)
 				if logAll || i == 0 { // answer(s) for the quality check.
 					t.Logf("[%s/%s #%d] %q", a.name, p.name, i, trim(text, 200))
 				}
@@ -102,13 +118,15 @@ func TestLive_ThinkingCap_AB(t *testing.T) {
 	}
 
 	var any bool
-	for _, a := range arms {
-		t.Logf("ARM %-16s ttft_ms  %s", a.name, dist(a.ttft))
-		t.Logf("ARM %-16s total_ms %s", a.name, dist(a.total))
-		any = any || len(a.ttft) > 0
+	for _, p := range abPrompts { // report per tier, tier-major for easy A/B read.
+		for _, a := range arms {
+			t.Logf("[%s] ARM %-16s ttft_ms  %s", p.name, a.name, dist(a.ttft[p.name]))
+			t.Logf("[%s] ARM %-16s total_ms %s", p.name, a.name, dist(a.total[p.name]))
+			any = any || len(a.ttft[p.name]) > 0
+		}
 	}
 	if !any {
-		t.Fatal("no successful samples on either arm — check key/quota")
+		t.Fatal("no successful samples on any arm — check key/quota")
 	}
 }
 
