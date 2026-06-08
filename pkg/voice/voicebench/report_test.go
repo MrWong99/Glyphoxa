@@ -63,7 +63,7 @@ func TestReport_Check_Passes(t *testing.T) {
 	r := voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{
 		voicebench.StageResponseLatency: {N: 30, P50: 900, P95: 2100},
 	}}
-	if v := r.Check(); len(v) != 0 {
+	if v := r.CheckSLO(); len(v) != 0 {
 		t.Errorf("Check under budget returned violations: %v", v)
 	}
 }
@@ -74,7 +74,7 @@ func TestReport_Check_FlagsBreach(t *testing.T) {
 	r := voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{
 		voicebench.StageResponseLatency: {N: 30, P50: 1100, P95: 3200},
 	}}
-	v := r.Check()
+	v := r.CheckSLO()
 	if len(v) != 1 || v[0].Quantile != "p95" {
 		t.Fatalf("Check = %v, want exactly one p95 violation", v)
 	}
@@ -90,11 +90,11 @@ func TestReport_Check_SkipsMissingStage(t *testing.T) {
 	r := voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{
 		voicebench.StageResponseLatency: {N: 0},
 	}}
-	if v := r.Check(); len(v) != 0 {
+	if v := r.CheckSLO(); len(v) != 0 {
 		t.Errorf("Check over an unmeasured stage returned %v, want none", v)
 	}
 	// Also: a stage entirely absent from the map is skipped.
-	if v := (voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{}}).Check(); len(v) != 0 {
+	if v := (voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{}}).CheckSLO(); len(v) != 0 {
 		t.Errorf("Check over an empty report returned %v, want none", v)
 	}
 }
@@ -121,5 +121,37 @@ func TestReport_JSON(t *testing.T) {
 	d := back.Stages[voicebench.StageLLMRound]
 	if back.Tier != "cassette" || d.P95 != 980 || d.N != 30 {
 		t.Errorf("round-trip = %s / %+v, want cassette tier + llm_round p95 980", back.Tier, d)
+	}
+}
+
+// TestReport_CheckRegression pins the cassette-tier gate: a stage whose p95 grew
+// past the tolerance over the committed baseline flags; one within tolerance
+// passes; a stage absent from the baseline is not a regression. This is the
+// guard the cassette tier uses INSTEAD of the absolute SLO (which would pass
+// trivially on instant-replay numbers).
+func TestReport_CheckRegression(t *testing.T) {
+	base := voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{
+		voicebench.StageResponseLatency: {N: 30, P95: 8}, // 8ms orchestration baseline
+		voicebench.StageAddressDetect:   {N: 30, P95: 2},
+	}}
+
+	// +50% on response_latency (8 → 12) breaches the 25% tolerance; address_detect
+	// flat passes.
+	regressed := voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{
+		voicebench.StageResponseLatency: {N: 30, P95: 12},
+		voicebench.StageAddressDetect:   {N: 30, P95: 2},
+		voicebench.StageLLMRound:        {N: 30, P95: 999}, // absent from baseline → not a regression
+	}}
+	v := regressed.CheckRegression(base, voicebench.DefaultRegressionTolerance)
+	if len(v) != 1 || v[0].Stage != voicebench.StageResponseLatency {
+		t.Fatalf("CheckRegression = %v, want exactly one response_latency breach", v)
+	}
+
+	// Within tolerance (8 → 9, +12.5%) passes.
+	ok := voicebench.Report{Stages: map[voicebench.Stage]voicebench.Distribution{
+		voicebench.StageResponseLatency: {N: 30, P95: 9},
+	}}
+	if v := ok.CheckRegression(base, 0); len(v) != 0 { // tol<=0 → default 25%
+		t.Errorf("CheckRegression within tolerance flagged: %v", v)
 	}
 }

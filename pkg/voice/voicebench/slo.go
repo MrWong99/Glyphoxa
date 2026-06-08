@@ -35,18 +35,18 @@ func (v Violation) String() string {
 	return fmt.Sprintf("%s %s = %.0fms > %.0fms budget", v.Stage, v.Quantile, v.Got, v.Budget)
 }
 
-// Check returns the budgets the report breaches, or nil if it meets every
-// asserted SLO. A stage with no samples (N==0) is skipped, not failed — a tier
-// that legitimately doesn't exercise a stage must not fail the gate (e.g. the
-// PCM cassette tier doesn't drive the opus codec). C2 turns a non-empty result
-// into a failing assertion; the default cassette tier flags *our* orchestration
-// regressions, the live tier feeds vendor SLOs.
+// CheckSLO is the LIVE-tier gate: it returns the absolute budgets the report
+// breaches, or nil if it meets every asserted SLO. This belongs to the live tier
+// ONLY — cassette replay is instant, so cassette-tier spans are ~0 and an
+// absolute SLO would pass trivially and MASK a 10x orchestration regression. Use
+// [Report.CheckRegression] for the cassette tier.
 //
-// NOTE: until A3 (#4) lands the first-audio hook, StageResponseLatency has no
-// samples on any tier, so Check is a no-op for the headline SLO — it starts
-// asserting the moment the hook feeds real spans. That is the intended seam, not
-// a silent pass.
-func (r Report) Check(slos ...SLO) []Violation {
+// A stage with no samples (N==0) is skipped, not failed — a tier that
+// legitimately doesn't exercise a stage must not fail the gate (e.g. a clip that
+// drove no codec). Until a run actually feeds StageResponseLatency (needs the A3
+// first-audio hook + a real reply), this is a no-op for the headline SLO — the
+// intended seam, not a silent pass.
+func (r Report) CheckSLO(slos ...SLO) []Violation {
 	if len(slos) == 0 {
 		slos = []SLO{EngineeringSLO}
 	}
@@ -61,6 +61,38 @@ func (r Report) Check(slos ...SLO) []Violation {
 		}
 		if s.P95ms > 0 && d.P95 > s.P95ms {
 			out = append(out, Violation{s.Stage, "p95", d.P95, s.P95ms})
+		}
+	}
+	return out
+}
+
+// DefaultRegressionTolerance is the per-stage p95 slack the cassette tier allows
+// over the committed baseline before flagging a regression (25%). Cassette spans
+// are tiny and a little jittery, so a too-tight threshold would flap; 25% still
+// catches the kind of multiplicative orchestration regression the tier exists to
+// guard (an accidental O(n²), a dropped streaming path).
+const DefaultRegressionTolerance = 0.25
+
+// CheckRegression is the CASSETTE-tier gate: it compares this report's per-stage
+// p95 against a committed baseline and flags any stage that grew by more than
+// tol (fraction, e.g. 0.25 = +25%). It does NOT assert an absolute SLO — on
+// instant cassette replay the numbers are orchestration-only and meaningless as
+// an absolute budget; the point is "did OUR code get relatively slower." A stage
+// absent from either side is skipped (a newly-added or removed stage isn't a
+// regression). tol<=0 uses [DefaultRegressionTolerance].
+func (r Report) CheckRegression(baseline Report, tol float64) []Violation {
+	if tol <= 0 {
+		tol = DefaultRegressionTolerance
+	}
+	var out []Violation
+	for stage, cur := range r.Stages {
+		base, ok := baseline.Stages[stage]
+		if !ok || base.P95 == 0 || cur.N == 0 || base.N == 0 {
+			continue
+		}
+		ceiling := base.P95 * (1 + tol)
+		if cur.P95 > ceiling {
+			out = append(out, Violation{stage, "p95", cur.P95, ceiling})
 		}
 	}
 	return out
