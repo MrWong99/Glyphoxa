@@ -39,20 +39,57 @@ func TestCorpus_ClipDirsExist(t *testing.T) {
 	}
 }
 
+// TestCorpus_CassetteFilesExist pins that every cassette name a clip declares
+// resolves to a tests/voice-cassettes/<name>.yaml — so a renamed/missing
+// cassette fails here, not deep in a bench run. Clips marked Cassette() must
+// have all three; a partially-backed clip (e.g. bart-test, STT only) is allowed
+// but its declared names must still exist.
+func TestCorpus_CassetteFilesExist(t *testing.T) {
+	root := cassetteRoot(t)
+	for _, c := range voicebench.Corpus {
+		for _, name := range []string{c.STTCassette, c.TTSCassette, c.LLMCassette} {
+			if name == "" {
+				continue
+			}
+			p := filepath.Join(root, name+".yaml")
+			if _, err := os.Stat(p); err != nil {
+				t.Errorf("corpus clip %q cassette %q: %v", c.Dir, name, err)
+			}
+		}
+	}
+	// At least one clip must be fully cassette-backed, else the keyless tier has
+	// nothing to drive.
+	var anyComplete bool
+	for _, c := range voicebench.Corpus {
+		anyComplete = anyComplete || c.Cassette()
+	}
+	if !anyComplete {
+		t.Error("no cassette-complete clip in Corpus; keyless tier cannot run")
+	}
+}
+
 // clipsRoot walks up from the package dir to find tests/voice-clips/.
-func clipsRoot(t *testing.T) string {
+func clipsRoot(t *testing.T) string { return repoSubdir(t, filepath.Join("tests", "voice-clips")) }
+
+// cassetteRoot walks up to find tests/voice-cassettes/.
+func cassetteRoot(t *testing.T) string {
+	return repoSubdir(t, filepath.Join("tests", "voice-cassettes"))
+}
+
+// repoSubdir walks up from the package dir to find a repo-relative subdir.
+func repoSubdir(t *testing.T, rel string) string {
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 8; i++ {
-		cand := filepath.Join(dir, "tests", "voice-clips")
+		cand := filepath.Join(dir, rel)
 		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
 			return cand
 		}
 		dir = filepath.Dir(dir)
 	}
-	t.Skip("tests/voice-clips not found from package dir; skipping clip-existence check")
+	t.Skipf("%s not found from package dir; skipping existence check", rel)
 	return ""
 }

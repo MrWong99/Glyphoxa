@@ -30,26 +30,54 @@ const (
 type Clip struct {
 	Dir  string // directory name under tests/voice-clips/
 	Tier Tier
+	// Cassette base-names under tests/voice-cassettes/ for the keyless tier:
+	// voicecassette.LoadSTT/LoadTTS/LoadLLM(t, name). A clip is cassette-COMPLETE
+	// only when all three resolve; STT and LLM (prompt-hash keyed) are
+	// load-bearing for the reply path. Empty = that provider has no cassette yet.
+	STTCassette string
+	TTSCassette string
+	LLMCassette string
 }
 
-// Corpus is the bench manifest: which existing clips feed which tier. It reuses
-// the tests/voice-clips/ clips rather than minting new audio (new dice/bait
-// clips need a paid TTS render or a recorded take — a follow-up, see the
-// reasoning-bait gap below). The cassette tier replays STT/TTS/LLM from
-// cassettes, so a clip's *audio* drives VAD+codec while the transcript/reply
-// come from the cassette — meaning tiering is about which orchestration path the
-// clip's transcript provokes, not the raw audio.
+// Cassette reports whether the clip has the full STT+TTS+LLM cassette set, so
+// the keyless cassette tier can drive it end-to-end with no keys.
+func (c Clip) Cassette() bool {
+	return c.STTCassette != "" && c.TTSCassette != "" && c.LLMCassette != ""
+}
+
+// Corpus is the bench manifest: which clips feed which tier, with the cassette
+// names that back the keyless tier. It reuses tests/voice-clips/ audio (which
+// drives real VAD+codec) and tests/voice-cassettes/ for the network providers,
+// so tiering is about which orchestration path the clip provokes, not the audio.
 //
-// GAP: there is no reasoning-bait clip yet (the H1/B2 tier). The existing corpus
-// has trivial (bart-test) and dice (hello-test / two-utterance-test) but nothing
-// that provokes deep thinking. Recording one ("if three travelers split a
-// 17-copper tab…") + its STT/LLM cassettes is the follow-up that lets the
-// cassette tier exercise B2's path keylessly; until then TierReasoningBait is
-// covered only by the live A/B (TestLive_ThinkingCap_AB) on the gemini adapter.
+// CASSETTE COVERAGE (what exists in tests/voice-cassettes/ today):
+//   - hello-test: stt-hello-test + tts-hello-test + llm-tool-dice → COMPLETE,
+//     and the only dice/tool-loop clip with a full set. The de-risk clip: the
+//     LLM cassette is prompt-hash keyed, so the reply-path assembly must
+//     reproduce the recorded prompt exactly — stand the rig up here first.
+//   - ttrpg-intro-en/de: stt + tts + the llm-agent-greet (no-tool) cassette →
+//     COMPLETE for a trivial (no tool) turn.
+//   - bart-test: stt only (no tts cassette) → NOT cassette-complete; live-tier
+//     only until a tts-bart-test is recorded (recording needs keys, gated).
+//
+// GAP: no reasoning-bait clip/cassette yet (the H1/B2 tier). Until one is
+// recorded, TierReasoningBait is covered only by the live A/B
+// (TestLive_ThinkingCap_AB) on the gemini adapter, not the cassette tier.
 var Corpus = []Clip{
-	{Dir: "bart-test", Tier: TierTrivial},
-	{Dir: "hello-test", Tier: TierDice},
-	{Dir: "two-utterance-test", Tier: TierDice},
+	{
+		Dir: "hello-test", Tier: TierDice,
+		STTCassette: "stt-hello-test", TTSCassette: "tts-hello-test", LLMCassette: "llm-tool-dice",
+	},
+	{
+		Dir: "ttrpg-intro-en", Tier: TierTrivial,
+		STTCassette: "stt-ttrpg-intro-en", TTSCassette: "tts-ttrpg-intro-en", LLMCassette: "llm-agent-greet",
+	},
+	{
+		Dir: "ttrpg-intro-de", Tier: TierTrivial,
+		STTCassette: "stt-ttrpg-intro-de", TTSCassette: "tts-ttrpg-intro-de", LLMCassette: "llm-agent-greet",
+	},
+	// bart-test has only an STT cassette → live tier only for now.
+	{Dir: "bart-test", Tier: TierTrivial, STTCassette: "stt-bart-test"},
 }
 
 // ClipsFor returns the corpus clips in the given tiers (all clips if none
