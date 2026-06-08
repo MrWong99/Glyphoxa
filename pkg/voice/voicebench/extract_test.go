@@ -16,13 +16,15 @@ func at(ms int) time.Time {
 
 // TestAccumulator_DerivableStages pins the stages the bench computes TODAY from
 // existing bus timestamps — the boundaries that must stay reconciled with A3's
-// subscriber (#4): vad_hangover, address_detect, llm_turn. One synthetic turn
-// with known offsets yields exact spans; absent #4 hooks, response_latency and
-// llm_round are intentionally not present (Check skips them).
+// subscriber (#4): address_detect and llm_turn. One synthetic turn with known
+// offsets yields exact spans. vad_hangover, response_latency and llm_round are
+// NOT derivable from today's events (vad_hangover would be utterance duration,
+// not the trailing-silence wait; the other two need #4's hooks) so they must be
+// absent — Check skips them rather than asserting a wrong number.
 func TestAccumulator_DerivableStages(t *testing.T) {
-	// speech_start@100, speech_end@600 (hangover 500), stt.final@700,
-	// address.routed@760 (address_detect 60), first tts.invoked@1300
-	// (llm_turn 540 from route).
+	// stt.final@700, address.routed@760 (address_detect 60), first
+	// tts.invoked@1300 (llm_turn 540 from route). VAD events are present but do
+	// NOT produce a hangover span — that's the whole point of this assertion.
 	events := []voiceevent.Event{
 		voiceevent.VADSpeechStart{At: at(100)},
 		voiceevent.VADSpeechEnd{At: at(600)},
@@ -37,7 +39,6 @@ func TestAccumulator_DerivableStages(t *testing.T) {
 	r := acc.Build()
 
 	want := map[voicebench.Stage]float64{
-		voicebench.StageVADHangover:   500,
 		voicebench.StageAddressDetect: 60,
 		voicebench.StageLLMTurn:       540,
 	}
@@ -51,13 +52,16 @@ func TestAccumulator_DerivableStages(t *testing.T) {
 			t.Errorf("stage %q p50 = %v ms, want %v ms", stage, d.P50, ms)
 		}
 	}
-	// The headline + per-round stages need #4's hooks; they must be absent now,
-	// not a misleading zero.
-	if _, ok := r.Stages[voicebench.StageResponseLatency]; ok {
-		t.Error("response_latency present before A3 first-audio hook landed; want absent")
-	}
-	if _, ok := r.Stages[voicebench.StageLLMRound]; ok {
-		t.Error("llm_round present before A3 per-round hook landed; want absent")
+	// Stages that need #4's hooks (or a hangover derivation we don't have) must
+	// be absent, not a misleading zero/duration.
+	for _, notYet := range []voicebench.Stage{
+		voicebench.StageResponseLatency,
+		voicebench.StageLLMRound,
+		voicebench.StageVADHangover,
+	} {
+		if _, ok := r.Stages[notYet]; ok {
+			t.Errorf("stage %q present before its A3 derivation landed; want absent", notYet)
+		}
 	}
 	if r.N != 1 || r.Tier != "cassette" {
 		t.Errorf("report header = N %d tier %q, want 1/cassette", r.N, r.Tier)

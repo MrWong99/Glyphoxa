@@ -21,13 +21,16 @@ type turnSpans map[Stage]time.Duration
 //   - address_detect = AddressRouted.At − STTFinal.At
 //   - llm_turn       = first TTSInvoked.At − AddressRouted.At   (route → first
 //     sentence dispatched; the whole LLM turn incl. tool rounds)
-//   - vad_hangover   = VADSpeechEnd.At − last VADSpeechStart.At (the fixed
-//     end-of-speech cost B3 tunes)
 //
-// SEAMED — needs A3 (#4) hooks, intentionally left unset so Check() skips them
-// rather than asserting a wrong number:
+// SEAMED — needs A3 (#4) hooks/derivation, intentionally left unset so Check()
+// skips them rather than asserting a wrong number:
 //   - response_latency (HEADLINE) = first-audio-out.At − VADSpeechEnd.At
 //   - llm_round (per Provider.Complete, round_index/had_tool_call)
+//   - vad_hangover — NOT derivable from VADSpeechStart/End: that delta is the
+//     utterance DURATION, not the trailing-silence wait. The hangover is the
+//     fixed minSilenceFrames×32ms cost between true-end-of-speech (no bus event)
+//     and the speech_end declaration. Take it from A3's subscriber definition or
+//     a dedicated hook; do not reconstruct it from the two VAD timestamps.
 //   - tts_ttfb / tts_total / stt_request / codec_* (some need the codec/TTS taps)
 //
 // When #4 publishes the first-audio and per-round events, add their cases here
@@ -36,15 +39,11 @@ type turnSpans map[Stage]time.Duration
 func extractTurn(events []voiceevent.Event) turnSpans {
 	spans := turnSpans{}
 
-	var lastSpeechStart, speechEnd, sttFinal, addrRouted, firstTTS time.Time
-	var haveSpeechEnd, haveSTT, haveAddr, haveTTS bool
+	var sttFinal, addrRouted, firstTTS time.Time
+	var haveSTT, haveAddr, haveTTS bool
 
 	for _, e := range events {
 		switch ev := e.(type) {
-		case voiceevent.VADSpeechStart:
-			lastSpeechStart = ev.At
-		case voiceevent.VADSpeechEnd:
-			speechEnd, haveSpeechEnd = ev.At, true
 		case voiceevent.STTFinal:
 			sttFinal, haveSTT = ev.At, true
 		case voiceevent.AddressRouted:
@@ -58,9 +57,6 @@ func extractTurn(events []voiceevent.Event) turnSpans {
 		// pipeline defines them; wire response_latency + llm_round at that point.
 	}
 
-	if haveSpeechEnd && !lastSpeechStart.IsZero() {
-		spans[StageVADHangover] = speechEnd.Sub(lastSpeechStart)
-	}
 	if haveAddr && haveSTT {
 		spans[StageAddressDetect] = addrRouted.Sub(sttFinal)
 	}
