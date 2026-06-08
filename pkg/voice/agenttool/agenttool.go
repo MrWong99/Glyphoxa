@@ -22,19 +22,56 @@ package agenttool
 
 import (
 	"context"
+	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
+
+// roundCounterKey is the context key under which [Engine.Generate] stores a
+// fresh per-turn round counter (an *int starting at 0). The adapter reads and
+// increments it per [tool.Provider.Generate] call so round_index is scoped to
+// one turn — never a field on the shared [providerAdapter], which would bleed
+// across the concurrent turns barge-in (ADR-0027, WithBargeIn(0)) allows.
+type roundCounterKey struct{}
+
+// withRoundCounter returns ctx carrying a fresh per-turn round counter.
+func withRoundCounter(ctx context.Context) context.Context {
+	n := 0
+	return context.WithValue(ctx, roundCounterKey{}, &n)
+}
+
+// nextRound returns the 0-based round index for this call and advances the
+// per-turn counter. A ctx without a counter (the adapter exercised outside an
+// Engine.Generate turn) yields 0 every call rather than panicking.
+func nextRound(ctx context.Context) int {
+	p, _ := ctx.Value(roundCounterKey{}).(*int)
+	if p == nil {
+		return 0
+	}
+	i := *p
+	*p++
+	return i
+}
 
 // providerAdapter makes a streaming [llm.Provider] usable as the non-streaming
 // [tool.Provider] the tool-use loop drives. model and maxTokens are baked in
 // here because [tool.Provider.Generate] carries no generation knobs — the
 // per-Agent LLM config lives on the bridge, not in the loop.
+//
+// rec/provName carry the A3 instrumentation: one [observe.StageRecorder.LLMRound]
+// span per [llm.Provider.Complete] (with round_index/had_tool_call, separating
+// H1 thinking from H2 extra rounds) plus a provider-call counter per call. Both
+// default to no-ops (observe.Discard, empty provider label) so the keyless path
+// and any caller that did not opt in stay silent.
 type providerAdapter struct {
 	provider  llm.Provider
 	model     string
 	maxTokens int
+
+	rec      observe.StageRecorder
+	provName observe.Provider
 }
 
 // Generate implements [tool.Provider]. It issues one streaming completion for
@@ -42,7 +79,15 @@ type providerAdapter struct {
 // accumulated assistant text plus any tool calls the model requested. A
 // Provider start error propagates; a mid-stream close simply ends accumulation
 // (matching the adapter's documented behaviour).
+//
+// It records one LLMRound span around the Complete+drain (the H1/H2 cut) and a
+// ProviderCall/ProviderError counter for the call. round_index comes from the
+// per-turn counter in ctx (see [withRoundCounter]); had_tool_call is known once
+// the stream is drained.
 func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, tools []tool.Decl) (tool.AssistantMessage, error) {
+	round := nextRound(ctx)
+	start := time.Now()
+
 	stream, err := a.provider.Complete(ctx, llm.Request{
 		Model:     a.model,
 		MaxTokens: a.maxTokens,
@@ -50,6 +95,15 @@ func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, 
 		Tools:     toLLMToolDefs(tools),
 	})
 	if err != nil {
+		// A start failure is a provider error with no round span (no completion
+		// happened); attribute it to the LLM stage. A cancelled ctx is a timeout-
+		// shaped outcome rather than a vendor error.
+		outcome := observe.OutcomeError
+		if ctx.Err() != nil {
+			outcome = observe.OutcomeTimeout
+		}
+		a.rec.ProviderCall(observe.StageLLM, a.provName, outcome)
+		a.rec.ProviderError(observe.StageLLM, a.provName)
 		return tool.AssistantMessage{}, err
 	}
 
@@ -68,6 +122,10 @@ func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, 
 		}
 	}
 	out.Text = string(text)
+
+	hadToolCall := len(out.ToolCalls) > 0
+	a.rec.LLMRound(a.provName, round, hadToolCall, time.Since(start))
+	a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
 	return out, nil
 }
 
@@ -77,21 +135,62 @@ type Engine struct {
 	loop *tool.Loop
 }
 
+// EngineOption configures a [NewEngine]. The only option today is
+// [WithMetrics], which opts the per-round LLM instrumentation in; without it
+// the Engine records nothing (the keyless default).
+type EngineOption func(*engineConfig)
+
+// engineConfig collects the optional [NewEngine] settings before the adapter is
+// built. The zero value is the no-op recorder + empty provider label.
+type engineConfig struct {
+	rec      observe.StageRecorder
+	provName observe.Provider
+}
+
+// WithMetrics injects the A3 per-round instrumentation: rec receives one
+// [observe.StageRecorder.LLMRound] span per [llm.Provider.Complete] inside the
+// loop (round_index/had_tool_call) plus a provider-call counter, labelled with
+// provName (the bounded provider enum for the wired [llm.Provider]). A nil rec
+// leaves the no-op default in place. Benchmarks inject their own recorder to
+// capture per-round numbers (C1); the live binary injects the Prometheus
+// adapter (A2).
+func WithMetrics(rec observe.StageRecorder, provName observe.Provider) EngineOption {
+	return func(c *engineConfig) {
+		if rec != nil {
+			c.rec = rec
+		}
+		c.provName = provName
+	}
+}
+
 // NewEngine builds an [Engine] over a streaming [llm.Provider] and the Agent's
 // tool grants. model/maxTokens are the per-Agent LLM config used for every
 // generation step. provider and grants must be non-nil ([tool.NewLoop] panics
 // otherwise) — they are wiring requirements. maxRounds caps tool-call rounds;
-// zero uses [tool.DefaultMaxRounds].
-func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTokens, maxRounds int) *Engine {
-	loop := tool.NewLoop(providerAdapter{provider: provider, model: model, maxTokens: maxTokens}, grants)
+// zero uses [tool.DefaultMaxRounds]. Pass [WithMetrics] to enable the A3 per-
+// round instrumentation; without it the adapter records nothing.
+func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTokens, maxRounds int, opts ...EngineOption) *Engine {
+	cfg := engineConfig{rec: observe.Discard{}}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	loop := tool.NewLoop(providerAdapter{
+		provider:  provider,
+		model:     model,
+		maxTokens: maxTokens,
+		rec:       cfg.rec,
+		provName:  cfg.provName,
+	}, grants)
 	loop.MaxRounds = maxRounds
 	return &Engine{loop: loop}
 }
 
 // Generate implements [agent.Engine]. It converts the assembled Hot Context to
-// [tool.Message]s and runs the loop to its final text.
+// [tool.Message]s and runs the loop to its final text. It installs a fresh
+// per-turn round counter into ctx so the adapter's LLMRound spans index from 0
+// for this turn and never share state with a concurrent turn (barge-in).
 func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
-	return e.loop.Run(ctx, toToolMessages(messages))
+	return e.loop.Run(withRoundCounter(ctx), toToolMessages(messages))
 }
 
 // toToolMessages converts the agent loop's [llm.Message]s into [tool.Message]s.
