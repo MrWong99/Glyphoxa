@@ -17,10 +17,11 @@ func TestRecorderTap_CapturesRecorderOnlyStages(t *testing.T) {
 	tap := rec.(*recorderTap)
 
 	// Two LLM rounds in one turn (the H2 tool-loop shape) + the fixed hangover.
-	rec.LLMRound("gemini", 0, false, 420*time.Millisecond)
-	rec.LLMRound("gemini", 1, true, 380*time.Millisecond)
+	// Use observe's bounded enum constants, not bare strings (ADR-0032 §2.1).
+	rec.LLMRound(observe.ProviderGemini, 0, false, 420*time.Millisecond)
+	rec.LLMRound(observe.ProviderGemini, 1, true, 380*time.Millisecond)
 	rec.VADHangover(256 * time.Millisecond)
-	rec.STTRequest("elevenlabs", 300*time.Millisecond)
+	rec.STTRequest(observe.ProviderElevenLabs, 300*time.Millisecond)
 
 	if got := tap.samples(StageLLMRound); len(got) != 2 {
 		t.Errorf("llm_round samples = %d, want 2", len(got))
@@ -41,11 +42,11 @@ func TestRecorderTap_CapturesRecorderOnlyStages(t *testing.T) {
 // TestRecorderTap_ProviderTally pins the provider call/error counters feed.
 func TestRecorderTap_ProviderTally(t *testing.T) {
 	tap := newRecorderTap()
-	tap.ProviderCall(observe.Stage("llm"), "gemini", observe.Outcome("ok"))
-	tap.ProviderCall(observe.Stage("llm"), "gemini", observe.Outcome("error"))
-	tap.ProviderError(observe.Stage("llm"), "gemini")
+	tap.ProviderCall(observe.StageLLM, observe.ProviderGemini, observe.OutcomeOK)
+	tap.ProviderCall(observe.StageLLM, observe.ProviderGemini, observe.OutcomeError)
+	tap.ProviderError(observe.StageLLM, observe.ProviderGemini)
 
-	if tap.calls[observe.Outcome("ok")] != 1 || tap.calls[observe.Outcome("error")] != 1 {
+	if tap.calls[observe.OutcomeOK] != 1 || tap.calls[observe.OutcomeError] != 1 {
 		t.Errorf("call tally = %v, want one ok + one error", tap.calls)
 	}
 	if tap.errors != 1 {
