@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -66,6 +67,12 @@ type Segmenter struct {
 	stt *STT
 
 	mu sync.Mutex
+	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of the most recent
+	// speech-end transition, captured so the flushed utterance's STTFinal can
+	// carry it forward (A3): it anchors the headline response-latency span at the
+	// turn's true speech-end without the metrics subscriber guessing. Zero until
+	// the first speech-end, and for a Flush with no preceding transition.
+	speechEndAt time.Time
 	// ctx is the context handed to STT.Transcribe when a segment flushes. It is
 	// the conversation's lifetime context, captured at Bind and cleared by the
 	// returned cancel; storing it lets Process stay frame-only (ctx-free) so the
@@ -106,9 +113,12 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		s.listening = true
 		s.mu.Unlock()
 	})
-	unsubEnd := voiceevent.On(bus, func(voiceevent.VADSpeechEnd) {
+	unsubEnd := voiceevent.On(bus, func(end voiceevent.VADSpeechEnd) {
 		s.mu.Lock()
 		s.listening = false
+		// Remember this turn's true speech-end so the flushed utterance's STTFinal
+		// can carry it (A3); the next Process call after speech ends flushes.
+		s.speechEndAt = end.At
 		s.mu.Unlock()
 	})
 	return func() {
@@ -143,9 +153,10 @@ func (s *Segmenter) Process(frame audio.Frame) error {
 	seg := s.buf
 	s.buf = nil
 	ctx := s.ctx
+	speechEndAt := s.speechEndAt
 	s.mu.Unlock()
 
-	return s.transcribe(ctx, seg)
+	return s.transcribe(ctx, seg, speechEndAt)
 }
 
 // Flush transcribes any buffered utterance audio immediately, regardless of
@@ -162,23 +173,27 @@ func (s *Segmenter) Flush() error {
 	s.buf = nil
 	s.listening = false
 	ctx := s.ctx
+	// A Flush has no speech-end transition (end-of-stream), so it carries the
+	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
 	s.mu.Unlock()
 
-	return s.transcribe(ctx, seg)
+	return s.transcribe(ctx, seg, time.Time{})
 }
 
-// transcribe hands a flushed segment to STT under ctx. An empty segment is a
-// no-op (a speech-end with nothing buffered, or a redundant Flush). A nil ctx —
-// the segmenter was never bound, or was already torn down — falls back to a
-// background context so a late flush still completes rather than panicking.
-func (s *Segmenter) transcribe(ctx context.Context, seg []audio.Frame) error {
+// transcribe hands a flushed segment to STT under ctx, carrying the turn's
+// speech-end time so STT can stamp it on the published STTFinal (A3). An empty
+// segment is a no-op (a speech-end with nothing buffered, or a redundant Flush).
+// A nil ctx — the segmenter was never bound, or was already torn down — falls
+// back to a background context so a late flush still completes rather than
+// panicking.
+func (s *Segmenter) transcribe(ctx context.Context, seg []audio.Frame, speechEndAt time.Time) error {
 	if len(seg) == 0 {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return s.stt.Transcribe(ctx, seg)
+	return s.stt.Transcribe(withSpeechEndAt(ctx, speechEndAt), seg)
 }
 
 // Reply is one thing an addressed Agent should say: a single sentence and the
@@ -242,6 +257,12 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		panic("orchestrator.Replier.Bind: bus must not be nil")
 	}
 	return voiceevent.On(bus, func(e voiceevent.AddressRouted) {
+		// Carry the turn correlation id (A3) into the dispatch context so the TTS
+		// stage and the wire tee stamp the same id on TTSInvoked / FirstAudio.
+		// Installed before the floor is taken so both the sync and barge-in
+		// branches inherit it.
+		ctx := voiceevent.WithTurnID(ctx, e.TurnID)
+
 		// Default (no floor): dispatch synchronously on the bus goroutine — the
 		// behaviour every non-barge-in caller relies on.
 		if r.floor == nil {

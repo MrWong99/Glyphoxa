@@ -46,9 +46,34 @@ func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator.STT.Transcribe: %w", err)
 	}
+	// A turn is born here (A3): mint its correlation id and carry forward the
+	// segment's speech-end time (from the Segmenter via ctx) so the headline
+	// response-latency span is anchored at the true end-of-speech.
 	s.bus.Publish(voiceevent.STTFinal{
-		At:   time.Now(),
-		Text: t.Text,
+		At:          time.Now(),
+		Text:        t.Text,
+		TurnID:      voiceevent.NewTurnID(),
+		SpeechEndAt: speechEndAtFrom(ctx),
 	})
 	return nil
+}
+
+// speechEndAtKey carries the segment's [voiceevent.VADSpeechEnd.At] from the
+// [Segmenter] to [STT.Transcribe] without widening the Transcribe signature
+// (which tracer-bullet tests and the cassette path call directly). Unexported
+// and orchestrator-internal.
+type speechEndAtKey struct{}
+
+// withSpeechEndAt returns ctx carrying the turn's speech-end time; a zero time
+// (a Flush with no speech-end transition) is carried as-is.
+func withSpeechEndAt(ctx context.Context, at time.Time) context.Context {
+	return context.WithValue(ctx, speechEndAtKey{}, at)
+}
+
+// speechEndAtFrom recovers the speech-end time, or the zero time if the segment
+// was transcribed without one (a direct Transcribe call, or an end-of-stream
+// Flush).
+func speechEndAtFrom(ctx context.Context) time.Time {
+	at, _ := ctx.Value(speechEndAtKey{}).(time.Time)
+	return at
 }

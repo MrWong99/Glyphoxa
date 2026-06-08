@@ -50,6 +50,15 @@ func TestTTSInvoked_EventName(t *testing.T) {
 	}
 }
 
+func TestFirstAudio_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := FirstAudio{}.EventName()
+	if got != "voice.first_audio" {
+		t.Errorf("EventName = %q, want %q", got, "voice.first_audio")
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 
