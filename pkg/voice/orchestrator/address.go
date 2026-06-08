@@ -70,6 +70,9 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	}
 	return voiceevent.On(bus, func(final voiceevent.STTFinal) {
 		for _, routed := range d.matcher.TargetMatch(final.Text) {
+			// Carry the turn correlation id (A3) from the utterance onto each
+			// routing decision it produced; the matcher does not know about it.
+			routed.TurnID = final.TurnID
 			bus.Publish(routed)
 		}
 	})

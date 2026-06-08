@@ -239,9 +239,14 @@ func Run(ctx context.Context, cfg Config) error {
 	// is the deterministic ordering the pump's Close() contract requires.
 	pump := wire.NewPlaybackPump(sess, cdc)
 	defer pump.Close()
-	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump)
 
-	conv, err := buildConversation(log, cfg.npc, teeSynth, cfg.StageMetrics)
+	// The orchestrator bus is created here (not inside buildConversation) so the
+	// tee can publish FirstAudio (A3 hook 1) onto the same bus the conversation's
+	// stages publish on and the metrics subscriber reads.
+	bus := voiceevent.NewBus()
+	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
+
+	conv, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -322,11 +327,10 @@ func npcVoice() tts.Voice {
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(log *slog.Logger, npc npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
-	bus := voiceevent.NewBus()
 
 	engine, err := silero.New()
 	if err != nil {

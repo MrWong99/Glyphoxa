@@ -179,10 +179,10 @@ func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 // the interface as no-ops.
 type discardMetrics struct{}
 
-func (discardMetrics) InboundFramesDropped(string, int)  {}
-func (discardMetrics) InboundUndecodableFrame(string)    {}
-func (discardMetrics) SessionOpened(string)              {}
-func (discardMetrics) SessionClosed(string)              {}
-func (discardMetrics) PlaybackStarted(string)            {}
-func (discardMetrics) PlaybackFinished(string, bool)     {}
-func (discardMetrics) BargeCancelled(string)             {}
+func (discardMetrics) InboundFramesDropped(string, int) {}
+func (discardMetrics) InboundUndecodableFrame(string)   {}
+func (discardMetrics) SessionOpened(string)             {}
+func (discardMetrics) SessionClosed(string)             {}
+func (discardMetrics) PlaybackStarted(string)           {}
+func (discardMetrics) PlaybackFinished(string, bool)    {}
+func (discardMetrics) BargeCancelled(string)            {}

@@ -2,8 +2,10 @@ package wire
 
 import (
 	"context"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 // PlaybackSink receives the audio chunks of one synthesized sentence so the
@@ -55,24 +57,28 @@ func (f PlaybackSinkFunc) HandleSentence(ctx context.Context, chunks <-chan tts.
 type TeeSynthesizer struct {
 	inner tts.Synthesizer
 	sink  PlaybackSink
+	bus   *voiceevent.Bus // optional; when set, publishes FirstAudio (A3 hook 1)
 }
 
 // NewTeeSynthesizer wraps inner so that every synthesized chunk is also
 // delivered to sink, one fresh channel per sentence. inner is the real audio
 // Synthesizer handed to [orchestrator.NewTTS]; sink is the playback path. Both
-// must be non-nil.
+// must be non-nil. bus is optional: when non-nil, the tee publishes a
+// [voiceevent.FirstAudio] the moment the first chunk of each sentence crosses to
+// the sink (A3 hook 1, the headline SLO boundary); a nil bus disables it (the
+// keyless / no-metrics path).
 //
 // AudioMarkupPrompt and every other part of the Synthesizer contract pass
 // through to inner unchanged — only Synthesize is decorated — so the wrapper is
 // safe to use anywhere a [tts.Synthesizer] is expected.
-func NewTeeSynthesizer(inner tts.Synthesizer, sink PlaybackSink) *TeeSynthesizer {
+func NewTeeSynthesizer(inner tts.Synthesizer, sink PlaybackSink, bus *voiceevent.Bus) *TeeSynthesizer {
 	if inner == nil {
 		panic("wire.NewTeeSynthesizer: inner Synthesizer must not be nil")
 	}
 	if sink == nil {
 		panic("wire.NewTeeSynthesizer: sink must not be nil")
 	}
-	return &TeeSynthesizer{inner: inner, sink: sink}
+	return &TeeSynthesizer{inner: inner, sink: sink, bus: bus}
 }
 
 // Synthesize delegates to the wrapped Synthesizer and tees the resulting chunk
@@ -96,10 +102,15 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 	play := make(chan tts.AudioChunk)
 	t.sink.HandleSentence(ctx, play)
 
+	// Recover the turn correlation id installed by the reply reactor so the
+	// FirstAudio (A3 hook 1) joins this sentence to its turn.
+	turnID := voiceevent.TurnIDFrom(ctx)
+
 	out := make(chan tts.AudioChunk)
 	go func() {
 		defer close(out)
 		defer close(play) // ADR-0012: close marks the sentence delivered/committable.
+		first := true
 		for chunk := range src {
 			// Forward to the orchestrator's drain. If the orchestrator stops
 			// reading (only on its own teardown), honour ctx so we don't leak.
@@ -107,6 +118,15 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 			case out <- chunk:
 			case <-ctx.Done():
 				return
+			}
+			// First chunk crossing to the sink is the headline SLO boundary
+			// ("first audio handed to the pump", A3 hook 1): stamp and publish it
+			// before the (possibly blocking) send so the moment measured is when
+			// audio became available to the pump, not when the pump drained it. A
+			// barge-cancelled sentence that never produces a chunk never publishes.
+			if first {
+				first = false
+				t.publishFirstAudio(turnID)
 			}
 			// Forward the same chunk to playback. A cancelled ctx (barge-in) ends
 			// the sentence; the deferred closes unwind both channels.
@@ -118,6 +138,17 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 		}
 	}()
 	return out, nil
+}
+
+// publishFirstAudio emits the [voiceevent.FirstAudio] for a sentence's first
+// chunk, if a bus is configured. It runs on the tee's forward goroutine — the
+// first bus publish off the reply/audio goroutine — so a metrics subscriber may
+// receive it concurrently with other turns.
+func (t *TeeSynthesizer) publishFirstAudio(turnID string) {
+	if t.bus == nil {
+		return
+	}
+	t.bus.Publish(voiceevent.FirstAudio{At: time.Now(), TurnID: turnID})
 }
 
 // AudioMarkupPrompt passes through to the wrapped Synthesizer unchanged.
