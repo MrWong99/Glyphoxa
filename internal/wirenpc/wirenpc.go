@@ -99,6 +99,13 @@ type Config struct {
 	Channel string
 	// Logger receives structured logs; nil discards them.
 	Logger *slog.Logger
+	// Metrics receives the hot-path voice counters/gauges (A2): inbound frame
+	// drops/undecodables and the sessions gauge. nil discards them. The same
+	// recorder is handed to the audio Manager (Session open/close, playback) and
+	// the inbound [wire.Pipeline] (undecodable frames) so one run's counters share
+	// a single sink. The orchestrator-sibling latency recorder (the SLO
+	// histograms) is wired separately off the bus — see buildConversation.
+	Metrics gxvoice.MetricsRecorder
 	// npc is the Character NPC this loop voices. Run resolves it; RunFromDB
 	// loads it from storage, the env-only Run path uses the hardcoded NPC.
 	npc npcSpec
@@ -189,6 +196,7 @@ func Run(ctx context.Context, cfg Config) error {
 	mgr := gxvoice.NewManager(client,
 		gxvoice.WithLogger(log),
 		gxvoice.WithDave(gxvoice.DaveAvailable()),
+		gxvoice.WithMetrics(cfg.Metrics),
 	)
 	defer mgr.Close()
 
@@ -232,8 +240,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
-	// DecodeInbound into the orchestrator.
-	pipe := wire.NewPipeline(conv, cdc, log)
+	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with
+	// the guild and shares the run's MetricsRecorder.
+	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics)
 	return pipe.Run(ctx, sess)
 }
 
