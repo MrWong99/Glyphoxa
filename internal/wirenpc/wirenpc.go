@@ -47,6 +47,21 @@ const (
 	// vadFrameMs is the orchestrator frame size; the inbound codec must reframe
 	// Discord's 48 kHz Opus to this 16 kHz / 32 ms (512-sample) cadence.
 	vadFrameMs = 32
+	// vadMinSilenceFrames is the consecutive sub-threshold frames Silero needs to
+	// leave the speaking state — the end-of-speech hangover, a fixed cost on every
+	// turn before STT can start (B3). Lowered from silero's default 15 (480 ms) to
+	// 12 (384 ms), a ~96 ms per-turn win.
+	//
+	// The plan proposed 8 (256 ms), but the corpus validation
+	// (TestB3_HangoverTuning_CorpusSegmentation) refuted it: at 8 the purpose-built
+	// two-utterance-test clip splits a single utterance at an internal pause
+	// (3 segments instead of its designed 2) — the exact clipped-tail / premature-
+	// cut failure mode the task warned against. That clip only recovers its correct
+	// count at 11; 12 keeps it correct with one frame of margin against real-mic
+	// variation. The longer natural ttrpg intros have inter-sentence pauses that
+	// any value below 15 splits, so they are excluded from the equality gate — that
+	// is a (benign) extra turn boundary at a real pause, not a mid-word cut.
+	vadMinSilenceFrames = 12
 
 	// elevenGeorgeVoiceID is the ElevenLabs "George" public preset — a neutral
 	// stand-in voice for the NPC.
@@ -346,7 +361,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		stageMetrics = observe.Discard{}
 	}
 
-	engine, err := silero.New()
+	engine, err := silero.New(silero.WithMinSilenceFrames(vadMinSilenceFrames))
 	if err != nil {
 		return nil, fmt.Errorf("init Silero VAD: %w", err)
 	}
