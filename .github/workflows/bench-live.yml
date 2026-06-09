@@ -1,0 +1,73 @@
+name: bench-live
+
+# Nightly live-tier latency benchmark (Sprint 2, Epic C2 / ADR-0033 addendum).
+# Drives the real Gemini + ElevenLabs stack through the corpus and asserts the
+# absolute EngineeringSLO (≤1.2s p50 / ≤2.5s p95 on response_latency) — the SAME
+# budgets observe's A2 alert rules use. A breach reds this run as a "latency
+# regression" signal; it NEVER gates a PR (the every-PR cassette gate in ci.yml
+# is the relative-regression tripwire). The cadence mirrors record-live.yml.
+on:
+  schedule:
+    - cron: "30 6 * * *" # 06:30 UTC daily (after the weekly record-live at 06:00).
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to benchmark"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: live latency benchmark
+    runs-on: ubuntu-latest
+    # Skip silently on forks without the secrets configured, mirroring
+    # record-live.yml — avoids a red run on every fork. The real key gate is the
+    # t.Fatalf in TestBench_LiveSLO when a key env is empty.
+    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Cache ONNX runtime
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/glyphoxa/onnxruntime
+          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
+
+      - name: Install libopus
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
+
+      # The live tier needs real silero VAD + codec (opus) AND real vendor keys
+      # (live). GX_BENCH_OUT names the JSON report the next step uploads. The
+      # test asserts CheckSLO and fails the run on an over-budget headline span.
+      - name: Live latency benchmark (absolute SLO gate)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          GX_BENCH_OUT: ${{ runner.temp }}/live-latency.json
+        run: |
+          if [ -z "$GEMINI_API_KEY" ] || [ -z "$ELEVENLABS_API_KEY" ]; then
+            echo "GEMINI_API_KEY and ELEVENLABS_API_KEY secrets must be set under repo Settings → Secrets and variables → Actions." >&2
+            exit 1
+          fi
+          go test -v -tags "bench opus nolibopusfile live" -run '^TestBench_LiveSLO$' ./pkg/voice/voicebench/
+
+      # Persist the per-stage p50/p95/p99 report regardless of pass/fail so a
+      # reviewer can read the distribution even on an SLO breach.
+      - name: Upload latency report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-latency-report
+          path: ${{ runner.temp }}/live-latency.json
+          if-no-files-found: warn

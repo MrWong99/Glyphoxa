@@ -76,6 +76,7 @@ func (t *recorderTap) drain() map[Stage][]time.Duration {
 //     (per `Provider.Complete`);
 //   - observe's `StageSubscriber` (installed on the bus by the rig): the
 //     bus-derived spans `ResponseLatency` / `AddressDetect` / `TTSTimeToFirstByte`.
+//
 // Because the subscriber is the single bus emitter — the exact one prod runs —
 // the captured numbers are definitionally the Prometheus series (bench == series)
 // with no re-derivation and no double-count.
@@ -111,12 +112,12 @@ func (t *recorderTap) TTSTimeToFirstByte(_ observe.Provider, d time.Duration) {
 
 // Unwired (carry-over #11): no caller records these yet. No-ops so the tap
 // satisfies the interface; the bench must not assert non-zero on them.
-func (t *recorderTap) VADHangover(time.Duration)                          {}
-func (t *recorderTap) CodecDecode(time.Duration)                          {}
-func (t *recorderTap) CodecEncode(time.Duration)                          {}
-func (t *recorderTap) STTRequest(observe.Provider, time.Duration)         {}
-func (t *recorderTap) TTSTotal(observe.Provider, time.Duration)           {}
-func (t *recorderTap) LLMTurn(observe.Provider, time.Duration)            {}
+func (t *recorderTap) VADHangover(time.Duration)                  {}
+func (t *recorderTap) CodecDecode(time.Duration)                  {}
+func (t *recorderTap) CodecEncode(time.Duration)                  {}
+func (t *recorderTap) STTRequest(observe.Provider, time.Duration) {}
+func (t *recorderTap) TTSTotal(observe.Provider, time.Duration)   {}
+func (t *recorderTap) LLMTurn(observe.Provider, time.Duration)    {}
 
 // compile-time assertion: the tap satisfies the recorder the orchestrator drives.
 var _ observe.StageRecorder = (*recorderTap)(nil)

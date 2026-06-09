@@ -79,6 +79,45 @@ jobs:
       - name: Integration test (with Docker)
         run: go test -race -tags=integration ./...
 
+  audio:
+    name: audio / CGO (opus + bench)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Cache ONNX runtime
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/glyphoxa/onnxruntime
+          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
+
+      # The opus codec (`//go:build opus`) links the system libopus via
+      # github.com/hraban/opus → pkg-config opus, paired with `nolibopusfile`
+      # so libopusfile isn't required (codec.go header). This is the ADR-0033
+      # "CGO/audio builds" job that keeps the live binary from silently breaking
+      # while the default suite stays CGO-light (codec stubbed).
+      - name: Install libopus
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
+
+      - name: Build + vet (opus tags)
+        run: |
+          go build -tags "opus nolibopusfile" ./...
+          go vet -tags "opus nolibopusfile" ./...
+
+      # The cassette-tier latency benchmark (Epic C): real silero VAD + codec,
+      # cassettes for the network providers — keyless (no secrets, ADR-0021) but
+      # CGO, so it runs HERE, not in the default no-CGO gate (ADR-0033 addendum).
+      # It replays the corpus and diffs each stage's p95 against the committed
+      # baseline (Report.CheckRegression); an absolute SLO is the live tier's job.
+      - name: Cassette latency benchmark (regression gate)
+        run: go test -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
