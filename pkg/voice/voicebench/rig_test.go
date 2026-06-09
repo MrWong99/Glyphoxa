@@ -18,15 +18,39 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
 )
 
-// stubProvider is a deterministic llm.Provider: it streams one fixed sentence
-// and an end_turn, no tools. It sidesteps the prompt_hash entirely — the
-// orchestration-floor run measures the pipeline's plumbing latency, for which
-// the LLM's content is irrelevant (only that a reply flows).
+// stubProvider is a deterministic llm.Provider: no tools, no prompt_hash — the
+// orchestration-floor run measures plumbing latency, for which the LLM's content
+// is irrelevant (only that a reply flows). It streams its reply as MULTIPLE
+// deltas split mid-sentence, so the agent's sentence splitter dispatches sentence
+// N to TTS while sentence N+1 is still "arriving" — the exact B1 sentence-stream
+// path the response_latency / tts_ttfb spans measure. A single-event stub would
+// collapse the reply to one TTS dispatch and silently under-test that win, so the
+// default reply is deliberately three sentences. text overrides the default.
 type stubProvider struct{ text string }
 
+// defaultStubReply is a deterministic 3-sentence reply. The splitter cuts on
+// terminal punctuation + whitespace, so this yields three TTS dispatches → three
+// per-sentence Tee→FirstAudio publishes per turn.
+const defaultStubReply = "Coming right up. The ale is fresh today. Anything else for you?"
+
 func (s stubProvider) Complete(ctx context.Context, _ llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent, 2)
-	ch <- llm.StreamEvent{Type: llm.EventText, Text: s.text}
+	reply := s.text
+	if reply == "" {
+		reply = defaultStubReply
+	}
+	// Chunk the reply into small deltas that straddle sentence boundaries, the way
+	// a real token stream does — so the first sentence completes (and dispatches)
+	// before the last delta arrives. Fixed-width slicing is deterministic and
+	// boundary-agnostic on purpose: it proves the splitter, not a pre-split feed.
+	const delta = 7
+	ch := make(chan llm.StreamEvent, len(reply)/delta+2)
+	for i := 0; i < len(reply); i += delta {
+		end := i + delta
+		if end > len(reply) {
+			end = len(reply)
+		}
+		ch <- llm.StreamEvent{Type: llm.EventText, Text: reply[i:end]}
+	}
 	ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
 	close(ch)
 	return ch, nil
@@ -110,7 +134,7 @@ func TestRig_StubFlow_PublishesFirstAudio(t *testing.T) {
 		VAD:      orchestrator.NewVAD(h.Bus, &scriptVADRig{seq: []vad.VADEventType{vad.VADSpeechStart, vad.VADSpeechEnd}}),
 		STT:      orchestrator.NewSTT(h.Bus, stubRecognizer{text: "another ale"}),
 		Persona:  agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper."},
-		Provider: stubProvider{text: "Coming right up."},
+		Provider: stubProvider{}, // default 3-sentence reply → exercises B1 per-sentence dispatch
 		Synth:    stubSynth{},
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),
 		Recorder: tap,
@@ -159,6 +183,17 @@ func TestRig_StubFlow_PublishesFirstAudio(t *testing.T) {
 	// assertion silently un-covers whether the cap metric reaches the bench.
 	if dist, ok := r.Stages[StageLLMRound]; !ok || dist.N == 0 {
 		t.Errorf("no llm_round span captured; the B2 adapter signal didn't reach the report. Stages: %v", stageKeys(r))
+	}
+
+	// The B1 per-sentence proof: the default stub reply is 3 sentences, so the
+	// streaming reply path must dispatch each one separately → MORE tts_ttfb
+	// samples than turns (one per sentence). A single tts_ttfb on a 1-turn clip
+	// means the rig regressed to the non-streaming WithReply path (whole reply as
+	// one Reply), which silently under-tests the highest-leverage latency fix.
+	if dist, ok := r.Stages[StageTTSTTFB]; !ok || dist.N <= r.N {
+		t.Errorf("tts_ttfb N = %d for %d turn(s); want >1 per turn (per-sentence dispatch). "+
+			"N<=turns ⇒ the reply collapsed to one dispatch (non-streaming path?). Stages: %v",
+			dist.N, r.N, stageKeys(r))
 	}
 }
 
