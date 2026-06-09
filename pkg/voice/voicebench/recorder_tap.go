@@ -15,11 +15,12 @@ import (
 // interface, so a captured number is definitionally the same value the
 // Prometheus adapter would observe (bench == series), with no re-derivation.
 //
-// It does NOT capture the bus-owned stages (response_latency / address_detect /
-// tts_ttfb) — those come from observe's separate bus subscriber in prod and from
-// the bench's own bus extraction here ([extractTurn]); capturing them on the tap
-// too would double-count. See the StageRecorder methods below for the full
-// ownership split.
+// It ALSO captures the bus-owned stages (response_latency / address_detect /
+// tts_ttfb) — but only because the bench installs observe's own
+// [observe.StageSubscriber] onto the bus pointing at THIS tap (rig.go). That
+// subscriber is the single bus emitter (the same one prod runs), so there is no
+// double-count: the tap no longer derives those stages itself. See the
+// StageRecorder methods below for the full ownership split.
 //
 // Safe for concurrent use: the orchestrator records from multiple goroutines.
 type recorderTap struct {
@@ -69,17 +70,15 @@ func (t *recorderTap) drain() map[Stage][]time.Duration {
 
 // observe.StageRecorder implementation.
 //
-// OWNERSHIP (reconciled with observe, the metrics reviewer): the orchestrator
-// injects ONE StageRecorder, and the agenttool provider adapter is the only
-// caller that records onto it — `LLMRound`, `ProviderCall`, `ProviderError`,
-// per `Provider.Complete`. The other stages are NOT recorded onto the injected
-// recorder in prod: response_latency / address_detect / tts_ttfb come from
-// observe's separate bus `StageSubscriber`, which the bench replaces with its
-// own bus extraction ([extractTurn], same `FirstAudio`−`SpeechEndAt`
-// derivation). So the tap OWNS only the agenttool-adapter spans; the other
-// methods are no-ops here to make double-counting structurally impossible — if
-// they ever start firing on the injected recorder, that's a prod change to
-// reconcile, not silent bench data.
+// OWNERSHIP (reconciled with observe, the metrics reviewer): the tap is the SOLE
+// recorder for the whole run. Two emit paths record onto it, with no overlap:
+//   - the agenttool provider adapter: `LLMRound`, `ProviderCall`, `ProviderError`
+//     (per `Provider.Complete`);
+//   - observe's `StageSubscriber` (installed on the bus by the rig): the
+//     bus-derived spans `ResponseLatency` / `AddressDetect` / `TTSTimeToFirstByte`.
+// Because the subscriber is the single bus emitter — the exact one prod runs —
+// the captured numbers are definitionally the Prometheus series (bench == series)
+// with no re-derivation and no double-count.
 //
 // vad_hangover / stt_request / tts_total / codec_* / llm_turn are interface-
 // present but UNWIRED (no caller anywhere yet — carry-over #11); they would land
@@ -99,12 +98,19 @@ func (t *recorderTap) ProviderError(_ observe.Stage, _ observe.Provider) {
 	t.mu.Unlock()
 }
 
-// Not owned by the tap — bus-derived (response_latency/address_detect/tts_ttfb)
-// or unwired (the rest). No-ops so the tap can satisfy the interface without
-// double-counting a bus-owned stage.
-func (t *recorderTap) ResponseLatency(observe.AgentRole, time.Duration)   {}
-func (t *recorderTap) AddressDetect(time.Duration)                        {}
-func (t *recorderTap) TTSTimeToFirstByte(observe.Provider, time.Duration) {}
+// Bus-derived spans, recorded by observe's StageSubscriber onto this tap.
+func (t *recorderTap) ResponseLatency(_ observe.AgentRole, d time.Duration) {
+	t.add(StageResponseLatency, d)
+}
+func (t *recorderTap) AddressDetect(d time.Duration) {
+	t.add(StageAddressDetect, d)
+}
+func (t *recorderTap) TTSTimeToFirstByte(_ observe.Provider, d time.Duration) {
+	t.add(StageTTSTTFB, d)
+}
+
+// Unwired (carry-over #11): no caller records these yet. No-ops so the tap
+// satisfies the interface; the bench must not assert non-zero on them.
 func (t *recorderTap) VADHangover(time.Duration)                          {}
 func (t *recorderTap) CodecDecode(time.Duration)                          {}
 func (t *recorderTap) CodecEncode(time.Duration)                          {}

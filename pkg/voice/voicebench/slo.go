@@ -73,13 +73,26 @@ func (r Report) CheckSLO(slos ...SLO) []Violation {
 // guard (an accidental O(n²), a dropped streaming path).
 const DefaultRegressionTolerance = 0.25
 
+// regressionNoiseFloorMs is the absolute p95 below which a stage is exempt from
+// the relative gate. On instant cassette replay the orchestration spans are
+// sub-millisecond, where a ±25% band is pure OS-scheduler jitter (the p95
+// observed swing run-to-run is itself >2x), so a relative gate on them flaps
+// without catching anything real. A stage only gates once its baseline p95
+// clears this floor — i.e. once it's large enough that a 25% growth is a genuine
+// multiplicative regression, not noise. The floor is two orders of magnitude
+// below the 1200ms headline SLO, so nothing the SLO cares about is exempted: a
+// real orchestration regression pushes a span well past 1ms before it matters.
+const regressionNoiseFloorMs = 1.0
+
 // CheckRegression is the CASSETTE-tier gate: it compares this report's per-stage
-// p95 against a committed baseline and flags any stage that grew by more than
-// tol (fraction, e.g. 0.25 = +25%). It does NOT assert an absolute SLO — on
-// instant cassette replay the numbers are orchestration-only and meaningless as
-// an absolute budget; the point is "did OUR code get relatively slower." A stage
-// absent from either side is skipped (a newly-added or removed stage isn't a
-// regression). tol<=0 uses [DefaultRegressionTolerance].
+// p95 against a committed baseline and flags any stage whose p95 BOTH cleared the
+// noise floor in the baseline AND grew by more than tol (fraction, e.g. 0.25 =
+// +25%). It does NOT assert an absolute SLO — on instant cassette replay the
+// numbers are orchestration-only and meaningless as an absolute budget; the point
+// is "did OUR code get relatively slower." A stage absent from either side, or
+// whose baseline p95 is below regressionNoiseFloorMs, is skipped (a newly-added
+// stage isn't a regression; a sub-ms span can't be gated relatively without
+// flapping on jitter). tol<=0 uses [DefaultRegressionTolerance].
 func (r Report) CheckRegression(baseline Report, tol float64) []Violation {
 	if tol <= 0 {
 		tol = DefaultRegressionTolerance
@@ -87,7 +100,7 @@ func (r Report) CheckRegression(baseline Report, tol float64) []Violation {
 	var out []Violation
 	for stage, cur := range r.Stages {
 		base, ok := baseline.Stages[stage]
-		if !ok || base.P95 == 0 || cur.N == 0 || base.N == 0 {
+		if !ok || base.P95 < regressionNoiseFloorMs || cur.N == 0 || base.N == 0 {
 			continue
 		}
 		ceiling := base.P95 * (1 + tol)

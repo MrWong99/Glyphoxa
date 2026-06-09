@@ -79,9 +79,18 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 	tee := wire.NewTeeSynthesizer(cfg.Synth, drainSink{}, cfg.Bus)
 	ttsStage := orchestrator.NewTTS(cfg.Bus, tee)
 
+	// Install observe's StageSubscriber on the bus so the bus-derived headline
+	// stages (response_latency / address_detect / tts_ttfb) are recorded onto the
+	// SAME tap the agenttool adapter records llm_round onto — reusing observe's
+	// per-TurnID grouping is the can't-drift guarantee (the bench reads the exact
+	// derivation prod's Prometheus subscriber uses, not a parallel extractor).
+	if cfg.Recorder != nil {
+		sub := observe.NewStageSubscriber(cfg.Recorder)
+		sub.Subscribe(cfg.Bus)
+	}
+
 	opts := []orchestrator.Option{
 		orchestrator.WithReply(replier.Reply()),
-		orchestrator.WithBargeIn(0),
 	}
 	if cfg.Detector != nil {
 		opts = append(opts, orchestrator.WithDetector(cfg.Detector))
