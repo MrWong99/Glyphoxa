@@ -22,6 +22,7 @@ package agenttool
 
 import (
 	"context"
+	"errors"
 
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
@@ -40,8 +41,9 @@ type providerAdapter struct {
 // Generate implements [tool.Provider]. It issues one streaming completion for
 // the conversation and declared Tools, drains the stream, and returns the
 // accumulated assistant text plus any tool calls the model requested. A
-// Provider start error propagates; a mid-stream close simply ends accumulation
-// (matching the adapter's documented behaviour).
+// Provider start error propagates. A stream that ends without an
+// [llm.EventDone] — an [llm.EventError], a ctx cancellation, or a silent
+// truncation — is an error, never a partial answer presented as complete.
 func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, tools []tool.Decl) (tool.AssistantMessage, error) {
 	stream, err := a.provider.Complete(ctx, llm.Request{
 		Model:     a.model,
@@ -55,6 +57,8 @@ func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, 
 
 	var out tool.AssistantMessage
 	var text []byte
+	var done bool
+	var streamErr error
 	for ev := range stream {
 		switch ev.Type {
 		case llm.EventText:
@@ -65,7 +69,20 @@ func (a providerAdapter) Generate(ctx context.Context, messages []tool.Message, 
 				Name:  ev.ToolCall.Name,
 				Input: ev.ToolCall.Input,
 			})
+		case llm.EventDone:
+			done = true
+		case llm.EventError:
+			streamErr = errors.New(ev.Err)
 		}
+	}
+	if streamErr != nil {
+		return tool.AssistantMessage{}, streamErr
+	}
+	if !done {
+		if err := ctx.Err(); err != nil {
+			return tool.AssistantMessage{}, err
+		}
+		return tool.AssistantMessage{}, errors.New("agenttool: completion stream ended without done event (truncated response)")
 	}
 	out.Text = string(text)
 	return out, nil
