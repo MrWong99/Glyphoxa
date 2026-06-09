@@ -126,7 +126,7 @@ type Config struct {
 func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
 	log := cfg.Logger
 	if log == nil {
-		log = slog.New(slog.NewTextHandler(discard{}, nil))
+		log = slog.New(slog.DiscardHandler)
 	}
 
 	pool, err := pgxpool.New(ctx, dsn)
@@ -164,7 +164,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	log := cfg.Logger
 	if log == nil {
-		log = slog.New(slog.NewTextHandler(discard{}, nil))
+		log = slog.New(slog.DiscardHandler)
 	}
 
 	guild, err := snowflake.Parse(cfg.Guild)
@@ -181,6 +181,10 @@ func Run(ctx context.Context, cfg Config) error {
 	// the binary was built with -tags dave; NewManager(WithDave(true)) then warns
 	// if encryption was expected but unavailable.
 	client, err := disgo.New(cfg.Token,
+		// Own disgo's logger explicitly (A1): route it through the same filtered
+		// app logger so the benign DAVE-decrypt noise is tamed even if disgo ever
+		// stops reading slog.Default().
+		bot.WithLogger(log),
 		bot.WithDefaultGateway(),
 		// disgo's default intents are IntentsNone, so the bot never receives its
 		// own VoiceStateUpdate — leaving the voice conn's ChannelID nil and
@@ -403,8 +407,3 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 	)
 	return conv, nil
 }
-
-// discard is an io.Writer sink for the fallback logger.
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }
