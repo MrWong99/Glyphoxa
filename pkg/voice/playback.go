@@ -31,6 +31,15 @@ type Source interface {
 // Opus payload — the framing disgo's dca-style streams and our TTS encoder
 // emit. A clean EOF at a frame boundary ends the source; EOF mid-frame is a
 // truncation error.
+//
+// ctx is checked between frames, NOT during a blocking Read: NextFrame runs on
+// disgo's sender goroutine, and a Read that never returns wedges that
+// goroutine beyond the reach of [Playback.Stop] and [Session.Close] — no
+// further outbound audio can flow until it unblocks. r must therefore be
+// memory-backed or otherwise prompt/closable (a file, bytes.Reader, or a pipe
+// whose writer is bounded). Do NOT wrap a network stream directly; buffer it
+// through a goroutine that owns the socket (and can be killed via its own ctx)
+// instead.
 func OpusReader(r io.Reader) Source {
 	return &opusReader{r: r}
 }
