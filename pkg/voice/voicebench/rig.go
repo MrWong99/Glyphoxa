@@ -90,7 +90,14 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 	}
 
 	opts := []orchestrator.Option{
-		orchestrator.WithReply(replier.Reply()),
+		// WithReplyStream (NOT WithReply): the streaming reply dispatches each
+		// sentence to TTS the moment it's ready (B1) — one TTSInvoked + one
+		// FirstAudio per sentence. WithReply's non-streaming turn() dispatches the
+		// whole completion as a SINGLE Reply, collapsing a multi-sentence reply to
+		// one TTS dispatch and never exercising the per-sentence Tee→FirstAudio
+		// path the response_latency / tts_ttfb spans measure. The bench must drive
+		// the same streaming path prod runs.
+		orchestrator.WithReplyStream(replier.ReplyStream()),
 	}
 	if cfg.Detector != nil {
 		opts = append(opts, orchestrator.WithDetector(cfg.Detector))
