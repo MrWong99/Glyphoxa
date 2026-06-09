@@ -101,3 +101,18 @@ func TestLast4(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenRejectsUnknownVersion pins the sealed-blob versioning: the leading
+// version byte exists so key/algorithm rotation can dispatch on it, which only
+// works if unknown versions are rejected loudly instead of fed to the AEAD.
+func TestOpenRejectsUnknownVersion(t *testing.T) {
+	c := newCipher(t)
+	sealed, err := c.Seal([]byte("data"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	sealed[0] = 0x7f
+	if _, err := c.Open(sealed); err == nil {
+		t.Fatal("Open accepted an unknown sealed-blob version")
+	}
+}

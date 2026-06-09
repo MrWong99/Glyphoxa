@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -53,13 +54,24 @@ func databaseURL() string {
 }
 
 // appCipher builds the AES-256-GCM cipher from the single app secret
-// ($GLYPHOXA_SECRET, ADR-0004). The secret is hashed to a 32-byte key with
-// SHA-256 so any-length secret yields a valid AES-256 key.
+// ($GLYPHOXA_SECRET, ADR-0004). The secret must be a base64-encoded 32-byte
+// random key — NOT a passphrase: an unsalted, unstretched hash of a human
+// passphrase would let anyone holding leaked ciphertext brute-force the
+// credentials offline. Requiring full-entropy keys removes that class of
+// attack instead of papering over it with a KDF cost factor.
+//
+// Generate one with: openssl rand -base64 32
 func appCipher() (*crypto.Cipher, error) {
 	secret := os.Getenv("GLYPHOXA_SECRET")
 	if secret == "" {
-		return nil, fmt.Errorf("seed: set $GLYPHOXA_SECRET (the app credential-encryption secret, ADR-0004)")
+		return nil, fmt.Errorf("seed: set $GLYPHOXA_SECRET (the app credential-encryption secret, ADR-0004); generate one with `openssl rand -base64 32`")
 	}
-	key := sha256.Sum256([]byte(secret))
-	return crypto.New(key[:])
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(secret))
+	if err != nil {
+		return nil, fmt.Errorf("seed: $GLYPHOXA_SECRET must be base64 (generate with `openssl rand -base64 32`): %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("seed: $GLYPHOXA_SECRET must decode to exactly 32 bytes (a full-entropy AES-256 key, e.g. `openssl rand -base64 32`), got %d", len(key))
+	}
+	return crypto.New(key)
 }

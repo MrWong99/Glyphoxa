@@ -106,7 +106,7 @@ the NPC once (in addition to the three keyring keys above), then run:
 ```sh
 # Postgres connection string and the app credential-encryption secret.
 export GLYPHOXA_DATABASE_URL="postgres://user:pass@host:5432/glyphoxa?sslmode=disable"
-export GLYPHOXA_SECRET="<app secret>"   # ADR-0004 single app secret
+export GLYPHOXA_SECRET="$(openssl rand -base64 32)"   # ADR-0004 single app secret (base64, 32 bytes)
 
 ./glyphoxa migrate up          # apply the schema (idempotent)
 ./glyphoxa seed                # create the demo Tenant/Campaign + Bart (idempotent)
@@ -155,8 +155,10 @@ come from the environment (above) / the OS keyring (task #10); the encrypted
 (ADR-0004), which the control-plane (task #6) will populate and decrypt. So
 seeding the NPC does **not** put any secret in the database.
 
-`GLYPHOXA_SECRET` is only used to seal/open those placeholders; any string works
-locally (it is SHA-256'd to a 32-byte AES key).
+`GLYPHOXA_SECRET` is only used to seal/open those placeholders. It must be a
+base64-encoded 32-byte random key (`openssl rand -base64 32`) — a full-entropy
+AES-256 key, never a passphrase, so leaked ciphertext cannot be brute-forced
+offline. Keep the value you seed with: the same key opens the blobs later.
 
 ## What to expect (audible build)
 
