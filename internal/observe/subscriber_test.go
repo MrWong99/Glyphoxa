@@ -133,6 +133,33 @@ func TestStageSubscriberHeadlineExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestStageSubscriberTTFBPairsLatestNotStale(t *testing.T) {
+	// A zero-chunk sentence emits TTSInvoked but never a FirstAudio (TTSInvoked is
+	// published unconditionally, FirstAudio only on a real chunk). The next
+	// sentence's tts_ttfb must pair against ITS OWN invoke, not the stale
+	// zero-chunk one — FIFO-front would mismeasure it.
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	bus.Publish(voiceevent.STTFinal{At: base, TurnID: "T", SpeechEndAt: base})
+	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+
+	// Sentence 0: synthesized but zero chunks → TTSInvoked, no FirstAudio.
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(100 * time.Millisecond), TurnID: "T", Index: 0})
+	// Sentence 1: serial dispatch means its invoke comes AFTER sentence 0's, then
+	// its FirstAudio. Correct ttfb = 1200 − 1000 = 200ms (its own invoke).
+	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1000 * time.Millisecond), TurnID: "T", Index: 1})
+	bus.Publish(voiceevent.FirstAudio{At: base.Add(1200 * time.Millisecond), TurnID: "T"})
+
+	if len(rec.ttsTTFB) != 1 {
+		t.Fatalf("tts_ttfb fired %d times, want 1", len(rec.ttsTTFB))
+	}
+	if rec.ttsTTFB[0].d != 200*time.Millisecond {
+		t.Fatalf("tts_ttfb = %v, want 200ms (paired to sentence 1's own invoke, not the stale 100ms one)", rec.ttsTTFB[0].d)
+	}
+}
+
 func TestStageSubscriberZeroSpeechEndSkipped(t *testing.T) {
 	// A flushed utterance with no speech-end transition (SpeechEndAt zero) must
 	// record NO response_latency — a decades-long delta would wreck the p95.
