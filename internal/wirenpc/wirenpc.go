@@ -250,6 +250,16 @@ func Run(ctx context.Context, cfg Config) error {
 	bus := voiceevent.NewBus()
 	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
 
+	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the
+	// SLO histograms (response_latency, address_detect, per-sentence tts_ttfb) from
+	// the turn-correlated bus events and feeds cfg.StageMetrics. Subscribe wires
+	// the handlers (deferred unsubscribe); Start runs the TTL sweep for the run's
+	// lifetime so abandoned/barged turns don't leak per-turn state. A nil
+	// StageMetrics (keyless) makes the subscriber a no-op via observe.Discard.
+	stageSub := observe.NewStageSubscriber(cfg.StageMetrics)
+	defer stageSub.Subscribe(bus)()
+	stageSub.Start(ctx)
+
 	conv, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
