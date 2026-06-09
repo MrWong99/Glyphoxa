@@ -21,7 +21,7 @@ func openChunks() (chan tts.AudioChunk, <-chan tts.AudioChunk) {
 // off sentence one. Order must also hold.
 func TestPlaybackPump_SerializesSentences(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{})
+	pump := newPump(p, fakeCodec{}, nil)
 	defer pump.Close()
 
 	c1, ro1 := openChunks()
@@ -67,7 +67,7 @@ func TestPlaybackPump_SerializesSentences(t *testing.T) {
 // sentence in flight beyond the playing one — see the cap-1 rationale).
 func TestPlaybackPump_HandleSentenceReturnsPromptly(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{})
+	pump := newPump(p, fakeCodec{}, nil)
 	defer pump.Close()
 
 	_, ro1 := openChunks()
@@ -96,7 +96,7 @@ func TestPlaybackPump_HandleSentenceReturnsPromptly(t *testing.T) {
 // rather than blocking the (lockstep) producer.
 func TestPlaybackPump_CloseStopsWorker(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{})
+	pump := newPump(p, fakeCodec{}, nil)
 
 	pump.Close()
 	pump.Close() // idempotent, must not panic or block
@@ -115,5 +115,52 @@ func TestPlaybackPump_CloseStopsWorker(t *testing.T) {
 	case <-sent:
 	case <-time.After(time.Second):
 		t.Fatal("post-Close HandleSentence did not drain the channel")
+	}
+}
+
+// TestPlaybackPump_CloseDrainsQueuedJob pins the teardown contract for a
+// sentence that was enqueued but never dequeued when Close fired: it must be
+// drained (unblocking the tee's lockstep forwarder), not abandoned, and not
+// spoken into the teardown.
+func TestPlaybackPump_CloseDrainsQueuedJob(t *testing.T) {
+	p := newFakePlayer()
+	pump := newPump(p, fakeCodec{}, nil)
+
+	// Worker busy on s1.
+	_, ro1 := openChunks()
+	pump.HandleSentence(context.Background(), ro1)
+	pb1 := p.waitPlay(t)
+
+	// s2 sits in the queue behind it, with its producer mid-send (the tee's
+	// lockstep forward goroutine).
+	c2, ro2 := openChunks()
+	pump.HandleSentence(context.Background(), ro2)
+	sent := make(chan struct{})
+	go func() { c2 <- tts.AudioChunk{}; close(sent) }()
+
+	// Close while s2 is still queued; stop is signalled before Close blocks on
+	// the worker, then finishing s1 lets the worker observe it.
+	closed := make(chan struct{})
+	go func() { pump.Close(); close(closed) }()
+	select {
+	case <-pump.stop:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not signal stop")
+	}
+	pb1.finish(nil)
+
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("queued sentence not drained after Close; the tee forwarder would block forever")
+	}
+	close(c2)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+	if got := p.plays.Load(); got != 1 {
+		t.Fatalf("plays = %d, want 1 (a queued-but-unstarted sentence must be dropped at Close, not spoken)", got)
 	}
 }
