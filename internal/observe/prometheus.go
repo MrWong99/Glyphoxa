@@ -107,16 +107,26 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	r.playbackTotal = counterVec("playback_total", "Playbacks finished, by whether they were interrupted.", "interrupted")
 	r.bargeCancels = counter("barge_cancels_total", "Confirmed barge-ins that tore down an Agent's active turn (ADR-0027).")
 
+	// Of the per-stage histograms, only response_latency, address_detect and
+	// tts_ttfb have a live emit-site this sprint (the bus subscriber); llm_round
+	// is emitted by the agenttool adapter. The remaining six — vad_hangover,
+	// stt_request, tts_total, codec_decode, codec_encode, llm_turn — are RESERVED:
+	// registered so the /metrics surface is spec-complete (ADR-0032), but their
+	// emit-sites are carry-over task #11, so they expose an empty histogram (0
+	// observations) until wired. The Help text says so, so a consumer doesn't read
+	// the absence of samples as a fault.
+	const reserved = " RESERVED: emit-site not yet wired (carry-over task #11); empty until then."
+
 	r.responseLatency = hist("response_latency_seconds", "Headline SLO: VAD speech-end to first audio chunk handed to the playback pump.", "agent_role")
-	r.vadHangover = plainHist("vad_hangover_seconds", "VAD end-of-speech detection lag (minSilenceFrames*frameMs).")
+	r.vadHangover = plainHist("vad_hangover_seconds", "VAD end-of-speech detection lag (minSilenceFrames*frameMs)."+reserved)
 	r.addressDetect = plainHist("address_detect_seconds", "Address-detection stage duration.")
-	r.codecDecode = plainHist("codec_decode_seconds", "Opus->PCM decode per inbound frame.")
-	r.codecEncode = plainHist("codec_encode_seconds", "PCM->Opus encode per outbound frame.")
-	r.sttRequest = hist("stt_request_seconds", "STT provider POST round-trip.", "provider")
+	r.codecDecode = plainHist("codec_decode_seconds", "Opus->PCM decode per inbound frame."+reserved)
+	r.codecEncode = plainHist("codec_encode_seconds", "PCM->Opus encode per outbound frame."+reserved)
+	r.sttRequest = hist("stt_request_seconds", "STT provider POST round-trip."+reserved, "provider")
 	r.ttsTTFB = hist("tts_ttfb_seconds", "TTS Synthesize call to first audio chunk.", "provider")
-	r.ttsTotal = hist("tts_total_seconds", "Full TTS synthesis.", "provider")
+	r.ttsTotal = hist("tts_total_seconds", "Full TTS synthesis."+reserved, "provider")
 	r.llmRound = hist("llm_round_seconds", "One LLM Complete round inside the agenttool loop.", "provider", "round_index", "had_tool_call")
-	r.llmTurn = hist("llm_turn_seconds", "Full agenttool loop (all rounds + tool exec).", "provider")
+	r.llmTurn = hist("llm_turn_seconds", "Full agenttool loop (all rounds + tool exec)."+reserved, "provider")
 
 	r.providerCalls = counterVec("provider_calls_total", "Vendor calls by stage, provider and outcome.", "stage", "provider", "outcome")
 	r.providerErrors = counterVec("provider_errors_total", "Vendor call errors by stage and provider.", "stage", "provider")

@@ -87,22 +87,36 @@ type StageRecorder interface {
 
 	// VADHangover is the speech-end detection lag (minSilenceFrames*frameMs),
 	// a fixed per-turn cost B3 tunes. (glyphoxa_voice_vad_hangover_seconds)
+	//
+	// RESERVED — emit-site not yet wired (carry-over task #11). Defined so the
+	// /metrics surface is spec-complete (ADR-0032), but no caller invokes it yet;
+	// the histogram stays empty until the VAD/segmenter (orchestrator) stamps it.
+	// An empty series here is expected, not a fault.
 	VADHangover(d time.Duration)
 	// AddressDetect is the address-detection stage duration.
-	// (glyphoxa_voice_address_detect_seconds)
+	// (glyphoxa_voice_address_detect_seconds) — WIRED by the bus subscriber.
 	AddressDetect(d time.Duration)
 	// CodecDecode / CodecEncode are the per-direction Opus<->PCM costs.
 	// (glyphoxa_voice_codec_decode_seconds / _codec_encode_seconds)
+	//
+	// RESERVED — emit-site not yet wired (carry-over task #11); the wire codec
+	// (pkg/voice/wire/codec) stamps these. Empty until then, expected.
 	CodecDecode(d time.Duration)
 	CodecEncode(d time.Duration)
 
 	// STTRequest is the STT provider POST round-trip.
 	// (glyphoxa_voice_stt_request_seconds{provider})
+	//
+	// RESERVED — emit-site not yet wired (carry-over task #11); the STT adapter
+	// (pkg/voice/stt/elevenlabs) stamps it. Empty until then, expected.
 	STTRequest(provider Provider, d time.Duration)
-	// TTSTimeToFirstByte is the Synthesize call → first AudioChunk span;
-	// TTSTotal is the full synthesis. (glyphoxa_voice_tts_ttfb_seconds /
-	// _tts_total_seconds, both {provider})
+	// TTSTimeToFirstByte is the Synthesize call → first AudioChunk span
+	// (glyphoxa_voice_tts_ttfb_seconds{provider}) — WIRED by the bus subscriber.
 	TTSTimeToFirstByte(provider Provider, d time.Duration)
+	// TTSTotal is the full synthesis. (glyphoxa_voice_tts_total_seconds{provider})
+	//
+	// RESERVED — emit-site not yet wired (carry-over task #11); the TTS stage/
+	// adapter stamps it. Empty until then, expected.
 	TTSTotal(provider Provider, d time.Duration)
 
 	// LLMRound is one Provider.Complete round inside the agenttool loop. roundIndex
@@ -110,9 +124,14 @@ type StageRecorder interface {
 	// "extra tool rounds" (H2) — the cut B2 needs. Recorded by the provider
 	// adapter, one call per Complete.
 	// (glyphoxa_voice_llm_round_seconds{provider,round_index,had_tool_call})
+	// — WIRED by agenttool.providerAdapter.Generate.
 	LLMRound(provider Provider, roundIndex int, hadToolCall bool, d time.Duration)
 	// LLMTurn is the full agenttool loop (all rounds + tool exec) for the turn.
 	// (glyphoxa_voice_llm_turn_seconds{provider})
+	//
+	// RESERVED — emit-site not yet wired (carry-over task #11); the agenttool loop
+	// wrapper stamps the full-turn span (it currently records only per-round
+	// LLMRound). Empty until then, expected.
 	LLMTurn(provider Provider, d time.Duration)
 
 	// ProviderCall counts one vendor call at stage with its outcome; ProviderError
