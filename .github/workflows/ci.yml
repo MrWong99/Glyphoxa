@@ -116,7 +116,7 @@ jobs:
       # It replays the corpus and diffs each stage's p95 against the committed
       # baseline (Report.CheckRegression); an absolute SLO is the live tier's job.
       - name: Cassette latency benchmark (regression gate)
-        run: go test -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
+        run: go test -race -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
 
   lint:
     name: golangci-lint
