@@ -47,6 +47,21 @@ const (
 	// vadFrameMs is the orchestrator frame size; the inbound codec must reframe
 	// Discord's 48 kHz Opus to this 16 kHz / 32 ms (512-sample) cadence.
 	vadFrameMs = 32
+	// vadMinSilenceFrames is the consecutive sub-threshold frames Silero needs to
+	// leave the speaking state — the end-of-speech hangover, a fixed cost on every
+	// turn before STT can start (B3). Lowered from silero's default 15 (480 ms) to
+	// 12 (384 ms), a ~96 ms per-turn win.
+	//
+	// The plan proposed 8 (256 ms), but the corpus validation
+	// (TestB3_HangoverTuning_CorpusSegmentation) refuted it: at 8 the purpose-built
+	// two-utterance-test clip splits a single utterance at an internal pause
+	// (3 segments instead of its designed 2) — the exact clipped-tail / premature-
+	// cut failure mode the task warned against. That clip only recovers its correct
+	// count at 11; 12 keeps it correct with one frame of margin against real-mic
+	// variation. The longer natural ttrpg intros have inter-sentence pauses that
+	// any value below 15 splits, so they are excluded from the equality gate — that
+	// is a (benign) extra turn boundary at a real pause, not a mid-word cut.
+	vadMinSilenceFrames = 12
 
 	// elevenGeorgeVoiceID is the ElevenLabs "George" public preset — a neutral
 	// stand-in voice for the NPC.
@@ -126,7 +141,7 @@ type Config struct {
 func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
 	log := cfg.Logger
 	if log == nil {
-		log = slog.New(slog.NewTextHandler(discard{}, nil))
+		log = slog.New(slog.DiscardHandler)
 	}
 
 	pool, err := pgxpool.New(ctx, dsn)
@@ -164,7 +179,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	log := cfg.Logger
 	if log == nil {
-		log = slog.New(slog.NewTextHandler(discard{}, nil))
+		log = slog.New(slog.DiscardHandler)
 	}
 
 	guild, err := snowflake.Parse(cfg.Guild)
@@ -181,6 +196,10 @@ func Run(ctx context.Context, cfg Config) error {
 	// the binary was built with -tags dave; NewManager(WithDave(true)) then warns
 	// if encryption was expected but unavailable.
 	client, err := disgo.New(cfg.Token,
+		// Own disgo's logger explicitly (A1): route it through the same filtered
+		// app logger so the benign DAVE-decrypt noise is tamed even if disgo ever
+		// stops reading slog.Default().
+		bot.WithLogger(log),
 		bot.WithDefaultGateway(),
 		// disgo's default intents are IntentsNone, so the bot never receives its
 		// own VoiceStateUpdate — leaving the voice conn's ChannelID nil and
@@ -245,6 +264,16 @@ func Run(ctx context.Context, cfg Config) error {
 	// stages publish on and the metrics subscriber reads.
 	bus := voiceevent.NewBus()
 	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
+
+	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the
+	// SLO histograms (response_latency, address_detect, per-sentence tts_ttfb) from
+	// the turn-correlated bus events and feeds cfg.StageMetrics. Subscribe wires
+	// the handlers (deferred unsubscribe); Start runs the TTL sweep for the run's
+	// lifetime so abandoned/barged turns don't leak per-turn state. A nil
+	// StageMetrics (keyless) makes the subscriber a no-op via observe.Discard.
+	stageSub := observe.NewStageSubscriber(cfg.StageMetrics)
+	defer stageSub.Subscribe(bus)()
+	stageSub.Start(ctx)
 
 	conv, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
 	if err != nil {
@@ -332,7 +361,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		stageMetrics = observe.Discard{}
 	}
 
-	engine, err := silero.New()
+	engine, err := silero.New(silero.WithMinSilenceFrames(vadMinSilenceFrames))
 	if err != nil {
 		return nil, fmt.Errorf("init Silero VAD: %w", err)
 	}
@@ -387,10 +416,15 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 
 	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
-		orchestrator.WithReply(replier.Reply()),
+		// B1: stream the reply sentence-by-sentence so first audio begins after the
+		// first sentence, not the whole completion. The agenttool Engine implements
+		// agent.StreamingEngine (it streams the final answer round), so ReplyStream
+		// dispatches each sentence as it lands.
+		orchestrator.WithReplyStream(replier.ReplyStream()),
 		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. Start
 		// with an instant cut (0 confirm window) to validate the async-turn path
-		// live; the ~250ms confirm window is the next tuning step.
+		// live; the ~250ms confirm window is the next tuning step. With B1 a barge
+		// now cancels mid-generation, not just pending dispatch.
 		orchestrator.WithBargeIn(0),
 		orchestrator.WithErrorHandler(func(err error) {
 			log.Warn("reply dispatch failed", "err", err)
@@ -398,8 +432,3 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 	)
 	return conv, nil
 }
-
-// discard is an io.Writer sink for the fallback logger.
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }

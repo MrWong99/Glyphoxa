@@ -57,7 +57,7 @@ const (
 // keys live in the keyring, not the DB — see [credPlaceholderLast4]).
 func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log *slog.Logger) error {
 	if log == nil {
-		log = slog.New(slog.NewTextHandler(discard{}, nil))
+		log = slog.New(slog.DiscardHandler)
 	}
 	st := storage.New(pool)
 

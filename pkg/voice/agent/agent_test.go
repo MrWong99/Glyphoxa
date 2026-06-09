@@ -273,6 +273,244 @@ func TestReply_EmptyCompletion_ReturnsNil(t *testing.T) {
 	}
 }
 
+// fakeStreamEngine is a [agent.StreamingEngine] that streams a scripted reply
+// delta-by-delta through onText, honouring ctx cancellation between deltas so a
+// barge-in can be simulated mid-stream. Its Generate is the non-streaming
+// fallback (the whole reply at once).
+type fakeStreamEngine struct {
+	deltas []string // streamed in order through onText
+	// pause, if non-nil, is closed by the test to release the stream after the
+	// first delta — so a barge-in cancel can land deterministically mid-stream.
+	pauseAfter int
+	pause      chan struct{}
+}
+
+func (e *fakeStreamEngine) Generate(_ context.Context, _ []llm.Message) (string, error) {
+	return strings.TrimSpace(strings.Join(e.deltas, "")), nil
+}
+
+func (e *fakeStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, onText func(string) error) (string, error) {
+	var full strings.Builder
+	for i, d := range e.deltas {
+		if err := ctx.Err(); err != nil {
+			return full.String(), err
+		}
+		full.WriteString(d)
+		if err := onText(d); err != nil {
+			return full.String(), err
+		}
+		if e.pause != nil && i == e.pauseAfter {
+			select {
+			case <-e.pause:
+			case <-ctx.Done():
+				return full.String(), ctx.Err()
+			}
+		}
+	}
+	return full.String(), nil
+}
+
+// streamReplier builds a Replier over a streaming engine, with a recording
+// dispatch that captures the sentences in order.
+func streamReplier(t *testing.T, eng agent.Engine) *agent.Replier {
+	t.Helper()
+	return agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+	})
+}
+
+// TestReplyStream_DispatchesSentencesInOrder pins the B1 win: a streamed reply is
+// dispatched sentence-by-sentence, in order, as the deltas arrive — not as one
+// blob after the whole completion.
+func TestReplyStream_DispatchesSentencesInOrder(t *testing.T) {
+	eng := &fakeStreamEngine{deltas: []string{"First one. ", "Second two! ", "Third three?"}}
+	r := streamReplier(t, eng)
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("bart", "go"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+	want := []string{"First one.", "Second two!", "Third three?"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("dispatched %q, want %q", got, want)
+	}
+}
+
+// TestReplyStream_NotAddressed_NoDispatch pins the AgentID gate on the streaming
+// path (mirrors the batch gate).
+func TestReplyStream_NotAddressed_NoDispatch(t *testing.T) {
+	eng := &fakeStreamEngine{deltas: []string{"Should not speak."}}
+	r := streamReplier(t, eng)
+	var dispatched int
+	err := r.ReplyStream()(context.Background(), routed("someone-else", "hi"), func(orchestrator.Reply) error {
+		dispatched++
+		return nil
+	})
+	if err != nil || dispatched != 0 {
+		t.Errorf("not-addressed stream: dispatched=%d err=%v, want 0/nil", dispatched, err)
+	}
+}
+
+// TestReplyStream_BargeMidStream_CommitsOnlySpoken pins the barge requirement and
+// the ADR-0012 deliver-then-commit rule: when the turn is cancelled after the
+// first sentence is spoken, (1) no further sentence is dispatched (pending
+// sentences stop), and (2) only the spoken sentence is committed to history —
+// not the untruncated completion.
+//
+// Scope note: the second turn is fired AFTER the first turn's goroutine has fully
+// unwound (the <-done barrier), so this pins the committed CONTENT
+// deterministically. It does NOT exercise the production interleaving where
+// WithBargeIn(0) lets turn 2 route while turn 1 is still committing — there,
+// turn-1 unwind (~a few statements after cancel) precedes turn-2 routing
+// (STT→address→bus fan-out) in practice, but ordering is not guaranteed by
+// construction (only r.mu's mutual exclusion is). If a real ordering bug ever
+// surfaces, a turn-sequence guard is the fix; today the mutex is sufficient.
+func TestReplyStream_BargeMidStream_CommitsOnlySpoken(t *testing.T) {
+	eng := &fakeStreamEngine{
+		deltas:     []string{"Aye. ", "Two rooms. ", "Anything else?"},
+		pauseAfter: 0, // pause after the first delta so we can cancel mid-stream
+		pause:      make(chan struct{}),
+	}
+	r := streamReplier(t, eng)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var mu sync.Mutex
+	var spoken []string
+	spokenLen := func() int { mu.Lock(); defer mu.Unlock(); return len(spoken) }
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.ReplyStream()(ctx, routed("bart", "rooms?"), func(rep orchestrator.Reply) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			mu.Lock()
+			spoken = append(spoken, rep.Sentence)
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	// Wait until the first sentence dispatched, then barge-in.
+	deadline := time.Now().Add(2 * time.Second)
+	for spokenLen() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+	close(eng.pause) // release the paused stream so the goroutine unwinds
+	<-done
+
+	if len(spoken) != 1 || spoken[0] != "Aye." {
+		t.Fatalf("spoken before barge = %q, want exactly [\"Aye.\"]", spoken)
+	}
+
+	// A follow-up turn appends its user message; history must remain ordered.
+	if err := r.ReplyStream()(context.Background(), routed("bart", "second turn"), func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	hist := r.HistorySnapshot()
+	wantSeq := []struct{ role, contains string }{
+		{"user", "rooms?"},
+		{"assistant", "Aye."},
+		{"user", "second turn"},
+	}
+	if len(hist) < len(wantSeq) {
+		t.Fatalf("history has %d messages, want >= %d: %+v", len(hist), len(wantSeq), hist)
+	}
+	for i, w := range wantSeq {
+		if string(hist[i].Role) != w.role || !strings.Contains(hist[i].Text, w.contains) {
+			t.Errorf("history[%d] = {%s %q}, want role %s containing %q", i, hist[i].Role, hist[i].Text, w.role, w.contains)
+		}
+	}
+	// The untruncated 2nd/3rd sentences must NOT be in the committed assistant turn.
+	if strings.Contains(hist[1].Text, "Two rooms") || strings.Contains(hist[1].Text, "Anything else") {
+		t.Errorf("committed assistant turn = %q, want only the spoken first sentence", hist[1].Text)
+	}
+}
+
+// delayStreamEngine streams sentences with a fixed delay BEFORE each one,
+// modelling the LLM taking perSentence to produce each sentence. Its Generate
+// (the batch path) blocks for ALL sentences before returning, so a batch reply
+// cannot dispatch until the whole completion is ready — exactly the B1 problem.
+type delayStreamEngine struct {
+	sentences   []string
+	perSentence time.Duration
+}
+
+func (e *delayStreamEngine) Generate(ctx context.Context, _ []llm.Message) (string, error) {
+	for range e.sentences {
+		select {
+		case <-time.After(e.perSentence):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return strings.Join(e.sentences, " "), nil
+}
+
+func (e *delayStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, onText func(string) error) (string, error) {
+	var full strings.Builder
+	for _, s := range e.sentences {
+		select {
+		case <-time.After(e.perSentence):
+		case <-ctx.Done():
+			return full.String(), ctx.Err()
+		}
+		chunk := s + " "
+		full.WriteString(chunk)
+		if err := onText(chunk); err != nil {
+			return full.String(), err
+		}
+	}
+	return full.String(), nil
+}
+
+// TestReplyStream_FirstAudioBeatsBatch is the B1 before/after number (preliminary,
+// off the dispatch boundary the A3 FirstAudio hook stamps in production): with a
+// model that takes ~perSentence per sentence, the STREAMING path dispatches the
+// first sentence after ~1×perSentence, while the BATCH path cannot dispatch
+// anything until the whole completion (~N×perSentence) is ready. The win is the
+// (N−1)×perSentence the user no longer waits before hearing the first word.
+func TestReplyStream_FirstAudioBeatsBatch(t *testing.T) {
+	const per = 40 * time.Millisecond
+	sentences := []string{"Aye, traveler.", "Two rooms upstairs.", "Anything else for ye?"}
+
+	// Streaming: time to the FIRST dispatch.
+	streamEng := &delayStreamEngine{sentences: sentences, perSentence: per}
+	rs := streamReplier(t, streamEng)
+	startS := time.Now()
+	var firstStream time.Duration
+	var once sync.Once
+	_ = rs.ReplyStream()(context.Background(), routed("bart", "rooms?"), func(orchestrator.Reply) error {
+		once.Do(func() { firstStream = time.Since(startS) })
+		return nil
+	})
+
+	// Batch: time until the (single, full-text) Reply is returned and dispatchable.
+	batchEng := &delayStreamEngine{sentences: sentences, perSentence: per}
+	rb := streamReplier(t, batchEng)
+	startB := time.Now()
+	_ = rb.Reply()(routed("bart", "rooms?")) // batch path blocks for the whole completion
+	firstBatch := time.Since(startB)
+
+	t.Logf("B1 first-audio (preliminary): streaming first dispatch=%v, batch first dispatch=%v, saved≈%v",
+		firstStream, firstBatch, firstBatch-firstStream)
+
+	// The robust, relative invariant: streaming reaches the first sentence before
+	// the batch path can dispatch anything at all (the whole-completion wait). An
+	// absolute wall-clock bound is deliberately avoided — it flakes under CI
+	// scheduling noise and the relative check already proves the win.
+	if firstStream >= firstBatch {
+		t.Errorf("streaming first dispatch %v not earlier than batch %v — B1 gave no win", firstStream, firstBatch)
+	}
+}
+
 // Compile-time assertion: the loop produces a value usable by the orchestrator
 // reply seam without an adapter.
 var _ orchestrator.ReplyFunc = (&agent.Replier{}).Reply()
