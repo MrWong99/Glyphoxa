@@ -53,9 +53,18 @@ type turnState struct {
 	roleKnown    bool // set at AddressRouted; gates the headline (needs the role label)
 	headlineDone bool // first FirstAudio consumed for response_latency
 
-	// pendingTTS is the arrival-ordered queue of TTSInvoked times awaiting their
-	// matching FirstAudio for per-sentence tts_ttfb.
-	pendingTTS []time.Time
+	// pendingTTS is the MOST-RECENT unmatched TTSInvoked time awaiting its
+	// FirstAudio for per-sentence tts_ttfb (zero = none pending). We keep only the
+	// latest, not a FIFO queue: dispatch is serial within a turn (the producer
+	// blocks on TTS.Dispatch, which drains the synthesis before the next sentence
+	// — orchestrator tts.go), so the order is strictly TTSInvoked_i ≺ FirstAudio_i
+	// ≺ TTSInvoked_{i+1}. A TTSInvoked left unmatched when the next one arrives was
+	// a zero-chunk synthesis (TTSInvoked is published unconditionally, FirstAudio
+	// only on a chunk) that will never get a FirstAudio — so the correct match for
+	// any FirstAudio is always the latest invoke, and FIFO-front would mispair it
+	// against the stale zero-chunk one. (Revisit if Ensemble Turns make dispatch
+	// concurrent — tts.go:69 anticipates that.)
+	pendingTTS time.Time
 
 	lastSeen time.Time
 }
@@ -148,7 +157,7 @@ func (s *StageSubscriber) onTTSInvoked(e voiceevent.TTSInvoked) {
 		t = &turnState{}
 		s.turns[e.TurnID] = t
 	}
-	t.pendingTTS = append(t.pendingTTS, e.At)
+	t.pendingTTS = e.At // keep only the latest; see turnState.pendingTTS
 	t.lastSeen = s.now()
 }
 
@@ -165,14 +174,13 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 	}
 	t.lastSeen = s.now()
 
-	// Per-sentence TTS time-to-first-byte: pair against the oldest unmatched
-	// TTSInvoked for this turn (arrival order; dispatch is sequential). The
+	// Per-sentence TTS time-to-first-byte: pair against the most-recent unmatched
+	// TTSInvoked for this turn (serial dispatch, see turnState.pendingTTS). The
 	// provider isn't on the bus; the voice slice synthesizes exclusively via
 	// ElevenLabs, so the label is that fixed known provider (not a guess).
-	if len(t.pendingTTS) > 0 {
-		ttsAt := t.pendingTTS[0]
-		t.pendingTTS = t.pendingTTS[1:]
-		s.rec.TTSTimeToFirstByte(ttsProvider, e.At.Sub(ttsAt))
+	if !t.pendingTTS.IsZero() {
+		s.rec.TTSTimeToFirstByte(ttsProvider, e.At.Sub(t.pendingTTS))
+		t.pendingTTS = time.Time{}
 	}
 
 	// Headline response latency: the FIRST FirstAudio of the turn only, and only
