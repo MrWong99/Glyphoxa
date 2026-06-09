@@ -53,3 +53,8 @@ func (r *Reframer) Flush() []int16 {
 
 // Buffered reports how many samples are held but not yet emitted.
 func (r *Reframer) Buffered() int { return len(r.buf) }
+
+// Reset discards any buffered samples. Used on a stream discontinuity (a
+// speaker resuming after a gap): the leftover tail belongs to the previous
+// utterance and must not prefix the new one.
+func (r *Reframer) Reset() { r.buf = r.buf[:0:0] }
