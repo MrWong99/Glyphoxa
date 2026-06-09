@@ -44,7 +44,12 @@ var onnxArtifacts = map[string]onnxArtifact{
 }
 
 // runtimeMu serialises concurrent ensureRuntime calls within one process so
-// two callers don't race on the cache-population step.
+// two callers don't race on the cache-population step. Cross-PROCESS safety
+// (e.g. `go test ./...` running several package binaries on a cold cache) is
+// handled differently: extraction lands in a private temp dir that is renamed
+// into place atomically, so a concurrent process either sees the complete lib
+// dir or none at all — never a half-written .so (dlopen on a truncated
+// library segfaults in native code).
 var runtimeMu sync.Mutex
 
 // ensureRuntime returns a path to libonnxruntime.so, populating the per-user
@@ -92,11 +97,50 @@ func ensureRuntime() (string, error) {
 // the pinned hash, and extracts every entry under "lib/" into destLibDir.
 // Other entries (headers, docs, license) are skipped — only the runtime is
 // needed at execution time.
+//
+// Publication is atomic: extraction goes into a sibling temp dir which is then
+// renamed onto destLibDir, so another process can never observe (and dlopen) a
+// partially-written library. If a concurrent process wins the rename, its
+// result is used and ours is discarded.
 func downloadAndExtract(artifact onnxArtifact, destLibDir string) error {
-	if err := os.MkdirAll(destLibDir, 0o755); err != nil {
+	parent := filepath.Dir(destLibDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
+	tmpDir, err := os.MkdirTemp(parent, "lib.tmp-*")
+	if err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir) // no-op after a successful rename
 
+	if err := fetchInto(artifact, tmpDir); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, onnxLibName)); err != nil {
+		return fmt.Errorf("tarball did not contain %s: %w", onnxLibName, err)
+	}
+
+	if err := os.Rename(tmpDir, destLibDir); err != nil {
+		// A concurrent process may have published first (destLibDir exists and
+		// is complete — publication is all-or-nothing); use its result.
+		if _, statErr := os.Stat(filepath.Join(destLibDir, onnxLibName)); statErr == nil {
+			return nil
+		}
+		// destLibDir exists but is unusable (e.g. debris from a pre-atomic
+		// version that crashed mid-extract): clear it and retry once.
+		if removeErr := os.RemoveAll(destLibDir); removeErr != nil {
+			return fmt.Errorf("publish runtime: %w (and clearing stale dir: %v)", err, removeErr)
+		}
+		if err := os.Rename(tmpDir, destLibDir); err != nil {
+			return fmt.Errorf("publish runtime: %w", err)
+		}
+	}
+	return nil
+}
+
+// fetchInto downloads and verifies the artifact tarball, extracting its lib/
+// entries into destLibDir (the private staging dir).
+func fetchInto(artifact onnxArtifact, destLibDir string) error {
 	resp, err := http.Get(artifact.url)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", artifact.url, err)
