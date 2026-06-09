@@ -9,28 +9,35 @@ import (
 
 // TestRecorderTap_CapturesRecorderOnlyStages pins that the tap, driven through
 // the REAL observe.StageRecorder interface the orchestrator emits on, captures
-// the recorder-only stages (llm_round is the B2 signal; vad_hangover/stt_request
-// are not bus events). Each recorded duration must land under its locked Stage,
-// so a sample read here is the same value the Prometheus adapter would observe.
-func TestRecorderTap_CapturesRecorderOnlyStages(t *testing.T) {
+// ONLY the agenttool-adapter span the tap owns (llm_round — the B2 signal), and
+// does NOT capture the bus-owned stages (response_latency/address_detect/tts_ttfb
+// come from observe's bus subscriber, not the injected recorder) so they can't
+// be double-counted. A captured sample is the same value the Prometheus adapter
+// would observe.
+func TestRecorderTap_OwnsOnlyAdapterSpans(t *testing.T) {
 	var rec observe.StageRecorder = newRecorderTap()
 	tap := rec.(*recorderTap)
 
-	// Two LLM rounds in one turn (the H2 tool-loop shape) + the fixed hangover.
-	// Use observe's bounded enum constants, not bare strings (ADR-0032 §2.1).
+	// Two LLM rounds in one turn (the H2 tool-loop shape) — owned by the tap.
 	rec.LLMRound(observe.ProviderGemini, 0, false, 420*time.Millisecond)
 	rec.LLMRound(observe.ProviderGemini, 1, true, 380*time.Millisecond)
+	// Bus-owned / unwired stages: calling them must be no-ops here (no double-count).
+	rec.ResponseLatency(observe.RoleCharacter, 900*time.Millisecond)
+	rec.AddressDetect(60 * time.Millisecond)
+	rec.TTSTimeToFirstByte(observe.ProviderElevenLabs, 120*time.Millisecond)
 	rec.VADHangover(256 * time.Millisecond)
 	rec.STTRequest(observe.ProviderElevenLabs, 300*time.Millisecond)
 
 	if got := tap.samples(StageLLMRound); len(got) != 2 {
 		t.Errorf("llm_round samples = %d, want 2", len(got))
 	}
-	if got := tap.samples(StageVADHangover); len(got) != 1 || got[0] != 256*time.Millisecond {
-		t.Errorf("vad_hangover samples = %v, want one 256ms", got)
-	}
-	if got := tap.samples(StageSTTRequest); len(got) != 1 {
-		t.Errorf("stt_request samples = %d, want 1", len(got))
+	for _, notOwned := range []Stage{
+		StageResponseLatency, StageAddressDetect, StageTTSTTFB,
+		StageVADHangover, StageSTTRequest,
+	} {
+		if got := tap.samples(notOwned); len(got) != 0 {
+			t.Errorf("tap captured %q (%d samples); it must leave that to the bus/unwired path", notOwned, len(got))
+		}
 	}
 
 	d := Summarize(tap.samples(StageLLMRound))
