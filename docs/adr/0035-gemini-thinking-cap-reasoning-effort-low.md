@@ -18,13 +18,30 @@ The Gemini adapter bounds gemini-2.5-flash's dynamic reasoning by sending a thin
 
 Keyless `httptest` tests pin the *wire shape* (default sends `reasoning_effort: "low"`, override/budget paths, mutual exclusivity) but cannot prove the endpoint *honours* the field or that wall-time actually tightens — a silently-ignored field would pass every keyless test. So the cap was verified with a small, key-blind live A/B against the real endpoint (key from the keyring via env, never printed).
 
-The A/B harness is `TestLive_ThinkingCap_AB` in `pkg/voice/llm/gemini/thinking_live_test.go` (`//go:build live`, excluded from the keyless suite): interleaved arms (uncapped default vs. `reasoning_effort:"low"`), measuring time-to-first-content-token (the cleanest H1/thinking signal) and total wall-time, reported as a distribution (p50/p95/p99), with a sample answer per arm for the quality check. It paces calls (`GX_AB_DELAY`, default 13s) to respect rate limits.
+The A/B harness is `TestLive_ThinkingCap_AB` in `pkg/voice/llm/gemini/thinking_live_test.go` (`//go:build live`, excluded from the keyless suite): three interleaved arms (uncapped default / `reasoning_effort:"low"` / `"medium"`), per-(arm,prompt) buckets, measuring time-to-first-content-token (the cleanest H1/thinking signal) and total wall-time as a distribution, with every answer logged (`GX_AB_LOG_ALL`) for the quality read. Paced (`GX_AB_DELAY`) to respect rate limits.
 
-**Findings from the first keyed run (2026-06-09), and why it's only directional:**
-- **The field is honoured, not silently ignored.** Both arms completed real calls against `gemini-2.5-flash` on the compat endpoint with no 4xx — `reasoning_effort` is accepted on 2.5-flash (the open question keyless tests could not answer). Sample replies were valid and in-character on the trivial tier (default → `"Aye."`, low → `"Comin'."`), i.e. no quality regression observed there.
-- **No wall-time distribution yet.** The shared deployment key is on the Gemini **free tier**, which caps `gemini-2.5-flash` at **20 requests/day** (`generate_content_free_tier_requests`, a daily cap distinct from the 5-req/min RPM throttle). A real p50/p95 needs N≥~30 per arm; the daily 20 cannot fund it, and this is the live NPC's shared key (a paced A/B starves the bot). So the latency distribution is **deferred to the paid nightly live tier** (ADR-0033) — exactly the residual Gemini live-unknown the Sprint-2 plan files under D3. Re-run `TestLive_ThinkingCap_AB` under a paid/billing-enabled key (or raise the free-tier quota) and paste the two `ARM … ttft_ms/total_ms` distribution lines here.
+**These are isolated single-call numbers, not the SLO.** Each measurement is one raw Gemini `chat/completions` call (one-line system prompt, no history, no tools, no orchestrator), so they prove the **H1 mechanism** — does capping thinking move the wall-time distribution — and nothing more. They are NOT the in-pipeline `glyphoxa_voice_llm_round_seconds` series and NOT the speech-end→first-audio SLO (≤1.2 s p50): even trivial ttft here is ~1.9 s because it's a raw call on a different boundary, pre-B1. Don't read 4971 ms against the 1.2 s budget — the SLO is a live-tier pipeline measurement (the second live run + the C1 live tier).
 
-**Status:** wire shape + default cap landed and keyless-green; the field is confirmed honoured live with no quality regression on the trivial tier; the p50/p95 wall-time delta is pending a paid-quota run. The chosen default (`"low"`) is recorded here and in `gemini.DefaultReasoningEffort`.
+**Measured A/B (2026-06-09, billing-enabled key, N=20/arm/prompt, ttft_ms):**
+
+| prompt tier | arm | p50 | p95 | max |
+|---|---|---|---|---|
+| reasoning-bait | default (uncapped) | 5560 | 9282 | 11067 |
+| reasoning-bait | **low** | **4971** | **5549** | **5585** |
+| reasoning-bait | medium | 6668 | 11717 | 11835 |
+| trivial | default (uncapped) | 1892 | 2849 | 2985 |
+| trivial | low | 2933 | 4654 | 4745 |
+| trivial | medium | 2860 | 6242 | 7864 |
+
+**1. The win — the reasoning tail collapses (the actual complaint).** On reasoning-bait, `low` beats uncapped across the whole distribution: p95 **9282→5549 ms (−40%)**, max **11067→5585 ms (−50%)**, and even p50 5560→4971. This replicates the N=4 pilot (max 11378→5066), so two independent runs agree. The Sprint-1 complaint was *"manchmal sehr spät"* — an intermittent **tail**, input-dependent — and capping thinking is exactly what flattens it. This is H1 confirmed.
+
+**2. The honest cost — a trivial-latency penalty.** On already-fast trivial turns `low` is ~1 s *slower* (p50 1892→2933, p95 2849→4654). `reasoning_effort` behaves as a thinking *floor/target*, not only a ceiling: on a prompt the model would barely think about it adds latency; on a prompt it would over-think (bait) it caps. So `low` **trades ~1 s on already-fast turns for a dramatically tighter reasoning tail.** Since the complaint was the tail — and B1 (sentence-streaming) attacks median latency on a separate axis — this trade is the right call for B2's charter, but it is a real trade, named here. If it bites in the live run, the lever is the explicit `WithThinkingBudget` knob (a numeric cap that bounds the tail without raising the floor as much).
+
+**3. `medium` is not pursued.** It showed no improvement over `low` on either tier (and looked worse), but at N=20 a p95 is the 2nd-worst sample = one vendor-jittery call, so the medium numbers are not a robust finding — just "no reason to prefer it." Not investigated further.
+
+**4. No quality regression.** All 60 reasoning-bait answers (20×3 arms) were reviewed: every arm answered with a coherent, in-character split that sums to 17 in one of two reasonable schemes (6.8/6.8/3.4 or the rounded 7/7/3 for the contradictory "split evenly but one drank half" premise). The capped arms are not muddier than uncapped (the single muddy sample in the N=4 pilot did not recur — it was noise; one `low` answer even *flags* the rounding remainder, which is awareness, not contradiction). The premise is contradictory and has no ground truth, so this is a self-consistency read, not a correctness one; a ground-truth reasoning prompt is a nightly-tier follow-up.
+
+**Decision:** keep the shipped default `reasoning_effort:"low"`. It targets the actual Sprint-1 complaint (the tail), with a stated and acceptable trivial-latency trade. Recorded in `gemini.DefaultReasoningEffort`.
 
 ## Considered options
 
