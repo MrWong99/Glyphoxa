@@ -22,6 +22,15 @@ import (
 //
 // Per ADR-0027 an Agent's own TTS never triggers a barge: only inbound
 // participant audio is VAD'd, so every speech_start here is a human's.
+//
+// Multi-speaker caveat: [voiceevent.VADSpeechStart]/[voiceevent.VADSpeechEnd]
+// carry no speaker identity because the current wiring runs ONE VAD session
+// over all participants' interleaved frames — the transitions describe the
+// mix, not a person. The confirm window is therefore only meaningful with the
+// single-active-speaker assumption of the MVP slice; do not tune
+// confirmWindow > 0 for a multi-speaker table until per-participant VAD
+// sessions (ADR-0019, deferred) attribute these events, or one speaker's
+// pause can disarm a window another speaker's interruption armed.
 type BargeIn struct {
 	floor   *Floor
 	confirm time.Duration
