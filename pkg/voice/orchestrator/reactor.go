@@ -196,12 +196,18 @@ type Reply struct {
 // "what do we say back" behaviour without touching any other stage: it is the
 // strategy seam of the reply reactor.
 //
+// ctx is the turn's context: with barge-in wired ([WithBargeIn]) it is the
+// per-turn floor context, so a human reclaiming the floor cancels any LLM call
+// in flight, not just the TTS/playback downstream of it. Implementations must
+// honor it (and should derive their own deadline — a hung provider must not
+// hold the turn forever).
+//
 // In v1.0 the production ReplyFunc is the Agent loop (Hot Context assembly +
 // Persona injection + LLM dispatch, ADR-0019 slice 1); tests supply a closure
 // returning a canned line. Per ADR-0025 a multi-Agent address can yield an
 // Ensemble Turn — the slice return type leaves room for that to grow behind the
 // same seam.
-type ReplyFunc func(voiceevent.AddressRouted) []Reply
+type ReplyFunc func(ctx context.Context, e voiceevent.AddressRouted) []Reply
 
 // Replier is the [Reactor] that runs a [ReplyFunc] on every
 // [voiceevent.AddressRouted] and dispatches each resulting [Reply] through the
@@ -263,7 +269,7 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 // stopping early if ctx is cancelled (a barge-in yielded the floor mid-turn). A
 // dispatch failure is reported through the ErrorFunc and does not stop the rest.
 func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) {
-	for _, rep := range r.reply(e) {
+	for _, rep := range r.reply(ctx, e) {
 		if ctx.Err() != nil {
 			return
 		}

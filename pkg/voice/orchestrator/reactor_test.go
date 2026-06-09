@@ -215,7 +215,7 @@ func TestBind_TearsDownInReverseOrder(t *testing.T) {
 func TestReplier_BindCancelUnsubscribes(t *testing.T) {
 	h := voicetest.New(t)
 	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
-	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+	reply := func(context.Context, voiceevent.AddressRouted) []orchestrator.Reply {
 		return []orchestrator.Reply{{Sentence: "hi"}}
 	}
 	cancel := orchestrator.NewReplier(ttsStage, reply, nil).Bind(t.Context(), h.Bus)
@@ -250,7 +250,7 @@ func (selectiveSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
 func TestReplier_DispatchErrorReportedAndDoesNotStopRemaining(t *testing.T) {
 	h := voicetest.New(t)
 	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
-	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+	reply := func(context.Context, voiceevent.AddressRouted) []orchestrator.Reply {
 		return []orchestrator.Reply{{Sentence: "boom"}, {Sentence: "ok"}}
 	}
 	var errs []error
@@ -275,7 +275,7 @@ func TestReplier_DispatchErrorReportedAndDoesNotStopRemaining(t *testing.T) {
 func TestReplier_NilErrorFuncDropsErrorWithoutPanic(t *testing.T) {
 	h := voicetest.New(t)
 	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
-	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+	reply := func(context.Context, voiceevent.AddressRouted) []orchestrator.Reply {
 		return []orchestrator.Reply{{Sentence: "boom"}, {Sentence: "ok"}}
 	}
 	t.Cleanup(orchestrator.NewReplier(ttsStage, reply, nil).Bind(t.Context(), h.Bus))
