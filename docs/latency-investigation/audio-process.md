@@ -384,3 +384,20 @@ when the turn dies of its own error before audio). The subscriber maps these to
 turn that vanished with **no** signal at all (TTL-reaped). A `TurnEnded` arriving
 *after* first audio (a barge mid-playback) is a normal interruption and does not
 re-count the turn (first-audio is terminal).
+
+**The `dice` grant is now conditional (task #5 — baseline root cause #4).** The
+unconditional grant declared the dice Tool to Gemini on *every* turn, so even a
+plain "how much for a room?" could draw an empty tool-call round before first
+audio (a round that streams no prose — seconds of avoidable baseline latency).
+The fix gates the grant per turn in the `agenttool.Engine`: it holds two loops
+over the same provider adapter (full grants, and grants with `dice` dropped via
+the new pure `tool.GrantSet.Without`) and picks the dice-less loop unless the
+**current** user utterance shows dice intent (`needsDice` — explicit `NdM`/`d20`
+notation or a recall-biased ttrpg keyword set; latest user message only, so an
+old roll doesn't arm later turns). A plain conversational turn is then
+structurally a single LLM round. The gate is biased for high recall (a false
+positive only costs the round we paid unconditionally before; a false negative
+would withhold dice when needed), so the tool path is intact when dice IS asked
+for. The locked `tool.Loop` / `GrantSet` seams are untouched — `Without` is
+additive and the gate lives entirely in the bridge. Cold-connection prewarm
+(doc #5) remains a separate follow-up.

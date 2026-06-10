@@ -77,6 +77,40 @@ func TestGrantSetGrantStripping(t *testing.T) {
 	}
 }
 
+func TestGrantSetWithoutIsPureAndDrops(t *testing.T) {
+	r := NewRegistry()
+	r.MustRegister(stubTool{name: "dice", readOnly: true})
+	r.MustRegister(stubTool{name: "writer", readOnly: true})
+
+	full := NewGrantSet(r, Grant{ToolName: "dice"}, Grant{ToolName: "writer"})
+	gated := full.Without("dice")
+
+	// The derived set drops only the named grant.
+	if _, _, ok := gated.resolve("dice"); ok {
+		t.Error("Without(dice) must drop the dice grant")
+	}
+	if _, _, ok := gated.resolve("writer"); !ok {
+		t.Error("Without(dice) must keep other grants")
+	}
+	if d := gated.Declarations(); len(d) != 1 || d[0].Name != "writer" {
+		t.Errorf("gated Declarations = %+v, want only writer", d)
+	}
+
+	// The original is untouched (purity): Without returns a copy.
+	if _, _, ok := full.resolve("dice"); !ok {
+		t.Error("Without must not mutate the receiver; dice must still resolve on the original")
+	}
+	if d := full.Declarations(); len(d) != 2 {
+		t.Errorf("original Declarations = %+v, want both grants intact", d)
+	}
+
+	// Removing a name that is not granted is a no-op copy.
+	same := full.Without("ghost")
+	if d := same.Declarations(); len(d) != 2 {
+		t.Errorf("Without(ungranted) = %+v, want an unchanged copy of both grants", d)
+	}
+}
+
 func TestGrantSetSkipsUnregisteredGrant(t *testing.T) {
 	r := NewRegistry()
 	// Grant names a tool that was never registered: grants access to nothing.
