@@ -52,11 +52,13 @@ type turnState struct {
 	speechEndAt  time.Time // STTFinal.SpeechEndAt; zero ⇒ no headline sample
 	sttFinalAt   time.Time
 	routedAt     time.Time // AddressRouted.At; zero until routed (for the turn-end log)
-	firstAudioAt time.Time // first FirstAudio.At; zero ⇒ never reached audio
+	firstAudioAt time.Time // first FirstAudio.At (handed-to-pump); zero ⇒ never reached audio
+	firstOpusAt  time.Time // first FirstOpus.At (audible-on-wire, the SLO end); zero ⇒ never reached the wire
 	role         AgentRole
-	roleKnown    bool // set at AddressRouted; gates the headline (needs the role label)
-	headlineDone bool // first FirstAudio consumed for response_latency
-	outcomeDone  bool // terminal TurnOutcome already recorded (first_audio/yielded); blocks a double-count at reap
+	roleKnown      bool // set at AddressRouted; gates the headline (needs the role label)
+	firstAudioDone bool // first FirstAudio consumed (success outcome + firstAudioAt)
+	latencyDone    bool // first FirstOpus consumed for the response_latency SLO sample
+	outcomeDone    bool // terminal TurnOutcome already recorded (first_audio/yielded); blocks a double-count at reap
 
 	yieldedText string // TurnYielded.Text: the dropped late-segment transcript (logged at turn-end)
 
@@ -130,6 +132,7 @@ func (s *StageSubscriber) Subscribe(bus *voiceevent.Bus) (unsubscribe func()) {
 		voiceevent.On(bus, s.onAddressRouted),
 		voiceevent.On(bus, s.onTTSInvoked),
 		voiceevent.On(bus, s.onFirstAudio),
+		voiceevent.On(bus, s.onFirstOpus),
 		voiceevent.On(bus, s.onTurnEnded),
 	}
 	return func() {
@@ -198,6 +201,8 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 	if e.TurnID == "" {
 		return
 	}
+	var logAttrs []any
+	defer func() { s.flushLog(logAttrs) }() // registered first → runs after Unlock (LIFO)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.turns[e.TurnID]
@@ -216,23 +221,48 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 		t.pendingTTS = time.Time{}
 	}
 
-	// Headline response latency: the FIRST FirstAudio of the turn only, and only
-	// when the span start is valid (non-zero SpeechEndAt) and the role is known.
-	if t.headlineDone {
+	// First-audio is the turn-lifecycle SUCCESS signal ("this turn produced
+	// audio"), recorded once; the headline response-latency SLO ends later, at the
+	// first Opus packet on the wire (onFirstOpus). outcomeDone blocks the TTL reap
+	// from also counting this turn as abandoned.
+	if t.firstAudioDone {
 		return
 	}
-	t.headlineDone = true
+	t.firstAudioDone = true
 	t.firstAudioAt = e.At
 
-	// Turn-lifecycle outcome: this turn reached audio (the success state, the
-	// counterpart to the survivorship-biased response_latency). Recorded once;
-	// outcomeDone blocks the TTL reap from also counting it as abandoned.
 	if !t.outcomeDone {
 		t.outcomeDone = true
 		s.rec.TurnOutcome(TurnFirstAudio, ReasonNone)
-		s.logTurn(e.TurnID, t, "first_audio")
+		logAttrs = s.turnLogAttrs(e.TurnID, t, "first_audio")
 	}
+}
 
+// onFirstOpus records the headline response-latency SLO sample: the FIRST Opus
+// packet of the turn reaching the Discord send path (audible-on-wire) minus the
+// turn's VAD speech-end (Luk's definition, task #7). It is the audible-on-wire
+// end the old handed-to-pump FirstAudio boundary undercounted. Recorded once per
+// turn, and only when the span start is valid (non-zero SpeechEndAt) and the role
+// label is known. A turn whose audio never reaches the wire (barge-cancelled
+// before any frame) emits no FirstOpus and so records no sample — correctly, the
+// user heard nothing.
+func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
+	if e.TurnID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.turns[e.TurnID]
+	if t == nil {
+		// FirstOpus with no opened turn (STTFinal lost): nothing to anchor against.
+		return
+	}
+	t.lastSeen = s.now()
+	if t.latencyDone {
+		return
+	}
+	t.latencyDone = true
+	t.firstOpusAt = e.At
 	if t.speechEndAt.IsZero() || !t.roleKnown {
 		return
 	}
@@ -250,6 +280,8 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	if e.TurnID == "" {
 		return
 	}
+	var logAttrs []any
+	defer func() { s.flushLog(logAttrs) }() // registered first → runs after Unlock (LIFO)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.turns[e.TurnID]
@@ -267,7 +299,7 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	t.outcomeDone = true
 	outcome, reason, label := turnEndOutcome(e.Reason)
 	s.rec.TurnOutcome(outcome, reason)
-	s.logTurn(e.TurnID, t, label)
+	logAttrs = s.turnLogAttrs(e.TurnID, t, label)
 }
 
 // turnEndOutcome maps a wire [voiceevent.TurnEndReason] to the bounded metric
@@ -290,11 +322,14 @@ func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string
 	}
 }
 
-// logTurn emits the one-line per-turn timing trace at turn-end. Called under
-// s.mu. outcome is "first_audio" (reached audio), "abandoned" (reaped without
-// it), or "yielded" (coalesced away by the floor grace window). Durations are
-// relative to speech-end (the SLO span start) when known.
-func (s *StageSubscriber) logTurn(turnID string, t *turnState, outcome string) {
+// turnLogAttrs builds the slog attrs for the one-line per-turn timing trace at
+// turn-end. Called under s.mu (it reads turnState), but it does NO I/O: the
+// caller emits s.log.Info AFTER releasing the lock (see [StageSubscriber.flushLog])
+// so the per-turn log write never happens under the mutex. outcome is
+// "first_audio" (reached audio), "abandoned" (reaped without it), or "yielded"
+// (coalesced away by the floor grace window). Durations are relative to
+// speech-end (the SLO span start) when known.
+func (s *StageSubscriber) turnLogAttrs(turnID string, t *turnState, outcome string) []any {
 	attrs := []any{
 		"turn_id", turnID,
 		"outcome", outcome,
@@ -308,6 +343,9 @@ func (s *StageSubscriber) logTurn(turnID string, t *turnState, outcome string) {
 		if !t.firstAudioAt.IsZero() {
 			attrs = append(attrs, "first_audio_after", t.firstAudioAt.Sub(t.speechEndAt))
 		}
+		if !t.firstOpusAt.IsZero() {
+			attrs = append(attrs, "first_opus_after", t.firstOpusAt.Sub(t.speechEndAt))
+		}
 	}
 	if t.firstAudioAt.IsZero() {
 		// The debuggable signal the thin Sprint-2 logs lacked: a turn that opened
@@ -319,7 +357,17 @@ func (s *StageSubscriber) logTurn(turnID string, t *turnState, outcome string) {
 		// until real utterance coalescing routes it into the surviving turn.
 		attrs = append(attrs, "yielded_text", t.yieldedText)
 	}
-	s.log.Info("voice turn end", attrs...)
+	return attrs
+}
+
+// flushLog emits a per-turn log line for attrs built under the lock, if any. It
+// MUST be called after s.mu is released — register it as a deferred call BEFORE
+// the deferred Unlock so LIFO ordering runs Unlock first, then this. A nil attrs
+// (no log was due) is a no-op.
+func (s *StageSubscriber) flushLog(attrs []any) {
+	if attrs != nil {
+		s.log.Info("voice turn end", attrs...)
+	}
 }
 
 // Start runs the TTL [StageSubscriber.Sweep] on a ticker until ctx is cancelled,
@@ -349,6 +397,14 @@ func (s *StageSubscriber) Start(ctx context.Context) {
 // (tests). Safe for concurrent use. Returns the number of turns reaped (for
 // tests / a debug gauge).
 func (s *StageSubscriber) Sweep() int {
+	// Collect the per-turn log lines for reaped turns under the lock, emit them
+	// after releasing it — the per-turn log write must not happen under s.mu.
+	var pending [][]any
+	defer func() {
+		for _, attrs := range pending {
+			s.flushLog(attrs)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cutoff := s.now().Add(-s.ttl)
@@ -363,7 +419,7 @@ func (s *StageSubscriber) Sweep() int {
 			// without re-counting).
 			if !t.outcomeDone {
 				s.rec.TurnOutcome(TurnAbandoned, ReasonNoFirstAudio)
-				s.logTurn(id, t, "abandoned")
+				pending = append(pending, s.turnLogAttrs(id, t, "abandoned"))
 			}
 			delete(s.turns, id)
 			reaped++

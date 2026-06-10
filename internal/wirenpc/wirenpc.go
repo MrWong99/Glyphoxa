@@ -283,13 +283,15 @@ func Run(ctx context.Context, cfg Config) error {
 	// (line above), and pipe.Run's own deferred cancel stops the Conversation
 	// first — so teardown order is conv-stop → pump.Close() → sess.Close(), which
 	// is the deterministic ordering the pump's Close() contract requires.
-	pump := wire.NewPlaybackPump(sess, cdc, log)
-	defer pump.Close()
-
 	// The orchestrator bus is created here (not inside buildConversation) so the
-	// tee can publish FirstAudio (A3 hook 1) onto the same bus the conversation's
+	// tee can publish FirstAudio (A3 hook 1) and the pump can publish FirstOpus
+	// (task #7, the audible-on-wire SLO end) onto the same bus the conversation's
 	// stages publish on and the metrics subscriber reads.
 	bus := voiceevent.NewBus()
+
+	pump := wire.NewPlaybackPump(sess, cdc, log, bus)
+	defer pump.Close()
+
 	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
 
 	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the

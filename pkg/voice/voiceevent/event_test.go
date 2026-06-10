@@ -59,6 +59,15 @@ func TestFirstAudio_EventName(t *testing.T) {
 	}
 }
 
+func TestFirstOpus_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := FirstOpus{}.EventName()
+	if got != "voice.first_opus" {
+		t.Errorf("EventName = %q, want %q", got, "voice.first_opus")
+	}
+}
+
 func TestTurnEnded_EventName(t *testing.T) {
 	t.Parallel()
 

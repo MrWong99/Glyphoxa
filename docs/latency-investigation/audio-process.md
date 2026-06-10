@@ -401,3 +401,28 @@ would withhold dice when needed), so the tool path is intact when dice IS asked
 for. The locked `tool.Loop` / `GrantSet` seams are untouched — `Without` is
 additive and the gate lives entirely in the bridge. Cold-connection prewarm
 (doc #5) remains a separate follow-up.
+
+**`response_latency` now ends audible-on-wire (task #7 — P1 item #5, Luk's
+definition).** The SLO was measuring "audio handed to the pump" (`FirstAudio`),
+which excludes the codec encode, the pump's real-time 20 ms pacing, and the
+Discord send tail — the span the user never experiences. Per Luk ("I stop talking
+until the first TTS opus packets are streamed back to Discord") the boundary moved
+to the **first Opus packet pulled to the Discord send path**: a new
+`voiceevent.FirstOpus` is published by a `voice.Source` decorator in
+`wire.playSentenceBus` on the first non-EOF frame disgo's sender pulls (the
+audible-on-wire moment), and the subscriber's `response_latency` now ends there
+instead of at `FirstAudio`. `FirstAudio` is retained for what it still owns — the
+per-sentence `tts_ttfb` pairing and the turn-lifecycle `first_audio` success
+outcome (which still gates `abandoned`). So the headline number finally measures
+speech-end → audible-on-wire, while the lifecycle/ttfb semantics are unchanged.
+
+**Barge-in timer residual (won't-fix, recorded).** `BargeIn` re-arms a fresh
+timer goroutine + channel on every `speech_start` while a confirm window is armed.
+That is a bounded allocation nit under multi-segment churn, **not** a leak. It is
+deliberately left as-is: the per-arm channel identity (`b.pending == done`) is the
+supersede disambiguator, and a single reusable `time.AfterFunc` cannot carry
+per-scheduling identity, so a "cleanup" to one timer would trade the nit for a
+correctness risk (a stale just-elapsed callback firing the barge against a freshly
+re-armed window). The eventual shape, if the churn ever matters, is a single
+long-lived worker goroutine draining one timer's channel plus a re-arm channel —
+its own scoped change with its own tests, not a rider on a latency hot-fix.

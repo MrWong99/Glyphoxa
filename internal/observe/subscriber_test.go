@@ -86,18 +86,62 @@ func TestStageSubscriberHeadlineAndStages(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base.Add(750 * time.Millisecond), TurnID: "T1", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 	bus.Publish(voiceevent.TTSInvoked{At: base.Add(1200 * time.Millisecond), TurnID: "T1", Index: 0})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(1500 * time.Millisecond), TurnID: "T1"})
+	// First opus on the wire lands AFTER first-audio-to-pump (codec encode + pacing).
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(1600 * time.Millisecond), TurnID: "T1"})
 
-	// response_latency = firstAudio(1500ms) − speechEnd(0) = 1.5s, role=character.
-	if len(rec.responseLat) != 1 || rec.responseLat[0].label != "character" || rec.responseLat[0].d != 1500*time.Millisecond {
-		t.Fatalf("response_latency = %+v, want one [character 1.5s]", rec.responseLat)
+	// response_latency now ends at FirstOpus (audible-on-wire): 1600ms − speechEnd(0)
+	// = 1.6s, role=character — NOT the 1.5s handed-to-pump FirstAudio moment.
+	if len(rec.responseLat) != 1 || rec.responseLat[0].label != "character" || rec.responseLat[0].d != 1600*time.Millisecond {
+		t.Fatalf("response_latency = %+v, want one [character 1.6s] (FirstOpus boundary)", rec.responseLat)
 	}
 	// address_detect = 750ms − 700ms = 50ms.
 	if len(rec.addressDetect) != 1 || rec.addressDetect[0] != 50*time.Millisecond {
 		t.Fatalf("address_detect = %v, want [50ms]", rec.addressDetect)
 	}
-	// tts_ttfb = 1500ms − 1200ms = 300ms, elevenlabs.
+	// tts_ttfb still pairs TTSInvoked↔FirstAudio = 1500ms − 1200ms = 300ms, elevenlabs.
 	if len(rec.ttsTTFB) != 1 || rec.ttsTTFB[0].label != "elevenlabs" || rec.ttsTTFB[0].d != 300*time.Millisecond {
 		t.Fatalf("tts_ttfb = %+v, want one [elevenlabs 300ms]", rec.ttsTTFB)
+	}
+}
+
+// TestStageSubscriberFirstOpusBoundary pins task #7: the response_latency span
+// ends at FirstOpus (audible-on-wire), and FirstAudio alone does NOT record a
+// latency sample — only the success outcome.
+func TestStageSubscriberFirstOpusBoundary(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	bus.Publish(voiceevent.STTFinal{At: base, TurnID: "T", SpeechEndAt: base})
+	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+
+	// FirstAudio alone: the turn produced audio (success outcome) but the SLO has
+	// not ended yet — no latency sample.
+	bus.Publish(voiceevent.FirstAudio{At: base.Add(800 * time.Millisecond), TurnID: "T"})
+	if len(rec.responseLat) != 0 {
+		t.Fatalf("FirstAudio alone recorded a latency sample %+v; the SLO ends at FirstOpus", rec.responseLat)
+	}
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnFirstAudio {
+		t.Fatalf("FirstAudio must record the first_audio success outcome, got %+v", got)
+	}
+
+	// FirstOpus on the wire ends the span: 1200 − 0 = 1.2s.
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(1200 * time.Millisecond), TurnID: "T"})
+	if len(rec.responseLat) != 1 || rec.responseLat[0].d != 1200*time.Millisecond {
+		t.Fatalf("response_latency = %+v, want one 1.2s sample at the FirstOpus boundary", rec.responseLat)
+	}
+}
+
+// TestStageSubscriberFirstOpusNoOpenTurnIgnored proves a FirstOpus for a turn the
+// subscriber never opened (STTFinal lost) is a safe no-op.
+func TestStageSubscriberFirstOpusNoOpenTurnIgnored(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	bus.Publish(voiceevent.FirstOpus{At: base, TurnID: "ghost"}) // no STTFinal first
+	if len(rec.responseLat) != 0 {
+		t.Fatalf("FirstOpus with no opened turn recorded %+v, want nothing", rec.responseLat)
 	}
 }
 
@@ -114,9 +158,10 @@ func TestStageSubscriberInterleavedTurnsUseOwnSpeechEnd(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base.Add(550 * time.Millisecond), TurnID: "A", Target: voiceevent.AddressTarget{AgentRole: "butler"}})
 	bus.Publish(voiceevent.STTFinal{At: base.Add(2500 * time.Millisecond), TurnID: "B", SpeechEndAt: endB})
 	bus.Publish(voiceevent.AddressRouted{At: base.Add(2550 * time.Millisecond), TurnID: "B", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	// B's audio lands FIRST (its LLM was faster), then A's.
-	bus.Publish(voiceevent.FirstAudio{At: base.Add(3 * time.Second), TurnID: "B"})         // 3000 − 2000 = 1.0s
-	bus.Publish(voiceevent.FirstAudio{At: base.Add(3500 * time.Millisecond), TurnID: "A"}) // 3500 − 0 = 3.5s
+	// B's audio reaches the wire FIRST (its LLM was faster), then A's. The SLO
+	// ends at FirstOpus per turn, each anchored to its OWN speechEnd.
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(3 * time.Second), TurnID: "B"})         // 3000 − 2000 = 1.0s
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(3500 * time.Millisecond), TurnID: "A"}) // 3500 − 0 = 3.5s
 
 	got := map[string]time.Duration{}
 	for _, l := range rec.responseLat {
@@ -131,8 +176,8 @@ func TestStageSubscriberInterleavedTurnsUseOwnSpeechEnd(t *testing.T) {
 }
 
 func TestStageSubscriberHeadlineExactlyOnce(t *testing.T) {
-	// Multiple sentences ⇒ multiple FirstAudio for one turn: response_latency must
-	// fire ONCE (first), the rest feed tts_ttfb only.
+	// Multiple sentences ⇒ multiple FirstAudio for one turn (each feeds tts_ttfb),
+	// and multiple FirstOpus (only the FIRST sets the response_latency sample).
 	rec := &recordingStage{}
 	bus := voiceevent.NewBus()
 	NewStageSubscriber(rec).Subscribe(bus)
@@ -143,9 +188,10 @@ func TestStageSubscriberHeadlineExactlyOnce(t *testing.T) {
 		at := base.Add(time.Duration(i+1) * 100 * time.Millisecond)
 		bus.Publish(voiceevent.TTSInvoked{At: at, TurnID: "T", Index: i})
 		bus.Publish(voiceevent.FirstAudio{At: at.Add(50 * time.Millisecond), TurnID: "T"})
+		bus.Publish(voiceevent.FirstOpus{At: at.Add(80 * time.Millisecond), TurnID: "T"})
 	}
 	if len(rec.responseLat) != 1 {
-		t.Fatalf("response_latency fired %d times, want exactly 1", len(rec.responseLat))
+		t.Fatalf("response_latency fired %d times, want exactly 1 (first FirstOpus only)", len(rec.responseLat))
 	}
 	if len(rec.ttsTTFB) != 3 {
 		t.Fatalf("tts_ttfb fired %d times, want 3 (one per sentence)", len(rec.ttsTTFB))
@@ -189,6 +235,7 @@ func TestStageSubscriberZeroSpeechEndSkipped(t *testing.T) {
 	bus.Publish(voiceevent.STTFinal{At: base, TurnID: "T", Text: "flush"}) // SpeechEndAt zero
 	bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "butler"}})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(time.Second), TurnID: "T"})
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(1100 * time.Millisecond), TurnID: "T"})
 
 	if len(rec.responseLat) != 0 {
 		t.Fatalf("response_latency = %+v, want none (zero SpeechEndAt skipped)", rec.responseLat)
@@ -394,8 +441,9 @@ func TestStageSubscriberTurnLog(t *testing.T) {
 }
 
 func TestStageSubscriberConcurrentFirstAudioRace(t *testing.T) {
-	// FirstAudio publishes off the tee's forward goroutine — concurrent deliveries
-	// across turns. -race guards the shared per-turn map.
+	// FirstAudio (tee goroutine) and FirstOpus (disgo sender goroutine) both publish
+	// off non-subscriber goroutines — concurrent deliveries across turns. -race
+	// guards the shared per-turn map.
 	rec := &recordingStage{}
 	bus := voiceevent.NewBus()
 	NewStageSubscriber(rec).Subscribe(bus)
@@ -412,6 +460,7 @@ func TestStageSubscriberConcurrentFirstAudioRace(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			bus.Publish(voiceevent.FirstAudio{At: base.Add(time.Second), TurnID: turnID(i)})
+			bus.Publish(voiceevent.FirstOpus{At: base.Add(1100 * time.Millisecond), TurnID: turnID(i)})
 		}(i)
 	}
 	wg.Wait()
@@ -468,6 +517,7 @@ func TestStageSubscriberEndToEndPrometheus(t *testing.T) {
 	bus.Publish(voiceevent.AddressRouted{At: base.Add(40 * time.Millisecond), TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
 	bus.Publish(voiceevent.TTSInvoked{At: base.Add(900 * time.Millisecond), TurnID: "T"})
 	bus.Publish(voiceevent.FirstAudio{At: base.Add(1100 * time.Millisecond), TurnID: "T"})
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(1200 * time.Millisecond), TurnID: "T"})
 
 	out := scrape(t, rec)
 	wants := []string{

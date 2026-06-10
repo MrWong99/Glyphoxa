@@ -126,15 +126,17 @@ type TTSInvoked struct {
 func (TTSInvoked) EventName() string { return "tts.invoked" }
 
 // FirstAudio marks the moment the first synthesized [tts.AudioChunk] of a
-// sentence crosses the TeeSynthesizer→PlaybackPump boundary — the headline SLO
-// boundary, "first audio handed to the pump" (A3 hook 1). It is published by the
-// wire tee, off its forward goroutine, so a metrics subscriber may receive it
-// concurrently with other turns and must lock its per-turn state.
+// sentence crosses the TeeSynthesizer→PlaybackPump boundary — "first audio handed
+// to the pump" (A3 hook 1). It is published by the wire tee, off its forward
+// goroutine, so a metrics subscriber may receive it concurrently with other turns
+// and must lock its per-turn state.
 //
-// There is no sentence index: the metrics subscriber keys on TurnID. The
-// headline response-latency uses the FIRST FirstAudio per TurnID; per-sentence
-// TTS time-to-first-byte pairs [TTSInvoked]↔FirstAudio within a TurnID by
-// arrival order (dispatch is sequential, so the interleave is clean).
+// It is NO LONGER the headline response-latency boundary — that is [FirstOpus],
+// the audible-on-wire moment. FirstAudio still owns two things: the per-sentence
+// tts_ttfb pairing ([TTSInvoked]↔FirstAudio by arrival order within a TurnID), and
+// the turn-lifecycle success signal ("this turn produced audio", which gates the
+// abandoned outcome). There is no sentence index: the metrics subscriber keys on
+// TurnID and uses the FIRST FirstAudio per turn for the success signal.
 type FirstAudio struct {
 	At     time.Time
 	TurnID string
@@ -142,6 +144,27 @@ type FirstAudio struct {
 
 // EventName implements [Event].
 func (FirstAudio) EventName() string { return "voice.first_audio" }
+
+// FirstOpus marks the moment the FIRST Opus packet of a turn is pulled from the
+// playback [voice.Source] by disgo's sender to be streamed to Discord — the
+// audible-on-wire boundary. It is the END of the headline response-latency SLO
+// per Luk's definition ("I stop talking until the first TTS opus packets are
+// streamed back to Discord"): strictly later than [FirstAudio] (handed-to-pump),
+// it includes the codec encode and the pump's real-time pacing that FirstAudio
+// excludes, so the span finally measures what the user experiences.
+//
+// Published once per turn by the wire playback path's Source decorator on the
+// first non-EOF frame it yields. It runs on disgo's sender goroutine, so a
+// metrics subscriber may receive it concurrently and must lock its per-turn
+// state. A turn whose audio is barge-cancelled before any frame reaches the wire
+// never emits it (correctly: nothing was audible).
+type FirstOpus struct {
+	At     time.Time
+	TurnID string
+}
+
+// EventName implements [Event].
+func (FirstOpus) EventName() string { return "voice.first_opus" }
 
 // TurnEndReason is the bounded cause a turn ended without (or after) audio,
 // carried on [TurnEnded]. It is published by the seam that KNOWS the cause — the
