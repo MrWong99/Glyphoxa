@@ -44,6 +44,17 @@ type Floor struct {
 	now      func() time.Time
 }
 
+// clock returns the floor's time source, defaulting to [time.Now] so a
+// zero-value Floor{} (no constructor) does not panic on a nil now in [Floor.Take]
+// — the constructors set it, but a bare Floor{} is otherwise fully usable, so the
+// clock must be too. Called under f.mu.
+func (f *Floor) clock() time.Time {
+	if f.now == nil {
+		return time.Now()
+	}
+	return f.now()
+}
+
 // NewFloor returns an unheld floor with no coalesce window: every [Floor.Take]
 // supersedes the prior turn (the original behaviour).
 func NewFloor() *Floor { return &Floor{now: time.Now} }
@@ -81,13 +92,13 @@ func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(
 	ctx, cancel := context.WithCancel(parent)
 
 	f.mu.Lock()
-	if f.cancel != nil && f.coalesce > 0 && f.now().Sub(f.lastTake) < f.coalesce {
+	if f.cancel != nil && f.coalesce > 0 && f.clock().Sub(f.lastTake) < f.coalesce {
 		// Same-utterance re-take inside the coalesce window: yield to the turn
 		// already holding the floor instead of superseding it. Cancel only THIS
 		// (the late segment's) context and leave the holder untouched. Refresh the
 		// anchor so a run of closely-spaced splits keeps coalescing (each segment
 		// is within the window of the previous one, not just the first).
-		f.lastTake = f.now()
+		f.lastTake = f.clock()
 		f.mu.Unlock()
 		cancel()
 		return ctx, func() {}, true // no-op release: this turn never held the floor
@@ -98,7 +109,7 @@ func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(
 	f.gen++
 	gen := f.gen
 	f.cancel = cancel
-	f.lastTake = f.now()
+	f.lastTake = f.clock()
 	f.holderTurn = voiceevent.TurnIDFrom(parent)
 	f.mu.Unlock()
 

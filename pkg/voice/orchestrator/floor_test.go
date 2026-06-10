@@ -9,6 +9,25 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
+// TestFloor_ZeroValueUsable proves a bare Floor{} (no constructor) does not panic
+// on its nil clock in Take — the clock defaults to time.Now. Guards the sharp
+// edge code-quality flagged: the constructors set now, but the type must be
+// usable zero-valued too.
+func TestFloor_ZeroValueUsable(t *testing.T) {
+	var f orchestrator.Floor // zero value, now == nil
+	ctx, release, coalesced := f.Take(context.Background())
+	defer release()
+	if coalesced {
+		t.Fatal("a zero-value floor has no coalesce window; Take must not coalesce")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("turn ctx must be live: %v", ctx.Err())
+	}
+	if !f.Active() {
+		t.Fatal("floor must be active after Take on a zero-value floor")
+	}
+}
+
 func TestFloor_TakeActiveReleaseInactive(t *testing.T) {
 	f := orchestrator.NewFloor()
 	if f.Active() {
