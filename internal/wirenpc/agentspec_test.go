@@ -30,6 +30,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 // pgImage carries the pgvector extension the schema needs (ADR-0011).
@@ -159,7 +160,7 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// assert it succeeds, and that the matcher routes a named utterance to the
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
-	conv, err := buildConversation(slog.New(slog.NewTextHandler(io.Discard, nil)), loaded, ttseleven.New(""))
+	conv, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), loaded, ttseleven.New(""), nil)
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
 	}
