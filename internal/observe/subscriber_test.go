@@ -265,8 +265,8 @@ func TestStageSubscriberFirstAudioOutcome(t *testing.T) {
 }
 
 // TestStageSubscriberYieldedOutcome pins the coalesced-segment path: a
-// TurnYielded records the distinct `yielded` outcome (not abandoned), and a
-// later TTL reap of its state must not re-count it.
+// TurnEnded(supersede_coalesced) records the distinct `yielded` outcome (not
+// abandoned), and a later TTL reap of its state must not re-count it.
 func TestStageSubscriberYieldedOutcome(t *testing.T) {
 	rec := &recordingStage{}
 	bus := voiceevent.NewBus()
@@ -279,7 +279,7 @@ func TestStageSubscriberYieldedOutcome(t *testing.T) {
 	// A late segment of one over-split utterance: opened, routed, then coalesced.
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "late", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "late", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TurnYielded{At: clock, TurnID: "late", Text: "and have you seen Gandalf"})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "late", Reason: voiceevent.TurnEndSupersedeCoalesced, Text: "and have you seen Gandalf"})
 
 	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnYielded || got[0].reason != ReasonSupersessionGrace {
 		t.Fatalf("turn outcomes = %+v, want one [yielded supersession_grace]", got)
@@ -293,6 +293,55 @@ func TestStageSubscriberYieldedOutcome(t *testing.T) {
 	sub.Sweep()
 	if got := rec.outcomes(); len(got) != 1 {
 		t.Fatalf("reap of a yielded turn re-counted the outcome: %+v", got)
+	}
+}
+
+// TestStageSubscriberTurnEndedReasons pins the precise-reason mapping: each
+// TurnEnded reason records the right outcome+reason, and a turn-end arriving
+// AFTER first audio is ignored (the turn already counted first_audio).
+func TestStageSubscriberTurnEndedReasons(t *testing.T) {
+	cases := []struct {
+		name        string
+		reason      voiceevent.TurnEndReason
+		wantOutcome TurnOutcome
+		wantReason  TurnReason
+	}{
+		{"barge", voiceevent.TurnEndBarge, TurnAbandoned, ReasonBarge},
+		{"tts_error", voiceevent.TurnEndTTSError, TurnAbandoned, ReasonTTSError},
+		{"provider_error", voiceevent.TurnEndProviderError, TurnAbandoned, ReasonProviderError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingStage{}
+			bus := voiceevent.NewBus()
+			NewStageSubscriber(rec).Subscribe(bus)
+
+			bus.Publish(voiceevent.STTFinal{At: base, TurnID: "T", SpeechEndAt: base})
+			bus.Publish(voiceevent.AddressRouted{At: base, TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+			bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "T", Reason: tc.reason})
+
+			if got := rec.outcomes(); len(got) != 1 || got[0].outcome != tc.wantOutcome || got[0].reason != tc.wantReason {
+				t.Fatalf("outcomes = %+v, want one [%s %s]", got, tc.wantOutcome, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestStageSubscriberTurnEndedAfterFirstAudioIgnored proves a barge mid-playback
+// (after first audio) does not re-count the turn: first_audio is terminal.
+func TestStageSubscriberTurnEndedAfterFirstAudioIgnored(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	bus.Publish(voiceevent.STTFinal{At: base, TurnID: "T", SpeechEndAt: base})
+	bus.Publish(voiceevent.AddressRouted{At: base.Add(50 * time.Millisecond), TurnID: "T", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.FirstAudio{At: base.Add(600 * time.Millisecond), TurnID: "T"})
+	// Barge after audio began: normal interruption, not a failure.
+	bus.Publish(voiceevent.TurnEnded{At: base.Add(900 * time.Millisecond), TurnID: "T", Reason: voiceevent.TurnEndBarge})
+
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnFirstAudio {
+		t.Fatalf("outcomes = %+v, want one [first_audio none] (post-audio barge must not re-count)", got)
 	}
 }
 
@@ -324,7 +373,7 @@ func TestStageSubscriberTurnLog(t *testing.T) {
 	// — the residual a yielded turn loses until real utterance coalescing.
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "late", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "late", Target: voiceevent.AddressTarget{AgentRole: "character"}})
-	bus.Publish(voiceevent.TurnYielded{At: clock.Add(60 * time.Millisecond), TurnID: "late", Text: "have you seen Gandalf"})
+	bus.Publish(voiceevent.TurnEnded{At: clock.Add(60 * time.Millisecond), TurnID: "late", Reason: voiceevent.TurnEndSupersedeCoalesced, Text: "have you seen Gandalf"})
 
 	clock = base.Add(2 * defaultTurnTTL)
 	sub.Sweep()

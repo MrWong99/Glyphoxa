@@ -130,7 +130,7 @@ func (s *StageSubscriber) Subscribe(bus *voiceevent.Bus) (unsubscribe func()) {
 		voiceevent.On(bus, s.onAddressRouted),
 		voiceevent.On(bus, s.onTTSInvoked),
 		voiceevent.On(bus, s.onFirstAudio),
-		voiceevent.On(bus, s.onTurnYielded),
+		voiceevent.On(bus, s.onTurnEnded),
 	}
 	return func() {
 		for _, u := range unsubs {
@@ -239,12 +239,14 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 	s.rec.ResponseLatency(t.role, e.At.Sub(t.speechEndAt))
 }
 
-// onTurnYielded records the terminal outcome of a late segment the floor's
-// coalesce grace window folded into the turn already speaking (root cause #2).
-// The segment never reaches TTS, so it would otherwise be reaped as `abandoned`
-// — record it once as the distinct `yielded` outcome (outcomeDone blocks the
-// reap from re-counting it) and keep its dropped transcript for the turn-end log.
-func (s *StageSubscriber) onTurnYielded(e voiceevent.TurnYielded) {
+// onTurnEnded records the terminal outcome of a turn that ended for a KNOWN
+// reason (barge / supersede-coalesced / tts or provider error), published by the
+// seam that knows the cause. It records the outcome+reason once (outcomeDone
+// blocks the TTL reap — and a later end signal — from re-counting it) so the
+// counter attributes WHY a turn died instead of the coarse no-first-audio
+// catch-all. A turn-end arriving AFTER first audio (e.g. a barge mid-playback) is
+// a normal interruption: outcomeDone is already set, so it is ignored.
+func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	if e.TurnID == "" {
 		return
 	}
@@ -256,13 +258,36 @@ func (s *StageSubscriber) onTurnYielded(e voiceevent.TurnYielded) {
 		s.turns[e.TurnID] = t
 	}
 	t.lastSeen = s.now()
-	t.yieldedText = e.Text
+	if e.Text != "" {
+		t.yieldedText = e.Text
+	}
 	if t.outcomeDone {
 		return
 	}
 	t.outcomeDone = true
-	s.rec.TurnOutcome(TurnYielded, ReasonSupersessionGrace)
-	s.logTurn(e.TurnID, t, "yielded")
+	outcome, reason, label := turnEndOutcome(e.Reason)
+	s.rec.TurnOutcome(outcome, reason)
+	s.logTurn(e.TurnID, t, label)
+}
+
+// turnEndOutcome maps a wire [voiceevent.TurnEndReason] to the bounded metric
+// outcome+reason and the log label. A coalesced end is its own `yielded` outcome
+// (it never reached TTS); the failure reasons are all `abandoned` (no audio) with
+// the precise cause. An unknown reason collapses to abandoned/no_first_audio
+// rather than leaking an unbounded label.
+func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string) {
+	switch r {
+	case voiceevent.TurnEndSupersedeCoalesced:
+		return TurnYielded, ReasonSupersessionGrace, "yielded"
+	case voiceevent.TurnEndBarge:
+		return TurnAbandoned, ReasonBarge, "abandoned"
+	case voiceevent.TurnEndTTSError:
+		return TurnAbandoned, ReasonTTSError, "abandoned"
+	case voiceevent.TurnEndProviderError:
+		return TurnAbandoned, ReasonProviderError, "abandoned"
+	default:
+		return TurnAbandoned, ReasonNoFirstAudio, "abandoned"
+	}
 }
 
 // logTurn emits the one-line per-turn timing trace at turn-end. Called under

@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 // Floor is the single conversational floor an Agent turn holds while it speaks.
@@ -30,10 +32,11 @@ import (
 // window (the [NewFloor] default) keeps the plain always-supersede behaviour the
 // barge path and the tracer-bullet tests rely on.
 type Floor struct {
-	mu       sync.Mutex
-	cancel   context.CancelFunc // non-nil while a turn holds the floor
-	gen      uint64             // increments per Take; guards stale releases
-	lastTake time.Time          // when the current holder took the floor (coalesce anchor)
+	mu         sync.Mutex
+	cancel     context.CancelFunc // non-nil while a turn holds the floor
+	gen        uint64             // increments per Take; guards stale releases
+	lastTake   time.Time          // when the current holder took the floor (coalesce anchor)
+	holderTurn string             // TurnID of the turn currently holding the floor (for Yield → barge attribution)
 
 	// coalesce is the same-utterance debounce window; 0 disables it (plain
 	// supersession). now is the clock, overridable in tests.
@@ -68,9 +71,12 @@ func NewFloorWithCoalesce(window time.Duration) *Floor {
 // cancel the in-flight turn. The returned context comes back already cancelled,
 // the returned release is a no-op on the floor, and coalesced is true — so the
 // caller can see this Take yielded (rather than took) the floor and react (e.g.
-// publish [voiceevent.TurnYielded] for the dropped segment) instead of speaking
+// publish [voiceevent.TurnEnded] for the dropped segment) instead of speaking
 // it, while the turn already holding the floor keeps it. On a normal take
 // coalesced is false.
+//
+// The turn's TurnID is recovered from parent ([voiceevent.TurnIDFrom]) and held
+// so [Floor.Yield] can attribute a barge to the turn it cancelled.
 func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(), coalesced bool) {
 	ctx, cancel := context.WithCancel(parent)
 
@@ -93,6 +99,7 @@ func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(
 	gen := f.gen
 	f.cancel = cancel
 	f.lastTake = f.now()
+	f.holderTurn = voiceevent.TurnIDFrom(parent)
 	f.mu.Unlock()
 
 	release = func() {
@@ -110,19 +117,23 @@ func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(
 }
 
 // Yield cancels the turn currently holding the floor and reports whether one was
-// held. It is the barge-in action: a true result means an Agent was actually
-// speaking and has now been cut; false means the floor was free, so nothing was
-// interrupted (and no BargeDetected should be emitted).
-func (f *Floor) Yield() bool {
+// held, along with that turn's TurnID. It is the barge-in action: yielded=true
+// means an Agent was actually speaking and has now been cut (and turnID is the
+// turn that was cut, so the caller can attribute the barge); yielded=false means
+// the floor was free, so nothing was interrupted (turnID is empty and no
+// BargeDetected/TurnEnded should be emitted).
+func (f *Floor) Yield() (turnID string, yielded bool) {
 	f.mu.Lock()
 	c := f.cancel
+	turnID = f.holderTurn
 	f.cancel = nil
+	f.holderTurn = ""
 	f.mu.Unlock()
 	if c == nil {
-		return false
+		return "", false
 	}
 	c()
-	return true
+	return turnID, true
 }
 
 // Active reports whether a turn currently holds the floor (an Agent is

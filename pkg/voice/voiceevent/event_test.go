@@ -59,12 +59,12 @@ func TestFirstAudio_EventName(t *testing.T) {
 	}
 }
 
-func TestTurnYielded_EventName(t *testing.T) {
+func TestTurnEnded_EventName(t *testing.T) {
 	t.Parallel()
 
-	got := TurnYielded{}.EventName()
-	if got != "turn.yielded" {
-		t.Errorf("EventName = %q, want %q", got, "turn.yielded")
+	got := TurnEnded{}.EventName()
+	if got != "turn.ended" {
+		t.Errorf("EventName = %q, want %q", got, "turn.ended")
 	}
 }
 

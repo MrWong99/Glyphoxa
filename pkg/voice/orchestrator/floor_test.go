@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 func TestFloor_TakeActiveReleaseInactive(t *testing.T) {
@@ -31,11 +32,18 @@ func TestFloor_TakeActiveReleaseInactive(t *testing.T) {
 
 func TestFloor_YieldCancelsHeldTurnAndReportsTrue(t *testing.T) {
 	f := orchestrator.NewFloor()
-	ctx, release, _ := f.Take(context.Background())
+	// The turn carries its TurnID in the parent ctx (as the production reply
+	// reactor does) so Yield can attribute the barge to the cut turn.
+	parent := voiceevent.WithTurnID(context.Background(), "T7")
+	ctx, release, _ := f.Take(parent)
 	defer release()
 
-	if !f.Yield() {
+	turnID, yielded := f.Yield()
+	if !yielded {
 		t.Fatal("Yield must report true when a turn was held")
+	}
+	if turnID != "T7" {
+		t.Fatalf("Yield returned turnID %q, want the held turn's T7 (barge attribution)", turnID)
 	}
 	if ctx.Err() == nil {
 		t.Fatal("Yield must cancel the held turn ctx")
@@ -47,8 +55,8 @@ func TestFloor_YieldCancelsHeldTurnAndReportsTrue(t *testing.T) {
 
 func TestFloor_YieldOnFreeFloorReportsFalse(t *testing.T) {
 	f := orchestrator.NewFloor()
-	if f.Yield() {
-		t.Fatal("Yield on a free floor must report false")
+	if turnID, yielded := f.Yield(); yielded || turnID != "" {
+		t.Fatalf("Yield on a free floor must report (\"\", false), got (%q, %v)", turnID, yielded)
 	}
 }
 

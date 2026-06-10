@@ -361,11 +361,11 @@ saves the *first* segment's turn from cancellation, but it does so by **yielding
 the late segment** — that segment is never spoken, so when VAD over-splits
 "*Bart, what's a room cost…*" / "*…and have you seen Gandalf?*", Bart answers only
 the **first half**. The fix is deliberately *visible*, not silent: the yielded
-segment emits `voiceevent.TurnYielded{TurnID, Text}`, which the metrics subscriber
-records as a **distinct `turn_total{outcome="yielded",reason="supersession_grace"}`**
-(not `abandoned`) and logs at INFO **with the dropped transcript**
-(`yielded_text=…`). So the over-split rate and the exact text lost are both
-measurable.
+segment emits `voiceevent.TurnEnded{Reason: supersede_coalesced, Text}`, which the
+metrics subscriber records as a **distinct
+`turn_total{outcome="yielded",reason="supersession_grace"}`** (not `abandoned`)
+and logs at INFO **with the dropped transcript** (`yielded_text=…`). So the
+over-split rate and the exact text lost are both measurable.
 
 This is the data the *next* iteration needs to justify **real utterance
 coalescing**: instead of dropping the late segment, assemble consecutive
@@ -373,3 +373,14 @@ same-speaker segments into one turn (or route the late segment's text into the
 in-flight turn's Hot Context before its LLM call) so one utterance = one *complete*
 turn. That belongs to the S2 Hot Context seam and per-participant VAD (ADR-0019),
 not the floor — out of task #1's blast radius, tracked as a follow-up.
+
+**Turn-end reasons are now precise (task #4).** The single `voiceevent.TurnEnded`
+event carries a bounded `Reason` published by the seam that knows the cause —
+`barge` (the `BargeIn`, via the `Floor` now returning the cut turn's `TurnID` from
+`Yield`), `supersede_coalesced` (the `Replier`'s coalesced branch), and
+`tts_error` / `provider_error` (the `Replier`'s dispatch / producer error paths
+when the turn dies of its own error before audio). The subscriber maps these to
+`turn_total{outcome,reason}`, so `no_first_audio` is now only the fallback for a
+turn that vanished with **no** signal at all (TTL-reaped). A `TurnEnded` arriving
+*after* first audio (a barge mid-playback) is a normal interruption and does not
+re-count the turn (first-audio is terminal).

@@ -31,6 +31,27 @@ func TestBargeIn_InstantYieldsActiveFloor(t *testing.T) {
 	voicetest.AssertEventCount[voiceevent.BargeDetected](t, h, 1)
 }
 
+// TestBargeIn_PublishesTurnEndedWithTurnID pins the barge attribution path
+// (task #4): a confirmed barge publishes a TurnEnded carrying the cut turn's
+// TurnID and the barge reason, so the metrics subscriber records why the turn
+// died instead of the coarse no-first-audio catch-all.
+func TestBargeIn_PublishesTurnEndedWithTurnID(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	// The turn holds the floor with its TurnID in ctx, as the reply reactor wires it.
+	parent := voiceevent.WithTurnID(context.Background(), "T42")
+	_, release, _ := floor.Take(parent)
+	defer release()
+
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.VADSpeechStart{})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool { return e.TurnID == "T42" && e.Reason == voiceevent.TurnEndBarge },
+		"turn.ended (barge) carrying the cut turn's TurnID",
+	)
+}
+
 // TestBargeIn_NoFloorNoBarge proves a speech_start with no Agent speaking is a
 // normal utterance onset, not a barge: nothing is cancelled, nothing emitted.
 func TestBargeIn_NoFloorNoBarge(t *testing.T) {

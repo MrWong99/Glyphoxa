@@ -96,22 +96,30 @@ const (
 
 // TurnReason is the bounded sub-reason label on the turn-lifecycle counter,
 // narrowing WHY a turn ended in its outcome. Kept deliberately small (ADR-0032
-// cardinality): the bus subscriber can attribute only what the bus reveals;
-// precise cancel attribution (barge vs supersede vs provider 4xx/5xx) needs a
-// TurnID-carrying turn-end event and is a follow-up.
+// cardinality): each value is published by the seam that knows the cause (the
+// orchestrator's BargeIn / Replier via [voiceevent.TurnEnded]); only a turn that
+// vanishes with no signal at all falls back to the coarse no_first_audio.
 type TurnReason string
 
 const (
 	// ReasonNone is the no-further-detail reason (the success path).
 	ReasonNone TurnReason = "none"
-	// ReasonNoFirstAudio: reaped without ever emitting first audio. The coarse
-	// catch-all for the abandoned outcome until a precise cancel reason is on the
-	// bus.
+	// ReasonNoFirstAudio: reaped by the TTL sweep without ever emitting first audio
+	// AND with no turn-end signal — the coarse fallback for a turn that simply
+	// vanished (the precise reasons below cover turns that ended for a known cause).
 	ReasonNoFirstAudio TurnReason = "no_first_audio"
 	// ReasonSupersessionGrace: the yielded outcome's reason — the floor's
 	// same-utterance coalesce window folded this late segment into the in-flight
 	// turn (it did not supersede it).
 	ReasonSupersessionGrace TurnReason = "supersession_grace"
+	// ReasonBarge: the turn was cut by a confirmed human barge-in before audio.
+	ReasonBarge TurnReason = "barge"
+	// ReasonTTSError: the turn's TTS synthesis failed (a real provider/synth error,
+	// not a context cancel).
+	ReasonTTSError TurnReason = "tts_error"
+	// ReasonProviderError: the reply producer (LLM round / tool loop) failed before
+	// the turn could produce audio.
+	ReasonProviderError TurnReason = "provider_error"
 )
 
 // StageRecorder records the orchestrator's per-stage / per-turn latency

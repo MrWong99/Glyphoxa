@@ -122,9 +122,16 @@ func (b *BargeIn) disarm() {
 	b.mu.Unlock()
 }
 
-// fire yields the floor and, if a turn was actually cancelled, announces it.
+// fire yields the floor and, if a turn was actually cancelled, announces it: the
+// BargeDetected observability signal (ADR-0027) and a TurnEnded carrying the cut
+// turn's TurnID + the barge reason, so the metrics subscriber attributes this
+// turn's death to the barge rather than the coarse no-first-audio catch-all.
 func (b *BargeIn) fire(bus *voiceevent.Bus) {
-	if b.floor.Yield() {
-		bus.Publish(voiceevent.BargeDetected{At: time.Now()})
+	turnID, yielded := b.floor.Yield()
+	if !yielded {
+		return
 	}
+	now := time.Now()
+	bus.Publish(voiceevent.BargeDetected{At: now})
+	bus.Publish(voiceevent.TurnEnded{At: now, TurnID: turnID, Reason: voiceevent.TurnEndBarge})
 }

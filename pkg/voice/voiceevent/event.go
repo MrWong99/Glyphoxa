@@ -143,25 +143,51 @@ type FirstAudio struct {
 // EventName implements [Event].
 func (FirstAudio) EventName() string { return "voice.first_audio" }
 
-// TurnYielded marks a turn that was coalesced away by the floor's same-utterance
-// grace window (see orchestrator.Floor): one spoken utterance VAD-split into two
-// segments opened two turns, and the LATE segment yielded to the turn already
-// holding the floor instead of superseding it. The late segment is therefore
-// never spoken — its turn ends here, before any TTS.
+// TurnEndReason is the bounded cause a turn ended without (or after) audio,
+// carried on [TurnEnded]. It is published by the seam that KNOWS the cause — the
+// only place the precise reason is available — so the metrics subscriber records
+// it instead of guessing. It is a log/exemplar value AND maps to the bounded
+// metric reason label (ADR-0032 §2.1): keep this set small.
+type TurnEndReason string
+
+const (
+	// TurnEndSupersedeCoalesced: the floor's same-utterance grace window folded a
+	// late VAD-split segment into the turn already speaking — the late segment is
+	// never spoken (latency investigation root cause #2). [TurnEnded.Text] carries
+	// its dropped transcript.
+	TurnEndSupersedeCoalesced TurnEndReason = "supersede_coalesced"
+	// TurnEndBarge: a confirmed human barge-in cancelled the turn (the floor was
+	// yielded while this turn held it).
+	TurnEndBarge TurnEndReason = "barge"
+	// TurnEndTTSError: the turn's TTS synthesis failed (a real provider/synth error,
+	// not a context cancel).
+	TurnEndTTSError TurnEndReason = "tts_error"
+	// TurnEndProviderError: the reply producer (LLM round/tool loop) failed before
+	// the turn could produce audio.
+	TurnEndProviderError TurnEndReason = "provider_error"
+)
+
+// TurnEnded marks a turn that ended for a known reason — distinct from a turn
+// that simply vanished (reaped by the metrics TTL sweep with no signal). It
+// carries the turn's TurnID and the precise [TurnEndReason] so the metrics
+// subscriber records WHY a turn died (barge vs supersede vs tts/provider error)
+// rather than the coarse "no first audio" catch-all. Text is the dropped
+// transcript, set only for [TurnEndSupersedeCoalesced]; empty otherwise.
 //
-// It carries the late segment's TurnID and transcript Text so the metrics
-// subscriber can record this turn's terminal outcome (yielded) without
-// double-counting it as abandoned, and log the dropped transcript — the known
-// residual until real utterance coalescing routes that text into the surviving
-// turn (latency investigation root cause #2, residual section).
-type TurnYielded struct {
+// Published by the seam that knows the cause: the [orchestrator.Replier]
+// (supersede-coalesced, tts/provider error) and the [orchestrator.BargeIn]
+// (barge). The subscriber treats first-audio as terminal, so a TurnEnded arriving
+// AFTER first audio (e.g. a barge mid-playback) is a normal interruption and does
+// not re-count the turn.
+type TurnEnded struct {
 	At     time.Time
 	TurnID string
+	Reason TurnEndReason
 	Text   string
 }
 
 // EventName implements [Event].
-func (TurnYielded) EventName() string { return "turn.yielded" }
+func (TurnEnded) EventName() string { return "turn.ended" }
 
 // BargeDetected marks a confirmed human barge-in: a participant reclaimed the
 // floor while an Agent was speaking, so the Agent's turn was torn down (ADR-0027).
