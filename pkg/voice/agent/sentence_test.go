@@ -101,6 +101,27 @@ func TestSentenceSplitter_EmptyAndWhitespaceOnly(t *testing.T) {
 	}
 }
 
+func TestSentenceSplitter_TagOnlySentenceFiltered(t *testing.T) {
+	// eleven_v3 audio/speaker tags ("[laughs]", "[Bart]") contain letters but
+	// ElevenLabs strips speaker tags + emojis and then rejects empty input
+	// (input_text_empty, HTTP 400) — which drops the whole reply. A sentence that
+	// is only such a tag must not be dispatched, via a terminator or the Flush tail.
+	if got := feed("[laughs]. "); got != nil {
+		t.Errorf("tag-only sentence → %q, want nil (ElevenLabs strips it to empty)", got)
+	}
+	if got := feed("[laughs]"); got != nil {
+		t.Errorf("tag-only Flush tail → %q, want nil", got)
+	}
+	// Real words plus a trailing tag: keep the words, drop the tag-only tail.
+	if got := feed("Aye! [laughs]"); !reflect.DeepEqual(got, []string{"Aye!"}) {
+		t.Errorf("words then tag → %q, want [\"Aye!\"]", got)
+	}
+	// A tag preceding real speech keeps the sentence (ElevenLabs voices the rest).
+	if got := feed("[Bart] Hello there."); !reflect.DeepEqual(got, []string{"[Bart] Hello there."}) {
+		t.Errorf("tag then words → %q, want [\"[Bart] Hello there.\"]", got)
+	}
+}
+
 func TestSentenceSplitter_TrailingTerminatorNoSpace(t *testing.T) {
 	// A terminator at end-of-input (no following space) still closes the sentence.
 	got := feed("Done.")
