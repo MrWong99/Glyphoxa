@@ -16,7 +16,8 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/mozilla-ai/any-llm-go v0.9.0
 	github.com/openai/openai-go v1.12.0
-	github.com/pgvector/pgvector-go v0.3.0
+	github.com/pgvector/pgvector-go v0.4.0
+	github.com/pgvector/pgvector-go/pgx v0.4.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/tiktoken-go/tokenizer v0.7.0
 	github.com/yalue/onnxruntime_go v1.30.1
