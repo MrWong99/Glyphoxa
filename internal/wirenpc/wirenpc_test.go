@@ -7,6 +7,18 @@ import (
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
+// TestBargeConfirmWindow_NonZero pins the live-mic invariant the latency
+// investigation established: the wired barge-in confirm window must be > 0. A
+// zero window lets the addressing user's own continued speech cancel the turn it
+// just triggered (single shared VAD session, no speaker identity), which was the
+// 20s self-cancel (docs/latency-investigation/audio-process.md). This test fails
+// loudly if anyone re-introduces WithBargeIn(0) for the live loop.
+func TestBargeConfirmWindow_NonZero(t *testing.T) {
+	if bargeConfirmWindow <= 0 {
+		t.Fatalf("bargeConfirmWindow = %v, must be > 0 against a live mic (a 0 window self-cancels the addressing user's own turn)", bargeConfirmWindow)
+	}
+}
+
 // TestNPCVoice_Emits48kPCM pins the live NPC's TTS output format at pcm_48000 so
 // the outbound codec path stays encode-only (Discord's Opus encoder runs at
 // 48 kHz; matching the TTS rate avoids a resampler on the live demo). It also

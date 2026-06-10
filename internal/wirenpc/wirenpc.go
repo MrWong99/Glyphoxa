@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
@@ -66,6 +67,19 @@ const (
 	// elevenGeorgeVoiceID is the ElevenLabs "George" public preset — a neutral
 	// stand-in voice for the NPC.
 	elevenGeorgeVoiceID = "JBFqnCBsd6RMkjVDRZzb"
+
+	// bargeConfirmWindow is how long continuous inbound speech must persist before
+	// it counts as a barge and yields Bart's floor (ADR-0027). It must be > 0
+	// against a live mic: with a single shared VAD session (ADR-0019) the events
+	// carry no speaker identity, so the addressing user's OWN continued speech —
+	// or a VAD split of one utterance into two segments — fires a fresh
+	// speech_start while Bart holds the floor. A zero window yields on that instant
+	// and cancels the in-flight TTS POST (the "context canceled" self-cancel that
+	// produced the 20s wait — see docs/latency-investigation/audio-process.md).
+	// 250ms debounces a speaker finishing their own sentence from a genuine
+	// interruption; it is the minimum until per-participant VAD (ADR-0019) can gate
+	// barge on speaker != the turn's addresser.
+	bargeConfirmWindow = 250 * time.Millisecond
 )
 
 // BartPersona is the Character NPC Persona (CONTEXT.md "Persona") for the MVP
@@ -422,11 +436,13 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		// agent.StreamingEngine (it streams the final answer round), so ReplyStream
 		// dispatches each sentence as it lands.
 		orchestrator.WithReplyStream(replier.ReplyStream()),
-		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. Start
-		// with an instant cut (0 confirm window) to validate the async-turn path
-		// live; the ~250ms confirm window is the next tuning step. With B1 a barge
-		// now cancels mid-generation, not just pending dispatch.
-		orchestrator.WithBargeIn(0),
+		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. The
+		// confirm window must be > 0 against a live mic — a zero window let the
+		// addressing user's own continued speech (single shared VAD session, no
+		// speaker identity) cancel the turn it had just triggered, which is the 20s
+		// self-cancel the latency investigation found. With B1 a confirmed barge
+		// cancels mid-generation, not just pending dispatch.
+		orchestrator.WithBargeIn(bargeConfirmWindow),
 		orchestrator.WithErrorHandler(func(err error) {
 			log.Warn("reply dispatch failed", "err", err)
 		}),
