@@ -132,6 +132,38 @@ func TestPlaySentenceBus_WrapsWithCtxTurnID(t *testing.T) {
 	}
 }
 
+// TestPlaySentenceBus_TwoSentencesPublishPerSource pins the multi-sentence shape:
+// a turn plays several sentences, each its OWN playSentenceBus call over its own
+// Source, so each sentence's first frame publishes its own FirstOpus (the
+// once-guard is per-Source). Two sentences ⇒ two FirstOpus, both for the same
+// turn. The headline-SLO once-per-turn dedup therefore lives in the subscriber
+// (latencyDone — see internal/observe TestStageSubscriberHeadlineExactlyOnce,
+// which feeds multiple FirstOpus and records exactly one sample), which is robust
+// to future pump refactors. This test guards the producer half of that contract.
+func TestPlaySentenceBus_TwoSentencesPublishPerSource(t *testing.T) {
+	bus := voiceevent.NewBus()
+	got := collectFirstOpus(bus)
+	codec := framingCodec{frames: [][]byte{{0x01}}}
+	ctx := voiceevent.WithTurnID(context.Background(), "Tmulti")
+
+	for i := 0; i < 2; i++ {
+		chunks := make(chan tts.AudioChunk)
+		close(chunks)
+		if err := playSentenceBus(ctx, &pullingPlayer{}, codec, chunks, bus); err != nil {
+			t.Fatalf("sentence %d: playSentenceBus: %v", i, err)
+		}
+	}
+
+	if len(*got) != 2 {
+		t.Fatalf("FirstOpus fired %d times, want 2 (one per sentence Source)", len(*got))
+	}
+	for i, e := range *got {
+		if e.TurnID != "Tmulti" {
+			t.Errorf("FirstOpus[%d].TurnID = %q, want Tmulti", i, e.TurnID)
+		}
+	}
+}
+
 // framingCodec is a fakeCodec whose PlaybackSource yields scripted frames so the
 // pulling player's NextFrame returns a real frame (triggering FirstOpus).
 type framingCodec struct{ frames [][]byte }

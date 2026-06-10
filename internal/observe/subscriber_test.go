@@ -176,8 +176,11 @@ func TestStageSubscriberInterleavedTurnsUseOwnSpeechEnd(t *testing.T) {
 }
 
 func TestStageSubscriberHeadlineExactlyOnce(t *testing.T) {
-	// Multiple sentences ⇒ multiple FirstAudio for one turn (each feeds tts_ttfb),
-	// and multiple FirstOpus (only the FIRST sets the response_latency sample).
+	// A multi-sentence turn: each sentence has its own playback Source, so each
+	// publishes its own FirstAudio (feeds tts_ttfb) AND its own FirstOpus (the
+	// per-Source once-guard — see wire.TestPlaySentenceBus_TwoSentencesPublishPerSource).
+	// The headline-SLO dedup lives HERE: only the FIRST FirstOpus per turn sets the
+	// response_latency sample (latencyDone). Three sentences ⇒ one sample.
 	rec := &recordingStage{}
 	bus := voiceevent.NewBus()
 	NewStageSubscriber(rec).Subscribe(bus)
