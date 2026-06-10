@@ -49,12 +49,12 @@ type StageSubscriber struct {
 // turnState is the per-TurnID timing state, opened at STTFinal and closed when
 // the headline sample lands (or reaped by TTL). lastSeen drives expiry.
 type turnState struct {
-	speechEndAt  time.Time // STTFinal.SpeechEndAt; zero ⇒ no headline sample
-	sttFinalAt   time.Time
-	routedAt     time.Time // AddressRouted.At; zero until routed (for the turn-end log)
-	firstAudioAt time.Time // first FirstAudio.At (handed-to-pump); zero ⇒ never reached audio
-	firstOpusAt  time.Time // first FirstOpus.At (audible-on-wire, the SLO end); zero ⇒ never reached the wire
-	role         AgentRole
+	speechEndAt    time.Time // STTFinal.SpeechEndAt; zero ⇒ no headline sample
+	sttFinalAt     time.Time
+	routedAt       time.Time // AddressRouted.At; zero until routed (for the turn-end log)
+	firstAudioAt   time.Time // first FirstAudio.At (handed-to-pump); zero ⇒ never reached audio
+	firstOpusAt    time.Time // first FirstOpus.At (audible-on-wire, the SLO end); zero ⇒ never reached the wire
+	role           AgentRole
 	roleKnown      bool // set at AddressRouted; gates the headline (needs the role label)
 	firstAudioDone bool // first FirstAudio consumed (success outcome + firstAudioAt)
 	latencyDone    bool // first FirstOpus consumed for the response_latency SLO sample

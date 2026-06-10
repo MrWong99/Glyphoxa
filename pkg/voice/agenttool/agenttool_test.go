@@ -426,8 +426,8 @@ func TestEngine_DiceGate_HistoryDiceDoesNotArmCurrentTurn(t *testing.T) {
 	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
-		{Role: llm.RoleUser, Text: "Roll a d20."},               // older turn: had dice intent
-		{Role: llm.RoleAssistant, Text: "You rolled a 14."},     // its answer
+		{Role: llm.RoleUser, Text: "Roll a d20."},                // older turn: had dice intent
+		{Role: llm.RoleAssistant, Text: "You rolled a 14."},      // its answer
 		{Role: llm.RoleUser, Text: "Great, point me to a room."}, // current turn: plain
 	}); err != nil {
 		t.Fatalf("Generate: %v", err)

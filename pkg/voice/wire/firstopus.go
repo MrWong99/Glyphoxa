@@ -2,6 +2,7 @@ package wire
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -23,11 +24,14 @@ import (
 // barge-cancelled sentence) never publishes, which is correct: nothing was
 // audible.
 type firstOpusSource struct {
-	inner    gxvoice.Source
-	bus      *voiceevent.Bus
-	turnID   string
-	fired    bool
-	nowFn    func() time.Time
+	inner  gxvoice.Source
+	bus    *voiceevent.Bus
+	turnID string
+	// fired guards the single publish. One disgo-sender goroutine pulls a Source
+	// serially today, so a plain bool would be safe — atomic.Bool future-proofs it
+	// against a pre-buffering pump that ever pulls one Source from two goroutines.
+	fired atomic.Bool
+	nowFn func() time.Time
 }
 
 // newFirstOpusSource wraps inner so the first frame it yields publishes
@@ -47,8 +51,7 @@ func newFirstOpusSource(inner gxvoice.Source, bus *voiceevent.Bus, turnID string
 // to the sender, not when the next poll comes around.
 func (s *firstOpusSource) NextFrame(ctx context.Context) ([]byte, error) {
 	frame, err := s.inner.NextFrame(ctx)
-	if err == nil && !s.fired {
-		s.fired = true
+	if err == nil && s.fired.CompareAndSwap(false, true) {
 		s.bus.Publish(voiceevent.FirstOpus{At: s.nowFn(), TurnID: s.turnID})
 	}
 	return frame, err

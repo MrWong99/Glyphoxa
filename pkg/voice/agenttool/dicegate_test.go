@@ -52,7 +52,7 @@ func TestNeedsDice(t *testing.T) {
 func TestNeedsDice_LatestUserOnly(t *testing.T) {
 	msgs := []llm.Message{
 		{Role: llm.RoleSystem, Text: "You are Bart. Roll dice when asked."}, // system mentions dice — ignored
-		{Role: llm.RoleUser, Text: "Roll a d20."},                            // older user turn
+		{Role: llm.RoleUser, Text: "Roll a d20."},                           // older user turn
 		{Role: llm.RoleAssistant, Text: "You rolled a 14."},
 		{Role: llm.RoleUser, Text: "Thanks, where's the bar?"}, // current: plain
 	}
