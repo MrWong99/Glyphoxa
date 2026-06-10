@@ -18,8 +18,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -125,7 +127,21 @@ type Config struct {
 	// an error (it runs inside a bus callback), so a failed completion returns
 	// no reply and is surfaced here. A nil OnError drops the error silently.
 	OnError func(error)
+
+	// TurnTimeout bounds one turn's LLM work (including any tool-use rounds a
+	// tool-backed Engine runs). The turn's context is cancelled when it elapses,
+	// unwinding the in-flight provider call, and the turn yields no reply (the
+	// deadline error goes to OnError). Zero applies [DefaultTurnTimeout];
+	// negative disables the deadline (the turn is still cancellable via the
+	// caller's ctx, e.g. barge-in).
+	TurnTimeout time.Duration
 }
+
+// DefaultTurnTimeout is the per-turn LLM deadline applied when
+// [Config.TurnTimeout] is zero. A voice turn that takes this long is dead in
+// conversational terms anyway; the deadline exists so a hung provider can never
+// wedge the reply path forever.
+const DefaultTurnTimeout = 60 * time.Second
 
 // Replier is the stateful Agent loop. Each addressed utterance appends a user
 // message and the assistant's reply to a running conversation, so the recent
@@ -170,12 +186,28 @@ func NewReplier(cfg Config) *Replier {
 // one blocking LLM call, and returns the spoken reply. On a route for a
 // different Agent it returns nil (says nothing); on an LLM failure it returns
 // nil and reports via [Config.OnError].
+//
+// The turn runs under ctx — with barge-in wired, the per-turn floor context,
+// so a barge cancels the LLM call itself — further bounded by
+// [Config.TurnTimeout] so a hung provider cannot hold the turn open forever.
 func (r *Replier) Reply() orchestrator.ReplyFunc {
-	return func(e voiceevent.AddressRouted) []orchestrator.Reply {
+	return func(ctx context.Context, e voiceevent.AddressRouted) []orchestrator.Reply {
 		if e.Target.AgentID != r.cfg.Persona.AgentID {
 			return nil // not addressed to this Agent
 		}
-		return r.turn(context.Background(), e.Text)
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		timeout := r.cfg.TurnTimeout
+		if timeout == 0 {
+			timeout = DefaultTurnTimeout
+		}
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		return r.turn(ctx, e.Text)
 	}
 }
 
@@ -350,7 +382,9 @@ type providerEngine struct {
 }
 
 // Generate implements [Engine]. It runs one completion and returns the
-// accumulated assistant text.
+// accumulated assistant text. A stream that ends without an [llm.EventDone] —
+// an [llm.EventError], a ctx cancellation, or a silent truncation — is an
+// error: a partial sentence must never be spoken as the Agent's full reply.
 func (e providerEngine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
 	stream, err := e.provider.Complete(ctx, llm.Request{
 		Model:     e.model,
@@ -361,10 +395,26 @@ func (e providerEngine) Generate(ctx context.Context, messages []llm.Message) (s
 		return "", err
 	}
 	var b strings.Builder
+	var done bool
+	var streamErr error
 	for ev := range stream {
-		if ev.Type == llm.EventText {
+		switch ev.Type {
+		case llm.EventText:
 			b.WriteString(ev.Text)
+		case llm.EventDone:
+			done = true
+		case llm.EventError:
+			streamErr = errors.New(ev.Err)
 		}
+	}
+	if streamErr != nil {
+		return "", streamErr
+	}
+	if !done {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "", errors.New("agent: completion stream ended without done event (truncated response)")
 	}
 	return b.String(), nil
 }

@@ -163,6 +163,13 @@ const (
 	// carries the provider's reason (e.g. "end_turn", "tool_use", "max_tokens")
 	// so the tool-use loop can decide whether to continue.
 	EventDone
+
+	// EventError marks a mid-stream failure — a transport error, a malformed
+	// frame, or a response exceeding the provider's size bounds — with the
+	// detail in [StreamEvent.Err]. It is terminal: the provider closes the
+	// channel right after. Consumers must treat the accumulated text as
+	// truncated and fail the turn rather than present it as a complete reply.
+	EventError
 )
 
 // StreamEvent is one item in a [Provider] completion stream. The active fields
@@ -179,6 +186,10 @@ type StreamEvent struct {
 
 	// StopReason is the provider's completion reason on an [EventDone].
 	StopReason string
+
+	// Err is the failure description on an [EventError]. A string, not an
+	// error, so cassette recordings serialize it faithfully (ADR-0021).
+	Err string
 }
 
 // Provider is the hot-path interface implemented by every LLM provider and by
@@ -190,7 +201,10 @@ type StreamEvent struct {
 // it to release the implementation's goroutines — mirroring
 // [github.com/MrWong99/Glyphoxa/pkg/voice/tts.Synthesizer]. A non-nil error is
 // returned only when the call cannot be started (missing key, bad request,
-// non-2xx response); a mid-stream failure closes the channel early.
+// non-2xx response); a mid-stream failure emits an [EventError] and then
+// closes the channel. A channel that closes with neither an [EventDone] nor an
+// [EventError] was cancelled via ctx; consumers must not treat any of these
+// early-closed streams' accumulated text as a complete reply.
 type Provider interface {
 	Complete(ctx context.Context, req Request) (<-chan StreamEvent, error)
 }

@@ -20,6 +20,14 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[snowflake.ID]*Session
+	// opening holds one mutex per guild, serializing concurrent Opens for the
+	// SAME guild end-to-end (close-stale → CreateConn → newSession → store).
+	// Without it two racing Opens both pass the existing-session check, both
+	// CreateConn for the guild, and the loser's Session is overwritten in the
+	// map without ever being Closed — leaking its Inbound consumer forever.
+	// Opens for different guilds stay concurrent. Entries are tiny and guilds
+	// are few, so the map is never pruned.
+	opening map[snowflake.ID]*sync.Mutex
 }
 
 // ManagerOption configures a [Manager] in [NewManager].
@@ -159,7 +167,20 @@ func newManager(vm voiceManager, opts ...ManagerOption) *Manager {
 		logger:   cfg.logger,
 		defaults: cfg.defaults,
 		sessions: make(map[snowflake.ID]*Session),
+		opening:  make(map[snowflake.ID]*sync.Mutex),
 	}
+}
+
+// guildMu returns the per-guild mutex serializing [Manager.Open] for one guild.
+func (m *Manager) guildMu(guild snowflake.ID) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mu, ok := m.opening[guild]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.opening[guild] = mu
+	}
+	return mu
 }
 
 // Open joins guild's voice channel and returns its Session. If a Session for
@@ -171,17 +192,27 @@ func (m *Manager) Open(ctx context.Context, guild, channel snowflake.ID, opts ..
 		opt(&cfg)
 	}
 
+	// Serialize the whole open sequence per guild (see Manager.opening). m.mu
+	// itself must not be held across Close/CreateConn/newSession — Close blocks
+	// on a playback Stop, and newSession blocks on the voice gateway.
+	gmu := m.guildMu(guild)
+	gmu.Lock()
+	defer gmu.Unlock()
+
 	m.mu.Lock()
-	if existing, ok := m.sessions[guild]; ok {
+	existing, replace := m.sessions[guild]
+	if replace {
 		// Drop the stale Session before opening a fresh connection so we never
-		// hold two for one Guild. Release the lock around Close — it blocks on a
-		// playback Stop and must not deadlock with a concurrent Open.
+		// hold two for one Guild.
 		delete(m.sessions, guild)
-		m.mu.Unlock()
-		_ = existing.Close()
-		m.mu.Lock()
 	}
 	m.mu.Unlock()
+	if replace {
+		_ = existing.Close()
+		// Release disgo's conn for the displaced session (mirrors Manager.Close)
+		// so CreateConn below hands back a fresh one, not the closed husk.
+		m.vm.RemoveConn(guild)
+	}
 
 	conn := m.vm.CreateConn(guild)
 	sess, err := newSession(ctx, guild, channel, conn, cfg)

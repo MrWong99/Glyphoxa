@@ -12,6 +12,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
@@ -29,12 +30,12 @@ const (
 	SeedCampaignName = "The Prancing Pony"
 
 	// llmProvider / llmModel record the DEPLOYMENT LLM in provider_config.
-	// Deployment is Gemini (no Anthropic key exists); the live adapter is task
-	// #13. buildConversation still wires the Anthropic adapter (the only one in
-	// this tree) — this DB data is recorded but not yet consumed by adapter
-	// selection. See the #5 seam note in wirenpc.go.
-	llmProvider = "gemini"
-	llmModel    = "gemini-2.0-flash"
+	// They reference the gemini adapter's own identifiers so the seeded row can
+	// never drift from what buildConversation actually wires (the DB value is
+	// recorded but not yet consumed by adapter selection — see the #5 seam note
+	// in wirenpc.go — so silent drift here would mislead later).
+	llmProvider = gemini.ProviderID
+	llmModel    = gemini.DefaultModel
 
 	// ttsModel / sttModel are the ElevenLabs models the Voice / STT configs record.
 	ttsModel = "eleven_multilingual_v2"

@@ -23,8 +23,10 @@
 package gemini
 
 import (
+	"net"
 	"net/http"
 	"os"
+	"time"
 )
 
 const (
@@ -98,9 +100,26 @@ type Option func(*Client)
 func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = u } }
 
 // WithHTTPClient supplies a custom http.Client. The default has no overall
-// timeout because streaming completions are long-lived; per-call deadlines must
-// come from the request context.
+// timeout because streaming completions are long-lived — but it does bound
+// dialing, TLS, and time-to-first-response-header (see [New]); the per-call
+// deadline for the whole exchange must come from the request context.
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
+
+// defaultHTTPClient bounds the connection-establishment phases so a black-holed
+// endpoint fails in seconds instead of hanging a turn. No overall Timeout: that
+// would also cap healthy long-lived SSE streams — the end-to-end bound is the
+// caller's ctx deadline (the agent loop's TurnTimeout).
+func defaultHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
 
 // WithModel sets the default model used when [llm.Request.Model] is empty.
 func WithModel(m string) Option { return func(c *Client) { c.model = m } }
@@ -143,7 +162,7 @@ func New(apiKey string, opts ...Option) *Client {
 		apiKey:          apiKey,
 		baseURL:         DefaultBaseURL,
 		model:           DefaultModel,
-		http:            &http.Client{},
+		http:            defaultHTTPClient(),
 		reasoningEffort: DefaultReasoningEffort,
 	}
 	for _, opt := range opts {

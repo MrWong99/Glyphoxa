@@ -136,8 +136,10 @@ jobs:
       # Go 1.26 modules. Building from source under the same Go toolchain
       # used for the project sidesteps both problems and keeps the lint
       # binary's "built with" version aligned with the project target.
+      # Pinned (not @latest) so a new lint release can't change what CI
+      # enforces — or what code it runs — without a reviewed bump.
       - name: Install golangci-lint v2
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
       - name: Run golangci-lint
         run: golangci-lint run ./...

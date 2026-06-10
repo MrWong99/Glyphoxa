@@ -118,7 +118,7 @@ func, `Feed(frame)` is the audio loop, and the reply behaviour is injected as a
 ```go
 conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
     orchestrator.WithDetector(detector),
-    orchestrator.WithReply(func(e voiceevent.AddressRouted) []orchestrator.Reply { /* … */ }),
+    orchestrator.WithReply(func(ctx context.Context, e voiceevent.AddressRouted) []orchestrator.Reply { /* … */ }),
     orchestrator.WithErrorHandler(func(err error) { t.Errorf("reply dispatch: %v", err) }),
 )
 t.Cleanup(conv.Register(t.Context()))

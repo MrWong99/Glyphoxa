@@ -379,7 +379,7 @@ func TestEngine_AsAgentEngine_DrivesReplier(t *testing.T) {
 		Engine:      eng,
 		Synthesizer: stubSynth{},
 	})
-	got := r.Reply()(addressed("bart", "Any rooms free?"))
+	got := r.Reply()(t.Context(), addressed("bart", "Any rooms free?"))
 	if len(got) != 1 || strings.TrimSpace(got[0].Sentence) != "Aye, two rooms upstairs." {
 		t.Fatalf("reply = %+v, want one spoken sentence from the tool engine", got)
 	}
@@ -387,5 +387,54 @@ func TestEngine_AsAgentEngine_DrivesReplier(t *testing.T) {
 	reqs := prov.requests()
 	if len(reqs) == 0 || reqs[0].Messages[0].Role != llm.RoleSystem {
 		t.Errorf("engine did not receive an assembled system prompt; first req = %+v", reqs)
+	}
+}
+
+// truncatingProvider streams some text and closes without [llm.EventDone] — a
+// mid-stream failure as the [llm.Provider] contract describes it.
+type truncatingProvider struct{}
+
+func (truncatingProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent, 1)
+	ch <- llm.StreamEvent{Type: llm.EventText, Text: "Half a sen"}
+	close(ch)
+	return ch, nil
+}
+
+// TestEngine_TruncatedStream_ReturnsError pins the truncation contract on the
+// tool-loop bridge: a stream that ends without EventDone must fail the
+// generation, never hand the loop (and ultimately TTS) a partial answer.
+func TestEngine_TruncatedStream_ReturnsError(t *testing.T) {
+	reg := tool.NewRegistry()
+	grants := tool.NewGrantSet(reg)
+	eng := agenttool.NewEngine(truncatingProvider{}, grants, "m", 0, 0)
+
+	_, err := eng.Generate(t.Context(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
+	if err == nil || !strings.Contains(err.Error(), "without done") {
+		t.Fatalf("Generate on truncated stream = %v, want truncation error", err)
+	}
+}
+
+// errorEventProvider terminates the stream with an [llm.EventError].
+type errorEventProvider struct{}
+
+func (errorEventProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent, 2)
+	ch <- llm.StreamEvent{Type: llm.EventText, Text: "Half a sen"}
+	ch <- llm.StreamEvent{Type: llm.EventError, Err: "provider: read stream: connection reset"}
+	close(ch)
+	return ch, nil
+}
+
+// TestEngine_EventError_PropagatesAsError pins that a terminal EventError
+// surfaces as the generation error, carrying the provider's message.
+func TestEngine_EventError_PropagatesAsError(t *testing.T) {
+	reg := tool.NewRegistry()
+	grants := tool.NewGrantSet(reg)
+	eng := agenttool.NewEngine(errorEventProvider{}, grants, "m", 0, 0)
+
+	_, err := eng.Generate(t.Context(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Generate on EventError = %v, want the provider's error", err)
 	}
 }

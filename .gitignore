@@ -52,3 +52,6 @@ deploy/zhi/plugin/dist/
 web/node_modules/
 web/.next/
 .claude/
+
+# local agent tooling artifact (not project code)
+.claude-flow/

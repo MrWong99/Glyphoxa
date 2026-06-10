@@ -126,7 +126,7 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 			// TTS cassette segment is matched positionally, so a second dispatch
 			// would exhaust it — sync.Once pins "one reply".
 			var answered sync.Once
-			reply := func(e voiceevent.AddressRouted) []orchestrator.Reply {
+			reply := func(_ context.Context, e voiceevent.AddressRouted) []orchestrator.Reply {
 				var out []orchestrator.Reply
 				if e.Target.AgentRole == "butler" {
 					answered.Do(func() {
@@ -203,7 +203,7 @@ func TestTurnID_PropagatesThroughStages(t *testing.T) {
 		address.NewMatcher(address.Config{Language: "en"},
 			address.Agent{Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}}),
 	)
-	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+	reply := func(_ context.Context, _ voiceevent.AddressRouted) []orchestrator.Reply {
 		return []orchestrator.Reply{{Sentence: "Aye.", Voice: voice}}
 	}
 
@@ -256,7 +256,7 @@ func TestTurnID_PropagatesThroughBargeInFloor(t *testing.T) {
 		address.NewMatcher(address.Config{Language: "en"},
 			address.Agent{Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}}),
 	)
-	reply := func(voiceevent.AddressRouted) []orchestrator.Reply {
+	reply := func(_ context.Context, _ voiceevent.AddressRouted) []orchestrator.Reply {
 		return []orchestrator.Reply{{Sentence: "Aye.", Voice: voice}}
 	}
 

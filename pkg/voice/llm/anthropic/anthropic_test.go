@@ -387,3 +387,63 @@ func TestComplete_Non2xx_WrapsOpAndStatus(t *testing.T) {
 func sse(data string) string {
 	return "event: x\ndata: " + data + "\n\n"
 }
+
+// TestComplete_MalformedFrame_EmitsEventError pins the truncation contract: a
+// frame that fails to decode must surface as a terminal [llm.EventError], not a
+// silent channel close — consumers would otherwise speak the partial text as a
+// complete reply (and `-tags=record` would bake it into a cassette).
+func TestComplete_MalformedFrame_EmitsEventError(t *testing.T) {
+	srv := sseServer(t, nil,
+		sse(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Half a sen"}}`),
+		sse(`{not json`),
+	)
+	defer srv.Close()
+
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	events := collect(t, ch)
+	last := events[len(events)-1]
+	if last.Type != llm.EventError {
+		t.Fatalf("last event type = %v, want EventError", last.Type)
+	}
+	if last.Err == "" {
+		t.Error("EventError carries no message")
+	}
+	for _, ev := range events {
+		if ev.Type == llm.EventDone {
+			t.Error("stream emitted EventDone despite the malformed frame")
+		}
+	}
+}
+
+// TestComplete_ServerErrorEvent_EmitsEventError pins that an in-band Anthropic
+// error frame terminates the stream with an [llm.EventError] (not a silent
+// close), carrying the server's payload for diagnosis.
+func TestComplete_ServerErrorEvent_EmitsEventError(t *testing.T) {
+	srv := sseServer(t, nil,
+		sse(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`),
+	)
+	defer srv.Close()
+
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	events := collect(t, ch)
+	if len(events) != 1 || events[0].Type != llm.EventError {
+		t.Fatalf("events = %+v, want exactly one EventError", events)
+	}
+	if !strings.Contains(events[0].Err, "overloaded_error") {
+		t.Errorf("EventError %q does not carry the server payload", events[0].Err)
+	}
+}
