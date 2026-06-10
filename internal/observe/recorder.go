@@ -68,6 +68,43 @@ const (
 	OutcomeTimeout Outcome = "timeout"
 )
 
+// TurnOutcome is the bounded result label on the turn-lifecycle counter
+// (glyphoxa_voice_turn_total). It is the survivorship counterpart to
+// response_latency: that histogram records ONLY turns that reached first audio,
+// so a turn cancelled / errored / abandoned before audio emits no sample and is
+// invisible. This counter records EVERY turn's terminal state, so the
+// failed/abandoned rate — the headline operational signal for a real-time voice
+// product — is observable next to the survivor latency (ADR-0032; latency
+// investigation root cause #3).
+type TurnOutcome string
+
+const (
+	// TurnFirstAudio: the turn reached first audio (it also recorded a
+	// response_latency sample). The success state.
+	TurnFirstAudio TurnOutcome = "first_audio"
+	// TurnAbandoned: the turn opened (STTFinal) but never reached first audio and
+	// was reaped by the TTL sweep — cancelled (barge/supersede), errored in TTS, or
+	// never synthesized. These are the turns the survivorship-biased
+	// response_latency cannot see.
+	TurnAbandoned TurnOutcome = "abandoned"
+)
+
+// TurnReason is the bounded sub-reason label on the turn-lifecycle counter,
+// narrowing WHY a turn ended in its outcome. Kept deliberately small (ADR-0032
+// cardinality): the bus subscriber can attribute only what the bus reveals;
+// precise cancel attribution (barge vs supersede vs provider 4xx/5xx) needs a
+// TurnID-carrying turn-end event and is a follow-up.
+type TurnReason string
+
+const (
+	// ReasonNone is the no-further-detail reason (the success path).
+	ReasonNone TurnReason = "none"
+	// ReasonNoFirstAudio: reaped without ever emitting first audio. The coarse
+	// catch-all for the abandoned outcome until a precise cancel reason is on the
+	// bus.
+	ReasonNoFirstAudio TurnReason = "no_first_audio"
+)
+
 // StageRecorder records the orchestrator's per-stage / per-turn latency
 // histograms and the provider-call counters. It is the contract the bus-driven
 // sibling subscriber (latency spans) and the provider adapters (provider calls,
@@ -142,6 +179,13 @@ type StageRecorder interface {
 	//  glyphoxa_voice_provider_errors_total{stage,provider})
 	ProviderCall(stage Stage, provider Provider, outcome Outcome)
 	ProviderError(stage Stage, provider Provider)
+
+	// TurnOutcome counts one turn's terminal state, the survivorship counterpart
+	// to ResponseLatency: every turn records exactly one outcome, so the
+	// failed/abandoned rate is visible next to the survivor latency.
+	// (glyphoxa_voice_turn_total{outcome,reason}) — WIRED by the bus subscriber
+	// (first_audio on the first FirstAudio per turn, abandoned on a TTL reap).
+	TurnOutcome(outcome TurnOutcome, reason TurnReason)
 }
 
 // Discard is the no-op StageRecorder used when none is configured, so call sites
@@ -160,6 +204,7 @@ func (Discard) LLMRound(Provider, int, bool, time.Duration) {}
 func (Discard) LLMTurn(Provider, time.Duration)             {}
 func (Discard) ProviderCall(Stage, Provider, Outcome)       {}
 func (Discard) ProviderError(Stage, Provider)               {}
+func (Discard) TurnOutcome(TurnOutcome, TurnReason)         {}
 
 // Static assertion that the no-op satisfies the contract.
 var _ StageRecorder = Discard{}

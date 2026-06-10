@@ -2,6 +2,7 @@ package observe
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type StageSubscriber struct {
 	rec StageRecorder
 	now func() time.Time
 	ttl time.Duration
+	log *slog.Logger
 
 	mu    sync.Mutex
 	turns map[string]*turnState
@@ -49,9 +51,12 @@ type StageSubscriber struct {
 type turnState struct {
 	speechEndAt  time.Time // STTFinal.SpeechEndAt; zero ⇒ no headline sample
 	sttFinalAt   time.Time
+	routedAt     time.Time // AddressRouted.At; zero until routed (for the turn-end log)
+	firstAudioAt time.Time // first FirstAudio.At; zero ⇒ never reached audio
 	role         AgentRole
 	roleKnown    bool // set at AddressRouted; gates the headline (needs the role label)
 	headlineDone bool // first FirstAudio consumed for response_latency
+	outcomeDone  bool // terminal TurnOutcome already recorded (first_audio); blocks a double-count at reap
 
 	// pendingTTS is the MOST-RECENT unmatched TTSInvoked time awaiting its
 	// FirstAudio for per-sentence tts_ttfb (zero = none pending). We keep only the
@@ -76,16 +81,40 @@ type turnState struct {
 const defaultTurnTTL = 60 * time.Second
 
 // NewStageSubscriber builds a subscriber recording onto rec. A nil rec is
-// replaced with [Discard] so it is always safe to construct.
-func NewStageSubscriber(rec StageRecorder) *StageSubscriber {
+// replaced with [Discard] so it is always safe to construct. opts configure
+// optional behaviour (e.g. [WithTurnLog]).
+func NewStageSubscriber(rec StageRecorder, opts ...StageSubscriberOption) *StageSubscriber {
 	if rec == nil {
 		rec = Discard{}
 	}
-	return &StageSubscriber{
+	s := &StageSubscriber{
 		rec:   rec,
 		now:   time.Now,
 		ttl:   defaultTurnTTL,
+		log:   slog.New(slog.DiscardHandler),
 		turns: make(map[string]*turnState),
+	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// StageSubscriberOption configures a [StageSubscriber] at construction.
+type StageSubscriberOption func(*StageSubscriber)
+
+// WithTurnLog enables the one-line-per-turn structured INFO timeline log
+// (turn_id, speech_end → routed → first_audio, or the abandoned reap), the
+// per-turn timing trace Sprint-2 log cleanup removed. A 20s wait is then
+// debuggable from the logs even when the survivorship-biased response_latency
+// histogram shows nothing for the failed turns. A nil logger disables it (the
+// default). It is one line per turn-end, not the old per-call-site noise.
+func WithTurnLog(log *slog.Logger) StageSubscriberOption {
+	return func(s *StageSubscriber) {
+		if log == nil {
+			log = slog.New(slog.DiscardHandler)
+		}
+		s.log = log
 	}
 }
 
@@ -137,6 +166,7 @@ func (s *StageSubscriber) onAddressRouted(e voiceevent.AddressRouted) {
 	}
 	t.role = normalizeRole(e.Target.AgentRole)
 	t.roleKnown = true
+	t.routedAt = e.At
 	t.lastSeen = s.now()
 
 	// address_detect = route decision − transcript. Only when we have the
@@ -189,10 +219,47 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 		return
 	}
 	t.headlineDone = true
+	t.firstAudioAt = e.At
+
+	// Turn-lifecycle outcome: this turn reached audio (the success state, the
+	// counterpart to the survivorship-biased response_latency). Recorded once;
+	// outcomeDone blocks the TTL reap from also counting it as abandoned.
+	if !t.outcomeDone {
+		t.outcomeDone = true
+		s.rec.TurnOutcome(TurnFirstAudio, ReasonNone)
+		s.logTurn(e.TurnID, t, "first_audio")
+	}
+
 	if t.speechEndAt.IsZero() || !t.roleKnown {
 		return
 	}
 	s.rec.ResponseLatency(t.role, e.At.Sub(t.speechEndAt))
+}
+
+// logTurn emits the one-line per-turn timing trace at turn-end. Called under
+// s.mu. outcome is "first_audio" (reached audio) or "abandoned" (reaped without
+// it). Durations are relative to speech-end (the SLO span start) when known.
+func (s *StageSubscriber) logTurn(turnID string, t *turnState, outcome string) {
+	attrs := []any{
+		"turn_id", turnID,
+		"outcome", outcome,
+		"role", string(t.role),
+	}
+	if !t.speechEndAt.IsZero() {
+		attrs = append(attrs, "speech_end", t.speechEndAt)
+		if !t.routedAt.IsZero() {
+			attrs = append(attrs, "routed_after", t.routedAt.Sub(t.speechEndAt))
+		}
+		if !t.firstAudioAt.IsZero() {
+			attrs = append(attrs, "first_audio_after", t.firstAudioAt.Sub(t.speechEndAt))
+		}
+	}
+	if t.firstAudioAt.IsZero() {
+		// The debuggable signal the thin Sprint-2 logs lacked: a turn that opened
+		// and never produced audio (the invisible 20s self-cancel).
+		attrs = append(attrs, "no_audio", true)
+	}
+	s.log.Info("voice turn end", attrs...)
 }
 
 // Start runs the TTL [StageSubscriber.Sweep] on a ticker until ctx is cancelled,
@@ -228,6 +295,16 @@ func (s *StageSubscriber) Sweep() int {
 	reaped := 0
 	for id, t := range s.turns {
 		if t.lastSeen.Before(cutoff) {
+			// A turn reaped without ever recording a terminal outcome never reached
+			// first audio: it was cancelled (barge/supersede), errored in TTS, or
+			// never synthesized — the exact failures response_latency cannot see.
+			// Count it as abandoned (outcomeDone gates the success turns, which keep
+			// their state alive for later-sentence ttfb pairing and are reaped here
+			// without re-counting).
+			if !t.outcomeDone {
+				s.rec.TurnOutcome(TurnAbandoned, ReasonNoFirstAudio)
+				s.logTurn(id, t, "abandoned")
+			}
 			delete(s.turns, id)
 			reaped++
 		}

@@ -1,7 +1,9 @@
 package observe
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,12 @@ type recordingStage struct {
 	responseLat   []labeledDur
 	addressDetect []time.Duration
 	ttsTTFB       []labeledDur
+	turnOutcomes  []turnOutcomeRec
+}
+
+type turnOutcomeRec struct {
+	outcome TurnOutcome
+	reason  TurnReason
 }
 
 type labeledDur struct {
@@ -50,6 +58,17 @@ func (r *recordingStage) LLMRound(Provider, int, bool, time.Duration) {}
 func (r *recordingStage) LLMTurn(Provider, time.Duration)             {}
 func (r *recordingStage) ProviderCall(Stage, Provider, Outcome)       {}
 func (r *recordingStage) ProviderError(Stage, Provider)               {}
+func (r *recordingStage) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turnOutcomes = append(r.turnOutcomes, turnOutcomeRec{outcome, reason})
+}
+
+func (r *recordingStage) outcomes() []turnOutcomeRec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]turnOutcomeRec(nil), r.turnOutcomes...)
+}
 
 var _ StageRecorder = (*recordingStage)(nil)
 
@@ -202,9 +221,84 @@ func TestStageSubscriberSweepReapsAbandonedTurns(t *testing.T) {
 	if len(rec.responseLat) != 0 {
 		t.Fatalf("abandoned turn recorded a sample: %+v", rec.responseLat)
 	}
+	// The survivorship counterpart: the reaped no-audio turn is counted as
+	// abandoned so the failure is visible even though response_latency saw nothing.
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnAbandoned || got[0].reason != ReasonNoFirstAudio {
+		t.Fatalf("turn outcomes = %+v, want one [abandoned no_first_audio]", got)
+	}
 	// A second sweep is a no-op (state already gone).
 	if got := sub.Sweep(); got != 0 {
 		t.Fatalf("double-reap: %d", got)
+	}
+}
+
+// TestStageSubscriberFirstAudioOutcome pins the success counterpart: a turn that
+// reaches first audio records exactly one first_audio outcome, and a later reap
+// of its (kept-alive) state does NOT re-count it as abandoned.
+func TestStageSubscriberFirstAudioOutcome(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec)
+	sub.Subscribe(bus)
+
+	clock := base
+	sub.now = func() time.Time { return clock }
+
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "live", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "live", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(400 * time.Millisecond), TurnID: "live", Index: 0})
+	bus.Publish(voiceevent.FirstAudio{At: clock.Add(600 * time.Millisecond), TurnID: "live"})
+	// A second sentence's first audio must NOT re-count the outcome.
+	bus.Publish(voiceevent.TTSInvoked{At: clock.Add(900 * time.Millisecond), TurnID: "live", Index: 1})
+	bus.Publish(voiceevent.FirstAudio{At: clock.Add(1000 * time.Millisecond), TurnID: "live"})
+
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnFirstAudio || got[0].reason != ReasonNone {
+		t.Fatalf("turn outcomes = %+v, want one [first_audio none]", got)
+	}
+
+	// Reaping the completed turn's kept-alive state must not add an abandoned count.
+	clock = base.Add(2 * defaultTurnTTL)
+	sub.Sweep()
+	if got := rec.outcomes(); len(got) != 1 {
+		t.Fatalf("reap of a completed turn re-counted the outcome: %+v", got)
+	}
+}
+
+// TestStageSubscriberTurnLog pins the per-turn timing trace: WithTurnLog emits
+// exactly one INFO line per turn-end, carrying the timing spine — and, for a
+// turn that never produced audio, the no_audio marker that makes a 20s
+// self-cancel debuggable from the logs (the trace Sprint-2 cleanup removed).
+func TestStageSubscriberTurnLog(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec, WithTurnLog(log))
+	sub.Subscribe(bus)
+
+	clock := base
+	sub.now = func() time.Time { return clock }
+
+	// A surviving turn: one line with first_audio timing.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "ok", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "ok", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.FirstAudio{At: clock.Add(600 * time.Millisecond), TurnID: "ok"})
+
+	// An abandoned turn (no audio): reaped and logged with the no_audio marker.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "dead", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "dead", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	clock = base.Add(2 * defaultTurnTTL)
+	sub.Sweep()
+
+	out := buf.String()
+	if got := strings.Count(out, "voice turn end"); got != 2 {
+		t.Fatalf("turn-end log lines = %d, want 2\n%s", got, out)
+	}
+	if !strings.Contains(out, `turn_id=ok`) || !strings.Contains(out, "first_audio_after=600ms") {
+		t.Fatalf("surviving turn line missing turn_id/first_audio_after:\n%s", out)
+	}
+	if !strings.Contains(out, `turn_id=dead`) || !strings.Contains(out, "no_audio=true") {
+		t.Fatalf("abandoned turn line missing turn_id/no_audio marker:\n%s", out)
 	}
 }
 

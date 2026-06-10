@@ -298,7 +298,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// the handlers (deferred unsubscribe); Start runs the TTL sweep for the run's
 	// lifetime so abandoned/barged turns don't leak per-turn state. A nil
 	// StageMetrics (keyless) makes the subscriber a no-op via observe.Discard.
-	stageSub := observe.NewStageSubscriber(cfg.StageMetrics)
+	stageSub := observe.NewStageSubscriber(cfg.StageMetrics, observe.WithTurnLog(log))
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(ctx)
 

@@ -119,5 +119,9 @@ func (t *recorderTap) STTRequest(observe.Provider, time.Duration) {}
 func (t *recorderTap) TTSTotal(observe.Provider, time.Duration)   {}
 func (t *recorderTap) LLMTurn(observe.Provider, time.Duration)    {}
 
+// TurnOutcome is the turn-lifecycle counter; the bench measures latency on
+// surviving turns, not the outcome mix, so it is a no-op here.
+func (t *recorderTap) TurnOutcome(observe.TurnOutcome, observe.TurnReason) {}
+
 // compile-time assertion: the tap satisfies the recorder the orchestrator drives.
 var _ observe.StageRecorder = (*recorderTap)(nil)
