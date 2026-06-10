@@ -80,6 +80,19 @@ const (
 	// interruption; it is the minimum until per-participant VAD (ADR-0019) can gate
 	// barge on speaker != the turn's addresser.
 	bargeConfirmWindow = 250 * time.Millisecond
+
+	// floorCoalesceWindow closes root cause #2 of the latency investigation: a
+	// turn's unit is a VAD segment, not a user utterance, so one utterance split by
+	// VAD into two STT segments opens two turns and the second's Floor.Take cancels
+	// the first mid-synthesis (a self-cancel with no barge). A Floor.Take landing
+	// within this window of the previous one is treated as the same utterance
+	// continuing and yields to the in-flight turn instead of superseding it, so one
+	// utterance maps to one turn. Sized a hair above the end-of-speech hangover
+	// (vadMinSilenceFrames*vadFrameMs = 12*32 = 384ms) so two segments split at an
+	// internal pause coalesce, while a genuine new utterance after a real
+	// conversational gap (turn-taking pauses run hundreds of ms longer) still opens
+	// its own turn.
+	floorCoalesceWindow = 600 * time.Millisecond
 )
 
 // BartPersona is the Character NPC Persona (CONTEXT.md "Persona") for the MVP
@@ -442,7 +455,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		// speaker identity) cancel the turn it had just triggered, which is the 20s
 		// self-cancel the latency investigation found. With B1 a confirmed barge
 		// cancels mid-generation, not just pending dispatch.
-		orchestrator.WithBargeIn(bargeConfirmWindow),
+		orchestrator.WithBargeInCoalesce(bargeConfirmWindow, floorCoalesceWindow),
 		orchestrator.WithErrorHandler(func(err error) {
 			log.Warn("reply dispatch failed", "err", err)
 		}),

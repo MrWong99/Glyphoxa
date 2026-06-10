@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -225,6 +226,57 @@ func TestReplier_BindCancelUnsubscribes(t *testing.T) {
 	h.Bus.Publish(voiceevent.AddressRouted{})
 
 	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+}
+
+// TestReplier_CoalescingFloorKeepsFirstSegmentTurn is the end-to-end proof of
+// root cause #2's fix: with a coalescing floor, two AddressRouted decisions from
+// one VAD-over-split utterance (two segments arriving back-to-back) must NOT
+// cancel each other. The first segment's turn keeps running; the second is
+// suppressed (coalesced) rather than superseding it mid-flight. Without the
+// coalesce window the second Floor.Take would cancel the first turn's ctx — the
+// self-cancel that produced no audio and no metric sample.
+func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+
+	// A streaming reply that blocks until its turn ctx is cancelled, reporting
+	// which turn (by TurnID) saw a cancel. The first segment's producer should
+	// keep running (never cancelled by the second); the coalesced second should
+	// see an already-cancelled ctx immediately.
+	started := make(chan string, 4)
+	firstCancelled := make(chan struct{}, 1)
+	reply := func(ctx context.Context, e voiceevent.AddressRouted, _ func(orchestrator.Reply) error) error {
+		started <- e.TurnID
+		if e.TurnID == "seg1" {
+			select {
+			case <-ctx.Done():
+				close(firstCancelled) // must NOT happen due to seg2
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		return nil
+	}
+
+	floor := orchestrator.NewFloorWithCoalesce(300 * time.Millisecond)
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(floor)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	// Two segments of one utterance, back-to-back (well inside the window).
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg1"})
+	// Wait for seg1's producer to actually start and take the floor before seg2.
+	if got := <-started; got != "seg1" {
+		t.Fatalf("first producer started for %q, want seg1", got)
+	}
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg2"})
+
+	// seg1 must run to its natural end without being cancelled by seg2.
+	select {
+	case <-firstCancelled:
+		t.Fatal("the first segment's turn was cancelled by the second — the self-cancel the coalesce window must prevent")
+	case <-time.After(200 * time.Millisecond):
+		// seg1 still running uninterrupted: correct.
+	}
 }
 
 // selectiveSynth is a [tts.Synthesizer] that fails Synthesize for sentences in
