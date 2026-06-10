@@ -20,7 +20,7 @@ require (
 	github.com/pgvector/pgvector-go/pgx v0.4.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/tiktoken-go/tokenizer v0.7.0
-	github.com/yalue/onnxruntime_go v1.30.1
+	github.com/yalue/onnxruntime_go v1.31.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/prometheus v0.66.0
