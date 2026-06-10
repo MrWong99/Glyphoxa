@@ -143,6 +143,26 @@ type FirstAudio struct {
 // EventName implements [Event].
 func (FirstAudio) EventName() string { return "voice.first_audio" }
 
+// TurnYielded marks a turn that was coalesced away by the floor's same-utterance
+// grace window (see orchestrator.Floor): one spoken utterance VAD-split into two
+// segments opened two turns, and the LATE segment yielded to the turn already
+// holding the floor instead of superseding it. The late segment is therefore
+// never spoken — its turn ends here, before any TTS.
+//
+// It carries the late segment's TurnID and transcript Text so the metrics
+// subscriber can record this turn's terminal outcome (yielded) without
+// double-counting it as abandoned, and log the dropped transcript — the known
+// residual until real utterance coalescing routes that text into the surviving
+// turn (latency investigation root cause #2, residual section).
+type TurnYielded struct {
+	At     time.Time
+	TurnID string
+	Text   string
+}
+
+// EventName implements [Event].
+func (TurnYielded) EventName() string { return "turn.yielded" }
+
 // BargeDetected marks a confirmed human barge-in: a participant reclaimed the
 // floor while an Agent was speaking, so the Agent's turn was torn down (ADR-0027).
 // It is the observability signal for a yield that actually cancelled an active

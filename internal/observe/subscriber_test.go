@@ -264,6 +264,38 @@ func TestStageSubscriberFirstAudioOutcome(t *testing.T) {
 	}
 }
 
+// TestStageSubscriberYieldedOutcome pins the coalesced-segment path: a
+// TurnYielded records the distinct `yielded` outcome (not abandoned), and a
+// later TTL reap of its state must not re-count it.
+func TestStageSubscriberYieldedOutcome(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec)
+	sub.Subscribe(bus)
+
+	clock := base
+	sub.now = func() time.Time { return clock }
+
+	// A late segment of one over-split utterance: opened, routed, then coalesced.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "late", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "late", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TurnYielded{At: clock, TurnID: "late", Text: "and have you seen Gandalf"})
+
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnYielded || got[0].reason != ReasonSupersessionGrace {
+		t.Fatalf("turn outcomes = %+v, want one [yielded supersession_grace]", got)
+	}
+	// No response_latency sample for a yielded (unspoken) segment.
+	if len(rec.responseLat) != 0 {
+		t.Fatalf("yielded segment recorded a latency sample: %+v", rec.responseLat)
+	}
+	// Reaping the yielded turn's state must not re-count it as abandoned.
+	clock = base.Add(2 * defaultTurnTTL)
+	sub.Sweep()
+	if got := rec.outcomes(); len(got) != 1 {
+		t.Fatalf("reap of a yielded turn re-counted the outcome: %+v", got)
+	}
+}
+
 // TestStageSubscriberTurnLog pins the per-turn timing trace: WithTurnLog emits
 // exactly one INFO line per turn-end, carrying the timing spine — and, for a
 // turn that never produced audio, the no_audio marker that makes a 20s
@@ -287,18 +319,28 @@ func TestStageSubscriberTurnLog(t *testing.T) {
 	// An abandoned turn (no audio): reaped and logged with the no_audio marker.
 	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "dead", SpeechEndAt: clock})
 	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "dead", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+
+	// A coalesced (yielded) segment: logged at turn-end with its dropped transcript
+	// — the residual a yielded turn loses until real utterance coalescing.
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "late", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock.Add(50 * time.Millisecond), TurnID: "late", Target: voiceevent.AddressTarget{AgentRole: "character"}})
+	bus.Publish(voiceevent.TurnYielded{At: clock.Add(60 * time.Millisecond), TurnID: "late", Text: "have you seen Gandalf"})
+
 	clock = base.Add(2 * defaultTurnTTL)
 	sub.Sweep()
 
 	out := buf.String()
-	if got := strings.Count(out, "voice turn end"); got != 2 {
-		t.Fatalf("turn-end log lines = %d, want 2\n%s", got, out)
+	if got := strings.Count(out, "voice turn end"); got != 3 {
+		t.Fatalf("turn-end log lines = %d, want 3\n%s", got, out)
 	}
 	if !strings.Contains(out, `turn_id=ok`) || !strings.Contains(out, "first_audio_after=600ms") {
 		t.Fatalf("surviving turn line missing turn_id/first_audio_after:\n%s", out)
 	}
 	if !strings.Contains(out, `turn_id=dead`) || !strings.Contains(out, "no_audio=true") {
 		t.Fatalf("abandoned turn line missing turn_id/no_audio marker:\n%s", out)
+	}
+	if !strings.Contains(out, `turn_id=late`) || !strings.Contains(out, "outcome=yielded") || !strings.Contains(out, "Gandalf") {
+		t.Fatalf("yielded turn line missing turn_id/outcome/dropped transcript:\n%s", out)
 	}
 }
 

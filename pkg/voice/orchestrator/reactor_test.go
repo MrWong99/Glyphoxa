@@ -232,25 +232,29 @@ func TestReplier_BindCancelUnsubscribes(t *testing.T) {
 // root cause #2's fix: with a coalescing floor, two AddressRouted decisions from
 // one VAD-over-split utterance (two segments arriving back-to-back) must NOT
 // cancel each other. The first segment's turn keeps running; the second is
-// suppressed (coalesced) rather than superseding it mid-flight. Without the
-// coalesce window the second Floor.Take would cancel the first turn's ctx — the
-// self-cancel that produced no audio and no metric sample.
+// coalesced — its producer never runs (the fragment is not spoken) and a
+// TurnYielded carrying its dropped transcript is published for the metrics
+// subscriber. Without the coalesce window the second Floor.Take would cancel the
+// first turn's ctx — the self-cancel that produced no audio and no metric sample.
 func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
 	h := voicetest.New(t)
 	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
 
-	// A streaming reply that blocks until its turn ctx is cancelled, reporting
-	// which turn (by TurnID) saw a cancel. The first segment's producer should
-	// keep running (never cancelled by the second); the coalesced second should
-	// see an already-cancelled ctx immediately.
+	// A streaming reply that records which TurnIDs actually ran a producer, and
+	// blocks seg1 until its ctx is cancelled (which must NOT happen due to seg2).
+	var mu sync.Mutex
+	var ran []string
 	started := make(chan string, 4)
 	firstCancelled := make(chan struct{}, 1)
 	reply := func(ctx context.Context, e voiceevent.AddressRouted, _ func(orchestrator.Reply) error) error {
+		mu.Lock()
+		ran = append(ran, e.TurnID)
+		mu.Unlock()
 		started <- e.TurnID
 		if e.TurnID == "seg1" {
 			select {
 			case <-ctx.Done():
-				close(firstCancelled) // must NOT happen due to seg2
+				close(firstCancelled)
 			case <-time.After(500 * time.Millisecond):
 			}
 		}
@@ -263,12 +267,12 @@ func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
 
 	// Two segments of one utterance, back-to-back (well inside the window).
-	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg1"})
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg1", Text: "Bart, what's a room"})
 	// Wait for seg1's producer to actually start and take the floor before seg2.
 	if got := <-started; got != "seg1" {
 		t.Fatalf("first producer started for %q, want seg1", got)
 	}
-	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg2"})
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg2", Text: "and have you seen Gandalf"})
 
 	// seg1 must run to its natural end without being cancelled by seg2.
 	select {
@@ -277,6 +281,21 @@ func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		// seg1 still running uninterrupted: correct.
 	}
+
+	// seg2 must have been coalesced: its producer never ran (the fragment is not
+	// spoken) and a TurnYielded carrying its transcript was published.
+	mu.Lock()
+	gotRan := append([]string(nil), ran...)
+	mu.Unlock()
+	for _, id := range gotRan {
+		if id == "seg2" {
+			t.Fatal("the coalesced segment's producer must not run (the fragment must not be spoken)")
+		}
+	}
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnYielded) bool { return e.TurnID == "seg2" && e.Text == "and have you seen Gandalf" },
+		"turn.yielded for the coalesced seg2 carrying its dropped transcript",
+	)
 }
 
 // selectiveSynth is a [tts.Synthesizer] that fails Synthesize for sentences in

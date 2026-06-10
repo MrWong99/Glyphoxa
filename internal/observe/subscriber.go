@@ -56,7 +56,9 @@ type turnState struct {
 	role         AgentRole
 	roleKnown    bool // set at AddressRouted; gates the headline (needs the role label)
 	headlineDone bool // first FirstAudio consumed for response_latency
-	outcomeDone  bool // terminal TurnOutcome already recorded (first_audio); blocks a double-count at reap
+	outcomeDone  bool // terminal TurnOutcome already recorded (first_audio/yielded); blocks a double-count at reap
+
+	yieldedText string // TurnYielded.Text: the dropped late-segment transcript (logged at turn-end)
 
 	// pendingTTS is the MOST-RECENT unmatched TTSInvoked time awaiting its
 	// FirstAudio for per-sentence tts_ttfb (zero = none pending). We keep only the
@@ -128,6 +130,7 @@ func (s *StageSubscriber) Subscribe(bus *voiceevent.Bus) (unsubscribe func()) {
 		voiceevent.On(bus, s.onAddressRouted),
 		voiceevent.On(bus, s.onTTSInvoked),
 		voiceevent.On(bus, s.onFirstAudio),
+		voiceevent.On(bus, s.onTurnYielded),
 	}
 	return func() {
 		for _, u := range unsubs {
@@ -236,9 +239,36 @@ func (s *StageSubscriber) onFirstAudio(e voiceevent.FirstAudio) {
 	s.rec.ResponseLatency(t.role, e.At.Sub(t.speechEndAt))
 }
 
+// onTurnYielded records the terminal outcome of a late segment the floor's
+// coalesce grace window folded into the turn already speaking (root cause #2).
+// The segment never reaches TTS, so it would otherwise be reaped as `abandoned`
+// — record it once as the distinct `yielded` outcome (outcomeDone blocks the
+// reap from re-counting it) and keep its dropped transcript for the turn-end log.
+func (s *StageSubscriber) onTurnYielded(e voiceevent.TurnYielded) {
+	if e.TurnID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.turns[e.TurnID]
+	if t == nil {
+		t = &turnState{}
+		s.turns[e.TurnID] = t
+	}
+	t.lastSeen = s.now()
+	t.yieldedText = e.Text
+	if t.outcomeDone {
+		return
+	}
+	t.outcomeDone = true
+	s.rec.TurnOutcome(TurnYielded, ReasonSupersessionGrace)
+	s.logTurn(e.TurnID, t, "yielded")
+}
+
 // logTurn emits the one-line per-turn timing trace at turn-end. Called under
-// s.mu. outcome is "first_audio" (reached audio) or "abandoned" (reaped without
-// it). Durations are relative to speech-end (the SLO span start) when known.
+// s.mu. outcome is "first_audio" (reached audio), "abandoned" (reaped without
+// it), or "yielded" (coalesced away by the floor grace window). Durations are
+// relative to speech-end (the SLO span start) when known.
 func (s *StageSubscriber) logTurn(turnID string, t *turnState, outcome string) {
 	attrs := []any{
 		"turn_id", turnID,
@@ -258,6 +288,11 @@ func (s *StageSubscriber) logTurn(turnID string, t *turnState, outcome string) {
 		// The debuggable signal the thin Sprint-2 logs lacked: a turn that opened
 		// and never produced audio (the invisible 20s self-cancel).
 		attrs = append(attrs, "no_audio", true)
+	}
+	if t.yieldedText != "" {
+		// The dropped late-segment transcript: the residual a yielded turn loses
+		// until real utterance coalescing routes it into the surviving turn.
+		attrs = append(attrs, "yielded_text", t.yieldedText)
 	}
 	s.log.Info("voice turn end", attrs...)
 }

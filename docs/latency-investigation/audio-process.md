@@ -338,3 +338,38 @@ race at the code level (does a second `Take` reliably cancel the first mid-`Disp
 and is there any window where the cancelled POST's goroutine leaks). The
 instrumentation gaps (survivorship metric, empty logs) are the seam between our two
 reports.
+
+---
+
+## Implemented (task #1) — and the residual it leaves
+
+Three commits on `lat/audio-process` land the P0/P1 fixes above:
+
+- **P0.1** — `WithBargeIn(0)` → `250ms` (`bargeConfirmWindow`), pinned non-zero
+  by a test. Closes root cause #1.
+- **P0.2** — a **floor coalesce window** (`NewFloorWithCoalesce` /
+  `WithBargeInCoalesce`, 600 ms live): a `Floor.Take` landing within the window of
+  the previous one **yields to** the in-flight turn instead of superseding it.
+  Closes the root-cause-#2 self-cancel without restructuring per-segment turn
+  identity (the floor-seam debounce, chosen over a Segmenter utterance-assembly
+  stage which would tangle with the locked S2 turn-identity seam).
+- **P1.3/P1.4** — `glyphoxa_voice_turn_total{outcome,reason}` (the survivorship
+  counterpart) + `WithTurnLog` one-line-per-turn timing trace.
+
+**Known residual — the coalesced segment's text is dropped.** The coalesce window
+saves the *first* segment's turn from cancellation, but it does so by **yielding
+the late segment** — that segment is never spoken, so when VAD over-splits
+"*Bart, what's a room cost…*" / "*…and have you seen Gandalf?*", Bart answers only
+the **first half**. The fix is deliberately *visible*, not silent: the yielded
+segment emits `voiceevent.TurnYielded{TurnID, Text}`, which the metrics subscriber
+records as a **distinct `turn_total{outcome="yielded",reason="supersession_grace"}`**
+(not `abandoned`) and logs at INFO **with the dropped transcript**
+(`yielded_text=…`). So the over-split rate and the exact text lost are both
+measurable.
+
+This is the data the *next* iteration needs to justify **real utterance
+coalescing**: instead of dropping the late segment, assemble consecutive
+same-speaker segments into one turn (or route the late segment's text into the
+in-flight turn's Hot Context before its LLM call) so one utterance = one *complete*
+turn. That belongs to the S2 Hot Context seam and per-participant VAD (ADR-0019),
+not the floor — out of task #1's blast radius, tracked as a follow-up.

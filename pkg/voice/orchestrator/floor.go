@@ -65,11 +65,13 @@ func NewFloorWithCoalesce(window time.Duration) *Floor {
 //
 // With a coalesce window ([NewFloorWithCoalesce]) a Take landing within that
 // window of the previous one is a split-utterance continuation: it does NOT
-// cancel the in-flight turn. The returned context comes back already cancelled
-// and the returned release is a no-op on the floor, so the caller's dispatch loop
-// sees ctx.Err() != nil and says nothing while the turn already speaking keeps
-// the floor.
-func (f *Floor) Take(parent context.Context) (context.Context, func()) {
+// cancel the in-flight turn. The returned context comes back already cancelled,
+// the returned release is a no-op on the floor, and coalesced is true — so the
+// caller can see this Take yielded (rather than took) the floor and react (e.g.
+// publish [voiceevent.TurnYielded] for the dropped segment) instead of speaking
+// it, while the turn already holding the floor keeps it. On a normal take
+// coalesced is false.
+func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(), coalesced bool) {
 	ctx, cancel := context.WithCancel(parent)
 
 	f.mu.Lock()
@@ -82,7 +84,7 @@ func (f *Floor) Take(parent context.Context) (context.Context, func()) {
 		f.lastTake = f.now()
 		f.mu.Unlock()
 		cancel()
-		return ctx, func() {} // no-op: this turn never held the floor
+		return ctx, func() {}, true // no-op release: this turn never held the floor
 	}
 	if f.cancel != nil {
 		f.cancel() // supersede a turn that is still unwinding
@@ -93,7 +95,7 @@ func (f *Floor) Take(parent context.Context) (context.Context, func()) {
 	f.lastTake = f.now()
 	f.mu.Unlock()
 
-	release := func() {
+	release = func() {
 		f.mu.Lock()
 		// Only clear if this turn still holds the floor: a later Take (or a
 		// Yield) may already have moved on, and a stale release must not wipe a
@@ -104,7 +106,7 @@ func (f *Floor) Take(parent context.Context) (context.Context, func()) {
 		f.mu.Unlock()
 		cancel()
 	}
-	return ctx, release
+	return ctx, release, false
 }
 
 // Yield cancels the turn currently holding the floor and reports whether one was

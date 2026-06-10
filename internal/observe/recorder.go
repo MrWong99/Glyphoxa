@@ -87,6 +87,11 @@ const (
 	// never synthesized. These are the turns the survivorship-biased
 	// response_latency cannot see.
 	TurnAbandoned TurnOutcome = "abandoned"
+	// TurnYielded: a late segment of one VAD-over-split utterance that the floor's
+	// coalesce grace window folded into the turn already speaking (root cause #2).
+	// It was never spoken — distinct from abandoned so the over-split rate (and the
+	// dropped-text residual) is observable on its own.
+	TurnYielded TurnOutcome = "yielded"
 )
 
 // TurnReason is the bounded sub-reason label on the turn-lifecycle counter,
@@ -103,6 +108,10 @@ const (
 	// catch-all for the abandoned outcome until a precise cancel reason is on the
 	// bus.
 	ReasonNoFirstAudio TurnReason = "no_first_audio"
+	// ReasonSupersessionGrace: the yielded outcome's reason — the floor's
+	// same-utterance coalesce window folded this late segment into the in-flight
+	// turn (it did not supersede it).
+	ReasonSupersessionGrace TurnReason = "supersession_grace"
 )
 
 // StageRecorder records the orchestrator's per-stage / per-turn latency

@@ -16,7 +16,7 @@ import (
 func TestBargeIn_InstantYieldsActiveFloor(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
-	turnCtx, release := floor.Take(context.Background())
+	turnCtx, release, _ := floor.Take(context.Background())
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
@@ -48,7 +48,7 @@ func TestBargeIn_NoFloorNoBarge(t *testing.T) {
 func TestBargeIn_SoftOverlapDoesNotCancel(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
-	turnCtx, release := floor.Take(context.Background())
+	turnCtx, release, _ := floor.Take(context.Background())
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 200*time.Millisecond).Bind(t.Context(), h.Bus))
@@ -66,7 +66,7 @@ func TestBargeIn_SoftOverlapDoesNotCancel(t *testing.T) {
 func TestBargeIn_ConfirmWindowCrossingCancels(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
-	turnCtx, release := floor.Take(context.Background())
+	turnCtx, release, _ := floor.Take(context.Background())
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 20*time.Millisecond).Bind(t.Context(), h.Bus))

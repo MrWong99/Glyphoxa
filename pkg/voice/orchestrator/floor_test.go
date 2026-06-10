@@ -13,7 +13,7 @@ func TestFloor_TakeActiveReleaseInactive(t *testing.T) {
 	if f.Active() {
 		t.Fatal("a fresh floor must be inactive")
 	}
-	ctx, release := f.Take(context.Background())
+	ctx, release, _ := f.Take(context.Background())
 	if !f.Active() {
 		t.Fatal("floor must be active after Take")
 	}
@@ -31,7 +31,7 @@ func TestFloor_TakeActiveReleaseInactive(t *testing.T) {
 
 func TestFloor_YieldCancelsHeldTurnAndReportsTrue(t *testing.T) {
 	f := orchestrator.NewFloor()
-	ctx, release := f.Take(context.Background())
+	ctx, release, _ := f.Take(context.Background())
 	defer release()
 
 	if !f.Yield() {
@@ -54,12 +54,15 @@ func TestFloor_YieldOnFreeFloorReportsFalse(t *testing.T) {
 
 func TestFloor_TakeSupersedesPreviousTurn(t *testing.T) {
 	f := orchestrator.NewFloor()
-	ctx1, release1 := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background())
 	defer release1()
 
-	ctx2, release2 := f.Take(context.Background())
+	ctx2, release2, coalesced := f.Take(context.Background())
 	defer release2()
 
+	if coalesced {
+		t.Fatal("a plain (no-coalesce) Take must never report coalesced")
+	}
 	if ctx1.Err() == nil {
 		t.Fatal("a new Take must cancel the previous turn's ctx")
 	}
@@ -81,14 +84,20 @@ func TestFloor_CoalesceWindowKeepsInFlightTurn(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(500 * time.Millisecond)
 	f.SetClock(func() time.Time { return now })
 
-	ctx1, release1 := f.Take(context.Background())
+	ctx1, release1, c1 := f.Take(context.Background())
 	defer release1()
+	if c1 {
+		t.Fatal("the first Take must not coalesce (nothing is holding the floor)")
+	}
 
 	// Second segment arrives 100ms later — inside the 500ms window.
 	now = now.Add(100 * time.Millisecond)
-	ctx2, release2 := f.Take(context.Background())
+	ctx2, release2, c2 := f.Take(context.Background())
 	defer release2()
 
+	if !c2 {
+		t.Fatal("a re-take inside the coalesce window must report coalesced=true so the caller can announce TurnYielded")
+	}
 	if ctx1.Err() != nil {
 		t.Fatal("a re-take inside the coalesce window must NOT cancel the in-flight turn")
 	}
@@ -117,14 +126,17 @@ func TestFloor_CoalesceWindowExpiresToSupersession(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(500 * time.Millisecond)
 	f.SetClock(func() time.Time { return now })
 
-	ctx1, release1 := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background())
 	defer release1()
 
 	// Real conversational gap: past the window.
 	now = now.Add(800 * time.Millisecond)
-	ctx2, release2 := f.Take(context.Background())
+	ctx2, release2, coalesced := f.Take(context.Background())
 	defer release2()
 
+	if coalesced {
+		t.Fatal("a re-take past the coalesce window is a genuine new turn, not coalesced")
+	}
 	if ctx1.Err() == nil {
 		t.Fatal("a re-take past the coalesce window must supersede the prior turn")
 	}
@@ -145,18 +157,21 @@ func TestFloor_CoalesceChainKeepsCoalescing(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(300 * time.Millisecond)
 	f.SetClock(func() time.Time { return now })
 
-	ctx1, release1 := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background())
 	defer release1()
 
 	// Segment 2 at +200ms (inside window of seg1), segment 3 at +400ms (outside
 	// window of seg1 but inside window of seg2 — anchor refreshed).
 	now = now.Add(200 * time.Millisecond)
-	_, r2 := f.Take(context.Background())
+	_, r2, c2 := f.Take(context.Background())
 	defer r2()
 	now = now.Add(200 * time.Millisecond)
-	_, r3 := f.Take(context.Background())
+	_, r3, c3 := f.Take(context.Background())
 	defer r3()
 
+	if !c2 || !c3 {
+		t.Fatalf("every segment in the rolling window must coalesce: seg2=%v seg3=%v", c2, c3)
+	}
 	if ctx1.Err() != nil {
 		t.Fatal("a chain of splits inside the rolling window must all coalesce; the first turn must survive")
 	}
@@ -170,11 +185,14 @@ func TestFloor_CoalesceChainKeepsCoalescing(t *testing.T) {
 // the tracer-bullet tests depend on, even on a back-to-back re-take.
 func TestFloor_ZeroCoalesceIsPlainSupersession(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(0)
-	ctx1, release1 := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background())
 	defer release1()
-	ctx2, release2 := f.Take(context.Background())
+	ctx2, release2, coalesced := f.Take(context.Background())
 	defer release2()
 
+	if coalesced {
+		t.Fatal("a zero coalesce window must never coalesce")
+	}
 	if ctx1.Err() == nil {
 		t.Fatal("a zero coalesce window must supersede the prior turn (no debounce)")
 	}
@@ -185,8 +203,8 @@ func TestFloor_ZeroCoalesceIsPlainSupersession(t *testing.T) {
 
 func TestFloor_StaleReleaseDoesNotClearNewerTurn(t *testing.T) {
 	f := orchestrator.NewFloor()
-	_, release1 := f.Take(context.Background())
-	_, release2 := f.Take(context.Background())
+	_, release1, _ := f.Take(context.Background())
+	_, release2, _ := f.Take(context.Background())
 	defer release2()
 
 	// Releasing the first (already-superseded) turn must not wipe the second

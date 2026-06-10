@@ -310,7 +310,18 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// Barge-in: take the floor and run the turn on its own goroutine so the
 		// inbound loop keeps feeding VAD during playback. A barge cancels turnCtx,
 		// which unwinds TTS synthesis and playback and breaks the dispatch loop.
-		turnCtx, release := r.floor.Take(ctx)
+		turnCtx, release, coalesced := r.floor.Take(ctx)
+		if coalesced {
+			// The floor's same-utterance grace window folded this late segment into
+			// the turn already speaking (one utterance VAD-split into two). The
+			// segment is NOT spoken; announce it so the metrics subscriber records a
+			// distinct `yielded` outcome (not `abandoned`) and logs the dropped
+			// transcript — the known residual until real utterance coalescing routes
+			// this text into the surviving turn. No goroutine is spawned.
+			release() // no-op on the floor, but keeps the take/release pairing honest
+			bus.Publish(voiceevent.TurnYielded{At: time.Now(), TurnID: e.TurnID, Text: e.Text})
+			return
+		}
 		go func() {
 			defer release()
 			r.dispatchAll(turnCtx, e)

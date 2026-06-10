@@ -51,6 +51,7 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.ProviderError(StageTTS, ProviderElevenLabs)
 	rec.TurnOutcome(TurnFirstAudio, ReasonNone)
 	rec.TurnOutcome(TurnAbandoned, ReasonNoFirstAudio)
+	rec.TurnOutcome(TurnYielded, ReasonSupersessionGrace)
 
 	out := scrape(t, rec)
 
@@ -73,6 +74,7 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		`glyphoxa_voice_provider_errors_total{provider="elevenlabs",stage="tts"} 1`,
 		`glyphoxa_voice_turn_total{outcome="first_audio",reason="none"} 1`,
 		`glyphoxa_voice_turn_total{outcome="abandoned",reason="no_first_audio"} 1`,
+		`glyphoxa_voice_turn_total{outcome="yielded",reason="supersession_grace"} 1`,
 		`glyphoxa_embedding_backlog 0`,
 	}
 	for _, want := range wantSubstrings {

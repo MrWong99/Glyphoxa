@@ -59,6 +59,15 @@ func TestFirstAudio_EventName(t *testing.T) {
 	}
 }
 
+func TestTurnYielded_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := TurnYielded{}.EventName()
+	if got != "turn.yielded" {
+		t.Errorf("EventName = %q, want %q", got, "turn.yielded")
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 
