@@ -13,6 +13,19 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
 
+const (
+	// maxLineBytes caps one SSE line (one frame). Anthropic carries an entire
+	// input_json_delta on a single data: line, so this must comfortably exceed
+	// any legitimate tool-argument delta.
+	maxLineBytes = 1024 * 1024
+
+	// maxStreamBytes caps the whole response stream. A voice turn's completion
+	// is a few KiB; 16 MiB is far past any legitimate reply and exists so a
+	// misbehaving or hostile endpoint (WithBaseURL gateways) cannot stream
+	// unboundedly into memory.
+	maxStreamBytes = 16 * 1024 * 1024
+)
+
 // messagesBody mirrors the Anthropic POST /v1/messages request body for a
 // streaming completion. System travels out-of-band per the API (a top-level
 // field, not a message), so the adapter lifts the [llm.RoleSystem] message out
@@ -228,8 +241,11 @@ func readErrorResponse(resp *http.Response, op string) error {
 
 // streamEvents reads the Anthropic SSE response from r, decodes each event, and
 // emits the corresponding [llm.StreamEvent] on ch. It closes ch on stream end
-// (after an [llm.EventDone]), ctx cancellation, or the first read/parse error;
-// r is closed before return so the connection is released to the pool.
+// (after an [llm.EventDone]) or ctx cancellation; any read/parse failure, a
+// server error frame, or a response exceeding maxStreamBytes emits a terminal
+// [llm.EventError] first so consumers never mistake a truncated stream for a
+// complete reply. r is closed before return so the connection is released to
+// the pool.
 //
 // SSE framing: each event is a "data: <json>\n" line (the "event:" line is
 // redundant with the JSON "type" field, so it is ignored). Decoding tracks
@@ -258,17 +274,30 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		}
 	}
 
+	fail := func(msg string) {
+		send(llm.StreamEvent{Type: llm.EventError, Err: msg})
+	}
+
 	sc := bufio.NewScanner(r)
 	// SSE lines are small, but a tool_use input or a long text delta can exceed
 	// bufio's default 64KiB token cap; raise the ceiling so a big block does
 	// not truncate the stream.
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
+
+	// total bounds the whole response body so a misbehaving (or hostile)
+	// endpoint cannot grow memory without limit: each line is capped by the
+	// scanner, this caps the number of lines.
+	var total int
 
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
 			return
 		}
 		line := sc.Text()
+		if total += len(line); total > maxStreamBytes {
+			fail(fmt.Sprintf("anthropic: response stream exceeded %d bytes", maxStreamBytes))
+			return
+		}
 		data, ok := strings.CutPrefix(line, "data:")
 		if !ok {
 			continue // event:, id:, blank separator, or retry: lines
@@ -280,7 +309,8 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 
 		var ev sseEvent
 		if err := json.Unmarshal([]byte(data), &ev); err != nil {
-			return // a malformed frame ends the stream early, like the tts read path
+			fail("anthropic: malformed SSE frame: " + err.Error())
+			return
 		}
 
 		switch ev.Type {
@@ -326,8 +356,12 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 				}
 			}
 		case "error":
-			return // a mid-stream error event closes the channel early
+			fail("anthropic: server error event: " + data)
+			return
 		}
+	}
+	if err := sc.Err(); err != nil {
+		fail("anthropic: read stream: " + err.Error())
 	}
 }
 

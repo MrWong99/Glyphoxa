@@ -17,8 +17,13 @@ import (
 // ErrKeySize is returned when the secret is not a valid AES-256 key.
 var ErrKeySize = errors.New("crypto: secret must be exactly 32 bytes (AES-256)")
 
-// Cipher seals and opens credential blobs. The nonce is prepended to the
-// ciphertext, so a sealed value is self-contained: nonce || ciphertext || tag.
+// version1 identifies the current sealed-blob format. The leading version byte
+// makes key/algorithm rotation possible without a column migration: a future
+// format bumps the byte and Open dispatches on it.
+const version1 = 0x01
+
+// Cipher seals and opens credential blobs. A sealed value is self-contained:
+// version || nonce || ciphertext || tag.
 type Cipher struct {
 	aead cipher.AEAD
 }
@@ -39,24 +44,29 @@ func New(key []byte) (*Cipher, error) {
 	return &Cipher{aead: aead}, nil
 }
 
-// Seal encrypts plaintext, returning nonce||ciphertext suitable for the
-// provider_config.credentials_ciphertext bytea column.
+// Seal encrypts plaintext, returning version||nonce||ciphertext suitable for
+// the provider_config.credentials_ciphertext bytea column.
 func (c *Cipher) Seal(plaintext []byte) ([]byte, error) {
-	nonce := make([]byte, c.aead.NonceSize())
+	buf := make([]byte, 1+c.aead.NonceSize())
+	buf[0] = version1
+	nonce := buf[1:]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("crypto: read nonce: %w", err)
 	}
-	// Seal appends the ciphertext+tag to nonce, so the nonce is the prefix.
-	return c.aead.Seal(nonce, nonce, plaintext, nil), nil
+	// Seal appends the ciphertext+tag to the version||nonce prefix.
+	return c.aead.Seal(buf, nonce, plaintext, nil), nil
 }
 
 // Open decrypts a value produced by Seal.
 func (c *Cipher) Open(sealed []byte) ([]byte, error) {
 	ns := c.aead.NonceSize()
-	if len(sealed) < ns {
+	if len(sealed) < 1+ns {
 		return nil, errors.New("crypto: sealed value too short")
 	}
-	nonce, ciphertext := sealed[:ns], sealed[ns:]
+	if sealed[0] != version1 {
+		return nil, fmt.Errorf("crypto: unknown sealed-blob version %#x", sealed[0])
+	}
+	nonce, ciphertext := sealed[1:1+ns], sealed[1+ns:]
 	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: open: %w", err)

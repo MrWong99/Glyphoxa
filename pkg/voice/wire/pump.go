@@ -2,6 +2,9 @@ package wire
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"sync"
 
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -28,6 +31,7 @@ import (
 type PlaybackPump struct {
 	player sessionPlayer
 	codec  Codec
+	logger *slog.Logger
 
 	queue chan playJob
 	stop  chan struct{} // closed by Close to tell the worker to exit
@@ -42,23 +46,28 @@ type playJob struct {
 
 // NewPlaybackPump builds a pump speaking on sess via codec and starts its worker.
 // Call [PlaybackPump.Close] at teardown to stop the worker. sess and codec must
-// be non-nil.
-func NewPlaybackPump(sess *gxvoice.Session, codec Codec) *PlaybackPump {
+// be non-nil. logger receives a warning per failed sentence playback (a mute
+// NPC must be diagnosable, not silent); nil discards them.
+func NewPlaybackPump(sess *gxvoice.Session, codec Codec, logger *slog.Logger) *PlaybackPump {
 	if sess == nil {
 		panic("wire.NewPlaybackPump: session must not be nil")
 	}
-	return newPump(realPlayer{sess}, codec)
+	return newPump(realPlayer{sess}, codec, logger)
 }
 
 // newPump is the testable core over the sessionPlayer seam, so the cross-
 // sentence serialization can be exercised with a fake player and no live Session.
-func newPump(player sessionPlayer, codec Codec) *PlaybackPump {
+func newPump(player sessionPlayer, codec Codec, logger *slog.Logger) *PlaybackPump {
 	if codec == nil {
 		panic("wire.NewPlaybackPump: codec must not be nil")
+	}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	p := &PlaybackPump{
 		player: player,
 		codec:  codec,
+		logger: logger,
 		// Cap 1 is provably sufficient: the orchestrator's TTS.Dispatch does not
 		// return (and so the Replier does not Dispatch the next sentence, which is
 		// what triggers the next HandleSentence) until the tee's forward goroutine
@@ -98,19 +107,47 @@ func (p *PlaybackPump) HandleSentence(ctx context.Context, chunks <-chan tts.Aud
 
 // run is the single serial worker: it plays one sentence to completion before
 // taking the next, which is what serializes playback and preserves order. It
-// exits when Close signals stop, finishing any in-flight sentence first.
+// exits when Close signals stop, finishing any in-flight sentence first and
+// draining any job still queued (its tee forwarder must never be orphaned).
 func (p *PlaybackPump) run() {
 	defer close(p.done)
 	for {
 		select {
 		case job := <-p.queue:
+			// Stop wins over a dequeued job: a select with both arms ready picks
+			// randomly, and a sentence enqueued just before Close must be dropped
+			// (drained), not spoken into the teardown — Close's contract is
+			// "finish the IN-FLIGHT sentence", and a queued one hasn't started.
+			select {
+			case <-p.stop:
+				go drain(job.chunks)
+				continue
+			default:
+			}
 			// playSentence blocks until this sentence's playback finishes or is
 			// interrupted; only then do we take the next, so Session.Play never
 			// auto-interrupts a still-playing sentence. A playback error is not
-			// fatal to the loop — one bad sentence must not silence the rest.
-			_ = playSentence(job.ctx, p.player, p.codec, job.chunks)
+			// fatal to the loop — one bad sentence must not silence the rest —
+			// but it must not be invisible either: a persistent failure here is
+			// "the NPC went mute", so warn on everything except the expected
+			// barge-in interrupt and ctx cancellation.
+			if err := playSentence(job.ctx, p.player, p.codec, job.chunks); err != nil &&
+				!errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
+				p.logger.Warn("wire: sentence playback failed", "err", err)
+			}
 		case <-p.stop:
-			return
+			// A job can already sit in queue when stop closes (enqueued before
+			// Close, never dequeued because this select picked the stop arm).
+			// Abandoning it undrained would block the tee's lockstep forwarder
+			// on its chunk channel — drain everything left before exiting.
+			for {
+				select {
+				case job := <-p.queue:
+					go drain(job.chunks)
+				default:
+					return
+				}
+			}
 		}
 	}
 }

@@ -212,7 +212,15 @@ func HashLLMRequest(req llm.Request) string {
 	}
 	// json.Marshal renders struct fields in declaration order and emits
 	// json.RawMessage verbatim, so the bytes are stable across runs.
-	b, _ := json.Marshal(h)
+	b, err := json.Marshal(h)
+	if err != nil {
+		// Marshal fails only on invalid RawMessage JSON in tool inputs/schemas.
+		// Hashing the empty bytes instead would collapse every such request to
+		// ONE hash — silently replaying the wrong recorded exchange, the exact
+		// failure the hash-keyed cassette exists to prevent. This is test
+		// infrastructure fed by fixed fixtures: fail loudly at the source.
+		panic(fmt.Sprintf("voicecassette: hash llm request: %v", err))
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

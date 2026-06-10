@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/disgoorg/snowflake/v2"
@@ -111,5 +112,47 @@ func TestManagerOpenReplacesExisting(t *testing.T) {
 	got, ok := m.Get(testGuild)
 	if !ok || got != second {
 		t.Fatal("Get should return the replacement session")
+	}
+}
+
+// TestManagerOpenConcurrentSameGuild_NoLeak pins the per-guild Open
+// serialization: racing Opens for one guild must never leave a Session alive
+// outside the map (its Inbound consumer would block forever). Exactly one
+// winner survives in the Manager; every other Session ends Closed.
+func TestManagerOpenConcurrentSameGuild_NoLeak(t *testing.T) {
+	fm := mock.NewManager()
+	m := newTestManager(fm)
+
+	const n = 8
+	sessions := make([]*Session, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s, err := m.Open(context.Background(), testGuild, testChannel)
+			if err != nil {
+				t.Errorf("Open %d: %v", i, err)
+				return
+			}
+			sessions[i] = s
+		}(i)
+	}
+	wg.Wait()
+
+	winner, ok := m.Get(testGuild)
+	if !ok {
+		t.Fatal("no session left in the manager")
+	}
+	for i, s := range sessions {
+		if s == nil || s == winner {
+			continue
+		}
+		if s.State() != Closed {
+			t.Errorf("session %d neither won nor was closed — leaked (state %v)", i, s.State())
+		}
+	}
+	if winner.State() == Closed {
+		t.Error("the winning session is closed")
 	}
 }

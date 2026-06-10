@@ -392,3 +392,37 @@ func TestComplete_Non2xx_WrapsOpAndStatus(t *testing.T) {
 func sse(data string) string {
 	return "data: " + data + "\n\n"
 }
+
+// TestComplete_MalformedFrame_EmitsEventError pins the truncation contract: a
+// frame that fails to decode must surface as a terminal [llm.EventError], not a
+// silent channel close — consumers would otherwise speak the partial text as a
+// complete reply (and `-tags=record` would bake it into a cassette).
+func TestComplete_MalformedFrame_EmitsEventError(t *testing.T) {
+	srv := sseServer(t, nil,
+		sse(`{"choices":[{"delta":{"content":"Half a sen"}}]}`),
+		sse(`{not json`),
+	)
+	defer srv.Close()
+
+	c := gemini.New("k", gemini.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	events := collect(t, ch)
+	last := events[len(events)-1]
+	if last.Type != llm.EventError {
+		t.Fatalf("last event type = %v, want EventError", last.Type)
+	}
+	if last.Err == "" {
+		t.Error("EventError carries no message")
+	}
+	for _, ev := range events {
+		if ev.Type == llm.EventDone {
+			t.Error("stream emitted EventDone despite the malformed frame")
+		}
+	}
+}

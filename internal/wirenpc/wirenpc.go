@@ -222,7 +222,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// (line above), and pipe.Run's own deferred cancel stops the Conversation
 	// first — so teardown order is conv-stop → pump.Close() → sess.Close(), which
 	// is the deterministic ordering the pump's Close() contract requires.
-	pump := wire.NewPlaybackPump(sess, cdc)
+	pump := wire.NewPlaybackPump(sess, cdc, log)
 	defer pump.Close()
 	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump)
 
@@ -329,8 +329,9 @@ func buildConversation(log *slog.Logger, npc npcSpec, synth tts.Synthesizer) (*o
 
 	detector := orchestrator.NewAddressDetector(npcMatcher(npc))
 
-	// grants would degrade to a single completion through the same path. The
-	// `dice` grant stays in code: Tool Grants are a #6 table, not yet seeded.
+	// The `dice` grant stays in code: Tool Grants are a #6 table, not yet
+	// seeded. With no grants the tool engine degrades to a single completion
+	// through the same path.
 	//
 	// Gemini is the live LLM provider (see the function doc): it reads
 	// GEMINI_API_KEY at request time (BYOK, ADR-0004); export it from the keyring

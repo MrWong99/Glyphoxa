@@ -55,8 +55,10 @@ type Session struct {
 	state atomic.Uint32 // State
 
 	// playMu serializes Play callers so the "interrupt current, install next"
-	// sequence is atomic with respect to other Play calls. The provider's slot
-	// swap is itself atomic; playMu only orders the surrounding bookkeeping.
+	// sequence is atomic with respect to other Play calls, and serializes Play
+	// against Close so a Play that passed the Closed check can never install a
+	// slot into an already-torn-down provider. The provider's slot swap is
+	// itself atomic; playMu orders the surrounding bookkeeping.
 	playMu  sync.Mutex
 	current atomic.Pointer[Playback]
 
@@ -149,6 +151,15 @@ func (s *Session) State() State { return State(s.state.Load()) }
 // channel. It is idempotent and safe to call concurrently with [Session.Play].
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
+		// Hold playMu for the whole teardown so Close serializes with Play.
+		// Without it, Play could pass its Closed check, lose the CPU while
+		// Close runs to completion, then install a fresh slot into a provider
+		// whose sender goroutine is gone — a playback whose Done never closes,
+		// permanently wedging anyone waiting on it (e.g. the wire.PlaybackPump
+		// worker, and through it PlaybackPump.Close).
+		s.playMu.Lock()
+		defer s.playMu.Unlock()
+
 		s.state.Store(uint32(Closed))
 
 		// Interrupt the active playback before tearing the connection down so

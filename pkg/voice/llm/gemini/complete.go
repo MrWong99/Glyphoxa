@@ -13,6 +13,19 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
 
+const (
+	// maxLineBytes caps one SSE line (one chunk). A whole tool-argument or
+	// content delta rides on a single data: line, so this must comfortably
+	// exceed any legitimate delta.
+	maxLineBytes = 1024 * 1024
+
+	// maxStreamBytes caps the whole response stream. A voice turn's completion
+	// is a few KiB; 16 MiB is far past any legitimate reply and exists so a
+	// misbehaving or hostile endpoint (WithBaseURL gateways) cannot stream
+	// unboundedly into memory.
+	maxStreamBytes = 16 * 1024 * 1024
+)
+
 // chatBody mirrors the OpenAI-compatible POST /chat/completions request body for
 // a streaming completion. The system prompt rides as a "system"-role message
 // (unlike Anthropic's top-level field), so the adapter keeps it in the message
@@ -228,8 +241,10 @@ func readErrorResponse(resp *http.Response, op string) error {
 
 // streamEvents reads the OpenAI-compatible SSE response from r, decodes each
 // chunk, and emits the corresponding [llm.StreamEvent] on ch. It closes ch on
-// stream end (after an [llm.EventDone]), ctx cancellation, or the first
-// read/parse error; r is closed before return so the connection is released.
+// stream end (after an [llm.EventDone]) or ctx cancellation; any read/parse
+// failure or a response exceeding maxStreamBytes emits a terminal
+// [llm.EventError] first so consumers never mistake a truncated stream for a
+// complete reply. r is closed before return so the connection is released.
 //
 // SSE framing: each event is a "data: <json>\n" line. A terminal "data: [DONE]"
 // sentinel marks the end. Tool calls stream incrementally: the first delta for a
@@ -287,17 +302,30 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		return true
 	}
 
+	fail := func(msg string) {
+		send(llm.StreamEvent{Type: llm.EventError, Err: msg})
+	}
+
 	sc := bufio.NewScanner(r)
 	// SSE lines are small, but a long content delta or tool-argument chunk can
 	// exceed bufio's default 64KiB token cap; raise the ceiling so a big chunk
 	// does not truncate the stream.
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
+
+	// total bounds the whole response body so a misbehaving (or hostile)
+	// endpoint cannot grow memory without limit: each line is capped by the
+	// scanner, this caps the number of lines.
+	var total int
 
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
 			return
 		}
 		line := sc.Text()
+		if total += len(line); total > maxStreamBytes {
+			fail(fmt.Sprintf("gemini: response stream exceeded %d bytes", maxStreamBytes))
+			return
+		}
 		data, ok := strings.CutPrefix(line, "data:")
 		if !ok {
 			continue // event:, id:, blank separator, or retry: lines
@@ -312,7 +340,8 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 
 		var chunk sseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return // a malformed frame ends the stream early, like the tts read path
+			fail("gemini: malformed SSE frame: " + err.Error())
+			return
 		}
 		if len(chunk.Choices) == 0 {
 			continue // e.g. a usage-only trailing chunk
@@ -349,6 +378,9 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 				return
 			}
 		}
+	}
+	if err := sc.Err(); err != nil {
+		fail("gemini: read stream: " + err.Error())
 	}
 }
 

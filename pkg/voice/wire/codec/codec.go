@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/hraban/opus"
@@ -61,6 +62,23 @@ const (
 	// maxEncodedBytes bounds one encoded Opus packet; 4000 is libopus's
 	// recommended max for a single frame.
 	maxEncodedBytes = 4000
+
+	// reframeGap is the per-speaker PTS discontinuity beyond which the
+	// reframer's leftover tail is discarded: it belongs to an utterance that
+	// ended (Discord stops sending frames during silence), and carrying up to
+	// ~32 ms of it into the next utterance would prefix minutes-old audio onto
+	// a fresh frame. PTS also restarts at zero when a speaker rejoins, which
+	// shows up as a negative delta and resets the same way.
+	reframeGap = 500 * time.Millisecond
+
+	// streamIdleTTL is how long a speaker's decode state may sit unused before
+	// it is pruned. Without pruning the per-speaker map grows monotonically
+	// for the Codec's lifetime (libopus decoder + scratch per user ever heard).
+	streamIdleTTL = 5 * time.Minute
+
+	// pruneEvery is the sweep cadence, counted in DecodeInbound calls (~50/s
+	// per speaker): cheap enough to keep the sweep off the hot path's tail.
+	pruneEvery = 4096
 )
 
 // Codec implements [wire.Codec]. Inbound decoding keeps one libopus decoder per
@@ -75,6 +93,7 @@ const (
 type Codec struct {
 	mu       sync.Mutex
 	decoders map[snowflake.ID]*inboundStream
+	calls    int // DecodeInbound calls since the last idle-stream sweep
 }
 
 // New returns a Codec ready to transcode. It implements [wire.Codec].
@@ -91,6 +110,10 @@ type inboundStream struct {
 	dec     *opus.Decoder
 	reframe *dsp.Reframer
 	pcm     []int16 // reused decode scratch buffer
+
+	lastPTS  time.Duration // last frame's per-speaker PTS, for gap detection
+	hasPTS   bool          // lastPTS holds a real value (PTS zero is valid)
+	lastSeen time.Time     // wall clock of the last decode, for idle pruning
 }
 
 // DecodeInbound decodes one Opus frame to 16 kHz mono PCM and returns the
@@ -106,6 +129,19 @@ func (c *Codec) DecodeInbound(frame gxvoice.Frame) ([]audio.Frame, error) {
 	if err != nil {
 		return nil, err
 	}
+	stream.lastSeen = time.Now()
+
+	// A PTS jump (speaker paused; Discord sends nothing during silence) or a
+	// PTS restart (speaker rejoined; negative delta) is a stream discontinuity:
+	// drop the reframer's leftover tail so the previous utterance's last
+	// samples never prefix the new one.
+	if stream.hasPTS {
+		if delta := frame.PTS - stream.lastPTS; delta < 0 || delta > reframeGap {
+			stream.reframe.Reset()
+		}
+	}
+	stream.lastPTS = frame.PTS
+	stream.hasPTS = true
 
 	n, err := stream.dec.Decode(frame.Opus, stream.pcm)
 	if err != nil {
@@ -128,9 +164,20 @@ func (c *Codec) DecodeInbound(frame gxvoice.Frame) ([]audio.Frame, error) {
 }
 
 // streamFor returns the per-speaker decode state, creating it on first sight.
+// Every pruneEvery calls it also sweeps streams idle past streamIdleTTL, so
+// the map tracks current speakers rather than everyone the Codec ever heard.
 func (c *Codec) streamFor(user snowflake.ID) (*inboundStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.calls++; c.calls >= pruneEvery {
+		c.calls = 0
+		cutoff := time.Now().Add(-streamIdleTTL)
+		for id, s := range c.decoders {
+			if id != user && s.lastSeen.Before(cutoff) {
+				delete(c.decoders, id)
+			}
+		}
+	}
 	if s, ok := c.decoders[user]; ok {
 		return s, nil
 	}
@@ -141,9 +188,10 @@ func (c *Codec) streamFor(user snowflake.ID) (*inboundStream, error) {
 		return nil, fmt.Errorf("codec: new Opus decoder: %w", err)
 	}
 	s := &inboundStream{
-		dec:     dec,
-		reframe: dsp.NewReframer(vadFrameSamples),
-		pcm:     make([]int16, maxDecodedSamples),
+		dec:      dec,
+		reframe:  dsp.NewReframer(vadFrameSamples),
+		pcm:      make([]int16, maxDecodedSamples),
+		lastSeen: time.Now(),
 	}
 	c.decoders[user] = s
 	return s, nil

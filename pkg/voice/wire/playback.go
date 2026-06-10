@@ -75,12 +75,16 @@ func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-ch
 	src, err := codec.PlaybackSource(chunks)
 	if err != nil {
 		// A codec-less build reports ErrCodecUnavailable here; surface it so the
-		// caller fails visibly rather than silently muting the NPC.
+		// caller fails visibly rather than silently muting the NPC. Drain the
+		// sentence first: the tee's lockstep forwarder blocks on this channel
+		// until someone consumes it, and on this path no playback ever will.
+		go drain(chunks)
 		return fmt.Errorf("wire.PlaySentence: build playback source: %w", err)
 	}
 
 	pb, err := p.Play(ctx, src)
 	if err != nil {
+		go drain(chunks) // same contract: an unplayed sentence must still be drained
 		return fmt.Errorf("wire.PlaySentence: play: %w", err)
 	}
 

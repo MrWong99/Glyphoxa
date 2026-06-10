@@ -23,8 +23,9 @@ type fakeProvider struct {
 	mu       sync.Mutex
 	requests []llm.Request
 
-	reply string // text streamed back, split into per-word EventText deltas
-	err   error  // returned from Complete when non-nil
+	reply    string // text streamed back, split into per-word EventText deltas
+	err      error  // returned from Complete when non-nil
+	truncate bool   // close the stream without EventDone (mid-stream failure)
 }
 
 func (f *fakeProvider) Complete(_ context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
@@ -48,7 +49,9 @@ func (f *fakeProvider) Complete(_ context.Context, req llm.Request) (<-chan llm.
 			}
 			ch <- llm.StreamEvent{Type: llm.EventText, Text: text}
 		}
-		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+		if !f.truncate {
+			ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+		}
 	}()
 	return ch, nil
 }
@@ -108,7 +111,7 @@ func TestReply_NotAddressed_ReturnsNilAndSkipsProvider(t *testing.T) {
 		Synthesizer: stubSynth{},
 	})
 
-	got := r.Reply()(routed("someone-else", "Hello there."))
+	got := r.Reply()(t.Context(), routed("someone-else", "Hello there."))
 	if got != nil {
 		t.Errorf("reply for unaddressed route = %+v, want nil", got)
 	}
@@ -130,7 +133,7 @@ func TestReply_Addressed_AssemblesSystemPromptAndAccumulatesText(t *testing.T) {
 		Synthesizer: stubSynth{},
 	})
 
-	got := r.Reply()(routed("bart", "Hello, innkeeper."))
+	got := r.Reply()(t.Context(), routed("bart", "Hello, innkeeper."))
 	if len(got) != 1 {
 		t.Fatalf("got %d replies, want 1", len(got))
 	}
@@ -178,8 +181,8 @@ func TestReply_MultiTurn_CarriesHistory(t *testing.T) {
 	})
 	reply := r.Reply()
 
-	reply(routed("bart", "Do you have rooms?"))
-	reply(routed("bart", "And a meal?"))
+	reply(t.Context(), routed("bart", "Do you have rooms?"))
+	reply(t.Context(), routed("bart", "And a meal?"))
 
 	req := prov.lastRequest(t)
 	// Expect: system, user "Do you have rooms?", assistant "Aye.", user "And a meal?".
@@ -221,9 +224,9 @@ func TestReply_HistoryTurns_BoundsTranscript(t *testing.T) {
 	})
 	reply := r.Reply()
 
-	reply(routed("bart", "first-utterance"))
-	reply(routed("bart", "second-utterance"))
-	reply(routed("bart", "third-utterance"))
+	reply(t.Context(), routed("bart", "first-utterance"))
+	reply(t.Context(), routed("bart", "second-utterance"))
+	reply(t.Context(), routed("bart", "third-utterance"))
 
 	req := prov.lastRequest(t)
 	var joined string
@@ -251,7 +254,7 @@ func TestReply_ProviderError_ReturnsNilAndReportsError(t *testing.T) {
 		OnError:     func(err error) { gotErr = err },
 	})
 
-	got := r.Reply()(routed("bart", "Hello."))
+	got := r.Reply()(t.Context(), routed("bart", "Hello."))
 	if got != nil {
 		t.Errorf("reply on provider error = %+v, want nil", got)
 	}
@@ -268,7 +271,7 @@ func TestReply_EmptyCompletion_ReturnsNil(t *testing.T) {
 		Provider:    &fakeProvider{reply: ""},
 		Synthesizer: stubSynth{},
 	})
-	if got := r.Reply()(routed("bart", "Hello.")); got != nil {
+	if got := r.Reply()(t.Context(), routed("bart", "Hello.")); got != nil {
 		t.Errorf("reply for empty completion = %+v, want nil", got)
 	}
 }
@@ -276,3 +279,85 @@ func TestReply_EmptyCompletion_ReturnsNil(t *testing.T) {
 // Compile-time assertion: the loop produces a value usable by the orchestrator
 // reply seam without an adapter.
 var _ orchestrator.ReplyFunc = (&agent.Replier{}).Reply()
+
+// TestReply_TruncatedStream_ReturnsNilAndReportsError pins the truncation
+// contract on the default engine: a stream that closes without [llm.EventDone]
+// (mid-stream network failure) must not be spoken as a complete reply — the
+// turn yields nothing and the failure surfaces via OnError.
+func TestReply_TruncatedStream_ReturnsNilAndReportsError(t *testing.T) {
+	var gotErr error
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    &fakeProvider{reply: "Half a sentence that never", truncate: true},
+		Synthesizer: stubSynth{},
+		OnError:     func(err error) { gotErr = err },
+	})
+
+	got := r.Reply()(t.Context(), routed("bart", "Hello."))
+	if got != nil {
+		t.Errorf("reply for truncated stream = %+v, want nil", got)
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "without done") {
+		t.Errorf("OnError got %v, want a truncation error", gotErr)
+	}
+}
+
+// ctxCaptureEngine records the ctx the Replier hands the Engine, so tests can
+// pin the per-turn deadline and ctx propagation.
+type ctxCaptureEngine struct {
+	ctx   context.Context
+	reply string
+}
+
+func (e *ctxCaptureEngine) Generate(ctx context.Context, _ []llm.Message) (string, error) {
+	e.ctx = ctx
+	return e.reply, nil
+}
+
+// TestReply_TurnTimeout_AppliesDeadlineAndPropagatesCtx pins the hung-provider
+// guard: the Engine's ctx must descend from the caller's turn ctx (so barge-in
+// cancellation reaches the LLM call) and carry the TurnTimeout deadline (so a
+// hung provider can never hold the turn open forever).
+func TestReply_TurnTimeout_AppliesDeadlineAndPropagatesCtx(t *testing.T) {
+	eng := &ctxCaptureEngine{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+	})
+
+	type ctxKey struct{}
+	parent := context.WithValue(t.Context(), ctxKey{}, "turn")
+	if got := r.Reply()(parent, routed("bart", "Hello.")); len(got) != 1 {
+		t.Fatalf("reply = %+v, want one sentence", got)
+	}
+
+	if eng.ctx.Value(ctxKey{}) != "turn" {
+		t.Error("engine ctx does not descend from the caller's turn ctx")
+	}
+	deadline, ok := eng.ctx.Deadline()
+	if !ok {
+		t.Fatal("engine ctx has no deadline; a hung provider would block the turn forever")
+	}
+	if remaining := time.Until(deadline); remaining > agent.DefaultTurnTimeout {
+		t.Errorf("deadline %v out past DefaultTurnTimeout %v", remaining, agent.DefaultTurnTimeout)
+	}
+}
+
+// TestReply_TurnTimeoutNegative_DisablesDeadline pins the documented escape
+// hatch: TurnTimeout < 0 leaves the turn bounded only by the caller's ctx.
+func TestReply_TurnTimeoutNegative_DisablesDeadline(t *testing.T) {
+	eng := &ctxCaptureEngine{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+		TurnTimeout: -1,
+	})
+	if got := r.Reply()(t.Context(), routed("bart", "Hello.")); len(got) != 1 {
+		t.Fatalf("reply = %+v, want one sentence", got)
+	}
+	if _, ok := eng.ctx.Deadline(); ok {
+		t.Error("engine ctx has a deadline despite TurnTimeout < 0")
+	}
+}
