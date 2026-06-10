@@ -89,7 +89,10 @@ func NewTeeSynthesizer(inner tts.Synthesizer, sink PlaybackSink, bus *voiceevent
 // If the wrapped Synthesize fails to start, the error is returned directly and
 // no playback channel is opened (the sentence never speaks). The returned
 // channel closes when the wrapped stream ends or ctx is cancelled; the sink
-// channel closes at the same moment.
+// channel closes at the same moment. On a ctx-cancelled early exit the wrapped
+// stream may still be mid-send, so it is drained on a goroutine to release its
+// producer — the tee never wedges an inner Synthesizer goroutine, even one that
+// does not itself select on ctx when sending.
 func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
 	src, err := t.inner.Synthesize(ctx, req)
 	if err != nil {
@@ -117,6 +120,7 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 			select {
 			case out <- chunk:
 			case <-ctx.Done():
+				go drain(src) // src is not yet exhausted; release its producer
 				return
 			}
 			// First chunk crossing to the sink is the headline SLO boundary
@@ -133,6 +137,7 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 			select {
 			case play <- chunk:
 			case <-ctx.Done():
+				go drain(src) // src is not yet exhausted; release its producer
 				return
 			}
 		}
