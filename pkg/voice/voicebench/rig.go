@@ -14,6 +14,7 @@ package voicebench
 
 import (
 	"context"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
@@ -51,8 +52,9 @@ type RigConfig struct {
 // BuildConversation wires the rig's Conversation: the agent reply loop over
 // Provider (dice tool granted, matching wirenpc's grant) feeding a Tee-wrapped
 // Synth that publishes FirstAudio on Bus. Returns the Conversation ready for
-// Register/Feed. The Tee's sink is a drain-only PlaybackSink — the bench measures
-// the FirstAudio boundary, not real playback.
+// Register/Feed. The Tee's sink is a drain-only PlaybackSink that also publishes
+// FirstOpus on each sentence's first chunk — the bench's audible-on-wire
+// boundary, where response_latency now ends (no real playback happens).
 func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 	rec := cfg.Recorder
 	if rec == nil {
@@ -73,10 +75,14 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 	})
 
 	// Tee the synth so the first AudioChunk per sentence publishes FirstAudio on
-	// the bus (A3 hook 1 — the headline SLO boundary). A drain-only sink stands
-	// in for the real PlaybackPump: the bench measures when audio reaches the
-	// pump boundary, not the audio itself.
-	tee := wire.NewTeeSynthesizer(cfg.Synth, drainSink{}, cfg.Bus)
+	// the bus (A3 hook 1 — tts_ttfb + the lifecycle success signal). The drain
+	// sink stands in for the real PlaybackPump AND for the wire boundary: it
+	// publishes FirstOpus on the first chunk per sentence the way prod's
+	// firstOpusSource does on the first frame the Discord sender pulls — the
+	// headline response_latency now ends there (task #7), so without it the
+	// bench records no response_latency samples at all. The bench has no codec
+	// /sender, so chunk-reaches-sink is its audible-on-wire moment.
+	tee := wire.NewTeeSynthesizer(cfg.Synth, drainSink{bus: cfg.Bus}, cfg.Bus)
 	ttsStage := orchestrator.NewTTS(cfg.Bus, tee)
 
 	// Install observe's StageSubscriber on the bus so the bus-derived headline
@@ -105,13 +111,25 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 	return orchestrator.NewConversation(cfg.Bus, cfg.VAD, cfg.STT, ttsStage, opts...)
 }
 
-// drainSink is a PlaybackSink that drains each sentence's chunks and drops them
-// — the bench needs the Tee→sink boundary to fire FirstAudio, not real audio.
-type drainSink struct{}
+// drainSink is a PlaybackSink that drains each sentence's chunks and drops them.
+// It publishes FirstOpus on the first chunk of each sentence (TurnID from the
+// per-turn ctx, mirroring prod's firstOpusSource; the subscriber dedupes to the
+// first per turn) — the bench's stand-in for the audible-on-wire boundary that
+// ends response_latency. A sentence cancelled before any chunk arrives publishes
+// nothing, matching prod.
+type drainSink struct{ bus *voiceevent.Bus }
 
-func (drainSink) HandleSentence(ctx context.Context, chunks <-chan tts.AudioChunk) {
+func (s drainSink) HandleSentence(ctx context.Context, chunks <-chan tts.AudioChunk) {
+	turnID := voiceevent.TurnIDFrom(ctx)
 	go func() {
+		first := true
 		for range chunks {
+			if first {
+				first = false
+				if s.bus != nil && turnID != "" {
+					s.bus.Publish(voiceevent.FirstOpus{At: time.Now(), TurnID: turnID})
+				}
+			}
 		}
 	}()
 }

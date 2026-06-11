@@ -30,7 +30,7 @@ Each `Stage` maps 1:1 onto a prod `glyphoxa_voice_<stage>_seconds` histogram (a
 bench number == a Prometheus series). Boundaries are reconciled with
 `internal/observe`'s A3 subscriber:
 
-- `response_latency` (headline) = first `FirstAudio` per `TurnID` − `STTFinal.SpeechEndAt` — from the bus.
+- `response_latency` (headline) = first `FirstOpus` per `TurnID` − `STTFinal.SpeechEndAt` — from the bus. Audible-on-wire boundary (task #7); the rig's drain sink publishes `FirstOpus` on each sentence's first chunk since the bench has no codec/sender. `FirstAudio` still feeds `tts_ttfb` and the lifecycle success outcome.
 - `address_detect`, `llm_turn` — from bus event `At:` deltas.
 - `llm_round`, `vad_hangover`, `stt_request`, `tts_ttfb/total`, `codec_*` —
   from the `recorderTap` (these are `observe.StageRecorder` calls, not bus
