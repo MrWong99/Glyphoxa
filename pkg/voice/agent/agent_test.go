@@ -552,6 +552,27 @@ func (e *ctxCaptureEngine) Generate(ctx context.Context, _ []llm.Message) (strin
 	return e.reply, nil
 }
 
+// ctxCaptureStreamEngine is the [StreamingEngine] counterpart of
+// [ctxCaptureEngine]: it records the ctx the Replier hands the streaming path so
+// the per-turn deadline can be pinned for ReplyStream just as it is for Reply.
+type ctxCaptureStreamEngine struct {
+	ctx   context.Context
+	reply string
+}
+
+func (e *ctxCaptureStreamEngine) Generate(ctx context.Context, _ []llm.Message) (string, error) {
+	e.ctx = ctx
+	return e.reply, nil
+}
+
+func (e *ctxCaptureStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, onText func(string) error) (string, error) {
+	e.ctx = ctx
+	if err := onText(e.reply); err != nil {
+		return e.reply, err
+	}
+	return e.reply, nil
+}
+
 // TestReply_TurnTimeout_AppliesDeadlineAndPropagatesCtx pins the hung-provider
 // guard: the Engine's ctx must descend from the caller's turn ctx (so barge-in
 // cancellation reaches the LLM call) and carry the TurnTimeout deadline (so a
@@ -579,6 +600,57 @@ func TestReply_TurnTimeout_AppliesDeadlineAndPropagatesCtx(t *testing.T) {
 	}
 	if remaining := time.Until(deadline); remaining > agent.DefaultTurnTimeout {
 		t.Errorf("deadline %v out past DefaultTurnTimeout %v", remaining, agent.DefaultTurnTimeout)
+	}
+}
+
+// TestReplyStream_TurnTimeout_AppliesDeadlineAndPropagatesCtx is the streaming
+// twin of TestReply_TurnTimeout_*: the production path wires ReplyStream
+// (orchestrator.WithReplyStream), and the Gemini client has no overall HTTP
+// timeout by design, so the per-turn deadline MUST be applied here too — without
+// it a thinking-then-stalling completion runs unbounded and never produces first
+// audio (the survivorship-biased latency the 20s live test hit).
+func TestReplyStream_TurnTimeout_AppliesDeadlineAndPropagatesCtx(t *testing.T) {
+	eng := &ctxCaptureStreamEngine{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+	})
+
+	type ctxKey struct{}
+	parent := context.WithValue(t.Context(), ctxKey{}, "turn")
+	if err := r.ReplyStream()(parent, routed("bart", "Hello."), func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("ReplyStream returned %v", err)
+	}
+
+	if eng.ctx.Value(ctxKey{}) != "turn" {
+		t.Error("engine ctx does not descend from the caller's turn ctx")
+	}
+	deadline, ok := eng.ctx.Deadline()
+	if !ok {
+		t.Fatal("streaming engine ctx has no deadline; a hung provider would block the turn forever")
+	}
+	if remaining := time.Until(deadline); remaining > agent.DefaultTurnTimeout {
+		t.Errorf("deadline %v out past DefaultTurnTimeout %v", remaining, agent.DefaultTurnTimeout)
+	}
+}
+
+// TestReplyStream_TurnTimeoutNegative_DisablesDeadline mirrors the batch escape
+// hatch on the streaming path: TurnTimeout < 0 leaves the turn bounded only by
+// the caller's ctx.
+func TestReplyStream_TurnTimeoutNegative_DisablesDeadline(t *testing.T) {
+	eng := &ctxCaptureStreamEngine{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+		TurnTimeout: -1,
+	})
+	if err := r.ReplyStream()(t.Context(), routed("bart", "Hello."), func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("ReplyStream returned %v", err)
+	}
+	if _, ok := eng.ctx.Deadline(); ok {
+		t.Error("streaming engine ctx has a deadline despite TurnTimeout < 0")
 	}
 }
 
