@@ -9,6 +9,7 @@ import (
 
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 // PlaybackPump is the outbound playback half of the live loop: a [PlaybackSink]
@@ -32,6 +33,7 @@ type PlaybackPump struct {
 	player sessionPlayer
 	codec  Codec
 	logger *slog.Logger
+	bus    *voiceevent.Bus // optional; when set, the playback Source publishes FirstOpus (task #7)
 
 	queue chan playJob
 	stop  chan struct{} // closed by Close to tell the worker to exit
@@ -47,17 +49,19 @@ type playJob struct {
 // NewPlaybackPump builds a pump speaking on sess via codec and starts its worker.
 // Call [PlaybackPump.Close] at teardown to stop the worker. sess and codec must
 // be non-nil. logger receives a warning per failed sentence playback (a mute
-// NPC must be diagnosable, not silent); nil discards them.
-func NewPlaybackPump(sess *gxvoice.Session, codec Codec, logger *slog.Logger) *PlaybackPump {
+// NPC must be diagnosable, not silent); nil discards them. bus is optional: when
+// non-nil, the first Opus frame of each turn publishes [voiceevent.FirstOpus] —
+// the audible-on-wire SLO boundary (task #7); nil disables it.
+func NewPlaybackPump(sess *gxvoice.Session, codec Codec, logger *slog.Logger, bus *voiceevent.Bus) *PlaybackPump {
 	if sess == nil {
 		panic("wire.NewPlaybackPump: session must not be nil")
 	}
-	return newPump(realPlayer{sess}, codec, logger)
+	return newPump(realPlayer{sess}, codec, logger, bus)
 }
 
 // newPump is the testable core over the sessionPlayer seam, so the cross-
 // sentence serialization can be exercised with a fake player and no live Session.
-func newPump(player sessionPlayer, codec Codec, logger *slog.Logger) *PlaybackPump {
+func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voiceevent.Bus) *PlaybackPump {
 	if codec == nil {
 		panic("wire.NewPlaybackPump: codec must not be nil")
 	}
@@ -68,6 +72,7 @@ func newPump(player sessionPlayer, codec Codec, logger *slog.Logger) *PlaybackPu
 		player: player,
 		codec:  codec,
 		logger: logger,
+		bus:    bus,
 		// Cap 1 is provably sufficient: the orchestrator's TTS.Dispatch does not
 		// return (and so the Replier does not Dispatch the next sentence, which is
 		// what triggers the next HandleSentence) until the tee's forward goroutine
@@ -131,7 +136,7 @@ func (p *PlaybackPump) run() {
 			// but it must not be invisible either: a persistent failure here is
 			// "the NPC went mute", so warn on everything except the expected
 			// barge-in interrupt and ctx cancellation.
-			if err := playSentence(job.ctx, p.player, p.codec, job.chunks); err != nil &&
+			if err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus); err != nil &&
 				!errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
 				p.logger.Warn("wire: sentence playback failed", "err", err)
 			}

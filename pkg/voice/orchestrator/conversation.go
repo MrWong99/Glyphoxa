@@ -32,8 +32,12 @@ type Conversation struct {
 	// floor is non-nil when barge-in is enabled ([WithBargeIn]): the replier runs
 	// turns on it (async, cancelable) and a [BargeIn] reactor yields it on a human
 	// interruption. bargeConfirm is that reactor's confirm window (0 = instant).
-	floor        *Floor
-	bargeConfirm time.Duration
+	// floorCoalesce is the floor's same-utterance coalesce window (0 = plain
+	// supersession); see [Floor] and [WithBargeInCoalesce].
+	floor         *Floor
+	bargeConfirm  time.Duration
+	floorCoalesce time.Duration
+	bargeEnabled  bool
 }
 
 // Option configures a [Conversation] at construction.
@@ -70,10 +74,31 @@ func WithReplyStream(fn StreamReplyFunc) Option {
 // the turn's TTS and playback. confirmWindow is how long continuous speech must
 // persist before it counts as a barge (0 yields instantly on onset). It requires
 // [WithReply]; without a replier there is no turn to interrupt.
+//
+// The floor uses plain supersession (no coalesce window); for the live loop,
+// where one utterance can VAD-split into several turns, prefer
+// [WithBargeInCoalesce] to keep one utterance mapped to one turn.
 func WithBargeIn(confirmWindow time.Duration) Option {
 	return func(c *Conversation) {
-		c.floor = NewFloor()
 		c.bargeConfirm = confirmWindow
+		c.floorCoalesce = 0
+		c.floor = nil // built in Register from the configured windows
+		c.bargeEnabled = true
+	}
+}
+
+// WithBargeInCoalesce is [WithBargeIn] plus a floor coalesce window (root cause
+// #2 of the latency investigation): a per-turn [Floor.Take] arriving within
+// coalesceWindow of the previous one is treated as the SAME utterance continuing
+// and yields to the in-flight turn instead of superseding it (see [Floor]). This
+// stops a VAD over-split of one utterance from self-cancelling its own first
+// turn mid-synthesis. A zero coalesceWindow is identical to [WithBargeIn].
+func WithBargeInCoalesce(confirmWindow, coalesceWindow time.Duration) Option {
+	return func(c *Conversation) {
+		c.bargeConfirm = confirmWindow
+		c.floorCoalesce = coalesceWindow
+		c.floor = nil // built in Register from the configured windows
+		c.bargeEnabled = true
 	}
 }
 
@@ -124,11 +149,18 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		} else {
 			replier = NewReplier(c.tts, c.reply, c.onError)
 		}
-		if c.floor != nil {
+		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the
 			// replier so a speech_start is evaluated for a yield ahead of any new
-			// turn it might otherwise route.
+			// turn it might otherwise route. The floor is built here (not at option
+			// time) so the coalesce window — possibly set by a later option — is in
+			// effect.
+			if c.floorCoalesce > 0 {
+				c.floor = NewFloorWithCoalesce(c.floorCoalesce)
+			} else {
+				c.floor = NewFloor()
+			}
 			replier.floor = c.floor
 			reactors = append(reactors, NewBargeIn(c.floor, c.bargeConfirm))
 		}

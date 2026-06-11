@@ -126,15 +126,17 @@ type TTSInvoked struct {
 func (TTSInvoked) EventName() string { return "tts.invoked" }
 
 // FirstAudio marks the moment the first synthesized [tts.AudioChunk] of a
-// sentence crosses the TeeSynthesizer→PlaybackPump boundary — the headline SLO
-// boundary, "first audio handed to the pump" (A3 hook 1). It is published by the
-// wire tee, off its forward goroutine, so a metrics subscriber may receive it
-// concurrently with other turns and must lock its per-turn state.
+// sentence crosses the TeeSynthesizer→PlaybackPump boundary — "first audio handed
+// to the pump" (A3 hook 1). It is published by the wire tee, off its forward
+// goroutine, so a metrics subscriber may receive it concurrently with other turns
+// and must lock its per-turn state.
 //
-// There is no sentence index: the metrics subscriber keys on TurnID. The
-// headline response-latency uses the FIRST FirstAudio per TurnID; per-sentence
-// TTS time-to-first-byte pairs [TTSInvoked]↔FirstAudio within a TurnID by
-// arrival order (dispatch is sequential, so the interleave is clean).
+// It is NO LONGER the headline response-latency boundary — that is [FirstOpus],
+// the audible-on-wire moment. FirstAudio still owns two things: the per-sentence
+// tts_ttfb pairing ([TTSInvoked]↔FirstAudio by arrival order within a TurnID), and
+// the turn-lifecycle success signal ("this turn produced audio", which gates the
+// abandoned outcome). There is no sentence index: the metrics subscriber keys on
+// TurnID and uses the FIRST FirstAudio per turn for the success signal.
 type FirstAudio struct {
 	At     time.Time
 	TurnID string
@@ -142,6 +144,73 @@ type FirstAudio struct {
 
 // EventName implements [Event].
 func (FirstAudio) EventName() string { return "voice.first_audio" }
+
+// FirstOpus marks the moment the FIRST Opus packet of a turn is pulled from the
+// playback [voice.Source] by disgo's sender to be streamed to Discord — the
+// audible-on-wire boundary. It is the END of the headline response-latency SLO
+// per Luk's definition ("I stop talking until the first TTS opus packets are
+// streamed back to Discord"): strictly later than [FirstAudio] (handed-to-pump),
+// it includes the codec encode and the pump's real-time pacing that FirstAudio
+// excludes, so the span finally measures what the user experiences.
+//
+// Published once per turn by the wire playback path's Source decorator on the
+// first non-EOF frame it yields. It runs on disgo's sender goroutine, so a
+// metrics subscriber may receive it concurrently and must lock its per-turn
+// state. A turn whose audio is barge-cancelled before any frame reaches the wire
+// never emits it (correctly: nothing was audible).
+type FirstOpus struct {
+	At     time.Time
+	TurnID string
+}
+
+// EventName implements [Event].
+func (FirstOpus) EventName() string { return "voice.first_opus" }
+
+// TurnEndReason is the bounded cause a turn ended without (or after) audio,
+// carried on [TurnEnded]. It is published by the seam that KNOWS the cause — the
+// only place the precise reason is available — so the metrics subscriber records
+// it instead of guessing. It is a log/exemplar value AND maps to the bounded
+// metric reason label (ADR-0032 §2.1): keep this set small.
+type TurnEndReason string
+
+const (
+	// TurnEndSupersedeCoalesced: the floor's same-utterance grace window folded a
+	// late VAD-split segment into the turn already speaking — the late segment is
+	// never spoken (latency investigation root cause #2). [TurnEnded.Text] carries
+	// its dropped transcript.
+	TurnEndSupersedeCoalesced TurnEndReason = "supersede_coalesced"
+	// TurnEndBarge: a confirmed human barge-in cancelled the turn (the floor was
+	// yielded while this turn held it).
+	TurnEndBarge TurnEndReason = "barge"
+	// TurnEndTTSError: the turn's TTS synthesis failed (a real provider/synth error,
+	// not a context cancel).
+	TurnEndTTSError TurnEndReason = "tts_error"
+	// TurnEndProviderError: the reply producer (LLM round/tool loop) failed before
+	// the turn could produce audio.
+	TurnEndProviderError TurnEndReason = "provider_error"
+)
+
+// TurnEnded marks a turn that ended for a known reason — distinct from a turn
+// that simply vanished (reaped by the metrics TTL sweep with no signal). It
+// carries the turn's TurnID and the precise [TurnEndReason] so the metrics
+// subscriber records WHY a turn died (barge vs supersede vs tts/provider error)
+// rather than the coarse "no first audio" catch-all. Text is the dropped
+// transcript, set only for [TurnEndSupersedeCoalesced]; empty otherwise.
+//
+// Published by the seam that knows the cause: the [orchestrator.Replier]
+// (supersede-coalesced, tts/provider error) and the [orchestrator.BargeIn]
+// (barge). The subscriber treats first-audio as terminal, so a TurnEnded arriving
+// AFTER first audio (e.g. a barge mid-playback) is a normal interruption and does
+// not re-count the turn.
+type TurnEnded struct {
+	At     time.Time
+	TurnID string
+	Reason TurnEndReason
+	Text   string
+}
+
+// EventName implements [Event].
+func (TurnEnded) EventName() string { return "turn.ended" }
 
 // BargeDetected marks a confirmed human barge-in: a participant reclaimed the
 // floor while an Agent was speaking, so the Agent's turn was torn down (ADR-0027).

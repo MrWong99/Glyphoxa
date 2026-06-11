@@ -59,6 +59,10 @@ type PrometheusRecorder struct {
 	providerCalls  *prometheus.CounterVec // stage, provider, outcome
 	providerErrors *prometheus.CounterVec // stage, provider
 
+	// turn lifecycle (StageRecorder): the survivorship counterpart to
+	// response_latency — every turn records one terminal outcome.
+	turnTotal *prometheus.CounterVec // outcome, reason
+
 	// embedding backlog: spec-complete stub (ADR-0032). The persistence/embedding
 	// layer isn't coded yet, so nothing Sets this — registered so the /metrics
 	// surface matches ADR-0032 and a reviewer diffing the two sees no gap.
@@ -130,6 +134,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 
 	r.providerCalls = counterVec("provider_calls_total", "Vendor calls by stage, provider and outcome.", "stage", "provider", "outcome")
 	r.providerErrors = counterVec("provider_errors_total", "Vendor call errors by stage and provider.", "stage", "provider")
+	r.turnTotal = counterVec("turn_total", "Turns by terminal outcome and reason — the survivorship counterpart to response_latency (which records only turns that reached first audio).", "outcome", "reason")
 
 	r.embeddingBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, // process-level, not a voice subsystem metric (ADR-0032)
@@ -142,7 +147,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		r.playbackTotal, r.bargeCancels,
 		r.responseLatency, r.vadHangover, r.addressDetect, r.codecDecode,
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
-		r.providerCalls, r.providerErrors, r.embeddingBacklog,
+		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
 		// Standard runtime collectors so /metrics also reports process/Go health.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
@@ -209,6 +214,9 @@ func (r *PrometheusRecorder) ProviderCall(s Stage, p Provider, o Outcome) {
 }
 func (r *PrometheusRecorder) ProviderError(s Stage, p Provider) {
 	r.providerErrors.WithLabelValues(string(s), string(p)).Inc()
+}
+func (r *PrometheusRecorder) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
+	r.turnTotal.WithLabelValues(string(outcome), string(reason)).Inc()
 }
 
 // Static assertions that the one adapter satisfies both contracts. The

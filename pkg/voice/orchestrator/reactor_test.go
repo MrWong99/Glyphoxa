@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -225,6 +226,169 @@ func TestReplier_BindCancelUnsubscribes(t *testing.T) {
 	h.Bus.Publish(voiceevent.AddressRouted{})
 
 	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+}
+
+// TestReplier_CoalescingFloorKeepsFirstSegmentTurn is the end-to-end proof of
+// root cause #2's fix: with a coalescing floor, two AddressRouted decisions from
+// one VAD-over-split utterance (two segments arriving back-to-back) must NOT
+// cancel each other. The first segment's turn keeps running; the second is
+// coalesced — its producer never runs (the fragment is not spoken) and a
+// TurnYielded carrying its dropped transcript is published for the metrics
+// subscriber. Without the coalesce window the second Floor.Take would cancel the
+// first turn's ctx — the self-cancel that produced no audio and no metric sample.
+func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+
+	// A streaming reply that records which TurnIDs actually ran a producer, and
+	// blocks seg1 until its ctx is cancelled (which must NOT happen due to seg2).
+	var mu sync.Mutex
+	var ran []string
+	started := make(chan string, 4)
+	firstCancelled := make(chan struct{}, 1)
+	reply := func(ctx context.Context, e voiceevent.AddressRouted, _ func(orchestrator.Reply) error) error {
+		mu.Lock()
+		ran = append(ran, e.TurnID)
+		mu.Unlock()
+		started <- e.TurnID
+		if e.TurnID == "seg1" {
+			select {
+			case <-ctx.Done():
+				close(firstCancelled)
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		return nil
+	}
+
+	floor := orchestrator.NewFloorWithCoalesce(300 * time.Millisecond)
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(floor)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	// Two segments of one utterance, back-to-back (well inside the window).
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg1", Text: "Bart, what's a room"})
+	// Wait for seg1's producer to actually start and take the floor before seg2.
+	if got := <-started; got != "seg1" {
+		t.Fatalf("first producer started for %q, want seg1", got)
+	}
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg2", Text: "and have you seen Gandalf"})
+
+	// seg1 must run to its natural end without being cancelled by seg2.
+	select {
+	case <-firstCancelled:
+		t.Fatal("the first segment's turn was cancelled by the second — the self-cancel the coalesce window must prevent")
+	case <-time.After(200 * time.Millisecond):
+		// seg1 still running uninterrupted: correct.
+	}
+
+	// seg2 must have been coalesced: its producer never ran (the fragment is not
+	// spoken) and a TurnYielded carrying its transcript was published.
+	mu.Lock()
+	gotRan := append([]string(nil), ran...)
+	mu.Unlock()
+	for _, id := range gotRan {
+		if id == "seg2" {
+			t.Fatal("the coalesced segment's producer must not run (the fragment must not be spoken)")
+		}
+	}
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool {
+			return e.TurnID == "seg2" && e.Reason == voiceevent.TurnEndSupersedeCoalesced && e.Text == "and have you seen Gandalf"
+		},
+		"turn.ended (supersede_coalesced) for the coalesced seg2 carrying its dropped transcript",
+	)
+}
+
+// waitTurnEnded subscribes a channel to TurnEnded on bus so a test can block until
+// the async (floor goroutine) turn publishes its end signal — AssertEvent does not
+// poll, so a direct synchronization is needed for the goroutine-driven turns.
+func waitTurnEnded(t *testing.T, bus *voiceevent.Bus) <-chan voiceevent.TurnEnded {
+	t.Helper()
+	ch := make(chan voiceevent.TurnEnded, 4)
+	t.Cleanup(voiceevent.On(bus, func(e voiceevent.TurnEnded) { ch <- e }))
+	return ch
+}
+
+// TestReplier_FloorTurnPublishesTTSErrorEnded pins task #4's tts_error path: a
+// turn whose only sentence fails synthesis (no audio, ctx not cancelled) publishes
+// TurnEnded(tts_error) carrying the TurnID, so the metrics subscriber attributes
+// the death precisely instead of the coarse no-first-audio reap.
+func TestReplier_FloorTurnPublishesTTSErrorEnded(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		return dispatch(orchestrator.Reply{Sentence: "boom"})
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(orchestrator.NewFloor())
+	ended := waitTurnEnded(t, h.Bus)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "terr"})
+
+	select {
+	case e := <-ended:
+		if e.TurnID != "terr" || e.Reason != voiceevent.TurnEndTTSError {
+			t.Fatalf("TurnEnded = %+v, want {terr tts_error}", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no TurnEnded(tts_error) published for a failed-synthesis turn")
+	}
+}
+
+// TestReplier_FloorTurnPublishesProviderErrorEnded pins task #4's provider_error
+// path: a producer (LLM/tool loop) that errors before any audio publishes
+// TurnEnded(provider_error).
+func TestReplier_FloorTurnPublishesProviderErrorEnded(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, _ func(orchestrator.Reply) error) error {
+		return errors.New("gemini round failed")
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(orchestrator.NewFloor())
+	ended := waitTurnEnded(t, h.Bus)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tperr"})
+
+	select {
+	case e := <-ended:
+		if e.TurnID != "tperr" || e.Reason != voiceevent.TurnEndProviderError {
+			t.Fatalf("TurnEnded = %+v, want {tperr provider_error}", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no TurnEnded(provider_error) published for a failed-producer turn")
+	}
+}
+
+// TestReplier_FloorCleanTurnPublishesNoTurnEnded proves a turn that produces audio
+// cleanly publishes no TurnEnded (the success path is silent; first audio is the
+// terminal signal). It synchronizes on the producer returning, then drains.
+func TestReplier_FloorCleanTurnPublishesNoTurnEnded(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{}) // all sentences succeed
+	done := make(chan struct{})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		defer close(done)
+		return dispatch(orchestrator.Reply{Sentence: "hello there"})
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(orchestrator.NewFloor())
+	ended := waitTurnEnded(t, h.Bus)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tok"})
+
+	<-done // producer finished; the goroutine publishes TurnEnded (if any) before exiting
+	// The publish happens after dispatchAll returns, just after the producer; give
+	// that a beat, then assert nothing arrived.
+	select {
+	case e := <-ended:
+		t.Fatalf("clean turn must publish no TurnEnded, got %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 // selectiveSynth is a [tts.Synthesizer] that fails Synthesize for sentences in

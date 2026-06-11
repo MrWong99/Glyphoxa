@@ -49,6 +49,12 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.TTSTimeToFirstByte(ProviderElevenLabs, 250*time.Millisecond)
 	rec.ProviderCall(StageLLM, ProviderGemini, OutcomeOK)
 	rec.ProviderError(StageTTS, ProviderElevenLabs)
+	rec.TurnOutcome(TurnFirstAudio, ReasonNone)
+	rec.TurnOutcome(TurnAbandoned, ReasonNoFirstAudio)
+	rec.TurnOutcome(TurnYielded, ReasonSupersessionGrace)
+	rec.TurnOutcome(TurnAbandoned, ReasonBarge)
+	rec.TurnOutcome(TurnAbandoned, ReasonTTSError)
+	rec.TurnOutcome(TurnAbandoned, ReasonProviderError)
 
 	out := scrape(t, rec)
 
@@ -69,6 +75,12 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		`glyphoxa_voice_tts_ttfb_seconds_bucket{provider="elevenlabs"`,
 		`glyphoxa_voice_provider_calls_total{outcome="ok",provider="gemini",stage="llm"} 1`,
 		`glyphoxa_voice_provider_errors_total{provider="elevenlabs",stage="tts"} 1`,
+		`glyphoxa_voice_turn_total{outcome="first_audio",reason="none"} 1`,
+		`glyphoxa_voice_turn_total{outcome="abandoned",reason="no_first_audio"} 1`,
+		`glyphoxa_voice_turn_total{outcome="yielded",reason="supersession_grace"} 1`,
+		`glyphoxa_voice_turn_total{outcome="abandoned",reason="barge"} 1`,
+		`glyphoxa_voice_turn_total{outcome="abandoned",reason="tts_error"} 1`,
+		`glyphoxa_voice_turn_total{outcome="abandoned",reason="provider_error"} 1`,
 		`glyphoxa_embedding_backlog 0`,
 	}
 	for _, want := range wantSubstrings {

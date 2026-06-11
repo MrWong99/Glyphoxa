@@ -175,8 +175,26 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 
 // Engine is the [agent.Engine] that drives the tool-use loop. Build with
 // [NewEngine] and pass as [agent.Config].Engine.
+//
+// It holds two pre-built loops over the same provider adapter: full (every
+// granted Tool declared) and gated (the dice Tool dropped). Per turn it picks
+// gated unless the latest user utterance shows dice intent ([needsDice]) — so a
+// plain conversational turn never declares dice and is structurally a single LLM
+// round, removing the empty tool-call round before first audio (latency
+// investigation baseline finding #4). If the grants never included dice the two
+// loops are identical and the pick is a no-op.
 type Engine struct {
-	loop *tool.Loop
+	full  *tool.Loop // every granted Tool declared
+	gated *tool.Loop // grants minus the dice Tool
+}
+
+// loopFor selects the loop for this turn: the full grants when the utterance
+// plausibly needs dice, the dice-less grants otherwise.
+func (e *Engine) loopFor(messages []llm.Message) *tool.Loop {
+	if needsDice(messages) {
+		return e.full
+	}
+	return e.gated
 }
 
 // EngineOption configures a [NewEngine]. The only option today is
@@ -218,15 +236,25 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 	for _, o := range opts {
 		o(&cfg)
 	}
-	loop := tool.NewLoop(providerAdapter{
+	adapter := providerAdapter{
 		provider:  provider,
 		model:     model,
 		maxTokens: maxTokens,
 		rec:       cfg.rec,
 		provName:  cfg.provName,
-	}, grants)
-	loop.MaxRounds = maxRounds
-	return &Engine{loop: loop}
+	}
+	newLoop := func(g *tool.GrantSet) *tool.Loop {
+		l := tool.NewLoop(adapter, g)
+		l.MaxRounds = maxRounds
+		return l
+	}
+	// Two loops over the same adapter: full grants, and grants with dice dropped.
+	// Per turn (Generate/GenerateStream) the dice gate picks between them so a
+	// non-dice utterance never declares the dice Tool — one round, not two.
+	return &Engine{
+		full:  newLoop(grants),
+		gated: newLoop(grants.Without(diceToolName)),
+	}
 }
 
 // Generate implements [agent.Engine]. It converts the assembled Hot Context to
@@ -234,7 +262,7 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 // per-turn round counter into ctx so the adapter's LLMRound spans index from 0
 // for this turn and never share state with a concurrent turn (barge-in).
 func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
-	return e.loop.Run(withRoundCounter(ctx), toToolMessages(messages))
+	return e.loopFor(messages).Run(withRoundCounter(ctx), toToolMessages(messages))
 }
 
 // GenerateStream implements [agent.StreamingEngine] (B1): it runs the same
@@ -244,7 +272,7 @@ func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, 
 // [Engine.Generate], so the A3 LLMRound / provider-call metrics are recorded
 // identically on the streaming production path. Returns the full final text.
 func (e *Engine) GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (string, error) {
-	return e.loop.RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
+	return e.loopFor(messages).RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
 }
 
 // toToolMessages converts the agent loop's [llm.Message]s into [tool.Message]s.
