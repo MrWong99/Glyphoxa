@@ -106,7 +106,7 @@ func runClipLive(t *testing.T, clip Clip, acc *Accumulator) {
 		Bus:      h.Bus,
 		VAD:      vadStage,
 		STT:      orchestrator.NewSTT(h.Bus, stteleven.New("")),
-		Persona:  agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper."},
+		Persona:  agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper.", Voice: benchVoice()},
 		Provider: gemini.New(""),
 		Synth:    ttseleven.New(""),
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),

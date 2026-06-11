@@ -14,6 +14,8 @@ package voicebench
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -22,6 +24,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 
@@ -109,6 +112,31 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 		opts = append(opts, orchestrator.WithDetector(cfg.Detector))
 	}
 	return orchestrator.NewConversation(cfg.Bus, cfg.VAD, cfg.STT, ttsStage, opts...)
+}
+
+// benchVoice mirrors wirenpc's npcVoice() (the prod NPC voice: ElevenLabs
+// "George" public preset, eleven_v3 defaults, pcm_48000) without importing the
+// pipeline's sole-owned internal/wirenpc. The live tier NEEDS it — a real
+// ElevenLabs Synthesize rejects an empty VoiceID, so a voiceless Persona makes
+// every live turn die silently with no audio (the exact 0-sample failure the
+// nightly hit on its first real run). The cassette tier's stub ignores the
+// VoiceID but the voice still shapes the system prompt via AudioMarkupPrompt,
+// so both tiers set it for prompt parity with prod.
+func benchVoice() tts.Voice {
+	settings := ttseleven.DefaultV3Settings()
+	settings.OutputFormat = "pcm_48000"
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		panic(fmt.Sprintf("voicebench.benchVoice: marshal voice settings: %v", err))
+	}
+	return tts.Voice{
+		ProviderID: ttseleven.ProviderID,
+		// ElevenLabs "George" public preset — same ID wirenpc pins for Bart.
+		VoiceID:  "JBFqnCBsd6RMkjVDRZzb",
+		Name:     "Bart",
+		Language: "en",
+		Settings: raw,
+	}
 }
 
 // drainSink is a PlaybackSink that drains each sentence's chunks and drops them.
