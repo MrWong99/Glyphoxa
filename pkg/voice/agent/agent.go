@@ -195,20 +195,37 @@ func (r *Replier) Reply() orchestrator.ReplyFunc {
 		if e.Target.AgentID != r.cfg.Persona.AgentID {
 			return nil // not addressed to this Agent
 		}
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		timeout := r.cfg.TurnTimeout
-		if timeout == 0 {
-			timeout = DefaultTurnTimeout
-		}
-		if timeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
-		}
+		ctx, cancel := r.withTurnTimeout(ctx)
+		defer cancel()
 		return r.turn(ctx, e.Text)
 	}
+}
+
+// withTurnTimeout bounds one turn's work with [Config.TurnTimeout] (zero applies
+// [DefaultTurnTimeout]; negative disables the deadline). It also substitutes a
+// background context for a nil one so a turn always has a valid parent. The
+// returned cancel must be called when the turn ends (defer) — it releases the
+// timer and, on the disabled-deadline path, is the no-op cancel of the
+// passed-through context.
+//
+// Both the batch ([Replier.Reply]) and streaming ([Replier.ReplyStream]) entry
+// points go through here so the per-turn deadline is identical on both — the
+// streaming path is the one production wires ([orchestrator.WithReplyStream]),
+// and the Gemini adapter's HTTP client has no overall timeout by design,
+// relying on exactly this ctx deadline to bound a thinking-then-stalling
+// completion (gemini.defaultHTTPClient).
+func (r *Replier) withTurnTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := r.cfg.TurnTimeout
+	if timeout == 0 {
+		timeout = DefaultTurnTimeout
+	}
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return context.WithCancel(ctx)
 }
 
 // turn runs one Agent turn for the given utterance text: it appends the user
@@ -255,6 +272,12 @@ func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
 		if e.Target.AgentID != r.cfg.Persona.AgentID {
 			return nil // not addressed to this Agent
 		}
+		// Bound the streaming turn with the same per-turn deadline as the batch
+		// path: production wires this path, and without it a thinking-then-stalling
+		// provider completion runs unbounded (the Gemini client has no overall HTTP
+		// timeout by design), so a wedged turn would never produce first audio.
+		ctx, cancel := r.withTurnTimeout(ctx)
+		defer cancel()
 		return r.streamTurn(ctx, e.Text, dispatch)
 	}
 }

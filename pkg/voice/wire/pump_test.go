@@ -21,7 +21,7 @@ func openChunks() (chan tts.AudioChunk, <-chan tts.AudioChunk) {
 // off sentence one. Order must also hold.
 func TestPlaybackPump_SerializesSentences(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{}, nil)
+	pump := newPump(p, fakeCodec{}, nil, nil)
 	defer pump.Close()
 
 	c1, ro1 := openChunks()
@@ -67,7 +67,7 @@ func TestPlaybackPump_SerializesSentences(t *testing.T) {
 // sentence in flight beyond the playing one — see the cap-1 rationale).
 func TestPlaybackPump_HandleSentenceReturnsPromptly(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{}, nil)
+	pump := newPump(p, fakeCodec{}, nil, nil)
 	defer pump.Close()
 
 	_, ro1 := openChunks()
@@ -96,7 +96,7 @@ func TestPlaybackPump_HandleSentenceReturnsPromptly(t *testing.T) {
 // rather than blocking the (lockstep) producer.
 func TestPlaybackPump_CloseStopsWorker(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{}, nil)
+	pump := newPump(p, fakeCodec{}, nil, nil)
 
 	pump.Close()
 	pump.Close() // idempotent, must not panic or block
@@ -124,7 +124,7 @@ func TestPlaybackPump_CloseStopsWorker(t *testing.T) {
 // spoken into the teardown.
 func TestPlaybackPump_CloseDrainsQueuedJob(t *testing.T) {
 	p := newFakePlayer()
-	pump := newPump(p, fakeCodec{}, nil)
+	pump := newPump(p, fakeCodec{}, nil, nil)
 
 	// Worker busy on s1.
 	_, ro1 := openChunks()

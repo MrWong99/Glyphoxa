@@ -48,6 +48,23 @@ func NewGrantSet(registry *Registry, grants ...Grant) *GrantSet {
 	return &GrantSet{registry: registry, grants: m}
 }
 
+// Without returns a derived GrantSet identical to this one but with the named
+// Tool's grant removed, sharing the same [Registry]. The receiver is not
+// mutated — it returns a copy — so a caller can narrow grants for one turn (e.g.
+// drop an unneeded Tool so it is never declared to the model, saving a wasted
+// tool-call round) without affecting any other turn. Removing a name that is not
+// granted is a no-op copy.
+func (gs *GrantSet) Without(toolName string) *GrantSet {
+	m := make(map[string]Grant, len(gs.grants))
+	for name, g := range gs.grants {
+		if name == toolName {
+			continue
+		}
+		m[name] = g
+	}
+	return &GrantSet{registry: gs.registry, grants: m}
+}
+
 // resolve returns the [Tool] and per-grant config for name, and whether the
 // Agent is both granted name and the Tool is registered. A grant for an
 // unregistered Tool, or no grant at all, returns ok=false — the loop treats

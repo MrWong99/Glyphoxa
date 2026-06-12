@@ -111,7 +111,7 @@ func runClipThroughRig(t *testing.T, clip Clip, acc *Accumulator) {
 		Bus:      h.Bus,
 		VAD:      vadStage,
 		STT:      orchestrator.NewSTT(h.Bus, stubRecognizer{text: "another ale, innkeeper"}),
-		Persona:  agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper."},
+		Persona:  agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper.", Voice: benchVoice()},
 		Provider: stubProvider{}, // default 3-sentence reply → exercises B1 per-sentence dispatch
 		Synth:    stubSynth{},
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),

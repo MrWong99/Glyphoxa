@@ -10,7 +10,67 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
+	"go.uber.org/goleak"
 )
+
+// ctxIgnoringSynth is a [tts.Synthesizer] whose stream goroutine does BARE sends
+// on the chunk channel — it does NOT select on ctx. The [tts.Synthesizer]
+// contract permits this (only the returned channel's close is specified, not the
+// producer's cancellation behaviour), so the tee must not rely on the inner
+// producer noticing ctx itself: it must drain src so a producer parked on a bare
+// send is released. It emits a bounded run of chunks then closes (a real synth
+// EOFs); the goroutine only terminates if every chunk is consumed. started closes
+// once the goroutine is live so a test can be sure there is a producer to leak.
+type ctxIgnoringSynth struct {
+	chunk   tts.AudioChunk
+	count   int
+	started chan struct{}
+}
+
+func (b *ctxIgnoringSynth) Synthesize(_ context.Context, _ tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	ch := make(chan tts.AudioChunk)
+	go func() {
+		defer close(ch)
+		close(b.started)
+		for i := 0; i < b.count; i++ {
+			ch <- b.chunk // bare blocking send: no ctx select, by design
+		}
+	}()
+	return ch, nil
+}
+
+func (b *ctxIgnoringSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestTee_DrainsInnerOnCancel proves the tee never wedges the wrapped
+// Synthesizer's producer goroutine when a turn is cancelled mid-stream (barge-in)
+// and the orchestrator stops draining the returned channel. The inner producer
+// here does bare blocking sends, so if the tee returned without draining src,
+// that goroutine would park forever on a send no one reads — goleak catches it.
+func TestTee_DrainsInnerOnCancel(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	inner := &ctxIgnoringSynth{chunk: chunk(1, 24000), count: 8, started: make(chan struct{})}
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go drainAll(chunks)
+	})
+	tee := wire.NewTeeSynthesizer(inner, sink, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "barge me"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+
+	<-inner.started // a producer goroutine now exists to potentially leak
+	// Read one chunk so the forward goroutine is past its first iteration, then
+	// cancel and stop reading: the orchestrator-side drain has gone away mid-turn.
+	<-out
+	cancel()
+
+	// Drain whatever is already buffered so the forward goroutine reaches its
+	// ctx-cancelled return; goleak (deferred) then asserts no goroutine survives.
+	go drainAll(out)
+}
 
 // fakeSynth is a minimal [tts.Synthesizer]: it streams a fixed list of chunks
 // (one per Synthesize call), or returns startErr without opening a stream. It

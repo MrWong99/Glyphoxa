@@ -310,43 +310,75 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// Barge-in: take the floor and run the turn on its own goroutine so the
 		// inbound loop keeps feeding VAD during playback. A barge cancels turnCtx,
 		// which unwinds TTS synthesis and playback and breaks the dispatch loop.
-		turnCtx, release := r.floor.Take(ctx)
+		turnCtx, release, coalesced := r.floor.Take(ctx)
+		if coalesced {
+			// The floor's same-utterance grace window folded this late segment into
+			// the turn already speaking (one utterance VAD-split into two). The
+			// segment is NOT spoken; announce it so the metrics subscriber records a
+			// distinct `yielded` outcome (not `abandoned`) and logs the dropped
+			// transcript — the known residual until real utterance coalescing routes
+			// this text into the surviving turn. No goroutine is spawned.
+			release() // no-op on the floor, but keeps the take/release pairing honest
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndSupersedeCoalesced, Text: e.Text})
+			return
+		}
 		go func() {
 			defer release()
-			r.dispatchAll(turnCtx, e)
+			reason := r.dispatchAll(turnCtx, e)
+			// Announce a turn that died of its own error (a real TTS/provider
+			// failure) before producing audio — so the metrics subscriber records
+			// the precise reason, not the coarse no-first-audio catch-all. A turn
+			// cancelled by a barge or a supersede is NOT reported here (ctx.Err() !=
+			// nil): the barge publishes its own TurnEnded, and the subscriber's
+			// first-audio/TTL guards handle the rest. A clean turn reports nothing.
+			if reason != "" && turnCtx.Err() == nil {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
+			}
 		}()
 	})
 }
 
-// dispatchAll renders one routing decision under ctx. With a streaming strategy
-// it drives the producer, dispatching each sentence as it arrives; otherwise it
-// renders every [Reply] the batch [ReplyFunc] returns, in order. Both stop early
-// if ctx is cancelled (a barge-in yielded the floor mid-turn). A dispatch
-// failure is reported through the ErrorFunc and does not stop the rest.
-func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) {
+// dispatchAll renders one routing decision under ctx, returning the turn-end
+// reason if the turn failed of its own error (empty on a clean turn or a
+// ctx-cancel). With a streaming strategy it drives the producer, dispatching each
+// sentence as it arrives; otherwise it renders every [Reply] the batch
+// [ReplyFunc] returns, in order. Both stop early if ctx is cancelled (a barge-in
+// yielded the floor mid-turn). A dispatch failure is reported through the
+// ErrorFunc and does not stop the rest.
+func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) voiceevent.TurnEndReason {
 	if r.replyStream != nil {
-		r.dispatchStream(ctx, e)
-		return
+		return r.dispatchStream(ctx, e)
 	}
+	var reason voiceevent.TurnEndReason
 	for _, rep := range r.reply(ctx, e) {
 		if ctx.Err() != nil {
-			return
+			return ""
 		}
-		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil && r.onError != nil {
-			r.onError(err)
+		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil {
+			if r.onError != nil {
+				r.onError(err)
+			}
+			// A synth failure on one sentence is non-fatal to the turn, but record
+			// it as the turn-end reason if no later sentence recovers with audio.
+			if ctx.Err() == nil {
+				reason = voiceevent.TurnEndTTSError
+			}
 		}
 	}
+	return reason
 }
 
 // dispatchStream drives the streaming reply strategy for one routing decision
-// (B1). It hands the producer a dispatch callback that synthesizes one sentence
-// at a time under ctx — serially, so the [PlaybackPump]'s single-in-flight
-// contract and the per-sentence FirstAudio ordering both hold — and returns
-// ctx.Err() once the turn is cancelled so the producer stops generating. A
-// dispatch failure is reported via the ErrorFunc but does not abort the turn
-// (one bad sentence must not silence the rest); a producer-level error is
-// likewise surfaced.
-func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted) {
+// (B1), returning the turn-end reason if the turn failed of its own error (empty
+// on a clean turn or a ctx-cancel). It hands the producer a dispatch callback
+// that synthesizes one sentence at a time under ctx — serially, so the
+// [PlaybackPump]'s single-in-flight contract and the per-sentence FirstAudio
+// ordering both hold — and returns ctx.Err() once the turn is cancelled so the
+// producer stops generating. A dispatch failure is reported via the ErrorFunc but
+// does not abort the turn (one bad sentence must not silence the rest); a
+// producer-level error is likewise surfaced.
+func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted) voiceevent.TurnEndReason {
+	var ttsFailed bool
 	dispatch := func(rep Reply) error {
 		if err := ctx.Err(); err != nil {
 			return err // barge-in cancelled the turn: stop the producer
@@ -360,10 +392,19 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			ttsFailed = true
 		}
 		return nil
 	}
-	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil && r.onError != nil {
-		r.onError(err)
+	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil {
+		if r.onError != nil {
+			r.onError(err)
+		}
+		// The producer (LLM round / tool loop) failed before the turn finished.
+		return voiceevent.TurnEndProviderError
 	}
+	if ttsFailed && ctx.Err() == nil {
+		return voiceevent.TurnEndTTSError
+	}
+	return ""
 }

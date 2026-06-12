@@ -16,7 +16,7 @@ import (
 func TestBargeIn_InstantYieldsActiveFloor(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
-	turnCtx, release := floor.Take(context.Background())
+	turnCtx, release, _ := floor.Take(context.Background())
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
@@ -29,6 +29,27 @@ func TestBargeIn_InstantYieldsActiveFloor(t *testing.T) {
 		t.Fatal("barge must free the floor")
 	}
 	voicetest.AssertEventCount[voiceevent.BargeDetected](t, h, 1)
+}
+
+// TestBargeIn_PublishesTurnEndedWithTurnID pins the barge attribution path
+// (task #4): a confirmed barge publishes a TurnEnded carrying the cut turn's
+// TurnID and the barge reason, so the metrics subscriber records why the turn
+// died instead of the coarse no-first-audio catch-all.
+func TestBargeIn_PublishesTurnEndedWithTurnID(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	// The turn holds the floor with its TurnID in ctx, as the reply reactor wires it.
+	parent := voiceevent.WithTurnID(context.Background(), "T42")
+	_, release, _ := floor.Take(parent)
+	defer release()
+
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.VADSpeechStart{})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool { return e.TurnID == "T42" && e.Reason == voiceevent.TurnEndBarge },
+		"turn.ended (barge) carrying the cut turn's TurnID",
+	)
 }
 
 // TestBargeIn_NoFloorNoBarge proves a speech_start with no Agent speaking is a
@@ -48,7 +69,7 @@ func TestBargeIn_NoFloorNoBarge(t *testing.T) {
 func TestBargeIn_SoftOverlapDoesNotCancel(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
-	turnCtx, release := floor.Take(context.Background())
+	turnCtx, release, _ := floor.Take(context.Background())
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 200*time.Millisecond).Bind(t.Context(), h.Bus))
@@ -66,7 +87,7 @@ func TestBargeIn_SoftOverlapDoesNotCancel(t *testing.T) {
 func TestBargeIn_ConfirmWindowCrossingCancels(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
-	turnCtx, release := floor.Take(context.Background())
+	turnCtx, release, _ := floor.Take(context.Background())
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 20*time.Millisecond).Bind(t.Context(), h.Bus))

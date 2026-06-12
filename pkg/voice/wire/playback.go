@@ -7,6 +7,7 @@ import (
 
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 // playback and sessionPlayer are the seam over the concrete [gxvoice.Session]/
@@ -66,8 +67,19 @@ func PlaySentence(ctx context.Context, sess *gxvoice.Session, codec Codec, chunk
 
 // playSentence is the testable core: it depends on the sessionPlayer seam, not a
 // concrete Session, so the block-until-Done discipline can be exercised with a
-// fake player and no live connection.
+// fake player and no live connection. It publishes no FirstOpus (nil bus); the
+// live pump uses [playSentenceBus].
 func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk) error {
+	return playSentenceBus(ctx, p, codec, chunks, nil)
+}
+
+// playSentenceBus is playSentence with an optional bus: when non-nil, the
+// playback Source is wrapped so the first Opus frame pulled to the wire publishes
+// [voiceevent.FirstOpus] for the turn (task #7, the audible-on-wire SLO end). The
+// turn's correlation id is recovered from ctx ([voiceevent.TurnIDFrom]), which
+// the tee installs and threads through HandleSentence → the play job. A nil bus
+// or a ctx with no turn id leaves the Source unwrapped.
+func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk, bus *voiceevent.Bus) error {
 	if chunks == nil {
 		return fmt.Errorf("wire.PlaySentence: chunks must not be nil")
 	}
@@ -81,6 +93,10 @@ func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-ch
 		go drain(chunks)
 		return fmt.Errorf("wire.PlaySentence: build playback source: %w", err)
 	}
+
+	// Wrap so the first frame on the wire stamps FirstOpus for this turn (no-op
+	// when bus is nil or the ctx carries no turn id).
+	src = newFirstOpusSource(src, bus, voiceevent.TurnIDFrom(ctx))
 
 	pb, err := p.Play(ctx, src)
 	if err != nil {

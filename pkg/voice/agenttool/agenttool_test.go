@@ -365,6 +365,79 @@ func TestEngine_NoTools_SingleGenerationReturnsText(t *testing.T) {
 	}
 }
 
+// TestEngine_DiceGate_PlainTurnOffersNoDiceAndIsSingleRound is the core #5 pin:
+// a conversational utterance with no dice intent must NOT declare the dice Tool,
+// so the model cannot emit an empty tool-call round before its answer — the turn
+// is structurally a single LLM round. This is the baseline-latency win.
+func TestEngine_DiceGate_PlainTurnOffersNoDiceAndIsSingleRound(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ale's a copper, traveler.", stop: "end_turn"},
+	}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+
+	got, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleSystem, Text: "You are Bart."},
+		{Role: llm.RoleUser, Text: "How much for a room and a pint?"},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "Ale's a copper, traveler." {
+		t.Errorf("text = %q, want the single-round answer", got)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("provider called %d times, want 1 (a plain turn must be one round)", len(reqs))
+	}
+	if len(reqs[0].Tools) != 0 {
+		t.Errorf("plain turn declared tools %+v, want none (dice gated out)", reqs[0].Tools)
+	}
+}
+
+// TestEngine_DiceGate_KeywordIntentOffersDice proves the gate's recall: an
+// utterance with ttrpg roll intent but no explicit NdM (a "saving throw") still
+// arms the dice Tool, so the tool path is not broken when dice IS needed.
+func TestEngine_DiceGate_KeywordIntentOffersDice(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You steady your nerves.", stop: "end_turn"},
+	}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Make a saving throw against the poison."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("provider called %d times, want 2 (dice intent → tool round-trip)", len(reqs))
+	}
+	if len(reqs[0].Tools) != 1 || reqs[0].Tools[0].Name != "dice" {
+		t.Errorf("keyword-intent turn tools = %+v, want the dice decl offered", reqs[0].Tools)
+	}
+}
+
+// TestEngine_DiceGate_HistoryDiceDoesNotArmCurrentTurn pins that the gate keys on
+// the CURRENT utterance only: a dice roll three messages ago must not keep dice
+// declared on a later plain turn.
+func TestEngine_DiceGate_HistoryDiceDoesNotArmCurrentTurn(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{{text: "Right this way.", stop: "end_turn"}}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Roll a d20."},                // older turn: had dice intent
+		{Role: llm.RoleAssistant, Text: "You rolled a 14."},      // its answer
+		{Role: llm.RoleUser, Text: "Great, point me to a room."}, // current turn: plain
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 1 || len(reqs[0].Tools) != 0 {
+		t.Errorf("history dice armed the current plain turn: reqs=%d tools=%+v, want 1 req / 0 tools", len(reqs), reqs[0].Tools)
+	}
+}
+
 // TestEngine_AsAgentEngine_DrivesReplier pins that the bridge slots into the
 // agent loop via agent.Config.Engine — the production wiring path — so an
 // addressed utterance flows utterance → Hot Context → tool loop → spoken reply.

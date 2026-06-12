@@ -109,13 +109,29 @@ func isSpace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
-// hasSpeakable reports whether s contains any letter or digit — i.e. something
-// worth synthesizing. A run of only punctuation/whitespace is not dispatched, so
-// the pump never speaks a silent or punctuation-only utterance.
+// hasSpeakable reports whether s contains any letter or digit OUTSIDE a bracketed
+// tag — i.e. something the TTS will actually voice. A run of only
+// punctuation/whitespace, only emojis, or only bracketed audio/speaker tags
+// (eleven_v3 markup like "[laughs]" or "[Bart]") is not dispatched: ElevenLabs
+// strips speaker tags and emojis and then rejects the request if nothing
+// remains ("input_text_empty", HTTP 400), so a tag-only sentence would drop the
+// whole reply. Letters/digits inside "[...]" are therefore not counted as
+// speakable; a sentence with real words plus a tag ("Aye! [laughs]") still
+// qualifies on the words outside the brackets.
 func hasSpeakable(s string) bool {
+	depth := 0
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return true
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+				return true
+			}
 		}
 	}
 	return false

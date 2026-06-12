@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
@@ -66,6 +67,32 @@ const (
 	// elevenGeorgeVoiceID is the ElevenLabs "George" public preset — a neutral
 	// stand-in voice for the NPC.
 	elevenGeorgeVoiceID = "JBFqnCBsd6RMkjVDRZzb"
+
+	// bargeConfirmWindow is how long continuous inbound speech must persist before
+	// it counts as a barge and yields Bart's floor (ADR-0027). It must be > 0
+	// against a live mic: with a single shared VAD session (ADR-0019) the events
+	// carry no speaker identity, so the addressing user's OWN continued speech —
+	// or a VAD split of one utterance into two segments — fires a fresh
+	// speech_start while Bart holds the floor. A zero window yields on that instant
+	// and cancels the in-flight TTS POST (the "context canceled" self-cancel that
+	// produced the 20s wait — see docs/latency-investigation/audio-process.md).
+	// 250ms debounces a speaker finishing their own sentence from a genuine
+	// interruption; it is the minimum until per-participant VAD (ADR-0019) can gate
+	// barge on speaker != the turn's addresser.
+	bargeConfirmWindow = 250 * time.Millisecond
+
+	// floorCoalesceWindow closes root cause #2 of the latency investigation: a
+	// turn's unit is a VAD segment, not a user utterance, so one utterance split by
+	// VAD into two STT segments opens two turns and the second's Floor.Take cancels
+	// the first mid-synthesis (a self-cancel with no barge). A Floor.Take landing
+	// within this window of the previous one is treated as the same utterance
+	// continuing and yields to the in-flight turn instead of superseding it, so one
+	// utterance maps to one turn. Sized a hair above the end-of-speech hangover
+	// (vadMinSilenceFrames*vadFrameMs = 12*32 = 384ms) so two segments split at an
+	// internal pause coalesce, while a genuine new utterance after a real
+	// conversational gap (turn-taking pauses run hundreds of ms longer) still opens
+	// its own turn.
+	floorCoalesceWindow = 600 * time.Millisecond
 )
 
 // BartPersona is the Character NPC Persona (CONTEXT.md "Persona") for the MVP
@@ -256,13 +283,15 @@ func Run(ctx context.Context, cfg Config) error {
 	// (line above), and pipe.Run's own deferred cancel stops the Conversation
 	// first — so teardown order is conv-stop → pump.Close() → sess.Close(), which
 	// is the deterministic ordering the pump's Close() contract requires.
-	pump := wire.NewPlaybackPump(sess, cdc, log)
-	defer pump.Close()
-
 	// The orchestrator bus is created here (not inside buildConversation) so the
-	// tee can publish FirstAudio (A3 hook 1) onto the same bus the conversation's
+	// tee can publish FirstAudio (A3 hook 1) and the pump can publish FirstOpus
+	// (task #7, the audible-on-wire SLO end) onto the same bus the conversation's
 	// stages publish on and the metrics subscriber reads.
 	bus := voiceevent.NewBus()
+
+	pump := wire.NewPlaybackPump(sess, cdc, log, bus)
+	defer pump.Close()
+
 	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
 
 	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the
@@ -271,7 +300,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// the handlers (deferred unsubscribe); Start runs the TTL sweep for the run's
 	// lifetime so abandoned/barged turns don't leak per-turn state. A nil
 	// StageMetrics (keyless) makes the subscriber a no-op via observe.Discard.
-	stageSub := observe.NewStageSubscriber(cfg.StageMetrics)
+	stageSub := observe.NewStageSubscriber(cfg.StageMetrics, observe.WithTurnLog(log))
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(ctx)
 
@@ -422,11 +451,13 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		// agent.StreamingEngine (it streams the final answer round), so ReplyStream
 		// dispatches each sentence as it lands.
 		orchestrator.WithReplyStream(replier.ReplyStream()),
-		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. Start
-		// with an instant cut (0 confirm window) to validate the async-turn path
-		// live; the ~250ms confirm window is the next tuning step. With B1 a barge
-		// now cancels mid-generation, not just pending dispatch.
-		orchestrator.WithBargeIn(0),
+		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. The
+		// confirm window must be > 0 against a live mic — a zero window let the
+		// addressing user's own continued speech (single shared VAD session, no
+		// speaker identity) cancel the turn it had just triggered, which is the 20s
+		// self-cancel the latency investigation found. With B1 a confirmed barge
+		// cancels mid-generation, not just pending dispatch.
+		orchestrator.WithBargeInCoalesce(bargeConfirmWindow, floorCoalesceWindow),
 		orchestrator.WithErrorHandler(func(err error) {
 			log.Warn("reply dispatch failed", "err", err)
 		}),
