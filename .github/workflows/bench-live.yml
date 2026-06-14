@@ -7,8 +7,6 @@ name: bench-live
 # regression" signal; it NEVER gates a PR (the every-PR cassette gate in ci.yml
 # is the relative-regression tripwire). The cadence mirrors record-live.yml.
 on:
-  schedule:
-    - cron: "30 6 * * *" # 06:30 UTC daily (after the weekly record-live at 06:00).
   workflow_dispatch:
     inputs:
       ref:
