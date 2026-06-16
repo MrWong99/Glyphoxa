@@ -37,6 +37,12 @@ type Floor struct {
 	gen        uint64             // increments per Take; guards stale releases
 	lastTake   time.Time          // when the current holder took the floor (coalesce anchor)
 	holderTurn string             // TurnID of the turn currently holding the floor (for Yield → barge attribution)
+	// speaking is true once the current holder has produced its first audible
+	// frame — the barge gate (ADR-0027). A held-but-silent turn (the pre-audio
+	// LLM "thinking" phase) is NOT speaking, so a human speech_start in that
+	// window is not a barge: the agent has made no sound to interrupt. Cleared on
+	// every Take (a new holder starts silent) and on Yield; set by [Floor.MarkSpeaking].
+	speaking bool
 
 	// coalesce is the same-utterance debounce window; 0 disables it (plain
 	// supersession). now is the clock, overridable in tests.
@@ -111,6 +117,7 @@ func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(
 	f.cancel = cancel
 	f.lastTake = f.clock()
 	f.holderTurn = voiceevent.TurnIDFrom(parent)
+	f.speaking = false // a fresh holder starts silent until it produces audio
 	f.mu.Unlock()
 
 	release = func() {
@@ -139,6 +146,7 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 	turnID = f.holderTurn
 	f.cancel = nil
 	f.holderTurn = ""
+	f.speaking = false
 	f.mu.Unlock()
 	if c == nil {
 		return "", false
@@ -147,11 +155,40 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 	return turnID, true
 }
 
-// Active reports whether a turn currently holds the floor (an Agent is
-// speaking). It is a point-in-time read; callers must tolerate the floor being
-// taken or yielded immediately afterward.
+// Active reports whether a turn currently holds the floor (a turn is in flight,
+// from its [Floor.Take] until release/Yield — which spans the pre-audio LLM phase
+// as well as playback). It is a point-in-time read; callers must tolerate the
+// floor being taken or yielded immediately afterward. For the "is the Agent
+// AUDIBLY speaking" question the barge gate asks, use [Floor.Speaking].
 func (f *Floor) Active() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.cancel != nil
+}
+
+// MarkSpeaking records that the turn identified by turnID has produced its first
+// audible frame, so the floor's current holder counts as audibly speaking for the
+// barge gate ([Floor.Speaking]). It is driven by the audible-on-wire signal
+// ([voiceevent.FirstOpus]) the [BargeIn] reactor subscribes to. turnID must match
+// the current holder: a late signal from an already-superseded/yielded turn (its
+// id no longer the holder) is ignored, so it cannot mark a newer, still-silent
+// holder as speaking. A no-op when the floor is free or the id does not match.
+func (f *Floor) MarkSpeaking(turnID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cancel != nil && f.holderTurn == turnID {
+		f.speaking = true
+	}
+}
+
+// Speaking reports whether the floor's current holder is audibly speaking — it
+// holds the floor AND has produced its first audible frame ([Floor.MarkSpeaking]).
+// This is the barge gate (ADR-0027): a human speech_start is a barge only while
+// the Agent is actually speaking, not during the held-but-silent pre-audio LLM
+// phase (where the speech is the addressing user's own continued/over-split
+// utterance, not an interruption). Point-in-time, like [Floor.Active].
+func (f *Floor) Speaking() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancel != nil && f.speaking
 }
