@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/disgoorg/disgo v0.19.6
 	github.com/disgoorg/godave v0.1.0
 	github.com/disgoorg/godave/golibdave v0.1.0
