@@ -1,5 +1,7 @@
 # Cap gemini-2.5-flash "thinking" wall-time: send `reasoning_effort: "low"` by default
 
+> **Superseded as the deployment default by ADR-0036.** The voice loop's default LLM moves to Llama 3.3 70B on Groq — a *non-reasoning* model with no thinking tail to cap, which removes both the H1 tail and the ~1 s trivial-turn floor this cap traded for. This ADR stays as the record of the Gemini thinking A/B, and the `WithReasoningEffort`/`WithThinkingBudget` knobs it documents remain live for any Gemini-routed traffic (the ADR-0036 fallback is `gemini-2.5-flash-lite`, which ships with thinking off by default).
+
 The Gemini adapter bounds gemini-2.5-flash's dynamic reasoning by sending a thinking cap on every completion — `reasoning_effort: "low"` by default — rather than only `max_tokens`. This is the primary fix for the Sprint-1 "manchmal sehr spät" latency complaint (latency.md H1 / Sprint 2 B2).
 
 ## What this decides
