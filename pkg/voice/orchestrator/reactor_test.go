@@ -39,14 +39,46 @@ func (s *scriptedVAD) Close() error { return nil }
 
 // recordingRecognizer captures the frame batch of every Transcribe call so a
 // test can assert which frames a flush handed to STT. It optionally returns err.
+// Transcription now runs on the segmenter's worker goroutine (#24), so calls is
+// mutex-guarded for -race; read it via [recordingRecognizer.batches] after a
+// [orchestrator.Segmenter.Flush] (which drains in-flight transcriptions).
 type recordingRecognizer struct {
-	err   error
+	err error
+
+	mu    sync.Mutex
 	calls [][]audio.Frame
 }
 
 func (r *recordingRecognizer) Transcribe(_ context.Context, frames []audio.Frame) (stt.Transcript, error) {
+	r.mu.Lock()
 	r.calls = append(r.calls, append([]audio.Frame(nil), frames...))
+	r.mu.Unlock()
 	return stt.Transcript{Text: "ok"}, r.err
+}
+
+// batches returns a snapshot of the captured Transcribe frame batches.
+func (r *recordingRecognizer) batches() [][]audio.Frame {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]audio.Frame(nil), r.calls...)
+}
+
+// blockingRecognizer blocks every Transcribe call on release after announcing it
+// started, so a test can hold STT "in flight" and observe whether the audio
+// intake keeps draining (the #24 decoupling) or stalls behind it.
+type blockingRecognizer struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingRecognizer) Transcribe(ctx context.Context, _ []audio.Frame) (stt.Transcript, error) {
+	r.started <- struct{}{}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return stt.Transcript{}, ctx.Err()
+	}
+	return stt.Transcript{Text: "ok"}, nil
 }
 
 // segFrame returns a 32 ms / 16 kHz frame (512 samples), the framing the rest
@@ -82,6 +114,52 @@ func feed(t *testing.T, seg *orchestrator.Segmenter, n int) {
 	}
 }
 
+// TestSegmenter_ProcessDoesNotBlockOnSTT is the #24 regression: the inbound audio
+// loop must keep draining while a slow, network-bound STT call is in flight, so an
+// utterance spoken during a previous utterance's transcription is not dropped at
+// the bounded inbound buffer. With STT decoupled from intake, Process hands the
+// segment to the transcription worker and returns; the old inline-STT coupling
+// stalled the feeding goroutine inside the recognizer call until it returned.
+func TestSegmenter_ProcessDoesNotBlockOnSTT(t *testing.T) {
+	bus := voiceevent.NewBus()
+	rec := &blockingRecognizer{started: make(chan struct{}, 4), release: make(chan struct{})}
+	vadStage := orchestrator.NewVAD(bus, &scriptedVAD{events: []vad.VADEventType{
+		vad.VADSpeechStart, vad.VADSpeechEnd, // utterance 1 → flush (transcription blocks the worker)
+	}})
+	sttStage := orchestrator.NewSTT(bus, rec)
+	seg := orchestrator.NewSegmenter(vadStage, sttStage)
+	t.Cleanup(seg.Bind(t.Context(), bus))
+
+	frame := segFrame(t)
+	fedAll := make(chan struct{})
+	go func() {
+		// Frame 0 starts speech, frame 1 ends it (flushing utterance 1 to STT, which
+		// blocks the worker), frames 2-3 are post-script silence. All four Process
+		// calls must return even though the recognizer is still blocked.
+		for range 4 {
+			_ = seg.Process(frame)
+		}
+		close(fedAll)
+	}()
+
+	// Utterance 1's transcription is in flight (the worker is blocked in Transcribe).
+	select {
+	case <-rec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("transcription never started")
+	}
+
+	// The audio loop must keep draining while STT is blocked — Process hands the
+	// segment to the worker and returns rather than running the recognizer inline.
+	select {
+	case <-fedAll:
+		// intake kept draining: correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Segmenter.Process blocked while STT was in flight — the #24 intake coupling")
+	}
+	close(rec.release) // let the worker unwind so Bind's cancel can stop it
+}
+
 // TestSegmenter_FlushTranscribesTrailingUtterance is the regression test for the
 // dropped-final-turn bug: the audio loop stops while speech is still active (no
 // speech-end transition ever fires), so Process never flushes. Without an
@@ -92,17 +170,18 @@ func TestSegmenter_FlushTranscribesTrailingUtterance(t *testing.T) {
 	seg, rec := newSegmenterRig(t, vad.VADSpeechStart, vad.VADSpeechContinue, vad.VADSpeechContinue)
 	feed(t, seg, 3)
 
-	if len(rec.calls) != 0 {
-		t.Fatalf("before Flush: %d transcribe calls, want 0 (speech still active)", len(rec.calls))
+	if got := rec.batches(); len(got) != 0 {
+		t.Fatalf("before Flush: %d transcribe calls, want 0 (speech still active)", len(got))
 	}
 
 	if err := seg.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	if len(rec.calls) != 1 {
-		t.Fatalf("after Flush: %d transcribe calls, want 1", len(rec.calls))
+	batches := rec.batches()
+	if len(batches) != 1 {
+		t.Fatalf("after Flush: %d transcribe calls, want 1", len(batches))
 	}
-	if got := len(rec.calls[0]); got != 3 {
+	if got := len(batches[0]); got != 3 {
 		t.Errorf("flushed segment had %d frames, want 3 (all buffered speech)", got)
 	}
 }
@@ -115,8 +194,8 @@ func TestSegmenter_FlushIsNoOpWhenEmpty(t *testing.T) {
 	if err := seg.Flush(); err != nil {
 		t.Fatalf("Flush on empty: %v", err)
 	}
-	if len(rec.calls) != 0 {
-		t.Errorf("empty Flush made %d transcribe calls, want 0", len(rec.calls))
+	if got := rec.batches(); len(got) != 0 {
+		t.Errorf("empty Flush made %d transcribe calls, want 0", len(got))
 	}
 }
 
@@ -127,52 +206,62 @@ func TestSegmenter_ProcessFlushesOnSpeechEnd(t *testing.T) {
 	seg, rec := newSegmenterRig(t, vad.VADSpeechStart, vad.VADSpeechContinue, vad.VADSpeechEnd)
 	feed(t, seg, 3)
 
-	if len(rec.calls) != 1 {
-		t.Fatalf("%d transcribe calls, want 1 (flush on speech-end)", len(rec.calls))
+	// The speech-end flush transcribes on a worker goroutine (#24); Flush drains it
+	// (and is a no-op on the already-emptied buffer) so the call is observable.
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
-	if got := len(rec.calls[0]); got != 2 {
+	batches := rec.batches()
+	if len(batches) != 1 {
+		t.Fatalf("%d transcribe calls, want 1 (flush on speech-end)", len(batches))
+	}
+	if got := len(batches[0]); got != 2 {
 		t.Errorf("utterance had %d frames, want 2 (the speech-end frame is excluded)", got)
 	}
 
 	if err := seg.Flush(); err != nil {
 		t.Fatalf("redundant Flush: %v", err)
 	}
-	if len(rec.calls) != 1 {
-		t.Errorf("redundant Flush re-transcribed: %d calls, want 1", len(rec.calls))
+	if got := rec.batches(); len(got) != 1 {
+		t.Errorf("redundant Flush re-transcribed: %d calls, want 1", len(got))
 	}
 }
 
 // TestSegmenter_BufferClearedAfterFlushError pins the "a failed utterance does
-// not bleed into the next" contract: when STT errors on flush, the buffer is
-// still cleared, so the following utterance contains only its own frames.
+// not bleed into the next" contract under the off-loop STT (#24): when the
+// recognizer errors, the error surfaces via onError (not Process's return, which
+// has no caller to take it now), and the buffer is still cleared so the following
+// utterance contains only its own frames.
 func TestSegmenter_BufferClearedAfterFlushError(t *testing.T) {
 	seg, rec := newSegmenterRig(t,
 		vad.VADSpeechStart, vad.VADSpeechEnd, // first utterance: 1 frame, then end
 		vad.VADSpeechStart, vad.VADSpeechEnd, // second utterance: 1 frame, then end
 	)
 	rec.err = errors.New("boom")
+	var mu sync.Mutex
+	var errs []error
+	seg.SetErrorHandler(func(err error) { mu.Lock(); errs = append(errs, err); mu.Unlock() })
 
-	// First utterance: frame 0 buffered, frame 1 ends speech and flushes → error.
-	if err := seg.Process(segFrame(t)); err != nil {
-		t.Fatalf("frame 0: %v", err)
-	}
-	if err := seg.Process(segFrame(t)); err == nil {
-		t.Fatal("frame 1: expected the recognizer error to propagate")
-	}
-
-	// Second utterance must not carry the first's frame.
-	if err := seg.Process(segFrame(t)); err != nil {
-		t.Fatalf("frame 2: %v", err)
-	}
-	if err := seg.Process(segFrame(t)); err == nil {
-		t.Fatal("frame 3: expected the recognizer error to propagate")
+	// Two utterances, each one frame then a speech-end that flushes to the failing
+	// recognizer. Process returns nil now (the STT call is off-loop); Flush drains
+	// both workers so their errors and frame batches are observable.
+	feed(t, seg, 4)
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 
-	if len(rec.calls) != 2 {
-		t.Fatalf("%d transcribe calls, want 2", len(rec.calls))
+	batches := rec.batches()
+	if len(batches) != 2 {
+		t.Fatalf("%d transcribe calls, want 2", len(batches))
 	}
-	if got := len(rec.calls[1]); got != 1 {
+	if got := len(batches[1]); got != 1 {
 		t.Errorf("second utterance had %d frames, want 1 (first utterance must not bleed in)", got)
+	}
+	mu.Lock()
+	gotErrs := len(errs)
+	mu.Unlock()
+	if gotErrs != 2 {
+		t.Errorf("onError saw %d recognizer errors, want 2 (both utterances failed)", gotErrs)
 	}
 }
 

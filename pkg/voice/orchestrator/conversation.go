@@ -132,6 +132,10 @@ func NewConversation(bus *voiceevent.Bus, vad *VAD, stt *STT, ttsStage *TTS, opt
 // the STT/TTS calls they trigger; teardown stays explicit via the returned
 // cancel (ADR-0026). Register must be called before [Conversation.Feed].
 func (c *Conversation) Register(ctx context.Context) (cancel func()) {
+	// The segmenter transcribes off the audio loop (#24), so its recognizer errors
+	// have no caller to return to; route them to the same handler the replier uses.
+	c.seg.onError = c.onError
+
 	reactors := []Reactor{c.seg}
 	if c.detector != nil {
 		reactors = append(reactors, c.detector)
@@ -169,18 +173,22 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	return Bind(ctx, c.bus, reactors...)
 }
 
-// Feed pushes one PCM frame into the conversation. It drives the VAD stage and
-// segments utterances to STT (see [Segmenter.Process]); the rest of the pipeline
-// — routing and reply — follows on the bus. Errors originate in the VAD or STT
-// stage and are returned to the audio loop.
+// Feed pushes one PCM frame into the conversation. It drives the VAD stage and,
+// on speech-end, hands the utterance to STT on a worker goroutine (see
+// [Segmenter.Process]); the rest of the pipeline — routing and reply — follows on
+// the bus. Feed returns as soon as the segment is handed off so the audio loop
+// keeps draining during the network-bound recognizer call (#24); only a VAD error
+// is returned. A recognizer error surfaces via [WithErrorHandler], not here.
 func (c *Conversation) Feed(frame audio.Frame) error {
 	return c.seg.Process(frame)
 }
 
 // Flush transcribes any utterance still buffered because the audio stream ended
-// while speech was active (see [Segmenter.Flush]). Call it once after the last
-// [Conversation.Feed] — at end of call, or when a clip is exhausted mid-speech —
-// so the final turn is not silently lost. With nothing buffered it is a no-op.
+// while speech was active, then waits for every in-flight transcription to finish
+// (see [Segmenter.Flush]). Call it once after the last [Conversation.Feed] — at
+// end of call, or when a clip is exhausted mid-speech — so the final turn is not
+// silently lost and all STTFinals land before the reactors tear down. With nothing
+// buffered or in flight it is a no-op.
 func (c *Conversation) Flush() error {
 	return c.seg.Flush()
 }

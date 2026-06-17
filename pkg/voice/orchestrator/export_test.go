@@ -14,3 +14,8 @@ func (f *Floor) SetClock(now func() time.Time) {
 // (external test package). Production wiring sets r.floor inside
 // Conversation.Register.
 func (r *Replier) SetFloor(floor *Floor) { r.floor = floor }
+
+// SetErrorHandler installs onError on the segmenter for the off-loop STT error
+// tests (external test package). Production wiring sets it inside
+// Conversation.Register from [WithErrorHandler].
+func (s *Segmenter) SetErrorHandler(fn ErrorFunc) { s.onError = fn }
