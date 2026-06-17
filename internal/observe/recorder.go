@@ -46,6 +46,7 @@ const (
 	ProviderOpenAI     Provider = "openai"
 	ProviderGemini     Provider = "gemini"
 	ProviderAnthropic  Provider = "anthropic"
+	ProviderGroq       Provider = "groq"
 )
 
 // Stage is the bounded stage label on the provider-call counters (which stage of

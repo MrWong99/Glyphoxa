@@ -8,11 +8,11 @@ type Tier string
 
 const (
 	// TierTrivial is a short reply with no tool call — the no-tool control. Its
-	// llm_turn is a single Gemini round; deviations flag orchestration overhead,
+	// llm_turn is a single LLM round; deviations flag orchestration overhead,
 	// not vendor variance.
 	TierTrivial Tier = "trivial"
 
-	// TierDice triggers the dice tool, forcing ≥2 sequential Gemini completions
+	// TierDice triggers the dice tool, forcing ≥2 sequential LLM completions
 	// per turn (H2). The contrast against TierTrivial confirms the bimodal
 	// llm_turn the tool loop creates.
 	TierDice Tier = "dice"

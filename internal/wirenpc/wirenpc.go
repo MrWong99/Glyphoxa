@@ -29,7 +29,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -367,18 +367,18 @@ func npcVoice() tts.Voice {
 
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
 // → STT (ElevenLabs) → Address Detection → production Reply (the Agent loop over
-// Gemini, with the dice Tool granted via the tool-use loop) → TTS (synth).
+// Groq, with the dice Tool granted via the tool-use loop) → TTS (synth).
 // Provider API keys are read by each adapter from its own env var at request
 // time (BYOK, ADR-0004), so construction here needs no secrets.
 //
 // npc supplies the addressable identity, Persona, and Voice (from the in-code
 // seed or, via [RunFromDB], the database). The `dice` Tool grant stays in code
-// (Tool Grants are a #6 table, not yet seeded). The LLM provider is Gemini — it
-// matches the live deployment (providers.llm "gemini", model gemini-2.5-flash;
-// there is no Anthropic key). The DB Agent's provider_config provider/model is
-// recorded but adapter selection is not yet driven by it; the wired adapter is
-// Gemini for any NPC in this tree. Keyless cassette tests replay the Anthropic
-// adapter behind the same llm.Provider interface.
+// (Tool Grants are a #6 table, not yet seeded). The LLM provider is Groq
+// (model llama-3.3-70b-versatile via the OpenAI-compat endpoint). The DB Agent's
+// provider_config provider/model is recorded but adapter selection is not yet
+// driven by it; the wired adapter is Groq for any NPC in this tree. Keyless
+// cassette tests replay the Anthropic adapter behind the same llm.Provider
+// interface.
 //
 // synth is the [tts.Synthesizer] the TTS stage drives. [Run] passes a
 // [wire.TeeSynthesizer] wrapping the real ElevenLabs synthesizer so the
@@ -414,21 +414,21 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 	// seeded. With no grants the tool engine degrades to a single completion
 	// through the same path.
 	//
-	// Gemini is the live LLM provider (see the function doc): it reads
-	// GEMINI_API_KEY at request time (BYOK, ADR-0004); export it from the keyring
+	// Groq is the live LLM provider (see the function doc): it reads
+	// GROQ_API_KEY at request time (BYOK, ADR-0004); export it from the keyring
 	// before a live run (docs/agents/live-npc-run.md). There is no Anthropic key,
 	// so wiring the Anthropic adapter here would pass the keyless cassette tests
-	// (which replay Anthropic) but fail the live run — Gemini is the only correct
+	// (which replay Anthropic) but fail the live run — Groq is the only correct
 	// default for a runnable NPC.
-	provider := gemini.New("")
+	provider := groq.New("")
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
-	toolEngine := agenttool.NewEngine(provider, grants, gemini.DefaultModel, 0, 0,
-		// Gemini is the wired provider (see the function doc), so the per-round
-		// LLM spans (A3) are labelled gemini. The no-op recorder keeps the keyless
+	toolEngine := agenttool.NewEngine(provider, grants, groq.DefaultModel, 0, 0,
+		// Groq is the wired provider (see the function doc), so the per-round
+		// LLM spans (A3) are labelled groq. The no-op recorder keeps the keyless
 		// path silent; the live binary / benchmark inject a real one.
-		agenttool.WithMetrics(stageMetrics, observe.ProviderGemini))
+		agenttool.WithMetrics(stageMetrics, observe.ProviderGroq))
 
 	replier := agent.NewReplier(agent.Config{
 		Persona: agent.Persona{

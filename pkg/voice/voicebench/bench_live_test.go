@@ -6,7 +6,7 @@
 // pre-release workflow (bench-live.yml), never on a PR.
 //
 // Unlike the cassette tier (instant replay → orchestration-only spans →
-// relative regression diff), the live tier drives the REAL Gemini + ElevenLabs
+// relative regression diff), the live tier drives the REAL Groq + ElevenLabs
 // stack, so its response_latency is the user-facing number the Sprint-2 B-fixes
 // are judged against. It therefore owns the ABSOLUTE EngineeringSLO
 // (≤1.2s p50 / ≤2.5s p95 on response_latency, via Report.CheckSLO) — the SAME
@@ -23,7 +23,7 @@ import (
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
-	gemini "github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -37,7 +37,7 @@ import (
 const liveReportEnv = "GX_BENCH_OUT"
 
 // TestBench_LiveSLO is the live-tier gate. It drives every cassette-complete
-// corpus clip through the bench-owned Conversation backed by REAL Gemini +
+// corpus clip through the bench-owned Conversation backed by REAL Groq +
 // ElevenLabs, reports the distribution, writes the JSON artifact, and asserts
 // the absolute EngineeringSLO on response_latency. A breach reds the run.
 func TestBench_LiveSLO(t *testing.T) {
@@ -45,7 +45,7 @@ func TestBench_LiveSLO(t *testing.T) {
 	// live workflow, where both secrets are required — a silent skip there would
 	// be a green run that measured nothing (the meaningless-green the bench
 	// exists to prevent). Local `-tags live` runs without keys are not expected.
-	for _, env := range []string{gemini.APIKeyEnv, stteleven.APIKeyEnv} {
+	for _, env := range []string{groq.APIKeyEnv, stteleven.APIKeyEnv} {
 		if os.Getenv(env) == "" {
 			t.Fatalf("%s not set — the live tier needs real vendor keys (workflow secret)", env)
 		}
@@ -78,7 +78,7 @@ func TestBench_LiveSLO(t *testing.T) {
 }
 
 // runLiveCorpus drives every cassette-complete corpus clip through the
-// bench-owned Conversation with live Gemini + ElevenLabs and returns the
+// bench-owned Conversation with live Groq + ElevenLabs and returns the
 // aggregated live-tier report. It reuses the clip audio (real VAD+codec) and the
 // same rig as the cassette tier — only the providers differ.
 func runLiveCorpus(t *testing.T) Report {
@@ -107,7 +107,7 @@ func runClipLive(t *testing.T, clip Clip, acc *Accumulator) {
 		VAD:      vadStage,
 		STT:      orchestrator.NewSTT(h.Bus, stteleven.New("")),
 		Persona:  agent.Persona{AgentID: "bart", Markdown: "You are Bart, the innkeeper.", Voice: benchVoice()},
-		Provider: gemini.New(""),
+		Provider: groq.New(""),
 		Synth:    ttseleven.New(""),
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),
 		Recorder: tap,

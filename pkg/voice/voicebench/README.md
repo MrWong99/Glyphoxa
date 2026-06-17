@@ -19,7 +19,7 @@ spans to a distribution. It does **not** re-implement event observation
 | Tier | Providers | Build | Runs | Asserts |
 |---|---|---|---|---|
 | **cassette** | real silero VAD + codec; STT/TTS/LLM from cassettes (no keys) | `-tags "bench opus"` (keyless-but-CGO) | the audio/CGO CI job | **regression-diff** vs `baseline.json` (`Report.CheckRegression`, default +25% p95) |
-| **live** | real ElevenLabs + Gemini | `-tags "bench opus live"` | nightly cron + pre-second-live-run | **absolute** `EngineeringSLO` (≤1.2 s p50 / ≤2.5 s p95, `Report.CheckSLO`) |
+| **live** | real ElevenLabs + Groq | `-tags "bench opus live"` | nightly cron + pre-second-live-run | **absolute** `EngineeringSLO` (≤1.2 s p50 / ≤2.5 s p95, `Report.CheckSLO`) |
 
 The default no-CGO PR gate never compiles the `//go:build bench` files, so the
 fast keyless gate is untouched.

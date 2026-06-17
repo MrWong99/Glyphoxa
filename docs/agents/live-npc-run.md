@@ -7,7 +7,7 @@ below); pass `-hardcoded` to use the in-code NPC without a database:
 
 ```
 Session.Inbound (Opus) → [codec] → VAD (Silero) → STT (ElevenLabs)
-  → Address Detection → Agent loop (Gemini + dice tool) → TTS (ElevenLabs)
+  → Address Detection → Agent loop (Groq + dice tool) → TTS (ElevenLabs)
   → [codec] → Session.Play (Opus)
 ```
 
@@ -33,11 +33,11 @@ build with the audio tags** (see Build below).
 - **CGO** toolchain (`CGO_ENABLED=1`, a C compiler): Silero VAD uses ONNX
   Runtime via cgo. This is the canonical build mode (see `Makefile`).
 - **Provider API keys** (BYOK, ADR-0004), supplied as environment variables —
-  never compiled in. The live LLM is **Gemini** (matching the deployment:
-  `providers.llm.name "gemini"`, model `gemini-2.5-flash`; there is no Anthropic
-  key). The binary reads, at request time:
-  - `GEMINI_API_KEY` — the LLM the Agent loop calls (Gemini, via its
-    OpenAI-compatibility endpoint). The wired adapter is Gemini for any NPC; a
+  never compiled in. The live LLM is **Groq** (`providers.llm.name "groq"`, model
+  `llama-3.3-70b-versatile`; there is no Anthropic key). The binary reads, at
+  request time:
+  - `GROQ_API_KEY` — the LLM the Agent loop calls (Groq, via its
+    OpenAI-compatibility endpoint). The wired adapter is Groq for any NPC; a
     DB-loaded Agent's `provider_config` provider/model is recorded but does not
     yet drive adapter selection.
   - `ELEVENLABS_API_KEY` — STT (scribe) and TTS (eleven_v3).
@@ -88,15 +88,15 @@ history):
 
 ```sh
 export DISCORD_BOT_TOKEN=$(secret-tool lookup service glyphoxa key discord-token)
-export GEMINI_API_KEY=$(secret-tool lookup service glyphoxa key gemini)
+export GROQ_API_KEY=$(secret-tool lookup service glyphoxa key groq)
 export ELEVENLABS_API_KEY=$(secret-tool lookup service glyphoxa key elevenlabs)
 ```
 
-(The keyring's logical key names — `discord-token`, `gemini`, `elevenlabs` — map
+(The keyring's logical key names — `discord-token`, `groq`, `elevenlabs` — map
 onto the three env var names above, which are what the binary actually reads.
-The `gemini` key backs the LLM here and also the deployment's S2S/embeddings.)
+The `groq` key backs the live LLM the voice loop calls.)
 Do **not** `echo`/`cat` a key; to spot-check, use the exit code only:
-`secret-tool lookup service glyphoxa key gemini >/dev/null; echo $?`.
+`secret-tool lookup service glyphoxa key groq >/dev/null; echo $?`.
 
 ## Run (DB-loaded NPC — the default)
 
@@ -117,7 +117,7 @@ export GLYPHOXA_SECRET="$(openssl rand -base64 32)"   # ADR-0004 single app secr
 ```
 
 For an **audio smoke test without Postgres**, use the `-hardcoded` escape hatch —
-it voices the in-code Bart (Gemini + ElevenLabs at pcm_48000) and needs no DB,
+it voices the in-code Bart (Groq + ElevenLabs at pcm_48000) and needs no DB,
 `migrate`, or `seed`:
 
 ```sh
@@ -147,7 +147,7 @@ Persona/Voice/identity differs.
 
 ### Credential home (the `provider_config` ciphertext is *not* the live key)
 
-The seed writes a `provider_config` row per Component (LLM=gemini, TTS/STT=
+The seed writes a `provider_config` row per Component (LLM=groq, TTS/STT=
 elevenlabs) with **encrypted placeholder** credentials and `last4="env"` — it
 never stores a real provider key. For the self-host `voice` binary the real keys
 come from the environment (above) / the OS keyring (task #10); the encrypted
@@ -168,7 +168,7 @@ offline. Keep the value you seed with: the same key opens the blobs later.
    and not Address-Only, when you say nothing addressed at all (the single-NPC
    fallback). Either way the utterance reaches his Agent loop.
 2. The Agent loop assembles Hot Context (Bart's Persona + the recent transcript)
-   and calls Gemini; the reply is spoken back through ElevenLabs in Bart's
+   and calls Groq; the reply is spoken back through ElevenLabs in Bart's
    voice.
 3. Ask Bart to **roll dice** (*"Bart, roll a d20 for my luck"*) to exercise the
    tool-use loop: the model calls the `dice` tool, the result is fed back, and
@@ -181,10 +181,11 @@ Unit tests never touch live services: STT/TTS use the recorded cassettes
 (`llm-*.yaml`) via `voicecassette.LoadLLM`. The cassette **record** path
 (`-tags=record`) still drives the **Anthropic** adapter — the cassettes were
 recorded against Claude and the prompt hashes are pinned to them, so swapping
-the *live* provider to Gemini does not touch the keyless test path. The
+the *live* provider to Groq does not touch the keyless test path. The
 provider interface (`llm.Provider`) is the same for both adapters, which is why
-the live swap (Anthropic → Gemini in `internal/wirenpc`) needed no change to the
-Agent loop, the tool-use bridge, or the cassette tests. To refresh cassettes
-after a prompt or model change, run the relevant tests with `-tags=record` and
-the API keys set (see `pkg/voice/voicecassette`). The live `voice` mode above is
-the only path that hits real Discord audio — and now real Gemini.
+the live swap (Anthropic → Gemini → Groq in `internal/wirenpc`) needed no change
+to the Agent loop, the tool-use bridge, or the cassette tests. To refresh
+cassettes after a prompt or model change, run the relevant tests with
+`-tags=record` and the API keys set (see `pkg/voice/voicecassette`). The live
+`voice` mode above is the only path that hits real Discord audio — and now real
+Groq.

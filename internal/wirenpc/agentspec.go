@@ -12,7 +12,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
@@ -30,12 +30,12 @@ const (
 	SeedCampaignName = "The Prancing Pony"
 
 	// llmProvider / llmModel record the DEPLOYMENT LLM in provider_config.
-	// They reference the gemini adapter's own identifiers so the seeded row can
+	// They reference the groq adapter's own identifiers so the seeded row can
 	// never drift from what buildConversation actually wires (the DB value is
 	// recorded but not yet consumed by adapter selection — see the #5 seam note
 	// in wirenpc.go — so silent drift here would mislead later).
-	llmProvider = gemini.ProviderID
-	llmModel    = gemini.DefaultModel
+	llmProvider = groq.ProviderID
+	llmModel    = groq.DefaultModel
 
 	// ttsModel / sttModel are the ElevenLabs models the Voice / STT configs record.
 	ttsModel = "eleven_multilingual_v2"
@@ -50,7 +50,7 @@ const (
 )
 
 // SeedNPC creates the demo Tenant, Campaign (which auto-creates its Butler via
-// the ADR-0009 trigger), the Gemini-LLM + ElevenLabs-TTS/STT Provider Configs,
+// the ADR-0009 trigger), the Groq-LLM + ElevenLabs-TTS/STT Provider Configs,
 // and the "Bart" Character NPC bound to them. It is idempotent: if a Tenant
 // named [SeedTenantName] already exists, it does nothing and reports that.
 //
