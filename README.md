@@ -104,7 +104,7 @@ make check
 | Component | Providers |
 |-----------|-----------|
 | **STT** | ElevenLabs, Deepgram Nova-3, whisper.cpp (local) |
-| **LLM** | OpenAI, Anthropic, Google Gemini, Ollama (local) — via [any-llm-go](https://github.com/mozilla-ai/any-llm-go) |
+| **LLM** | Groq, Google Gemini, OpenAI, Ollama (local) — via the official [OpenAI Go SDK](https://github.com/openai/openai-go) against OpenAI-compatible endpoints; Anthropic (native) — see [ADR-0037](docs/adr/0037-openai-go-sdk-for-llm-providers.md) |
 | **TTS** | ElevenLabs, Coqui XTTS (local) |
 | **S2S** | Gemini Live, OpenAI Realtime |
 | **Embeddings** | OpenAI, Ollama (local) |
