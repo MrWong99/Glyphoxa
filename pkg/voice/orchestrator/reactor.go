@@ -45,26 +45,47 @@ func Bind(ctx context.Context, bus *voiceevent.Bus, reactors ...Reactor) (cancel
 	}
 }
 
-// ErrorFunc reports an error from a stage call a reactor fires from inside a
-// bus callback. Bus callbacks cannot return an error, so a reactor whose
-// triggered call fails — the [Replier]'s [TTS.Dispatch] — surfaces it here
-// instead. A nil ErrorFunc drops the error silently. (The [Segmenter]'s
-// [STT.Transcribe] runs inside [Segmenter.Process] and returns its error to the
-// caller directly, so it needs no ErrorFunc.)
+// ErrorFunc reports an error from a stage call a reactor fires off the audio
+// loop. The [Replier]'s [TTS.Dispatch] runs inside a bus callback, which cannot
+// return an error; the [Segmenter]'s [STT.Transcribe] runs on a worker goroutine
+// (#24), which likewise has no caller to return to. Both surface their failures
+// here instead. A nil ErrorFunc drops the error silently.
 type ErrorFunc func(error)
 
 // Segmenter turns the VAD stage's frame-level transitions into utterance-sized
 // batches for STT. It is both a frame sink and a [Reactor]: callers feed PCM
 // via [Segmenter.Process], which drives the wrapped VAD stage, and
 // [Segmenter.Bind] subscribes to the VADSpeechStart / VADSpeechEnd events that
-// stage publishes. Frames that arrive while speech is active are buffered; the
-// completed batch is handed to [STT.Transcribe] when speech ends.
+// stage publishes. Frames that arrive while speech is active are buffered; when
+// speech ends the completed batch is handed to a single transcription worker
+// goroutine so the network-bound [STT.Transcribe] call never stalls the audio
+// loop (#24). The worker is serial: it transcribes utterances in the order they
+// were segmented, so STTFinal — and the turns it fans out — stay in speech order
+// (positional cassette replay and downstream turn-taking both rely on this).
 //
 // This is the bus-driven form of the accumulate-between-VAD-events loop the
 // slice-1 pipeline test used to spell out inline (ADR-0026).
 type Segmenter struct {
 	vad *VAD
 	stt *STT
+
+	// onError surfaces a recognizer error from the transcription worker (see
+	// [Segmenter.Process]). Bus callbacks — and now the off-loop STT call — cannot
+	// return an error to the audio loop, so it is reported here instead. A nil
+	// onError drops the error silently. Set by [Conversation.Register] from
+	// [WithErrorHandler].
+	onError ErrorFunc
+	// jobs carries flushed segments from the audio loop to the single transcription
+	// worker (#24). Created and drained per [Segmenter.Bind] lifetime; buffered
+	// deeply enough that a normal call never backs the audio loop up on the send.
+	jobs chan transcribeJob
+	// inflight counts segments enqueued but not yet transcribed, so
+	// [Segmenter.Flush] can wait for the backlog (incl. the final utterance) to
+	// drain before the reactors tear down — otherwise the final STTFinal could fire
+	// after its downstream subscribers are gone. worker tracks the worker goroutine
+	// itself so Bind's cancel can stop it.
+	inflight sync.WaitGroup
+	worker   sync.WaitGroup
 
 	mu sync.Mutex
 	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of the most recent
@@ -82,6 +103,23 @@ type Segmenter struct {
 	buf       []audio.Frame
 }
 
+// transcribeJob is one flushed utterance handed to the transcription worker: the
+// segment frames plus the per-segment state STT needs (the lifetime ctx and the
+// turn's speech-end time), snapshotted at enqueue so the worker never reads
+// mutable Segmenter state.
+type transcribeJob struct {
+	ctx         context.Context
+	seg         []audio.Frame
+	speechEndAt time.Time
+}
+
+// transcribeQueueDepth is the buffer on the worker's job channel. A flush enqueues
+// at most one job per utterance, so this comfortably outlasts any real backlog
+// (the recognizer keeps up with speech on average); a send only blocks the audio
+// loop if this many transcriptions are outstanding, a pathological overload far
+// past the inbound-buffer drop the decoupling exists to prevent.
+const transcribeQueueDepth = 64
+
 // NewSegmenter wires vad and stt together. Both must be non-nil; passing nil
 // for either panics. The caller owns the wrapped stages.
 func NewSegmenter(vad *VAD, stt *STT) *Segmenter {
@@ -97,16 +135,28 @@ func NewSegmenter(vad *VAD, stt *STT) *Segmenter {
 // Bind subscribes the segmenter to the VAD speech transitions on bus and records
 // ctx as the context handed to STT.Transcribe on flush. It implements
 // [Reactor]; bus must be non-nil. The subscriptions only flip the speech-active
-// flag — the actual buffering and flush happen in [Segmenter.Process] so a
-// recognizer error can be returned to the audio loop rather than swallowed in a
-// callback.
+// flag — the actual buffering happens in [Segmenter.Process], which on speech-end
+// hands the batch to a transcription worker goroutine (so the recognizer call
+// never blocks the audio loop) and surfaces any recognizer error via onError.
 func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func()) {
 	if bus == nil {
 		panic("orchestrator.Segmenter.Bind: bus must not be nil")
 	}
 	s.mu.Lock()
 	s.ctx = ctx
+	jobs := make(chan transcribeJob, transcribeQueueDepth)
+	s.jobs = jobs
 	s.mu.Unlock()
+
+	// One serial worker drains the queue, so transcriptions stay in speech order.
+	s.worker.Go(func() {
+		for job := range jobs {
+			if err := s.transcribe(job.ctx, job.seg, job.speechEndAt); err != nil && s.onError != nil {
+				s.onError(err)
+			}
+			s.inflight.Done()
+		}
+	})
 
 	unsubStart := voiceevent.On(bus, func(voiceevent.VADSpeechStart) {
 		s.mu.Lock()
@@ -126,7 +176,12 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		unsubEnd()
 		s.mu.Lock()
 		s.ctx = nil
+		s.jobs = nil
 		s.mu.Unlock()
+		// Closing the queue lets the worker drain any still-buffered jobs and exit;
+		// in the normal path Flush already emptied it, so this just stops the worker.
+		close(jobs)
+		s.worker.Wait()
 	}
 }
 
@@ -134,11 +189,16 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 // utterance audio. The VAD stage publishes the speech transitions synchronously,
 // so by the time it returns the speech-active flag is up to date: while active
 // the frame is buffered; on the first frame after speech ends the buffered
-// utterance is flushed to [STT.Transcribe]. The frame that ends speech is not
-// part of the utterance and is not buffered.
+// utterance is handed to [STT.Transcribe] on a worker goroutine. The frame that
+// ends speech is not part of the utterance and is not buffered.
 //
-// A recognizer error is returned to the caller; the buffer is cleared either
-// way so a failed utterance does not bleed into the next one.
+// The transcription runs OFF the audio loop (#24): the recognizer call is
+// network-bound (~1-2s) and running it inline here would stall the inbound loop,
+// so frames arriving during that window would be dropped at the bounded inbound
+// buffer and whole utterances lost. Process therefore returns as soon as the
+// segment is handed off, keeping the loop draining; only a VAD error is returned.
+// The buffer is cleared synchronously so a failed utterance does not bleed into
+// the next, and a recognizer error surfaces via onError, not this return value.
 func (s *Segmenter) Process(frame audio.Frame) error {
 	if err := s.vad.Process(frame); err != nil {
 		return err
@@ -156,17 +216,54 @@ func (s *Segmenter) Process(frame audio.Frame) error {
 	speechEndAt := s.speechEndAt
 	s.mu.Unlock()
 
-	return s.transcribe(ctx, seg, speechEndAt)
+	s.dispatchTranscription(ctx, seg, speechEndAt)
+	return nil
+}
+
+// dispatchTranscription enqueues a flushed segment for the transcription worker so
+// the audio intake loop is never blocked by the network-bound recognizer call
+// (#24); an empty segment is a no-op. The enqueue is counted on inflight so
+// [Segmenter.Flush] can drain the backlog before teardown. Each segment is owned
+// by the job (Process cleared s.buf before handing it over, so a subsequent append
+// cannot mutate it) and mints its own TurnID at STTFinal (stt.go). The send blocks
+// only if the queue is full (see [transcribeQueueDepth]). A recognizer error is
+// reported by the worker through onError — the side channel that replaces the
+// inline call's return value.
+func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time) {
+	if len(seg) == 0 {
+		return
+	}
+	s.mu.Lock()
+	jobs := s.jobs
+	s.mu.Unlock()
+	if jobs == nil {
+		// Not bound (or already torn down): transcribe inline so a late flush still
+		// completes rather than dropping the utterance.
+		if err := s.transcribe(ctx, seg, speechEndAt); err != nil && s.onError != nil {
+			s.onError(err)
+		}
+		return
+	}
+	s.inflight.Add(1)
+	jobs <- transcribeJob{ctx: ctx, seg: seg, speechEndAt: speechEndAt}
 }
 
 // Flush transcribes any buffered utterance audio immediately, regardless of
-// whether speech is still active, and clears the buffer. It is the
-// end-of-stream counterpart to [Segmenter.Process]: when the audio loop stops
-// while the speaker is still mid-utterance (the call ends, a clip is cut off
-// before its trailing silence), the wrapped VAD never observes a speech-end
-// transition, so the buffered final utterance would otherwise be dropped. Call
-// Flush once after the last [Segmenter.Process]. With no buffered audio it is a
-// no-op; the recognizer error, if any, is returned.
+// whether speech is still active, then waits for every in-flight transcription to
+// complete. It is the end-of-stream counterpart to [Segmenter.Process]: when the
+// audio loop stops while the speaker is still mid-utterance (the call ends, a clip
+// is cut off before its trailing silence), the wrapped VAD never observes a
+// speech-end transition, so the buffered final utterance would otherwise be
+// dropped. Call Flush once after the last [Segmenter.Process], before tearing the
+// reactors down.
+//
+// Because transcription is now off-loop (see [Segmenter.Process]), Flush is also
+// the drain barrier: it blocks until the worker has transcribed every queued
+// utterance (including the final one) and published its STTFinal, so the final
+// turn's downstream stages run while their subscribers are still bound. With no
+// buffered audio and nothing in flight it is a no-op. Recognizer errors surface
+// via onError, so Flush always returns nil (the error return is retained for the
+// audio loop's call-site symmetry).
 func (s *Segmenter) Flush() error {
 	s.mu.Lock()
 	seg := s.buf
@@ -177,7 +274,9 @@ func (s *Segmenter) Flush() error {
 	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
 	s.mu.Unlock()
 
-	return s.transcribe(ctx, seg, time.Time{})
+	s.dispatchTranscription(ctx, seg, time.Time{})
+	s.inflight.Wait()
+	return nil
 }
 
 // transcribe hands a flushed segment to STT under ctx, carrying the turn's

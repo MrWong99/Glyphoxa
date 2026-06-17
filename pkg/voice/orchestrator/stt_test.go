@@ -149,6 +149,11 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 					t.Fatalf("frame %d: conv.Feed: %v", i, err)
 				}
 			}
+			// Drain the off-loop transcription workers (#24) so every STTFinal — and
+			// the turn it fans out — has landed before the assertions read the log.
+			if err := conv.Flush(); err != nil {
+				t.Fatalf("conv.Flush: %v", err)
+			}
 
 			// VAD is the most basic thing that should have been noticed.
 			voicetest.AssertEventOccurred[voiceevent.VADSpeechStart](t, h)
@@ -325,7 +330,11 @@ func TestSTT_CarriesSpeechEndAt(t *testing.T) {
 	seg := orchestrator.NewSegmenter(vadStage, sttStage)
 	t.Cleanup(seg.Bind(t.Context(), bus))
 
-	feed(t, seg, 4) // start, continue, end, (flush)
+	feed(t, seg, 4) // start, continue, end, (flush dispatched to a worker)
+	// Transcription runs off-loop (#24); Flush drains it so the STTFinal is observable.
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
 
 	if speechEnd.IsZero() {
 		t.Fatal("no VADSpeechEnd was published")

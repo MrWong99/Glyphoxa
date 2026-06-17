@@ -44,10 +44,10 @@ func NewDriver(conv *orchestrator.Conversation, h *voicetest.Harness, tap *recor
 // headlineTimeout bounds how long RunClip polls the tap for the turn's
 // response_latency sample after Flush — a HANG GUARD, not a per-turn latency
 // budget. Without barge-in the orchestrator drives the whole turn (STT → reply →
-// TTS) synchronously inside Flush, so by the time the barrier polls, the sample
-// has already landed and the wait is ~0 regardless of how slow the turn was
-// (verified: a 6s reply still resolves with zero poll-wait — Flush blocks for
-// the 6s, the barrier then finds the sample immediately). So this is NOT the
+// TTS) on the transcription worker that Flush drains (#24), so by the time the
+// barrier polls, the sample has already landed and the wait is ~0 regardless of
+// how slow the turn was (verified: a 6s reply still resolves with zero poll-wait —
+// Flush blocks for the 6s, the barrier then finds the sample immediately). So this is NOT the
 // live SLO ceiling and must not be confused with it; it only fires if a turn
 // never produces audio at all (a wedged provider/tee), where a hard error — a
 // clip that yields no headline metric is exactly the silent-drop the bench

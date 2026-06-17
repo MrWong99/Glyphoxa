@@ -458,8 +458,11 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		// self-cancel the latency investigation found. With B1 a confirmed barge
 		// cancels mid-generation, not just pending dispatch.
 		orchestrator.WithBargeInCoalesce(bargeConfirmWindow, floorCoalesceWindow),
+		// Handles failures the reactors fire off the audio loop: the replier's TTS
+		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
+		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).
 		orchestrator.WithErrorHandler(func(err error) {
-			log.Warn("reply dispatch failed", "err", err)
+			log.Warn("voice pipeline stage failed", "err", err)
 		}),
 	)
 	return conv, nil
