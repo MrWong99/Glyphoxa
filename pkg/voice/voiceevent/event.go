@@ -106,13 +106,16 @@ func (AddressRouted) EventName() string { return "address.routed" }
 // TTSInvoked marks the dispatch of one sentence to the TTS stage.
 //
 // Per ADR-0021's TTS cassette policy the observable contract for TTS is "the
-// provider was invoked with sentence N" — synthesized audio is not fed back
-// to tests. The orchestrator publishes this event once the underlying
-// [tts.Synthesizer] has accepted the sentence (Synthesize returned without
-// error); whether audio chunks subsequently arrived is not observable here.
+// provider was invoked with sentence N" — synthesized audio is not fed back to
+// tests. The orchestrator publishes this event when it hands the sentence to the
+// underlying [tts.Synthesizer], BEFORE the Synthesize call returns — so a sentence
+// whose Synthesize start-errors (empty VoiceID, auth failure) still emits
+// TTSInvoked, the invoked-but-never-spoke signal (#20). It announces the dispatch
+// attempt, not a success: whether the sentence was actually spoken is signalled by
+// [FirstAudio], not here.
 //
-// Index is 0-based within the current turn and increments per successful
-// dispatch on the same stage.
+// Index is 0-based within the current turn and increments per dispatch attempt on
+// the same stage.
 type TTSInvoked struct {
 	At       time.Time
 	Sentence string

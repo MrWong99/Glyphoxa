@@ -302,9 +302,15 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		ctx := voiceevent.WithTurnID(ctx, e.TurnID)
 
 		// Default (no floor): dispatch synchronously on the bus goroutine — the
-		// behaviour every non-barge-in caller relies on.
+		// behaviour every non-barge-in caller relies on. Announce a turn that died of
+		// its own error (a real TTS/provider failure) before producing audio so the
+		// metrics subscriber records the precise reason, not the coarse no-first-audio
+		// TTL reap (#20) — mirroring the floor branch below. The sync path has no
+		// barge/supersede, so a non-cancelled ctx is the only guard needed.
 		if r.floor == nil {
-			r.dispatchAll(ctx, e)
+			if reason := r.dispatchAll(ctx, e); reason != "" && ctx.Err() == nil {
+				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
+			}
 			return
 		}
 		// Barge-in: take the floor and run the turn on its own goroutine so the
