@@ -68,11 +68,11 @@ type turnState struct {
 	// blocks on TTS.Dispatch, which drains the synthesis before the next sentence
 	// — orchestrator tts.go), so the order is strictly TTSInvoked_i ≺ FirstAudio_i
 	// ≺ TTSInvoked_{i+1}. A TTSInvoked left unmatched when the next one arrives was
-	// a zero-chunk synthesis (TTSInvoked is published unconditionally, FirstAudio
-	// only on a chunk) that will never get a FirstAudio — so the correct match for
-	// any FirstAudio is always the latest invoke, and FIFO-front would mispair it
-	// against the stale zero-chunk one. (Revisit if Ensemble Turns make dispatch
-	// concurrent — tts.go:69 anticipates that.)
+	// a zero-chunk or start-errored synthesis (TTSInvoked is published per dispatch
+	// attempt, FirstAudio only on a chunk) that will never get a FirstAudio — so the
+	// correct match for any FirstAudio is always the latest invoke, and FIFO-front
+	// would mispair it against the stale unmatched one. (Revisit if Ensemble Turns
+	// make dispatch concurrent — tts.go anticipates that.)
 	pendingTTS time.Time
 
 	lastSeen time.Time

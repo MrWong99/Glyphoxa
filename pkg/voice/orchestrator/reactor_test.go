@@ -337,6 +337,34 @@ func TestReplier_FloorTurnPublishesTTSErrorEnded(t *testing.T) {
 	}
 }
 
+// TestReplier_SyncTurnPublishesTTSErrorEnded pins #20's sync-path gap: a no-floor
+// replier (the voicebench rig's config — WithReplyStream, no barge-in) whose only
+// sentence start-errors must publish TurnEnded(tts_error) carrying the TurnID, so
+// the metrics subscriber records abandoned/tts_error instead of the coarse
+// no-first-audio TTL reap. The floor path already does this
+// (TestReplier_FloorTurnPublishesTTSErrorEnded); the sync path discarded the
+// reason, so a start-error there was completely silent.
+func TestReplier_SyncTurnPublishesTTSErrorEnded(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		return dispatch(orchestrator.Reply{Sentence: "boom"})
+	}
+	// No SetFloor: the synchronous (no-barge-in) dispatch path runs on the bus
+	// goroutine, so the TurnEnded is published before Publish returns.
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tsync"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool {
+			return e.TurnID == "tsync" && e.Reason == voiceevent.TurnEndTTSError
+		},
+		"turn.ended (tts_error) for a sync-path failed-synthesis turn",
+	)
+}
+
 // TestReplier_FloorTurnPublishesProviderErrorEnded pins task #4's provider_error
 // path: a producer (LLM/tool loop) that errors before any audio publishes
 // TurnEnded(provider_error).
@@ -426,8 +454,14 @@ func TestReplier_DispatchErrorReportedAndDoesNotStopRemaining(t *testing.T) {
 	if len(errs) != 1 {
 		t.Fatalf("ErrorFunc saw %d errors, want 1", len(errs))
 	}
-	// The first reply failed (no event); the second still dispatched.
-	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+	// Both sentences are announced: TTSInvoked is the dispatch attempt (#20), so
+	// the start-errored sentence is visible as invoked-but-never-spoke AND the
+	// reply after it still dispatched.
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 2)
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TTSInvoked) bool { return e.Sentence == "boom" },
+		"tts.invoked for the start-errored sentence (invoked-but-never-spoke)",
+	)
 	voicetest.AssertEvent(t, h,
 		func(e voiceevent.TTSInvoked) bool { return e.Sentence == "ok" },
 		"tts.invoked for the reply after the failed one",
@@ -446,7 +480,9 @@ func TestReplier_NilErrorFuncDropsErrorWithoutPanic(t *testing.T) {
 
 	h.Bus.Publish(voiceevent.AddressRouted{}) // must not panic on the dropped error
 
-	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+	// Both sentences are announced (TTSInvoked = dispatch attempt, #20); the
+	// failed one's error is dropped silently and the next reply still dispatched.
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 2)
 }
 
 // TestSegmenter_ConcurrentFeedAndFlush is a -race probe: an audio loop feeding

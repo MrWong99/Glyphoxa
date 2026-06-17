@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -25,6 +26,36 @@ func (closedChanSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-cha
 }
 
 func (closedChanSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// startErrSynth is a [tts.Synthesizer] whose Synthesize always start-errors (nil
+// channel, non-nil error), standing in for an empty VoiceID / auth failure / bad
+// request — the start-error the #20 visibility fix is about.
+type startErrSynth struct{}
+
+func (startErrSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	return nil, errors.New("synth start error")
+}
+
+func (startErrSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestTTS_DispatchPublishesInvokedOnStartError pins #20's per-sentence visibility:
+// a sentence whose Synthesize start-errors must still publish TTSInvoked — the
+// invoked-but-never-spoke signal — and return the error, rather than vanishing
+// before any event. The event announces the dispatch ATTEMPT, not a success.
+func TestTTS_DispatchPublishesInvokedOnStartError(t *testing.T) {
+	h := voicetest.New(t)
+	stage := orchestrator.NewTTS(h.Bus, startErrSynth{})
+
+	const sentence = "this will fail to synthesize"
+	if err := stage.Dispatch(context.Background(), sentence, voicetest.LiveElevenLabsVoice()); err == nil {
+		t.Fatal("Dispatch: expected the synth start error to propagate")
+	}
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TTSInvoked) bool { return e.Sentence == sentence && e.Index == 0 },
+		"tts.invoked published for a start-errored sentence",
+	)
+}
 
 // TestTTS_HelloTest_DispatchesSentence is TB6: the first TTS tracer bullet,
 // per ADR-0021's TTS cassette policy.

@@ -41,11 +41,18 @@ func NewTTS(bus *voiceevent.Bus, synthesizer tts.Synthesizer) *TTS {
 // [voiceevent.TTSInvoked] event identifying the sentence and its 0-based
 // position in the turn.
 //
+// TTSInvoked is published BEFORE the [tts.Synthesizer.Synthesize] call — it
+// announces the dispatch attempt, not a success. A sentence whose Synthesize
+// start-errors (empty VoiceID, auth failure, bad request) therefore still emits
+// TTSInvoked, so the failed sentence is visible as invoked-but-never-spoke rather
+// than vanishing with no per-sentence signal (#20); the start error is then
+// wrapped and returned. (A FirstAudio for the sentence is what marks it actually
+// spoken — see [voiceevent.FirstAudio].)
+//
 // Per ADR-0022 callers must drain the returned audio channel to release the
 // implementation's goroutines; this stage drains and discards the chunks
 // itself (per ADR-0021's TTS cassette policy the audio is not observable to
-// tests). Errors from the synthesizer are wrapped and returned without
-// publishing, and do not advance the per-turn index.
+// tests).
 //
 // Forward-looking shape — when the playback pipeline lands, the drain loop
 // becomes a forward into the resampler/aligner that feeds the Opus encoder
@@ -59,17 +66,11 @@ func NewTTS(bus *voiceevent.Bus, synthesizer tts.Synthesizer) *TTS {
 // bullet) will scope a fresh TTS per Agent reply rather than reset this one
 // in place.
 func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) error {
-	ch, err := s.synthesizer.Synthesize(ctx, tts.SynthesizeRequest{
-		Sentence: sentence,
-		Voice:    voice,
-	})
-	if err != nil {
-		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
-	}
 	// Assign the per-turn index under the lock so concurrent dispatches (an
 	// Ensemble Turn or a barge-in canceller, both anticipated below) get
-	// distinct, monotonically increasing indices. Only a successful synthesis
-	// consumes an index — the error path above returns before this.
+	// distinct, monotonically increasing indices. The index counts dispatch
+	// attempts within the turn, assigned before Synthesize so a start-errored
+	// sentence still consumes its slot and stays visible.
 	s.mu.Lock()
 	index := s.nextIndex
 	s.nextIndex++
@@ -81,6 +82,14 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 		Index:    index,
 		TurnID:   voiceevent.TurnIDFrom(ctx),
 	})
+
+	ch, err := s.synthesizer.Synthesize(ctx, tts.SynthesizeRequest{
+		Sentence: sentence,
+		Voice:    voice,
+	})
+	if err != nil {
+		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
+	}
 	for range ch {
 	}
 	return nil
