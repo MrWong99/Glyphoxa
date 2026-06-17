@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
-	github.com/disgoorg/disgo v0.19.4 // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; bump deliberately
+	github.com/disgoorg/disgo v0.19.6 // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; bump deliberately
 	github.com/disgoorg/godave/golibdave v0.1.0 // DAVE/MLS glue, used only under -tags dave (CGO + libdave)
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/google/uuid v1.6.0
