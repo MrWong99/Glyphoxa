@@ -1,0 +1,60 @@
+name: llm-ttft-live
+
+# On-demand live TTFT probe for the deployment LLM (ADR-0036: Llama 3.3 70B on
+# Groq). This is the diagnostic instrument for the bench-live SLO: it isolates the
+# RAW provider time-to-first-content-token (no STT/TTS/orchestrator) so a
+# response_latency breach can be attributed to Groq itself vs. the pipeline.
+#
+# Unlike bench-live.yml it needs neither CGO/libopus nor the ONNX VAD — it is a
+# pure `-tags=live` LLM call — so it is cheap to dispatch whenever the nightly
+# latency gate reds. It does NOT gate: the test only fails if Groq produces no
+# samples at all (key/quota dead); the verdict is the printed p50/p95/p99 TTFT
+# distribution, surfaced in the run log. ADR-0036's caveat — "measure the live
+# tier from the deployment's egress before assuming the research's ~0.27s TTFT" —
+# is exactly what this answers.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to probe"
+        required: false
+        default: "main"
+      n:
+        description: "Samples per prompt tier (GX_GROQ_N)"
+        required: false
+        default: "8"
+
+permissions:
+  contents: read
+
+jobs:
+  ttft:
+    name: live Groq TTFT probe
+    runs-on: ubuntu-latest
+    # Skip silently on forks without the secret, mirroring bench-live.yml. The
+    # real key gate is the t.Skip in the test when GROQ_API_KEY is empty.
+    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # The TTFT probe is a pure live LLM call: no opus/CGO, no VAD. It prints the
+      # per-tier TTFT + total-latency distribution and only fails if no sample
+      # lands (a dead key/quota), so the run log carries the diagnostic verdict.
+      - name: Live Groq TTFT distribution
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GX_GROQ_N: ${{ github.event.inputs.n || '8' }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "GROQ_API_KEY secret must be set under repo Settings → Secrets and variables → Actions." >&2
+            exit 1
+          fi
+          go test -v -tags live -run '^TestLive_GroqLlama_TTFT$' ./pkg/voice/llm/groq/
