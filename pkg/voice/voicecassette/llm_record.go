@@ -105,7 +105,7 @@ func (r *LLMRecorder) write() error {
 	}
 	out := LLMCassette{
 		Exchanges: r.exchanges,
-		Notes:     appendProvenance(r.existing.Notes, "claude"),
+		Notes:     appendProvenance(r.existing.Notes, "Anthropic", "claude"),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {

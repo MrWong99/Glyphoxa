@@ -10,15 +10,18 @@ import (
 	"time"
 )
 
-// appendProvenance returns notes with a dated "Re-recorded against ElevenLabs
-// <model> on <date>." line appended for reviewer context. The append is
-// idempotent within a day: re-running -tags=record twice on the same date
-// must not accrete duplicate stamps (the recorder loads the existing notes,
-// which on the second run already carry the line). Re-records on a later date
-// still append, preserving the refresh history.
-func appendProvenance(notes, model string) string {
-	line := fmt.Sprintf("Re-recorded against ElevenLabs %s on %s.",
-		model, time.Now().UTC().Format("2006-01-02"))
+// appendProvenance returns notes with a dated "Re-recorded against <vendor>
+// <model> on <date>." line appended for reviewer context. The vendor is passed
+// explicitly because the three recorders hit different APIs — ElevenLabs for
+// STT/TTS, Anthropic for the LLM cassettes (ADR-0021's Anthropic/Ollama BYOK
+// matrix) — and the stamp must name the one that produced the bytes. The append
+// is idempotent within a day: re-running -tags=record twice on the same date
+// (the recorder loads the existing notes, which on the second run already carry
+// the line) must not accrete duplicate stamps. Re-records on a later date still
+// append, preserving the refresh history.
+func appendProvenance(notes, vendor, model string) string {
+	line := fmt.Sprintf("Re-recorded against %s %s on %s.",
+		vendor, model, time.Now().UTC().Format("2006-01-02"))
 	switch {
 	case notes == "":
 		return line

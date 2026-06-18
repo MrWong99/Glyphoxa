@@ -92,7 +92,7 @@ func (r *TTSRecorder) write() error {
 	}
 	out := TTSCassette{
 		Sentences: r.sentences,
-		Notes:     appendProvenance(r.existing.Notes, "eleven_v3"),
+		Notes:     appendProvenance(r.existing.Notes, "ElevenLabs", "eleven_v3"),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {

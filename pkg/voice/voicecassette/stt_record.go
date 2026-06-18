@@ -85,7 +85,7 @@ func (r *STTRecorder) write() error {
 	}
 	out := STTCassette{
 		Segments: r.segments,
-		Notes:    appendProvenance(r.existing.Notes, "scribe_v2"),
+		Notes:    appendProvenance(r.existing.Notes, "ElevenLabs", "scribe_v2"),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {

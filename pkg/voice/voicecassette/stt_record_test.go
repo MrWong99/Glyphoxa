@@ -155,7 +155,7 @@ func TestSTTRecorder_WriteProvenanceIdempotentSameDay(t *testing.T) {
 	name := "stt-idempotent-record"
 	// Notes as a prior same-day record would have left them: hand-authored
 	// text plus today's provenance stamp already appended.
-	existing := appendProvenance("hand-authored note", "scribe_v2")
+	existing := appendProvenance("hand-authored note", "ElevenLabs", "scribe_v2")
 	r := &STTRecorder{
 		name:     name,
 		segments: []STTSegment{{AudioSHA256: "h", Transcript: "tr"}},
