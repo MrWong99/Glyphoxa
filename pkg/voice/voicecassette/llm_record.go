@@ -11,14 +11,14 @@ import (
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"gopkg.in/yaml.v3"
 )
 
 // LoadLLM in -tags=record builds returns an [LLMRecorder] that proxies every
-// Complete call to a live Anthropic client, captures the request hash and the
-// streamed response (text, tool_calls, stop reason), and rewrites
-// tests/voice-cassettes/<name>.yaml at test cleanup. The ANTHROPIC_API_KEY
+// Complete call to a live Groq client (Llama 3.3 70B, ADR-0036), captures the
+// request hash and the streamed response (text, tool_calls, stop reason), and
+// rewrites tests/voice-cassettes/<name>.yaml at test cleanup. The GROQ_API_KEY
 // environment variable supplies credentials.
 //
 // Because the cassette is hashed per prompt, the tool-use loop records one
@@ -31,7 +31,7 @@ func LoadLLM(t *testing.T, name string) llm.Provider {
 	existing, _ := loadLLMCassetteFromDisk(t, name, false)
 	r := &LLMRecorder{
 		name:     name,
-		client:   anthropic.New(""),
+		client:   groq.New(""),
 		existing: existing,
 	}
 	t.Cleanup(func() {
@@ -43,12 +43,12 @@ func LoadLLM(t *testing.T, name string) llm.Provider {
 }
 
 // LLMRecorder is the -tags=record counterpart to [LLMProvider]: it forwards
-// every Complete call to a live [anthropic.Client], drains the stream while
+// every Complete call to a live [groq.Client], drains the stream while
 // capturing the response, and appends a keyed [LLMExchange] so the cassette can
 // be rewritten at cleanup.
 type LLMRecorder struct {
 	name     string
-	client   *anthropic.Client
+	client   *groq.Client
 	existing LLMCassette
 
 	mu        sync.Mutex
@@ -105,7 +105,7 @@ func (r *LLMRecorder) write() error {
 	}
 	out := LLMCassette{
 		Exchanges: r.exchanges,
-		Notes:     appendProvenance(r.existing.Notes, "Anthropic", "claude"),
+		Notes:     appendProvenance(r.existing.Notes, "Groq", "llama-3.3-70b-versatile"),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {

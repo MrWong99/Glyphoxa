@@ -1,8 +1,9 @@
 name: record-live
 
-# Nightly smoke test of the -tags=record path against the real ElevenLabs API,
-# per ADR-0021's "live (nightly)" cadence. Catches vendor drift between
-# cassette refreshes — voice removed, schema change, eleven_v3 deprecated, etc.
+# Nightly smoke test of the -tags=record path against the real vendor APIs, per
+# ADR-0021's "live (nightly)" cadence. Catches vendor drift between cassette
+# refreshes — ElevenLabs voice removed / schema change / eleven_v3 deprecated,
+# or the Groq LLM endpoint / Llama 3.3 70B model id (ADR-0036) shifting.
 #
 # Also runnable on demand via the Actions UI ("Run workflow") when a reviewer
 # wants to re-record cassettes from a feature branch.
@@ -62,6 +63,30 @@ jobs:
       # recorder writing a cassette the replay path can't read.
       - name: Replay rewritten cassette
         run: go test -run='^TestTTS_HelloTest_DispatchesSentence$' ./pkg/voice/orchestrator/
+
+      # Live LLM record run — drives the real Groq API (Llama 3.3 70B, ADR-0036)
+      # and rewrites the agent-loop greeting cassette in-place. Like the TTS leg,
+      # the diff is not committed back; this verifies the -tags=record LLM path
+      # still works end-to-end against the live vendor and catches Groq endpoint
+      # or model-id drift. Only the greeting cassette is recorded here — its
+      # replay test asserts on response shape (non-empty text, no tool calls),
+      # so a live refresh stays green regardless of the exact wording Llama
+      # returns. The tool-dice cassette stays a hand-authored fixture: it pins an
+      # exact final string and a provider-specific tool_call id, which a live
+      # recording would not reproduce verbatim.
+      - name: Record LLM cassette against live Groq API
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "GROQ_API_KEY secret is not set — add it under repo Settings → Secrets and variables → Actions." >&2
+            exit 1
+          fi
+          go test -tags=record -run='^TestLoadLLM_AgentLoop_ReplaysGreeting$' ./pkg/voice/voicecassette/
+
+      # Confirm the rewritten LLM cassette replays clean.
+      - name: Replay rewritten LLM cassette
+        run: go test -run='^TestLoadLLM_AgentLoop_ReplaysGreeting$' ./pkg/voice/voicecassette/
 
       # Surface the cassette diff in the run log so a human can spot
       # unexpected drift (sentence changed, schema shifted, etc.).

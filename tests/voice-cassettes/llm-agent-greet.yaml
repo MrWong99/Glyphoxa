@@ -4,9 +4,11 @@
 # loop assembles for Persona "Bart, the innkeeper" + audio-markup "Speak
 # plainly." + the user utterance "Hello, innkeeper." The exchange is keyed by
 # prompt_hash (sha256 of model+system+messages+tools); a prompt change misses
-# and fails the test. Re-record against a live LLM with `-tags=record`.
+# and fails the test. The hash pins model "llama-3.3-70b-versatile" (Groq, the
+# production LLM per ADR-0036). Re-record against the live Groq API with
+# `-tags=record` (GROQ_API_KEY supplies credentials).
 exchanges:
-  - prompt_hash: 6ca5a6fcface92d62b3c92f752c920cbe79192fb8bfe8ba669ae80bfd50ff38f
+  - prompt_hash: dce2b29a032e3e951940a2f3336a397ece486da052836591468819028b5f7139
     text: "Welcome, traveler. A warm bed and a hot meal await — what'll it be?"
     stop_reason: end_turn
-notes: Hand-authored fixture for the agent-loop replay test (no live recording).
+notes: Hand-authored fixture for the agent-loop replay test (no live recording); prompt_hash pins model llama-3.3-70b-versatile (Groq).

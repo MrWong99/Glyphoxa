@@ -9,16 +9,18 @@
 #
 # Each is keyed by prompt_hash. The second hash depends on the first exchange's
 # tool_call id ("toolu_roll1") and args AND on the live dice result, so those
-# must replay verbatim — change any and exchange 2 misses. Re-record against a
-# live LLM with `-tags=record` (the dice seed stays fixed in the test).
+# must replay verbatim — change any and exchange 2 misses. Both hashes pin model
+# "llama-3.3-70b-versatile" (Groq, the production LLM per ADR-0036). Re-record
+# against the live Groq API with `-tags=record` (GROQ_API_KEY supplies
+# credentials; the dice seed stays fixed in the test).
 exchanges:
-  - prompt_hash: 5056cd6d46898b2739ef3d972d378a67d37e7e4010436bba0a537792da26c76d
+  - prompt_hash: 94d0e3189c69ee6b6fe388161f54ceab89eb6bbfa2871cbbfb806c02580244e1
     tool_calls:
       - id: toolu_roll1
         name: dice
         input: '{"count":1,"sides":20}'
     stop_reason: tool_use
-  - prompt_hash: 7ebd62378001b170acfe4ac2070a0ccd3dc98c828cdd2b274f15963617a3b747
+  - prompt_hash: 42ee6314e058ae5b1b559a3c22eee6ee8984ceedb1833c7976a85d7012362c92
     text: "The bones favor you tonight, traveler."
     stop_reason: end_turn
-notes: Hand-authored fixture for the tool-use-loop replay test; dice rng seeded PCG(42,99), first draw.
+notes: Hand-authored fixture for the tool-use-loop replay test; prompt_hashes pin model llama-3.3-70b-versatile (Groq); dice rng seeded PCG(42,99), first draw.
