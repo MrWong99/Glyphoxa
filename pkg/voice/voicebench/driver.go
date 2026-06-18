@@ -31,6 +31,22 @@ type Driver struct {
 	// §5). silenceFrames is how many to append (must exceed minSilenceFrames).
 	silence       audio.Frame
 	silenceFrames int
+
+	// realtime paces Feed at each frame's wall-clock duration instead of feeding
+	// the whole clip as fast as the CPU allows. It is the live-tier fidelity fix:
+	// the corpus clips are continuous monologues the VAD splits into several
+	// utterances, and fast-feeding stamps every VADSpeechEnd within the same few
+	// milliseconds (clip-start). Because the reply runs synchronously on the single
+	// transcription worker (the bench wires no floor), utterance N's turn then
+	// waits behind every prior turn — so its response_latency (firstOpus −
+	// speechEndAt) accrues all of their wall-clock, a pure fast-feed artifact that
+	// inflated the live p95 to ~10s while the REAL per-turn latency (~STT + first
+	// sentence + tts ≈ 1.2s) is well inside budget. Pacing at real time spaces the
+	// utterances by their true durations, so the worker drains each turn before the
+	// next utterance's speech-end fires — measuring the user-facing per-turn latency
+	// rather than a serialization queue. The cassette tier leaves it false (its
+	// canned replay has no real per-turn cost to serialize).
+	realtime bool
 }
 
 // NewDriver builds a Driver. tap may be nil on a tier that takes no recorder
@@ -52,7 +68,13 @@ func NewDriver(conv *orchestrator.Conversation, h *voicetest.Harness, tap *recor
 // never produces audio at all (a wedged provider/tee), where a hard error — a
 // clip that yields no headline metric is exactly the silent-drop the bench
 // exists to catch — beats hanging the run forever.
-const headlineTimeout = 5 * time.Second
+//
+// It must comfortably outlast the SLOWEST legitimate turn: a rambling live reply
+// can take ~9 s of LLM generation + serial TTS drain, and the dice clip runs two
+// LLM rounds before first audio. At 5 s the guard fired on a valid-but-slow turn
+// and aborted the WHOLE run (losing every sample) — the opposite of a hang guard.
+// 30 s only trips on a genuinely wedged provider/tee, never on a slow-but-live one.
+const headlineTimeout = 30 * time.Second
 
 // RunClip feeds one clip's frames through the conversation, appends trailing
 // silence to provoke a natural speech-end, flushes any utterance still buffered,
@@ -76,12 +98,30 @@ func (d *Driver) RunClip(ctx context.Context, frames []audio.Frame) error {
 	cancel := d.conv.Register(ctx)
 	defer cancel()
 
+	// pace returns how long to sleep before feeding the i-th frame of the run so
+	// the whole sequence is fed at wall-clock speed (zero on the fast cassette
+	// path). It schedules against a fixed start so per-frame sleep jitter does not
+	// accumulate into drift.
+	start := time.Now()
+	var elapsed time.Duration
+	pace := func(f audio.Frame) {
+		if !d.realtime {
+			return
+		}
+		elapsed += frameDuration(f)
+		if wait := elapsed - time.Since(start); wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+
 	for _, f := range frames {
+		pace(f)
 		if err := d.conv.Feed(f); err != nil {
 			return err
 		}
 	}
 	for i := 0; i < d.silenceFrames; i++ {
+		pace(d.silence)
 		if err := d.conv.Feed(d.silence); err != nil {
 			return err
 		}
@@ -126,6 +166,17 @@ func (d *Driver) waitHeadlines(ctx context.Context) (int, error) {
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
+}
+
+// frameDuration is a frame's wall-clock duration (samples ÷ sample-rate). A
+// zero-sample or zero-rate frame is zero, so an unsized frame never blocks the
+// paced feed. Used by [Driver.RunClip] to feed the live tier at real time.
+func frameDuration(f audio.Frame) time.Duration {
+	n, rate := len(f.Samples()), f.SampleRate()
+	if n == 0 || rate <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second / time.Duration(rate)
 }
 
 // eligibleTurns counts the turns in an event log that the subscriber records a

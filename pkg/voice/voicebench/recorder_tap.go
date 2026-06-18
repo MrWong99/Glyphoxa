@@ -81,10 +81,11 @@ func (t *recorderTap) drain() map[Stage][]time.Duration {
 // the captured numbers are definitionally the Prometheus series (bench == series)
 // with no re-derivation and no double-count.
 //
-// vad_hangover / stt_request / tts_total / codec_* / llm_turn are interface-
-// present but UNWIRED (no caller anywhere yet — carry-over #11); they would land
-// here if/when their emit site records onto the injected recorder, but the bench
-// must not assert non-zero on them until then.
+// stt_request is now wired (the STT stage records it via WithSTTMetrics — see
+// below). vad_hangover / tts_total / codec_* / llm_turn remain interface-present
+// but UNWIRED (no caller anywhere yet — carry-over #11); they would land here
+// if/when their emit site records onto the injected recorder, but the bench must
+// not assert non-zero on them until then.
 func (t *recorderTap) LLMRound(_ observe.Provider, _ int, _ bool, d time.Duration) {
 	t.add(StageLLMRound, d)
 }
@@ -112,12 +113,18 @@ func (t *recorderTap) TTSTimeToFirstByte(_ observe.Provider, d time.Duration) {
 
 // Unwired (carry-over #11): no caller records these yet. No-ops so the tap
 // satisfies the interface; the bench must not assert non-zero on them.
-func (t *recorderTap) VADHangover(time.Duration)                  {}
-func (t *recorderTap) CodecDecode(time.Duration)                  {}
-func (t *recorderTap) CodecEncode(time.Duration)                  {}
-func (t *recorderTap) STTRequest(observe.Provider, time.Duration) {}
-func (t *recorderTap) TTSTotal(observe.Provider, time.Duration)   {}
-func (t *recorderTap) LLMTurn(observe.Provider, time.Duration)    {}
+func (t *recorderTap) VADHangover(time.Duration)                {}
+func (t *recorderTap) CodecDecode(time.Duration)                {}
+func (t *recorderTap) CodecEncode(time.Duration)                {}
+func (t *recorderTap) TTSTotal(observe.Provider, time.Duration) {}
+func (t *recorderTap) LLMTurn(observe.Provider, time.Duration)  {}
+
+// STTRequest IS wired: the orchestrator's STT stage records the recognizer POST
+// round-trip onto the injected recorder (this tap, via WithSTTMetrics) — the SAME
+// prod seam wirenpc uses — so the live report decomposes response_latency into
+// its STT half (the dominant fixed cost). The cassette tier replays a stub
+// recognizer with metrics off, so it stays absent there.
+func (t *recorderTap) STTRequest(_ observe.Provider, d time.Duration) { t.add(StageSTTRequest, d) }
 
 // TurnOutcome is the turn-lifecycle counter; the bench measures latency on
 // surviving turns, not the outcome mix, so it is a no-op here.

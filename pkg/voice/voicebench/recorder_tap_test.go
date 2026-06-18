@@ -8,12 +8,13 @@ import (
 )
 
 // TestRecorderTap_CapturesWiredStages pins what the tap, driven through the REAL
-// observe.StageRecorder interface, captures. Two emit paths record onto it with
-// no overlap: the agenttool adapter (llm_round — the B2 signal) and observe's
+// observe.StageRecorder interface, captures. Three emit paths record onto it with
+// no overlap: the agenttool adapter (llm_round — the B2 signal), the orchestrator
+// STT stage (stt_request — the POST round-trip, via WithSTTMetrics), and observe's
 // StageSubscriber (the bus-derived response_latency/address_detect/tts_ttfb,
-// installed on the bus by the rig). Both are the single emitter for their span,
-// so a captured sample is the same value the Prometheus adapter observes — no
-// double-count. The genuinely-unwired stages (vad_hangover/stt_request/…,
+// installed on the bus by the rig). Each is the single emitter for its span, so a
+// captured sample is the same value the Prometheus adapter observes — no
+// double-count. The genuinely-unwired stages (vad_hangover/codec_*/llm_turn/…,
 // carry-over #11) have no caller yet and remain no-ops.
 func TestRecorderTap_CapturesWiredStages(t *testing.T) {
 	var rec observe.StageRecorder = newRecorderTap()
@@ -22,16 +23,18 @@ func TestRecorderTap_CapturesWiredStages(t *testing.T) {
 	// Adapter span (owned by the tap): two LLM rounds in one turn (H2 tool-loop).
 	rec.LLMRound(observe.ProviderGemini, 0, false, 420*time.Millisecond)
 	rec.LLMRound(observe.ProviderGemini, 1, true, 380*time.Millisecond)
+	// STT stage span (owned by the tap via WithSTTMetrics): the POST round-trip.
+	rec.STTRequest(observe.ProviderElevenLabs, 300*time.Millisecond)
 	// Bus-derived spans the subscriber records onto this tap (single emitter each).
 	rec.ResponseLatency(observe.RoleCharacter, 900*time.Millisecond)
 	rec.AddressDetect(60 * time.Millisecond)
 	rec.TTSTimeToFirstByte(observe.ProviderElevenLabs, 120*time.Millisecond)
 	// Unwired stages: still no-ops (no emitter records them yet, #11).
 	rec.VADHangover(256 * time.Millisecond)
-	rec.STTRequest(observe.ProviderElevenLabs, 300*time.Millisecond)
 
 	for stage, want := range map[Stage]int{
 		StageLLMRound:        2,
+		StageSTTRequest:      1,
 		StageResponseLatency: 1,
 		StageAddressDetect:   1,
 		StageTTSTTFB:         1,
@@ -40,7 +43,7 @@ func TestRecorderTap_CapturesWiredStages(t *testing.T) {
 			t.Errorf("tap %q samples = %d, want %d", stage, got, want)
 		}
 	}
-	for _, unwired := range []Stage{StageVADHangover, StageSTTRequest} {
+	for _, unwired := range []Stage{StageVADHangover, StageLLMTurn} {
 		if got := tap.samples(unwired); len(got) != 0 {
 			t.Errorf("tap captured unwired %q (%d samples); it has no emitter yet (#11)", unwired, len(got))
 		}

@@ -5,4 +5,7 @@ segments:
       transcript: Hey, Glyphoxer Butler, wiederhol doch einfach einmal bitte, was letzte Session so passiert ist. Äh, was, mach 'ne kurze Zusammenfassung und
     - audio_sha256: 8739a0ff8af000e0cb7af4c570ccb306ce985d04de3256ebe269d4defff61af8
       transcript: Ja, wo sind wir am Ende bei rausgekommen?
-notes: Re-recorded against ElevenLabs scribe_v2 on 2026-05-27.
+notes: |-
+    Re-recorded against ElevenLabs scribe_v2 on 2026-05-27.
+
+    Re-recorded against ElevenLabs scribe_v2 on 2026-06-18.

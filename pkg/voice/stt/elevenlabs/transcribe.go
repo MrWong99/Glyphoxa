@@ -49,6 +49,22 @@ func (c *Client) Transcribe(ctx context.Context, frames []audio.Frame) (stt.Tran
 	if err := mw.WriteField("file_format", FileFormatPCMS16LE16); err != nil {
 		return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write file_format: %w", err)
 	}
+	// Turn off the server-side work we never consume — we read only Transcript.Text,
+	// so both of these shrink the scribe POST's latency (the dominant fixed cost
+	// inside response_latency) without changing the text we act on. diarize defaults
+	// off and language stays auto-detected, since the user may speak EN or DE.
+	//
+	// timestamps_granularity=none skips word/character forced-alignment, a
+	// non-trivial server cost the orchestrator has no use for (it carries no
+	// per-word timing).
+	if err := mw.WriteField("timestamps_granularity", "none"); err != nil {
+		return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write timestamps_granularity: %w", err)
+	}
+	// tag_audio_events=false skips non-speech event detection ([laughter], etc.),
+	// keeping the transcript to the spoken words the LLM and address matcher want.
+	if err := mw.WriteField("tag_audio_events", "false"); err != nil {
+		return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: write tag_audio_events: %w", err)
+	}
 	filePart, err := mw.CreateFormFile("file", "utterance.pcm")
 	if err != nil {
 		return stt.Transcript{}, fmt.Errorf("elevenlabs.Transcribe: create file part: %w", err)

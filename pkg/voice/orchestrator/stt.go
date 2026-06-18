@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -20,17 +21,79 @@ import (
 type STT struct {
 	bus        *voiceevent.Bus
 	recognizer stt.Recognizer
+
+	// rec/provider carry the A3 instrumentation: one stt_request span per
+	// [stt.Recognizer.Transcribe] (the provider POST round-trip), the SAME seam
+	// the agenttool adapter records llm_round on. Both default to no-ops
+	// (observe.Discard, empty provider label) so the keyless path and any caller
+	// that did not opt in stay silent. This is the STT half of the response_latency
+	// span — speechEnd→STTFinal — and the live bench's latency localisation showed
+	// it is the dominant fixed cost (~0.7s) inside the headline, so making it a
+	// real series lets prod alert on a scribe slowdown, not just the nightly.
+	rec      observe.StageRecorder
+	provider observe.Provider
+
+	// timeout bounds ONE [stt.Recognizer.Transcribe] call. It is the STT analogue
+	// of the Replier's per-turn LLM deadline (agent.DefaultTurnTimeout): the single
+	// serial transcription worker (orchestrator.Segmenter) runs Transcribe under the
+	// CONVERSATION-lifetime context, which has no per-request deadline — so a hung
+	// recognizer POST (e.g. a black-holed ElevenLabs scribe call) would block the
+	// worker forever, and every later utterance would queue behind it and never be
+	// transcribed: the NPC goes permanently silent (observed live). Bounding each
+	// call means a hung provider degrades ONE turn and the worker recovers, instead
+	// of wedging the whole pipeline. A barge/supersede cancels only the per-TURN
+	// context, never this one, so without this bound nothing interrupts the POST.
+	// Zero disables the bound (defaults to [defaultSTTRequestTimeout]).
+	timeout time.Duration
+}
+
+// defaultSTTRequestTimeout bounds one recognizer call when [WithSTTTimeout] is
+// not set. Generous against a real call (scribe transcribes a VAD-segmented
+// utterance in ~1–2s) yet tight enough that a hung provider recovers in seconds
+// rather than wedging the serial worker until session shutdown.
+const defaultSTTRequestTimeout = 15 * time.Second
+
+// STTOption configures an [STT] at construction: [WithSTTMetrics] opts the
+// stt_request instrumentation in, [WithSTTTimeout] overrides the per-request
+// deadline.
+type STTOption func(*STT)
+
+// WithSTTTimeout overrides the per-[stt.Recognizer.Transcribe] deadline (see
+// [STT.timeout]). A non-positive value disables the bound; the default is
+// [defaultSTTRequestTimeout]. Tests use a short value to exercise the hung-
+// recognizer recovery without waiting the full default.
+func WithSTTTimeout(d time.Duration) STTOption {
+	return func(s *STT) { s.timeout = d }
+}
+
+// WithSTTMetrics injects the stt_request instrumentation: rec receives one
+// [observe.StageRecorder.STTRequest] span per [stt.Recognizer.Transcribe],
+// labelled with provider (the bounded provider enum for the wired recognizer). A
+// nil rec leaves the no-op default in place.
+func WithSTTMetrics(rec observe.StageRecorder, provider observe.Provider) STTOption {
+	return func(s *STT) {
+		if rec != nil {
+			s.rec = rec
+		}
+		s.provider = provider
+	}
 }
 
 // NewSTT wires recognizer into bus. Both must be non-nil; passing nil panics.
-func NewSTT(bus *voiceevent.Bus, recognizer stt.Recognizer) *STT {
+// Pass [WithSTTMetrics] to record the stt_request POST round-trip; without it
+// the stage records nothing (the keyless default).
+func NewSTT(bus *voiceevent.Bus, recognizer stt.Recognizer, opts ...STTOption) *STT {
 	if bus == nil {
 		panic("orchestrator.NewSTT: bus must not be nil")
 	}
 	if recognizer == nil {
 		panic("orchestrator.NewSTT: recognizer must not be nil")
 	}
-	return &STT{bus: bus, recognizer: recognizer}
+	s := &STT{bus: bus, recognizer: recognizer, rec: observe.Discard{}, timeout: defaultSTTRequestTimeout}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Transcribe forwards frames to the recognizer and, on success, publishes
@@ -42,7 +105,23 @@ func NewSTT(bus *voiceevent.Bus, recognizer stt.Recognizer) *STT {
 // signal; the orchestrator's job is to faithfully relay whatever the
 // recognizer authoritatively returns.
 func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
+	// Bound the recognizer call so a hung provider cannot wedge the serial
+	// transcription worker forever (see [STT.timeout]). context.WithTimeout honours
+	// any earlier parent deadline, so this only ever tightens the bound. The
+	// recognizer's request ctx is cancelled when the deadline fires, aborting the
+	// in-flight POST and freeing the worker for the next utterance.
+	if s.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+	}
+
+	start := time.Now()
 	t, err := s.recognizer.Transcribe(ctx, frames)
+	// Record the POST round-trip whether it succeeded or failed — both consumed
+	// real wall-clock inside the response_latency span, and a failed/slow scribe
+	// call is exactly what this series exists to surface.
+	s.rec.STTRequest(s.provider, time.Since(start))
 	if err != nil {
 		return fmt.Errorf("orchestrator.STT.Transcribe: %w", err)
 	}
