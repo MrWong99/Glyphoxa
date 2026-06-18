@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,50 @@ type stubRecognizer struct {
 
 func (s stubRecognizer) Transcribe(context.Context, []audio.Frame) (stt.Transcript, error) {
 	return s.transcript, nil
+}
+
+// hangingRecognizer is a [stt.Recognizer] that never returns on its own — it
+// blocks until its context is cancelled, then returns ctx.Err(). It stands in for
+// a black-holed provider POST (the live wedge: a hung ElevenLabs scribe call that
+// the conversation-lifetime context never cancels).
+type hangingRecognizer struct{}
+
+func (hangingRecognizer) Transcribe(ctx context.Context, _ []audio.Frame) (stt.Transcript, error) {
+	<-ctx.Done()
+	return stt.Transcript{}, ctx.Err()
+}
+
+// TestSTT_Transcribe_BoundsHungRecognizer pins the wedge fix: a recognizer call
+// that would otherwise block forever is bounded by the stage's per-request
+// timeout ([orchestrator.WithSTTTimeout]). Without the bound, the single serial
+// transcription worker stalls on the hung POST and every later utterance starves
+// — the NPC goes permanently silent (observed live). With it, the call returns a
+// deadline error promptly so the worker recovers, and no STTFinal is published
+// for the failed turn.
+func TestSTT_Transcribe_BoundsHungRecognizer(t *testing.T) {
+	h := voicetest.New(t)
+
+	var finals int
+	voiceevent.On(h.Bus, func(voiceevent.STTFinal) { finals++ }) // sync bus: runs on Publish's goroutine
+
+	stage := orchestrator.NewSTT(h.Bus, hangingRecognizer{}, orchestrator.WithSTTTimeout(50*time.Millisecond))
+
+	start := time.Now()
+	err := stage.Transcribe(context.Background(), []audio.Frame{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Transcribe returned nil on a hung recognizer; want a deadline error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v; want context.DeadlineExceeded (the per-request timeout firing)", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Transcribe blocked %v on a 50ms timeout; the per-request bound did not fire", elapsed)
+	}
+	if finals != 0 {
+		t.Fatalf("published %d STTFinal for a timed-out transcription; want 0 (no transcript to relay)", finals)
+	}
 }
 
 // TestSTT_HelloTest_EmitsFinal is TB5: the first cassette-backed tracer

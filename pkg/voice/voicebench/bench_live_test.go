@@ -22,6 +22,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
@@ -102,9 +103,12 @@ func runClipLive(t *testing.T, clip Clip, acc *Accumulator) {
 	tap := newRecorderTap()
 	target := voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}
 	conv := BuildConversation(RigConfig{
-		Bus:      h.Bus,
-		VAD:      vadStage,
-		STT:      orchestrator.NewSTT(h.Bus, stteleven.New("")),
+		Bus: h.Bus,
+		VAD: vadStage,
+		// Record stt_request through the SAME prod seam wirenpc uses (the STT stage's
+		// injected recorder), so the live report decomposes response_latency into its
+		// STT half — the dominant fixed cost — via the real emit path, not a bench wrapper.
+		STT:      orchestrator.NewSTT(h.Bus, stteleven.New(""), orchestrator.WithSTTMetrics(tap, observe.ProviderElevenLabs)),
 		Persona:  benchPersona(),
 		Provider: groq.New(""),
 		Synth:    ttseleven.New(""),
@@ -114,6 +118,7 @@ func runClipLive(t *testing.T, clip Clip, acc *Accumulator) {
 
 	silence := silenceLike(t, frames)
 	d := NewDriver(conv, h, tap, acc, silence, 20)
+	d.realtime = true // live tier: feed at wall-clock so per-turn latency isn't a fast-feed serialization artifact
 	if err := d.RunClip(context.Background(), frames); err != nil {
 		t.Fatalf("clip %q: %v", clip.Dir, err)
 	}

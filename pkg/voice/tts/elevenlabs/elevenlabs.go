@@ -13,8 +13,10 @@
 package elevenlabs
 
 import (
+	"net"
 	"net/http"
 	"os"
+	"time"
 )
 
 const (
@@ -46,10 +48,34 @@ type Option func(*Client)
 // and self-hosted ElevenLabs deployments.
 func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = u } }
 
-// WithHTTPClient supplies a custom http.Client. The default has no overall
-// timeout because streaming syntheses are long-lived; per-call deadlines must
-// come from the request context.
+// WithHTTPClient supplies a custom http.Client. The default ([defaultHTTPClient])
+// bounds the connection-establishment and time-to-first-audio-byte phases but
+// sets no overall Timeout (a synthesis streams for the length of the reply); the
+// per-call end-to-end bound is the request context's deadline (the per-turn floor
+// context, cancelled on barge-in).
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
+
+// defaultHTTPClient bounds the connection-establishment and response-header
+// phases so a black-holed synthesis endpoint fails fast instead of holding the
+// reply goroutine open. It mirrors the STT adapter and the LLM clients, but with
+// voice-tight values: a synthesis must start emitting audio in well under a
+// second (first-audio TTFB is ~0.25–0.45s in practice), so ResponseHeaderTimeout
+// is 5s — ~10× the observed max, enough headroom to never trip on a real reply
+// yet failing a hung connection in 5s rather than tens of seconds. It bounds
+// time-to-first-RESPONSE-byte only, NOT the streamed audio that follows, so a
+// long multi-sentence reply is never clipped. No overall Timeout, for the same
+// reason. The barge/per-turn ctx is still the end-to-end cancel.
+func defaultHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: 5 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
 
 // New constructs a [Client]. If apiKey is empty it falls back to the
 // ELEVENLABS_API_KEY environment variable; if that is also empty, the
@@ -63,7 +89,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: DefaultBaseURL,
-		http:    &http.Client{},
+		http:    defaultHTTPClient(),
 	}
 	for _, opt := range opts {
 		opt(c)

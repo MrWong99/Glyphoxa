@@ -405,7 +405,8 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 	}
 	vadStage := orchestrator.NewVAD(bus, vadSession)
 
-	sttStage := orchestrator.NewSTT(bus, stteleven.New(""))
+	sttStage := orchestrator.NewSTT(bus, stteleven.New(""),
+		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
 	ttsStage := orchestrator.NewTTS(bus, synth)
 
 	detector := orchestrator.NewAddressDetector(npcMatcher(npc))

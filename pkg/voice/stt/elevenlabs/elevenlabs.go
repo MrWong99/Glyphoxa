@@ -14,8 +14,10 @@
 package elevenlabs
 
 import (
+	"net"
 	"net/http"
 	"os"
+	"time"
 )
 
 const (
@@ -48,9 +50,38 @@ type Option func(*Client)
 // and self-hosted ElevenLabs deployments.
 func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = u } }
 
-// WithHTTPClient supplies a custom http.Client. The default has no overall
-// timeout; per-call deadlines must come from the request context.
+// WithHTTPClient supplies a custom http.Client. The default ([defaultHTTPClient])
+// bounds the connection-establishment and response-header phases but sets no
+// overall Timeout; the per-call end-to-end bound is the request context's
+// deadline (the orchestrator STT stage's per-request timeout).
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
+
+// defaultHTTPClient bounds the connection-establishment and response-header
+// phases so a black-holed scribe endpoint fails in seconds instead of hanging
+// the single serial transcription worker (and, behind it, the whole voice loop)
+// until session shutdown. No overall Timeout: a Scribe POST uploads the utterance
+// audio first, and an http.Client.Timeout would cap that upload as well as the
+// transcription — the end-to-end bound is the caller's ctx deadline (the
+// orchestrator STT stage's per-request timeout, default 15s).
+//
+// Scribe's response is a single JSON blob (non-streaming), so ResponseHeaderTimeout
+// bounds the WHOLE transcription once the body is sent — the exact "connected but
+// never answers" hang the live wedge hit. We expect a response well under 2s
+// (stt_request p95 ~1.4s), so 10s gives generous headroom for a long utterance on
+// a slow day while still failing a hang in 10s. Dial/TLS are voice-tight (5s) —
+// a healthy connect is sub-second; these only delay failure on a cold connect to
+// a dead endpoint.
+func defaultHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
 
 // New constructs a [Client]. If apiKey is empty it falls back to the
 // ELEVENLABS_API_KEY environment variable; if that is also empty, the
@@ -63,7 +94,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: DefaultBaseURL,
-		http:    &http.Client{},
+		http:    defaultHTTPClient(),
 	}
 	for _, opt := range opts {
 		opt(c)
