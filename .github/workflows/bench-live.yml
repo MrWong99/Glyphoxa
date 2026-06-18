@@ -1,8 +1,9 @@
 name: bench-live
 
 # Nightly live-tier latency benchmark (Sprint 2, Epic C2 / ADR-0033 addendum).
-# Drives the real Gemini + ElevenLabs stack through the corpus and asserts the
-# absolute EngineeringSLO (≤1.2s p50 / ≤2.5s p95 on response_latency) — the SAME
+# Drives the real Groq + ElevenLabs stack (ADR-0036: Llama 3.3 70B on Groq is the
+# deployment LLM) through the corpus and asserts the absolute EngineeringSLO
+# (≤1.2s p50 / ≤2.5s p95 on response_latency) — the SAME
 # budgets observe's A2 alert rules use. A breach reds this run as a "latency
 # regression" signal; it NEVER gates a PR (the every-PR cassette gate in ci.yml
 # is the relative-regression tripwire). The cadence mirrors record-live.yml.
@@ -50,12 +51,12 @@ jobs:
       # test asserts CheckSLO and fails the run on an over-budget headline span.
       - name: Live latency benchmark (absolute SLO gate)
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           GX_BENCH_OUT: ${{ runner.temp }}/live-latency.json
         run: |
-          if [ -z "$GEMINI_API_KEY" ] || [ -z "$ELEVENLABS_API_KEY" ]; then
-            echo "GEMINI_API_KEY and ELEVENLABS_API_KEY secrets must be set under repo Settings → Secrets and variables → Actions." >&2
+          if [ -z "$GROQ_API_KEY" ] || [ -z "$ELEVENLABS_API_KEY" ]; then
+            echo "GROQ_API_KEY and ELEVENLABS_API_KEY secrets must be set under repo Settings → Secrets and variables → Actions." >&2
             exit 1
           fi
           go test -v -tags "bench opus nolibopusfile live" -run '^TestBench_LiveSLO$' ./pkg/voice/voicebench/
