@@ -6,12 +6,18 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+
+	// pgx stdlib driver: the /readyz probe pings through a database/sql handle
+	// (issue #33). Registered here as well as in migrate.go so this file's use of
+	// sql.Open("pgx", …) is self-documenting; the blank import is idempotent.
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
@@ -107,16 +113,38 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Resolve the DB DSN once: it both gates the load path below and, when
+	// present, backs the /readyz probe (issue #33). -hardcoded runs with no DB,
+	// so its readiness probe is nil (always-ready — see observe.ReadinessProbe).
+	dsn := ""
+	if !hardcoded {
+		dsn = databaseURL()
+		if dsn == "" {
+			return fmt.Errorf("voice mode loads the NPC from the DB by default; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL), or pass -hardcoded to use the in-code NPC")
+		}
+	}
+
 	if metricsAddr != "" {
-		observe.NewMetricsServer(metricsAddr, metrics, log).Start(ctx)
+		var ready observe.ReadinessProbe
+		if dsn != "" {
+			// The live pgxpool is opened later inside wirenpc.RunFromDB and isn't
+			// reachable here, so /readyz pings through a small standalone
+			// database/sql handle (pgx stdlib driver, already a dep — see
+			// migrate.go). It lives for the metrics server's lifetime alongside the
+			// voice loop. NOTE: this ping-handle may later be consolidated with the
+			// schema-check handle from the wirenpc boot path (#32) once both merge.
+			db, err := sql.Open("pgx", dsn)
+			if err != nil {
+				return fmt.Errorf("voice: open readiness-probe db handle: %w", err)
+			}
+			defer db.Close()
+			ready = db.PingContext
+		}
+		observe.NewMetricsServer(metricsAddr, metrics, ready, log).Start(ctx)
 	}
 
 	if hardcoded {
 		return wirenpc.Run(ctx, cfg)
-	}
-	dsn := databaseURL()
-	if dsn == "" {
-		return fmt.Errorf("voice mode loads the NPC from the DB by default; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL), or pass -hardcoded to use the in-code NPC")
 	}
 	return wirenpc.RunFromDB(ctx, cfg, dsn)
 }

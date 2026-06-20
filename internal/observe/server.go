@@ -3,37 +3,79 @@ package observe
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 )
 
+// ReadinessProbe reports whether the voice node's external dependencies are
+// healthy enough to serve traffic — in practice a DB ping (issue #33). It backs
+// /readyz: a nil error means ready (200), any error means not-ready (503). A nil
+// ReadinessProbe means "no dependency to gate on" and /readyz is always 200,
+// which is the correct answer for a -hardcoded no-DB run.
+type ReadinessProbe func(context.Context) error
+
 // MetricsServer is the minimal metrics-only HTTP listener for voice mode
 // (ADR-0032 §2.3): no SPA, no SSE, just /metrics so a Prometheus can scrape a
-// headless voice node. In web/all mode the adapter's [PrometheusRecorder.Handler]
-// is mounted on the existing server instead (control-plane, issue #6) — this
-// type is only for the standalone voice node.
+// headless voice node — plus the /healthz and /readyz k8s probes (issue #33). In
+// web/all mode the adapter's [PrometheusRecorder.Handler] is mounted on the
+// existing server instead (control-plane, issue #6) — this type is only for the
+// standalone voice node.
 type MetricsServer struct {
 	srv *http.Server
 	log *slog.Logger
 }
 
 // NewMetricsServer builds a metrics-only server serving rec's registry at
-// /metrics on addr (e.g. ":9090"). It does not listen until [MetricsServer.Start].
-func NewMetricsServer(addr string, rec *PrometheusRecorder, log *slog.Logger) *MetricsServer {
+// /metrics on addr (e.g. ":9090"), plus the /healthz liveness and /readyz
+// readiness probes for Kubernetes (issue #33). ready gates /readyz; pass nil for
+// a no-DB run (see [ReadinessProbe]). It does not listen until
+// [MetricsServer.Start].
+func NewMetricsServer(addr string, rec *PrometheusRecorder, ready ReadinessProbe, log *slog.Logger) *MetricsServer {
 	if log == nil {
 		log = slog.Default()
 	}
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", rec.Handler())
 	return &MetricsServer{
 		srv: &http.Server{
 			Addr:              addr,
-			Handler:           mux,
+			Handler:           newMux(rec, ready),
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 		log: log,
 	}
+}
+
+// newMux wires the voice-node endpoints onto a fresh mux: /metrics (rec's
+// registry), /healthz (liveness — always 200 while the process serves), and
+// /readyz (readiness — 200 when ready returns nil, 503 otherwise; always 200 if
+// ready is nil). Factored out so the handlers are testable without a real
+// listener.
+func newMux(rec *PrometheusRecorder, ready ReadinessProbe) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", rec.Handler())
+	// Liveness: the process is up and able to serve a request. It deliberately
+	// ignores dependency health — a failing DB must not make k8s kill the pod
+	// (that's readiness's job).
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+	// Readiness: gate traffic on the dependency probe (a DB ping).
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if ready == nil {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "ok")
+			return
+		}
+		if err := ready(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+	return mux
 }
 
 // Start serves in a background goroutine and shuts the listener down when ctx is

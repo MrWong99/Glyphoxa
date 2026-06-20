@@ -2,9 +2,11 @@ package observe
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +25,7 @@ func TestMetricsServerServesAndShutsDown(t *testing.T) {
 
 	rec := NewPrometheusRecorder()
 	rec.SessionOpened("g")
-	srv := NewMetricsServer(addr, rec, nil)
+	srv := NewMetricsServer(addr, rec, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.Start(ctx)
@@ -59,5 +61,76 @@ func TestMetricsServerServesAndShutsDown(t *testing.T) {
 			t.Fatal("metrics server did not shut down on context cancel")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestHealthzAlwaysOK pins the liveness contract: /healthz is 200 as long as the
+// process can serve a request — it never consults the readiness probe.
+func TestHealthzAlwaysOK(t *testing.T) {
+	// Even with a probe that always fails, liveness stays 200.
+	srv := httptest.NewServer(newMux(NewPrometheusRecorder(), func(context.Context) error {
+		return errors.New("db down")
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestReadyzProbeOK is the happy-path readiness gate: a probe returning nil means
+// the dependency (a DB ping) is healthy, so /readyz is 200.
+func TestReadyzProbeOK(t *testing.T) {
+	srv := httptest.NewServer(newMux(NewPrometheusRecorder(), func(context.Context) error {
+		return nil
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/readyz = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestReadyzProbeDown is the DB-down readiness case: a probe returning an error
+// means the dependency is unreachable, so /readyz is 503 and k8s holds traffic.
+func TestReadyzProbeDown(t *testing.T) {
+	srv := httptest.NewServer(newMux(NewPrometheusRecorder(), func(context.Context) error {
+		return errors.New("dial tcp: connection refused")
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz = %d, want 503", resp.StatusCode)
+	}
+}
+
+// TestReadyzNilProbeOK pins the -hardcoded / no-DB contract: a nil probe means
+// there is no dependency to gate on, so /readyz is unconditionally 200.
+func TestReadyzNilProbeOK(t *testing.T) {
+	srv := httptest.NewServer(newMux(NewPrometheusRecorder(), nil))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/readyz (nil probe) = %d, want 200", resp.StatusCode)
 	}
 }
