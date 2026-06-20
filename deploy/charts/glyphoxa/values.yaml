@@ -91,9 +91,11 @@ seed:
 # It never migrates: EnsureCurrent (#32) fails the pod fast if the schema is
 # behind, rather than auto-migrating under a serving process.
 voice:
-  # Enable/disable the voice Deployment. Off by default: a bare `helm install`
-  # stands up the DB + schema + seed without needing live Discord/provider keys.
-  # Set true (and supply guild/channel + the credential values above) to serve.
+  # Enable/disable the voice Deployment. ON by default, so a bare `helm install`
+  # serves the NPC — which means it requires guild/channel plus the four
+  # credential values above, or the render fails fast with an actionable message
+  # (a voice pod can't run without them). For the DB-prep path only (migrate +
+  # seed, no live Discord/provider keys), set this false.
   enabled: true
 
   # Discord guild (server) and voice channel snowflake IDs the bot joins. Both
@@ -139,6 +141,23 @@ voice:
     limits:
       cpu: "1"
       memory: 1Gi
+
+  # Container securityContext for the voice container, hardened by default and
+  # overridable. The image runs as USER 65532 (#31) and the bundled ONNX runtime
+  # means the VAD never writes at boot, so the locked-down defaults hold —
+  # readOnlyRootFilesystem included: the k3d e2e confirmed the pod boots to
+  # /readyz=200 with a read-only rootfs (no boot-time write to /tmp or elsewhere).
+  # Set to {} (in a values file) to disable, or override individual fields for a
+  # cluster with a stricter or looser policy.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
 
   # Probe tuning. Liveness targets /healthz (process-up, ignores DB health so a
   # DB blip can't get the pod killed); readiness targets /readyz (DB ping — 200

@@ -41,6 +41,18 @@ metadata:
 spec:
   # Voice is stateful per channel — a single replica by intent (see the header).
   replicas: 1
+  # Recreate, NOT the default RollingUpdate: on a `helm upgrade` (e.g. an image
+  # bump) RollingUpdate would surge a second voice pod and keep the old one until
+  # the new is Ready. But /readyz only pings the DB — the Discord gateway is
+  # opened later in Run(), after the readiness server is already serving — so the
+  # new pod reports Ready on DB alone while the old pod still holds the gateway
+  # session. For the surge window TWO pods would mgr.Open the SAME guild+channel
+  # with the SAME token, the single-replica-per-channel violation this chart
+  # exists to prevent. Recreate tears the old pod down before the new one starts,
+  # so at most one pod ever holds the channel (at the cost of a brief gap on
+  # upgrade, which is correct for a single-session voice workload).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
@@ -65,6 +77,13 @@ spec:
         - name: voice
           image: {{ include "glyphoxa.voice.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.voice.securityContext }}
+          # Hardened by default (overridable). The image runs as USER 65532 (#31)
+          # and GLYPHOXA_ONNX_LIB points at the bundled lib so the VAD never
+          # downloads/writes a runtime at boot — so a locked-down context holds.
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - -mode
             - voice

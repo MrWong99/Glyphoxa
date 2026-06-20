@@ -49,6 +49,16 @@ tests:
           path: spec.replicas
           value: 1
 
+  - it: uses the Recreate strategy so an upgrade never runs two pods on one channel
+    # The default RollingUpdate would surge a second voice pod that reports Ready
+    # on the DB-only /readyz while the old pod still holds the Discord gateway —
+    # two pods on the same guild+channel with the same token. Recreate tears the
+    # old pod down first, keeping at most one session-holder.
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
   - it: is NOT a Helm hook so it applies after the migrate and seed hooks
     # The migrate (-5) and seed (-4) hooks complete before any non-hook resource;
     # leaving the Deployment hook-free puts it at the implicit weight 0, after the
@@ -287,6 +297,43 @@ tests:
           path: spec.template.spec.containers[0].resources.limits.cpu
       - isNotNullOrEmpty:
           path: spec.template.spec.containers[0].resources.limits.memory
+
+  - it: hardens the voice container's securityContext by default
+    # The image runs as USER 65532 (#31); the container locks down further —
+    # non-root, no privilege escalation, a read-only rootfs (the k3d e2e proved
+    # the pod boots to /readyz=200 without a writable rootfs), all capabilities
+    # dropped, the runtime default seccomp profile. Overridable via
+    # voice.securityContext.
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value:
+            - ALL
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: lets the operator override the container securityContext
+    # The block is rendered from voice.securityContext, so an operator can loosen
+    # it (here: opt out of the read-only rootfs). Setting it to {} in a values
+    # file drops the block entirely.
+    set:
+      voice:
+        securityContext:
+          readOnlyRootFilesystem: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: false
 
   - it: does NOT run migrations
     # The migrate hook owns the schema; EnsureCurrent (#32) fails the pod fast if
