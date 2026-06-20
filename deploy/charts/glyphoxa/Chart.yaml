@@ -1,0 +1,26 @@
+apiVersion: v2
+name: glyphoxa
+description: |
+  Glyphoxa on Kubernetes — a pgvector Postgres plus a migrate Job that applies
+  the embedded schema as a Helm pre-install/pre-upgrade hook (ADR-0034).
+  This is the first deploy slice: it stands up the database and brings the
+  schema current. The serving workloads (seed Job, voice Deployment) slot in
+  later behind their own templates.
+type: application
+
+# Chart version is the packaging version; appVersion tracks the Glyphoxa image
+# the chart deploys (ADR-0034: one image, mode/config via args+env). When no
+# image.tag is set in values, templates fall back to appVersion.
+version: 0.1.0
+appVersion: "0.1.0"
+
+kubeVersion: ">=1.27.0-0"
+
+keywords:
+  - glyphoxa
+  - postgres
+  - pgvector
+  - migrations
+
+sources:
+  - https://github.com/MrWong99/Glyphoxa_v2

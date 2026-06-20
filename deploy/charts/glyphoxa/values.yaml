@@ -1,0 +1,55 @@
+# Glyphoxa Helm values — slice 1 (ADR-0034): pgvector Postgres + migrate hook.
+# The serving workloads (#35 seed Job, #36 voice Deployment) add their own keys
+# under this same file when they land.
+
+# The single Glyphoxa image (ADR-0034). `tag` defaults to the chart appVersion
+# when left empty so a chart bump pins a matching image.
+image:
+  repository: ghcr.io/mrwong99/glyphoxa
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# DB connection. By default the chart stands up its own in-cluster Postgres and
+# assembles the connection URL against that Service. Set `database.url` to point
+# the migrate Job (and later the serving workloads) at an external Postgres
+# instead; when set, the bundled Postgres can be disabled via `postgres.enabled`.
+database:
+  # Full DSN. Leave empty to have the chart assemble one from the values below
+  # against the in-cluster Postgres Service.
+  url: ""
+  name: glyphoxa
+  user: glyphoxa
+  # Password for the in-cluster Postgres role and the assembled URL. CHANGE THIS
+  # for any real deploy — or better, template it from an external Secret. A
+  # static default keeps `helm install` zero-ceremony for local/dev clusters.
+  password: glyphoxa
+  sslmode: disable
+
+# In-cluster pgvector Postgres (a plain StatefulSet, NOT the CNPG operator —
+# ADR-0034 scopes the operator out of slice 1).
+postgres:
+  enabled: true
+  image:
+    repository: pgvector/pgvector
+    tag: pg17
+    pullPolicy: IfNotPresent
+  service:
+    port: 5432
+  persistence:
+    size: 8Gi
+    # storageClassName: ""  # use the cluster default when unset
+  resources: {}
+
+# Migrate hook Job (ADR-0031: `glyphoxa migrate up`, advisory-locked). Runs as a
+# Helm pre-install/pre-upgrade hook before any serving workload.
+migrate:
+  # Negative hook-weight orders the migration ahead of the non-hook serving
+  # workloads (which apply at weight 0 / after hooks).
+  hookWeight: -5
+  resources: {}
+
+# Pod-level knobs shared by the workloads this chart renders.
+podSecurityContext: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

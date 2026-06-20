@@ -1,0 +1,32 @@
+{{- if .Values.postgres.enabled }}
+{{/*
+Headless Service (clusterIP: None) giving the Postgres StatefulSet stable
+per-pod DNS. Its name is the host both the assembled connection URL and the
+migrate Job's pg_isready wait target resolve — that single name is the contract
+between the database and everything that connects to it.
+
+A pre-install/pre-upgrade hook (weight -10) so its DNS is resolvable before the
+migrate hook (weight -5) connects through it.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "glyphoxa.postgres.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ include "glyphoxa.dbHookWeight" . | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  clusterIP: None
+  selector:
+    {{- include "glyphoxa.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: {{ .Values.postgres.service.port }}
+      targetPort: postgres
+      protocol: TCP
+{{- end }}

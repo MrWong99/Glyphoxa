@@ -1,0 +1,22 @@
+Glyphoxa slice 1 installed: {{ .Release.Name }} (namespace {{ .Release.Namespace }}).
+
+What this release stands up (ADR-0034):
+{{- if .Values.postgres.enabled }}
+  - A pgvector Postgres StatefulSet reachable in-cluster at:
+      {{ include "glyphoxa.postgres.fullname" . }}:{{ .Values.postgres.service.port }}
+{{- else }}
+  - No in-cluster Postgres (postgres.enabled=false); using the external
+    database.url you supplied.
+{{- end }}
+  - A migrate Job run as a pre-install/pre-upgrade hook that applied the schema
+    with `glyphoxa migrate up` before this release became ready.
+
+Verify the schema is current:
+
+  kubectl -n {{ .Release.Namespace }} run glyphoxa-migrate-check --rm -it --restart=Never \
+    --image={{ include "glyphoxa.image" . }} \
+    --env GLYPHOXA_DATABASE_URL="$(kubectl -n {{ .Release.Namespace }} get secret {{ include "glyphoxa.secretName" . }} -o jsonpath='{.data.database-url}' | base64 -d)" \
+    -- migrate status
+
+The serving workloads (seed Job, voice Deployment) are not part of this slice;
+they land in later issues and assume this schema is already current.

@@ -1,0 +1,9 @@
+# Patterns to ignore when packaging the chart.
+.DS_Store
+.git/
+.gitignore
+*.tmproj
+.vscode/
+.idea/
+# helm-unittest specs are dev-only; they must not ship in the packaged chart.
+tests/

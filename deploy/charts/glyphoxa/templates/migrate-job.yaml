@@ -1,0 +1,86 @@
+{{/*
+Migrate hook Job — the heart of slice 1 (ADR-0034, ADR-0031).
+
+It runs `glyphoxa migrate up` (advisory-locked inside the binary) ONCE per
+install/upgrade as a Helm pre-install/pre-upgrade hook, BEFORE any serving
+workload, rather than as an init-container on every replica. The single hook is
+what makes the migration run once and observably; the advisory lock is what
+makes a concurrent run safe (ADR-0031).
+
+- hook + hook-weight: pre-install,pre-upgrade at a negative weight so it applies
+  ahead of the (non-hook, weight-0) serving workloads added in #35/#36.
+- hook-delete-policy before-hook-creation: the prior run's Job is cleared before
+  re-running on upgrade, so a leftover completed Job never blocks the new one
+  and its logs stay around until the next upgrade for inspection.
+- initContainer: hook Jobs can start before Postgres accepts connections, so an
+  initContainer blocks on pg_isready against the Postgres Service before the
+  migrate container runs. The migrate path also retries, but waiting here keeps
+  the run deterministic and the Job logs clean.
+- GLYPHOXA_DATABASE_URL comes from the DB Secret, pointed at the in-cluster
+  Postgres Service DNS.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "glyphoxa.migrate.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ .Values.migrate.hookWeight | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "glyphoxa.postgres.image" . }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              until pg_isready -h {{ include "glyphoxa.postgres.fullname" . }} -p {{ .Values.postgres.service.port }} -U {{ .Values.database.user | quote }};
+              do echo "waiting for postgres at {{ include "glyphoxa.postgres.fullname" . }}:{{ .Values.postgres.service.port }}"; sleep 2; done
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "glyphoxa.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - migrate
+            - up
+          env:
+            - name: GLYPHOXA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: database-url
+          {{- with .Values.migrate.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

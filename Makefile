@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint docker-build docker-smoke
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint docker-build docker-smoke helm-lint helm-test helm-validate
 
 # Build voice engine
 build:
@@ -148,3 +148,26 @@ docker-build:
 # the process is non-root. Build the image first (make docker-build).
 docker-smoke:
 	./scripts/container-smoke.sh $(DOCKER_IMAGE)
+
+# --- Helm chart (ADR-0034, issue #34) --------------------------------------
+# The deploy chart stands up a pgvector Postgres and applies the schema via a
+# migrate pre-install hook Job. These targets mirror the fast `helm` CI job:
+# template-time correctness only, no cluster (the cluster e2e is issue #37).
+# Requires: helm, the helm-unittest plugin
+# (helm plugin install https://github.com/helm-unittest/helm-unittest), and
+# kubeconform (https://github.com/yannh/kubeconform).
+HELM_CHART ?= deploy/charts/glyphoxa
+
+helm-lint:
+	helm lint $(HELM_CHART)
+
+helm-test:
+	helm unittest $(HELM_CHART)
+
+# Render both value paths (in-cluster Postgres and external DB) and schema-check
+# each against the upstream Kubernetes schemas.
+helm-validate:
+	helm template glyphoxa $(HELM_CHART) | kubeconform -strict -summary -kubernetes-version 1.30.0
+	helm template glyphoxa $(HELM_CHART) --set postgres.enabled=false \
+		--set database.url='postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require' \
+		| kubeconform -strict -summary -kubernetes-version 1.30.0
