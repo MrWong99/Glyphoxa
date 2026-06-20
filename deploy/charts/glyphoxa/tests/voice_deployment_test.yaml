@@ -1,0 +1,359 @@
+suite: voice-mode Deployment
+# The voice Deployment runs the single image in `voice` mode: one replica (voice
+# is stateful per channel), joining the configured Discord guild+channel and
+# giving the seeded NPC a live voice loop (#36). It consumes the four
+# provider/runtime keys + GLYPHOXA_DATABASE_URL from the app Secret, takes
+# guild/channel from values, and exposes /healthz, /readyz, /metrics on the
+# metrics port. It is NOT a Helm hook: it applies after the migrate+seed hooks,
+# and it NEVER runs migrations — EnsureCurrent (#32) fails the pod fast if the
+# schema is behind.
+templates:
+  - templates/voice-deployment.yaml
+# Voice requires guild/channel + a Discord token + the three provider keys to
+# render (each is `required` when voice.enabled). guild/channel are quoted
+# strings (a snowflake loses precision as a number). The credential values are
+# deliberately plain low-entropy ASCII placeholders, NOT real tokens or random
+# base64 — a random blob here only trips secret scanners. Production supplies
+# real keys.
+set:
+  voice:
+    guild: "111111111111111111"
+    channel: "222222222222222222"
+  discordBotToken: unit-test-discord-token-placeholder
+  elevenLabsApiKey: unit-test-elevenlabs-placeholder
+  geminiApiKey: unit-test-gemini-placeholder
+  groqApiKey: unit-test-groq-placeholder
+tests:
+  - it: renders a Deployment named for the release
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-voice
+
+  - it: is disabled when voice.enabled is false
+    set:
+      voice:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: runs exactly one replica
+    # Voice is stateful per channel (one gateway connection / one channel join),
+    # so the workload is pinned to a single replica — scaling out would have two
+    # bots fighting over the same voice channel.
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: uses the Recreate strategy so an upgrade never runs two pods on one channel
+    # The default RollingUpdate would surge a second voice pod that reports Ready
+    # on the DB-only /readyz while the old pod still holds the Discord gateway —
+    # two pods on the same guild+channel with the same token. Recreate tears the
+    # old pod down first, keeping at most one session-holder.
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  - it: is NOT a Helm hook so it applies after the migrate and seed hooks
+    # The migrate (-5) and seed (-4) hooks complete before any non-hook resource;
+    # leaving the Deployment hook-free puts it at the implicit weight 0, after the
+    # schema is current and the NPC seeded.
+    asserts:
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]
+
+  - it: runs `glyphoxa` in voice mode with the configured guild, channel, and metrics address
+    # The whole arg vector, in order: mode/guild/channel from values plus the
+    # -metrics-addr that must match the exposed container port (asserted below).
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - -mode
+            - voice
+            - -guild
+            - "111111111111111111"
+            - -channel
+            - "222222222222222222"
+            - -metrics-addr
+            - ":9090"
+
+  - it: rejects a numeric guild rather than deploying a truncated snowflake
+    # A snowflake passed as a NUMBER is already truncated by float64 before the
+    # template runs (111111111111111111 -> 111111111111111104), and int64 can't
+    # recover the lost digits. So the render fails with an actionable message
+    # instead of silently shipping a wrong ID that fails confusingly at runtime.
+    set:
+      voice:
+        guild: 111111111111111111
+    asserts:
+      - failedTemplate:
+          errorPattern: "must be a quoted string, not a number"
+
+  - it: runs the configured image
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: honours an overridden image repository and tag
+    set:
+      image:
+        repository: ghcr.io/example/glyphoxa
+        tag: v9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/glyphoxa:v9.9.9
+
+  - it: lets the voice block override the image independently of the shared image
+    set:
+      voice:
+        image:
+          repository: ghcr.io/example/glyphoxa-voice
+          tag: voice-1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/glyphoxa-voice:voice-1.2.3
+
+  - it: sources GLYPHOXA_DATABASE_URL from the DB connection Secret
+    # Same in-cluster Postgres Service the migrate/seed hooks used; the pod's
+    # /readyz pings through it, and RunFromDB loads the seeded NPC from it.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: database-url
+
+  - it: sources DISCORD_BOT_TOKEN from the Secret
+    # runVoice requires DISCORD_BOT_TOKEN; it must come from a Secret, never be
+    # baked into the image or the template.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DISCORD_BOT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: discord-bot-token
+
+  - it: sources the three provider keys from the Secret
+    # ElevenLabs (STT/TTS), Gemini, and Groq (LLM) — each adapter reads its own
+    # env var at request time (BYOK, ADR-0004); all ride in the app Secret.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ELEVENLABS_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: elevenlabs-api-key
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GEMINI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: gemini-api-key
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GROQ_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: groq-api-key
+
+  - it: emits JSON logs in the cluster
+    # GLYPHOXA_LOG_FORMAT=json so the structured logs are machine-parseable for
+    # cluster log aggregation (ADR-0032).
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_LOG_FORMAT
+            value: json
+
+  - it: does NOT carry GLYPHOXA_SECRET
+    # Voice never decrypts the sealed provider_config: loadSeededNPC takes no
+    # cipher and the adapters read real keys from their own env vars. The cipher
+    # key stays on the seed Job; leaking it into the long-lived serving pod would
+    # widen its blast radius for no reason.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: app-secret
+
+  - it: relies on the image's bundled GLYPHOXA_ONNX_LIB by default
+    # The image already sets GLYPHOXA_ONNX_LIB to its bundled libonnxruntime path
+    # (#31 Dockerfile), so the chart does not override it by default.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_ONNX_LIB
+
+  - it: lets the operator override GLYPHOXA_ONNX_LIB when needed
+    set:
+      voice:
+        onnxLib: /custom/lib/libonnxruntime.so
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_ONNX_LIB
+            value: /custom/lib/libonnxruntime.so
+
+  - it: exposes the metrics port as a named container port
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9090
+            protocol: TCP
+
+  - it: derives the metrics address and container port from voice.metricsPort together
+    # A custom port must flow to BOTH the -metrics-addr flag and the container
+    # port, or the probes/scrape would target a port the process isn't serving.
+    set:
+      voice:
+        metricsPort: 9999
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: ":9999"
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9999
+
+  - it: probes liveness against /healthz on the metrics port
+    # Liveness ignores DB health (a failing DB must not get the pod killed); it
+    # targets /healthz, which is 200 while the process serves.
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: metrics
+
+  - it: probes readiness against /readyz on the metrics port
+    # /readyz pings the DB (200 only when the schema is current and reachable),
+    # which is the real "ready to serve" bar for the automated e2e.
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: metrics
+
+  - it: annotates the pod for Prometheus scraping on the metrics port
+    # ADR-0032: voice opens a minimal metrics-only listener scraped at /metrics.
+    # Pod annotations are the operator-CRD-free way to advertise that to a
+    # Prometheus configured for annotation-based discovery.
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["prometheus.io/scrape"]
+          value: "true"
+      - equal:
+          path: spec.template.metadata.annotations["prometheus.io/port"]
+          value: "9090"
+      - equal:
+          path: spec.template.metadata.annotations["prometheus.io/path"]
+          value: /metrics
+
+  - it: sets resource requests and limits
+    # A long-lived serving pod must declare requests+limits so the scheduler can
+    # place it and the kubelet can cap it (the ONNX VAD + audio path are not free).
+    asserts:
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.requests.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.memory
+
+  - it: hardens the voice container's securityContext by default
+    # The image runs as USER 65532 (#31); the container locks down further —
+    # non-root, no privilege escalation, a read-only rootfs (the k3d e2e proved
+    # the pod boots to /readyz=200 without a writable rootfs), all capabilities
+    # dropped, the runtime default seccomp profile. Overridable via
+    # voice.securityContext.
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value:
+            - ALL
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: lets the operator override the container securityContext
+    # The block is rendered from voice.securityContext, so an operator can loosen
+    # it (here: opt out of the read-only rootfs). Setting it to {} in a values
+    # file drops the block entirely.
+    set:
+      voice:
+        securityContext:
+          readOnlyRootFilesystem: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: false
+
+  - it: does NOT run migrations
+    # The migrate hook owns the schema; EnsureCurrent (#32) fails the pod fast if
+    # it is behind. The pod must never carry a `migrate` arg or a migrate
+    # initContainer that would auto-migrate under it.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: migrate
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: selects its pods with the standard selector labels
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: glyphoxa
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/instance"]
+          value: RELEASE-NAME
+      - equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/component"]
+          value: voice

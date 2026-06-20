@@ -1,0 +1,170 @@
+{{/*
+Voice-mode Deployment (#36) — the serving workload of the chart.
+
+It runs the single image as `glyphoxa -mode voice -guild <id> -channel <id>`,
+joining one Discord guild+channel and giving the seeded NPC a live voice loop.
+
+- ONE replica, by intent: voice is stateful per channel (one Discord gateway
+  connection, one channel join), so two replicas would fight over the same
+  channel. The replica count is fixed here rather than surfaced as a tunable.
+- NOT a Helm hook: a plain resource applies after every pre-install/pre-upgrade
+  hook, so the migrate (-5) and seed (-4) hooks have completed — the schema is
+  current and the demo NPC seeded — before this pod starts.
+- It NEVER migrates: no `migrate` arg and no migrate initContainer. The migrate
+  hook owns the schema; EnsureCurrent (#32) inside RunFromDB fails the pod fast
+  with the actionable `migrate up` message if the schema is behind, rather than
+  auto-migrating under a serving process.
+- Credentials come from the app Secret (ADR-0034): DISCORD_BOT_TOKEN plus the
+  three provider keys each adapter reads at request time (BYOK, ADR-0004). It
+  does NOT read GLYPHOXA_SECRET — loadSeededNPC takes no cipher and never
+  decrypts the sealed placeholder credentials; keeping the cipher key off this
+  long-lived pod keeps its blast radius small.
+- Health/metrics (#33, ADR-0032): the metrics-only listener serves /metrics for
+  scraping plus the /healthz liveness and /readyz readiness probes on the metrics
+  port. Liveness targets /healthz (process-up; it ignores DB health so a DB blip
+  can't get the pod killed); readiness targets /readyz (a DB ping — 200 only when
+  the schema is current and reachable). The port is advertised for Prometheus via
+  prometheus.io/* pod annotations (annotation-based discovery; no operator CRD).
+- GLYPHOXA_ONNX_LIB is set by the image (#31 Dockerfile points it at the bundled
+  libonnxruntime), so the pod relies on that by default and only overrides it
+  when voice.onnxLib is set.
+*/}}
+{{- if .Values.voice.enabled }}
+{{- $metricsAddr := printf ":%d" (int .Values.voice.metricsPort) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "glyphoxa.voice.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: voice
+spec:
+  # Voice is stateful per channel — a single replica by intent (see the header).
+  replicas: 1
+  # Recreate, NOT the default RollingUpdate: on a `helm upgrade` (e.g. an image
+  # bump) RollingUpdate would surge a second voice pod and keep the old one until
+  # the new is Ready. But /readyz only pings the DB — the Discord gateway is
+  # opened later in Run(), after the readiness server is already serving — so the
+  # new pod reports Ready on DB alone while the old pod still holds the gateway
+  # session. For the surge window TWO pods would mgr.Open the SAME guild+channel
+  # with the SAME token, the single-replica-per-channel violation this chart
+  # exists to prevent. Recreate tears the old pod down before the new one starts,
+  # so at most one pod ever holds the channel (at the cost of a brief gap on
+  # upgrade, which is correct for a single-session voice workload).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: voice
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: voice
+      annotations:
+        # Advertise the metrics-only listener for annotation-based Prometheus
+        # scrape discovery (ADR-0032). No operator CRD (ServiceMonitor) required.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.voice.metricsPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: voice
+          image: {{ include "glyphoxa.voice.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.voice.securityContext }}
+          # Hardened by default (overridable). The image runs as USER 65532 (#31)
+          # and GLYPHOXA_ONNX_LIB points at the bundled lib so the VAD never
+          # downloads/writes a runtime at boot — so a locked-down context holds.
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - -mode
+            - voice
+            - -guild
+            - {{ include "glyphoxa.voice.snowflake" (required "voice.guild is required when voice.enabled: the Discord guild (server) snowflake ID the bot joins." .Values.voice.guild) | quote }}
+            - -channel
+            - {{ include "glyphoxa.voice.snowflake" (required "voice.channel is required when voice.enabled: the Discord voice channel snowflake ID the bot joins." .Values.voice.channel) | quote }}
+            - -metrics-addr
+            - {{ $metricsAddr | quote }}
+          env:
+            # The in-cluster Postgres Service URL: RunFromDB loads the seeded NPC
+            # from it and /readyz pings through it. Same key the migrate/seed
+            # hooks used, so the host can never drift.
+            - name: GLYPHOXA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: database-url
+            # Required by runVoice to open the Discord gateway.
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: discord-bot-token
+            # Provider keys each adapter reads from its own env var at request
+            # time (BYOK, ADR-0004): ElevenLabs (STT + TTS), Gemini, Groq (LLM).
+            - name: ELEVENLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: elevenlabs-api-key
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: gemini-api-key
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: groq-api-key
+            # JSON logs for cluster log aggregation (ADR-0032).
+            - name: GLYPHOXA_LOG_FORMAT
+              value: json
+            {{- with .Values.voice.onnxLib }}
+            # Override the image's bundled libonnxruntime path only when set.
+            - name: GLYPHOXA_ONNX_LIB
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.voice.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: {{ .Values.voice.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.voice.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.voice.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.voice.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: {{ .Values.voice.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.voice.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.voice.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.voice.readinessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.voice.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
