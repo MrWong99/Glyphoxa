@@ -13,8 +13,8 @@ import (
 // appendProvenance returns notes with a dated "Re-recorded against <vendor>
 // <model> on <date>." line appended for reviewer context. The vendor is passed
 // explicitly because the three recorders hit different APIs — ElevenLabs for
-// STT/TTS, Anthropic for the LLM cassettes (ADR-0021's Anthropic/Ollama BYOK
-// matrix) — and the stamp must name the one that produced the bytes. The append
+// STT/TTS, Groq for the LLM cassettes (Llama 3.3 70B per ADR-0036) — and the
+// stamp must name the one that produced the bytes. The append
 // is idempotent within a day: re-running -tags=record twice on the same date
 // (the recorder loads the existing notes, which on the second run already carry
 // the line) must not accrete duplicate stamps. Re-records on a later date still
