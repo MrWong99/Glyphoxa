@@ -1,6 +1,6 @@
-# Glyphoxa Helm values — slice 1 (ADR-0034): pgvector Postgres + migrate hook +
-# seed Job. The voice Deployment (#36) adds its own keys under this same file
-# when it lands.
+# Glyphoxa Helm values — pgvector Postgres + migrate hook + seed Job (ADR-0034)
+# and the voice-mode Deployment (#36) that serves the seeded NPC in a Discord
+# voice channel.
 
 # The single Glyphoxa image (ADR-0034). `tag` defaults to the chart appVersion
 # when left empty so a chart bump pins a matching image.
@@ -10,13 +10,27 @@ image:
   pullPolicy: IfNotPresent
 
 # The single app secret (ADR-0004): a base64-encoded 32-byte credential-cipher
-# key. The seed Job (and later the voice workload) reads it as GLYPHOXA_SECRET to
-# seal/open the placeholder provider credentials it writes to the DB (the real
-# provider keys live in the OS keyring, NOT the DB). There is no default: an
-# unset value fails the render so a deploy can never silently run on a weak or
-# shared key. Generate one with `openssl rand -base64 32`. For real deploys,
-# prefer templating it from an external Secret over committing it to values.
+# key. The seed Job reads it as GLYPHOXA_SECRET to seal the placeholder provider
+# credentials it writes to the DB (the real provider keys live in env/the OS
+# keyring, NOT the DB). The voice Deployment does NOT read it — it never decrypts
+# those placeholders. There is no default: an unset value fails the render so a
+# deploy can never silently run on a weak or shared key. Generate one with
+# `openssl rand -base64 32`. For real deploys, prefer templating it from an
+# external Secret over committing it to values.
 appSecret: ""
+
+# Runtime credentials the voice Deployment (#36) reads from the app Secret. The
+# voice pod reads DISCORD_BOT_TOKEN to join the gateway and the three provider
+# keys at request time (BYOK, ADR-0004): ELEVENLABS_API_KEY (STT + TTS),
+# GEMINI_API_KEY, and GROQ_API_KEY (LLM). They are stored in the Secret, never
+# baked into the image (ADR-0034). Defaults are empty: voice mode fails without a
+# real Discord token, and a migrate/seed-only install (voice.enabled=false) needs
+# none of them. For real deploys, prefer templating them from an external Secret
+# over committing them to values.
+discordBotToken: ""
+elevenLabsApiKey: ""
+geminiApiKey: ""
+groqApiKey: ""
 
 # DB connection. By default the chart stands up its own in-cluster Postgres and
 # assembles the connection URL against that Service. Set `database.url` to point
@@ -69,6 +83,78 @@ seed:
   # yet still ahead of the non-hook serving workloads at weight 0.
   hookWeight: -4
   resources: {}
+
+# Voice-mode Deployment (#36): the single image run as `glyphoxa -mode voice`,
+# joining one Discord guild+channel and giving the seeded NPC a live voice loop.
+# It is a plain (non-hook) workload, so it applies after the migrate (-5) and
+# seed (-4) hooks — the schema is current and the NPC seeded before it starts.
+# It never migrates: EnsureCurrent (#32) fails the pod fast if the schema is
+# behind, rather than auto-migrating under a serving process.
+voice:
+  # Enable/disable the voice Deployment. Off by default: a bare `helm install`
+  # stands up the DB + schema + seed without needing live Discord/provider keys.
+  # Set true (and supply guild/channel + the credential values above) to serve.
+  enabled: true
+
+  # Discord guild (server) and voice channel snowflake IDs the bot joins. Both
+  # are required when voice.enabled; the render fails if either is empty so a
+  # voice pod can never start with the `-guild`/`-channel` flags unset.
+  #
+  # QUOTE THEM. A snowflake is a 64-bit ID that loses precision as a float, so a
+  # bare number (`--set voice.guild=111...`, or a YAML value without quotes) is
+  # silently truncated. The render rejects a non-string value with an actionable
+  # error; supply a quoted YAML string (guild: "111...") or use `--set-string`.
+  guild: ""
+  channel: ""
+
+  # Single replica, by intent: voice is stateful per channel (one gateway
+  # connection and one channel join), so two replicas would fight over the same
+  # voice channel. Not surfaced as a tunable — scaling out is a design change,
+  # not a value.
+
+  # Optional per-workload image override. When repository/tag are set here they
+  # win over the shared top-level `image`; otherwise the voice pod runs the same
+  # image as the migrate/seed Jobs (the common case — one image, ADR-0034).
+  image:
+    repository: ""
+    tag: ""
+
+  # Override the image's bundled GLYPHOXA_ONNX_LIB only if the libonnxruntime
+  # path differs from the #31 image default (/usr/local/lib/libonnxruntime.so).
+  # Empty leaves the image's own ENV in force.
+  onnxLib: ""
+
+  # The voice node's metrics-only HTTP listener (ADR-0032): /metrics for scraping
+  # plus the /healthz liveness and /readyz readiness probes (#33). The port is
+  # named `metrics` on the container and advertised via prometheus.io/* pod
+  # annotations for annotation-based scrape discovery (no operator CRD required).
+  metricsPort: 9090
+
+  # Resource requests/limits for the long-lived serving pod. The ONNX VAD and the
+  # audio path are not free, so both are set; tune for your cluster.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  # Probe tuning. Liveness targets /healthz (process-up, ignores DB health so a
+  # DB blip can't get the pod killed); readiness targets /readyz (DB ping — 200
+  # only when the schema is current and reachable). initialDelaySeconds gives the
+  # boot path (pool open → EnsureCurrent → NPC load → Discord join) room before
+  # the first probe.
+  livenessProbe:
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
 
 # Pod-level knobs shared by the workloads this chart renders.
 podSecurityContext: {}

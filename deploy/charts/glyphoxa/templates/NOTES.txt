@@ -15,6 +15,14 @@ What this release stands up (ADR-0034):
     the demo Tenant/Campaign/NPC with `glyphoxa seed`. The seed is idempotent, so
     it re-runs harmlessly on `helm upgrade`.
 {{- end }}
+{{- if .Values.voice.enabled }}
+  - A voice-mode Deployment (single replica) running
+      glyphoxa -mode voice -guild {{ .Values.voice.guild }} -channel {{ .Values.voice.channel }}
+    that joins the configured Discord voice channel and gives the seeded NPC a
+    live voice loop. It serves /healthz, /readyz, /metrics on port
+    {{ .Values.voice.metricsPort }}. It never migrates: if the schema is behind
+    it fails fast (EnsureCurrent) rather than serving.
+{{- end }}
 
 Verify the schema is current:
 
@@ -23,5 +31,15 @@ Verify the schema is current:
     --env GLYPHOXA_DATABASE_URL="$(kubectl -n {{ .Release.Namespace }} get secret {{ include "glyphoxa.secretName" . }} -o jsonpath='{.data.database-url}' | base64 -d)" \
     -- migrate status
 
-The voice Deployment is not part of this slice; it lands in a later issue (#36)
-and assumes this schema is current and the demo NPC seeded.
+{{- if .Values.voice.enabled }}
+
+Manual verification of the voice loop (cannot be automated — needs a live
+Discord gateway): with a REAL DISCORD_BOT_TOKEN and a guild/channel the bot can
+join, the voice pod becomes Available and joins the channel; speak to the NPC
+and it responds. With a placeholder token, the pod still reaches /readyz=200
+(DB connected, schema current) but then exits when the Discord join fails and
+the Deployment crashloops — that is expected without live credentials.
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.voice.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "glyphoxa.voice.fullname" . }} -f
+{{- end }}

@@ -60,6 +60,31 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-seed" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "glyphoxa.voice.fullname" -}}
+{{- printf "%s-voice" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Render a Discord snowflake ID (guild/channel) as an exact string, rejecting any
+non-string value with an actionable error.
+
+Snowflakes are 64-bit IDs whose magnitude exceeds float64's 53-bit integer
+precision, so a value parsed as a NUMBER is already truncated before any
+template logic runs — `111111111111111111` becomes `111111111111111104`. That
+happens at the YAML/`--set` boundary (a bare `--set voice.guild=111...`, or
+Helm's --reuse-values re-serializing through JSON), where int64 coercion can no
+longer recover the lost digits. So rather than silently deploy a pod with a
+wrong ID that fails confusingly at runtime, fail the render and tell the operator
+to quote it (a YAML string, or `--set-string`).
+*/}}
+{{- define "glyphoxa.voice.snowflake" -}}
+{{- if kindIs "string" . -}}
+{{- . -}}
+{{- else -}}
+{{- fail (printf "Discord snowflake ID %v must be a quoted string, not a number — a 64-bit ID loses precision as a float. Set it as a YAML string (guild: \"111...\") or use --set-string." .) -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 The single Glyphoxa image reference (ADR-0034). tag falls back to the chart
 appVersion so an unset tag still pins a matching image.
@@ -75,18 +100,30 @@ appVersion so an unset tag still pins a matching image.
 {{- end }}
 
 {{/*
+The voice Deployment's image. It defaults to the shared [glyphoxa.image] (one
+image, ADR-0034) but lets voice.image.repository/tag override either field
+independently — handy for pinning the voice pod to a build with the native opus/
+ONNX tags without moving the migrate/seed Jobs.
+*/}}
+{{- define "glyphoxa.voice.image" -}}
+{{- $repo := .Values.voice.image.repository | default .Values.image.repository -}}
+{{- $tag := .Values.voice.image.tag | default .Values.image.tag | default .Chart.AppVersion -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end }}
+
+{{/*
 Hook ordering weights. The DB resources (Secret, Service, StatefulSet) come up
-first, then the migrate Job, then the seed Job, then (later) the serving
-workloads. All are pre-install/pre-upgrade hooks EXCEPT the voice Deployment
-(#36), which is a plain resource applied after every hook — so the migration and
-seed always precede it. Weights sort ascending; lower runs first; Helm waits for
-each weight's hook Jobs to complete before the next, so the seed only starts
-once the migration has finished and the schema is current.
+first, then the migrate Job, then the seed Job, then the serving workloads. All
+are pre-install/pre-upgrade hooks EXCEPT the voice Deployment (#36), which is a
+plain resource applied after every hook — so the migration and seed always
+precede it. Weights sort ascending; lower runs first; Helm waits for each
+weight's hook Jobs to complete before the next, so the seed only starts once the
+migration has finished and the schema is current.
 
   -10  DB Secret + Postgres Service + StatefulSet
    -5  migrate Job
    -4  seed Job
-    0  (voice Deployment, #36 — not in this slice)
+    0  voice Deployment (#36 — a plain resource, applied after every hook)
 */}}
 {{- define "glyphoxa.dbHookWeight" -}}-10{{- end }}
 
