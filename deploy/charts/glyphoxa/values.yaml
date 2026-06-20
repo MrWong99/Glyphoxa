@@ -1,6 +1,6 @@
-# Glyphoxa Helm values — slice 1 (ADR-0034): pgvector Postgres + migrate hook.
-# The serving workloads (#35 seed Job, #36 voice Deployment) add their own keys
-# under this same file when they land.
+# Glyphoxa Helm values — slice 1 (ADR-0034): pgvector Postgres + migrate hook +
+# seed Job. The voice Deployment (#36) adds its own keys under this same file
+# when it lands.
 
 # The single Glyphoxa image (ADR-0034). `tag` defaults to the chart appVersion
 # when left empty so a chart bump pins a matching image.
@@ -8,6 +8,15 @@ image:
   repository: ghcr.io/mrwong99/glyphoxa
   tag: ""
   pullPolicy: IfNotPresent
+
+# The single app secret (ADR-0004): a base64-encoded 32-byte credential-cipher
+# key. The seed Job (and later the voice workload) reads it as GLYPHOXA_SECRET to
+# seal/open the placeholder provider credentials it writes to the DB (the real
+# provider keys live in the OS keyring, NOT the DB). There is no default: an
+# unset value fails the render so a deploy can never silently run on a weak or
+# shared key. Generate one with `openssl rand -base64 32`. For real deploys,
+# prefer templating it from an external Secret over committing it to values.
+appSecret: ""
 
 # DB connection. By default the chart stands up its own in-cluster Postgres and
 # assembles the connection URL against that Service. Set `database.url` to point
@@ -46,6 +55,19 @@ migrate:
   # Negative hook-weight orders the migration ahead of the non-hook serving
   # workloads (which apply at weight 0 / after hooks).
   hookWeight: -5
+  resources: {}
+
+# Seed hook Job: `glyphoxa seed` loads the demo Tenant/Campaign/NPC (+
+# provider_configs) the voice mode (#36) loads by default. Runs as a Helm
+# pre-install/pre-upgrade hook. The seed is idempotent on the demo Tenant name,
+# so re-running on upgrade neither errors nor duplicates data.
+seed:
+  # Enable/disable the seed Job. On by default so the demo NPC is present for the
+  # voice workload; set false for clusters that load NPCs by other means.
+  enabled: true
+  # -4 sorts AFTER the migrate Job (-5), so the schema is current before seeding,
+  # yet still ahead of the non-hook serving workloads at weight 0.
+  hookWeight: -4
   resources: {}
 
 # Pod-level knobs shared by the workloads this chart renders.

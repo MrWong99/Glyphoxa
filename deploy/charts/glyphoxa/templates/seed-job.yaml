@@ -1,0 +1,97 @@
+{{/*
+Seed hook Job — loads the demo NPC into the cluster DB (#35).
+
+It runs `glyphoxa seed` ONCE per install/upgrade as a Helm
+pre-install/pre-upgrade hook, after the migrate hook and before any serving
+workload, so the in-cluster DB holds the demo Tenant/Campaign/NPC (+
+provider_configs) that voice mode (#36) loads by default — without it the voice
+pod has no NPC and crashloops. The seed is idempotent on the demo Tenant name
+(it skips when the Tenant already exists), so the pre-upgrade run neither errors
+nor duplicates data on a chart bump.
+
+- hook + hook-weight: pre-install,pre-upgrade at weight -4 — after the migrate
+  Job (-5), so the schema is current before seeding, yet still ahead of the
+  non-hook serving workloads at weight 0. Helm waits for each weight's hook Jobs
+  to complete before the next, so the migration has finished when the seed runs.
+- hook-delete-policy before-hook-creation: the prior run's Job is cleared before
+  re-running on upgrade, so a leftover completed Job never blocks the new one and
+  its logs stay around until the next upgrade for inspection.
+- initContainer: like the migrate hook, the seed Pod can start before Postgres
+  accepts connections, so an initContainer blocks on pg_isready against the
+  Postgres Service before the seed container runs.
+- GLYPHOXA_DATABASE_URL comes from the DB Secret, pointed at the in-cluster
+  Postgres Service DNS; GLYPHOXA_SECRET (ADR-0004) comes from the same Secret and
+  is the credential-cipher key the seed uses to seal placeholder provider
+  credentials (the real keys live in the OS keyring, not the DB).
+*/}}
+{{- if .Values.seed.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "glyphoxa.seed.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ .Values.seed.hookWeight | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: seed
+    spec:
+      restartPolicy: Never
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "glyphoxa.postgres.image" . }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              until pg_isready -h {{ include "glyphoxa.postgres.fullname" . }} -p {{ .Values.postgres.service.port }} -U {{ .Values.database.user | quote }};
+              do echo "waiting for postgres at {{ include "glyphoxa.postgres.fullname" . }}:{{ .Values.postgres.service.port }}"; sleep 2; done
+      {{- end }}
+      containers:
+        - name: seed
+          image: {{ include "glyphoxa.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - seed
+          env:
+            - name: GLYPHOXA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: database-url
+            - name: GLYPHOXA_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: app-secret
+          {{- with .Values.seed.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

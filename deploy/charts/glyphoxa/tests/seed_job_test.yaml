@@ -1,0 +1,103 @@
+suite: seed hook Job
+# The seed Job loads the demo Tenant/Campaign/NPC (+ provider_configs) the voice
+# mode (#36) loads by default — without it the voice pod has no NPC and
+# crashloops. It runs `glyphoxa seed` from the single image as a Helm
+# pre-install/pre-upgrade hook, ordered AFTER the migrate hook (so the schema is
+# current) and before the serving workloads. It reads GLYPHOXA_DATABASE_URL from
+# the DB Secret and GLYPHOXA_SECRET (the ADR-0004 credential cipher key) from the
+# same Secret. The seed code is idempotent on the demo Tenant name, so re-running
+# on upgrade is safe.
+templates:
+  - templates/seed-job.yaml
+tests:
+  - it: renders a Job
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-seed
+
+  - it: is a pre-install AND pre-upgrade Helm hook
+    # pre-upgrade matters: re-seeding on upgrade is safe (idempotent) and keeps
+    # the demo NPC present after a chart bump.
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+
+  - it: runs AFTER the migrate hook but before serving workloads
+    # migrate is weight -5; the seed at -4 sorts after it (so the schema exists
+    # before seeding) yet still ahead of the non-hook serving workloads at
+    # weight 0. We pin the exact value the template uses.
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-4"
+
+  - it: cleans up the prior hook Job before re-running on upgrade
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+
+  - it: runs `glyphoxa seed` from the configured image
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - seed
+
+  - it: honours an overridden image repository and tag
+    set:
+      image:
+        repository: ghcr.io/example/glyphoxa
+        tag: v9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/glyphoxa:v9.9.9
+
+  - it: sources GLYPHOXA_DATABASE_URL from the DB connection Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: database-url
+
+  - it: sources GLYPHOXA_SECRET (the credential cipher key) from the Secret
+    # The seed seals placeholder provider credentials with this key (ADR-0004);
+    # it must come from a Secret, never be baked into the template.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: app-secret
+
+  - it: waits for Postgres to accept connections before seeding
+    # Like the migrate hook, the seed Pod can start before Postgres is reachable;
+    # an initContainer blocking on pg_isready keeps the run deterministic.
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: pgvector/pgvector:pg17
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[-1]
+          pattern: pg_isready.*RELEASE-NAME-glyphoxa-postgres
+
+  - it: never restarts a completed seed pod
+    asserts:
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never

@@ -56,6 +56,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-migrate" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "glyphoxa.seed.fullname" -}}
+{{- printf "%s-seed" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{/*
 The single Glyphoxa image reference (ADR-0034). tag falls back to the chart
 appVersion so an unset tag still pins a matching image.
@@ -72,14 +76,17 @@ appVersion so an unset tag still pins a matching image.
 
 {{/*
 Hook ordering weights. The DB resources (Secret, Service, StatefulSet) come up
-first, then the migrate Job, then (later) the serving workloads. All are
-pre-install/pre-upgrade hooks EXCEPT the serving workloads (#35/#36), which are
-plain resources applied after every hook — so the migration always precedes
-them. Weights sort ascending; lower runs first.
+first, then the migrate Job, then the seed Job, then (later) the serving
+workloads. All are pre-install/pre-upgrade hooks EXCEPT the voice Deployment
+(#36), which is a plain resource applied after every hook — so the migration and
+seed always precede it. Weights sort ascending; lower runs first; Helm waits for
+each weight's hook Jobs to complete before the next, so the seed only starts
+once the migration has finished and the schema is current.
 
   -10  DB Secret + Postgres Service + StatefulSet
    -5  migrate Job
-    0  (serving workloads, not in this slice)
+   -4  seed Job
+    0  (voice Deployment, #36 — not in this slice)
 */}}
 {{- define "glyphoxa.dbHookWeight" -}}-10{{- end }}
 
