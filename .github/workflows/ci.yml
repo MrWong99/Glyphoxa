@@ -160,10 +160,13 @@ jobs:
       # template-time correctness only. The real cluster e2e (helm install →
       # Postgres Ready → migrate Job Completed) is issue #37's job and is NOT run
       # here, so an unrelated PR's chart feedback stays seconds, not minutes.
+      # Helm >= 3.18 is required: helm-unittest v1.1.1's plugin.yaml uses the
+      # `platformHooks` field, which older Helm (<= 3.17) refuses to parse,
+      # leaving the plugin installed-but-unusable. Keep these two pins in step.
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
-          version: v3.16.3
+          version: v3.18.4
 
       # helm-unittest renders the templates and asserts the hook ordering,
       # images, and Secret wiring (deploy/charts/glyphoxa/tests/*). Pinned (not
