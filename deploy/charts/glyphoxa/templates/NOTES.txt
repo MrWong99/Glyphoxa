@@ -10,6 +10,11 @@ What this release stands up (ADR-0034):
 {{- end }}
   - A migrate Job run as a pre-install/pre-upgrade hook that applied the schema
     with `glyphoxa migrate up` before this release became ready.
+{{- if .Values.seed.enabled }}
+  - A seed Job run as a pre-install/pre-upgrade hook (after migrate) that loaded
+    the demo Tenant/Campaign/NPC with `glyphoxa seed`. The seed is idempotent, so
+    it re-runs harmlessly on `helm upgrade`.
+{{- end }}
 
 Verify the schema is current:
 
@@ -18,5 +23,5 @@ Verify the schema is current:
     --env GLYPHOXA_DATABASE_URL="$(kubectl -n {{ .Release.Namespace }} get secret {{ include "glyphoxa.secretName" . }} -o jsonpath='{.data.database-url}' | base64 -d)" \
     -- migrate status
 
-The serving workloads (seed Job, voice Deployment) are not part of this slice;
-they land in later issues and assume this schema is already current.
+The voice Deployment is not part of this slice; it lands in a later issue (#36)
+and assumes this schema is current and the demo NPC seeded.
