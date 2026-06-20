@@ -1,0 +1,131 @@
+{{- if .Values.postgres.enabled }}
+{{/*
+pgvector Postgres as a plain StatefulSet (ADR-0034 scopes the CNPG operator out
+of slice 1). A volumeClaimTemplate gives the single replica durable storage; the
+headless Service (postgres-service.yaml) gives it stable DNS. The migrate hook
+Job and (later) the serving workloads connect through that Service.
+
+Credentials come from the DB Secret so they cannot drift from the assembled
+connection URL. PGDATA points at a subdirectory of the mount because the
+pgvector/postgres image refuses to initialise into a volume root that carries a
+lost+found directory (a common PVC backing-store artifact).
+
+It is a pre-install/pre-upgrade hook (weight -10) so the database is up before
+the migrate hook (weight -5) and any serving workload. Helm does not wait for
+non-Job hooks to become Ready — it only waits for them to be created — so the
+migrate Job's own pg_isready initContainer is what blocks until Postgres
+actually accepts connections.
+
+before-hook-creation means an upgrade deletes and recreates this StatefulSet.
+The data survives: a StatefulSet delete does NOT garbage-collect the PVCs its
+volumeClaimTemplate created, so the recreated pod reattaches the same volume.
+The cost is a brief Postgres restart per upgrade, acceptable for the single
+in-cluster instance this slice ships (operators wanting zero-downtime point
+database.url at an externally managed Postgres and set postgres.enabled=false).
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "glyphoxa.postgres.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ include "glyphoxa.dbHookWeight" . | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  replicas: 1
+  serviceName: {{ include "glyphoxa.postgres.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ include "glyphoxa.postgres.image" . }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: database
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          {{- with .Values.postgres.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.postgres.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}
+{{- end }}

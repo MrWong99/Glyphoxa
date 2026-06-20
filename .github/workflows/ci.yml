@@ -150,6 +150,57 @@ jobs:
       - name: Container smoke test
         run: ./scripts/container-smoke.sh glyphoxa:smoke
 
+  helm:
+    name: helm chart (lint + unittest + kubeconform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The fast, cluster-free gate for the deploy chart (ADR-0034, issue #34):
+      # template-time correctness only. The real cluster e2e (helm install →
+      # Postgres Ready → migrate Job Completed) is issue #37's job and is NOT run
+      # here, so an unrelated PR's chart feedback stays seconds, not minutes.
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      # helm-unittest renders the templates and asserts the hook ordering,
+      # images, and Secret wiring (deploy/charts/glyphoxa/tests/*). Pinned (not
+      # @latest) so a plugin release can't silently change what CI enforces.
+      - name: Install helm-unittest plugin
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v1.1.1
+
+      # kubeconform validates the rendered manifests against the upstream
+      # Kubernetes JSON schemas — the structural gate `helm lint`/unittest don't
+      # provide. Pinned release binary, fetched without piping a script to a shell.
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
+      - name: Helm lint
+        run: helm lint deploy/charts/glyphoxa
+
+      - name: Helm unittest
+        run: helm unittest deploy/charts/glyphoxa
+
+      # Render every value path the chart supports and schema-validate each.
+      # -strict rejects unknown fields; the in-cluster path (4 docs) and the
+      # external-DB path (postgres disabled, 2 docs) are both checked so neither
+      # render branch can regress into an invalid manifest.
+      - name: Render + kubeconform
+        run: |
+          helm template glyphoxa deploy/charts/glyphoxa \
+            | kubeconform -strict -summary -kubernetes-version 1.30.0
+          helm template glyphoxa deploy/charts/glyphoxa \
+            --set postgres.enabled=false \
+            --set database.url='postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require' \
+            | kubeconform -strict -summary -kubernetes-version 1.30.0
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

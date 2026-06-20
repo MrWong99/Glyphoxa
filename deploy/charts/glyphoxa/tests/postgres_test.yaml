@@ -1,0 +1,101 @@
+suite: pgvector Postgres
+# ADR-0034 scopes slice 1 to a plain StatefulSet pgvector Postgres (NOT the CNPG
+# operator) with a PVC and a Service whose DNS the migrate Job targets.
+templates:
+  - templates/postgres-statefulset.yaml
+  - templates/postgres-service.yaml
+tests:
+  - it: runs the pgvector/pgvector:pg17 image
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - isKind:
+          of: StatefulSet
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: pgvector/pgvector:pg17
+
+  - it: comes up as a hook ahead of the migrate Job
+    # weight -10 < the migrate Job's -5, so the database exists before the
+    # migration connects; same hook events as the migrate Job.
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+
+  - it: is omitted entirely when an external database is used
+    template: templates/postgres-statefulset.yaml
+    set:
+      postgres:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: persists data on a PVC volume claim template
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - equal:
+          path: spec.volumeClaimTemplates[0].spec.resources.requests.storage
+          value: 8Gi
+      - contains:
+          path: spec.volumeClaimTemplates[0].spec.accessModes
+          content: ReadWriteOnce
+
+  - it: binds to the headless Service so the StatefulSet has stable DNS
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - equal:
+          path: spec.serviceName
+          value: RELEASE-NAME-glyphoxa-postgres
+
+  - it: sources its credentials and database name from the DB Secret
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: password
+
+  - it: declares a readiness probe via pg_isready
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[-1]
+          pattern: pg_isready
+
+  - it: exposes a Service the migrate Job and serving workloads resolve by DNS
+    template: templates/postgres-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-postgres
+      - equal:
+          path: spec.ports[0].port
+          value: 5432
+
+  - it: is a headless Service for stable per-pod DNS
+    template: templates/postgres-service.yaml
+    asserts:
+      - equal:
+          path: spec.clusterIP
+          value: None
+
+  - it: comes up as a hook ahead of the migrate Job
+    template: templates/postgres-service.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"

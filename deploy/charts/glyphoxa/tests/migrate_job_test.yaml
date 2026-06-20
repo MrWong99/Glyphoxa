@@ -1,0 +1,86 @@
+suite: migrate hook Job
+# The migrate Job is the heart of slice 1 (ADR-0034): it runs `glyphoxa migrate
+# up` from the single image as a Helm pre-install/pre-upgrade hook, ordered to
+# run before any serving workload, and reads its connection string from the DB
+# Secret pointed at the in-cluster Postgres Service.
+templates:
+  - templates/migrate-job.yaml
+tests:
+  - it: renders a Job
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-migrate
+
+  - it: is a pre-install AND pre-upgrade Helm hook
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+
+  - it: carries a hook-weight that orders it before serving workloads
+    # Serving workloads (#35 seed Job, #36 voice Deployment) are NOT hooks and
+    # so apply at weight 0 / after hooks; a negative weight guarantees the
+    # migration runs first. We pin the exact value the templates use.
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-5"
+
+  - it: cleans up the prior hook Job before re-running on upgrade
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+
+  - it: runs `glyphoxa migrate up` from the configured image
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - migrate
+            - up
+
+  - it: honours an overridden image repository and tag
+    set:
+      image:
+        repository: ghcr.io/example/glyphoxa
+        tag: v9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/glyphoxa:v9.9.9
+
+  - it: sources GLYPHOXA_DATABASE_URL from the DB connection Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: database-url
+
+  - it: waits for Postgres to accept connections before migrating
+    # Hook Jobs can start before Postgres is reachable; an initContainer that
+    # blocks on pg_isready against the Postgres Service makes the migrate run
+    # deterministic rather than relying solely on the Job backoff.
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: pgvector/pgvector:pg17
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[-1]
+          pattern: pg_isready.*RELEASE-NAME-glyphoxa-postgres
+
+  - it: never restarts a completed migrate pod
+    asserts:
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never
