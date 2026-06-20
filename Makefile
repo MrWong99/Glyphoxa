@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint docker-build docker-smoke
 
 # Build voice engine
 build:
@@ -133,3 +133,18 @@ proto-lint:
 # Clean build artifacts
 clean:
 	rm -rf bin/ coverage.out
+
+# --- Container image (ADR-0034) --------------------------------------------
+# One multi-stage image for the single binary; `mode`/config are runtime args.
+# The native build (whisper.cpp + libopus + libdave + CGO) is SLOW on a cold
+# layer cache — expect several minutes on first build.
+DOCKER_IMAGE ?= glyphoxa:smoke
+
+docker-build:
+	docker build -t $(DOCKER_IMAGE) .
+
+# Run the container smoke test (issue #31) against $(DOCKER_IMAGE). Asserts the
+# CLI works, ldd resolves every native dep, the bundled ONNX runtime exists, and
+# the process is non-root. Build the image first (make docker-build).
+docker-smoke:
+	./scripts/container-smoke.sh $(DOCKER_IMAGE)

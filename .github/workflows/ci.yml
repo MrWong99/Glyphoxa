@@ -118,6 +118,38 @@ jobs:
       - name: Cassette latency benchmark (regression gate)
         run: go test -race -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
 
+  image:
+    name: container image (build + smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # buildx + layer caching keeps the slow native build (whisper.cpp +
+      # libopus + libdave + CGO) off the critical path on warm caches. This is a
+      # SEPARATE job from the fast `test` gate (ADR-0033): the heavy image build
+      # must not slow an unrelated PR's unit feedback.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the single image (ADR-0034) and LOAD it into the local daemon so
+      # the smoke test can `docker run` it. No push on PRs — publishing happens
+      # only on release (release-image.yml).
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: glyphoxa:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The executable acceptance spec for issue #31: migrate --help exits 0;
+      # ldd resolves every native lib (libopus, libdave, libonnxruntime — no
+      # "not found"); the bundled ONNX runtime exists at $GLYPHOXA_ONNX_LIB; and
+      # the process runs as a non-root uid.
+      - name: Container smoke test
+        run: ./scripts/container-smoke.sh glyphoxa:smoke
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

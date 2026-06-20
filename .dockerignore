@@ -38,3 +38,17 @@ examples/
 LICENSE
 CONTRIBUTING.md
 SECURITY.md
+
+# Test fixtures: audio clips + recorded cassettes are not needed to compile the
+# binary (the production assets — Silero model, SQL migrations — are go:embed'd
+# from pkg/ and internal/, not from tests/). Keeping them out trims the build
+# context the daemon has to ship.
+tests/
+
+# Agent worktrees and local Claude state never belong in the image context.
+.claude/
+
+# The Dockerfile itself and the smoke-test harness aren't build inputs.
+Dockerfile
+.dockerignore
+scripts/container-smoke.sh
