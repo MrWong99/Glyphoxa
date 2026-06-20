@@ -35,6 +35,16 @@ func RunMigrate(ctx context.Context, args []string) error {
 		return fmt.Errorf("migrate: missing subcommand")
 	}
 
+	// Help is a pure documentation path: it must succeed with no database and
+	// no network (e.g. `docker run … glyphoxa migrate --help` in a fresh image),
+	// so it short-circuits before the DSN check. Usage goes to stdout — it's the
+	// requested output here, not an error diagnostic.
+	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Println(migrateUsage)
+		return nil
+	}
+
 	dsn := os.Getenv("GLYPHOXA_DATABASE_URL")
 	if dsn == "" {
 		dsn = os.Getenv("DATABASE_URL")

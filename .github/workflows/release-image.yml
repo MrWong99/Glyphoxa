@@ -1,0 +1,69 @@
+name: release-image
+
+# Publishes the single Glyphoxa OCI image (ADR-0034) to GitHub Container
+# Registry on a release tag. The image tags match the goreleaser footer
+# (.goreleaser.yml: `docker pull ghcr.io/mrwong99/glyphoxa:v{{ .Version }}`) and
+# the issue-#31 requirement that the published image carry version + git SHA.
+#
+# Triggered by the same `v*` tags goreleaser releases on, so the binary archives
+# (goreleaser) and the container image are cut from one tag. The `zhi-*` tags
+# goreleaser ignores are excluded here too, for parity.
+on:
+  push:
+    tags:
+      - "v*"
+      - "!zhi-*"
+
+# Pushing to ghcr needs `packages: write`; `contents: read` to check out.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: build + push image to ghcr
+    runs-on: ubuntu-latest
+    # Don't attempt to publish from forks (no package write, no intent).
+    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # docker/metadata-action derives the tag set from the git ref:
+      #   - type=ref,event=tag → the literal tag, e.g. v1.2.3 (matches the
+      #     goreleaser footer's ghcr.io/mrwong99/glyphoxa:v1.2.3).
+      #   - type=sha,prefix= → the short git SHA, e.g. a1b2c3d (the "+ git SHA"
+      #     half of issue #31's "version + git SHA").
+      #   - latest only on a non-prerelease tag.
+      # The repo is lowercased by the action, so MrWong99 → mrwong99 to match the
+      # goreleaser footer's ghcr.io/mrwong99/glyphoxa.
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/glyphoxa
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The PR `image` job (ci.yml) primes this gha cache, so the release
+          # build reuses the slow native layers when the source matches.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
