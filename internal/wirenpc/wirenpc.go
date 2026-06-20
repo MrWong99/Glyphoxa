@@ -11,6 +11,7 @@ package wirenpc
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the database/sql "pgx" driver for the goose-backed schema check
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -177,6 +179,15 @@ func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
 	}
 	defer pool.Close()
 
+	// Fail fast on a stale schema BEFORE any other DB interaction (ADR-0031):
+	// serving Modes (voice) never auto-migrate, so a DB behind the embedded
+	// migrations must refuse to start with the actionable `migrate up` message
+	// rather than running queries against a schema the code no longer matches.
+	// This runs after the pool opens and before loadSeededNPC (the first query).
+	if err := ensureSchemaCurrent(ctx, dsn); err != nil {
+		return err
+	}
+
 	npc, err := loadSeededNPC(ctx, storage.New(pool))
 	if err != nil {
 		return err
@@ -185,6 +196,26 @@ func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
 
 	cfg.npc = npc
 	return Run(ctx, cfg)
+}
+
+// ensureSchemaCurrent verifies the DB at dsn is migrated to the latest embedded
+// schema version, returning the storage layer's actionable version-mismatch
+// error (verbatim) if it is behind. This is the ADR-0031 fail-fast guard for
+// serving Modes: [RunFromDB] calls it once at startup, after the pool opens and
+// before any other query, so a process can never serve against a stale schema.
+//
+// [storage.EnsureCurrent] needs a database/sql handle on the pgx stdlib driver
+// (goose's API; the app's own queries use the pgxpool). That handle exists only
+// for this check, so it is opened from the same dsn and closed immediately —
+// keeping the seam free of the live voice loop and Discord, so it is testable on
+// its own against a real Postgres.
+func ensureSchemaCurrent(ctx context.Context, dsn string) error {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("wirenpc: open schema-check handle: %w", err)
+	}
+	defer db.Close()
+	return storage.EnsureCurrent(ctx, db)
 }
 
 // Run builds and runs the live NPC voice loop until ctx is cancelled. It joins
