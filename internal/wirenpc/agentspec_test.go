@@ -160,10 +160,11 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// assert it succeeds, and that the matcher routes a named utterance to the
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
-	conv, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), loaded, ttseleven.New(""), nil)
+	conv, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), loaded, ttseleven.New(""), nil)
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
 	}
+	defer cleanup()
 	if conv == nil {
 		t.Fatal("buildConversation returned a nil Conversation")
 	}
@@ -175,6 +176,37 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	if got := routed[0].Target.AgentID; got != loaded.agentID {
 		t.Errorf("routed AgentID = %q, want loaded agentID %q (matcher/Persona disagree)", got, loaded.agentID)
 	}
+}
+
+// TestBuildConversation_CleanupDoesNotDestroyEngine guards issue #44's reconnect
+// loop against a regression that destroys the process-global Silero/ONNX
+// environment. cleanup() must release only the per-cycle VAD session, NEVER the
+// shared engine: silero.Engine wraps an ONNX environment initialised once and
+// never re-initialised, so closing it would tear ONNX down for the whole process
+// and every later reconnect's NewSession would fail — the NPC would go
+// permanently deaf after the first Discord drop. Build → cleanup → build again
+// (mimicking one reconnect cycle) must both succeed. Real Silero, so integration.
+func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
+	npc := hardcodedNPC()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	conv1, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npc, ttseleven.New(""), nil)
+	if err != nil {
+		t.Fatalf("first buildConversation: %v", err)
+	}
+	if conv1 == nil {
+		t.Fatal("first buildConversation returned a nil Conversation")
+	}
+	cleanup1() // end of reconnect cycle 1
+
+	conv2, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npc, ttseleven.New(""), nil)
+	if err != nil {
+		t.Fatalf("second buildConversation after cleanup: %v — cleanup destroyed the shared ONNX env?", err)
+	}
+	if conv2 == nil {
+		t.Fatal("second buildConversation returned a nil Conversation")
+	}
+	cleanup2()
 }
 
 // TestSeedIdempotent asserts a second SeedNPC is a no-op (the slice re-seeds on
