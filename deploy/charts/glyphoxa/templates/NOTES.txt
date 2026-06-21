@@ -36,9 +36,11 @@ Verify the schema is current:
 Manual verification of the voice loop (cannot be automated — needs a live
 Discord gateway): with a REAL DISCORD_BOT_TOKEN and a guild/channel the bot can
 join, the voice pod becomes Available and joins the channel; speak to the NPC
-and it responds. With a placeholder token, the pod still reaches /readyz=200
-(DB connected, schema current) but then exits when the Discord join fails and
-the Deployment crashloops — that is expected without live credentials.
+and it responds. With a placeholder token, the pod still becomes Available and
+serves /readyz=200 (DB connected, schema current) but cannot join Discord: it
+keeps the process up and retries the join with backoff (issue #44), logging
+repeated "voice connection failed; reconnecting" warnings rather than
+crashlooping. The channel join itself is the manual, live-credential check.
 
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.voice.fullname" . }}
   kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "glyphoxa.voice.fullname" . }} -f

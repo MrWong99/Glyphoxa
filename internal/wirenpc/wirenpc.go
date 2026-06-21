@@ -97,6 +97,72 @@ const (
 	floorCoalesceWindow = 600 * time.Millisecond
 )
 
+// reconnectPolicy bounds how the live voice loop backs off between failed or
+// dropped Discord connections (issue #44). A serving voice pod must not
+// crashloop because Discord is briefly unreachable: Run keeps serving /healthz
+// and /readyz (DB-backed) and retries on this schedule instead of exiting.
+// Capped exponential, no jitter — one pod reconnecting to one gateway has no
+// thundering herd to spread.
+type reconnectPolicy struct {
+	initial time.Duration
+	max     time.Duration
+	factor  float64
+	// sleep blocks for d or until ctx is cancelled (returns ctx.Err() if
+	// cancelled first). Injected so tests drive the backoff without real waits.
+	sleep func(ctx context.Context, d time.Duration) error
+}
+
+func defaultReconnectPolicy() reconnectPolicy {
+	return reconnectPolicy{initial: time.Second, max: 30 * time.Second, factor: 2, sleep: sleepCtx}
+}
+
+// sleepCtx blocks for d or until ctx is cancelled, returning ctx.Err() on
+// cancel. A timer (not time.Sleep) so a cancelled ctx returns immediately.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func nextDelay(d time.Duration, p reconnectPolicy) time.Duration {
+	next := time.Duration(float64(d) * p.factor)
+	if next > p.max {
+		return p.max
+	}
+	return next
+}
+
+// runWithReconnect calls attempt repeatedly, keeping the process alive across
+// failed or dropped Discord connections. It returns nil (clean shutdown) ONLY
+// when ctx is cancelled; every other return from attempt — an error OR a clean
+// session-close (nil) — is a lost connection and triggers a backed-off
+// reconnect. attempt is handed a connected callback it calls once the join
+// succeeds, which resets the backoff so a long-lived session that later drops
+// reconnects promptly instead of inheriting a grown delay.
+func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, attempt func(ctx context.Context, connected func()) error) error {
+	delay := p.initial
+	for {
+		err := attempt(ctx, func() { delay = p.initial })
+		if ctx.Err() != nil {
+			return nil // shutdown requested — stop retrying, exit clean (fixes SIGTERM->exit1)
+		}
+		if err != nil {
+			log.Warn("voice connection failed; reconnecting", "err", err, "backoff", delay)
+		} else {
+			log.Info("voice session ended; reconnecting", "backoff", delay)
+		}
+		if serr := p.sleep(ctx, delay); serr != nil {
+			return nil // ctx cancelled during backoff — clean shutdown
+		}
+		delay = nextDelay(delay, p)
+	}
+}
+
 // BartPersona is the Character NPC Persona (CONTEXT.md "Persona") for the MVP
 // slice. Exported so the `seed` command writes the same Persona text the in-code
 // NPC used, and the DB-load equivalence test can compare against it.
@@ -240,6 +306,9 @@ func Run(ctx context.Context, cfg Config) error {
 		log = slog.New(slog.DiscardHandler)
 	}
 
+	// Config validation is fatal: a bad guild/channel ID can never succeed, so
+	// retrying would crashloop slowly. Parse before the reconnect loop so only
+	// genuinely transient connection failures are retried.
 	guild, err := snowflake.Parse(cfg.Guild)
 	if err != nil {
 		return fmt.Errorf("wirenpc: parse guild ID %q: %w", cfg.Guild, err)
@@ -248,6 +317,41 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("wirenpc: parse channel ID %q: %w", cfg.Channel, err)
 	}
+
+	// Keep serving across a briefly unreachable or dropped Discord instead of
+	// exiting (issue #44): cmd/glyphoxa's metrics server (which carries /healthz
+	// and the DB-backed /readyz) lives for ctx independently of this loop, so a
+	// reconnecting voice loop lets the Deployment reach Available without live
+	// Discord creds. Each cycle is one connectAndServe; runWithReconnect backs
+	// off between cycles and returns clean only when ctx is cancelled.
+	//
+	// Note: disgo runs its own bounded reconnect during OpenGateway, so this
+	// policy governs the inter-cycle gap and post-join drops (a session that joins
+	// then later disconnects), not the initial dial retries disgo already handles.
+	return runWithReconnect(ctx, log, defaultReconnectPolicy(),
+		func(ctx context.Context, connected func()) error {
+			return connectAndServe(ctx, cfg, guild, channel, log, connected)
+		})
+}
+
+// connectAndServe runs ONE connect-and-serve cycle: build the Discord client,
+// open the gateway, join the channel, assemble the pipeline, and pump audio
+// until ctx is cancelled or the connection drops. It calls connected() once the
+// join succeeds, which resets the caller's backoff so a long-lived session that
+// later drops reconnects promptly. Any error — or a clean return (a dropped
+// gateway often reports none) — flows back to runWithReconnect, which decides
+// whether to retry; only a cancelled ctx ends the loop.
+func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func()) error {
+	// Per-cycle context: everything this cycle spawns — the stage subscriber's
+	// TTL-sweep goroutine (stageSub.Start), the Discord gateway, and the audio
+	// loop — is bound to cycleCtx, so the deferred cancel reaps it at cycle end.
+	// Without this a flapping Discord (issue #44) would leak one sweeper goroutine
+	// per reconnect: the outer ctx only ends at process shutdown. cycleCtx is a
+	// child of ctx, so a cancelled process still unwinds promptly (pipe.Run et al.
+	// observe the cancellation), and runWithReconnect checks the OUTER ctx to
+	// decide shutdown vs reconnect.
+	cycleCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Discord client: DAVE/MLS is wired at construction (it cannot be enabled
 	// after disgo builds its VoiceManager). DaveOption() is a no-op stub unless
@@ -273,7 +377,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer client.Close(context.Background())
 
-	if err := client.OpenGateway(ctx); err != nil {
+	if err := client.OpenGateway(cycleCtx); err != nil {
 		return fmt.Errorf("wirenpc: open gateway: %w", err)
 	}
 
@@ -284,11 +388,15 @@ func Run(ctx context.Context, cfg Config) error {
 	)
 	defer mgr.Close()
 
-	sess, err := mgr.Open(ctx, guild, channel)
+	sess, err := mgr.Open(cycleCtx, guild, channel)
 	if err != nil {
 		return fmt.Errorf("wirenpc: join voice channel: %w", err)
 	}
 	defer sess.Close()
+	// The join succeeded: reset the reconnect backoff so a session that runs for
+	// a while and only later drops reconnects on the initial delay, not a delay
+	// grown by earlier connect failures (issue #44).
+	connected()
 	log.Info("joined voice channel", "guild", guild, "channel", channel, "npc", cfg.npc.name)
 
 	// One Codec instance serves both directions: DecodeInbound (called from the
@@ -333,18 +441,22 @@ func Run(ctx context.Context, cfg Config) error {
 	// StageMetrics (keyless) makes the subscriber a no-op via observe.Discard.
 	stageSub := observe.NewStageSubscriber(cfg.StageMetrics, observe.WithTurnLog(log))
 	defer stageSub.Subscribe(bus)()
-	stageSub.Start(ctx)
+	stageSub.Start(cycleCtx)
 
-	conv, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
+	conv, cleanup, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
+	// cleanup closes the per-cycle VAD session (not the shared Silero engine — see
+	// buildConversation). Without it each reconnect cycle (issue #44) would leak a
+	// Silero session that nothing ever closed.
+	defer cleanup()
 
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
 	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with
 	// the guild and shares the run's MetricsRecorder.
 	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics)
-	return pipe.Run(ctx, sess)
+	return pipe.Run(cycleCtx, sess)
 }
 
 // npcMatcher builds the Address Detection matcher for the NPC. This Campaign has
@@ -416,14 +528,14 @@ func npcVoice() tts.Voice {
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
 
 	engine, err := silero.New(silero.WithMinSilenceFrames(vadMinSilenceFrames))
 	if err != nil {
-		return nil, fmt.Errorf("init Silero VAD: %w", err)
+		return nil, nil, fmt.Errorf("init Silero VAD: %w", err)
 	}
 	vadSession, err := engine.NewSession(vad.Config{
 		SampleRate:       vadSampleRate,
@@ -432,7 +544,18 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		SilenceThreshold: 0.35,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open VAD session: %w", err)
+		return nil, nil, fmt.Errorf("open VAD session: %w", err)
+	}
+	// cleanup releases ONLY the per-cycle VAD session (its ONNX inferencer), which
+	// a reconnect cycle (issue #44) would otherwise leak on every loop. It must
+	// NOT close the engine: silero.Engine wraps the process-global ONNX
+	// environment (initialised once via sync.Once and never re-initialised), so
+	// engine.Close() → DestroyEnvironment would tear ONNX down for the whole
+	// process — the next cycle's NewSession would fail and the NPC would go
+	// permanently deaf after the first Discord drop. The engine is a singleton: it
+	// lives for the process and is never closed here. session.Close is idempotent.
+	cleanup := func() {
+		_ = vadSession.Close()
 	}
 	vadStage := orchestrator.NewVAD(bus, vadSession)
 
@@ -497,5 +620,5 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 			log.Warn("voice pipeline stage failed", "err", err)
 		}),
 	)
-	return conv, nil
+	return conv, cleanup, nil
 }
