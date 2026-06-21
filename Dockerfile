@@ -25,7 +25,7 @@
 # you the version drifted, so keep these in lockstep.
 # ---------------------------------------------------------------------------
 ARG GO_VERSION=1.26
-ARG ONNX_VERSION=1.25.1
+ARG ONNX_VERSION=1.26.0
 ARG DAVE_VERSION=v1.1.0
 
 # ===========================================================================

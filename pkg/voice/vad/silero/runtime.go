@@ -18,7 +18,11 @@ import (
 
 // onnxRuntimeVersion pins the ONNX Runtime release we resolve at runtime.
 // Bumping this requires updating the per-arch SHA-256 sums below.
-const onnxRuntimeVersion = "1.25.1"
+//
+// Kept >= the ORT API version the onnxruntime_go binding requests: v1.31.0
+// asks for ORT API 26 (shipped in ORT 1.26.0), so an older bundled runtime
+// fails initialization with "Error setting ORT API base: 2".
+const onnxRuntimeVersion = "1.26.0"
 
 // onnxLibName is the shared library file we extract from the release tarball.
 const onnxLibName = "libonnxruntime.so"
@@ -35,11 +39,11 @@ type onnxArtifact struct {
 var onnxArtifacts = map[string]onnxArtifact{
 	"linux/amd64": {
 		url:    "https://github.com/microsoft/onnxruntime/releases/download/v" + onnxRuntimeVersion + "/onnxruntime-linux-x64-" + onnxRuntimeVersion + ".tgz",
-		sha256: "eb566a49cfc49ef0642f809b69340b5bb656c7c4905ba873526d226f2c005816",
+		sha256: "1254da24fb389cf39dc0ff3451ab48301740ffbfcbaf646849df92f80ee92c57",
 	},
 	"linux/arm64": {
 		url:    "https://github.com/microsoft/onnxruntime/releases/download/v" + onnxRuntimeVersion + "/onnxruntime-linux-aarch64-" + onnxRuntimeVersion + ".tgz",
-		sha256: "daa71b56b00c4ab34798a3d96ca41a32ece4d3e302dc2386d3cca83fd4491214",
+		sha256: "34ff1c2d0f12e2cf3d33a0c5f82e39792e1d581fbd6968fd7c30d173654be01a",
 	},
 }
 
