@@ -29,7 +29,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -223,9 +222,12 @@ type Config struct {
 	// nothing. The live binary injects the Prometheus adapter; the benchmark
 	// injects its own; the keyless default is the no-op recorder.
 	StageMetrics observe.StageRecorder
-	// npc is the Character NPC this loop voices. Run resolves it; RunFromDB
-	// loads it from storage, the env-only Run path uses the hardcoded NPC.
-	npc npcSpec
+	// npcs are the Character NPCs this loop voices. Run resolves them: RunFromDB
+	// loads all Character NPCs in the campaign from storage; the env-only Run path
+	// seeds the single hardcoded NPC when the slice is empty. The roster the loop
+	// assembles from these is the INITIAL membership; NPCs join and leave at
+	// runtime via the programmatic [Roster] API (issue #49).
+	npcs []npcSpec
 }
 
 // RunFromDB loads the seeded Character NPC from Postgres (via the task-#8
@@ -249,18 +251,20 @@ func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
 	// serving Modes (voice) never auto-migrate, so a DB behind the embedded
 	// migrations must refuse to start with the actionable `migrate up` message
 	// rather than running queries against a schema the code no longer matches.
-	// This runs after the pool opens and before loadSeededNPC (the first query).
+	// This runs after the pool opens and before loadSeededNPCs (the first query).
 	if err := ensureSchemaCurrent(ctx, dsn); err != nil {
 		return err
 	}
 
-	npc, err := loadSeededNPC(ctx, storage.New(pool))
+	npcs, err := loadSeededNPCs(ctx, storage.New(pool))
 	if err != nil {
 		return err
 	}
-	log.Info("loaded NPC from DB", "npc", npc.name, "agentID", npc.agentID)
+	for _, npc := range npcs {
+		log.Info("loaded NPC from DB", "npc", npc.name, "agentID", npc.agentID)
+	}
 
-	cfg.npc = npc
+	cfg.npcs = npcs
 	return Run(ctx, cfg)
 }
 
@@ -297,8 +301,8 @@ func ensureSchemaCurrent(ctx context.Context, dsn string) error {
 // runnable and the wiring complete without the native dependency. Build with
 // -tags "opus dave nolibopusfile" for a hearing, speaking, encrypted NPC.
 func Run(ctx context.Context, cfg Config) error {
-	if cfg.npc.agentID == "" {
-		cfg.npc = hardcodedNPC()
+	if len(cfg.npcs) == 0 {
+		cfg.npcs = []npcSpec{hardcodedNPC()}
 	}
 
 	log := cfg.Logger
@@ -397,7 +401,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// a while and only later drops reconnects on the initial delay, not a delay
 	// grown by earlier connect failures (issue #44).
 	connected()
-	log.Info("joined voice channel", "guild", guild, "channel", channel, "npc", cfg.npc.name)
+	log.Info("joined voice channel", "guild", guild, "channel", channel, "npcs", npcNames(cfg.npcs))
 
 	// One Codec instance serves both directions: DecodeInbound (called from the
 	// single Pipeline.Run goroutine) and PlaybackSource (called from the playback
@@ -443,7 +447,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, cleanup, err := buildConversation(bus, log, cfg.npc, teeSynth, cfg.StageMetrics)
+	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -459,25 +463,28 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	return pipe.Run(cycleCtx, sess)
 }
 
-// npcMatcher builds the Address Detection matcher for the NPC. This Campaign has
-// one Character NPC and no addressable Butler in this slice, so it uses the
-// scoring Matcher (ADR-0024): the NPC gets a name/alias match AND the single-NPC
-// fallback, so both a named utterance ("Bart, …") and an unnamed one route to
-// him — a non-Address-Only lone NPC catches unaddressed speech. The whole-word
-// matcher is deliberately not used: it requires a Butler as its unconditional
-// fallback, which this slice does not have, and would leave the NPC silent on
-// every unnamed utterance.
+// npcMatcher builds the Address Detection matcher for one NPC. With a single
+// non-Address-Only Character NPC and no addressable Butler it uses the scoring
+// Matcher (ADR-0024): the NPC gets a name/alias match AND the single-NPC
+// fallback, so both a named utterance ("Bart, …") and an unnamed one route to it.
+// The whole-word matcher is deliberately not used: it requires a Butler as its
+// unconditional fallback, which this slice does not have, and would leave the NPC
+// silent on every unnamed utterance.
+//
+// Multi-NPC wiring goes through [Roster.AddNPC] (the matcher's roster grows past
+// the first agent via [address.Matcher.Add]); this single-agent constructor is
+// retained as the unit-test seam for the one-NPC routing invariant.
 func npcMatcher(npc npcSpec) *address.Matcher {
-	return address.NewMatcher(address.Config{Language: "en"},
-		address.Agent{
-			Target: voiceevent.AddressTarget{
-				AgentID:   npc.agentID,
-				AgentRole: "character",
-				Name:      npc.name,
-			},
-			Aliases: npc.aliases,
-		},
-	)
+	return address.NewMatcher(address.Config{Language: "en"}, matcherAgent(npc))
+}
+
+// npcNames returns the NPCs' display names for a log line.
+func npcNames(npcs []npcSpec) []string {
+	names := make([]string, len(npcs))
+	for i, n := range npcs {
+		names[i] = n.name
+	}
+	return names
 }
 
 // npcVoice is the hardcoded NPC's TTS Voice (the [hardcodedNPC] seed source).
@@ -514,10 +521,18 @@ func npcVoice() tts.Voice {
 // Provider API keys are read by each adapter from its own env var at request
 // time (BYOK, ADR-0004), so construction here needs no secrets.
 //
-// npc supplies the addressable identity, Persona, and Voice (from the in-code
-// seed or, via [RunFromDB], the database). The `dice` Tool grant stays in code
-// (Tool Grants are a #6 table, not yet seeded). The LLM provider is Groq
-// (model llama-3.3-70b-versatile via the OpenAI-compat endpoint). The DB Agent's
+// npcs supplies the INITIAL Character NPCs the loop voices — their addressable
+// identity, Persona, and Voice (from the in-code seed or, via [RunFromDB], the
+// database). It assembles them into a [Roster] (one address Matcher + one Cast):
+// the detector routes against the Matcher and the reply stream multiplexes across
+// the Cast, so an utterance naming an NPC is answered in that NPC's Voice and a
+// lone NPC still catches unaddressed speech. The returned Roster is the
+// programmatic control surface for adding/removing NPCs at runtime (#49); the
+// caller owns it for the cycle's lifetime. npcs must be non-empty.
+//
+// All NPCs share ONE Groq tool-engine (one client, the `dice` grant in code —
+// Tool Grants are a #6 table, not yet seeded). The LLM provider is Groq (model
+// llama-3.3-70b-versatile via the OpenAI-compat endpoint). The DB Agent's
 // provider_config provider/model is recorded but adapter selection is not yet
 // driven by it; the wired adapter is Groq for any NPC in this tree. Keyless
 // cassette tests replay the Anthropic adapter behind the same llm.Provider
@@ -528,14 +543,17 @@ func npcVoice() tts.Voice {
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
+	}
+	if len(npcs) == 0 {
+		return nil, nil, nil, fmt.Errorf("wirenpc: buildConversation needs at least one NPC")
 	}
 
 	engine, err := silero.New(silero.WithMinSilenceFrames(vadMinSilenceFrames))
 	if err != nil {
-		return nil, nil, fmt.Errorf("init Silero VAD: %w", err)
+		return nil, nil, nil, fmt.Errorf("init Silero VAD: %w", err)
 	}
 	vadSession, err := engine.NewSession(vad.Config{
 		SampleRate:       vadSampleRate,
@@ -544,7 +562,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		SilenceThreshold: 0.35,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("open VAD session: %w", err)
+		return nil, nil, nil, fmt.Errorf("open VAD session: %w", err)
 	}
 	// cleanup releases ONLY the per-cycle VAD session (its ONNX inferencer), which
 	// a reconnect cycle (issue #44) would otherwise leak on every loop. It must
@@ -563,8 +581,6 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
 	ttsStage := orchestrator.NewTTS(bus, synth)
 
-	detector := orchestrator.NewAddressDetector(npcMatcher(npc))
-
 	// The `dice` grant stays in code: Tool Grants are a #6 table, not yet
 	// seeded. With no grants the tool engine degrades to a single completion
 	// through the same path.
@@ -574,7 +590,8 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 	// before a live run (docs/agents/live-npc-run.md). There is no Anthropic key,
 	// so wiring the Anthropic adapter here would pass the keyless cassette tests
 	// (which replay Anthropic) but fail the live run — Groq is the only correct
-	// default for a runnable NPC.
+	// default for a runnable NPC. One engine is shared across every NPC in the
+	// Roster — they reuse one client rather than each opening their own.
 	provider := groq.New("")
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
@@ -585,27 +602,23 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 		// path silent; the live binary / benchmark inject a real one.
 		agenttool.WithMetrics(stageMetrics, observe.ProviderGroq))
 
-	replier := agent.NewReplier(agent.Config{
-		Persona: agent.Persona{
-			AgentID:  npc.agentID,
-			Markdown: npc.persona,
-			Voice:    npc.voice,
-		},
-		Engine:       toolEngine,
-		Synthesizer:  ttseleven.New(""),
-		HistoryTurns: 16,
-		OnError: func(err error) {
-			log.Warn("agent reply failed", "npc", npc.name, "err", err)
-		},
-	})
+	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
+	// in the Matcher and its Replier (over the shared engine) in the Cast. The
+	// Matcher is built from the first NPC and grown for the rest.
+	roster := newRoster(rosterDepsForLive(toolEngine, ttseleven.New(""), 16, log))
+	for _, npc := range npcs {
+		roster.AddNPC(npc)
+	}
+
+	detector := orchestrator.NewAddressDetector(roster.matcher)
 
 	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
 		// B1: stream the reply sentence-by-sentence so first audio begins after the
 		// first sentence, not the whole completion. The agenttool Engine implements
-		// agent.StreamingEngine (it streams the final answer round), so ReplyStream
-		// dispatches each sentence as it lands.
-		orchestrator.WithReplyStream(replier.ReplyStream()),
+		// agent.StreamingEngine (it streams the final answer round), so the Cast's
+		// reply stream dispatches each sentence as it lands, to the addressed NPC.
+		orchestrator.WithReplyStream(roster.cast.ReplyStream()),
 		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. The
 		// confirm window must be > 0 against a live mic — a zero window let the
 		// addressing user's own continued speech (single shared VAD session, no
@@ -620,5 +633,5 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npc npcSpec, synth
 			log.Warn("voice pipeline stage failed", "err", err)
 		}),
 	)
-	return conv, cleanup, nil
+	return conv, roster, cleanup, nil
 }

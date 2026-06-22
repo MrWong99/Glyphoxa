@@ -161,39 +161,48 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 	return nil
 }
 
-// loadSeededNPC reads the demo Campaign's single Character NPC from the DB and
-// maps it to the npcSpec the voice loop builds from. The auto-created Butler is
-// ignored (it is the slash-command Agent for #6, not voiced here); this slice
-// expects exactly one Character NPC in the Campaign.
+// loadSeededNPCs reads ALL the demo Campaign's Character NPCs from the DB and
+// maps each to the npcSpec the voice loop builds its Roster from. The
+// auto-created Butler is ignored (it is the slash-command Agent for #6, not
+// voiced here). This is the INITIAL roster membership; NPCs join and leave at
+// runtime via the programmatic [Roster] API (#49). The single-NPC default of the
+// demo seed yields a one-element slice — the pre-Roster behavior unchanged.
 //
-// AgentID is the Agent's DB UUID as a string — the stable identity Address
+// AgentID is each Agent's DB UUID as a string — the stable identity Address
 // Detection routes on (the in-code path used "bart"; the value only has to be
 // consistent between the matcher and the Persona, which it is).
-func loadSeededNPC(ctx context.Context, st *storage.Store) (npcSpec, error) {
+func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, error) {
 	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
 	if err != nil {
-		return npcSpec{}, fmt.Errorf("wirenpc: load NPC: find tenant: %w", err)
+		return nil, fmt.Errorf("wirenpc: load NPCs: find tenant: %w", err)
 	}
 
 	campaignID, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
 	if err != nil {
-		return npcSpec{}, fmt.Errorf("wirenpc: load NPC: find campaign: %w", err)
+		return nil, fmt.Errorf("wirenpc: load NPCs: find campaign: %w", err)
 	}
 
 	chars, err := st.CharacterAgents(ctx, campaignID)
 	if err != nil {
-		return npcSpec{}, err
+		return nil, err
 	}
-	if len(chars) != 1 {
-		return npcSpec{}, fmt.Errorf("wirenpc: load NPC: expected exactly 1 Character NPC in %q, found %d",
-			SeedCampaignName, len(chars))
+	if len(chars) == 0 {
+		return nil, fmt.Errorf("wirenpc: load NPCs: no Character NPC in %q", SeedCampaignName)
 	}
 
-	loaded, err := st.LoadAgent(ctx, chars[0].ID)
-	if err != nil {
-		return npcSpec{}, err
+	specs := make([]npcSpec, 0, len(chars))
+	for _, c := range chars {
+		loaded, err := st.LoadAgent(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		spec, err := npcSpecFromAgent(loaded.Agent)
+		if err != nil {
+			return nil, err
+		}
+		specs = append(specs, spec)
 	}
-	return npcSpecFromAgent(loaded.Agent)
+	return specs, nil
 }
 
 // npcSpecFromAgent maps a storage.Agent (vendor-neutral) to the voice-domain
