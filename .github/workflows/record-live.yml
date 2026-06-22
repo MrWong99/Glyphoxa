@@ -30,7 +30,7 @@ jobs:
     # noise level low.
     if: github.repository == 'MrWong99/Glyphoxa_v2'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 

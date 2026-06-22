@@ -27,7 +27,7 @@ jobs:
     # t.Fatalf in TestBench_LiveSLO when a key env is empty.
     if: github.repository == 'MrWong99/Glyphoxa_v2'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
