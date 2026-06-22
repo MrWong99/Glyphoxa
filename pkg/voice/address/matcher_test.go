@@ -1,6 +1,8 @@
 package address_test
 
 import (
+	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +26,12 @@ var (
 	}
 	goblin = address.Agent{
 		Target: voiceevent.AddressTarget{AgentID: "npc-goblin", AgentRole: "character", Name: "Goblin"},
+	}
+	// dwarf is a spare Character NPC used to keep the lone-NPC fallback inert in
+	// roster tests, so an unnamed turn routing somewhere proves continuation
+	// rather than the single-NPC fallback.
+	dwarf = address.Agent{
+		Target: voiceevent.AddressTarget{AgentID: "npc-dwarf", AgentRole: "character", Name: "Durin"},
 	}
 )
 
@@ -174,10 +182,82 @@ func TestMatcher_EmptyHeuristicStackNeverAddresses(t *testing.T) {
 
 // TestMatcher_MultiTargetEnsemble covers the multi-target half of the contract:
 // one utterance naming two NPCs addresses both (an Ensemble Turn, ADR-0025).
+// MaxTargets: -1 lifts the single-target default cap so the full named set is
+// published — the proof that ensemble routing stays reachable.
 func TestMatcher_MultiTargetEnsemble(t *testing.T) {
-	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, goblin)
+	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, butler, bart, goblin)
 	got := m.TargetMatch("Bart and the Goblin start arguing")
 	assertIDs(t, got, "npc-bart", "npc-goblin")
+}
+
+// TestMatcher_SingleTargetByDefault pins the default cap: naming two NPCs in one
+// utterance addresses only the top-scored one (ties break by Agent order), so a
+// default-config matcher fires a single turn rather than two.
+func TestMatcher_SingleTargetByDefault(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, goblin)
+	assertIDs(t, m.TargetMatch("Bart and the Goblin start arguing"), "npc-bart")
+}
+
+// TestMatcher_MaxTargetsCap proves the cap is configurable: MaxTargets: 2 keeps
+// the top two of a larger named set, while MaxTargets: -1 keeps them all.
+func TestMatcher_MaxTargetsCap(t *testing.T) {
+	const utter = "Bart, the Goblin, and Glyphoxa all turn to look"
+
+	capped := address.NewMatcher(address.Config{Language: "en", MaxTargets: 2}, butler, bart, goblin)
+	if got := routedIDs(capped.TargetMatch(utter)); len(got) != 2 {
+		t.Fatalf("MaxTargets: 2 addressed %v, want 2", got)
+	}
+
+	unlimited := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, butler, bart, goblin)
+	if got := routedIDs(unlimited.TargetMatch(utter)); len(got) != 3 {
+		t.Fatalf("MaxTargets: -1 addressed %v, want 3", got)
+	}
+}
+
+// TestMatcher_AddAgent proves an Agent added after construction is addressable:
+// before the Add naming the Goblin routes to nobody (two other NPCs keep the
+// lone-NPC fallback inert), after it the new NPC is reached by name.
+func TestMatcher_AddAgent(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, dwarf)
+	assertIDs(t, m.TargetMatch("Goblin, what are you plotting?"))
+
+	m.Add(goblin)
+	assertIDs(t, m.TargetMatch("Goblin, what are you plotting?"), "npc-goblin")
+}
+
+// TestMatcher_RemoveAgent proves a removed Agent stops being addressed and that
+// its continuation state is pruned: after the Goblin holds the floor it is
+// removed, and the follow-up that would otherwise continue to it routes nowhere.
+// Bart and the Dwarf keep the lone-NPC fallback inert throughout, so the only
+// thing that could route an unnamed turn to the Goblin is stale continuation.
+func TestMatcher_RemoveAgent(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, dwarf, goblin)
+
+	// The Goblin becomes the last addressee, so continuation would normally
+	// keep the floor on it.
+	assertIDs(t, m.TargetMatch("Goblin, hold the line."), "npc-goblin")
+
+	m.Remove("npc-goblin")
+
+	// Named again, the Goblin is gone, so nobody is addressed...
+	assertIDs(t, m.TargetMatch("Goblin, hold the line."))
+	// ...and the continuation state was pruned, so an unnamed follow-up does not
+	// resurrect it: it routes to nobody rather than continuing to the departed
+	// Goblin.
+	assertIDs(t, m.TargetMatch("anyway, carry on"))
+}
+
+// TestMatcher_Add_Panics pins Add's validation: an empty AgentID and a duplicate
+// AgentID are both wiring errors that must panic rather than corrupt the roster.
+func TestMatcher_Add_Panics(t *testing.T) {
+	assertPanics(t, "empty AgentID", func() {
+		m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
+		m.Add(address.Agent{Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Nameless"}})
+	})
+	assertPanics(t, "duplicate AgentID", func() {
+		m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
+		m.Add(address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bartholomew"}})
+	})
 }
 
 // TestMatcher_TextEchoedVerbatim proves each decision carries the utterance text
@@ -245,15 +325,24 @@ func assertPanics(t *testing.T, desc string, fn func()) {
 }
 
 // TestMatcher_ConcurrentUse exercises the matcher's locking: many goroutines
-// route and feed interruptions at once. Run under `go test -race` it pins that
-// the shared conversational state is guarded.
+// route, feed interruptions, and churn the roster at once. Run under
+// `go test -race` it pins that the shared conversational state stays guarded and
+// that the lock-free index read sees a consistent index across a concurrent
+// rebuild.
 func TestMatcher_ConcurrentUse(t *testing.T) {
-	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, goblin)
+	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, butler, bart)
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
-		wg.Add(2)
+		// Each iteration churns a uniquely-named NPC so concurrent Adds never
+		// collide on a duplicate AgentID (which is a panic), letting roster
+		// mutation race freely against routing and interruptions.
+		id := fmt.Sprintf("npc-extra-%d", i)
+		extra := address.Agent{Target: voiceevent.AddressTarget{AgentID: id, AgentRole: "character", Name: "Extra" + strconv.Itoa(i)}}
+		wg.Add(4)
 		go func() { defer wg.Done(); m.TargetMatch("Bart and the Goblin talk") }()
 		go func() { defer wg.Done(); m.NoteInterruption("npc-bart") }()
+		go func() { defer wg.Done(); m.Add(extra) }()
+		go func() { defer wg.Done(); m.Remove(id) }()
 	}
 	wg.Wait()
 }
