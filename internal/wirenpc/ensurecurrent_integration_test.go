@@ -96,7 +96,7 @@ func TestEnsureSchemaCurrent_CurrentSchemaPasses(t *testing.T) {
 // site: RunFromDB itself must fail fast on a stale schema, returning the
 // version-mismatch error WITHOUT proceeding to the NPC load (or Discord). The DB
 // here is stale AND empty of any seeded NPC, so if RunFromDB reached
-// loadSeededNPC it would surface a "find tenant" error instead — asserting the
+// loadSeededNPCs it would surface a "find tenant" error instead — asserting the
 // schema-out-of-date message proves the check runs first. No Discord token is
 // needed because the schema check precedes any gateway connection.
 func TestRunFromDB_StaleSchemaFailsFastBeforeNPCLoad(t *testing.T) {
@@ -110,6 +110,6 @@ func TestRunFromDB_StaleSchemaFailsFastBeforeNPCLoad(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "schema out of date") {
 		t.Errorf("RunFromDB error %q is not the schema-out-of-date fail-fast error; "+
-			"the check must run before loadSeededNPC (which would error on the missing tenant)", err)
+			"the check must run before loadSeededNPCs (which would error on the missing tenant)", err)
 	}
 }

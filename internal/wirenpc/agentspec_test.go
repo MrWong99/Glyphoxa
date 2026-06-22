@@ -1,7 +1,7 @@
 //go:build integration
 
 // These tests stand up a real Postgres (testcontainers) to exercise the seed →
-// DB → loadSeededNPC → buildConversation round-trip, so they are tag-isolated
+// DB → loadSeededNPCs → buildConversation round-trip, so they are tag-isolated
 // behind `integration` (ADR-0033): the default `go test ./...` stays Docker-free
 // per ADR-0021, and a dedicated `-tags=integration` CI job runs these with
 // Docker. The runtime t.Skip on a missing Postgres remains for local
@@ -116,10 +116,14 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 		t.Fatalf("SeedNPC: %v", err)
 	}
 
-	loaded, err := loadSeededNPC(ctx, storage.New(pool))
+	specs, err := loadSeededNPCs(ctx, storage.New(pool))
 	if err != nil {
-		t.Fatalf("loadSeededNPC: %v", err)
+		t.Fatalf("loadSeededNPCs: %v", err)
 	}
+	if len(specs) != 1 {
+		t.Fatalf("demo seed loaded %d Character NPCs, want 1", len(specs))
+	}
+	loaded := specs[0]
 	want := hardcodedNPC()
 
 	if loaded.name != want.name {
@@ -160,7 +164,7 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// assert it succeeds, and that the matcher routes a named utterance to the
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
-	conv, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), loaded, ttseleven.New(""), nil)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil)
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
 	}
@@ -168,13 +172,88 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	if conv == nil {
 		t.Fatal("buildConversation returned a nil Conversation")
 	}
+	if roster == nil {
+		t.Fatal("buildConversation returned a nil Roster")
+	}
 
-	routed := npcMatcher(loaded).TargetMatch("Bart, do you have a room?")
+	// The assembled Roster's Matcher must route a named utterance to the loaded
+	// Agent's identity (so the Persona the reply loop answers for and the Address
+	// Detection target agree — the chain that makes the NPC speak).
+	routed := roster.matcher.TargetMatch("Bart, do you have a room?")
 	if len(routed) == 0 {
 		t.Fatal("named utterance routed to nobody for the DB-loaded NPC")
 	}
 	if got := routed[0].Target.AgentID; got != loaded.agentID {
 		t.Errorf("routed AgentID = %q, want loaded agentID %q (matcher/Persona disagree)", got, loaded.agentID)
+	}
+}
+
+// TestLoadSeededNPCs_LoadsAllCharacterAgents pins the Stage-3 multi-NPC load
+// (issue #49): loadSeededNPCs returns EVERY Character NPC in the campaign, not
+// just one — the old loadSeededNPC hard-failed unless exactly one was present.
+// Seed the demo (one NPC), insert a second Character NPC into the same campaign,
+// and assert both come back and assemble into a Roster that routes each by name.
+func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+
+	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
+	if err != nil {
+		t.Fatalf("FindTenantByName: %v", err)
+	}
+	campaignID, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	if err != nil {
+		t.Fatalf("FindCampaignByName: %v", err)
+	}
+
+	// A second Character NPC in the same campaign — a Voice Session can host ≥2.
+	if _, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID:  campaignID,
+		Role:        storage.AgentRoleCharacter,
+		Name:        "Mira",
+		Persona:     "You are Mira, the wandering bard.",
+		AddressOnly: false,
+		Aliases:     []string{"bard"},
+	}); err != nil {
+		t.Fatalf("CreateAgent (Mira): %v", err)
+	}
+
+	specs, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("loadSeededNPCs returned %d NPCs, want 2 (Bart + Mira)", len(specs))
+	}
+
+	// The two NPCs must assemble into a Roster that routes each by name to its own
+	// identity — the end-to-end multi-NPC acceptance bar.
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil)
+	if err != nil {
+		t.Fatalf("buildConversation from 2 DB NPCs: %v", err)
+	}
+	defer cleanup()
+	if conv == nil {
+		t.Fatal("buildConversation returned a nil Conversation")
+	}
+
+	byName := map[string]string{} // display name -> agentID
+	for _, s := range specs {
+		byName[s.name] = s.agentID
+	}
+	for _, name := range []string{"Bart", "Mira"} {
+		routed := roster.matcher.TargetMatch(name + ", a word?")
+		if len(routed) == 0 {
+			t.Fatalf("naming %q routed to nobody", name)
+		}
+		if got := routed[0].Target.AgentID; got != byName[name] {
+			t.Errorf("naming %q routed to AgentID %q, want %q", name, got, byName[name])
+		}
 	}
 }
 
@@ -187,10 +266,10 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 // permanently deaf after the first Discord drop. Build → cleanup → build again
 // (mimicking one reconnect cycle) must both succeed. Real Silero, so integration.
 func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
-	npc := hardcodedNPC()
+	npcs := []npcSpec{hardcodedNPC()}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	conv1, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npc, ttseleven.New(""), nil)
+	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil)
 	if err != nil {
 		t.Fatalf("first buildConversation: %v", err)
 	}
@@ -199,7 +278,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	}
 	cleanup1() // end of reconnect cycle 1
 
-	conv2, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npc, ttseleven.New(""), nil)
+	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil)
 	if err != nil {
 		t.Fatalf("second buildConversation after cleanup: %v — cleanup destroyed the shared ONNX env?", err)
 	}
