@@ -129,7 +129,7 @@ jobs:
       # SEPARATE job from the fast `test` gate (ADR-0033): the heavy image build
       # must not slow an unrelated PR's unit feedback.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Build the single image (ADR-0034) and LOAD it into the local daemon so
       # the smoke test can `docker run` it. No push on PRs — publishing happens
@@ -222,7 +222,7 @@ jobs:
       # into the local daemon so k3d can import it. cache-from only (no cache-to)
       # — the `image` job owns the cache write, so the two never race on it.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build image
         uses: docker/build-push-action@v6
