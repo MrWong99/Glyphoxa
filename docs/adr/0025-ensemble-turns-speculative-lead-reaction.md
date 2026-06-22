@@ -1,5 +1,7 @@
 # Ensemble turns: speculative lead + cross-talk reaction
 
+> **Status: Deferred (v1.0). Not superseded.** v1.0 ships **single-target by default** (ADR-0024 `MaxTargets`, ADR-0038): one utterance addresses one Agent on one shared Barge-in floor. The Ensemble Turn below remains the **design-of-record** and the multi-target decision set is reachable by setting `MaxTargets > 1` (or `-1`), but the speculative-lead / cross-talk turn-taking layer described here — fan-out, Lead race, Cross-talk Reaction, queued follow-up — is **not implemented** in v1.0. Deferring it is a turn-taking-layer decision, captured in ADR-0038; the design here stands unchanged for when it lands.
+
 When one utterance addresses two or more Agents (ADR-0024 returns a set), the turn-taking layer runs an **Ensemble Turn** rather than N independent turns. The goal is human-like cross-talk while each NPC stays an independent Agent — its own Persona, LLM config, Hot Context, and Voice. There is no director LLM and no ADR-0022 dialogue render on the hot path.
 
 Mechanic:
