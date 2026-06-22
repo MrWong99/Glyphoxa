@@ -19,7 +19,7 @@ require (
 
 require (
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
-	github.com/openai/openai-go/v3 v3.40.0
+	github.com/openai/openai-go/v3 v3.41.0
 	github.com/prometheus/client_golang v1.23.2
 	go.uber.org/goleak v1.3.0
 )
