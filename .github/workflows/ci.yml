@@ -164,7 +164,7 @@ jobs:
       # `platformHooks` field, which older Helm (<= 3.17) refuses to parse,
       # leaving the plugin installed-but-unusable. Keep these two pins in step.
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.18.4
 
@@ -235,7 +235,7 @@ jobs:
       # Helm >= 3.18 for platformHooks parity with the `helm` job (kept in step
       # with the helm-unittest pin there).
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.18.4
 
