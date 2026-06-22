@@ -3,6 +3,7 @@ package address
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -60,6 +61,13 @@ type Config struct {
 	// AddressThreshold is the minimum total score an Agent needs to be
 	// addressed. Default 1.0.
 	AddressThreshold float64
+	// MaxTargets caps how many Agents one utterance may address, applied to the
+	// score-sorted hits before the decision set is built (so only the published
+	// Agents become the next turn's continuation context). Zero defaults to 1
+	// (single-target: naming two NPCs fires one turn on the top-scored). A
+	// positive N caps at N; a negative value lifts the cap entirely, restoring
+	// the full Ensemble Turn set (ADR-0025).
+	MaxTargets int
 	// RecencyWindow bounds how long mentioned words and interruptions stay
 	// "recent". Default 30s.
 	RecencyWindow time.Duration
@@ -111,15 +119,21 @@ func DefaultHeuristics() []Heuristic {
 // use; the bus delivers events synchronously but possibly from different
 // goroutines.
 type Matcher struct {
-	agents     []Agent
-	index      *fuzzyIndex
+	// index is read lock-free by TargetMatch and swapped wholesale by Add/Remove
+	// under m.mu, so a concurrent roster rebuild never tears a scoring pass.
+	index atomic.Pointer[fuzzyIndex]
+
+	nameMatch  NameMatchConfig // retained to rebuild the index on roster changes
+	enc        Encoder         // retained to rebuild the index on roster changes
 	heuristics []Heuristic
 	threshold  float64
+	maxTargets int // resolved cap: >0 caps at N, <0 is unlimited (0 never stored)
 	window     time.Duration
 	maxWords   int
 	clock      func() time.Time
 
 	mu            sync.Mutex
+	agents        []Agent
 	lastAddressed map[string]bool
 	interruptions map[string]time.Time
 	recentWords   []timedWord
@@ -163,28 +177,45 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 	if clock == nil {
 		clock = time.Now
 	}
+	maxTargets := cfg.MaxTargets
+	if maxTargets == 0 {
+		maxTargets = 1
+	}
 
 	agents = append([]Agent(nil), agents...)
-	names := make([][]string, len(agents))
 	for i := range agents {
 		if agents[i].Target.AgentID == "" {
 			panic("address.NewMatcher: agent Target.AgentID must not be empty")
 		}
 		agents[i].index = i
-		names[i] = agents[i].matchableNames()
 	}
 
-	return &Matcher{
-		agents:        agents,
-		index:         newFuzzyIndex(cfg.NameMatch, enc, names),
+	m := &Matcher{
+		nameMatch:     cfg.NameMatch,
+		enc:           enc,
 		heuristics:    heuristics,
 		threshold:     threshold,
+		maxTargets:    maxTargets,
 		window:        window,
 		maxWords:      maxWords,
 		clock:         clock,
+		agents:        agents,
 		lastAddressed: map[string]bool{},
 		interruptions: map[string]time.Time{},
 	}
+	m.index.Store(m.buildIndex())
+	return m
+}
+
+// buildIndex rebuilds the fuzzy name index from the current m.agents. Callers
+// that mutate m.agents (the constructor and Add/Remove) hold m.mu; the
+// constructor is the sole exception, running before the Matcher is shared.
+func (m *Matcher) buildIndex() *fuzzyIndex {
+	names := make([][]string, len(m.agents))
+	for i := range m.agents {
+		names[i] = m.agents[i].matchableNames()
+	}
+	return newFuzzyIndex(m.nameMatch, m.enc, names)
 }
 
 // NoteInterruption records that the Agent with agentID was just interrupted
@@ -198,12 +229,87 @@ func (m *Matcher) NoteInterruption(agentID string) {
 	m.mu.Unlock()
 }
 
+// Add inserts agents into the live roster so they become addressable mid-Voice
+// Session (a Character NPC joining the scene). It rebuilds and atomically swaps
+// the fuzzy index so a concurrent [Matcher.TargetMatch] keeps scoring against a
+// consistent index throughout. It panics if any Agent has an empty
+// Target.AgentID or an AgentID already on the roster (or duplicated within the
+// same call): a roster that cannot uniquely name its targets is a wiring error,
+// matching [NewMatcher]'s contract. Adding nothing is a no-op.
+func (m *Matcher) Add(agents ...Agent) {
+	if len(agents) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	seen := make(map[string]struct{}, len(m.agents)+len(agents))
+	for _, a := range m.agents {
+		seen[a.Target.AgentID] = struct{}{}
+	}
+	for _, a := range agents {
+		if a.Target.AgentID == "" {
+			panic("address.Matcher.Add: agent Target.AgentID must not be empty")
+		}
+		if _, dup := seen[a.Target.AgentID]; dup {
+			panic("address.Matcher.Add: duplicate agent AgentID " + a.Target.AgentID)
+		}
+		seen[a.Target.AgentID] = struct{}{}
+		m.agents = append(m.agents, a)
+	}
+	m.reindexLocked()
+}
+
+// Remove drops the Agents with agentIDs from the live roster (a Character NPC
+// leaving the scene) and prunes their continuation and interruption state so a
+// later turn never resurrects a departed Agent. Unknown agentIDs are ignored.
+// Removing every Agent is allowed: the matcher then routes to nobody. It
+// rebuilds and atomically swaps the fuzzy index like [Matcher.Add].
+func (m *Matcher) Remove(agentIDs ...string) {
+	if len(agentIDs) == 0 {
+		return
+	}
+	drop := make(map[string]struct{}, len(agentIDs))
+	for _, id := range agentIDs {
+		drop[id] = struct{}{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	kept := m.agents[:0]
+	for _, a := range m.agents {
+		if _, gone := drop[a.Target.AgentID]; gone {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	m.agents = kept
+	for id := range drop {
+		delete(m.lastAddressed, id)
+		delete(m.interruptions, id)
+	}
+	m.reindexLocked()
+}
+
+// reindexLocked reassigns each Agent's index to its new slice position and swaps
+// in a freshly built fuzzy index. Caller holds m.mu. The index Store is atomic,
+// so TargetMatch's lock-free read always sees a whole index — the old one until
+// the swap, the new one after, never a half-built one.
+func (m *Matcher) reindexLocked() {
+	for i := range m.agents {
+		m.agents[i].index = i
+	}
+	m.index.Store(m.buildIndex())
+}
+
 // TargetMatch scores text against every Agent and returns the addressed set,
 // highest total first. It implements the orchestrator's TargetMatcher.
 func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 	now := m.clock()
 	words := tokenize(text)
-	nameScores := m.index.scoreAll(words)
+	// Read the index lock-free: Add/Remove swap it atomically, so this scoring
+	// pass sees one consistent index even across a concurrent rebuild.
+	nameScores := m.index.Load().scoreAll(words)
 
 	m.mu.Lock()
 
@@ -254,6 +360,13 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 
 	// Highest score wins; ties break by Agent order so the result is stable.
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].total > hits[j].total })
+
+	// Cap the published set before building it, so lastAddressed records only
+	// the Agents actually addressed: naming two NPCs under the single-target
+	// default fires one turn on the top-scored, not two.
+	if m.maxTargets >= 0 && len(hits) > m.maxTargets {
+		hits = hits[:m.maxTargets]
+	}
 
 	addressed := make(map[string]bool, len(hits))
 	out := make([]voiceevent.AddressRouted, 0, len(hits))

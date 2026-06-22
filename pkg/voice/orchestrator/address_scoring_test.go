@@ -29,6 +29,14 @@ func newScoringDetector(agents ...address.Agent) *orchestrator.AddressDetector {
 	return orchestrator.NewAddressDetector(m)
 }
 
+// newEnsembleDetector is newScoringDetector with the single-target default cap
+// lifted (MaxTargets: -1), so a multi-NPC utterance yields the full Ensemble
+// Turn set the detector must forward verbatim.
+func newEnsembleDetector(agents ...address.Agent) *orchestrator.AddressDetector {
+	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, agents...)
+	return orchestrator.NewAddressDetector(m)
+}
+
 // TestScoringMatcher_HelloTest_RoutesToButler is TB7 through the scoring
 // matcher: the hello-test clip ("Glyphoxa, roll a perception check for me")
 // names the Butler, so the cassette-replayed transcript must route there. It
@@ -97,12 +105,13 @@ func TestScoringMatcher_Mishearing_RoutesToNPC(t *testing.T) {
 }
 
 // TestScoringMatcher_Ensemble_PublishesEveryTarget proves the detector
-// publishes every decision the scoring matcher returns: an utterance naming two
-// NPCs yields two address.routed events (an Ensemble Turn, ADR-0025), not one.
+// publishes every decision the scoring matcher returns: with the single-target
+// cap lifted (an ensemble matcher), an utterance naming two NPCs yields two
+// address.routed events (an Ensemble Turn, ADR-0025), not one.
 func TestScoringMatcher_Ensemble_PublishesEveryTarget(t *testing.T) {
 	h := voicetest.New(t)
 	butlerAg, bartAg, goblinAg := scoringAgents()
-	d := newScoringDetector(butlerAg, bartAg, goblinAg)
+	d := newEnsembleDetector(butlerAg, bartAg, goblinAg)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start arguing"})
