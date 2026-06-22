@@ -48,7 +48,7 @@ jobs:
       # goreleaser footer's ghcr.io/mrwong99/glyphoxa.
       - name: Compute image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/glyphoxa
           tags: |
