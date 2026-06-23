@@ -63,6 +63,40 @@ func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 	return nil
 }
 
+const campaignColumns = `
+	id, tenant_id, gm_member_id, name, system, language,
+	created_at, updated_at`
+
+func scanCampaign(row pgx.Row) (Campaign, error) {
+	var c Campaign
+	err := row.Scan(
+		&c.ID, &c.TenantID, &c.GMMemberID, &c.Name, &c.System, &c.Language,
+		&c.CreatedAt, &c.UpdatedAt,
+	)
+	return c, err
+}
+
+// GetActiveCampaign returns the "active" campaign: the most-recently-created
+// one. Glyphoxa is single-operator today (one Tenant), so the global latest is
+// the sole Tenant's latest. Tenant scoping fills in behind the X-Tenant-Id
+// pass-through later (ADR-0039), at which point this gains a WHERE tenant_id = $1.
+// No campaign yields ErrNotFound (the RPC layer maps it to Connect CodeNotFound).
+func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+campaignColumns+`
+		   FROM campaign
+		  ORDER BY created_at DESC, id DESC
+		  LIMIT 1`)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: get active campaign: %w", err)
+	}
+	return c, nil
+}
+
 const agentColumns = `
 	id, campaign_id, agent_role, name, persona, voice,
 	voice_provider_config_id, llm_provider_config_id,

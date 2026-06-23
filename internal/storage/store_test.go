@@ -219,3 +219,56 @@ func TestGetAgentNotFound(t *testing.T) {
 		t.Fatalf("GetAgent(random): got %v, want ErrNotFound", err)
 	}
 }
+
+// TestGetActiveCampaign asserts the single-operator "active campaign" read:
+// the most-recently-created campaign is returned. seedCampaign inserts the
+// first campaign; a second campaign is then inserted with an explicitly later
+// created_at so the ordering is deterministic (two rows inserted within the
+// same statement-second would otherwise tie on created_at's now() default).
+func TestGetActiveCampaign(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, firstID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A newer campaign for the same tenant, forced strictly after the first.
+	var secondID uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name, system, language, created_at)
+		 VALUES ($1, 'Curse of Strahd', 'dnd5e', 'en', now() + interval '1 second')
+		 RETURNING id`, tenantID).Scan(&secondID); err != nil {
+		t.Fatalf("insert second campaign: %v", err)
+	}
+
+	active, err := st.GetActiveCampaign(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	if active.ID != secondID {
+		t.Errorf("active campaign id = %s, want newest %s (got first %s?)", active.ID, secondID, firstID)
+	}
+	if active.Name != "Curse of Strahd" {
+		t.Errorf("active campaign name = %q, want Curse of Strahd", active.Name)
+	}
+	if active.TenantID != tenantID {
+		t.Errorf("active campaign tenant = %s, want %s", active.TenantID, tenantID)
+	}
+}
+
+// TestGetActiveCampaignEmpty asserts a freshly migrated DB with no campaign
+// yields ErrNotFound (mapped to Connect CodeNotFound by the RPC layer).
+func TestGetActiveCampaignEmpty(t *testing.T) {
+	dsn := startPostgres(t)
+	ctx := context.Background()
+
+	db := openSQL(t, dsn)
+	if err := storage.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	pool := openPool(t, dsn)
+	st := storage.New(pool)
+
+	if _, err := st.GetActiveCampaign(ctx); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetActiveCampaign on empty DB: got %v, want ErrNotFound", err)
+	}
+}
