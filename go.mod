@@ -18,10 +18,12 @@ require (
 )
 
 require (
+	connectrpc.com/connect v1.20.0
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
 	github.com/openai/openai-go/v3 v3.41.0
 	github.com/prometheus/client_golang v1.23.2
 	go.uber.org/goleak v1.3.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -97,6 +99,5 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/Regis24GmbH/go-diacritics.v2 v2.0.3 // indirect
 )

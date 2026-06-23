@@ -1,0 +1,47 @@
+// Package glyphoxa.management.v1 defines the operator-facing management API
+// served over Connect (gRPC + Connect + gRPC-Web) by the web tier (ADR-0039).
+// Stage 1 (#65) exposes a single read RPC; CRUD and session control land later.
+syntax = "proto3";
+
+package glyphoxa.management.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1;managementv1";
+
+// CampaignService exposes read access to the operator's campaigns. For the
+// single-operator self-host (ADR-0039) it resolves the sole seeded tenant; the
+// X-Tenant-Id pass-through that scopes multi-tenant reads fills in later.
+service CampaignService {
+  // GetActiveCampaign returns the most-recently-created campaign for the
+  // operator. It fails with CodeNotFound when no campaign exists.
+  rpc GetActiveCampaign(GetActiveCampaignRequest) returns (GetActiveCampaignResponse);
+}
+
+// Campaign is the wire representation of a campaign record.
+message Campaign {
+  // id is the campaign's UUID.
+  string id = 1;
+  // tenant_id is the owning tenant's UUID.
+  string tenant_id = 2;
+  // name is the human-readable campaign title.
+  string name = 3;
+  // system is the tabletop ruleset (e.g. "D&D 5e").
+  string system = 4;
+  // language is the BCP-47 tag the campaign runs in (e.g. "en", "de").
+  string language = 5;
+  // created_at is when the campaign was created.
+  google.protobuf.Timestamp created_at = 6;
+  // updated_at is when the campaign was last modified.
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// GetActiveCampaignRequest is the (empty) request for GetActiveCampaign; the
+// active campaign is resolved server-side for the single operator.
+message GetActiveCampaignRequest {}
+
+// GetActiveCampaignResponse carries the resolved active campaign.
+message GetActiveCampaignResponse {
+  // campaign is the most-recently-created campaign for the operator.
+  Campaign campaign = 1;
+}
