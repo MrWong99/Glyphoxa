@@ -69,7 +69,13 @@ func MountObservability(mux *http.ServeMux, rec *PrometheusRecorder, ready Readi
 			return
 		}
 		if err := ready(r.Context()); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			// Log the cause server-side and keep the response body generic: /readyz
+			// is unauthenticated and, on the web tier, publicly reachable, so the
+			// probe error (which wraps DB DSN fragments — user, database, host)
+			// must not reach the wire. The 503 status is all a k8s readiness gate
+			// needs; the cause belongs in the logs.
+			slog.Default().Warn("readiness probe failed", "err", err)
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

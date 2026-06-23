@@ -1,8 +1,11 @@
 // Package web is the single-operator web tier (ADR-0039): one cleartext HTTP
-// listener that serves the Connect RPC handlers AND the observability endpoints
-// (/metrics, /healthz, /readyz) over the same port. It is deliberately
-// decoupled from the campaign/storage specifics — callers hand it a set of
-// [Mount]s — so it unit-tests keyless with a fake Connect handler.
+// listener that serves ONLY the Connect RPC handlers. The observability
+// endpoints (/metrics, /healthz, /readyz) live on a SEPARATE internal port (the
+// standalone observe.MetricsServer) so Prometheus and the kubelet can reach them
+// while they stay off the public API surface — the API listener never exposes
+// /readyz or /metrics to the web. The server is deliberately decoupled from the
+// campaign/storage specifics — callers hand it a set of [Mount]s — so it
+// unit-tests keyless with a fake Connect handler.
 //
 // The listener speaks both Connect-over-HTTP/1.1 (JSON or binary) and gRPC over
 // h2c (cleartext HTTP/2). Rather than the deprecated x/net/http2/h2c wrapper, it
@@ -21,8 +24,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/MrWong99/Glyphoxa/internal/observe"
 )
 
 // Mount is one path-prefixed handler to register on the server's mux — e.g. the
@@ -33,15 +34,13 @@ type Mount struct {
 	Handler http.Handler
 }
 
-// Config configures a [Server]. Recorder is required (it backs /metrics); Ready
-// gates /readyz (nil means always-ready — see [observe.ReadinessProbe]); Logger
-// defaults to slog.Default when nil.
+// Config configures a [Server]. Logger defaults to slog.Default when nil. The
+// observability endpoints are NOT served here — they live on the separate
+// metrics port (see the package doc) — so this carries no recorder or probe.
 type Config struct {
-	Addr     string
-	Mounts   []Mount
-	Recorder *observe.PrometheusRecorder
-	Ready    observe.ReadinessProbe
-	Logger   *slog.Logger
+	Addr   string
+	Mounts []Mount
+	Logger *slog.Logger
 }
 
 // Server is the web-tier HTTP listener. Build it with [NewServer] and run it
@@ -51,14 +50,19 @@ type Server struct {
 	srv *http.Server
 	log *slog.Logger
 
+	// done is closed once Serve returns (i.e. after the ctx-triggered graceful
+	// Shutdown has fully drained). [Server.Wait] blocks on it so callers can
+	// hold resources (e.g. the DB pool) open until in-flight handlers finish.
+	done chan struct{}
+
 	mu   sync.Mutex // guards addr against the Start writer / Addr readers
 	addr string
 }
 
-// NewServer builds the server's mux — the configured [Mount]s plus the
-// observability endpoints (ADR-0032) — enables cleartext HTTP/2 (h2c) alongside
-// HTTP/1.1 via [http.Server.Protocols] so gRPC and Connect share one cleartext
-// port, and returns a Server that has not yet bound a listener (see [Server.Start]).
+// NewServer builds the server's mux from the configured [Mount]s, enables
+// cleartext HTTP/2 (h2c) alongside HTTP/1.1 via [http.Server.Protocols] so gRPC
+// and Connect share one cleartext port, and returns a Server that has not yet
+// bound a listener (see [Server.Start]).
 func NewServer(cfg Config) *Server {
 	log := cfg.Logger
 	if log == nil {
@@ -69,7 +73,6 @@ func NewServer(cfg Config) *Server {
 	for _, m := range cfg.Mounts {
 		mux.Handle(m.Path, m.Handler)
 	}
-	observe.MountObservability(mux, cfg.Recorder, cfg.Ready)
 
 	// Serve HTTP/1.1 and cleartext HTTP/2 (h2c) on the one port via the Go 1.24+
 	// Protocols field, replacing the deprecated x/net/http2/h2c wrapper. Connect
@@ -85,6 +88,7 @@ func NewServer(cfg Config) *Server {
 			ReadHeaderTimeout: 5 * time.Second,
 			Protocols:         protocols,
 		},
+		done: make(chan struct{}),
 		addr: cfg.Addr,
 		log:  log,
 	}
@@ -112,12 +116,23 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.srv.Shutdown(shutCtx)
 	}()
 	go func() {
+		defer close(s.done)
 		s.log.Info("web server listening", "addr", s.addr)
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.log.Error("web server failed", "err", err)
 		}
 	}()
 	return nil
+}
+
+// Wait blocks until the server has fully stopped — i.e. after the ctx passed to
+// [Server.Start] is cancelled and the graceful Shutdown has drained in-flight
+// requests and Serve has returned. Callers use it to keep dependencies (the DB
+// pool) alive until handlers finish, instead of racing teardown against drain.
+// Call it only after a successful [Server.Start]; on a bind failure Start
+// returns the error and Wait must not be called (done never closes).
+func (s *Server) Wait() {
+	<-s.done
 }
 
 // Addr returns the resolved listen address — meaningful only after [Server.Start]

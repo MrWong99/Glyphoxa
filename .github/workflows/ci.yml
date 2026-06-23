@@ -34,6 +34,14 @@ jobs:
         with:
           token: ${{ secrets.BUF_REGISTRY_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # BOOTSTRAP CARVE-OUT (#65): breaking-change detection compares against
+          # the PR base (main), which has NO .proto files yet — this is the first
+          # PR to add proto/glyphoxa/management/v1. `buf breaking` against an empty
+          # baseline errors ("had no .proto files") and would fail the job. Once
+          # this lands and main carries the module, remove this line to re-enable
+          # breaking against main (or set breaking_against_registry: true after the
+          # first push-to-main publishes buf.build/glyphoxa/glyphoxa).
+          breaking: false
 
   # Generate the protobuf/Connect/ES stubs exactly ONCE per push, in an
   # authenticated job, and fan them out as an artifact (ADR-0039 codegen).

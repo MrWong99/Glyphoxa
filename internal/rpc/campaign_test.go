@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -110,5 +111,24 @@ func TestGetActiveCampaign_NotFound(t *testing.T) {
 	}
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
 		t.Errorf("code = %v, want %v", got, connect.CodeNotFound)
+	}
+}
+
+func TestGetActiveCampaign_Internal(t *testing.T) {
+	t.Parallel()
+
+	// A non-ErrNotFound storage failure maps to CodeInternal (the raw cause is
+	// logged server-side, not returned to the client).
+	client := newClient(t, fakeReader{err: errors.New("boom")})
+
+	_, err := client.GetActiveCampaign(
+		context.Background(),
+		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}),
+	)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("code = %v, want %v", got, connect.CodeInternal)
 	}
 }

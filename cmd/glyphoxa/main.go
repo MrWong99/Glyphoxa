@@ -45,9 +45,11 @@ func main() {
 	slog.SetDefault(log)
 
 	// `migrate` and `seed` are subcommands with their own argument grammar,
-	// dispatched before flag parsing. The full Mode dispatcher (all/web) and
-	// root command surface belong to the control-plane task (#6); this slice
-	// wires `migrate` (ADR-0031), `seed` (task #5), and the `voice` mode.
+	// dispatched before flag parsing. `voice`, `web`, and `all` are the Modes
+	// (ADR-0005); the broader root-command surface still belongs to the
+	// control-plane task (#6). NOTE: ADR-0005's eventual default Mode is `all`,
+	// but the binary defaults `-mode` to `voice` for the MVP slices and migrates
+	// the default to `all` with #6 — a recorded choice, not silent drift.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "migrate":
@@ -70,8 +72,8 @@ func main() {
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
 	hardcoded := flag.Bool("hardcoded", false, "use the in-code NPC instead of loading from the database — no Postgres needed, for smoke-testing audio without a seeded DB")
-	metricsAddr := flag.String("metrics-addr", ":9090", "address for the voice-mode /metrics listener (ADR-0032); empty disables it")
-	webAddr := flag.String("web-addr", ":8080", "address for the web/all-mode HTTP listener (Connect RPC + /metrics + probes, ADR-0039)")
+	metricsAddr := flag.String("metrics-addr", ":9090", "address for the /metrics + /healthz + /readyz listener (all Modes; kept off the public web API port, ADR-0032); empty disables it")
+	webAddr := flag.String("web-addr", ":8080", "address for the web/all-mode Connect RPC API listener (ADR-0039); observability is on -metrics-addr")
 	flag.Parse()
 
 	switch *mode {
@@ -81,12 +83,12 @@ func main() {
 			os.Exit(1)
 		}
 	case "web":
-		if err := runWeb(log, cfg, metrics, *webAddr, false); err != nil {
+		if err := runWeb(log, cfg, metrics, *webAddr, *metricsAddr, false); err != nil {
 			log.Error("web mode exited with error", "err", err)
 			os.Exit(1)
 		}
 	case "all":
-		if err := runWeb(log, cfg, metrics, *webAddr, true); err != nil {
+		if err := runWeb(log, cfg, metrics, *webAddr, *metricsAddr, true); err != nil {
 			log.Error("all mode exited with error", "err", err)
 			os.Exit(1)
 		}
@@ -167,20 +169,20 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 }
 
 // runWeb is the web/all-mode entrypoint (ADR-0039). It resolves the required DB
-// DSN, opens a pgxpool-backed storage.Store, builds the web tier (Connect
-// CampaignService + /metrics + probes on one cleartext h2c port), and runs it
-// until SIGINT/SIGTERM. metrics is mounted on the web mux — no standalone
-// MetricsServer in this mode (ADR-0032).
+// DSN, opens a pgxpool-backed storage.Store, and runs two listeners until
+// SIGINT/SIGTERM: the public Connect API (CampaignService) on webAddr, and the
+// metrics + k8s probes (/metrics, /healthz, /readyz) on the separate internal
+// metricsAddr — so the actuator endpoints stay off the public API surface.
 //
 // When withVoice is set (-mode=all) AND the Discord credentials are present
 // (DISCORD_BOT_TOKEN + -guild + -channel), the existing env-cred voice loop runs
 // concurrently under the same context, so SIGTERM stops both. Missing creds
 // degrade to web-only with a warning rather than failing (matches the #44
 // resilience posture); the single Prometheus recorder feeds both halves.
-func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, webAddr string, withVoice bool) error {
+func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, webAddr, metricsAddr string, withVoice bool) error {
 	dsn := databaseURL()
 	if dsn == "" {
-		return fmt.Errorf("web/all mode require a database; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL)")
+		return fmt.Errorf("web/all modes require a database; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -193,22 +195,22 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	defer pool.Close()
 	store := storage.New(pool)
 
-	// /readyz pings through a standalone database/sql handle (pgx stdlib driver,
-	// already a dep — see migrate.go); the pgxpool above is the request path, this
-	// is the probe path, mirroring runVoice.
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return fmt.Errorf("web: open readiness-probe db handle: %w", err)
+	// Metrics + k8s probes (/metrics, /healthz, /readyz) listen on their OWN port
+	// (metricsAddr), separate from the public web API — so they are scrapeable by
+	// Prometheus and the kubelet but never exposed on the external API surface.
+	// /readyz pings the request pool directly: the web tier owns its pool here
+	// (unlike the voice node, whose live pool is unreachable from main, so it
+	// needs a standalone handle).
+	if metricsAddr != "" {
+		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
 	}
-	defer db.Close()
 
+	// The web API server serves ONLY the Connect RPC mounts on webAddr.
 	mountPath, mountHandler := rpc.NewCampaignServer(store).Handler()
 	srv := web.NewServer(web.Config{
-		Addr:     webAddr,
-		Mounts:   []web.Mount{{Path: mountPath, Handler: mountHandler}},
-		Recorder: metrics,
-		Ready:    observe.ReadinessProbe(db.PingContext),
-		Logger:   log,
+		Addr:   webAddr,
+		Mounts: []web.Mount{{Path: mountPath, Handler: mountHandler}},
+		Logger: log,
 	})
 
 	// Without the voice half, runWebTier blocks on the web server alone.
@@ -220,8 +222,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// present. Resolving the token here (not in wirenpc) keeps the no-creds
 	// fallback a local decision: web-only is a healthy all-mode run, not an error.
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
-	voiceEnabled := cfg.Token != "" && cfg.Guild != "" && cfg.Channel != ""
-	if !voiceEnabled {
+	if !voiceEnabled(cfg.Token, cfg.Guild, cfg.Channel) {
 		log.Warn("voice disabled: set DISCORD_BOT_TOKEN, -guild, -channel to enable")
 		return runWebTier(ctx, srv)
 	}
@@ -230,23 +231,44 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
 
-	// errgroup ties the two halves to one context: the first to fail cancels the
-	// other, and SIGTERM (via ctx) stops both. A clean shutdown of either returns
-	// nil, so the process exits non-zero only on a real error.
+	// errgroup ties the two halves to one context so SIGTERM (via ctx) stops both.
+	// The web tier is the only fatal half: if it fails, gctx cancels and the voice
+	// loop unwinds. The voice half is best-effort (below) and always returns nil,
+	// so the process exits non-zero only on a web-tier error.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return runWebTier(gctx, srv) })
-	g.Go(func() error { return wirenpc.RunFromDB(gctx, cfg, dsn) })
+	g.Go(func() error {
+		// Voice is best-effort in all-mode: a voice startup/runtime failure must
+		// NOT tear down the web tier (the #44 resilience posture — the pod keeps
+		// serving /readyz). Log and degrade to web-only by returning nil; the
+		// gctx.Err() guard suppresses the benign cancellation log when SIGTERM is
+		// already stopping both halves.
+		if err := wirenpc.RunFromDB(gctx, cfg, dsn); err != nil && gctx.Err() == nil {
+			log.Error("voice loop exited; continuing web-only", "err", err)
+		}
+		return nil
+	})
 	return g.Wait()
 }
 
-// runWebTier starts the web server on ctx and blocks until ctx is cancelled,
-// returning any bind error from Start. Factored out so the keyless default-gate
-// test can boot a fake-handler server and assert clean boot+shutdown without
-// Postgres or Discord credentials.
+// voiceEnabled reports whether the all-mode voice loop should join: it needs the
+// Discord bot token plus a target guild and channel. Missing any of the three is
+// a healthy web-only all-mode run (ADR-0039), not an error — factored out so the
+// gating decision is unit-tested without Discord credentials.
+func voiceEnabled(token, guild, channel string) bool {
+	return token != "" && guild != "" && channel != ""
+}
+
+// runWebTier starts the web API server on ctx and blocks until it has fully shut
+// down — Start binds the listener, then Wait returns only after the ctx-triggered
+// graceful Shutdown has drained in-flight handlers, so the caller's deferred
+// pool.Close runs strictly after the drain. Factored out so the keyless
+// default-gate test can boot a fake-handler server and assert clean boot+shutdown
+// without Postgres or Discord credentials.
 func runWebTier(ctx context.Context, srv *web.Server) error {
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("web: start server: %w", err)
 	}
-	<-ctx.Done()
+	srv.Wait()
 	return nil
 }

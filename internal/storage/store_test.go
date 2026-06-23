@@ -3,9 +3,11 @@
 package storage_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -252,6 +254,46 @@ func TestGetActiveCampaign(t *testing.T) {
 	}
 	if active.TenantID != tenantID {
 		t.Errorf("active campaign tenant = %s, want %s", active.TenantID, tenantID)
+	}
+}
+
+// TestGetActiveCampaignTiebreaker asserts the `id DESC` secondary sort: two
+// campaigns sharing one identical created_at resolve deterministically to the
+// greater id, so "latest" never flaps when rows tie on the now() default.
+func TestGetActiveCampaignTiebreaker(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, _ := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// Two more campaigns sharing one explicit created_at (strictly after the
+	// seeded one) so only the id DESC tiebreaker decides the winner.
+	ts := time.Now().Add(time.Hour)
+	var ids []uuid.UUID
+	for _, name := range []string{"Tomb of Annihilation", "Descent into Avernus"} {
+		var id uuid.UUID
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO campaign (tenant_id, name, system, language, created_at)
+			 VALUES ($1, $2, 'dnd5e', 'en', $3) RETURNING id`,
+			tenantID, name, ts).Scan(&id); err != nil {
+			t.Fatalf("insert campaign %q: %v", name, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// Postgres orders uuids by their 16 big-endian bytes; bytes.Compare matches
+	// that exactly, so the greater id is the expected `id DESC` winner.
+	want := ids[0]
+	if bytes.Compare(ids[1][:], ids[0][:]) > 0 {
+		want = ids[1]
+	}
+
+	active, err := st.GetActiveCampaign(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	if active.ID != want {
+		t.Errorf("tiebreak id = %s, want greater id %s", active.ID, want)
 	}
 }
 
