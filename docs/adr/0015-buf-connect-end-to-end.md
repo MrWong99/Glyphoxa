@@ -11,3 +11,8 @@ Service granularity is small and focused:
 - `glyphoxa.voice.v1.VoiceControlService` — voice↔gateway: `claim_session`, `release_session`, `push_event`
 
 Carve-outs (plain `net/http`, outside Connect): SSE event stream, OAuth callbacks, file uploads. Connect server-streaming RPCs lack EventSource semantics (`Last-Event-ID`, proxy-compat); OAuth is HTML redirects; multipart is the right shape for uploads.
+
+## Addendum (#65): connect-es v2 merges the TS generators
+
+This ADR's "`protoc-gen-es` + `protoc-gen-connect-es`" wording predates Connect-ES v2. As of `@connectrpc/connect` v2 the separate `protoc-gen-connect-es` generator is **gone** — `protoc-gen-es` v2 now bakes the service descriptors into the message file (`*_pb.ts`), and the browser client is constructed at runtime with `createClient(CampaignService, transport)` rather than a generated `*PromiseClient`. The first codegen slice (#65) therefore wires a single TS plugin, `buf.build/bufbuild/es:v2`, instead of the v1 two-plugin pair. The decision is unchanged in substance — one `.proto` source of truth, a fully typed client, no hand-written types or zod — only the generator topology moved upstream. The Go side is unaffected (`connectrpc/go` is the connect-go generator).
+

@@ -48,6 +48,9 @@ deploy/helm/*/Chart.lock
 deploy/zhi/plugin/zhi-config-glyphoxa
 deploy/zhi/plugin/dist/
 
+# Generated protobuf/Connect/ES stubs (buf generate; produced in CI + Docker build)
+/gen/
+
 # Web frontend
 web/node_modules/
 web/.next/

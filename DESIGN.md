@@ -42,10 +42,16 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0032](docs/adr/0032-observability-slog-prometheus-deferred-tracing.md) | Observability: structured slog + thin Prometheus; tracing deferred behind a flag | Q16 |
 | [0033](docs/adr/0033-ci-test-strategy.md) | CI/test: keyless-default suite, build-tag-isolated heavy tests, tiered live | Q17 |
 | [0034](docs/adr/0034-deployment-artifacts.md) | Deployment: one image (mode as arg), Helm for k8s, systemd for self-host | Q18 |
+| [0035](docs/adr/0035-gemini-thinking-cap-reasoning-effort-low.md) | Gemini thinking cap: reasoning effort low | LLM tuning |
+| [0036](docs/adr/0036-voice-llm-llama-3-3-70b-on-groq.md) | Voice LLM: Llama 3.3 70B on Groq | LLM provider |
+| [0037](docs/adr/0037-openai-go-sdk-for-llm-providers.md) | OpenAI Go SDK for LLM providers (openaicompat) | LLM provider |
+| [0038](docs/adr/0038-multi-npc-single-target-default-programmatic-roster.md) | Multi-NPC: single-target default, one shared floor, programmatic roster | multi-NPC epic |
+| [0039](docs/adr/0039-mvp-ui-backend-single-operator-web-tier.md) | MVP UI ↔ backend: single-operator self-host web tier | MVP UI integration |
 
 ## Open questions
 
 - **Q19 — First sprint scope.** Retrospective / next-sprint planning given what shipped. Held until the live demo runs (needs to see what shipped audibly).
+- **MVP UI integration increment.** Scoped by [ADR-0039](docs/adr/0039-mvp-ui-backend-single-operator-web-tier.md): the first web tier that makes the three designed screens (Configuration · Campaign · Session) drive the real voice pipeline, single-operator self-host. Tracked as an Epic + TDD vertical-slice issues on the tracker.
 
 ## Methodology notes
 

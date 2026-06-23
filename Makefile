@@ -117,14 +117,13 @@ dave-libs:
 proto:
 	buf generate
 
-# Check that generated protobuf code is up to date (CI target).
+# Verify the proto stubs generate AND the result compiles. gen/ is gitignored
+# (ADR-0039) — produced in CI and the Docker build, not committed — so a stale-
+# diff check is meaningless. Instead regenerate and compile: a broken or stale
+# proto now fails by not building.
 proto-check:
 	buf generate
-	@if [ -n "$$(git diff --name-only gen/)" ]; then \
-		echo "ERROR: generated protobuf code is stale. Run 'make proto' and commit."; \
-		git diff --name-only gen/; \
-		exit 1; \
-	fi
+	go build ./...
 
 # Lint protobuf definitions.
 proto-lint:
@@ -140,7 +139,10 @@ clean:
 # layer cache — expect several minutes on first build.
 DOCKER_IMAGE ?= glyphoxa:smoke
 
-docker-build:
+# Depends on `proto`: gen/ is gitignored and NOT generated inside the image
+# (buf/node stay out of the builder), so it must exist in the build context on
+# the host before `docker build` ships it. `make proto` runs `buf generate` first.
+docker-build: proto
 	docker build -t $(DOCKER_IMAGE) .
 
 # Run the container smoke test (issue #31) against $(DOCKER_IMAGE). Asserts the

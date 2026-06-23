@@ -15,8 +15,80 @@ permissions:
   contents: read
 
 jobs:
+  # Lint, format-check, breaking-check, and (on merge to main) PUSH the proto
+  # module to the BSR via the official buf-action (ADR-0039). On pull_request it
+  # posts a summary comment; on push-to-main it runs `buf push` to publish
+  # buf.build/glyphoxa/glyphoxa. Independent of codegen (this action does NOT
+  # generate) — the `proto` job below owns stub generation.
+  buf:
+    name: buf (lint + breaking + push)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # buf-action posts a PR summary comment
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned (not floating @v1) so an action release can't change what CI
+      # enforces — or publishes — without a reviewed bump.
+      - uses: bufbuild/buf-action@v1.4.0
+        with:
+          token: ${{ secrets.BUF_REGISTRY_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # BOOTSTRAP CARVE-OUT (#65): breaking-change detection compares against
+          # the PR base (main), which has NO .proto files yet — this is the first
+          # PR to add proto/glyphoxa/management/v1. `buf breaking` against an empty
+          # baseline errors ("had no .proto files") and would fail the job. Once
+          # this lands and main carries the module, remove this line to re-enable
+          # breaking against main (or set breaking_against_registry: true after the
+          # first push-to-main publishes buf.build/glyphoxa/glyphoxa).
+          breaking: false
+
+  # Generate the protobuf/Connect/ES stubs exactly ONCE per push, in an
+  # authenticated job, and fan them out as an artifact (ADR-0039 codegen).
+  # Generate-only: lint/format/breaking live in the `buf` job above. gen/ is
+  # gitignored (NOT committed): buf.gen.yaml drives REMOTE BSR plugins
+  # (protocolbuffers/go, connectrpc/go, bufbuild/es), which are rate-limited
+  # unless authed — so buf authenticates here via BUF_TOKEN once, and every
+  # downstream Go-compiling job + the Docker build CONSUMES the uploaded gen/
+  # rather than re-running buf (no per-job BSR hits, no buf/node in the image).
+  proto:
+    name: proto (generate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned buf CLI (not @latest) so a buf release can't change what CI
+      # generates without a reviewed bump. Matches the local 1.66.0.
+      - name: Setup buf
+        uses: bufbuild/buf-setup-action@v1.50.0
+        with:
+          version: 1.66.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # buf authenticates to the BSR via BUF_TOKEN. The remote plugins in
+      # buf.gen.yaml are rate-limited for anonymous callers; the operator-
+      # provisioned BUF_REGISTRY_TOKEN secret lifts that for this authed job.
+      - name: Generate stubs
+        run: buf generate
+        env:
+          BUF_TOKEN: ${{ secrets.BUF_REGISTRY_TOKEN }}
+
+      # Upload the gen/ tree as `gen`. With a single `path: gen`, the artifact's
+      # least-common-ancestor is gen/, so its internal layout is
+      # glyphoxa/... (the gen/ prefix is stripped). Downstream jobs
+      # download with `path: gen`, restoring ./gen/glyphoxa/... — the exact
+      # import path the generated Go (go_package .../gen/glyphoxa/...) needs.
+      - name: Upload gen artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gen
+          path: gen
+          retention-days: 1
+          if-no-files-found: error
+
   test:
     name: build + vet + test
+    needs: [proto]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -26,6 +98,15 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+
+      # Restore the generated stubs (produced once by the `proto` job) BEFORE
+      # any go build/vet/test — gen/ is gitignored, so without this the module
+      # doesn't compile. `path: gen` lands files at ./gen/glyphoxa/...
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
 
       # pkg/voice/vad/silero downloads libonnxruntime.so on first use and
       # extracts it under $XDG_CACHE_HOME/glyphoxa/onnxruntime/<version>.
@@ -55,6 +136,7 @@ jobs:
 
   integration:
     name: integration (Postgres / testcontainers)
+    needs: [proto]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -64,6 +146,13 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+
+      # Restore the generated stubs before any go build/test (gen/ is gitignored).
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
 
       - name: Cache ONNX runtime
         uses: actions/cache@v5
@@ -81,6 +170,7 @@ jobs:
 
   audio:
     name: audio / CGO (opus + bench)
+    needs: [proto]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -90,6 +180,13 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+
+      # Restore the generated stubs before any go build/test (gen/ is gitignored).
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
 
       - name: Cache ONNX runtime
         uses: actions/cache@v5
@@ -120,9 +217,20 @@ jobs:
 
   image:
     name: container image (build + smoke)
+    needs: [proto]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # The Dockerfile does `COPY . .` then `go build` — gen/ is gitignored and
+      # NOT generated inside the image (no buf/node in the builder), so it must
+      # be present in the build CONTEXT. Restore it here BEFORE the docker build;
+      # .dockerignore does not exclude gen/, so `COPY . .` picks it up.
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
 
       # buildx + layer caching keeps the slow native build (whisper.cpp +
       # libopus + libdave + CGO) off the critical path on warm caches. This is a
@@ -213,10 +321,20 @@ jobs:
     # build per run. The real cluster e2e is issue #37's gate — deliberately a
     # SEPARATE job from the fast `test` suite (ADR-0033) so the heavy image build
     # + cluster spin-up never slows unit feedback.
-    needs: [image]
+    # `image` stays for cache ordering; `proto` is added because this job runs
+    # its OWN docker build and so needs gen/ in its build context too.
+    needs: [image, proto]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # Restore the generated stubs into the build context (gen/ is gitignored,
+      # not generated inside the image) before this job's own docker build.
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
 
       # Rebuild the single image (ADR-0034) from the warm gha cache and LOAD it
       # into the local daemon so k3d can import it. cache-from only (no cache-to)
@@ -273,6 +391,7 @@ jobs:
 
   lint:
     name: golangci-lint
+    needs: [proto]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -282,6 +401,14 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+
+      # Restore the generated stubs before the lint run (gen/ is gitignored;
+      # golangci-lint type-checks the module, so it must compile).
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
 
       # Install golangci-lint v2 from source rather than via the official
       # action: the action's v6 release pins golangci-lint v1, which can't

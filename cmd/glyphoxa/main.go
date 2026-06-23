@@ -14,12 +14,18 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
+
 	// pgx stdlib driver: the /readyz probe pings through a database/sql handle
 	// (issue #33). Registered here as well as in migrate.go so this file's use of
 	// sql.Open("pgx", …) is self-documenting; the blank import is idempotent.
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/rpc"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
@@ -39,9 +45,11 @@ func main() {
 	slog.SetDefault(log)
 
 	// `migrate` and `seed` are subcommands with their own argument grammar,
-	// dispatched before flag parsing. The full Mode dispatcher (all/web) and
-	// root command surface belong to the control-plane task (#6); this slice
-	// wires `migrate` (ADR-0031), `seed` (task #5), and the `voice` mode.
+	// dispatched before flag parsing. `voice`, `web`, and `all` are the Modes
+	// (ADR-0005); the broader root-command surface still belongs to the
+	// control-plane task (#6). NOTE: ADR-0005's eventual default Mode is `all`,
+	// but the binary defaults `-mode` to `voice` for the MVP slices and migrates
+	// the default to `all` with #6 — a recorded choice, not silent drift.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "migrate":
@@ -59,12 +67,13 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "voice", "process mode: voice")
+	mode := flag.String("mode", "voice", "process mode: voice|web|all")
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
 	hardcoded := flag.Bool("hardcoded", false, "use the in-code NPC instead of loading from the database — no Postgres needed, for smoke-testing audio without a seeded DB")
-	metricsAddr := flag.String("metrics-addr", ":9090", "address for the voice-mode /metrics listener (ADR-0032); empty disables it")
+	metricsAddr := flag.String("metrics-addr", ":9090", "address for the /metrics + /healthz + /readyz listener (all Modes; kept off the public web API port, ADR-0032); empty disables it")
+	webAddr := flag.String("web-addr", ":8080", "address for the web/all-mode Connect RPC API listener (ADR-0039); observability is on -metrics-addr")
 	flag.Parse()
 
 	switch *mode {
@@ -73,8 +82,18 @@ func main() {
 			log.Error("voice mode exited with error", "err", err)
 			os.Exit(1)
 		}
+	case "web":
+		if err := runWeb(log, cfg, metrics, *webAddr, *metricsAddr, false); err != nil {
+			log.Error("web mode exited with error", "err", err)
+			os.Exit(1)
+		}
+	case "all":
+		if err := runWeb(log, cfg, metrics, *webAddr, *metricsAddr, true); err != nil {
+			log.Error("all mode exited with error", "err", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (only \"voice\" is supported in this slice)\n", *mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (one of voice|web|all)\n", *mode)
 		os.Exit(2)
 	}
 }
@@ -147,4 +166,109 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		return wirenpc.Run(ctx, cfg)
 	}
 	return wirenpc.RunFromDB(ctx, cfg, dsn)
+}
+
+// runWeb is the web/all-mode entrypoint (ADR-0039). It resolves the required DB
+// DSN, opens a pgxpool-backed storage.Store, and runs two listeners until
+// SIGINT/SIGTERM: the public Connect API (CampaignService) on webAddr, and the
+// metrics + k8s probes (/metrics, /healthz, /readyz) on the separate internal
+// metricsAddr — so the actuator endpoints stay off the public API surface.
+//
+// When withVoice is set (-mode=all) AND the Discord credentials are present
+// (DISCORD_BOT_TOKEN + -guild + -channel), the existing env-cred voice loop runs
+// concurrently under the same context, so SIGTERM stops both. Missing creds
+// degrade to web-only with a warning rather than failing (matches the #44
+// resilience posture); the single Prometheus recorder feeds both halves.
+func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, webAddr, metricsAddr string, withVoice bool) error {
+	dsn := databaseURL()
+	if dsn == "" {
+		return fmt.Errorf("web/all modes require a database; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL)")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("web: open db pool: %w", err)
+	}
+	defer pool.Close()
+	store := storage.New(pool)
+
+	// Metrics + k8s probes (/metrics, /healthz, /readyz) listen on their OWN port
+	// (metricsAddr), separate from the public web API — so they are scrapeable by
+	// Prometheus and the kubelet but never exposed on the external API surface.
+	// /readyz pings the request pool directly: the web tier owns its pool here
+	// (unlike the voice node, whose live pool is unreachable from main, so it
+	// needs a standalone handle).
+	if metricsAddr != "" {
+		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
+	}
+
+	// The web API server serves ONLY the Connect RPC mounts on webAddr.
+	mountPath, mountHandler := rpc.NewCampaignServer(store).Handler()
+	srv := web.NewServer(web.Config{
+		Addr:   webAddr,
+		Mounts: []web.Mount{{Path: mountPath, Handler: mountHandler}},
+		Logger: log,
+	})
+
+	// Without the voice half, runWebTier blocks on the web server alone.
+	if !withVoice {
+		return runWebTier(ctx, srv)
+	}
+
+	// all-mode: the voice loop only joins when the Discord credentials are
+	// present. Resolving the token here (not in wirenpc) keeps the no-creds
+	// fallback a local decision: web-only is a healthy all-mode run, not an error.
+	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
+	if !voiceEnabled(cfg.Token, cfg.Guild, cfg.Channel) {
+		log.Warn("voice disabled: set DISCORD_BOT_TOKEN, -guild, -channel to enable")
+		return runWebTier(ctx, srv)
+	}
+
+	cfg.Logger = log
+	cfg.Metrics = metrics
+	cfg.StageMetrics = metrics
+
+	// errgroup ties the two halves to one context so SIGTERM (via ctx) stops both.
+	// The web tier is the only fatal half: if it fails, gctx cancels and the voice
+	// loop unwinds. The voice half is best-effort (below) and always returns nil,
+	// so the process exits non-zero only on a web-tier error.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return runWebTier(gctx, srv) })
+	g.Go(func() error {
+		// Voice is best-effort in all-mode: a voice startup/runtime failure must
+		// NOT tear down the web tier (the #44 resilience posture — the pod keeps
+		// serving /readyz). Log and degrade to web-only by returning nil; the
+		// gctx.Err() guard suppresses the benign cancellation log when SIGTERM is
+		// already stopping both halves.
+		if err := wirenpc.RunFromDB(gctx, cfg, dsn); err != nil && gctx.Err() == nil {
+			log.Error("voice loop exited; continuing web-only", "err", err)
+		}
+		return nil
+	})
+	return g.Wait()
+}
+
+// voiceEnabled reports whether the all-mode voice loop should join: it needs the
+// Discord bot token plus a target guild and channel. Missing any of the three is
+// a healthy web-only all-mode run (ADR-0039), not an error — factored out so the
+// gating decision is unit-tested without Discord credentials.
+func voiceEnabled(token, guild, channel string) bool {
+	return token != "" && guild != "" && channel != ""
+}
+
+// runWebTier starts the web API server on ctx and blocks until it has fully shut
+// down — Start binds the listener, then Wait returns only after the ctx-triggered
+// graceful Shutdown has drained in-flight handlers, so the caller's deferred
+// pool.Close runs strictly after the drain. Factored out so the keyless
+// default-gate test can boot a fake-handler server and assert clean boot+shutdown
+// without Postgres or Discord credentials.
+func runWebTier(ctx context.Context, srv *web.Server) error {
+	if err := srv.Start(ctx); err != nil {
+		return fmt.Errorf("web: start server: %w", err)
+	}
+	srv.Wait()
+	return nil
 }

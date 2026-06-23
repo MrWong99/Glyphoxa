@@ -1,8 +1,20 @@
 version: v2
 plugins:
-  - remote: buf.build/protocolbuffers/go
+  # Go message structs. Pinned (like the CLI + es plugin) so a plugin release
+  # can't change generated code without a reviewed bump; tracks the
+  # google.golang.org/protobuf version in go.mod.
+  - remote: buf.build/protocolbuffers/go:v1.36.11
     out: gen
     opt: paths=source_relative
-  - remote: buf.build/grpc/go
+  # Connect-go handlers + clients (gRPC + Connect + gRPC-Web). Supersedes grpc/go.
+  # Pinned to the protoc-gen-connect-go release matching connectrpc.com/connect.
+  - remote: buf.build/connectrpc/go:v1.18.1
     out: gen
     opt: paths=source_relative
+  # TypeScript messages + service descriptors for the web SPA (ADR-0039).
+  # protoc-gen-es v2 bakes services into the *_pb.ts; the web client uses
+  # createClient(Service, transport) from @connectrpc/connect — no separate
+  # connect-es generator plugin is needed. web/ is generated in CI.
+  - remote: buf.build/bufbuild/es:v2.12.1
+    out: gen/ts
+    opt: target=ts
