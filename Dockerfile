@@ -113,6 +113,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
+# The generated protobuf/Connect stubs (gen/, gitignored, ADR-0039) are expected
+# to ALREADY exist in the build context — produced on the host by `make proto`
+# (which `make docker-build` depends on) or by the CI `proto` job (downloaded as
+# the `gen` artifact before the build). They are NOT generated inside the image:
+# buf/node deliberately stay out of the builder. .dockerignore does not exclude
+# gen/, so this COPY brings them in; the go build below then compiles them.
 COPY . .
 
 # Compile the live binary with the production CGO tags and the whisper/dave/opus
