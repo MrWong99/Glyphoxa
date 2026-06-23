@@ -46,13 +46,13 @@ func NewMetricsServer(addr string, rec *PrometheusRecorder, ready ReadinessProbe
 	}
 }
 
-// newMux wires the voice-node endpoints onto a fresh mux: /metrics (rec's
+// MountObservability mounts the observability endpoints — /metrics (rec's
 // registry), /healthz (liveness — always 200 while the process serves), and
 // /readyz (readiness — 200 when ready returns nil, 503 otherwise; always 200 if
-// ready is nil). Factored out so the handlers are testable without a real
-// listener.
-func newMux(rec *PrometheusRecorder, ready ReadinessProbe) *http.ServeMux {
-	mux := http.NewServeMux()
+// ready is nil) — onto a caller-supplied mux. The standalone voice
+// [MetricsServer] and the web/all-mode server (ADR-0039) share this one wiring
+// so the probe semantics stay identical across modes (ADR-0032).
+func MountObservability(mux *http.ServeMux, rec *PrometheusRecorder, ready ReadinessProbe) {
 	mux.Handle("/metrics", rec.Handler())
 	// Liveness: the process is up and able to serve a request. It deliberately
 	// ignores dependency health — a failing DB must not make k8s kill the pod
@@ -75,6 +75,14 @@ func newMux(rec *PrometheusRecorder, ready ReadinessProbe) *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
+}
+
+// newMux wires the voice-node endpoints onto a fresh mux via
+// [MountObservability]. Factored out so the handlers are testable without a real
+// listener.
+func newMux(rec *PrometheusRecorder, ready ReadinessProbe) *http.ServeMux {
+	mux := http.NewServeMux()
+	MountObservability(mux, rec, ready)
 	return mux
 }
 
