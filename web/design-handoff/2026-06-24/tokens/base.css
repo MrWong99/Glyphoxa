@@ -1,0 +1,28 @@
+/* Glyphoxa Design System — base tokens
+ * Root design primitives shared by every theme. Density / accent / reduce-motion
+ * are root attributes; downstream token files override per [data-accent].
+ */
+:root {
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --border-width: 1px;
+
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  --z-overlay: 50;
+  --z-toast: 60;
+}
+
+:root[data-reduce-motion="true"] {
+  --duration-fast: 0ms;
+  --duration-base: 0ms;
+}
+
+:root[data-density="compact"] {
+  --space-row: 8px;
+}

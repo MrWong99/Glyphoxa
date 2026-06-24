@@ -1,0 +1,11 @@
+/* Glyphoxa Design System — effects tokens (shadows, glows) */
+:root {
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
+
+  --glow-accent: 0 0 0 1px var(--color-accent-bg), 0 0 18px var(--color-accent-bg);
+  --glow-live: 0 0 0 4px var(--color-success-bg);
+
+  --ring-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+}

@@ -1,0 +1,10 @@
+/* Glyphoxa Design System — font face loading
+ * The prototype loads Inter + JetBrains Mono from the system / a self-hosted
+ * bundle. At handoff we fall back to the system stack (see typography.css) so no
+ * network font is required for the SPA to render correctly.
+ */
+@supports (font-variation-settings: normal) {
+  :root {
+    --font-sans: "InterVariable", "Inter", system-ui, sans-serif;
+  }
+}

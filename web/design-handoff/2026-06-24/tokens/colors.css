@@ -1,0 +1,42 @@
+/* Glyphoxa Design System — color tokens
+ * Dark-first console palette. [data-accent] flips the accent ramp; the neutral
+ * surface ramp stays constant so future handoffs can recolor without touching
+ * layout CSS.
+ */
+:root {
+  --color-bg: #0b0d12;
+  --color-surface: #12151c;
+  --color-surface-raised: #181c25;
+  --color-surface-sunken: #0d0f15;
+  --color-border: #232834;
+  --color-border-strong: #2f3645;
+
+  --color-text: #e7eaf0;
+  --color-text-muted: #9aa3b2;
+  --color-text-faint: #5f6878;
+
+  --color-accent: #7c5cff;
+  --color-accent-hover: #8f73ff;
+  --color-accent-contrast: #ffffff;
+
+  --color-success: #3ecf8e;
+  --color-warning: #f5a623;
+  --color-danger: #ff5d5d;
+
+  --color-success-bg: rgba(62, 207, 142, 0.12);
+  --color-warning-bg: rgba(245, 166, 35, 0.12);
+  --color-danger-bg: rgba(255, 93, 93, 0.12);
+  --color-accent-bg: rgba(124, 92, 255, 0.14);
+}
+
+:root[data-accent="ember"] {
+  --color-accent: #ff7a45;
+  --color-accent-hover: #ff8f60;
+  --color-accent-bg: rgba(255, 122, 69, 0.14);
+}
+
+:root[data-accent="emerald"] {
+  --color-accent: #2fd5a0;
+  --color-accent-hover: #46e0b1;
+  --color-accent-bg: rgba(47, 213, 160, 0.14);
+}
