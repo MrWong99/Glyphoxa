@@ -230,29 +230,29 @@ type Config struct {
 	npcs []npcSpec
 }
 
-// RunFromDB loads the seeded Character NPC from Postgres (via the task-#8
-// storage layer) and runs the live voice loop with it, instead of the in-code
-// NPC. dsn is the Postgres connection string. This is the task-#5 DB-load path:
-// the only thing it changes versus [Run] is the *source* of the NPC's Persona/
-// Voice/identity — the assembled pipeline is identical.
-func RunFromDB(ctx context.Context, cfg Config, dsn string) error {
+// RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
+// storage layer) and runs the live voice loop with them, instead of the in-code
+// NPC. pool is an already-open pgxpool the caller owns (and closes) — voice mode
+// opens exactly one pool that ALSO backs the /readyz probe, and all/web mode
+// hands in its existing request pool, so the voice path never opens a second
+// duplicate handle. This is the task-#5 DB-load path: the only thing it changes
+// versus [Run] is the *source* of the NPC's Persona/Voice/identity — the
+// assembled pipeline is identical.
+func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool) error {
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		return fmt.Errorf("wirenpc: open DB pool: %w", err)
-	}
-	defer pool.Close()
-
 	// Fail fast on a stale schema BEFORE any other DB interaction (ADR-0031):
 	// serving Modes (voice) never auto-migrate, so a DB behind the embedded
 	// migrations must refuse to start with the actionable `migrate up` message
 	// rather than running queries against a schema the code no longer matches.
-	// This runs after the pool opens and before loadSeededNPCs (the first query).
-	if err := ensureSchemaCurrent(ctx, dsn); err != nil {
+	// This runs before loadSeededNPCs (the first query). The schema check needs a
+	// database/sql handle (goose's API), which the pgxpool can't provide, so the
+	// dsn is recovered from the pool's own config — no second connection string
+	// threaded through the callers.
+	if err := ensureSchemaCurrent(ctx, pool.Config().ConnString()); err != nil {
 		return err
 	}
 

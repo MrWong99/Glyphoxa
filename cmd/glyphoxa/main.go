@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -16,11 +15,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
-
-	// pgx stdlib driver: the /readyz probe pings through a database/sql handle
-	// (issue #33). Registered here as well as in migrate.go so this file's use of
-	// sql.Open("pgx", …) is self-documenting; the blank import is idempotent.
-	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
@@ -132,40 +126,34 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Resolve the DB DSN once: it both gates the load path below and, when
-	// present, backs the /readyz probe (issue #33). -hardcoded runs with no DB,
-	// so its readiness probe is nil (always-ready — see observe.ReadinessProbe).
-	dsn := ""
-	if !hardcoded {
-		dsn = databaseURL()
-		if dsn == "" {
-			return fmt.Errorf("voice mode loads the NPC from the DB by default; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL), or pass -hardcoded to use the in-code NPC")
-		}
-	}
-
-	if metricsAddr != "" {
-		var ready observe.ReadinessProbe
-		if dsn != "" {
-			// The live pgxpool is opened later inside wirenpc.RunFromDB and isn't
-			// reachable here, so /readyz pings through a small standalone
-			// database/sql handle (pgx stdlib driver, already a dep — see
-			// migrate.go). It lives for the metrics server's lifetime alongside the
-			// voice loop. NOTE: this ping-handle may later be consolidated with the
-			// schema-check handle from the wirenpc boot path (#32) once both merge.
-			db, err := sql.Open("pgx", dsn)
-			if err != nil {
-				return fmt.Errorf("voice: open readiness-probe db handle: %w", err)
-			}
-			defer db.Close()
-			ready = db.PingContext
-		}
-		observe.NewMetricsServer(metricsAddr, metrics, ready, log).Start(ctx)
-	}
-
+	// -hardcoded runs with no DB: no pool, and the readiness probe is nil
+	// (always-ready — see observe.ReadinessProbe). The default path resolves the
+	// DSN and opens ONE pgxpool that serves BOTH the /readyz probe (pool.Ping) and
+	// the NPC load inside RunFromDB — the voice node no longer opens a separate
+	// standalone readiness handle alongside RunFromDB's own pool (issue #77).
 	if hardcoded {
+		if metricsAddr != "" {
+			observe.NewMetricsServer(metricsAddr, metrics, nil, log).Start(ctx)
+		}
 		return wirenpc.Run(ctx, cfg)
 	}
-	return wirenpc.RunFromDB(ctx, cfg, dsn)
+
+	dsn := databaseURL()
+	if dsn == "" {
+		return fmt.Errorf("voice mode loads the NPC from the DB by default; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL), or pass -hardcoded to use the in-code NPC")
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("voice: open db pool: %w", err)
+	}
+	defer pool.Close()
+
+	if metricsAddr != "" {
+		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
+	}
+
+	return wirenpc.RunFromDB(ctx, cfg, pool)
 }
 
 // runWeb is the web/all-mode entrypoint (ADR-0039). It resolves the required DB
@@ -243,7 +231,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// serving /readyz). Log and degrade to web-only by returning nil; the
 		// gctx.Err() guard suppresses the benign cancellation log when SIGTERM is
 		// already stopping both halves.
-		if err := wirenpc.RunFromDB(gctx, cfg, dsn); err != nil && gctx.Err() == nil {
+		if err := wirenpc.RunFromDB(gctx, cfg, pool); err != nil && gctx.Err() == nil {
 			log.Error("voice loop exited; continuing web-only", "err", err)
 		}
 		return nil
