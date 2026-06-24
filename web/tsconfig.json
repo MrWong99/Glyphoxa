@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+
+    "types": ["node", "vitest/globals", "@testing-library/jest-dom"],
+
+    "baseUrl": ".",
+    "paths": {
+      "@gen/*": ["../gen/ts/*"],
+      "@/*": ["./src/*"],
+      // The generated client lives at ../gen/ts (outside web/), so bundler module
+      // resolution from that file walks up past web/node_modules and can't find
+      // the @bufbuild/* packages. Redirect the bare specifier and the two subpath
+      // exports the generated *_pb.ts uses straight at their type declarations so
+      // both tsc and Vite resolve them from web/node_modules.
+      "@bufbuild/protobuf": ["./node_modules/@bufbuild/protobuf/dist/esm/index.d.ts"],
+      "@bufbuild/protobuf/codegenv2": [
+        "./node_modules/@bufbuild/protobuf/dist/esm/codegenv2/index.d.ts"
+      ],
+      "@bufbuild/protobuf/wkt": ["./node_modules/@bufbuild/protobuf/dist/esm/wkt/index.d.ts"]
+    }
+  },
+  "include": ["src", "vite.config.ts", "vitest.setup.ts", "../gen/ts"]
+}
