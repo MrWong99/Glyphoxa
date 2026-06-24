@@ -1,28 +1,99 @@
-/* Glyphoxa Design System — base tokens
- * Root design primitives shared by every theme. Density / accent / reduce-motion
- * are root attributes; downstream token files override per [data-accent].
- */
-:root {
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
-  --radius-pill: 999px;
+/* ============================================================================
+ * Glyphoxa — Base elements & utilities
+ * Light-touch resets + element defaults so any page that links styles.css
+ * inherits the arcane theme. Utilities are namespaced `gx-`.
+ * ========================================================================== */
 
-  --border-width: 1px;
+*,
+*::before,
+*::after { box-sizing: border-box; }
 
-  --duration-fast: 120ms;
-  --duration-base: 200ms;
-  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+html { -webkit-text-size-adjust: 100%; }
 
-  --z-overlay: 50;
-  --z-toast: 60;
+body {
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  line-height: var(--body-line);
+  color: var(--text-default);
+  background-color: var(--surface-void);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-:root[data-reduce-motion="true"] {
-  --duration-fast: 0ms;
-  --duration-base: 0ms;
+/* Headings default to the Zilla Slab display family */
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  line-height: var(--display-line);
+  letter-spacing: var(--display-tracking);
+  color: var(--text-strong);
+  text-wrap: pretty;
 }
 
-:root[data-density="compact"] {
-  --space-row: 8px;
+p { margin: 0 0 var(--spacing-md); text-wrap: pretty; }
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+a:hover { color: var(--text-link-hover); text-decoration: underline; }
+
+code, kbd, samp, pre { font-family: var(--font-mono); }
+
+::selection { background: rgba(144, 89, 255, 0.4); color: #fff; }
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* Custom scrollbar — arcane stone */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--surface-base); }
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-30);
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--surface-base);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-ink-10); }
+
+/* ---- Utilities ---------------------------------------------------------- */
+
+/* Atmospheric page wash — drop on a full-bleed wrapper */
+.gx-wash { background-color: var(--surface-void); background-image: var(--wash-arcane); }
+
+/* Faint rune-grid texture overlay */
+.gx-runegrid { background-image: var(--rune-grid); background-size: var(--rune-grid-size); }
+
+/* Runic small-caps eyebrow */
+.gx-overline {
+  font-family: var(--font-base);
+  font-size: var(--overline-size);
+  font-weight: var(--overline-weight);
+  letter-spacing: var(--overline-tracking);
+  text-transform: uppercase;
+  color: var(--rune);
+}
+
+/* Gradient text — for the wordmark / hero numerals */
+.gx-gradient-text {
+  background: var(--gradient-arcane);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gx-display { font-family: var(--font-display); }
+.gx-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

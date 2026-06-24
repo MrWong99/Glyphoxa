@@ -1,97 +1,87 @@
-// Glyphoxa Design System — Configuration screen (ui_kits/glyphoxa-web)
-// THIS is the Configuration screen. The campaign header (name / system /
-// language) is wired to the live GetActiveCampaign RPC in the SPA. The provider
-// keys, voice dropdown, and health/connection badge render as styled DISABLED
-// "coming soon" placeholders until their RPCs land (ADR-0039 product decision).
+/* Glyphoxa web UI kit — Settings (providers) + Users. */
 
-import { AppShell } from "./shell.jsx";
-import { mockCampaign, mockProviderKeys, mockVoices, mockConnection } from "./data.jsx";
+function SettingsScreen({ page }) {
+  const Icon = window.GXIcon;
+  const { Card, Badge, Button, Avatar, Select, Switch, Input } = window.GlyphoxaDesignSystem_55f528;
 
-export function SettingsScreen() {
-  const campaign = mockCampaign;
+  if (page === 'users') {
+    const users = [
+      { name: 'Sora Vance', email: 'sora@flagon.gg', role: 'Dungeon Master', rv: 'arcane', status: 'live' },
+      { name: 'Petra Quill', email: 'petra@flagon.gg', role: 'Tenant Admin', rv: 'gold', status: 'idle' },
+      { name: 'Bram Holt', email: 'bram@flagon.gg', role: 'Player', rv: 'neutral', status: 'offline' },
+      { name: 'Ix the Scribe', email: 'ix@flagon.gg', role: 'Player', rv: 'neutral', status: 'offline' },
+    ];
+    return (
+      <div style={{ padding: 28, maxWidth: 920, margin: '0 auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 22 }}>
+          <div style={{ flex: 1 }}>
+            <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, color: 'var(--text-strong)', margin: 0 }}>Users</h1>
+            <p style={{ color: 'var(--text-muted)', margin: '4px 0 0' }}>Everyone with a seat at your table.</p>
+          </div>
+          <Button variant="primary" iconStart={<Icon name="UserPlus" size={16} />}>Invite</Button>
+        </div>
+        <Card flat>
+          {users.map((u, i) => (
+            <div key={u.email} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '13px 18px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
+              <Avatar name={u.name} size="md" status={u.status} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-strong)' }}>{u.name}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-subtle)' }}>{u.email}</div>
+              </div>
+              <Badge variant={u.rv} size="sm">{u.role}</Badge>
+              <Icon name="EllipsisVertical" size={16} style={{ color: 'var(--text-subtle)' }} />
+            </div>
+          ))}
+        </Card>
+      </div>
+    );
+  }
+
+  const providers = [
+    { kind: 'STT', name: 'Deepgram Nova-3', icon: 'Ear', status: 'ok', opts: ['Deepgram Nova-3', 'ElevenLabs', 'whisper.cpp (local)'] },
+    { kind: 'LLM', name: 'Anthropic Claude', icon: 'BrainCircuit', status: 'ok', opts: ['Anthropic Claude', 'OpenAI', 'Google Gemini', 'Ollama (local)'] },
+    { kind: 'TTS', name: 'ElevenLabs', icon: 'AudioLines', status: 'ok', opts: ['ElevenLabs', 'Coqui XTTS (local)'] },
+    { kind: 'Embeddings', name: 'OpenAI', icon: 'Network', status: 'degraded', opts: ['OpenAI', 'Ollama (local)'] },
+  ];
 
   return (
-    <AppShell activeId="configuration">
-      <header className="page-header">
-        <div>
-          <h1 className="page-title">Configuration</h1>
-          <p className="page-subtitle">
-            Provider keys, voices, and the active campaign for this self-host.
-          </p>
-        </div>
-        <span className="tag" data-tone={mockConnection.connected ? "success" : undefined}>
-          <span className="live-dot" data-state={mockConnection.connected ? "live" : "idle"} />
-          {mockConnection.connected ? mockConnection.bot : "Bot offline"}
-        </span>
-      </header>
+    <div style={{ padding: 28, maxWidth: 820, margin: '0 auto' }}>
+      <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, color: 'var(--text-strong)', margin: 0 }}>Providers</h1>
+      <p style={{ color: 'var(--text-muted)', margin: '4px 0 22px' }}>Swap any engine with a config change — not a rewrite.</p>
 
-      {/* Campaign header — LIVE in the SPA */}
-      <section className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Active campaign</h2>
-            <p className="card-desc">Resolved from the seeded tenant.</p>
-          </div>
-        </div>
-        <div className="campaign-header">
-          <span className="avatar">{campaign.name.charAt(0)}</span>
-          <div className="campaign-meta">
-            <span className="campaign-name">{campaign.name}</span>
-            <div className="campaign-attrs">
-              <span className="campaign-attr">
-                <span className="campaign-attr-label">System</span>
-                <span className="campaign-attr-value">{campaign.system}</span>
-              </span>
-              <span className="campaign-attr">
-                <span className="campaign-attr-label">Language</span>
-                <span className="campaign-attr-value">{campaign.language}</span>
-              </span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {providers.map((p) => (
+          <Card key={p.kind}>
+            <div style={{ padding: 16, display: 'flex', alignItems: 'center', gap: 14 }}>
+              <span style={{ width: 40, height: 40, flex: '0 0 40px', borderRadius: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-inset)', color: 'var(--arcane)' }}><Icon name={p.icon} size={19} /></span>
+              <div style={{ width: 96 }}>
+                <div className="gx-overline">{p.kind}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-strong)', marginTop: 2 }}>{p.name}</div>
+              </div>
+              <div style={{ flex: 1, maxWidth: 240 }}>
+                <Select defaultValue={p.name} options={p.opts} aria-label={p.kind + ' provider'} />
+              </div>
+              {p.status === 'ok'
+                ? <Badge variant="success" dot size="sm">Healthy</Badge>
+                : <Badge variant="warning" dot size="sm">Degraded</Badge>}
             </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Provider keys — coming soon */}
-      <section className="card" data-disabled="true">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Provider keys</h2>
-            <p className="card-desc">Bring-your-own keys for LLM, STT, and TTS.</p>
-          </div>
-          <span className="coming-soon">coming soon</span>
-        </div>
-        {mockProviderKeys.map((k) => (
-          <div className="field" key={k.component}>
-            <label className="field-label">
-              {k.component.toUpperCase()} — {k.provider}
-            </label>
-            <div className="field-row">
-              <input className="input" placeholder="•••• not yet wired" disabled />
-              <button className="btn" data-variant="ghost" disabled>
-                Replace
-              </button>
-            </div>
-          </div>
+          </Card>
         ))}
-      </section>
+      </div>
 
-      {/* Voice dropdown — coming soon */}
-      <section className="card" data-disabled="true">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">NPC voice</h2>
-            <p className="card-desc">Default TTS voice for new NPCs.</p>
+      <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 600, color: 'var(--text-strong)', margin: '28px 0 12px' }}>Session defaults</h2>
+      <Card>
+        <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <Input label="Latency budget (ms)" defaultValue="1200" />
+            <Select label="Default engine" options={['Cascaded', 'S2S — Gemini', 'S2S — OpenAI']} />
           </div>
-          <span className="coming-soon">coming soon</span>
+          <Switch label="Continuous live transcription" defaultChecked />
+          <Switch label="Speculative sentence cascade (experimental)" />
         </div>
-        <div className="field">
-          <label className="field-label">Voice</label>
-          <button className="select" disabled>
-            {mockVoices[0].name}
-            <span aria-hidden="true">▾</span>
-          </button>
-        </div>
-      </section>
-    </AppShell>
+      </Card>
+    </div>
   );
 }
+
+window.GXSettings = SettingsScreen;

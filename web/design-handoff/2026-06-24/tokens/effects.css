@@ -1,11 +1,48 @@
-/* Glyphoxa Design System — effects tokens (shadows, glows) */
+/* ============================================================================
+ * Glyphoxa — Effects: shadows, glows, gradients, focus, motion
+ * Protocol's ink/blue-tinted elevation shadows, plus arcane glow layers that
+ * give the dark RPG surface its lit-from-within, enchanted quality.
+ * ========================================================================== */
+
 :root {
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
+  /* ---- Elevation shadows (Protocol, deepened for dark stone) ----------- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(9, 32, 77, 0.3);
+  --shadow-md: 0 8px 16px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(9, 32, 77, 0.35);
+  --shadow-lg: 0 24px 48px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(9, 32, 77, 0.4);
+  --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
-  --glow-accent: 0 0 0 1px var(--color-accent-bg), 0 0 18px var(--color-accent-bg);
-  --glow-live: 0 0 0 4px var(--color-success-bg);
+  /* ---- Arcane glows — the signature "lit rune" effect ------------------ */
+  --glow-arcane: 0 0 0 1px rgba(144, 89, 255, 0.4), 0 0 24px rgba(144, 89, 255, 0.35);
+  --glow-arcane-soft: 0 0 32px rgba(144, 89, 255, 0.22);
+  --glow-rune: 0 0 0 1px rgba(0, 221, 255, 0.5), 0 0 20px rgba(0, 221, 255, 0.4);
+  --glow-rune-soft: 0 0 28px rgba(0, 221, 255, 0.25);
+  --glow-live: 0 0 0 1px rgba(63, 225, 176, 0.5), 0 0 16px rgba(63, 225, 176, 0.45);
+  --glow-gold: 0 0 24px rgba(255, 189, 79, 0.4);
 
-  --ring-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+  /* ---- Gradients ------------------------------------------------------- */
+  /* Signature arcane sweep — Protocol "Cool Gradient": blue → violet → purple */
+  --gradient-arcane: linear-gradient(90deg, #3a8ee6, #9059ff, #c139e6); /* @kind color */
+  --gradient-arcane-diag: linear-gradient(135deg, #3a8ee6, #9059ff 55%, #c139e6); /* @kind color */
+  /* Rune glow for live/active states */
+  --gradient-rune: linear-gradient(90deg, #00ddff, #9059ff); /* @kind color */
+  /* Spell sweep used on usage bars / progress */
+  --gradient-spell: linear-gradient(90deg, #9059ff, #0090ed); /* @kind color */
+  /* Atmospheric radial wash for page/hero backgrounds */
+  --wash-arcane: radial-gradient(120% 80% at 50% -10%, rgba(144, 89, 255, 0.18), transparent 60%),
+                 radial-gradient(90% 60% at 85% 0%, rgba(0, 221, 255, 0.1), transparent 55%); /* @kind color */
+
+  /* ---- Focus ring — Protocol-style 2px offset, rune-cyan --------------- */
+  --focus-ring: 0 0 0 2px var(--surface-base), 0 0 0 4px var(--rune);
+
+  /* ---- Motion — Protocol uses short, no-nonsense transitions ----------- */
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1); /* @kind other */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);     /* @kind other */
+  --duration-fast: 100ms; /* @kind other */
+  --duration-base: 160ms; /* @kind other */
+  --duration-slow: 280ms; /* @kind other */
+
+  /* ---- Texture: faint rune-grid overlay for empty stone surfaces ------- */
+  --rune-grid: linear-gradient(rgba(144, 89, 255, 0.05) 1px, transparent 1px),
+               linear-gradient(90deg, rgba(144, 89, 255, 0.05) 1px, transparent 1px); /* @kind color */
+  --rune-grid-size: 32px 32px; /* @kind spacing */
 }
