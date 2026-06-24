@@ -98,12 +98,7 @@ func newMux(rec *PrometheusRecorder, ready ReadinessProbe) *http.ServeMux {
 // a missing metrics endpoint is operationally visible but must not crash the
 // voice node.
 func (m *MetricsServer) Start(ctx context.Context) {
-	go func() {
-		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = m.srv.Shutdown(shutCtx)
-	}()
+	ShutdownOnCancel(ctx, m.srv)
 	go func() {
 		m.log.Info("metrics server listening", "addr", m.srv.Addr, "path", "/metrics")
 		if err := m.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
