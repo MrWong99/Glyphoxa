@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
+	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
@@ -205,11 +207,22 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
 	}
 
-	// The web API server serves ONLY the Connect RPC mounts on webAddr.
+	// The web tier serves the Connect API under /api and the embedded SPA at /
+	// (ADR-0013/0039). The browser dials Connect at baseUrl "/api"
+	// (web/src/lib/transport.ts), so the generated handler — mounted on the mux
+	// at its own absolute path (mountPath, e.g.
+	// /glyphoxa.management.v1.CampaignService/) — is wrapped in
+	// http.StripPrefix("/api", …) and registered under "/api/". StripPrefix
+	// removes the /api segment before the Connect handler matches its method
+	// path, so /api/<service>/<method> resolves correctly. The SPA handler is the
+	// "/" catch-all; ServeMux's longest-prefix match keeps /api/ ahead of it, so
+	// only non-API paths (and client-side deep links) reach the SPA fallback.
 	mountPath, mountHandler := rpc.NewCampaignServer(store).Handler()
+	apiHandler := http.StripPrefix("/api", mountHandler)
 	srv := web.NewServer(web.Config{
 		Addr:   webAddr,
-		Mounts: []web.Mount{{Path: mountPath, Handler: mountHandler}},
+		Mounts: []web.Mount{{Path: "/api" + mountPath, Handler: apiHandler}},
+		Root:   spa.Handler(),
 		Logger: log,
 	})
 
