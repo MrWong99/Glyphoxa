@@ -1,8 +1,28 @@
-/* Base resets + body type (ADR-0017) — ported from the handoff styles.css head. */
+/* Base elements + gx- utilities (ADR-0017) — ported verbatim from
+ * web/design-handoff/2026-06-24/tokens/base.css. Arcane theme defaults +
+ * gx-namespaced utilities (.gx-wash / .gx-runegrid / .gx-overline /
+ * .gx-gradient-text / .gx-display / .gx-mono).
+ */
+
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-base);
+  font-size: var(--body-md);
+  line-height: var(--body-line);
+  color: var(--text-default);
+  background-color: var(--surface-void);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 html,
@@ -11,31 +31,123 @@ body,
   height: 100%;
 }
 
-body {
+/* Headings default to the Zilla Slab display family */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
   margin: 0;
-  background: var(--color-bg);
-  color: var(--color-text);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-  line-height: var(--leading-normal);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  line-height: var(--display-line);
+  letter-spacing: var(--display-tracking);
+  color: var(--text-strong);
+  text-wrap: pretty;
+}
+
+p {
+  margin: 0 0 var(--spacing-md);
+  text-wrap: pretty;
 }
 
 a {
-  color: inherit;
+  color: var(--text-link);
+  text-decoration: none;
+  transition: color var(--duration-fast) var(--ease-standard);
 }
 
+a:hover {
+  color: var(--text-link-hover);
+  text-decoration: underline;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: rgba(144, 89, 255, 0.4);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* Custom scrollbar — arcane stone */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 
-::-webkit-scrollbar-thumb {
-  background: var(--color-border-strong);
-  border-radius: var(--radius-pill);
+::-webkit-scrollbar-track {
+  background: var(--surface-base);
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-30);
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--surface-base);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-10);
+}
+
+/* ---- Utilities ---------------------------------------------------------- */
+
+/* Atmospheric page wash — drop on a full-bleed wrapper */
+.gx-wash {
+  background-color: var(--surface-void);
+  background-image: var(--wash-arcane);
+}
+
+/* Faint rune-grid texture overlay */
+.gx-runegrid {
+  background-image: var(--rune-grid);
+  background-size: var(--rune-grid-size);
+}
+
+/* Runic small-caps eyebrow */
+.gx-overline {
+  font-family: var(--font-base);
+  font-size: var(--overline-size);
+  font-weight: var(--overline-weight);
+  letter-spacing: var(--overline-tracking);
+  text-transform: uppercase;
+  color: var(--rune);
+}
+
+/* Gradient text — for the wordmark / hero numerals */
+.gx-gradient-text {
+  background: var(--gradient-arcane);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gx-display {
+  font-family: var(--font-display);
+}
+
+.gx-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

@@ -57,7 +57,10 @@ describe("Configuration", () => {
     );
 
     await screen.findByText(CANNED.name);
-    // Provider keys + voice dropdown render as disabled placeholders.
-    expect(screen.getAllByText("coming soon").length).toBeGreaterThanOrEqual(2);
+    // The provider rows + Session-defaults render as disabled "coming soon"
+    // placeholders (no Stage-2 backend); the live campaign header is the only
+    // wired data. Case-insensitive: the badges say "coming soon", the
+    // Session-defaults label "Coming soon".
+    expect(screen.getAllByText(/coming soon/i).length).toBeGreaterThanOrEqual(2);
   });
 });

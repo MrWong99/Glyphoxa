@@ -1,50 +1,9 @@
-/* Configuration screen — co-located CSS (ADR-0017). The shared layout/component
- * classes live in styles/components.css; only screen-specific rules go here.
+/* Configuration (Providers) screen — co-located CSS (ADR-0017). The shared
+ * gx- layout/component classes live in styles/components.css; only screen-local
+ * tweaks go here.
  */
-.campaign-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-}
 
-.campaign-meta {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.campaign-name {
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-}
-
-.campaign-attrs {
-  display: flex;
-  gap: var(--space-4);
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-}
-
-.campaign-attr {
-  display: flex;
-  gap: var(--space-2);
-  align-items: baseline;
-}
-
-.campaign-attr-label {
-  color: var(--color-text-faint);
-  text-transform: uppercase;
-  font-size: var(--text-xs);
-  letter-spacing: var(--tracking-wider);
-}
-
-.campaign-attr-value {
-  color: var(--color-text);
-  font-weight: var(--weight-medium);
-}
-
-.campaign-error {
-  margin: 0;
-  color: var(--color-danger);
-  font-size: var(--text-sm);
+/* The live campaign header sits above the provider list with breathing room. */
+.gx-providers__campaign {
+  margin-bottom: var(--spacing-lg);
 }
