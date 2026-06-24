@@ -1,0 +1,8 @@
+/* Glyphoxa — Webfonts
+ * Display/Headline: Zilla Slab — Mozilla's slab-serif. Stands in for the
+ *   proprietary "Mozilla Headline"; its inked, carved character reads like a
+ *   spellbook tome, perfect for the RPG voice. (SUBSTITUTION — see README.)
+ * Body/UI: Inter — Protocol's authentic base UI typeface.
+ * Mono: JetBrains Mono — dice, stat blocks, latency readouts, transcripts.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');

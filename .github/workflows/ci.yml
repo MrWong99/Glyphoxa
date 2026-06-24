@@ -78,6 +78,47 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # Build the Vite + React SPA and run its vitest suite (ADR-0013/0039). Depends
+  # on `proto` because the SPA's typed Connect client imports the generated
+  # gen/ts/* stubs (gen/ is gitignored, produced once by `proto` and fanned out
+  # as the `gen` artifact — same pattern as the Go `test` job). The Go `test`/
+  # `image`/`e2e` jobs keep compiling without a node step because the committed
+  # placeholder internal/spa/dist/index.html satisfies the //go:embed; shipping
+  # the REAL built SPA inside the container image is a follow-up.
+  web:
+    name: web (vite build + vitest)
+    needs: [proto]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # The SPA imports the generated TS client from gen/ts/*; restore the stubs
+      # produced once by the `proto` job before `npm ci`/build (gen/ is gitignored).
+      - name: Download gen artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gen
+          path: gen
+
+      - name: Install deps
+        run: npm ci
+        working-directory: web
+
+      - name: Build SPA
+        run: npm run build
+        working-directory: web
+
+      - name: Test
+        run: npm run test
+        working-directory: web
+
   test:
     name: build + vet + test
     needs: [proto]

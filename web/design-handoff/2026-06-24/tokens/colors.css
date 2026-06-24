@@ -1,0 +1,161 @@
+/* ============================================================================
+ * Glyphoxa — Color tokens
+ * Built on the Mozilla Protocol palette (protocol-tokens), recast for a
+ * dark, arcane TTRPG surface. Two tiers:
+ *   1. RAW PALETTE   — the full Protocol scale, verbatim hex. Reference only.
+ *   2. SEMANTIC       — what you actually build with. Dark-first ("arcane").
+ * ========================================================================== */
+
+:root {
+  /* ---- 1. RAW PROTOCOL PALETTE ----------------------------------------- */
+
+  /* Violet — the arcane spellcasting core (Protocol violet) */
+  --color-violet-05: #e7dfff;
+  --color-violet-10: #d9bfff;
+  --color-violet-20: #cb9eff;
+  --color-violet-30: #c689ff;
+  --color-violet-40: #ab71ff;
+  --color-violet-50: #9059ff;
+  --color-violet-60: #7542e5;
+  --color-violet-70: #592acb;
+  --color-violet-80: #45278d;
+  --color-violet-90: #321c64;
+
+  /* Blue — rune-glow & spell energy (Protocol blue) */
+  --color-blue-05: #aaf2ff;
+  --color-blue-10: #80ebff;
+  --color-blue-20: #00ddff;
+  --color-blue-30: #00b3f4;
+  --color-blue-40: #0090ed;
+  --color-blue-50: #0060df;
+  --color-blue-60: #0250bb;
+  --color-blue-70: #054096;
+  --color-blue-80: #073072;
+  --color-blue-90: #09204d;
+
+  /* Purple — enchantment / legendary highlight */
+  --color-purple-30: #f770ff;
+  --color-purple-40: #d74cf0;
+  --color-purple-50: #b833e1;
+  --color-purple-60: #952bb9;
+  --color-purple-70: #722291;
+
+  /* Green — live sessions, success, "the connection is good" */
+  --color-green-30: #88ffd1;
+  --color-green-40: #54ffbd;
+  --color-green-50: #3fe1b0;
+  --color-green-60: #2ac3a2;
+  --color-green-70: #008787;
+
+  /* Yellow / gold — gold leaf, legendary, warnings */
+  --color-yellow-20: #ffea80;
+  --color-yellow-30: #ffd567;
+  --color-yellow-40: #ffbd4f;
+  --color-yellow-50: #ffa436;
+
+  /* Orange — ember / fire damage */
+  --color-orange-40: #ff8a50;
+  --color-orange-50: #ff7139;
+  --color-orange-60: #e25920;
+
+  /* Red — danger, stop, critical fail */
+  --color-red-20: #ff9aa2;
+  --color-red-40: #ff6a75;
+  --color-red-50: #ff4f5e;
+  --color-red-60: #e22850;
+  --color-red-70: #c50042;
+
+  /* Pink — charm / bardic */
+  --color-pink-40: #ff4aa2;
+  --color-pink-50: #ff298a;
+  --color-pink-60: #e31587;
+
+  /* Ink — violet-tinted darks: every surface in the arcane theme */
+  --color-ink-05: #393473;
+  --color-ink-10: #342f6d;
+  --color-ink-20: #312a64;
+  --color-ink-30: #2e255d;
+  --color-ink-40: #2b2156;
+  --color-ink-50: #291d4f;
+  --color-ink-60: #271948;
+  --color-ink-70: #241541;
+  --color-ink-80: #20123a;
+  --color-ink-90: #1d1133;
+
+  /* Light gray — neutral text on dark */
+  --color-light-gray-05: #ffffff;
+  --color-light-gray-10: #f9f9fb;
+  --color-light-gray-20: #f0f0f4;
+  --color-light-gray-30: #e0e0e6;
+  --color-light-gray-40: #cfcfd8;
+  --color-light-gray-50: #bfbfc9;
+  --color-light-gray-60: #afafba;
+  --color-light-gray-70: #9f9fad;
+  --color-light-gray-80: #8f8f9e;
+  --color-light-gray-90: #80808f;
+
+  /* Marketing gray */
+  --color-marketing-gray-40: #b1b1bc;
+  --color-marketing-gray-60: #7a7a8b;
+  --color-marketing-gray-70: #5e5e72;
+  --color-marketing-gray-90: #1f2033;
+
+  --color-black: #000000;
+  --color-white: #ffffff;
+
+  /* ---- 2. SEMANTIC — ARCANE (dark, the canonical Glyphoxa theme) ------- */
+
+  /* Brand */
+  --arcane: var(--color-violet-50);          /* primary — spellcasting violet */
+  --arcane-hover: var(--color-violet-40);
+  --arcane-active: var(--color-violet-60);
+  --arcane-ink: var(--color-violet-90);       /* violet wash behind glows */
+  --rune: var(--color-blue-20);               /* cyan rune-glow accent */
+  --rune-soft: var(--color-blue-10);
+  --spell: var(--color-blue-40);              /* secondary spell-energy blue */
+  --gold: var(--color-yellow-40);             /* legendary / gilt accent */
+  --ember: var(--color-orange-50);
+
+  /* Surfaces — deep arcane stone → raised panels */
+  --surface-void: #120a24;                    /* page canvas, deepest */
+  --surface-base: var(--color-ink-90);        /* app shell */
+  --surface-raised: var(--color-ink-80);      /* sidebar / topbar */
+  --surface-card: var(--color-ink-70);        /* cards, panels */
+  --surface-card-hover: var(--color-ink-60);
+  --surface-inset: #170d2c;                   /* wells, inputs, code */
+  --surface-overlay: var(--color-ink-50);     /* popovers, dialogs */
+
+  /* Borders */
+  --border-subtle: rgba(144, 89, 255, 0.14);
+  --border-default: rgba(144, 89, 255, 0.24);
+  --border-strong: rgba(144, 89, 255, 0.42);
+  --border-rune: rgba(0, 221, 255, 0.45);
+
+  /* Text */
+  --text-strong: var(--color-white);
+  --text-default: var(--color-light-gray-20);
+  --text-muted: var(--color-light-gray-70);
+  --text-subtle: var(--color-marketing-gray-60);
+  --text-on-arcane: var(--color-white);
+  --text-link: var(--color-blue-10);
+  --text-link-hover: var(--color-blue-05);
+
+  /* Status */
+  --status-live: var(--color-green-50);
+  --status-live-bg: rgba(63, 225, 176, 0.12);
+  --status-success: var(--color-green-50);
+  --status-warning: var(--color-yellow-40);
+  --status-warning-bg: rgba(255, 189, 79, 0.12);
+  --status-danger: var(--color-red-50);
+  --status-danger-bg: rgba(255, 79, 94, 0.12);
+  --status-info: var(--color-blue-40);
+  --status-info-bg: rgba(0, 144, 237, 0.12);
+
+  /* Speaker palette — transcript NPC/voice colour-coding */
+  --speaker-1: var(--color-blue-20);
+  --speaker-2: var(--color-green-50);
+  --speaker-3: var(--color-violet-40);
+  --speaker-4: var(--color-yellow-40);
+  --speaker-5: var(--color-pink-40);
+  --speaker-6: var(--color-orange-40);
+}

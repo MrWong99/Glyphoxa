@@ -54,7 +54,17 @@ deploy/zhi/plugin/dist/
 # Web frontend
 web/node_modules/
 web/.next/
+web/dist/
 .claude/
+
+# Embedded SPA bundle (internal/spa/dist). The real `npm run build` emits
+# index.html + hashed assets here; only the committed PLACEHOLDER index.html is
+# tracked so `go build ./...` + the //go:embed compile on a fresh checkout with
+# no node step (mirroring how gen/ is handled — but committed, not an artifact).
+# The real built index.html overwrites the placeholder locally/in CI; git keeps
+# the placeholder version. The hashed assets/ are build output, never tracked.
+/internal/spa/dist/*
+!/internal/spa/dist/index.html
 
 # local agent tooling artifact (not project code)
 .claude-flow/

@@ -43,6 +43,14 @@ type Config struct {
 	Addr   string
 	Mounts []Mount
 	Logger *slog.Logger
+
+	// Root, when non-nil, is the catch-all handler mounted at "/" — the embedded
+	// SPA (internal/spa) in web/all Mode. http.ServeMux always prefers the more
+	// specific [Mount] prefixes (e.g. the Connect API under /api/) over the "/"
+	// root, so requests that match no API prefix fall through to Root, which
+	// serves the SPA shell with client-side-routing fallback. Nil leaves "/"
+	// unmounted (the API-only server tests).
+	Root http.Handler
 }
 
 // Server is the web-tier HTTP listener. Build it with [NewServer] and run it
@@ -74,6 +82,12 @@ func NewServer(cfg Config) *Server {
 	mux := http.NewServeMux()
 	for _, m := range cfg.Mounts {
 		mux.Handle(m.Path, m.Handler)
+	}
+	// The SPA catch-all is registered last at "/"; ServeMux's longest-prefix
+	// match keeps the API mounts (e.g. /api/) ahead of it, so only unmatched
+	// paths reach the SPA fallback.
+	if cfg.Root != nil {
+		mux.Handle("/", cfg.Root)
 	}
 
 	// Serve HTTP/1.1 and cleartext HTTP/2 (h2c) on the one port via the Go 1.24+

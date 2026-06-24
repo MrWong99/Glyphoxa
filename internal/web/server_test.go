@@ -3,7 +3,9 @@ package web_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -63,10 +65,15 @@ func startServer(t *testing.T, mounts ...web.Mount) (base string, stop func()) {
 	return "http://" + srv.Addr(), stop
 }
 
+// mountFake mounts the fake CampaignService under /api, mirroring the production
+// wiring (cmd/glyphoxa runWeb): the browser dials Connect at baseUrl "/api", so
+// the generated handler is wrapped in http.StripPrefix("/api", …) and registered
+// under "/api" + its method path. Connect clients in the tests therefore dial
+// base + "/api".
 func mountFake(t *testing.T, svc fakeCampaignService) web.Mount {
 	t.Helper()
 	path, handler := managementv1connect.NewCampaignServiceHandler(svc)
-	return web.Mount{Path: path, Handler: handler}
+	return web.Mount{Path: "/api" + path, Handler: http.StripPrefix("/api", handler)}
 }
 
 func TestServerRoutesConnectThenShutsDown(t *testing.T) {
@@ -80,9 +87,10 @@ func TestServerRoutesConnectThenShutsDown(t *testing.T) {
 	base, stop := startServer(t, mountFake(t, fakeCampaignService{campaign: want}))
 
 	// GetActiveCampaign over Connect-JSON proves the server ROUTES the Connect
-	// handler over the cleartext port (WithProtoJSON forces the JSON codec).
+	// handler over the cleartext port (WithProtoJSON forces the JSON codec). The
+	// API is mounted under /api now (the SPA owns /), so the client dials there.
 	client := managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, base, connect.WithProtoJSON(),
+		http.DefaultClient, base+"/api", connect.WithProtoJSON(),
 	)
 	got, err := client.GetActiveCampaign(
 		context.Background(),
@@ -111,7 +119,7 @@ func TestServerSurfacesConnectErrorCodes(t *testing.T) {
 	}))
 
 	client := managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, base, connect.WithProtoJSON(),
+		http.DefaultClient, base+"/api", connect.WithProtoJSON(),
 	)
 	_, err := client.GetActiveCampaign(
 		context.Background(),
@@ -122,5 +130,61 @@ func TestServerSurfacesConnectErrorCodes(t *testing.T) {
 	}
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
 		t.Errorf("code = %v, want %v", got, connect.CodeNotFound)
+	}
+}
+
+// TestServerMountsRootSPAAlongsideAPI proves the web tier serves the SPA at "/"
+// (Config.Root) WHILE the Connect API stays reachable under /api — the
+// production all/web-Mode shape (the SPA owns "/", the API owns /api). It uses a
+// canned root handler (not internal/spa) to keep the web package decoupled from
+// the embedded bundle, mirroring how the fake Connect handler stands in for rpc.
+func TestServerMountsRootSPAAlongsideAPI(t *testing.T) {
+	const rootBody = "<div id=\"root\"></div>"
+	root := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(rootBody))
+	})
+
+	srv := web.NewServer(web.Config{
+		Addr:   "127.0.0.1:0",
+		Mounts: []web.Mount{mountFake(t, fakeCampaignService{campaign: &managementv1.Campaign{Name: "Lost Mine"}})},
+		Root:   root,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		srv.Wait()
+	})
+	base := "http://" + srv.Addr()
+
+	// "/" and an arbitrary client-side deep link both reach the SPA root.
+	for _, path := range []string{"/", "/t/foo/configuration"} {
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), rootBody) {
+			t.Errorf("GET %s: status=%d body=%q, want 200 + SPA root", path, resp.StatusCode, body)
+		}
+	}
+
+	// The API still routes under /api despite the "/" catch-all.
+	client := managementv1connect.NewCampaignServiceClient(
+		http.DefaultClient, base+"/api", connect.WithProtoJSON(),
+	)
+	got, err := client.GetActiveCampaign(
+		context.Background(),
+		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}),
+	)
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	if got.Msg.GetCampaign().GetName() != "Lost Mine" {
+		t.Errorf("name = %q, want %q", got.Msg.GetCampaign().GetName(), "Lost Mine")
 	}
 }

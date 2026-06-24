@@ -1,0 +1,9 @@
+/* Configuration (Providers) screen — co-located CSS (ADR-0017). The shared
+ * gx- layout/component classes live in styles/components.css; only screen-local
+ * tweaks go here.
+ */
+
+/* The live campaign header sits above the provider list with breathing room. */
+.gx-providers__campaign {
+  margin-bottom: var(--spacing-lg);
+}
