@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 )
 
 // Mount is one path-prefixed handler to register on the server's mux — e.g. the
@@ -109,12 +111,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.addr = ln.Addr().String()
 	s.mu.Unlock()
 
-	go func() {
-		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.srv.Shutdown(shutCtx)
-	}()
+	observe.ShutdownOnCancel(ctx, s.srv)
 	go func() {
 		defer close(s.done)
 		s.log.Info("web server listening", "addr", s.addr)

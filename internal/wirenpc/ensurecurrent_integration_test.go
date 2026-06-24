@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -31,6 +32,18 @@ func openSQL(t *testing.T, dsn string) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// openPool opens a pgxpool the way the production callers (cmd/glyphoxa) do, so
+// the RunFromDB seam is exercised against a real pool, not a dsn string.
+func openPool(t *testing.T, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // migrateToHead applies every embedded migration so the DB schema is current.
@@ -104,7 +117,7 @@ func TestRunFromDB_StaleSchemaFailsFastBeforeNPCLoad(t *testing.T) {
 	migrateToHead(t, dsn)
 	rollBackOne(t, dsn)
 
-	err := RunFromDB(context.Background(), Config{}, dsn)
+	err := RunFromDB(context.Background(), Config{}, openPool(t, dsn))
 	if err == nil {
 		t.Fatal("RunFromDB returned nil on a stale schema; serving must fail fast before any other DB query")
 	}
