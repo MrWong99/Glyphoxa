@@ -36,6 +36,18 @@ type Mount struct {
 	Handler http.Handler
 }
 
+// APIMount adapts a generated Connect handler pair — (mountPath, handler) as
+// returned by a service's Handler() method — into a [Mount] under the public
+// /api prefix. The browser dials Connect at baseUrl "/api"
+// (web/src/lib/transport.ts), so the handler is wrapped in
+// http.StripPrefix("/api", …) and registered at "/api"+mountPath; StripPrefix
+// removes the /api segment before the Connect handler matches its method path.
+// The stacked #68/#71 PRs reuse this to mount their services identically to
+// AuthService/CampaignService.
+func APIMount(mountPath string, handler http.Handler) Mount {
+	return Mount{Path: "/api" + mountPath, Handler: http.StripPrefix("/api", handler)}
+}
+
 // Config configures a [Server]. Logger defaults to slog.Default when nil. The
 // observability endpoints are NOT served here — they live on the separate
 // metrics port (see the package doc) — so this carries no recorder or probe.
