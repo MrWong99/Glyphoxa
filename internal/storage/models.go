@@ -87,6 +87,34 @@ type Agent struct {
 	UpdatedAt   time.Time
 }
 
+// User is a human operator authenticated via Discord OAuth (ADR-0016). The
+// Discord snowflake is the stable identity key; Name/Avatar are display-only and
+// refreshed from Discord on each login.
+type User struct {
+	ID            uuid.UUID
+	DiscordUserID string
+	Name          string
+	// Avatar is an absolute image URL (or empty).
+	Avatar    string
+	Role      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Session is a server-side login session (ADR-0016): the Token is the opaque
+// random secret carried in the glyphoxa_session cookie, and this row is the
+// authority. ExpiresAt gates validity; deleting the row revokes instantly.
+type Session struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	Token      string
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
+	IP         string
+	UA         string
+}
+
 // LoadedAgent is an Agent with its bound Provider Configs resolved — the bundle
 // the orchestrator needs to bring an Agent to life (Persona, Voice, LLM/TTS
 // configs). Either config may be nil if the Agent has none bound.
