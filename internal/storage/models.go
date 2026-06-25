@@ -70,6 +70,9 @@ type Agent struct {
 	CampaignID uuid.UUID
 	Role       AgentRole
 	Name       string
+	// Title is the Agent's role subtitle shown in the editor (e.g. "Gruff
+	// innkeeper"); free text, may be empty.
+	Title string
 	// Persona: markdown personality/backstory/speech style.
 	Persona string
 	// Voice (ADR-0022/0023): TTS provider + voice-id config, stored as JSONB.
@@ -82,9 +85,14 @@ type Agent struct {
 	LLMProviderConfigID uuid.NullUUID
 	// AddressOnly: reachable only by explicit name/alias (ADR-0024). Butler true.
 	AddressOnly bool
-	Aliases     []string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// SpeakerColor is a server-assigned palette SLOT (not a colour value): the web
+	// tier maps it onto its speaker palette so each roster member renders in a
+	// stable hue across reloads (#71). Assigned round-robin per Campaign on
+	// Character insert; the Butler keeps slot 0.
+	SpeakerColor int
+	Aliases      []string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // User is a human operator authenticated via Discord OAuth (ADR-0016). The
