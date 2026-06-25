@@ -45,3 +45,50 @@ message GetActiveCampaignResponse {
   // campaign is the most-recently-created campaign for the operator.
   Campaign campaign = 1;
 }
+
+// AuthService exposes the operator's authenticated identity to the SPA boot
+// flow (ADR-0016 / ADR-0039). The session itself is issued by the net/http
+// Discord OAuth carve-out (ADR-0015); this Connect surface reads it back and
+// tears it down. The auth interceptor resolves the session cookie into the
+// request context, so GetCurrentUser fails with CodeUnauthenticated when no
+// valid session is present — the SPA's 401 → /login signal.
+service AuthService {
+  // GetCurrentUser returns the signed-in operator's display identity. It is a
+  // read (NO_SIDE_EFFECTS) and is reachable unauthenticated so the SPA can probe
+  // the session at boot: no/expired session fails with CodeUnauthenticated.
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Logout deletes the server-side session row and clears the session + CSRF
+  // cookies. It is state-changing, so the auth + CSRF interceptors guard it.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+}
+
+// User is the signed-in operator's display identity (ADR-0016). It deliberately
+// omits the internal user id and Discord user id — the SPA only renders the
+// name, role, and avatar in the sidebar.
+message User {
+  // name is the operator's display name (Discord global name or username).
+  string name = 1;
+  // role is the operator's role label (e.g. "operator").
+  string role = 2;
+  // avatar is an absolute avatar image URL, or empty when none is set.
+  string avatar = 3;
+}
+
+// GetCurrentUserRequest is the (empty) request for GetCurrentUser; the operator
+// is resolved server-side from the session cookie.
+message GetCurrentUserRequest {}
+
+// GetCurrentUserResponse carries the signed-in operator's identity.
+message GetCurrentUserResponse {
+  // user is the signed-in operator.
+  User user = 1;
+}
+
+// LogoutRequest is the (empty) request for Logout; the session to delete is
+// resolved server-side from the session cookie.
+message LogoutRequest {}
+
+// LogoutResponse is the (empty) response for Logout.
+message LogoutResponse {}
