@@ -98,16 +98,16 @@ func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
 }
 
 const agentColumns = `
-	id, campaign_id, agent_role, name, persona, voice,
+	id, campaign_id, agent_role, name, title, persona, voice,
 	voice_provider_config_id, llm_provider_config_id,
-	address_only, aliases, created_at, updated_at`
+	address_only, speaker_color, aliases, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent
 	err := row.Scan(
-		&a.ID, &a.CampaignID, &a.Role, &a.Name, &a.Persona, &a.Voice,
+		&a.ID, &a.CampaignID, &a.Role, &a.Name, &a.Title, &a.Persona, &a.Voice,
 		&a.VoiceProviderConfigID, &a.LLMProviderConfigID,
-		&a.AddressOnly, &a.Aliases, &a.CreatedAt, &a.UpdatedAt,
+		&a.AddressOnly, &a.SpeakerColor, &a.Aliases, &a.CreatedAt, &a.UpdatedAt,
 	)
 	return a, err
 }

@@ -1,0 +1,189 @@
+/* Campaign screen — co-located CSS (ADR-0017). Shared gx- layout/component
+ * classes live in styles/components.css; only screen-local layout goes here.
+ */
+
+.gx-campaign-screen__header {
+  margin-bottom: var(--spacing-lg);
+}
+
+.gx-campaign-screen__sub {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-xs);
+}
+
+.gx-campaign-screen__system {
+  font-family: var(--font-mono);
+  font-size: var(--mono-sm);
+  color: var(--rune);
+}
+
+.gx-campaign-screen__lede {
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+
+/* Two-column: roster list + editor pane. Collapses to one column when narrow. */
+.gx-roster-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .gx-roster-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.gx-roster {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-roster__item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-default);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.gx-roster__item:hover {
+  background: var(--surface-card-hover);
+}
+
+.gx-roster__item[data-active="true"] {
+  border-color: var(--border-strong);
+  box-shadow: var(--glow-arcane-soft);
+}
+
+.gx-roster__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  flex: 0 0 auto;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.gx-roster__meta {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gx-roster__name {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-roster__title {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-roster__add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  margin-top: var(--spacing-xs);
+  background: transparent;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.gx-roster__add:hover:not(:disabled) {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+.gx-roster__add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.gx-roster__empty {
+  margin-top: var(--spacing-sm);
+  padding: var(--spacing-md);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+}
+
+/* Editor pane */
+.gx-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+}
+
+.gx-editor__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.gx-editor__head-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  align-items: flex-start;
+}
+
+.gx-editor__role {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+
+.gx-editor__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-md);
+}
+
+@media (max-width: 520px) {
+  .gx-editor__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.gx-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+  line-height: var(--body-line);
+}
+
+.gx-editor__switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-editor__actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-xs);
+}

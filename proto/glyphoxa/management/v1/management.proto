@@ -16,6 +16,30 @@ service CampaignService {
   // GetActiveCampaign returns the most-recently-created campaign for the
   // operator. It fails with CodeNotFound when no campaign exists.
   rpc GetActiveCampaign(GetActiveCampaignRequest) returns (GetActiveCampaignResponse);
+
+  // GetCampaignRoster returns the active campaign together with its ordered
+  // roster — the Butler first, then the Character NPCs — each carrying a stable
+  // speaker-colour slot (#71). It is a read (NO_SIDE_EFFECTS), so the CSRF check
+  // is exempt; it fails with CodeNotFound when no campaign exists.
+  rpc GetCampaignRoster(GetCampaignRosterRequest) returns (GetCampaignRosterResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateAgent adds a Character NPC ("Add NPC") to the active campaign and
+  // returns the created agent, including its server-assigned speaker-colour slot.
+  // The role is always 'character'; the Butler is auto-created (ADR-0009).
+  rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
+
+  // UpdateAgent saves an agent's editor fields (name, title, persona, voice,
+  // address-only, aliases) and returns the updated agent. Editing the Butler can
+  // neither change its role nor turn off Address-Only (ADR-0009 / ADR-0024). A
+  // missing id fails with CodeNotFound.
+  rpc UpdateAgent(UpdateAgentRequest) returns (UpdateAgentResponse);
+
+  // DeleteAgent removes a Character NPC. Deleting the Butler fails with
+  // CodeFailedPrecondition (it is undeletable, ADR-0009); a missing id fails with
+  // CodeNotFound.
+  rpc DeleteAgent(DeleteAgentRequest) returns (DeleteAgentResponse);
 }
 
 // Campaign is the wire representation of a campaign record.
@@ -92,3 +116,105 @@ message LogoutRequest {}
 
 // LogoutResponse is the (empty) response for Logout.
 message LogoutResponse {}
+
+// Agent is the wire representation of a roster member — the Butler or a Character
+// NPC (ADR-0009). It carries the editor-facing fields plus the server-assigned
+// speaker-colour slot; the encrypted provider bindings are not exposed here.
+message Agent {
+  // id is the agent's UUID.
+  string id = 1;
+  // campaign_id is the owning campaign's UUID.
+  string campaign_id = 2;
+  // role is the agent archetype: "butler" or "character" (ADR-0009).
+  string role = 3;
+  // name is the agent's display name (and primary address term).
+  string name = 4;
+  // title is the role subtitle shown under the name (e.g. "Gruff innkeeper").
+  string title = 5;
+  // persona is the markdown personality/backstory/speech style injected into the
+  // prompt.
+  string persona = 6;
+  // voice is the selected voice id (empty when unset). The encrypted TTS provider
+  // binding is not exposed.
+  string voice = 7;
+  // address_only: the agent waits to be named (ADR-0024). Always true for the
+  // Butler.
+  bool address_only = 8;
+  // speaker_color is the stable palette SLOT the web tier maps onto its speaker
+  // palette, so each roster member renders in a stable hue across reloads.
+  uint32 speaker_color = 9;
+  // aliases are extra name/aliases for Address Detection beyond name.
+  repeated string aliases = 10;
+}
+
+// GetCampaignRosterRequest is the (empty) request for GetCampaignRoster; the
+// active campaign is resolved server-side for the single operator.
+message GetCampaignRosterRequest {}
+
+// GetCampaignRosterResponse carries the active campaign and its ordered roster.
+message GetCampaignRosterResponse {
+  // campaign is the active campaign (title is its name; plus system/language).
+  Campaign campaign = 1;
+  // roster is the campaign's agents in stable order: the Butler first, then the
+  // Character NPCs.
+  repeated Agent roster = 2;
+}
+
+// CreateAgentRequest is the editor's "Add NPC" payload. The role is always
+// 'character' and the campaign is resolved server-side, so neither is carried.
+message CreateAgentRequest {
+  // name is the new NPC's display name (e.g. "New NPC").
+  string name = 1;
+  // title is the role subtitle.
+  string title = 2;
+  // persona is the markdown personality/backstory/speech style.
+  string persona = 3;
+  // voice is the selected voice id (empty when unset).
+  string voice = 4;
+  // address_only: the NPC waits to be named (ADR-0024).
+  bool address_only = 5;
+  // aliases are extra address terms beyond name.
+  repeated string aliases = 6;
+}
+
+// CreateAgentResponse carries the created Character NPC, including its
+// server-assigned speaker-colour slot.
+message CreateAgentResponse {
+  // agent is the newly created NPC.
+  Agent agent = 1;
+}
+
+// UpdateAgentRequest carries an agent's editor fields. address_only is ignored
+// for the Butler (kept true). Unknown id fails with CodeNotFound.
+message UpdateAgentRequest {
+  // id is the agent to update.
+  string id = 1;
+  // name is the agent's display name.
+  string name = 2;
+  // title is the role subtitle.
+  string title = 3;
+  // persona is the markdown personality/backstory/speech style.
+  string persona = 4;
+  // voice is the selected voice id (empty when unset).
+  string voice = 5;
+  // address_only: the agent waits to be named; ignored for the Butler (ADR-0024).
+  bool address_only = 6;
+  // aliases are extra address terms beyond name.
+  repeated string aliases = 7;
+}
+
+// UpdateAgentResponse carries the updated agent.
+message UpdateAgentResponse {
+  // agent is the updated agent.
+  Agent agent = 1;
+}
+
+// DeleteAgentRequest names the agent to delete. Deleting the Butler fails with
+// CodeFailedPrecondition (ADR-0009).
+message DeleteAgentRequest {
+  // id is the agent to delete.
+  string id = 1;
+}
+
+// DeleteAgentResponse is the (empty) response for DeleteAgent.
+message DeleteAgentResponse {}

@@ -13,6 +13,7 @@ import (
 	"net/http"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
@@ -20,23 +21,30 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// campaignReader is the read surface CampaignServer needs. *storage.Store
-// satisfies it via GetActiveCampaign, so handlers can be driven by a fake in
-// unit tests and the real store in integration tests.
-type campaignReader interface {
+// campaignStore is the narrow storage surface CampaignServer needs — the active
+// campaign read plus the roster reads and the agent CRUD writes (#71).
+// *storage.Store satisfies it, so handlers can be driven by a fake in unit tests
+// and the real store in integration tests.
+type campaignStore interface {
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
+	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
+	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
+	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
+	CreateAgent(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
+	UpdateAgent(ctx context.Context, a storage.AgentUpdate) (storage.Agent, error)
+	DeleteAgent(ctx context.Context, id uuid.UUID) error
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a
-// campaignReader.
+// campaignStore.
 type CampaignServer struct {
-	reader campaignReader
+	store campaignStore
 }
 
-// NewCampaignServer wraps a campaignReader (e.g. *storage.Store) in a
+// NewCampaignServer wraps a campaignStore (e.g. *storage.Store) in a
 // CampaignServer.
-func NewCampaignServer(r campaignReader) *CampaignServer {
-	return &CampaignServer{reader: r}
+func NewCampaignServer(s campaignStore) *CampaignServer {
+	return &CampaignServer{store: s}
 }
 
 // compile-time assertion that CampaignServer satisfies the generated handler.
@@ -49,7 +57,7 @@ func (s *CampaignServer) GetActiveCampaign(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetActiveCampaignRequest],
 ) (*connect.Response[managementv1.GetActiveCampaignResponse], error) {
-	c, err := s.reader.GetActiveCampaign(ctx)
+	c, err := s.store.GetActiveCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

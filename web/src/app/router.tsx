@@ -10,6 +10,7 @@ import { AppShell } from "@/components/AppShell";
 import { AuthGate } from "@/app/AuthGate";
 import { Login } from "@/screens/login/Login";
 import { Configuration } from "@/screens/configuration/Configuration";
+import { Campaign } from "@/screens/campaign/Campaign";
 import { Placeholder } from "@/screens/Placeholder";
 
 // Code-based route tree (ADR-0018). The Tenant lives in the path
@@ -68,8 +69,8 @@ const tenantIndexRoute = createRoute({
   },
 });
 
-// /t/:tenantSlug/:screen — selects the active screen. Only Configuration is
-// live this stage; Campaign and Session render styled placeholders.
+// /t/:tenantSlug/:screen — selects the active screen. Configuration and Campaign
+// are live on their RPCs; Session renders a styled placeholder.
 const screenRoute = createRoute({
   getParentRoute: () => tenantRoute,
   path: "$screen",
@@ -79,7 +80,7 @@ const screenRoute = createRoute({
       case "configuration":
         return <Configuration />;
       case "campaign":
-        return <Placeholder title="Campaign" />;
+        return <Campaign />;
       case "session":
         return <Placeholder title="Session" />;
       default:

@@ -18,8 +18,11 @@ import (
 // fakeCampaignService is a canned CampaignServiceHandler so runWebTier can be
 // exercised without Postgres: the keyless default gate (ADR-0021/0033) must
 // prove the web tier boots, serves the Connect API, and shuts down on ctx cancel
-// with no DB or Discord credentials in play.
-type fakeCampaignService struct{}
+// with no DB or Discord credentials in play. The embedded Unimplemented handler
+// supplies the roster + CRUD methods (#71) this test does not exercise.
+type fakeCampaignService struct {
+	managementv1connect.UnimplementedCampaignServiceHandler
+}
 
 func (fakeCampaignService) GetActiveCampaign(
 	context.Context,
