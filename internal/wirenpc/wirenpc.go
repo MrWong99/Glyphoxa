@@ -5,8 +5,9 @@
 //
 // "Hardcoded" means the NPC's Persona, Voice, and provider selection live in
 // code here (no DB); task #5 swaps this for a DB-loaded Agent. Credentials are
-// runtime-only — the Discord token and provider API keys come from the
-// environment, never compiled in.
+// runtime-only and never compiled in: the Discord token and provider API keys
+// come from the environment or, on the DB-load path, from the decrypted saved
+// provider_config (BYOK, ADR-0004/0039, issue #69).
 package wirenpc
 
 import (
@@ -462,7 +463,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 
 	// cfg.keys.tts is the resolved BYOK TTS key (issue #69): the decrypted saved
 	// key when one is configured, or "" to fall back to ELEVENLABS_API_KEY.
-	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(cfg.keys.tts), pump, bus)
+	teeSynth := wire.NewTeeSynthesizer(newTTS(cfg.keys.tts), pump, bus)
 
 	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the
 	// SLO histograms (response_latency, address_detect, per-sentence tts_ttfb) from
@@ -542,6 +543,18 @@ func npcVoice() tts.Voice {
 	}
 }
 
+// Provider-adapter constructors, injected as package vars so a test can spy on
+// the apiKey each component receives (issue #69). The adapters expose no key
+// getter, so this is the seam that pins the resolved BYOK key reaching its OWN
+// adapter — a slot swap (e.g. groq.New(keys.stt)) or a dropped `cfg.keys = keys`
+// would otherwise revert the feature to ENV while every providerKeys{} test
+// stayed green. Production always uses the real constructors.
+var (
+	newLLM = groq.New
+	newSTT = stteleven.New
+	newTTS = ttseleven.New
+)
+
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
 // → STT (ElevenLabs) → Address Detection → production Reply (the Agent loop over
 // Groq, with the dice Tool granted via the tool-use loop) → TTS (synth).
@@ -609,7 +622,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	}
 	vadStage := orchestrator.NewVAD(bus, vadSession)
 
-	sttStage := orchestrator.NewSTT(bus, stteleven.New(keys.stt),
+	sttStage := orchestrator.NewSTT(bus, newSTT(keys.stt),
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
 	ttsStage := orchestrator.NewTTS(bus, synth)
 
@@ -626,7 +639,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	// Anthropic) but fail the live run — Groq is the only correct default for a
 	// runnable NPC. One engine is shared across every NPC in the Roster — they
 	// reuse one client rather than each opening their own.
-	provider := groq.New(keys.llm)
+	provider := newLLM(keys.llm)
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
@@ -639,7 +652,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over the shared engine) in the Cast. The
 	// Matcher is built from the first NPC and grown for the rest.
-	roster := newRoster(rosterDepsForLive(toolEngine, ttseleven.New(keys.tts), 16, log))
+	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}
