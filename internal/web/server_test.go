@@ -73,7 +73,7 @@ func startServer(t *testing.T, mounts ...web.Mount) (base string, stop func()) {
 func mountFake(t *testing.T, svc fakeCampaignService) web.Mount {
 	t.Helper()
 	path, handler := managementv1connect.NewCampaignServiceHandler(svc)
-	return web.Mount{Path: "/api" + path, Handler: http.StripPrefix("/api", handler)}
+	return web.APIMount(path, handler)
 }
 
 func TestServerRoutesConnectThenShutsDown(t *testing.T) {
