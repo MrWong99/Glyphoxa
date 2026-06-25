@@ -23,6 +23,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
@@ -187,6 +188,17 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	defer pool.Close()
 	store := storage.New(pool)
 
+	// The BYOK credential cipher (ADR-0004) is best-effort at boot: without
+	// $GLYPHOXA_SECRET the web tier still serves (Configuration reads work), but
+	// saving a provider key / Bot token fails loudly (CodeFailedPrecondition) —
+	// the #44 keyless-degradation posture, not a hard boot failure.
+	cipher, err := appCipher()
+	if err != nil {
+		log.Warn("provider credential encryption is disabled; saving keys in "+
+			"Configuration will fail until $GLYPHOXA_SECRET is set", "err", err)
+		cipher = nil
+	}
+
 	// Metrics + k8s probes (/metrics, /healthz, /readyz) listen on their OWN port
 	// (metricsAddr), separate from the public web API — so they are scrapeable by
 	// Prometheus and the kubelet but never exposed on the external API surface.
@@ -204,7 +216,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// paths (and client-side deep links) reach the SPA fallback.
 	srv := web.NewServer(web.Config{
 		Addr:   webAddr,
-		Mounts: managementMounts(store, log),
+		Mounts: managementMounts(store, cipher, log),
 		Root:   spa.Handler(),
 		Logger: log,
 	})
@@ -257,15 +269,16 @@ func voiceEnabled(token, guild, channel string) bool {
 
 // managementMounts wires the auth tier and the management Connect services into
 // the web mux (ADR-0015/0016/0039): the interceptor-guarded Connect handlers
-// (CampaignService, AuthService) under /api, and the net/http Discord OAuth
-// redirect + callback under /auth. The single [auth.Stack] gates every Connect
-// service identically — auth (session cookie) → CSRF double-submit → tenant
-// pass-through — with AuthService.GetCurrentUser left reachable unauthenticated
-// so the SPA can probe the session at boot. Live Discord login requires the
-// operator's OAuth app credentials (DISCORD_OAUTH_CLIENT_ID / _SECRET /
-// _REDIRECT_URL) — a one-time setup, not code; absent them the gate still stands
-// and the API simply has no way in.
-func managementMounts(store *storage.Store, log *slog.Logger) []web.Mount {
+// (CampaignService, AuthService, ProviderService) under /api, and the net/http
+// Discord OAuth redirect + callback under /auth. The single [auth.Stack] gates
+// every Connect service identically — auth (session cookie) → CSRF double-submit
+// → tenant pass-through — with AuthService.GetCurrentUser left reachable
+// unauthenticated so the SPA can probe the session at boot. Live Discord login
+// requires the operator's OAuth app credentials (DISCORD_OAUTH_CLIENT_ID /
+// _SECRET / _REDIRECT_URL) — a one-time setup, not code; absent them the gate
+// still stands and the API simply has no way in. cipher seals BYOK provider
+// keys (ADR-0004); it may be nil (saving keys then fails CodeFailedPrecondition).
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger) []web.Mount {
 	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
 	if clientID == "" {
 		log.Warn("Discord OAuth is not configured; login is disabled until " +
@@ -286,10 +299,12 @@ func managementMounts(store *storage.Store, log *slog.Logger) []web.Mount {
 
 	campaignPath, campaignHandler := rpc.NewCampaignServer(store).Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
+	providerPath, providerHandler := rpc.NewProviderServer(store, cipher, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
+		web.APIMount(providerPath, providerHandler),
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}

@@ -64,6 +64,23 @@ type ProviderConfig struct {
 	UpdatedAt             time.Time
 }
 
+// DeploymentConfig is the single-operator Discord integration the Configuration
+// screen edits (#68): the deployment Bot token — a write-only secret, sealed at
+// rest like a Provider Config — plus the non-secret Guild / Voice channel IDs.
+// The Bot is deployment-shared (one token regardless of Tenant, CONTEXT.md), so
+// this is distinct from the per-Component, Tenant-scoped provider_config
+// (ADR-0004); it is keyed by tenant_id only for the MVP single operator
+// (ADR-0039). DiscordBotTokenCiphertext is empty until a token is saved.
+type DeploymentConfig struct {
+	TenantID                  uuid.UUID
+	DiscordBotTokenCiphertext []byte
+	DiscordBotTokenLast4      string
+	GuildID                   string
+	VoiceChannelID            string
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+}
+
 // Agent is an AI-controlled persona — Butler or Character NPC (ADR-0009).
 type Agent struct {
 	ID         uuid.UUID

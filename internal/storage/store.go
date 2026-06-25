@@ -195,6 +195,55 @@ func (s *Store) GetProviderConfig(ctx context.Context, id uuid.UUID) (ProviderCo
 	return p, nil
 }
 
+// ListProviderConfigs returns all of a Tenant's Provider Configs, ordered by
+// Component then Provider (deterministic for the Configuration screen, #68). An
+// empty result is not an error.
+func (s *Store) ListProviderConfigs(ctx context.Context, tenantID uuid.UUID) ([]ProviderConfig, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+providerConfigColumns+`
+		   FROM provider_config
+		  WHERE tenant_id = $1
+		  ORDER BY component, provider`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list provider_config for tenant %s: %w", tenantID, err)
+	}
+	defer rows.Close()
+
+	var out []ProviderConfig
+	for rows.Next() {
+		p, err := scanProviderConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan provider_config: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list provider_config for tenant %s: %w", tenantID, err)
+	}
+	return out, nil
+}
+
+// GetProviderConfigByComponent returns the Tenant's most-recently-updated
+// Provider Config for a Component, or ErrNotFound when none is bound. A Component
+// can have more than one Provider in the matrix (ADR-0004); this resolves the one
+// the operator last saved.
+func (s *Store) GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component Component) (ProviderConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+providerConfigColumns+`
+		   FROM provider_config
+		  WHERE tenant_id = $1 AND component = $2
+		  ORDER BY updated_at DESC, id DESC
+		  LIMIT 1`, tenantID, component)
+	p, err := scanProviderConfig(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProviderConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return ProviderConfig{}, fmt.Errorf("storage: get provider_config (tenant %s, component %s): %w", tenantID, component, err)
+	}
+	return p, nil
+}
+
 // LoadAgent loads an Agent together with its bound LLM and TTS Provider Configs
 // — the Persona/Voice/provider bundle the orchestrator needs (the core read
 // this task exists to enable). Missing or unbound configs yield nil, not an

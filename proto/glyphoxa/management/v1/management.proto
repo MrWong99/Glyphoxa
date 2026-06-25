@@ -218,3 +218,104 @@ message DeleteAgentRequest {
 
 // DeleteAgentResponse is the (empty) response for DeleteAgent.
 message DeleteAgentResponse {}
+
+// ProviderService backs the Configuration screen (#68; ADR-0004 BYOK /
+// ADR-0039 single-operator). Credentials are WRITE-ONLY after save: a saved
+// secret's plaintext is NEVER returned over any RPC — responses carry only the
+// last 4 characters (last4) plus metadata, so the screen renders a masked value
+// and a "last updated" without ever reading a secret back.
+service ProviderService {
+  // ListProviderConfigs returns the operator's saved Configuration: the three
+  // write-only credentials (Discord bot token, Groq, ElevenLabs) as masked
+  // metadata, plus the non-secret Discord Guild / Voice channel IDs. It is a
+  // read (NO_SIDE_EFFECTS), so the CSRF check is skipped.
+  rpc ListProviderConfigs(ListProviderConfigsRequest) returns (ListProviderConfigsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // SaveProviderConfig seals and stores one BYOK provider key (Groq or
+  // ElevenLabs) and returns only its masked metadata. Replacing an existing key
+  // updates its last4 + updated_at. State-changing: auth + CSRF guard it.
+  rpc SaveProviderConfig(SaveProviderConfigRequest) returns (SaveProviderConfigResponse);
+  // SaveDiscordSettings stores the Discord deployment integration: the Bot token
+  // (a write-only secret, sealed at rest) and the non-secret Guild / Voice
+  // channel IDs. An omitted bot_token leaves the stored token unchanged, so the
+  // IDs can be saved without re-entering the secret. State-changing.
+  rpc SaveDiscordSettings(SaveDiscordSettingsRequest) returns (SaveDiscordSettingsResponse);
+}
+
+// ProviderCredential is the WRITE-ONLY view of a saved secret: never its value,
+// only the last 4 characters and whether/when it was saved (ADR-0004). The
+// Configuration screen renders a masked field, a "last updated", and a Healthy /
+// Key-needed badge from these fields alone.
+message ProviderCredential {
+  // component is the credential's primary Component label ("llm", "tts") or
+  // "discord" for the Bot token. Display/identity only — not the storage enum.
+  string component = 1;
+  // provider identifies the credential slot ("groq", "elevenlabs", "discord").
+  string provider = 2;
+  // ever_saved is true once a real key has been stored. An unsaved slot, or one
+  // still holding the seed's ENV placeholder, is false → the screen shows
+  // "Key needed".
+  bool ever_saved = 3;
+  // show_masked tells the screen to render the masked value + Replace button
+  // (true exactly when ever_saved).
+  bool show_masked = 4;
+  // last4 is the last 4 characters of the saved secret — the only plaintext
+  // kept (empty when never saved).
+  string last4 = 5;
+  // model is the selected model/voice id for the provider (empty for Discord).
+  string model = 6;
+  // updated_at is when the credential was last saved (unset when never saved).
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// ListProviderConfigsRequest is the (empty) request; the tenant is resolved
+// server-side from the session.
+message ListProviderConfigsRequest {}
+
+// ListProviderConfigsResponse carries the three write-only credentials plus the
+// non-secret Discord IDs the screen edits.
+message ListProviderConfigsResponse {
+  // credentials are the Discord bot token, Groq, and ElevenLabs slots.
+  repeated ProviderCredential credentials = 1;
+  // guild_id is the Discord server the Bot serves (non-secret; may be empty).
+  string guild_id = 2;
+  // voice_channel_id is the channel sessions join (non-secret; may be empty).
+  string voice_channel_id = 3;
+}
+
+// SaveProviderConfigRequest seals one BYOK provider key.
+message SaveProviderConfigRequest {
+  // provider is the BYOK slot to save: "groq" or "elevenlabs".
+  string provider = 1;
+  // secret is the plaintext API key to seal. Write-only: never returned.
+  string secret = 2;
+  // model is the selected model/voice id (optional).
+  string model = 3;
+}
+
+// SaveProviderConfigResponse returns the saved key's masked metadata.
+message SaveProviderConfigResponse {
+  // credential is the saved key's write-only view (never its value).
+  ProviderCredential credential = 1;
+}
+
+// SaveDiscordSettingsRequest stores the Discord deployment integration.
+message SaveDiscordSettingsRequest {
+  // bot_token is the Discord Bot token to seal. Omit (no presence) to leave the
+  // stored token unchanged — lets the IDs be saved without re-entering the
+  // secret. Write-only: never returned.
+  optional string bot_token = 1;
+  // guild_id / voice_channel_id are the non-secret Discord IDs, stored as-is.
+  string guild_id = 2;
+  string voice_channel_id = 3;
+}
+
+// SaveDiscordSettingsResponse returns the Bot token's masked metadata plus the
+// stored IDs after the save.
+message SaveDiscordSettingsResponse {
+  // credential is the Bot token's write-only view after the save.
+  ProviderCredential credential = 1;
+  string guild_id = 2;
+  string voice_channel_id = 3;
+}

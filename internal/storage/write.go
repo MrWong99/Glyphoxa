@@ -89,6 +89,44 @@ const speakerColorSlots = 6
 // CodeFailedPrecondition.
 var ErrButlerUndeletable = errors.New("storage: butler cannot be deleted")
 
+// UpsertProviderConfigs inserts-or-replaces a batch of Provider Configs in one
+// transaction, keyed by (tenant_id, component, provider): a matching row has its
+// model + sealed credential + last4 refreshed (the operator replacing a key, or
+// the first real key overwriting the seed's "env" placeholder), otherwise a new
+// row is inserted. The batch is atomic so a multi-Component provider (ElevenLabs
+// → stt + tts share one key, ADR-0004) lands all-or-nothing. Returns the
+// resulting rows in input order. Requires the UNIQUE (tenant_id, component,
+// provider) key from migration 00005.
+func (s *Store) UpsertProviderConfigs(ctx context.Context, configs []NewProviderConfig) ([]ProviderConfig, error) {
+	out := make([]ProviderConfig, 0, len(configs))
+	err := s.InTx(ctx, func(tx *Store) error {
+		for _, c := range configs {
+			row := tx.db.QueryRow(ctx,
+				`INSERT INTO provider_config
+				   (tenant_id, component, provider, model, credentials_ciphertext, credentials_last4)
+				 VALUES ($1, $2, $3, $4, $5, $6)
+				 ON CONFLICT (tenant_id, component, provider) DO UPDATE
+				   SET model = EXCLUDED.model,
+				       credentials_ciphertext = EXCLUDED.credentials_ciphertext,
+				       credentials_last4 = EXCLUDED.credentials_last4,
+				       updated_at = now()
+				 RETURNING `+providerConfigColumns,
+				c.TenantID, c.Component, c.Provider, c.Model,
+				c.CredentialsCiphertext, c.CredentialsLast4)
+			pc, err := scanProviderConfig(row)
+			if err != nil {
+				return fmt.Errorf("storage: upsert provider_config (%s/%s): %w", c.Component, c.Provider, err)
+			}
+			out = append(out, pc)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NewAgent is the input to CreateAgent. Voice is the opaque JSONB blob the voice
 // domain serializes its tts.Voice into; storage keeps it vendor-neutral.
 // SpeakerColor is NOT an input — it is server-assigned on Character insert.
