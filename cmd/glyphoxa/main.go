@@ -17,10 +17,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
@@ -185,6 +188,17 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	defer pool.Close()
 	store := storage.New(pool)
 
+	// The BYOK credential cipher (ADR-0004) is best-effort at boot: without
+	// $GLYPHOXA_SECRET the web tier still serves (Configuration reads work), but
+	// saving a provider key / Bot token fails loudly (CodeFailedPrecondition) —
+	// the #44 keyless-degradation posture, not a hard boot failure.
+	cipher, err := appCipher()
+	if err != nil {
+		log.Warn("provider credential encryption is disabled; saving keys in "+
+			"Configuration will fail until $GLYPHOXA_SECRET is set", "err", err)
+		cipher = nil
+	}
+
 	// Metrics + k8s probes (/metrics, /healthz, /readyz) listen on their OWN port
 	// (metricsAddr), separate from the public web API — so they are scrapeable by
 	// Prometheus and the kubelet but never exposed on the external API surface.
@@ -195,21 +209,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
 	}
 
-	// The web tier serves the Connect API under /api and the embedded SPA at /
-	// (ADR-0013/0039). The browser dials Connect at baseUrl "/api"
-	// (web/src/lib/transport.ts), so the generated handler — mounted on the mux
-	// at its own absolute path (mountPath, e.g.
-	// /glyphoxa.management.v1.CampaignService/) — is wrapped in
-	// http.StripPrefix("/api", …) and registered under "/api/". StripPrefix
-	// removes the /api segment before the Connect handler matches its method
-	// path, so /api/<service>/<method> resolves correctly. The SPA handler is the
-	// "/" catch-all; ServeMux's longest-prefix match keeps /api/ ahead of it, so
-	// only non-API paths (and client-side deep links) reach the SPA fallback.
-	mountPath, mountHandler := rpc.NewCampaignServer(store).Handler()
-	apiHandler := http.StripPrefix("/api", mountHandler)
+	// The web tier serves the auth-guarded Connect API under /api, the Discord
+	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
+	// (ADR-0013/0039). The SPA handler is the "/" catch-all; ServeMux's
+	// longest-prefix match keeps /api/ and /auth/ ahead of it, so only non-API
+	// paths (and client-side deep links) reach the SPA fallback.
 	srv := web.NewServer(web.Config{
 		Addr:   webAddr,
-		Mounts: []web.Mount{{Path: "/api" + mountPath, Handler: apiHandler}},
+		Mounts: managementMounts(store, cipher, log),
 		Root:   spa.Handler(),
 		Logger: log,
 	})
@@ -258,6 +265,49 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // gating decision is unit-tested without Discord credentials.
 func voiceEnabled(token, guild, channel string) bool {
 	return token != "" && guild != "" && channel != ""
+}
+
+// managementMounts wires the auth tier and the management Connect services into
+// the web mux (ADR-0015/0016/0039): the interceptor-guarded Connect handlers
+// (CampaignService, AuthService, ProviderService) under /api, and the net/http
+// Discord OAuth redirect + callback under /auth. The single [auth.Stack] gates
+// every Connect service identically — auth (session cookie) → CSRF double-submit
+// → tenant pass-through — with AuthService.GetCurrentUser left reachable
+// unauthenticated so the SPA can probe the session at boot. Live Discord login
+// requires the operator's OAuth app credentials (DISCORD_OAUTH_CLIENT_ID /
+// _SECRET / _REDIRECT_URL) — a one-time setup, not code; absent them the gate
+// still stands and the API simply has no way in. cipher seals BYOK provider
+// keys (ADR-0004); it may be nil (saving keys then fails CodeFailedPrecondition).
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger) []web.Mount {
+	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
+	if clientID == "" {
+		log.Warn("Discord OAuth is not configured; login is disabled until " +
+			"DISCORD_OAUTH_CLIENT_ID, DISCORD_OAUTH_CLIENT_SECRET and " +
+			"DISCORD_OAUTH_REDIRECT_URL are set")
+	}
+	discord := auth.NewDiscordClient(auth.DiscordConfig{
+		ClientID:     clientID,
+		ClientSecret: os.Getenv("DISCORD_OAUTH_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("DISCORD_OAUTH_REDIRECT_URL"),
+	})
+	oauth := auth.NewOAuth(store, discord, "/", log)
+	authServer := auth.NewAuthServer(store, log)
+
+	// The store satisfies both Authenticator (AuthenticateSession) and
+	// TenantResolver (TenantForUser); GetCurrentUser is the only public procedure.
+	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
+
+	campaignPath, campaignHandler := rpc.NewCampaignServer(store).Handler(stack.HandlerOptions()...)
+	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
+	providerPath, providerHandler := rpc.NewProviderServer(store, cipher, log).Handler(stack.HandlerOptions()...)
+
+	return []web.Mount{
+		web.APIMount(campaignPath, campaignHandler),
+		web.APIMount(authPath, authHandler),
+		web.APIMount(providerPath, providerHandler),
+		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
+		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
+	}
 }
 
 // runWebTier starts the web API server on ctx and blocks until it has fully shut

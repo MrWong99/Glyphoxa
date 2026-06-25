@@ -16,6 +16,30 @@ service CampaignService {
   // GetActiveCampaign returns the most-recently-created campaign for the
   // operator. It fails with CodeNotFound when no campaign exists.
   rpc GetActiveCampaign(GetActiveCampaignRequest) returns (GetActiveCampaignResponse);
+
+  // GetCampaignRoster returns the active campaign together with its ordered
+  // roster — the Butler first, then the Character NPCs — each carrying a stable
+  // speaker-colour slot (#71). It is a read (NO_SIDE_EFFECTS), so the CSRF check
+  // is exempt; it fails with CodeNotFound when no campaign exists.
+  rpc GetCampaignRoster(GetCampaignRosterRequest) returns (GetCampaignRosterResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateAgent adds a Character NPC ("Add NPC") to the active campaign and
+  // returns the created agent, including its server-assigned speaker-colour slot.
+  // The role is always 'character'; the Butler is auto-created (ADR-0009).
+  rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
+
+  // UpdateAgent saves an agent's editor fields (name, title, persona, voice,
+  // address-only, aliases) and returns the updated agent. Editing the Butler can
+  // neither change its role nor turn off Address-Only (ADR-0009 / ADR-0024). A
+  // missing id fails with CodeNotFound.
+  rpc UpdateAgent(UpdateAgentRequest) returns (UpdateAgentResponse);
+
+  // DeleteAgent removes a Character NPC. Deleting the Butler fails with
+  // CodeFailedPrecondition (it is undeletable, ADR-0009); a missing id fails with
+  // CodeNotFound.
+  rpc DeleteAgent(DeleteAgentRequest) returns (DeleteAgentResponse);
 }
 
 // Campaign is the wire representation of a campaign record.
@@ -44,4 +68,254 @@ message GetActiveCampaignRequest {}
 message GetActiveCampaignResponse {
   // campaign is the most-recently-created campaign for the operator.
   Campaign campaign = 1;
+}
+
+// AuthService exposes the operator's authenticated identity to the SPA boot
+// flow (ADR-0016 / ADR-0039). The session itself is issued by the net/http
+// Discord OAuth carve-out (ADR-0015); this Connect surface reads it back and
+// tears it down. The auth interceptor resolves the session cookie into the
+// request context, so GetCurrentUser fails with CodeUnauthenticated when no
+// valid session is present — the SPA's 401 → /login signal.
+service AuthService {
+  // GetCurrentUser returns the signed-in operator's display identity. It is a
+  // read (NO_SIDE_EFFECTS) and is reachable unauthenticated so the SPA can probe
+  // the session at boot: no/expired session fails with CodeUnauthenticated.
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Logout deletes the server-side session row and clears the session + CSRF
+  // cookies. It is state-changing, so the auth + CSRF interceptors guard it.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+}
+
+// User is the signed-in operator's display identity (ADR-0016). It deliberately
+// omits the internal user id and Discord user id — the SPA only renders the
+// name, role, and avatar in the sidebar.
+message User {
+  // name is the operator's display name (Discord global name or username).
+  string name = 1;
+  // role is the operator's role label (e.g. "operator").
+  string role = 2;
+  // avatar is an absolute avatar image URL, or empty when none is set.
+  string avatar = 3;
+}
+
+// GetCurrentUserRequest is the (empty) request for GetCurrentUser; the operator
+// is resolved server-side from the session cookie.
+message GetCurrentUserRequest {}
+
+// GetCurrentUserResponse carries the signed-in operator's identity.
+message GetCurrentUserResponse {
+  // user is the signed-in operator.
+  User user = 1;
+}
+
+// LogoutRequest is the (empty) request for Logout; the session to delete is
+// resolved server-side from the session cookie.
+message LogoutRequest {}
+
+// LogoutResponse is the (empty) response for Logout.
+message LogoutResponse {}
+
+// Agent is the wire representation of a roster member — the Butler or a Character
+// NPC (ADR-0009). It carries the editor-facing fields plus the server-assigned
+// speaker-colour slot; the encrypted provider bindings are not exposed here.
+message Agent {
+  // id is the agent's UUID.
+  string id = 1;
+  // campaign_id is the owning campaign's UUID.
+  string campaign_id = 2;
+  // role is the agent archetype: "butler" or "character" (ADR-0009).
+  string role = 3;
+  // name is the agent's display name (and primary address term).
+  string name = 4;
+  // title is the role subtitle shown under the name (e.g. "Gruff innkeeper").
+  string title = 5;
+  // persona is the markdown personality/backstory/speech style injected into the
+  // prompt.
+  string persona = 6;
+  // voice is the selected voice id (empty when unset). The encrypted TTS provider
+  // binding is not exposed.
+  string voice = 7;
+  // address_only: the agent waits to be named (ADR-0024). Always true for the
+  // Butler.
+  bool address_only = 8;
+  // speaker_color is the stable palette SLOT the web tier maps onto its speaker
+  // palette, so each roster member renders in a stable hue across reloads.
+  uint32 speaker_color = 9;
+  // aliases are extra name/aliases for Address Detection beyond name.
+  repeated string aliases = 10;
+}
+
+// GetCampaignRosterRequest is the (empty) request for GetCampaignRoster; the
+// active campaign is resolved server-side for the single operator.
+message GetCampaignRosterRequest {}
+
+// GetCampaignRosterResponse carries the active campaign and its ordered roster.
+message GetCampaignRosterResponse {
+  // campaign is the active campaign (title is its name; plus system/language).
+  Campaign campaign = 1;
+  // roster is the campaign's agents in stable order: the Butler first, then the
+  // Character NPCs.
+  repeated Agent roster = 2;
+}
+
+// CreateAgentRequest is the editor's "Add NPC" payload. The role is always
+// 'character' and the campaign is resolved server-side, so neither is carried.
+message CreateAgentRequest {
+  // name is the new NPC's display name (e.g. "New NPC").
+  string name = 1;
+  // title is the role subtitle.
+  string title = 2;
+  // persona is the markdown personality/backstory/speech style.
+  string persona = 3;
+  // voice is the selected voice id (empty when unset).
+  string voice = 4;
+  // address_only: the NPC waits to be named (ADR-0024).
+  bool address_only = 5;
+  // aliases are extra address terms beyond name.
+  repeated string aliases = 6;
+}
+
+// CreateAgentResponse carries the created Character NPC, including its
+// server-assigned speaker-colour slot.
+message CreateAgentResponse {
+  // agent is the newly created NPC.
+  Agent agent = 1;
+}
+
+// UpdateAgentRequest carries an agent's editor fields. address_only is ignored
+// for the Butler (kept true). Unknown id fails with CodeNotFound.
+message UpdateAgentRequest {
+  // id is the agent to update.
+  string id = 1;
+  // name is the agent's display name.
+  string name = 2;
+  // title is the role subtitle.
+  string title = 3;
+  // persona is the markdown personality/backstory/speech style.
+  string persona = 4;
+  // voice is the selected voice id (empty when unset).
+  string voice = 5;
+  // address_only: the agent waits to be named; ignored for the Butler (ADR-0024).
+  bool address_only = 6;
+  // aliases are extra address terms beyond name.
+  repeated string aliases = 7;
+}
+
+// UpdateAgentResponse carries the updated agent.
+message UpdateAgentResponse {
+  // agent is the updated agent.
+  Agent agent = 1;
+}
+
+// DeleteAgentRequest names the agent to delete. Deleting the Butler fails with
+// CodeFailedPrecondition (ADR-0009).
+message DeleteAgentRequest {
+  // id is the agent to delete.
+  string id = 1;
+}
+
+// DeleteAgentResponse is the (empty) response for DeleteAgent.
+message DeleteAgentResponse {}
+
+// ProviderService backs the Configuration screen (#68; ADR-0004 BYOK /
+// ADR-0039 single-operator). Credentials are WRITE-ONLY after save: a saved
+// secret's plaintext is NEVER returned over any RPC — responses carry only the
+// last 4 characters (last4) plus metadata, so the screen renders a masked value
+// and a "last updated" without ever reading a secret back.
+service ProviderService {
+  // ListProviderConfigs returns the operator's saved Configuration: the three
+  // write-only credentials (Discord bot token, Groq, ElevenLabs) as masked
+  // metadata, plus the non-secret Discord Guild / Voice channel IDs. It is a
+  // read (NO_SIDE_EFFECTS), so the CSRF check is skipped.
+  rpc ListProviderConfigs(ListProviderConfigsRequest) returns (ListProviderConfigsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // SaveProviderConfig seals and stores one BYOK provider key (Groq or
+  // ElevenLabs) and returns only its masked metadata. Replacing an existing key
+  // updates its last4 + updated_at. State-changing: auth + CSRF guard it.
+  rpc SaveProviderConfig(SaveProviderConfigRequest) returns (SaveProviderConfigResponse);
+  // SaveDiscordSettings stores the Discord deployment integration: the Bot token
+  // (a write-only secret, sealed at rest) and the non-secret Guild / Voice
+  // channel IDs. An omitted bot_token leaves the stored token unchanged, so the
+  // IDs can be saved without re-entering the secret. State-changing.
+  rpc SaveDiscordSettings(SaveDiscordSettingsRequest) returns (SaveDiscordSettingsResponse);
+}
+
+// ProviderCredential is the WRITE-ONLY view of a saved secret: never its value,
+// only the last 4 characters and whether/when it was saved (ADR-0004). The
+// Configuration screen renders a masked field, a "last updated", and a Healthy /
+// Key-needed badge from these fields alone.
+message ProviderCredential {
+  // component is the credential's primary Component label ("llm", "tts") or
+  // "discord" for the Bot token. Display/identity only — not the storage enum.
+  string component = 1;
+  // provider identifies the credential slot ("groq", "elevenlabs", "discord").
+  string provider = 2;
+  // ever_saved is true once a real key has been stored. An unsaved slot, or one
+  // still holding the seed's ENV placeholder, is false → the screen shows
+  // "Key needed".
+  bool ever_saved = 3;
+  // show_masked tells the screen to render the masked value + Replace button
+  // (true exactly when ever_saved).
+  bool show_masked = 4;
+  // last4 is the last 4 characters of the saved secret — the only plaintext
+  // kept (empty when never saved).
+  string last4 = 5;
+  // model is the selected model/voice id for the provider (empty for Discord).
+  string model = 6;
+  // updated_at is when the credential was last saved (unset when never saved).
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// ListProviderConfigsRequest is the (empty) request; the tenant is resolved
+// server-side from the session.
+message ListProviderConfigsRequest {}
+
+// ListProviderConfigsResponse carries the three write-only credentials plus the
+// non-secret Discord IDs the screen edits.
+message ListProviderConfigsResponse {
+  // credentials are the Discord bot token, Groq, and ElevenLabs slots.
+  repeated ProviderCredential credentials = 1;
+  // guild_id is the Discord server the Bot serves (non-secret; may be empty).
+  string guild_id = 2;
+  // voice_channel_id is the channel sessions join (non-secret; may be empty).
+  string voice_channel_id = 3;
+}
+
+// SaveProviderConfigRequest seals one BYOK provider key.
+message SaveProviderConfigRequest {
+  // provider is the BYOK slot to save: "groq" or "elevenlabs".
+  string provider = 1;
+  // secret is the plaintext API key to seal. Write-only: never returned.
+  string secret = 2;
+  // model is the selected model/voice id (optional).
+  string model = 3;
+}
+
+// SaveProviderConfigResponse returns the saved key's masked metadata.
+message SaveProviderConfigResponse {
+  // credential is the saved key's write-only view (never its value).
+  ProviderCredential credential = 1;
+}
+
+// SaveDiscordSettingsRequest stores the Discord deployment integration.
+message SaveDiscordSettingsRequest {
+  // bot_token is the Discord Bot token to seal. Omit (no presence) to leave the
+  // stored token unchanged — lets the IDs be saved without re-entering the
+  // secret. Write-only: never returned.
+  optional string bot_token = 1;
+  // guild_id / voice_channel_id are the non-secret Discord IDs, stored as-is.
+  string guild_id = 2;
+  string voice_channel_id = 3;
+}
+
+// SaveDiscordSettingsResponse returns the Bot token's masked metadata plus the
+// stored IDs after the save.
+message SaveDiscordSettingsResponse {
+  // credential is the Bot token's write-only view after the save.
+  ProviderCredential credential = 1;
+  string guild_id = 2;
+  string voice_channel_id = 3;
 }

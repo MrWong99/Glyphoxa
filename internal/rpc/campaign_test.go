@@ -27,6 +27,28 @@ func (f fakeReader) GetActiveCampaign(context.Context) (storage.Campaign, error)
 	return f.campaign, f.err
 }
 
+// The roster + CRUD half of campaignStore is unused by the GetActiveCampaign
+// tests; stub it so fakeReader still satisfies the widened interface. The CRUD
+// handlers have their own fake (campaign_crud_test.go).
+func (fakeReader) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {
+	return storage.Agent{}, storage.ErrNotFound
+}
+func (fakeReader) CharacterAgents(context.Context, uuid.UUID) ([]storage.Agent, error) {
+	return nil, nil
+}
+func (fakeReader) GetAgent(context.Context, uuid.UUID) (storage.Agent, error) {
+	return storage.Agent{}, storage.ErrNotFound
+}
+func (fakeReader) CreateAgent(context.Context, storage.NewAgent) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+func (fakeReader) UpdateAgent(context.Context, storage.AgentUpdate) (storage.Agent, error) {
+	return storage.Agent{}, storage.ErrNotFound
+}
+func (fakeReader) DeleteAgent(context.Context, uuid.UUID) error {
+	return nil
+}
+
 // newClient stands up the CampaignServer handler behind an httptest server and
 // returns a Connect-JSON client for it. WithProtoJSON forces the JSON codec on
 // the wire (the default is binary proto), so this also asserts the RPC is

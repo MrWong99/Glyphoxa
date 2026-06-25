@@ -64,12 +64,32 @@ type ProviderConfig struct {
 	UpdatedAt             time.Time
 }
 
+// DeploymentConfig is the single-operator Discord integration the Configuration
+// screen edits (#68): the deployment Bot token — a write-only secret, sealed at
+// rest like a Provider Config — plus the non-secret Guild / Voice channel IDs.
+// The Bot is deployment-shared (one token regardless of Tenant, CONTEXT.md), so
+// this is distinct from the per-Component, Tenant-scoped provider_config
+// (ADR-0004); it is keyed by tenant_id only for the MVP single operator
+// (ADR-0039). DiscordBotTokenCiphertext is empty until a token is saved.
+type DeploymentConfig struct {
+	TenantID                  uuid.UUID
+	DiscordBotTokenCiphertext []byte
+	DiscordBotTokenLast4      string
+	GuildID                   string
+	VoiceChannelID            string
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+}
+
 // Agent is an AI-controlled persona — Butler or Character NPC (ADR-0009).
 type Agent struct {
 	ID         uuid.UUID
 	CampaignID uuid.UUID
 	Role       AgentRole
 	Name       string
+	// Title is the Agent's role subtitle shown in the editor (e.g. "Gruff
+	// innkeeper"); free text, may be empty.
+	Title string
 	// Persona: markdown personality/backstory/speech style.
 	Persona string
 	// Voice (ADR-0022/0023): TTS provider + voice-id config, stored as JSONB.
@@ -82,9 +102,42 @@ type Agent struct {
 	LLMProviderConfigID uuid.NullUUID
 	// AddressOnly: reachable only by explicit name/alias (ADR-0024). Butler true.
 	AddressOnly bool
-	Aliases     []string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// SpeakerColor is a server-assigned palette SLOT (not a colour value): the web
+	// tier maps it onto its speaker palette so each roster member renders in a
+	// stable hue across reloads (#71). Assigned round-robin per Campaign on
+	// Character insert; the Butler keeps slot 0.
+	SpeakerColor int
+	Aliases      []string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// User is a human operator authenticated via Discord OAuth (ADR-0016). The
+// Discord snowflake is the stable identity key; Name/Avatar are display-only and
+// refreshed from Discord on each login.
+type User struct {
+	ID            uuid.UUID
+	DiscordUserID string
+	Name          string
+	// Avatar is an absolute image URL (or empty).
+	Avatar    string
+	Role      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Session is a server-side login session (ADR-0016): the Token is the opaque
+// random secret carried in the glyphoxa_session cookie, and this row is the
+// authority. ExpiresAt gates validity; deleting the row revokes instantly.
+type Session struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	Token      string
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
+	IP         string
+	UA         string
 }
 
 // LoadedAgent is an Agent with its bound Provider Configs resolved — the bundle

@@ -26,8 +26,11 @@ func TestMain(m *testing.M) {
 // fakeCampaignService is a keyless, deterministic CampaignServiceHandler. It
 // lets the web-server test prove routing of a Connect handler — success AND
 // error-code — without pulling in internal/rpc or internal/storage. The server
-// is decoupled from campaign specifics, so a canned handler is enough.
+// is decoupled from campaign specifics, so a canned handler is enough. The
+// embedded Unimplemented handler supplies the roster + CRUD methods (#71) the
+// routing test does not exercise.
 type fakeCampaignService struct {
+	managementv1connect.UnimplementedCampaignServiceHandler
 	campaign *managementv1.Campaign
 	err      error
 }
@@ -73,7 +76,7 @@ func startServer(t *testing.T, mounts ...web.Mount) (base string, stop func()) {
 func mountFake(t *testing.T, svc fakeCampaignService) web.Mount {
 	t.Helper()
 	path, handler := managementv1connect.NewCampaignServiceHandler(svc)
-	return web.Mount{Path: "/api" + path, Handler: http.StripPrefix("/api", handler)}
+	return web.APIMount(path, handler)
 }
 
 func TestServerRoutesConnectThenShutsDown(t *testing.T) {

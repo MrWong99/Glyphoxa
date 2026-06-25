@@ -1,0 +1,348 @@
+package rpc_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
+
+	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/rpc"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+)
+
+// fakeProviderStore is an in-memory providerStore: it mimics the (tenant,
+// component, provider) upsert and the column-isolated deployment_config saves so
+// the handler can be unit-tested keyless.
+type fakeProviderStore struct {
+	configs map[string]storage.ProviderConfig // key: component|provider
+	dep     *storage.DeploymentConfig
+	tick    int
+}
+
+func newFakeProviderStore() *fakeProviderStore {
+	return &fakeProviderStore{configs: map[string]storage.ProviderConfig{}}
+}
+
+// now returns a strictly-increasing timestamp so updated_at advances on replace.
+func (f *fakeProviderStore) now() time.Time {
+	f.tick++
+	return time.Date(2026, 6, 25, 12, 0, f.tick, 0, time.UTC)
+}
+
+func (f *fakeProviderStore) ListProviderConfigs(_ context.Context, _ uuid.UUID) ([]storage.ProviderConfig, error) {
+	out := make([]storage.ProviderConfig, 0, len(f.configs))
+	for _, c := range f.configs {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (f *fakeProviderStore) UpsertProviderConfigs(_ context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error) {
+	out := make([]storage.ProviderConfig, 0, len(configs))
+	for _, n := range configs {
+		key := string(n.Component) + "|" + n.Provider
+		row, ok := f.configs[key]
+		if !ok {
+			row = storage.ProviderConfig{ID: uuid.New(), TenantID: n.TenantID, Component: n.Component, Provider: n.Provider, CreatedAt: f.now()}
+		}
+		row.Model = n.Model
+		row.CredentialsCiphertext = n.CredentialsCiphertext
+		row.CredentialsLast4 = n.CredentialsLast4
+		row.UpdatedAt = f.now()
+		f.configs[key] = row
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func (f *fakeProviderStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
+	if f.dep == nil {
+		return storage.DeploymentConfig{}, storage.ErrNotFound
+	}
+	return *f.dep, nil
+}
+
+func (f *fakeProviderStore) SaveDiscordBotToken(_ context.Context, tenantID uuid.UUID, ciphertext []byte, last4 string) (storage.DeploymentConfig, error) {
+	if f.dep == nil {
+		f.dep = &storage.DeploymentConfig{TenantID: tenantID, CreatedAt: f.now()}
+	}
+	f.dep.DiscordBotTokenCiphertext = ciphertext
+	f.dep.DiscordBotTokenLast4 = last4
+	f.dep.UpdatedAt = f.now()
+	return *f.dep, nil
+}
+
+func (f *fakeProviderStore) SaveDiscordChannels(_ context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
+	if f.dep == nil {
+		f.dep = &storage.DeploymentConfig{TenantID: tenantID, CreatedAt: f.now()}
+	}
+	f.dep.GuildID = guildID
+	f.dep.VoiceChannelID = voiceChannelID
+	f.dep.UpdatedAt = f.now()
+	return *f.dep, nil
+}
+
+func testCipher(t *testing.T) *crypto.Cipher {
+	t.Helper()
+	c, err := crypto.New(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("crypto.New: %v", err)
+	}
+	return c
+}
+
+// newProviderClient mounts a ProviderServer behind a server-side interceptor
+// that injects a fixed tenant (the auth stack's job, faked here), and returns a
+// Connect-JSON client. WithProtoJSON also asserts the RPCs work over JSON.
+func newProviderClient(t *testing.T, store *fakeProviderStore, cipher *crypto.Cipher) (managementv1connect.ProviderServiceClient, uuid.UUID) {
+	t.Helper()
+	tenantID := uuid.New()
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			return next(auth.WithTenant(ctx, tenantID), req)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewProviderServer(store, cipher, nil).Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return managementv1connect.NewProviderServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON()), tenantID
+}
+
+// credByProvider finds a credential in a list by its provider slot.
+func credByProvider(creds []*managementv1.ProviderCredential, provider string) *managementv1.ProviderCredential {
+	for _, c := range creds {
+		if c.GetProvider() == provider {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
+	t.Parallel()
+	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+
+	resp, err := client.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	creds := resp.Msg.GetCredentials()
+	if len(creds) != 3 {
+		t.Fatalf("credentials = %d, want 3 (discord, groq, elevenlabs)", len(creds))
+	}
+	for _, want := range []string{"discord", "groq", "elevenlabs"} {
+		c := credByProvider(creds, want)
+		if c == nil {
+			t.Fatalf("missing credential slot %q", want)
+		}
+		if c.GetEverSaved() || c.GetShowMasked() || c.GetLast4() != "" {
+			t.Errorf("%s should be key-needed on an empty store: %+v", want, c)
+		}
+	}
+	if resp.Msg.GetGuildId() != "" || resp.Msg.GetVoiceChannelId() != "" {
+		t.Errorf("guild/voice should be empty: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+func TestProviderSave_SealStoreLast4_WriteOnly(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	cipher := testCipher(t)
+	client, _ := newProviderClient(t, store, cipher)
+
+	const secret = "test-groq-secret-value-1111"
+	resp, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq",
+		Secret:   secret,
+		Model:    "llama-3.3-70b-versatile",
+	}))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	cred := resp.Msg.GetCredential()
+	if !cred.GetEverSaved() || !cred.GetShowMasked() {
+		t.Errorf("saved credential should be ever_saved + show_masked: %+v", cred)
+	}
+	if cred.GetComponent() != "llm" || cred.GetProvider() != "groq" {
+		t.Errorf("component/provider = %q/%q, want llm/groq", cred.GetComponent(), cred.GetProvider())
+	}
+	if cred.GetLast4() != crypto.Last4(secret) {
+		t.Errorf("last4 = %q, want %q", cred.GetLast4(), crypto.Last4(secret))
+	}
+
+	// Write-only contract: the plaintext must not appear anywhere in the response.
+	if strings.Contains(cred.String(), secret) {
+		t.Fatal("response leaked the plaintext secret")
+	}
+
+	// Seal → store round-trip: the stored ciphertext opens back to the plaintext,
+	// proving the handler sealed it (and stored ciphertext, never plaintext).
+	stored := store.configs["llm|groq"]
+	if string(stored.CredentialsCiphertext) == secret {
+		t.Fatal("stored ciphertext is the raw plaintext")
+	}
+	opened, err := cipher.Open(stored.CredentialsCiphertext)
+	if err != nil {
+		t.Fatalf("open stored ciphertext: %v", err)
+	}
+	if string(opened) != secret {
+		t.Errorf("round-trip = %q, want %q", opened, secret)
+	}
+}
+
+func TestProviderSave_ElevenLabsUpsertsSttAndTts(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	cipher := testCipher(t)
+	client, _ := newProviderClient(t, store, cipher)
+
+	const secret = "test-elevenlabs-secret-2222"
+	if _, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "elevenlabs", Secret: secret,
+	})); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// One save wrote both Components, sharing the ciphertext + last4.
+	for _, comp := range []string{"tts|elevenlabs", "stt|elevenlabs"} {
+		row, ok := store.configs[comp]
+		if !ok {
+			t.Fatalf("missing upserted row %q", comp)
+		}
+		if row.CredentialsLast4 != crypto.Last4(secret) {
+			t.Errorf("%s last4 = %q, want %q", comp, row.CredentialsLast4, crypto.Last4(secret))
+		}
+	}
+
+	// List collapses the two rows into one ElevenLabs slot.
+	resp, _ := client.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	c := credByProvider(resp.Msg.GetCredentials(), "elevenlabs")
+	if c == nil || !c.GetEverSaved() || c.GetComponent() != "tts" {
+		t.Errorf("elevenlabs slot = %+v, want one saved tts-labelled credential", c)
+	}
+}
+
+func TestProviderSave_ReplaceUpdatesLast4AndTimestamp(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	client, _ := newProviderClient(t, store, testCipher(t))
+	ctx := context.Background()
+
+	first, err := client.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "first_keyAAAA"}))
+	if err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	second, err := client.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "second_keyBBBB"}))
+	if err != nil {
+		t.Fatalf("replace save: %v", err)
+	}
+
+	if first.Msg.GetCredential().GetLast4() == second.Msg.GetCredential().GetLast4() {
+		t.Errorf("replace did not change last4 (%q)", second.Msg.GetCredential().GetLast4())
+	}
+	if !second.Msg.GetCredential().GetUpdatedAt().AsTime().After(first.Msg.GetCredential().GetUpdatedAt().AsTime()) {
+		t.Errorf("replace did not advance updated_at: %v !> %v",
+			second.Msg.GetCredential().GetUpdatedAt().AsTime(), first.Msg.GetCredential().GetUpdatedAt().AsTime())
+	}
+}
+
+func TestProviderSave_UnknownProviderAndEmptySecret(t *testing.T) {
+	t.Parallel()
+	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	ctx := context.Background()
+
+	_, err := client.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{Provider: "openai", Secret: "x"}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("unknown provider code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	_, err = client.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: ""}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("empty secret code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+}
+
+func TestProviderSave_NoCipherFailsPrecondition(t *testing.T) {
+	t.Parallel()
+	client, _ := newProviderClient(t, newFakeProviderStore(), nil) // nil cipher
+	ctx := context.Background()
+
+	_, err := client.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{Provider: "groq", Secret: "x"}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("save without cipher code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	// Reads still work without a cipher.
+	if _, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{})); err != nil {
+		t.Errorf("List without cipher: %v", err)
+	}
+}
+
+func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	client, _ := newProviderClient(t, store, testCipher(t))
+	ctx := context.Background()
+
+	const token = "test-discord-bot-token-3333"
+	saveTok, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		BotToken:       &[]string{token}[0],
+		GuildId:        "472093001100",
+		VoiceChannelId: "472093774421",
+	}))
+	if err != nil {
+		t.Fatalf("save discord: %v", err)
+	}
+	cred := saveTok.Msg.GetCredential()
+	if !cred.GetEverSaved() || cred.GetProvider() != "discord" || cred.GetLast4() != crypto.Last4(token) {
+		t.Errorf("discord credential = %+v, want saved/discord/last4=%q", cred, crypto.Last4(token))
+	}
+	if strings.Contains(cred.String(), token) {
+		t.Fatal("discord response leaked the bot token")
+	}
+	if saveTok.Msg.GetGuildId() != "472093001100" || saveTok.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("ids not stored: %q / %q", saveTok.Msg.GetGuildId(), saveTok.Msg.GetVoiceChannelId())
+	}
+
+	// IDs-only save (no bot_token) must not wipe the token.
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: "999", VoiceChannelId: "888",
+	})); err != nil {
+		t.Fatalf("save ids: %v", err)
+	}
+	resp, _ := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	discord := credByProvider(resp.Msg.GetCredentials(), "discord")
+	if discord == nil || !discord.GetEverSaved() || discord.GetLast4() != crypto.Last4(token) {
+		t.Errorf("token wiped by ids-only save: %+v", discord)
+	}
+	if resp.Msg.GetGuildId() != "999" || resp.Msg.GetVoiceChannelId() != "888" {
+		t.Errorf("ids not updated: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+// TestProviderList_EnvPlaceholderIsKeyNeeded asserts the ADR-0039 seam: a
+// provider_config still holding the seed's "env" placeholder reads as key-needed,
+// not as a saved key.
+func TestProviderList_EnvPlaceholderIsKeyNeeded(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	store.configs["llm|groq"] = storage.ProviderConfig{
+		ID: uuid.New(), Component: storage.ComponentLLM, Provider: "groq",
+		CredentialsLast4: "env", UpdatedAt: time.Now(),
+	}
+	client, _ := newProviderClient(t, store, testCipher(t))
+
+	resp, _ := client.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	groq := credByProvider(resp.Msg.GetCredentials(), "groq")
+	if groq.GetEverSaved() {
+		t.Errorf("env-placeholder groq should be key-needed, got ever_saved=true: %+v", groq)
+	}
+}

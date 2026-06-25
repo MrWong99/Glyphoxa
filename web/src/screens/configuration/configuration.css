@@ -7,3 +7,45 @@
 .gx-providers__campaign {
   margin-bottom: var(--spacing-lg);
 }
+
+/* Secret credential control (key field / masked + Replace), right-aligned in the
+ * provider row before the status badge. */
+.gx-secret {
+  margin-left: auto;
+  min-width: 0;
+}
+
+.gx-secret__edit,
+.gx-secret__saved {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.gx-secret__edit .gx-field {
+  margin: 0;
+}
+
+.gx-secret__mask {
+  letter-spacing: 0.18em;
+  color: var(--text-subtle);
+  font-family: var(--font-mono, monospace);
+}
+
+/* Discord connection card: the Bot token row above the two ID inputs. */
+.gx-discord {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-discord__ids {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-md);
+}
+
+.gx-discord__save {
+  display: flex;
+  justify-content: flex-end;
+}

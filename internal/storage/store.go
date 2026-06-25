@@ -98,16 +98,16 @@ func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
 }
 
 const agentColumns = `
-	id, campaign_id, agent_role, name, persona, voice,
+	id, campaign_id, agent_role, name, title, persona, voice,
 	voice_provider_config_id, llm_provider_config_id,
-	address_only, aliases, created_at, updated_at`
+	address_only, speaker_color, aliases, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent
 	err := row.Scan(
-		&a.ID, &a.CampaignID, &a.Role, &a.Name, &a.Persona, &a.Voice,
+		&a.ID, &a.CampaignID, &a.Role, &a.Name, &a.Title, &a.Persona, &a.Voice,
 		&a.VoiceProviderConfigID, &a.LLMProviderConfigID,
-		&a.AddressOnly, &a.Aliases, &a.CreatedAt, &a.UpdatedAt,
+		&a.AddressOnly, &a.SpeakerColor, &a.Aliases, &a.CreatedAt, &a.UpdatedAt,
 	)
 	return a, err
 }
@@ -191,6 +191,55 @@ func (s *Store) GetProviderConfig(ctx context.Context, id uuid.UUID) (ProviderCo
 	}
 	if err != nil {
 		return ProviderConfig{}, fmt.Errorf("storage: get provider_config %s: %w", id, err)
+	}
+	return p, nil
+}
+
+// ListProviderConfigs returns all of a Tenant's Provider Configs, ordered by
+// Component then Provider (deterministic for the Configuration screen, #68). An
+// empty result is not an error.
+func (s *Store) ListProviderConfigs(ctx context.Context, tenantID uuid.UUID) ([]ProviderConfig, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+providerConfigColumns+`
+		   FROM provider_config
+		  WHERE tenant_id = $1
+		  ORDER BY component, provider`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list provider_config for tenant %s: %w", tenantID, err)
+	}
+	defer rows.Close()
+
+	var out []ProviderConfig
+	for rows.Next() {
+		p, err := scanProviderConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan provider_config: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list provider_config for tenant %s: %w", tenantID, err)
+	}
+	return out, nil
+}
+
+// GetProviderConfigByComponent returns the Tenant's most-recently-updated
+// Provider Config for a Component, or ErrNotFound when none is bound. A Component
+// can have more than one Provider in the matrix (ADR-0004); this resolves the one
+// the operator last saved.
+func (s *Store) GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component Component) (ProviderConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+providerConfigColumns+`
+		   FROM provider_config
+		  WHERE tenant_id = $1 AND component = $2
+		  ORDER BY updated_at DESC, id DESC
+		  LIMIT 1`, tenantID, component)
+	p, err := scanProviderConfig(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProviderConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return ProviderConfig{}, fmt.Errorf("storage: get provider_config (tenant %s, component %s): %w", tenantID, component, err)
 	}
 	return p, nil
 }

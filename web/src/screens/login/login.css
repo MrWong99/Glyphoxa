@@ -1,0 +1,50 @@
+/* Login screen — the minimal Discord-only auth gate (ADR-0016). Centered arcane
+   card on the app surface; reuses the gx- token vocabulary. */
+.gx-login {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.gx-login__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  max-width: 360px;
+  padding: 32px 28px;
+  background: var(--surface-card, #16131f);
+  border: 1px solid var(--border-subtle, #2a2535);
+  border-radius: 16px;
+  text-align: center;
+}
+
+.gx-login__sigil {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  color: #fff;
+  background: linear-gradient(135deg, #9059ff, #00ddff);
+}
+
+.gx-login__wordmark {
+  margin: 4px 0 0;
+  font-size: 26px;
+}
+
+.gx-login__lede {
+  margin: 0 0 8px;
+  color: var(--text-subtle, #9a93a8);
+}
+
+.gx-login__soon {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
