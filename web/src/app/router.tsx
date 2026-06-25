@@ -7,19 +7,29 @@ import {
 } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/AppShell";
+import { AuthGate } from "@/app/AuthGate";
+import { Login } from "@/screens/login/Login";
 import { Configuration } from "@/screens/configuration/Configuration";
 import { Placeholder } from "@/screens/Placeholder";
 
 // Code-based route tree (ADR-0018). The Tenant lives in the path
 // (/t/:tenantSlug/...) so URLs are bookmarkable; for the single-operator MVP
-// (ADR-0039) the slug is a thin pass-through. The boot flow's auth/onboarding
-// branches are deferred to later stages — this stage redirects the root to the
-// default tenant's Configuration screen.
+// (ADR-0039) the slug is a thin pass-through. The shell is wrapped in the
+// AuthGate (ADR-0016): it probes GetCurrentUser at boot and redirects to /login
+// on a 401, then hands the real operator identity to the shell.
 
 const DEFAULT_TENANT = "default";
 
 const rootRoute = createRootRoute({
   component: () => <Outlet />,
+});
+
+// /login — the Discord-only OAuth entry (ADR-0016). It lives OUTSIDE the tenant
+// shell so it never triggers the AuthGate (which would loop).
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/login",
+  component: Login,
 });
 
 // "/" → the default tenant's Configuration (boot flow stand-in for this stage).
@@ -34,13 +44,15 @@ const indexRoute = createRoute({
   },
 });
 
-// /t/:tenantSlug — the persistent shell hosting the screen Outlet.
+// /t/:tenantSlug — the persistent shell hosting the screen Outlet, gated by the
+// AuthGate so an unauthenticated visit redirects to /login and an authenticated
+// one renders the shell with the real operator identity.
 const tenantRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "t/$tenantSlug",
   component: function TenantLayout() {
     const { tenantSlug } = tenantRoute.useParams();
-    return <AppShell tenantSlug={tenantSlug} />;
+    return <AuthGate>{(user) => <AppShell tenantSlug={tenantSlug} user={user} />}</AuthGate>;
   },
 });
 
@@ -78,6 +90,7 @@ const screenRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  loginRoute,
   tenantRoute.addChildren([tenantIndexRoute, screenRoute]),
 ]);
 
