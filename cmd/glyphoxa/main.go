@@ -158,7 +158,19 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
 	}
 
-	return wirenpc.RunFromDB(ctx, cfg, pool)
+	// The BYOK credential cipher (ADR-0004) is best-effort, mirroring runWeb: a
+	// self-host voice node with no $GLYPHOXA_SECRET still runs on the seeded "env"
+	// placeholder configs (which resolve to the adapters' env vars — today's
+	// behavior). A real saved key WITH no cipher is the only failure, and
+	// RunFromDB surfaces it clearly (issue #69) rather than silently using ENV.
+	cipher, err := appCipher()
+	if err != nil {
+		log.Warn("provider credential decryption is disabled; the voice loop will "+
+			"use env-var API keys unless a saved BYOK key requires $GLYPHOXA_SECRET", "err", err)
+		cipher = nil
+	}
+
+	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
 }
 
 // runWeb is the web/all-mode entrypoint (ADR-0039). It resolves the required DB
@@ -251,7 +263,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// serving /readyz). Log and degrade to web-only by returning nil; the
 		// gctx.Err() guard suppresses the benign cancellation log when SIGTERM is
 		// already stopping both halves.
-		if err := wirenpc.RunFromDB(gctx, cfg, pool); err != nil && gctx.Err() == nil {
+		if err := wirenpc.RunFromDB(gctx, cfg, pool, cipher); err != nil && gctx.Err() == nil {
 			log.Error("voice loop exited; continuing web-only", "err", err)
 		}
 		return nil
