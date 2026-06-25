@@ -117,7 +117,7 @@ func TestRunFromDB_StaleSchemaFailsFastBeforeNPCLoad(t *testing.T) {
 	migrateToHead(t, dsn)
 	rollBackOne(t, dsn)
 
-	err := RunFromDB(context.Background(), Config{}, openPool(t, dsn))
+	err := RunFromDB(context.Background(), Config{}, openPool(t, dsn), nil)
 	if err == nil {
 		t.Fatal("RunFromDB returned nil on a stale schema; serving must fail fast before any other DB query")
 	}

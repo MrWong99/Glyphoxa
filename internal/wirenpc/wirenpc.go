@@ -26,6 +26,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
@@ -228,6 +229,12 @@ type Config struct {
 	// assembles from these is the INITIAL membership; NPCs join and leave at
 	// runtime via the programmatic [Roster] API (issue #49).
 	npcs []npcSpec
+	// keys are the resolved per-component BYOK API keys (issue #69): RunFromDB
+	// decrypts the saved provider_config credentials into them under the hybrid
+	// policy (ADR-0039), and connectAndServe/buildConversation hand them to the
+	// adapters. An empty key means "adapter ENV fallback", so the zero value (the
+	// env-only Run path) reproduces today's behavior untouched.
+	keys providerKeys
 }
 
 // RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
@@ -238,7 +245,14 @@ type Config struct {
 // duplicate handle. This is the task-#5 DB-load path: the only thing it changes
 // versus [Run] is the *source* of the NPC's Persona/Voice/identity — the
 // assembled pipeline is identical.
-func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool) error {
+//
+// cipher decrypts the saved BYOK provider credentials (issue #69, ADR-0004): a
+// real saved key (last4 != "env") drives the session decrypted, while the seeded
+// "env" placeholder falls back to the adapter's own env var (the hybrid policy,
+// ADR-0039). A nil cipher is fine when every config is the env placeholder — the
+// no-$GLYPHOXA_SECRET self-host path — but a real saved key with no cipher is a
+// clear startup error, never a silent fall back to ENV.
+func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *crypto.Cipher) error {
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -256,7 +270,8 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool) error {
 		return err
 	}
 
-	npcs, err := loadSeededNPCs(ctx, storage.New(pool))
+	st := storage.New(pool)
+	npcs, primary, tenantID, err := loadSeededNPCs(ctx, st)
 	if err != nil {
 		return err
 	}
@@ -264,7 +279,17 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool) error {
 		log.Info("loaded NPC from DB", "npc", npc.name, "agentID", npc.agentID)
 	}
 
+	// Resolve the session's BYOK keys from the saved provider_config (issue #69).
+	// A decryption failure (e.g. a real saved key with the wrong/absent cipher)
+	// is fatal here, before any Discord connection — the operator sees a clear
+	// error instead of an NPC that silently ran on the wrong (env) key.
+	keys, err := resolveSessionKeys(ctx, st, tenantID, primary, cipher)
+	if err != nil {
+		return err
+	}
+
 	cfg.npcs = npcs
+	cfg.keys = keys
 	return Run(ctx, cfg)
 }
 
@@ -435,7 +460,9 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	pump := wire.NewPlaybackPump(sess, cdc, log, bus)
 	defer pump.Close()
 
-	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(""), pump, bus)
+	// cfg.keys.tts is the resolved BYOK TTS key (issue #69): the decrypted saved
+	// key when one is configured, or "" to fall back to ELEVENLABS_API_KEY.
+	teeSynth := wire.NewTeeSynthesizer(ttseleven.New(cfg.keys.tts), pump, bus)
 
 	// Attach the orchestrator-sibling latency subscriber (A2/#10): it derives the
 	// SLO histograms (response_latency, address_detect, per-sentence tts_ttfb) from
@@ -447,7 +474,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics)
+	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics, cfg.keys)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -518,8 +545,13 @@ func npcVoice() tts.Voice {
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
 // → STT (ElevenLabs) → Address Detection → production Reply (the Agent loop over
 // Groq, with the dice Tool granted via the tool-use loop) → TTS (synth).
-// Provider API keys are read by each adapter from its own env var at request
-// time (BYOK, ADR-0004), so construction here needs no secrets.
+//
+// keys are the resolved BYOK provider keys (issue #69, hybrid policy ADR-0039):
+// each adapter is constructed with its component's key, which OVERRIDES that
+// adapter's *_API_KEY env var — except an empty key (the env placeholder, or the
+// env-only [Run] path) keeps today's behavior, where the adapter reads its env
+// var at request time (ADR-0004). So a saved key drives the session and an
+// unconfigured component falls back to ENV.
 //
 // npcs supplies the INITIAL Character NPCs the loop voices — their addressable
 // identity, Persona, and Voice (from the in-code seed or, via [RunFromDB], the
@@ -543,7 +575,7 @@ func npcVoice() tts.Voice {
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -577,7 +609,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	}
 	vadStage := orchestrator.NewVAD(bus, vadSession)
 
-	sttStage := orchestrator.NewSTT(bus, stteleven.New(""),
+	sttStage := orchestrator.NewSTT(bus, stteleven.New(keys.stt),
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
 	ttsStage := orchestrator.NewTTS(bus, synth)
 
@@ -585,14 +617,16 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	// seeded. With no grants the tool engine degrades to a single completion
 	// through the same path.
 	//
-	// Groq is the live LLM provider (see the function doc): it reads
-	// GROQ_API_KEY at request time (BYOK, ADR-0004); export it from the keyring
-	// before a live run (docs/agents/live-npc-run.md). There is no Anthropic key,
-	// so wiring the Anthropic adapter here would pass the keyless cassette tests
-	// (which replay Anthropic) but fail the live run — Groq is the only correct
-	// default for a runnable NPC. One engine is shared across every NPC in the
-	// Roster — they reuse one client rather than each opening their own.
-	provider := groq.New("")
+	// Groq is the live LLM provider (see the function doc). Its key is keys.llm:
+	// the decrypted saved BYOK key (issue #69) when one is configured, otherwise
+	// "" so the adapter falls back to GROQ_API_KEY at request time (BYOK,
+	// ADR-0004) — export it from the keyring before an env-only live run
+	// (docs/agents/live-npc-run.md). There is no Anthropic key, so wiring the
+	// Anthropic adapter here would pass the keyless cassette tests (which replay
+	// Anthropic) but fail the live run — Groq is the only correct default for a
+	// runnable NPC. One engine is shared across every NPC in the Roster — they
+	// reuse one client rather than each opening their own.
+	provider := groq.New(keys.llm)
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
@@ -605,7 +639,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over the shared engine) in the Cast. The
 	// Matcher is built from the first NPC and grown for the rest.
-	roster := newRoster(rosterDepsForLive(toolEngine, ttseleven.New(""), 16, log))
+	roster := newRoster(rosterDepsForLive(toolEngine, ttseleven.New(keys.tts), 16, log))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}
