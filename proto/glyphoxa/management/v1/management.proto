@@ -319,3 +319,130 @@ message SaveDiscordSettingsResponse {
   string guild_id = 2;
   string voice_channel_id = 3;
 }
+
+// VoiceService backs the LIVE provider data the Configuration and Campaign
+// screens render (#70; ADR-0039 single-operator / ADR-0004 BYOK credential
+// bridge). It exposes the ElevenLabs voice catalog and a short voice preview for
+// the voice selects, the Groq model allowlist for the model select, and an async
+// provider-health signal that upgrades the Configuration badges from
+// key-presence to a real tested status. Every live call uses the operator's
+// decrypted tenant key; the read RPCs are NO_SIDE_EFFECTS so the SPA probes them
+// as queries that render after the page (CSRF-exempt).
+service VoiceService {
+  // ListVoices returns the ElevenLabs voice catalog (live ListVoices via the
+  // decrypted tenant key; cassette/fixture-deterministic in tests, ADR-0021).
+  // It feeds the Campaign voice select. Read (NO_SIDE_EFFECTS).
+  rpc ListVoices(ListVoicesRequest) returns (ListVoicesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // PreviewVoice synthesizes a short TTS sample for a chosen voice + sample text
+  // and returns playable audio (wraps the existing Synthesize). It spends
+  // provider quota, so unlike the reads it is auth + CSRF guarded like a
+  // mutation.
+  rpc PreviewVoice(PreviewVoiceRequest) returns (PreviewVoiceResponse);
+  // ListModels returns the static model allowlist for a provider — Groq exposes
+  // no list-models API, so its model select is a curated allowlist (ADR-0039).
+  // Read (NO_SIDE_EFFECTS).
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // GetProviderHealth runs the async test-calls — ElevenLabs /v1/voices, a Groq
+  // ping, and a live Discord gateway login that resolves the bot tag — and
+  // returns per-provider status plus that tag. The screen renders key-presence
+  // instantly, then upgrades from this. Read (NO_SIDE_EFFECTS).
+  rpc GetProviderHealth(GetProviderHealthRequest) returns (GetProviderHealthResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// Voice is the wire view of one selectable TTS voice (ADR-0022/0023). It carries
+// the vendor voice id the agent persists plus a display label for the select.
+message Voice {
+  // provider is the owning TTS provider id (e.g. "elevenlabs").
+  string provider = 1;
+  // voice_id is the vendor-side voice identifier persisted on the agent.
+  string voice_id = 2;
+  // name is the human-readable voice name (e.g. "Marcus").
+  string name = 3;
+  // language is a BCP-47 hint (e.g. "en"); optional.
+  string language = 4;
+  // label is the display string for the select (e.g. "ElevenLabs · Marcus").
+  string label = 5;
+}
+
+// ListVoicesRequest is the (empty) request; the tenant key is resolved
+// server-side.
+message ListVoicesRequest {}
+
+// ListVoicesResponse carries the live voice catalog.
+message ListVoicesResponse {
+  // voices is the provider's voice catalog for the select.
+  repeated Voice voices = 1;
+}
+
+// PreviewVoiceRequest asks for a short spoken sample of one voice.
+message PreviewVoiceRequest {
+  // voice_id is the vendor voice to synthesize with.
+  string voice_id = 1;
+  // text is the sample line to speak; the server supplies a default when empty.
+  string text = 2;
+}
+
+// PreviewVoiceResponse carries the synthesized sample as a self-contained audio
+// blob the browser can play directly.
+message PreviewVoiceResponse {
+  // audio is the encoded sample (a WAV container around the PCM sample).
+  bytes audio = 1;
+  // sample_rate is the audio sample rate in Hz.
+  int32 sample_rate = 2;
+  // channels is the channel count (1 = mono).
+  int32 channels = 3;
+  // mime_type is the IANA media type of audio (e.g. "audio/wav").
+  string mime_type = 4;
+}
+
+// ListModelsRequest names the provider whose model allowlist to return.
+message ListModelsRequest {
+  // provider is the LLM provider slot (e.g. "groq").
+  string provider = 1;
+}
+
+// ListModelsResponse carries the static model allowlist.
+message ListModelsResponse {
+  // models is the curated list of selectable model ids (first is the default).
+  repeated string models = 1;
+}
+
+// HealthStatus is the tested liveness of a provider credential.
+enum HealthStatus {
+  // HEALTH_STATUS_UNSPECIFIED is the not-yet-tested / unknown state.
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  // HEALTH_STATUS_HEALTHY means the test-call succeeded.
+  HEALTH_STATUS_HEALTHY = 1;
+  // HEALTH_STATUS_DEGRADED means the test-call failed (bad key, unreachable, …).
+  HEALTH_STATUS_DEGRADED = 2;
+}
+
+// ProviderHealth is one provider's tested status, upgrading the screen's badge
+// from key-presence to a real signal.
+message ProviderHealth {
+  // provider is the slot tested ("groq", "elevenlabs", "discord").
+  string provider = 1;
+  // status is the tested liveness.
+  HealthStatus status = 2;
+  // detail is a short human-readable note (an error summary when degraded).
+  string detail = 3;
+  // bot_tag is the resolved Discord bot tag from the live gateway login
+  // (e.g. "Glyphoxa#4823"); set only on the "discord" entry.
+  string bot_tag = 4;
+}
+
+// GetProviderHealthRequest is the (empty) request; the tenant is resolved
+// server-side.
+message GetProviderHealthRequest {}
+
+// GetProviderHealthResponse carries the per-provider tested health.
+message GetProviderHealthResponse {
+  // providers is the tested status for each credential slot.
+  repeated ProviderHealth providers = 1;
+}
