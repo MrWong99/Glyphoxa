@@ -81,6 +81,28 @@ type DeploymentConfig struct {
 	UpdatedAt                 time.Time
 }
 
+// VoiceSessionStatus is a Voice Session's lifecycle state (#72). A session is
+// 'running' from Start until Stop (or loop exit), then 'ended'.
+type VoiceSessionStatus string
+
+const (
+	VoiceSessionRunning VoiceSessionStatus = "running"
+	VoiceSessionEnded   VoiceSessionStatus = "ended"
+)
+
+// VoiceSession is one run of the live voice loop — the Bot's presence in one
+// Discord voice channel, bound to a Campaign (CONTEXT.md "Voice Session", #72).
+// EndedAt is nil while running; LineCount records transcript lines produced (0
+// for this stage — the live feed is #73).
+type VoiceSession struct {
+	ID         uuid.UUID
+	CampaignID uuid.UUID
+	StartedAt  time.Time
+	EndedAt    *time.Time
+	Status     VoiceSessionStatus
+	LineCount  int
+}
+
 // Agent is an AI-controlled persona — Butler or Character NPC (ADR-0009).
 type Agent struct {
 	ID         uuid.UUID
