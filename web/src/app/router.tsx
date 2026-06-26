@@ -11,6 +11,7 @@ import { AuthGate } from "@/app/AuthGate";
 import { Login } from "@/screens/login/Login";
 import { Configuration } from "@/screens/configuration/Configuration";
 import { Campaign } from "@/screens/campaign/Campaign";
+import { Session } from "@/screens/session/Session";
 import { Placeholder } from "@/screens/Placeholder";
 
 // Code-based route tree (ADR-0018). The Tenant lives in the path
@@ -82,7 +83,7 @@ const screenRoute = createRoute({
       case "campaign":
         return <Campaign />;
       case "session":
-        return <Placeholder title="Session" />;
+        return <Session />;
       default:
         return <Placeholder title="Not found" />;
     }
