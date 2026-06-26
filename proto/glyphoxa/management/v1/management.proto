@@ -319,3 +319,77 @@ message SaveDiscordSettingsResponse {
   string guild_id = 2;
   string voice_channel_id = 3;
 }
+
+// SessionService drives the live Voice Session from the Session screen (#72,
+// ADR-0039): an in-process SessionManager starts/stops the voice loop in `all`
+// mode — the control RPC is defined, not looped through a backplane (ADR-0005).
+// The Bot's guild/voice channel come from the saved deployment config, not CLI
+// flags; the credential-bridge keys (#69) drive the loop.
+service SessionService {
+  // GetSession returns the current Voice Session for the active campaign — the
+  // running session when one is live, otherwise the most recent ended one (for
+  // the screen's last-session summary) — and whether voice is active. It is a
+  // read (NO_SIDE_EFFECTS), so the CSRF check is skipped.
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // StartSession launches the voice loop for the active campaign and returns the
+  // created running session. It fails with CodeFailedPrecondition when the
+  // Discord guild/channel are unconfigured, and CodeAlreadyExists when a session
+  // is already active. State-changing: auth + CSRF guard it.
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  // StopSession cancels the active voice loop and returns the ended session. It
+  // fails with CodeFailedPrecondition when no session is active. State-changing.
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+}
+
+// VoiceSession is the wire view of a voice_sessions row (#72): the Bot's
+// presence in one Discord voice channel, bound to a campaign.
+message VoiceSession {
+  // id is the voice session's UUID.
+  string id = 1;
+  // campaign_id is the campaign the session runs for.
+  string campaign_id = 2;
+  // status is the lifecycle state: "running" or "ended".
+  string status = 3;
+  // started_at is when the session started.
+  google.protobuf.Timestamp started_at = 4;
+  // ended_at is when the session ended; unset while running.
+  google.protobuf.Timestamp ended_at = 5;
+  // line_count is how many transcript lines the session produced (0 this stage;
+  // the live transcript feed is #73).
+  uint32 line_count = 6;
+}
+
+// GetSessionRequest is the (empty) request; the active campaign and the
+// in-process session are resolved server-side for the single operator.
+message GetSessionRequest {}
+
+// GetSessionResponse carries the current session and whether voice is active.
+message GetSessionResponse {
+  // session is the running session, or the most recent ended one; unset when no
+  // session has ever run for the active campaign.
+  VoiceSession session = 1;
+  // active is true exactly when a voice loop is running in this process.
+  bool active = 2;
+}
+
+// StartSessionRequest is the (empty) request; the active campaign is resolved
+// server-side for the single operator.
+message StartSessionRequest {}
+
+// StartSessionResponse carries the created running session.
+message StartSessionResponse {
+  // session is the newly started running session.
+  VoiceSession session = 1;
+}
+
+// StopSessionRequest is the (empty) request; the active session is resolved from
+// the in-process manager.
+message StopSessionRequest {}
+
+// StopSessionResponse carries the ended session.
+message StopSessionResponse {
+  // session is the session that was just ended.
+  VoiceSession session = 1;
+}
