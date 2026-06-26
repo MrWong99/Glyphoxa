@@ -5,12 +5,16 @@ import { create } from "@bufbuild/protobuf";
 
 import {
   CampaignService,
+  VoiceService,
   AgentSchema,
   CampaignSchema,
   GetCampaignRosterResponseSchema,
   CreateAgentResponseSchema,
   UpdateAgentResponseSchema,
   DeleteAgentResponseSchema,
+  ListVoicesResponseSchema,
+  VoiceSchema,
+  PreviewVoiceResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -51,7 +55,28 @@ function mockTransport() {
   ];
   let nextId = 2;
 
+  // LIVE voice catalog the select renders (#70). It includes the NPC's persisted
+  // "rachel" id so the trigger shows its live label, proving the dropdown is fed
+  // by VoiceService rather than a static list.
+  const liveVoices = [
+    create(VoiceSchema, { provider: "elevenlabs", voiceId: "rachel", name: "Rachel", label: "ElevenLabs · Rachel" }),
+    create(VoiceSchema, { provider: "elevenlabs", voiceId: "marcus", name: "Marcus", label: "ElevenLabs · Marcus" }),
+  ];
+  const previewCalls: string[] = [];
+
   const transport = createRouterTransport(({ service }) => {
+    service(VoiceService, {
+      listVoices: () => create(ListVoicesResponseSchema, { voices: liveVoices }),
+      previewVoice: (req) => {
+        previewCalls.push(req.voiceId);
+        return create(PreviewVoiceResponseSchema, {
+          audio: new Uint8Array([1, 2, 3, 4]),
+          sampleRate: 24000,
+          channels: 1,
+          mimeType: "audio/wav",
+        });
+      },
+    });
     service(CampaignService, {
       getCampaignRoster: () =>
         create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, ...npcs] }),
@@ -88,17 +113,17 @@ function mockTransport() {
       },
     });
   });
-  return { transport, npcs };
+  return { transport, npcs, previewCalls };
 }
 
 function renderScreen() {
-  const { transport, npcs } = mockTransport();
+  const { transport, npcs, previewCalls } = mockTransport();
   render(
     <Providers transport={transport} queryClient={makeQueryClient()}>
       <Campaign />
     </Providers>,
   );
-  return { npcs };
+  return { npcs, previewCalls };
 }
 
 describe("Campaign", () => {
@@ -152,5 +177,23 @@ describe("Campaign", () => {
     await waitFor(() => expect(screen.queryByText("New NPC")).not.toBeInTheDocument());
     expect(npcs).toHaveLength(1);
     expect(screen.getByText("Bart")).toBeInTheDocument();
+  });
+
+  it("renders the voice select from the live ListVoices catalog", async () => {
+    renderScreen();
+    // Select Bart (persisted voice id "rachel"); the trigger shows the LIVE label
+    // resolved from the catalog, not the raw id — proving the dropdown is fed by
+    // VoiceService.ListVoices.
+    fireEvent.click(await screen.findByText("Bart"));
+    expect(await screen.findByText("ElevenLabs · Rachel")).toBeInTheDocument();
+  });
+
+  it("previews the selected voice via the PreviewVoice RPC", async () => {
+    const { previewCalls } = renderScreen();
+    fireEvent.click(await screen.findByText("Bart"));
+    fireEvent.click(screen.getByRole("button", { name: /preview voice/i }));
+    // The preview RPC fired for the selected voice (audio playback is a no-op in
+    // jsdom; the RPC call is the observable behaviour).
+    await waitFor(() => expect(previewCalls).toEqual(["rachel"]));
   });
 });

@@ -6,12 +6,18 @@ import { create } from "@bufbuild/protobuf";
 import {
   CampaignService,
   ProviderService,
+  VoiceService,
+  HealthStatus,
   GetActiveCampaignResponseSchema,
   CampaignSchema,
   ListProviderConfigsResponseSchema,
   ProviderCredentialSchema,
   SaveProviderConfigResponseSchema,
   SaveDiscordSettingsResponseSchema,
+  GetProviderHealthResponseSchema,
+  ProviderHealthSchema,
+  ListModelsResponseSchema,
+  type ProviderHealth,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -36,18 +42,31 @@ function cred(component: string, provider: string, last4?: string) {
   });
 }
 
+// health builds a ProviderHealth entry the GetProviderHealth RPC returns.
+function health(provider: string, status: HealthStatus, botTag = ""): ProviderHealth {
+  return create(ProviderHealthSchema, { provider, status, botTag });
+}
+
+const GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+
 // stateful mock backend: List reflects what Save mutates, so an invalidation
 // refetch shows the saved credential — proving the write-only round-trip from
-// the screen's side (the RPC never returns a secret value).
-function mockBackend() {
+// the screen's side (the RPC never returns a secret value). `opts` seeds already-
+// saved slots and the async health the GetProviderHealth RPC reports (#70).
+function mockBackend(opts: { saved?: Partial<Record<"groq" | "elevenlabs" | "discord", string>>; health?: ProviderHealth[] } = {}) {
   const state = {
-    groq: undefined as string | undefined,
-    elevenlabs: undefined as string | undefined,
-    discord: undefined as string | undefined,
+    groq: opts.saved?.groq,
+    elevenlabs: opts.saved?.elevenlabs,
+    discord: opts.saved?.discord,
     guildId: "",
     voiceChannelId: "",
   };
   return createRouterTransport(({ service }) => {
+    service(VoiceService, {
+      getProviderHealth: () =>
+        create(GetProviderHealthResponseSchema, { providers: opts.health ?? [] }),
+      listModels: () => create(ListModelsResponseSchema, { models: GROQ_MODELS }),
+    });
     service(CampaignService, {
       getActiveCampaign: () =>
         create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
@@ -139,5 +158,36 @@ describe("Configuration", () => {
     // Values survive the invalidation refetch (round-tripped through the RPC).
     expect(await screen.findByDisplayValue("472093001100")).toBeInTheDocument();
     expect(screen.getByDisplayValue("472093774421")).toBeInTheDocument();
+  });
+
+  it("renders the Groq model allowlist select (ListModels)", async () => {
+    renderScreen();
+    // The Groq row's model select defaults to the first allowlisted model.
+    const groqModelSelect = await screen.findByLabelText("Groq model");
+    expect(within(groqModelSelect).getByText("llama-3.3-70b-versatile")).toBeInTheDocument();
+  });
+
+  it("upgrades a saved provider's badge to Degraded from the health RPC", async () => {
+    renderScreen(
+      mockBackend({
+        saved: { elevenlabs: "abcd" },
+        health: [health("elevenlabs", HealthStatus.DEGRADED)],
+      }),
+    );
+    // ElevenLabs is saved → renders presence-Healthy instantly, then the async
+    // health RPC downgrades it to Degraded.
+    const degraded = await screen.findByText(/degraded/i);
+    const row = degraded.closest(".gx-provider-row") as HTMLElement;
+    expect(within(row).getByText("ElevenLabs")).toBeInTheDocument();
+  });
+
+  it("shows the resolved Discord bot tag from the live login", async () => {
+    renderScreen(
+      mockBackend({
+        saved: { discord: "tok9" },
+        health: [health("discord", HealthStatus.HEALTHY, "Glyphoxa#4823")],
+      }),
+    );
+    expect(await screen.findByText(/Connected as Glyphoxa#4823/)).toBeInTheDocument();
   });
 });
