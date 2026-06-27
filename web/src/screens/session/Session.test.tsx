@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -184,5 +184,79 @@ describe("Session live transcript (#73)", () => {
     expect(screen.getByText("Bart")).toBeInTheDocument();
     expect(screen.getByText("NPC")).toBeInTheDocument();
     expect(await screen.findByText("Bart is speaking…")).toBeInTheDocument();
+  });
+
+  it("does not open the stream until the snapshot resolves (FIX 4)", async () => {
+    // A snapshot that never resolves until we say so.
+    let resolveSnap!: (r: Response) => void;
+    globalThis.fetch = (() =>
+      new Promise<Response>((res) => {
+        resolveSnap = res;
+      })) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    // Session is live, but the snapshot is still pending.
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+
+    // The stream must NOT be open yet — so an SSE line can never race ahead of a
+    // late snapshot that would clobber it.
+    expect(MockEventSource.last()).toBeUndefined();
+
+    // Resolve the snapshot → the stream opens → a streamed line renders.
+    act(() => {
+      resolveSnap(
+        new Response(JSON.stringify({ lines: [], status: "live", typing: { active: false, label: "" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    const es = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("stream not opened after snapshot resolved");
+      return inst;
+    });
+    act(() => {
+      es.emit("line", {
+        id: "u:1",
+        who: "Player / DM",
+        kind: "player",
+        ts: new Date().toISOString(),
+        text: "hello there",
+      });
+    });
+    expect(await screen.findByText("hello there")).toBeInTheDocument();
+  });
+
+  it("re-syncs the snapshot on EventSource reconnect (FIX 3)", async () => {
+    const snap = { lines: [], status: "live", typing: { active: false, label: "" } };
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(snap), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    await screen.findByText("Live");
+    const es = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("EventSource not opened yet");
+      return inst;
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1)); // initial snapshot
+
+    // First open = initial connect (no refetch); a SECOND open = reconnect, which
+    // re-fetches the authoritative snapshot.
+    act(() => es.emit("open", null));
+    act(() => es.emit("open", null));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 });

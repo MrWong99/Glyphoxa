@@ -57,7 +57,7 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
 
   // Snapshot seed: the initial state the live stream then tails. staleTime is
   // Infinity because the EventSource — not refetching — keeps it current.
-  const { data } = useQuery<Transcript>({
+  const { data, isSuccess } = useQuery<Transcript>({
     queryKey: transcriptKey(sessionId ?? ""),
     enabled,
     staleTime: Infinity,
@@ -70,9 +70,24 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
   });
 
   useEffect(() => {
-    if (!enabled || !sessionId) return;
+    // Gate the stream on snapshot success (FIX 4): if the snapshot resolved AFTER
+    // an SSE line write it would clobber the cache and drop that line. Opening
+    // only once the snapshot has landed makes that ordering impossible; the
+    // first-connect ring replay (idempotent upsert) re-covers the small window
+    // between the snapshot capture and the stream opening.
+    if (!enabled || !sessionId || !isSuccess) return;
     const key = transcriptKey(sessionId);
     const es = new EventSource(`/api/v1/sessions/${sessionId}/events`);
+
+    // Re-sync the authoritative snapshot on a RECONNECT (any "open" after the
+    // first, FIX 3): the Last-Event-ID ring replay covers bounded lag, this
+    // covers an unbounded gap. upsert-by-id makes the refetch + replay overlap
+    // idempotent.
+    let everConnected = false;
+    es.addEventListener("open", () => {
+      if (everConnected) void queryClient.invalidateQueries({ queryKey: key });
+      everConnected = true;
+    });
 
     es.addEventListener("line", (e) => {
       const line = JSON.parse((e as MessageEvent).data) as TranscriptLine;
@@ -84,7 +99,7 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     });
 
     return () => es.close();
-  }, [enabled, sessionId, queryClient]);
+  }, [enabled, sessionId, isSuccess, queryClient]);
 
   return data ?? EMPTY;
 }
