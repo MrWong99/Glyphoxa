@@ -78,8 +78,10 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Accel-Buffering", "no") // disable proxy buffering so frames flush promptly
+	// No "Connection: keep-alive": it is a hop-by-hop header the web tier's h2c
+	// listener rejects, and SSE needs no help from it. Disable proxy buffering so
+	// frames flush promptly.
+	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
