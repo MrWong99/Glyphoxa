@@ -32,11 +32,14 @@
   font-family: var(--font-mono, monospace);
 }
 
-/* Discord connection card: the Bot token row above the two ID inputs. */
+/* Discord connection card: the Bot token row above the two ID inputs.
+ * (#88 slice 1) The card carried no inner padding — its rows were flush to the
+ * card edges, unlike the padded provider rows / defaults body. */
 .gx-discord {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
+  padding: var(--spacing-md);
 }
 
 .gx-discord__ids {

@@ -835,7 +835,7 @@ textarea.gx-input {
 .gx-providers__list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--spacing-md);
 }
 .gx-provider-row {
   padding: 16px;

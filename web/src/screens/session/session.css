@@ -2,6 +2,14 @@
  * classes live in styles/components.css; only screen-local tweaks go here.
  */
 
+/* Page gutter (#88 slice 1): the screen root had no padding, so the content sat
+ * flush against the topbar and the content edges. */
+.gx-session {
+  padding: var(--spacing-xl);
+  max-width: var(--content-lg);
+  margin: 0 auto;
+}
+
 .gx-session__header {
   margin-bottom: var(--spacing-lg);
 }
@@ -10,13 +18,16 @@
   margin: 0;
 }
 
-/* Control row: status badge + elapsed timer on the left, Start/Stop on the right. */
+/* Control row: status badge + elapsed timer on the left, Start/Stop on the right.
+ * (#88 slice 1) The control Card carried no inner padding — its badge/timer/
+ * buttons sat flush against the card edges. */
 .gx-session__control {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--spacing-lg);
   flex-wrap: wrap;
+  padding: var(--spacing-md) var(--spacing-lg);
 }
 
 .gx-session__status {
@@ -52,6 +63,12 @@
 
 .gx-session__transcript {
   margin-top: var(--spacing-xl);
+}
+
+/* (#88 slice 1) The transcript Card had no inner padding, so its lines / empty
+ * state were flush to the card edges. */
+.gx-session__transcript .gx-card {
+  padding: var(--spacing-md) var(--spacing-lg);
 }
 
 .gx-session__transcript-empty {
