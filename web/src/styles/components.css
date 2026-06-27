@@ -502,6 +502,87 @@ textarea.gx-input {
   color: var(--text-strong);
 }
 
+/* ===================== Combobox (components/ui/Combobox.tsx) =============
+ * A filterable, height-bounded picker (cmdk) for large/growing option lists —
+ * the live ElevenLabs voice catalog (#88 slice 2). Reuses the .gx-select trigger
+ * + .gx-select__content popover vocabulary; adds the filter input + bounded list.
+ */
+.gx-combobox__anchor {
+  position: relative;
+}
+.gx-combobox__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  padding-right: var(--spacing-md);
+}
+.gx-combobox__trigger .gx-select-chevron {
+  position: static;
+  flex: 0 0 auto;
+}
+.gx-combobox__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-combobox__placeholder {
+  color: var(--text-subtle);
+}
+.gx-combobox__content {
+  position: absolute;
+  top: calc(100% + var(--spacing-xs));
+  left: 0;
+  right: 0;
+  min-width: 100%;
+  padding: 0;
+}
+.gx-combobox__search {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gx-combobox__search-icon {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.gx-combobox__input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-strong);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+}
+.gx-combobox__input::placeholder {
+  color: var(--text-subtle);
+}
+/* Bound the list so a 28+ catalog scrolls instead of running off-screen. */
+.gx-combobox__list {
+  max-height: calc(var(--layout-2xl) + var(--layout-xl));
+  overflow-y: auto;
+  padding: var(--spacing-xs);
+}
+.gx-combobox__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+.gx-combobox__item[data-selected="true"] {
+  background: rgba(144, 89, 255, 0.18);
+  color: var(--text-strong);
+}
+.gx-combobox__empty {
+  padding: var(--spacing-sm) var(--spacing-md);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+}
+
 /* ===================== Switch (components/forms/Switch.jsx) =============
  * Ported onto a Radix Switch wrapper (ADR-0017): the Radix root carries
  * .gx-switch__track, the thumb .gx-switch__thumb; [data-state=checked] replaces

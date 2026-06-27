@@ -9,7 +9,7 @@ import type { Agent, Voice } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
-import { Select } from "@/components/ui/Select";
+import { Combobox } from "@/components/ui/Combobox";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
@@ -286,7 +286,15 @@ function AgentEditor({
       </div>
 
       <div className="gx-editor__voice">
-        <Select label="Voice" options={voiceOpts} value={voice || undefined} onValueChange={setVoice} placeholder="Pick a voice…" />
+        <Combobox
+          label="Voice"
+          options={voiceOpts}
+          value={voice || undefined}
+          onValueChange={setVoice}
+          placeholder="Pick a voice…"
+          searchPlaceholder="Search voices…"
+          emptyText="No matching voices"
+        />
         <Button
           variant="secondary"
           size="sm"
