@@ -344,6 +344,61 @@ func TestStartUndecryptableToken(t *testing.T) {
 	}
 }
 
+// fakeFinalizer is a stand-in TranscriptFinalizer: it records the id it was asked
+// to finalize and returns a canned authoritative line count (#74).
+type fakeFinalizer struct {
+	mu     sync.Mutex
+	id     uuid.UUID
+	count  int
+	called int
+}
+
+func (f *fakeFinalizer) Finalize(_ context.Context, id uuid.UUID) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called++
+	f.id = id
+	return f.count, nil
+}
+
+func (f *fakeFinalizer) seen() (uuid.UUID, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.id, f.called
+}
+
+// TestStopFinalizesTranscriptCount is #74 AC2: on Stop the Manager finalizes the
+// transcript for the active session and records the authoritative line_count on
+// the ended row (replacing the always-0 in-memory count).
+func TestStopFinalizesTranscriptCount(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+	fin := &fakeFinalizer{count: 9}
+	mgr.SetTranscript(fin)
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	ended, err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ended.LineCount != 9 {
+		t.Errorf("ended line_count = %d, want 9 (the finalized count)", ended.LineCount)
+	}
+	if id, called := fin.seen(); called != 1 || id != vs.ID {
+		t.Errorf("finalize seen id=%s called=%d, want id=%s called=1", id, called, vs.ID)
+	}
+}
+
 // TestStopWithoutActiveSession returns ErrNoActiveSession.
 func TestStopWithoutActiveSession(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)

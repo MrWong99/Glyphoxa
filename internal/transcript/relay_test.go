@@ -32,7 +32,7 @@ func liveRelay(t *testing.T) (*voiceevent.Bus, *Relay, *fakeSessions, string) {
 	t.Helper()
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	r := NewRelay(bus, fs, nil)
+	r := NewRelay(bus, fs, nil, nil)
 	return bus, r, fs, fs.id.String()
 }
 
@@ -327,7 +327,7 @@ func TestPublish_DoesNotBlockOnLaggedSubscriber(t *testing.T) {
 func TestDropWhenIdle(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: false}
-	r := NewRelay(bus, fs, nil)
+	r := NewRelay(bus, fs, nil, nil)
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "ignored", TurnID: "t1"})
 	if got := r.Frames(fs.id.String(), 0); got != nil {
 		t.Errorf("idle relay buffered %d frames", len(got))

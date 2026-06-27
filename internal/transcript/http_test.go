@@ -134,7 +134,7 @@ func connect(t *testing.T, base, id string, lastID uint64) (<-chan sseFrame, con
 func TestSSE_ReplayThenLive(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	relay := transcript.NewRelay(bus, fs, nil)
+	relay := transcript.NewRelay(bus, fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 	id := fs.id.String()
@@ -172,7 +172,7 @@ func TestSSE_ReplayThenLive(t *testing.T) {
 func TestSnapshotEndpoint(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	relay := transcript.NewRelay(bus, fs, nil)
+	relay := transcript.NewRelay(bus, fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 	id := fs.id.String()
@@ -200,7 +200,7 @@ func TestSnapshotEndpoint(t *testing.T) {
 func TestSnapshotIdle(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: false}
-	relay := transcript.NewRelay(bus, fs, nil)
+	relay := transcript.NewRelay(bus, fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 

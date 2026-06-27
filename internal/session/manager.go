@@ -61,6 +61,17 @@ type Store interface {
 	EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error)
 }
 
+// TranscriptFinalizer drains the live transcript's writer queue for a session and
+// returns the authoritative persisted line_count (#74, ADR-0040). The Manager
+// calls it on Stop / loop exit BEFORE EndVoiceSession so the recorded count
+// matches the persisted rows. *transcript.Relay satisfies it; defined here (not
+// imported) so the manager does NOT depend on the relay — the relay already
+// depends on the manager via Sessions, and the reverse import would cycle. nil
+// (not wired / persistence off) leaves line_count at the in-memory default.
+type TranscriptFinalizer interface {
+	Finalize(ctx context.Context, id uuid.UUID) (int, error)
+}
+
 // LoopRunner runs the live voice loop until ctx is cancelled. Production wraps
 // wirenpc.RunFromDB (which loads the campaign roster and resolves the
 // credential-bridge keys, #69) bound to the app pool + cipher; tests inject a
@@ -81,12 +92,13 @@ type activeSession struct {
 // Manager owns at most one live voice session at a time (the single-active
 // guard). It is safe for concurrent use.
 type Manager struct {
-	store   Store
-	run     LoopRunner
-	base    wirenpc.Config // Token (env fallback)/Logger/Metrics template; Guild/Channel come from saved config
-	cipher  *crypto.Cipher // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
-	log     *slog.Logger
-	enabled bool // false in web-only mode: Start is rejected (ADR-0039)
+	store      Store
+	run        LoopRunner
+	base       wirenpc.Config      // Token (env fallback)/Logger/Metrics template; Guild/Channel come from saved config
+	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
+	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
+	log        *slog.Logger
+	enabled    bool // false in web-only mode: Start is rejected (ADR-0039)
 
 	mu     sync.Mutex
 	active *activeSession
@@ -106,6 +118,15 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		log = slog.Default()
 	}
 	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled}
+}
+
+// SetTranscript wires the transcript finalizer the Manager calls on Stop / loop
+// exit (#74). It is set once at boot — after both the Manager and the relay are
+// built (the relay needs the Manager via Sessions, so the Manager is built first
+// and the finalizer back-wired) — before any session can start, so no lock is
+// needed.
+func (m *Manager) SetTranscript(t TranscriptFinalizer) {
+	m.transcript = t
 }
 
 // Start launches the live voice loop for a campaign and records a running
@@ -186,7 +207,21 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 	// context — otherwise the ended_at write would itself be cancelled.
 	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), endTimeout)
 	defer cancel()
-	ended, err := m.store.EndVoiceSession(endCtx, as.session.ID, as.session.LineCount)
+
+	// Drain the live transcript's writer queue and read the authoritative count
+	// BEFORE ending the row, so line_count matches the persisted rows (#74). A
+	// finalize failure logs and falls back to the in-memory count rather than
+	// blocking the session from ending.
+	lineCount := as.session.LineCount
+	if m.transcript != nil {
+		if n, ferr := m.transcript.Finalize(endCtx, as.session.ID); ferr != nil {
+			m.log.Error("finalize transcript before end", "err", ferr, "voice_session", as.session.ID)
+		} else {
+			lineCount = n
+		}
+	}
+
+	ended, err := m.store.EndVoiceSession(endCtx, as.session.ID, lineCount)
 
 	m.mu.Lock()
 	if err != nil {

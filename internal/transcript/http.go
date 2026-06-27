@@ -107,10 +107,13 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// ServeSnapshot is the initial-state read: GET /api/v1/sessions/{id}. It returns
-// the current transcript lines plus the derived status/typing as JSON.
+// ServeSnapshot is the initial-state read: GET /api/v1/sessions/{id}. For the live
+// active session it returns the in-memory coalesced lines + derived status/typing;
+// for any other (ended) session it replays the persisted history from the DB with
+// status "idle" (#74, ADR-0040), so a reconnect / reload sees the transcript even
+// after the in-memory ring is gone.
 func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
-	view := r.View(req.PathValue("id"))
+	view := r.snapshot(req.Context(), req.PathValue("id"))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
