@@ -223,12 +223,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	}
 
 	// Base voice config for manager-driven sessions (ADR-0039): the Session screen
-	// starts/stops the live loop in-process via the SessionManager. The Discord
-	// token comes from the environment (the deployment-shared Bot); the guild and
-	// voice channel are sourced per-session from the saved deployment config, not
-	// these flags (#72). The credential-bridge keys (#69) are resolved inside
-	// RunFromDB. enabled = withVoice: only `all` mode drives the loop — a web-only
-	// replica answers GetSession (idle) but rejects Start.
+	// starts/stops the live loop in-process via the SessionManager. The base
+	// Discord token is the env fallback (the deployment-shared Bot); a saved
+	// deployment token (decrypted via cipher) overrides it per-session (#87). The
+	// guild and voice channel are sourced per-session from the saved deployment
+	// config, not these flags (#72). The credential-bridge keys (#69) are resolved
+	// inside RunFromDB. enabled = withVoice: only `all` mode drives the loop — a
+	// web-only replica answers GetSession (idle) but rejects Start.
 	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
 	cfg.Logger = log
 	cfg.Metrics = metrics
@@ -236,7 +237,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	runner := func(rctx context.Context, c wirenpc.Config) error {
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
-	mgr := session.NewManager(store, runner, cfg, log, withVoice)
+	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice)
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /

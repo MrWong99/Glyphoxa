@@ -54,6 +54,34 @@ func resolveKey(cipher *crypto.Cipher, cfg *storage.ProviderConfig, component st
 	return string(plaintext), nil
 }
 
+// ResolveDiscordToken resolves the Discord bot token a UI-started session drives
+// (issue #87), under the SAME hybrid policy as [resolveKey] (ADR-0039):
+//
+//   - last4 == "" or the "env" placeholder: no real token in the DB -> the
+//     envToken (DISCORD_BOT_TOKEN), preserving the voice-mode / dev / CI path.
+//   - a real saved token (last4 != "env") but no cipher: a CLEAR error, never a
+//     silent env fall-through (AC3) — boot without $GLYPHOXA_SECRET cannot quietly
+//     ignore a saved token and degrade to ENV.
+//   - a real saved token the cipher cannot open: a CLEAR error wrapping crypto's.
+//   - otherwise: the decrypted plaintext token.
+//
+// Unlike the provider keys (where "" means "adapter env fallback"), the caller
+// treats an empty result as a missing token precondition — the env token is
+// already folded in here.
+func ResolveDiscordToken(cipher *crypto.Cipher, last4 string, ciphertext []byte, envToken string) (string, error) {
+	if last4 == "" || last4 == credPlaceholderLast4 {
+		return envToken, nil
+	}
+	if cipher == nil {
+		return "", fmt.Errorf("wirenpc: Discord bot token needs decryption but the credential cipher is unavailable; set $GLYPHOXA_SECRET (ADR-0004)")
+	}
+	plaintext, err := cipher.Open(ciphertext)
+	if err != nil {
+		return "", fmt.Errorf("wirenpc: decrypt Discord bot token: %w", err)
+	}
+	return string(plaintext), nil
+}
+
 // resolveProviderKeys resolves all three components a voice session needs.
 // Any single component's decryption failure fails the whole resolution (AC2):
 // a misconfigured key surfaces at boot, never as a half-configured session that

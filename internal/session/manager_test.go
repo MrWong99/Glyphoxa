@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log/slog"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
@@ -128,8 +130,24 @@ func (r *blockingRunner) wasCancelled() bool {
 
 func newManager(t *testing.T, store session.Store, run session.LoopRunner, enabled bool) *session.Manager {
 	t.Helper()
-	return session.NewManager(store, run, wirenpc.Config{Token: "test-token"},
+	return session.NewManager(store, run, wirenpc.Config{Token: "test-token"}, nil,
 		slog.New(slog.DiscardHandler), enabled)
+}
+
+// newCipher builds a Cipher on a fresh random AES-256 key for the #87 saved-token
+// path — keyless and Docker-free, so the resolution logic is proven in the
+// default suite.
+func newCipher(t *testing.T) *crypto.Cipher {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand key: %v", err)
+	}
+	c, err := crypto.New(key)
+	if err != nil {
+		t.Fatalf("crypto.New: %v", err)
+	}
+	return c
 }
 
 // TestStartStopLifecycle is AC1: Start → status running + row written + the loop
@@ -221,6 +239,80 @@ func TestStartRequiresDiscordConfig(t *testing.T) {
 	}
 	if created, _ := store.counts(); created != 0 {
 		t.Errorf("created rows = %d, want 0", created)
+	}
+}
+
+// TestStartUsesSavedToken is issue #87 AC1: a real Bot token saved in the
+// deployment config is DECRYPTED with the cipher and handed to the loop in
+// cfg.Token — DISCORD_BOT_TOKEN is not required (the base token here is empty).
+func TestStartUsesSavedToken(t *testing.T) {
+	const savedToken = "MT999.saved.bot.token"
+	cipher := newCipher(t)
+	sealed, err := cipher.Seal([]byte(savedToken))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	store := newFakeStore()
+	store.dep.DiscordBotTokenCiphertext = sealed
+	store.dep.DiscordBotTokenLast4 = crypto.Last4(savedToken)
+
+	runner := newBlockingRunner()
+	mgr := session.NewManager(store, runner.run, wirenpc.Config{}, cipher,
+		slog.New(slog.DiscardHandler), true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+	if got := runner.cfg().Token; got != savedToken {
+		t.Errorf("loop cfg token = %q, want decrypted saved token %q", got, savedToken)
+	}
+}
+
+// TestStartFallsBackToEnvToken is issue #87 AC2: with no real saved token (the
+// "env" placeholder), Start uses the base DISCORD_BOT_TOKEN — the
+// voice-mode/dev/CI path is preserved.
+func TestStartFallsBackToEnvToken(t *testing.T) {
+	store := newFakeStore()
+	store.dep.DiscordBotTokenLast4 = "env" // seeded placeholder: no real token in the DB
+	runner := newBlockingRunner()
+	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "env-bot-token"}, nil,
+		slog.New(slog.DiscardHandler), true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+	if got := runner.cfg().Token; got != "env-bot-token" {
+		t.Errorf("loop cfg token = %q, want env fallback %q", got, "env-bot-token")
+	}
+}
+
+// TestStartMissingToken is issue #87 AC3: neither a saved token nor an env token
+// -> a clear precondition (ErrDiscordTokenMissing) and NO voice_sessions row.
+func TestStartMissingToken(t *testing.T) {
+	store := newFakeStore() // guild/channel set, no token saved
+	mgr := session.NewManager(store, newBlockingRunner().run, wirenpc.Config{}, nil,
+		slog.New(slog.DiscardHandler), true)
+
+	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, session.ErrDiscordTokenMissing) {
+		t.Errorf("Start with no token = %v, want ErrDiscordTokenMissing", err)
+	}
+	if created, _ := store.counts(); created != 0 {
+		t.Errorf("created rows = %d, want 0 (missing token must not write)", created)
 	}
 }
 

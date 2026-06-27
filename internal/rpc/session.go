@@ -144,6 +144,8 @@ func (s *SessionServer) startError(err error) error {
 		return connect.NewError(connect.CodeAlreadyExists, errors.New("a voice session is already active"))
 	case errors.Is(err, session.ErrDiscordNotConfigured):
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("the Discord guild/voice channel are not configured"))
+	case errors.Is(err, session.ErrDiscordTokenMissing):
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("no Discord bot token is configured"))
 	case errors.Is(err, session.ErrVoiceUnavailable):
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("voice is not available in this mode"))
 	default:
