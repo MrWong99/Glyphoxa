@@ -199,6 +199,20 @@ func TestSessionStartTokenMissing(t *testing.T) {
 	}
 }
 
+// TestSessionStartTokenUndecryptable maps the #87 undecryptable-token
+// precondition to FailedPrecondition (the boot-without-$GLYPHOXA_SECRET misconfig
+// must be actionable, not an opaque Internal).
+func TestSessionStartTokenUndecryptable(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeSessionManager{startErr: session.ErrDiscordTokenUndecryptable}
+	client := newSessionClient(t, mgr, activeStore())
+
+	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("token-undecryptable code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
 // TestSessionStartNoCampaign fails with FailedPrecondition when there is no
 // active campaign to run a session for.
 func TestSessionStartNoCampaign(t *testing.T) {

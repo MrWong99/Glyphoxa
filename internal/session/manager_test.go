@@ -316,6 +316,34 @@ func TestStartMissingToken(t *testing.T) {
 	}
 }
 
+// TestStartUndecryptableToken is issue #87 polish: a REAL saved token the manager
+// cannot decrypt (here: no cipher, the boot-without-$GLYPHOXA_SECRET misconfig)
+// fails Start with the ErrDiscordTokenUndecryptable precondition (not an opaque
+// internal error) and writes NO voice_sessions row.
+func TestStartUndecryptableToken(t *testing.T) {
+	const savedToken = "MT999.saved.bot.token"
+	cipher := newCipher(t)
+	sealed, err := cipher.Seal([]byte(savedToken))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	store := newFakeStore()
+	store.dep.DiscordBotTokenCiphertext = sealed
+	store.dep.DiscordBotTokenLast4 = crypto.Last4(savedToken)
+
+	// nil cipher: a real saved token can no longer be opened.
+	mgr := session.NewManager(store, newBlockingRunner().run, wirenpc.Config{}, nil,
+		slog.New(slog.DiscardHandler), true)
+
+	_, err = mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, session.ErrDiscordTokenUndecryptable) {
+		t.Errorf("Start with undecryptable token = %v, want ErrDiscordTokenUndecryptable", err)
+	}
+	if created, _ := store.counts(); created != 0 {
+		t.Errorf("created rows = %d, want 0 (undecryptable token must not write)", created)
+	}
+}
+
 // TestStopWithoutActiveSession returns ErrNoActiveSession.
 func TestStopWithoutActiveSession(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)

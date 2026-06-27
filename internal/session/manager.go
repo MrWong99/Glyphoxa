@@ -44,6 +44,12 @@ var (
 	// Bot token nor a DISCORD_BOT_TOKEN env token is available (#87). Mapped to
 	// CodeFailedPrecondition, mirroring ErrDiscordNotConfigured.
 	ErrDiscordTokenMissing = errors.New("session: no Discord bot token configured")
+	// ErrDiscordTokenUndecryptable is returned by Start when a real saved Bot token
+	// cannot be decrypted — booted without $GLYPHOXA_SECRET (nil cipher) or a
+	// ciphertext the cipher won't open (#87). The underlying actionable detail is
+	// wrapped in the chain. Mapped to CodeFailedPrecondition (a self-host
+	// misconfig), not an opaque Internal.
+	ErrDiscordTokenUndecryptable = errors.New("session: saved Discord bot token could not be decrypted")
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
@@ -91,7 +97,8 @@ type Manager struct {
 // overlays the saved guild/channel onto a copy and resolves the Bot token (the
 // saved deployment token decrypted via cipher, else the base env token — #87).
 // cipher may be nil (boot without $GLYPHOXA_SECRET): the env-fallback path still
-// works, but a real saved token then fails Start clearly. enabled is false in
+// works, but a real saved token then fails Start with a clear precondition
+// (ErrDiscordTokenUndecryptable). enabled is false in
 // web-only mode, where the process does not drive voice (Start fails
 // ErrVoiceUnavailable).
 func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto.Cipher, log *slog.Logger, enabled bool) *Manager {
@@ -131,7 +138,9 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// mirroring the guild/channel precondition above.
 	token, err := wirenpc.ResolveDiscordToken(m.cipher, dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext, m.base.Token)
 	if err != nil {
-		return storage.VoiceSession{}, fmt.Errorf("session: resolve Discord token: %w", err)
+		// A real saved token that won't decrypt: surface ErrDiscordTokenUndecryptable
+		// (errors.Is at the RPC layer) while keeping the actionable detail in the chain.
+		return storage.VoiceSession{}, fmt.Errorf("%w: %w", ErrDiscordTokenUndecryptable, err)
 	}
 	if token == "" {
 		return storage.VoiceSession{}, ErrDiscordTokenMissing
