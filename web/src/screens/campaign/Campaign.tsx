@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { Lock, Plus, Sparkles, Trash2 } from "lucide-react";
+import { Lock, Plus, Sparkles, Trash2, Volume2 } from "lucide-react";
 
-import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { Agent } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, VoiceService } from "@gen/glyphoxa/management/v1/management_pb";
+import type { Agent, Voice } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
@@ -12,6 +12,7 @@ import { Select } from "@/components/ui/Select";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
+import { playAudioBlob } from "@/lib/audio";
 
 import "./campaign.css";
 
@@ -22,10 +23,9 @@ import "./campaign.css";
 // to the DB and the roster re-reads it back after each mutation invalidates the
 // query.
 
-// The voice dropdown is a static allowlist placeholder this slice — the live
-// ElevenLabs ListVoices wiring lands with the provider RPCs. The selected id is
-// persisted to the agent's voice field regardless, so edits round-trip.
-const VOICE_OPTIONS = ["rachel", "adam", "antoni", "bella", "elli", "domi"];
+// The voice dropdown is LIVE ElevenLabs ListVoices data (#70, VoiceService);
+// each option's value is the vendor voice id persisted on the agent and its
+// label is "ElevenLabs · Name". Preview voice synthesizes a short sample.
 
 // speakerVar maps a server-assigned palette slot onto the 6-colour speaker
 // palette (tokens.css --speaker-1..6). The slot is 0-based; the palette is 1-based.
@@ -41,6 +41,12 @@ export function Campaign() {
   const queryClient = useQueryClient();
   const { data, status, error } = useQuery(CampaignService.method.getCampaignRoster, {});
   const roster = useMemo(() => data?.roster ?? [], [data]);
+
+  // Live ElevenLabs voice catalog (#70). The query is non-blocking: a missing
+  // key / failed catalog leaves voices empty and the editor still renders the
+  // agent's persisted voice id, so the screen never breaks on a degraded TTS.
+  const voicesQuery = useQuery(VoiceService.method.listVoices, {});
+  const voices = useMemo(() => voicesQuery.data?.voices ?? [], [voicesQuery.data]);
 
   // Selection: the chosen agent, defaulting to the first roster member (the
   // Butler) until the operator picks another. Falls back to the Butler when the
@@ -166,6 +172,7 @@ export function Campaign() {
           <AgentEditor
             key={selected.id}
             agent={selected}
+            voices={voices}
             onSaved={() => void invalidateRoster()}
             onDelete={
               isButler(selected) ? undefined : () => deleteAgent.mutate({ id: selected.id })
@@ -184,11 +191,13 @@ export function Campaign() {
 // disabled switch (ADR-0009 / ADR-0024).
 function AgentEditor({
   agent,
+  voices,
   onSaved,
   onDelete,
   deleting,
 }: {
   agent: Agent;
+  voices: Voice[];
   onSaved: () => void;
   onDelete?: () => void;
   deleting: boolean;
@@ -201,12 +210,22 @@ function AgentEditor({
   const [addressOnly, setAddressOnly] = useState(agent.addressOnly);
 
   const update = useMutation(CampaignService.method.updateAgent, { onSuccess: onSaved });
+  const preview = useMutation(VoiceService.method.previewVoice);
 
+  // Options come from the live catalog: value = vendor voice id, label =
+  // "ElevenLabs · Name". The agent's persisted voice id is kept as a bare option
+  // even when the catalog is empty/stale, so the current selection always shows.
   const voiceOpts = useMemo(() => {
-    const set = new Set(VOICE_OPTIONS);
-    if (voice) set.add(voice);
-    return [...set];
-  }, [voice]);
+    const opts = voices.map((v) => ({ value: v.voiceId, label: v.label || v.name || v.voiceId }));
+    if (voice && !opts.some((o) => o.value === voice)) opts.unshift({ value: voice, label: voice });
+    return opts;
+  }, [voices, voice]);
+
+  const playPreview = async () => {
+    if (!voice) return;
+    const res = await preview.mutateAsync({ voiceId: voice, text: "" });
+    playAudioBlob(res.audio, res.mimeType);
+  };
 
   const save = () =>
     update.mutate({
@@ -259,7 +278,18 @@ function AgentEditor({
         </span>
       </div>
 
-      <Select label="Voice" options={voiceOpts} value={voice || undefined} onValueChange={setVoice} placeholder="Pick a voice…" />
+      <div className="gx-editor__voice">
+        <Select label="Voice" options={voiceOpts} value={voice || undefined} onValueChange={setVoice} placeholder="Pick a voice…" />
+        <Button
+          variant="secondary"
+          size="sm"
+          iconStart={<Volume2 size={14} />}
+          onClick={() => void playPreview()}
+          disabled={!voice || preview.isPending}
+        >
+          Preview voice
+        </Button>
+      </div>
 
       <div className="gx-editor__switch">
         <Switch

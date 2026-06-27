@@ -49,3 +49,15 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* Resolved Discord bot tag from the live gateway login (#70), under the name. */
+.gx-provider-row__tag {
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--text-subtle);
+  margin-top: 2px;
+}
+
+/* Groq model allowlist select sits between the row meta and the secret control. */
+.gx-provider-row .gx-select-field {
+  min-width: 12rem;
+}
