@@ -404,6 +404,53 @@ func (r *Relay) View(id string) View {
 	}
 }
 
+// snapshot returns the initial-state View for id: the in-memory live state when id
+// IS the active session, else the DB-persisted history with status "idle" (#74).
+// Live behaviour is unchanged from View; the persisted path is the
+// reconnect/reload history for an ended session.
+func (r *Relay) snapshot(ctx context.Context, id string) View {
+	r.mu.Lock()
+	live := r.currentSessionID() == id && id == r.activeID
+	if live {
+		v := View{Lines: append([]Line(nil), r.lines...), Status: "live", Typing: r.typing}
+		r.mu.Unlock()
+		return v
+	}
+	r.mu.Unlock()
+	return r.persistedView(ctx, id)
+}
+
+// persistedView reads an ended session's lines from the store, ordered by seq, and
+// returns them as an idle View (#74). A nil store, an unparseable id, or a read
+// error degrades to the empty idle view (logged) so the screen still renders.
+func (r *Relay) persistedView(ctx context.Context, id string) View {
+	empty := View{Lines: []Line{}, Status: "idle", Typing: Typing{}}
+	if r.store == nil {
+		return empty
+	}
+	sid, err := uuid.Parse(id)
+	if err != nil {
+		return empty
+	}
+	rows, err := r.store.ListTranscriptLines(ctx, sid)
+	if err != nil {
+		r.log.Warn("transcript: load persisted snapshot", "err", err, "session", id)
+		return empty
+	}
+	lines := make([]Line, 0, len(rows))
+	for _, t := range rows {
+		lines = append(lines, Line{
+			ID:   t.LineID,
+			Who:  t.Who,
+			Tag:  t.Tag,
+			Kind: Kind(t.Kind),
+			TS:   t.TS,
+			Text: t.Text,
+		})
+	}
+	return View{Lines: lines, Status: "idle", Typing: Typing{}}
+}
+
 // Frames returns the buffered frames for id with Seq > afterSeq — the
 // Last-Event-ID replay set. Empty when id is not the active session.
 func (r *Relay) Frames(id string, afterSeq uint64) []Frame {

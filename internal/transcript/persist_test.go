@@ -2,6 +2,9 @@ package transcript
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"sync"
 	"testing"
@@ -96,6 +99,49 @@ func TestPersist_CoalescesAndCounts(t *testing.T) {
 	}
 	if got[1].LineID != "a:t1" || got[1].Text != "Well met. What'll it be?" || got[1].VoiceSessionID != fs.id {
 		t.Errorf("persisted coalesced reply = %+v", got[1])
+	}
+}
+
+// TestSnapshot_EndedSessionReplaysFromDB is #74 AC3: the snapshot for a session
+// that is NOT the live active one replays its persisted history from the store,
+// ordered by seq, with status "idle" — so a reload sees the transcript after the
+// in-memory ring is gone.
+func TestSnapshot_EndedSessionReplaysFromDB(t *testing.T) {
+	bus := voiceevent.NewBus()
+	sid := uuid.New()
+	fs := &fakeSessions{id: sid, active: false} // not live
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+
+	ctx := context.Background()
+	// Seed out of seq order to prove ORDER BY seq on read.
+	_ = store.UpsertTranscriptLine(ctx, storage.TranscriptLine{
+		VoiceSessionID: sid, LineID: "a:t1", Seq: 3, Who: "Bart", Tag: "NPC", Kind: "npc", TS: at(2), Text: "Well met. Sit.",
+	})
+	_ = store.UpsertTranscriptLine(ctx, storage.TranscriptLine{
+		VoiceSessionID: sid, LineID: "u:1", Seq: 1, Who: "Player / DM", Kind: "player", TS: at(1), Text: "Hello Bart",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sid.String(), nil)
+	req.SetPathValue("id", sid.String())
+	w := httptest.NewRecorder()
+	r.ServeSnapshot(w, req)
+
+	var v View
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if v.Status != "idle" || v.Typing.Active {
+		t.Fatalf("ended snapshot status=%q typing=%+v, want idle/inactive", v.Status, v.Typing)
+	}
+	if len(v.Lines) != 2 {
+		t.Fatalf("replayed %d lines, want 2: %+v", len(v.Lines), v.Lines)
+	}
+	if v.Lines[0].ID != "u:1" || v.Lines[0].Text != "Hello Bart" {
+		t.Errorf("line[0] = %+v, want human u:1 first (seq order)", v.Lines[0])
+	}
+	if v.Lines[1].ID != "a:t1" || v.Lines[1].Kind != KindNPC || v.Lines[1].Tag != "NPC" || v.Lines[1].Text != "Well met. Sit." {
+		t.Errorf("line[1] = %+v, want coalesced NPC reply", v.Lines[1])
 	}
 }
 
