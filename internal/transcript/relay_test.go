@@ -223,6 +223,26 @@ func TestTyping_ClearsAfterCleanTurn(t *testing.T) {
 	}
 }
 
+// TestTyping_ClearsOnSpeechStart (round 3, live-validated): the stale
+// "<NPC> is speaking…" label clears the moment a human starts talking
+// (VADSpeechStart fires before STTFinal), not only on the next finalized line.
+func TestTyping_ClearsOnSpeechStart(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Aye.", TurnID: "t1"})
+	if v := r.View(id); v.Typing.Label != "Bart is speaking…" {
+		t.Fatalf("pre-speech typing=%+v", v.Typing)
+	}
+	// Clean turn (no TurnEnded); the human opens their mouth.
+	bus.Publish(voiceevent.VADSpeechStart{At: at(3)})
+	if v := r.View(id); !v.Typing.Active || v.Typing.Label != listenLabel {
+		t.Fatalf("typing not cleared on speech start: %+v", v.Typing)
+	}
+}
+
 // TestLateTTSInvoked_DoesNotClobber (FIX 2): a barge can deliver a sentence
 // after TurnEnded; it must not recreate the turn with a zero target and overwrite
 // the finalized coalesced reply.

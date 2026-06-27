@@ -196,6 +196,13 @@ func (r *Relay) project(e voiceevent.Event) {
 	}
 
 	switch ev := e.(type) {
+	case voiceevent.VADSpeechStart:
+		// A human opened their mouth: clear any stale "<NPC> is speaking…" the
+		// moment speech starts (it fires BEFORE STTFinal), instead of waiting for
+		// the next finalized line. Live-validated — a clean turn emits no
+		// TurnEnded, so without this the last agent line keeps the label through
+		// the following silence. Also correct for a barge (human over the Agent).
+		r.setTyping(r.liveTyping())
 	case voiceevent.STTFinal:
 		// A human utterance — one line per STTFinal in the anonymous lane
 		// (ADR-0039: raw STT carries no speaker id).
