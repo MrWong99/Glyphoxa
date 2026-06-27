@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, Outlet, useParams } from "@tanstack/react-router";
+import { Toaster } from "sonner";
 import { Dices, Settings, Swords, ScrollText } from "lucide-react";
 
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
@@ -65,6 +66,11 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           <Outlet />
         </main>
       </div>
+
+      {/* Single toast host for the whole app (ADR-0017: sonner). Mounted here, not
+          in Providers, so the screen unit tests that render without the shell get a
+          clean DOM and their deterministic inline cues instead of toast portals. */}
+      <Toaster theme="dark" position="bottom-right" richColors />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Lock, Plus, Sparkles, Trash2, Volume2 } from "lucide-react";
 
 import { CampaignService, VoiceService } from "@gen/glyphoxa/management/v1/management_pb";
@@ -209,7 +210,13 @@ function AgentEditor({
   const [voice, setVoice] = useState(agent.voice);
   const [addressOnly, setAddressOnly] = useState(agent.addressOnly);
 
-  const update = useMutation(CampaignService.method.updateAgent, { onSuccess: onSaved });
+  const update = useMutation(CampaignService.method.updateAgent, {
+    onSuccess: () => {
+      onSaved();
+      toast.success(`Saved ${name || agent.name}`);
+    },
+    onError: (err) => toast.error(`Couldn't save: ${err.message}`),
+  });
   const preview = useMutation(VoiceService.method.previewVoice);
 
   // Options come from the live catalog: value = vendor voice id, label =
@@ -307,7 +314,7 @@ function AgentEditor({
 
       <div className="gx-editor__actions">
         <Button variant="primary" onClick={save} disabled={update.isPending}>
-          Save changes
+          {update.isPending ? "Saving…" : "Save changes"}
         </Button>
         {onDelete && (
           <Button
@@ -319,6 +326,19 @@ function AgentEditor({
             Delete NPC
           </Button>
         )}
+        {/* Deterministic, accessible save cue — independent of the toast portal so
+            the screen test (rendered without the shell's <Toaster>) can assert it. */}
+        <span className="gx-editor__status" aria-live="polite">
+          {update.isError ? (
+            <span className="gx-editor__status--error" role="alert">
+              Couldn't save: {update.error.message}
+            </span>
+          ) : update.isSuccess ? (
+            "Saved"
+          ) : (
+            ""
+          )}
+        </span>
       </div>
     </Card>
   );

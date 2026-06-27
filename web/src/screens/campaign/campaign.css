@@ -184,8 +184,22 @@
 
 .gx-editor__actions {
   display: flex;
+  align-items: center;
   gap: var(--spacing-sm);
   margin-top: var(--spacing-xs);
+  padding-top: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+/* Inline save cue beside the action buttons. */
+.gx-editor__status {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-success);
+}
+
+.gx-editor__status--error {
+  color: var(--status-danger);
 }
 
 /* Voice select + Preview-voice button row (#70). */
