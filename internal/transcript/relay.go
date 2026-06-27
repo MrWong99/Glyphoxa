@@ -11,11 +11,14 @@
 package transcript
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -132,6 +135,16 @@ type Sessions interface {
 	Snapshot() (storage.VoiceSession, bool)
 }
 
+// LineStore is the narrow persistence surface the relay needs (#74, ADR-0040):
+// an incremental UPSERT of each projected Line, a list for replay-on-reload, and
+// the authoritative count for the Stop summary. *storage.Store satisfies it;
+// tests fake it. nil disables persistence (the live-only relay, e.g. unit tests).
+type LineStore interface {
+	UpsertTranscriptLine(ctx context.Context, l storage.TranscriptLine) error
+	ListTranscriptLines(ctx context.Context, sessionID uuid.UUID) ([]storage.TranscriptLine, error)
+	CountTranscriptLines(ctx context.Context, sessionID uuid.UUID) (int, error)
+}
+
 // turn holds the per-turn coalescing state: the routed target and the Agent's
 // reply line whose text accumulates across the turn's TTSInvoked sentences.
 // ended marks a finalized turn (TurnEnded seen) so a late TTSInvoked — which a
@@ -148,32 +161,51 @@ type turn struct {
 // all take the same lock.
 type Relay struct {
 	sessions Sessions
+	store    LineStore // persists projected lines (#74); nil disables persistence
 	log      *slog.Logger
 
 	mu       sync.Mutex
 	activeID string // current session id; "" when idle
-	buf      []Frame
-	lines    []Line
-	typing   Typing
-	turns    map[string]*turn
-	nextSeq  uint64
-	humanSeq uint64
-	subs     map[*subscriber]struct{}
+	// activeUUID / activeCampaignID mirror activeID as the typed FKs persistence
+	// needs; captured from the active session's Snapshot at rollover.
+	activeUUID       uuid.UUID
+	activeCampaignID uuid.UUID
+	buf              []Frame
+	lines            []Line
+	typing           Typing
+	turns            map[string]*turn
+	nextSeq          uint64
+	humanSeq         uint64
+	subs             map[*subscriber]struct{}
+
+	// writeCh is the non-blocking queue draining into the single writer goroutine
+	// (#74): emitLine tees each Line in here under r.mu, the bus contract forbids
+	// blocking so the send drops on overflow, and Finalize sends a flush barrier.
+	// nil when persistence is disabled (store == nil).
+	writeCh chan writeOp
 }
 
 // NewRelay subscribes to the bus once and returns a Relay ready to serve. The
 // subscription lives for the process: the same bus persists across reconnect
 // cycles AND across sessions (single active session, ADR-0039), so the relay
 // sees every event without re-subscribing.
-func NewRelay(bus *voiceevent.Bus, sessions Sessions, log *slog.Logger) *Relay {
+func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog.Logger) *Relay {
 	if log == nil {
 		log = slog.Default()
 	}
 	r := &Relay{
 		sessions: sessions,
+		store:    store,
 		log:      log,
 		turns:    map[string]*turn{},
 		subs:     map[*subscriber]struct{}{},
+	}
+	// One writer goroutine for the process drains the queue (#74). Only started
+	// when persistence is enabled, so the live-only relay keeps its single-state
+	// behaviour and unit tests with a nil store spawn nothing.
+	if store != nil {
+		r.writeCh = make(chan writeOp, persistQueue)
+		go r.writeLoop()
 	}
 	bus.Subscribe(r.project)
 	return r
@@ -271,6 +303,12 @@ func (r *Relay) currentSessionID() string {
 // replays a coherent state.
 func (r *Relay) rollover(id string) {
 	r.activeID = id
+	// Capture the typed session + campaign ids persistence needs as FKs (#74).
+	// During a rollover the snapshot is active, so this is the freshly-active row.
+	if vs, ok := r.sessions.Snapshot(); ok {
+		r.activeUUID = vs.ID
+		r.activeCampaignID = vs.CampaignID
+	}
 	r.buf = nil
 	r.lines = nil
 	r.turns = map[string]*turn{}
@@ -315,6 +353,10 @@ func (r *Relay) emitLine(l Line) {
 		r.lines = append(r.lines, l)
 	}
 	r.emit(Frame{Event: "line", Data: mustJSON(l)})
+	// emit assigned this line frame's seq to r.nextSeq; tee the line for durable
+	// persistence with that seq as its ordering key, BEFORE the typing status
+	// frame below bumps nextSeq again (#74).
+	r.persist(l, r.nextSeq)
 
 	switch l.Kind {
 	case KindNPC, KindButler:

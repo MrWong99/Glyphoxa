@@ -250,7 +250,9 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
 	// process bus once and reads the active session from the manager (Snapshot).
-	relay := transcript.NewRelay(eventBus, mgr, log)
+	// The store backs incremental line persistence + replay-on-reload (#74,
+	// ADR-0040); the manager finalizes the relay's writer queue on Stop (below).
+	relay := transcript.NewRelay(eventBus, mgr, store, log)
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
