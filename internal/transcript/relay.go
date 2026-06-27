@@ -26,10 +26,13 @@ const (
 	// reconnecting browser replays the frames after its Last-Event-ID; older
 	// frames are dropped, so a very stale reconnect re-syncs from the snapshot.
 	ringCap = 500
-	// subBuffer sizes each live subscriber's channel. It is >= ringCap so a
-	// reader keeping any reasonable pace never overflows; a reader that stalls is
-	// dropped (lagged) and its EventSource reconnects + replays from the ring.
-	subBuffer = 512
+	// subBuffer sizes each live subscriber's channel. It MUST be <= ringCap so the
+	// replay is lossless across a lagged drop: when a stalled reader's channel
+	// overflows (subBuffer unsent frames) and is dropped, every frame it missed is
+	// still within the ring's last ringCap, so its EventSource reconnect replays
+	// them from Last-Event-ID with no gap. A reader keeping any reasonable pace
+	// never overflows; an unbounded gap re-syncs from the snapshot.
+	subBuffer = 256
 
 	// listenLabel is the typing label while a session is live but no Agent is
 	// mid-reply (the design's "Listening to the table…").
@@ -131,9 +134,13 @@ type Sessions interface {
 
 // turn holds the per-turn coalescing state: the routed target and the Agent's
 // reply line whose text accumulates across the turn's TTSInvoked sentences.
+// ended marks a finalized turn (TurnEnded seen) so a late TTSInvoked — which a
+// barge can deliver AFTER the end — does not recreate the entry with a zero
+// target and clobber the completed coalesced reply.
 type turn struct {
 	target voiceevent.AddressTarget
 	line   *Line
+	ended  bool
 }
 
 // Relay projects bus events into transcript lines and serves them over SSE +
@@ -207,6 +214,11 @@ func (r *Relay) project(e voiceevent.Event) {
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
 		t := r.turn(ev.TurnID)
+		if t.ended {
+			// A barge can deliver a sentence after TurnEnded; ignore it so the
+			// finalized reply is not clobbered (FIX 2). typing already cleared.
+			return
+		}
 		if t.line == nil {
 			k := kindFor(t.target.AgentRole)
 			t.line = &Line{
@@ -218,13 +230,22 @@ func (r *Relay) project(e voiceevent.Event) {
 				Text: ev.Sentence,
 			}
 		} else if ev.Sentence != "" {
-			t.line.Text += " " + ev.Sentence
+			// Only separate with a space when there is preceding text — an empty
+			// first sentence then a non-empty one must not leave a leading space.
+			if t.line.Text != "" {
+				t.line.Text += " "
+			}
+			t.line.Text += ev.Sentence
 		}
+		// emitLine derives typing from the line's kind (FIX 1), so a clean turn
+		// (which emits NO TurnEnded) still shows "speaking" and a later human line
+		// returns to listening — no standalone setTyping here.
 		r.emitLine(*t.line)
-		r.setTyping(Typing{Active: true, Label: nameOr(t.target.Name, "NPC") + " is speaking…"})
 	case voiceevent.TurnEnded:
-		// The turn's reply is finalized; back to listening.
-		delete(r.turns, ev.TurnID)
+		// Mark the turn finalized (keep the entry so a late sentence is dropped,
+		// FIX 2) and fall back to listening — correct for a barge that cut the
+		// Agent off mid-reply.
+		r.turn(ev.TurnID).ended = true
 		r.setTyping(r.liveTyping())
 	}
 }
@@ -268,7 +289,12 @@ func (r *Relay) liveTyping() Typing {
 }
 
 // emitLine upserts the line into the current display state (replacing a turn's
-// coalescing reply in place) and emits a "line" frame.
+// coalescing reply in place), emits a "line" frame, and derives the typing
+// indicator from the line's kind (FIX 1). Deriving it from the LAST emitted line
+// — Agent line => "<who> is speaking…", human line => listening — matches the
+// design rule and is robust to a CLEAN turn, which emits no TurnEnded: without
+// this the label would stick on "speaking" through the following silence and
+// human turns.
 func (r *Relay) emitLine(l Line) {
 	replaced := false
 	for i := range r.lines {
@@ -282,6 +308,13 @@ func (r *Relay) emitLine(l Line) {
 		r.lines = append(r.lines, l)
 	}
 	r.emit(Frame{Event: "line", Data: mustJSON(l)})
+
+	switch l.Kind {
+	case KindNPC, KindButler:
+		r.setTyping(Typing{Active: true, Label: l.Who + " is speaking…"})
+	default: // KindPlayer / KindGM — a human line means we are back to listening
+		r.setTyping(r.liveTyping())
+	}
 }
 
 // setTyping emits a "status" frame only when the typing indicator changes, so an

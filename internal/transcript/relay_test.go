@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -197,6 +198,108 @@ func TestRolloverOnSessionChange(t *testing.T) {
 	v := r.View(id2)
 	if len(v.Lines) != 1 || v.Lines[0].Text != "new" {
 		t.Errorf("session 2 view = %+v", v)
+	}
+}
+
+// TestTyping_ClearsAfterCleanTurn is the headline regression (FIX 1): a CLEAN
+// turn emits NO TurnEnded, so typing must NOT stay stuck on "<NPC> is speaking…"
+// — a following human utterance returns it to listening.
+func TestTyping_ClearsAfterCleanTurn(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hi", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Aye.", TurnID: "t1"})
+	// No TurnEnded — a clean (successful) turn reports nothing.
+	if v := r.View(id); v.Typing.Label != "Bart is speaking…" {
+		t.Fatalf("mid-reply typing=%+v", v.Typing)
+	}
+	// A new human turn must clear the stuck speaking label.
+	bus.Publish(voiceevent.STTFinal{At: at(4), Text: "again", TurnID: "t2"})
+	if v := r.View(id); !v.Typing.Active || v.Typing.Label != listenLabel {
+		t.Fatalf("typing did not return to listening after clean turn: %+v", v.Typing)
+	}
+}
+
+// TestLateTTSInvoked_DoesNotClobber (FIX 2): a barge can deliver a sentence
+// after TurnEnded; it must not recreate the turn with a zero target and overwrite
+// the finalized coalesced reply.
+func TestLateTTSInvoked_DoesNotClobber(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hello", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Sit.", TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
+	before := r.View(id)
+
+	bus.Publish(voiceevent.TTSInvoked{At: at(6), Sentence: "LATE", TurnID: "t1"})
+	after := r.View(id)
+
+	if len(after.Lines) != len(before.Lines) {
+		t.Fatalf("late TTS changed line count: before %d after %d", len(before.Lines), len(after.Lines))
+	}
+	agent := after.Lines[1]
+	if agent.Who != "Bart" || agent.Text != "Well met. Sit." {
+		t.Fatalf("late TTS clobbered the finalized reply: %+v", agent)
+	}
+	if after.Typing.Label != listenLabel {
+		t.Fatalf("typing changed after a dropped late sentence: %+v", after.Typing)
+	}
+}
+
+// TestRingEviction_Lossless (FIX 3): subBuffer <= ringCap guarantees a lagged
+// drop is replayable from the ring. Emitting past the cap keeps a contiguous
+// suffix (no gap) so a reconnect resumes losslessly within the retained window.
+func TestRingEviction_Lossless(t *testing.T) {
+	if subBuffer > ringCap {
+		t.Fatalf("subBuffer(%d) must be <= ringCap(%d) for lossless lagged replay", subBuffer, ringCap)
+	}
+	bus, r, _, id := liveRelay(t)
+	for i := 0; i < ringCap+100; i++ {
+		bus.Publish(voiceevent.STTFinal{At: at(i), Text: fmt.Sprintf("%d", i), TurnID: fmt.Sprintf("t%d", i)})
+	}
+	all := r.Frames(id, 0)
+	if len(all) != ringCap {
+		t.Fatalf("ring kept %d frames, want %d", len(all), ringCap)
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i].Seq != all[i-1].Seq+1 {
+			t.Fatalf("gap in retained ring at %d: %d then %d", i, all[i-1].Seq, all[i].Seq)
+		}
+	}
+}
+
+// TestPublish_DoesNotBlockOnLaggedSubscriber (FIX 5): the synchronous bus must
+// never stall on a slow SSE client — flooding a never-read subscriber past
+// subBuffer signals it lagged and Publish returns promptly.
+func TestPublish_DoesNotBlockOnLaggedSubscriber(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	bus.Publish(voiceevent.STTFinal{At: at(0), Text: "warm", TurnID: "w"}) // sets activeID
+	s, _ := r.attach(id, 0)                                                // never read s.ch
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < subBuffer+50; i++ {
+			bus.Publish(voiceevent.STTFinal{At: at(i), Text: "x", TurnID: fmt.Sprintf("f%d", i)})
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish blocked on a lagged (never-read) subscriber")
+	}
+	select {
+	case <-s.lagged:
+	case <-time.After(time.Second):
+		t.Fatal("a lagged subscriber was never signalled")
 	}
 }
 
