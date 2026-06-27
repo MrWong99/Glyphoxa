@@ -502,7 +502,16 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
 	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with
 	// the guild and shares the run's MetricsRecorder.
-	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics)
+	//
+	// WithSilenceClock drives VAD endpointing during the inbound packet gap a
+	// paused speaker leaves (issue #91): Discord sends a few Opus silence frames
+	// then stops sending entirely, so without a steady silence clock the VAD never
+	// sees the trailing silence and each line lands one utterance late. The clock
+	// runs at the VAD frame geometry (vadSampleRate/vadFrameMs) so silero endpoints
+	// ~vadMinSilenceFrames*vadFrameMs (= 384 ms) after the speaker stops — the
+	// natural cadence the bargeConfirm/floorCoalesce windows already account for.
+	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics,
+		wire.WithSilenceClock(vadSampleRate, vadFrameMs))
 	return pipe.Run(cycleCtx, sess)
 }
 

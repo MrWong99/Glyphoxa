@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
@@ -83,6 +84,80 @@ type Pipeline struct {
 	log     *slog.Logger
 	metrics gxvoice.MetricsRecorder
 	guild   string
+
+	// silence is the synthesized PCM silence frame the silence clock feeds into
+	// the VAD during inbound gaps (issue #91); silenceOn gates the whole mechanism
+	// off when no [WithSilenceClock] was given (the pre-#91 behaviour). newClock
+	// builds the frame-cadence clock — a real time.Ticker in production, a fake in
+	// tests. See [WithSilenceClock] and [Pipeline.run].
+	silence   audio.Frame
+	silenceOn bool
+	newClock  func() silenceClock
+}
+
+// silenceClock paces synthesized PCM silence into the VAD so trailing silence
+// (Discord stops sending packets when a speaker pauses — see [Pipeline.run])
+// advances silero's end-of-speech hangover and the utterance endpoints naturally,
+// instead of hanging until the next utterance arrives (issue #91). It ticks once
+// per orchestrator frame interval while inbound audio is idle; every real inbound
+// frame calls reset, suppressing a tick for one interval so NO silence is injected
+// while speech flows. Production uses a [time.Ticker]; tests inject a fake whose
+// channel they fire by hand, so endpointing is deterministic with no wall-clock
+// (the precedent: address.Clock, reconnectPolicy.sleep).
+type silenceClock interface {
+	ticks() <-chan time.Time
+	reset()
+	stop()
+}
+
+// tickerClock is the production [silenceClock]: a [time.Ticker] at the frame
+// cadence. reset restarts the interval on every real inbound frame, so the ticker
+// only fires once audio has been idle for one full interval and keeps firing every
+// interval until audio resumes.
+type tickerClock struct {
+	t *time.Ticker
+	d time.Duration
+}
+
+func newTickerClock(d time.Duration) *tickerClock {
+	return &tickerClock{t: time.NewTicker(d), d: d}
+}
+
+func (c *tickerClock) ticks() <-chan time.Time { return c.t.C }
+func (c *tickerClock) reset()                  { c.t.Reset(c.d) }
+func (c *tickerClock) stop()                   { c.t.Stop() }
+
+// Option configures a [Pipeline] at construction.
+type Option func(*Pipeline)
+
+// WithSilenceClock enables the continuous silence clock (issue #91): during
+// inbound silence and packet gaps the pipeline feeds synthesized PCM silence into
+// the VAD at the orchestrator frame cadence, so a paused speaker's utterance
+// endpoints within the silero hangover window rather than coalescing with the next
+// utterance. sampleRate and frameMs are the orchestrator's frame geometry (the
+// VAD/STT rate, e.g. 16000 Hz / 32 ms): they shape the synthesized silence frame
+// AND set the tick interval. Without this option the pipeline keeps the pre-#91
+// behaviour, dropping inbound silence frames untouched.
+func WithSilenceClock(sampleRate, frameMs int) Option {
+	d := time.Duration(frameMs) * time.Millisecond
+	return withSilenceClock(sampleRate, frameMs, func() silenceClock { return newTickerClock(d) })
+}
+
+// withSilenceClock is the seam [WithSilenceClock] is built on, with the clock
+// factory injectable so tests drive a fake clock channel by hand. It derives the
+// silence frame from the supplied geometry (no magic 512/16000/32 in wire — the
+// shape matches whatever rate the pipeline runs at), panicking on an invalid
+// geometry since that is a wiring bug, not a runtime condition.
+func withSilenceClock(sampleRate, frameMs int, newClock func() silenceClock) Option {
+	return func(p *Pipeline) {
+		f, err := audio.NewFrame(make([]int16, sampleRate*frameMs/1000), sampleRate, frameMs)
+		if err != nil {
+			panic(fmt.Sprintf("wire.WithSilenceClock: invalid frame geometry %d Hz / %d ms: %v", sampleRate, frameMs, err))
+		}
+		p.silence = f
+		p.silenceOn = true
+		p.newClock = newClock
+	}
 }
 
 // NewPipeline wires the reactive Conversation to the Codec. conv is the fully
@@ -91,7 +166,7 @@ type Pipeline struct {
 // [UnavailableCodec] until the transcoder lands). guild is the Discord guild ID
 // the inbound counters are tagged with (A2); a nil logger discards logs and a
 // nil metrics recorder discards counters.
-func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger, guild string, metrics gxvoice.MetricsRecorder) *Pipeline {
+func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger, guild string, metrics gxvoice.MetricsRecorder, opts ...Option) *Pipeline {
 	if conv == nil {
 		panic("wire.NewPipeline: conv must not be nil")
 	}
@@ -104,7 +179,11 @@ func NewPipeline(conv *orchestrator.Conversation, codec Codec, log *slog.Logger,
 	if metrics == nil {
 		metrics = discardMetrics{}
 	}
-	return &Pipeline{conv: conv, codec: codec, log: log, guild: guild, metrics: metrics}
+	p := &Pipeline{conv: conv, codec: codec, log: log, guild: guild, metrics: metrics}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 // Run registers the conversation's reactors on its bus and pumps the Session's
@@ -121,6 +200,16 @@ func (p *Pipeline) Run(ctx context.Context, sess *gxvoice.Session) error {
 	if sess == nil {
 		return fmt.Errorf("wire.Run: session must not be nil")
 	}
+	return p.run(ctx, sess.Inbound())
+}
+
+// run is the inbound audio loop over an arbitrary frame channel: it registers the
+// conversation, pumps inbound frames through the [Codec] into the orchestrator,
+// and drives the silence clock that endpoints a paused speaker (issue #91). Run
+// supplies a live [gxvoice.Session]'s channel; the seam exists so the headless
+// tests drive the same loop with a synthetic inbound channel and an injected
+// silence clock — no Discord and no wall-clock waits (ADR-0019).
+func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error {
 	cancel := p.conv.Register(ctx)
 	defer cancel()
 	defer func() {
@@ -129,17 +218,50 @@ func (p *Pipeline) Run(ctx context.Context, sess *gxvoice.Session) error {
 		}
 	}()
 
-	inbound := sess.Inbound()
+	// Silence clock (#91): Discord sends a few Opus silence frames when a speaker
+	// stops, then STOPS sending packets entirely during the pause — so the inbound
+	// channel goes quiet and the VAD never sees the trailing silence that ends the
+	// utterance, leaving each line one utterance behind. While audio is idle this
+	// clock feeds synthesized PCM silence into the VAD at the frame cadence,
+	// advancing silero's end-of-speech hangover so the segment endpoints a few
+	// hundred ms after the speaker stops. Every real frame resets it, so NO silence
+	// is injected while speech flows (continuous speech must not endpoint). Disabled
+	// when no [WithSilenceClock] was given: the loop then just drops inbound silence
+	// frames, the pre-#91 behaviour.
+	var clk silenceClock
+	var clockTicks <-chan time.Time
+	if p.silenceOn {
+		clk = p.newClock()
+		defer clk.stop()
+		clockTicks = clk.ticks()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-clockTicks:
+			// Audio has been idle for one frame interval: advance the VAD with one
+			// frame of silence so a paused speaker's utterance endpoints.
+			if err := p.conv.Feed(p.silence); err != nil {
+				p.log.Debug("feed silence frame", "err", err)
+			}
 		case frame, ok := <-inbound:
 			if !ok {
 				return nil // session closed
 			}
 			if frame.Silence {
+				// A Discord Opus silence frame: the speaker has stopped. Do NOT decode
+				// it and do NOT reset the silence clock — let the clock keep advancing
+				// the VAD hangover through this frame and the packet gap that follows, so
+				// the utterance endpoints (issue #91). Pre-#91 this `continue` dropped the
+				// frame with nothing left to advance the VAD.
 				continue
+			}
+			// Real audio arrived: reset the idle clock so no synthesized silence is
+			// injected while frames keep flowing.
+			if clk != nil {
+				clk.reset()
 			}
 			pcm, err := p.codec.DecodeInbound(frame)
 			if err != nil {
