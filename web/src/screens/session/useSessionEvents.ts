@@ -53,13 +53,17 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 
 export function useSessionEvents(sessionId: string | undefined, active: boolean): Transcript {
   const queryClient = useQueryClient();
-  const enabled = active && !!sessionId;
+  // Fetch the snapshot for ANY session that exists — live OR ended. A reload of
+  // an ended session replays its persisted history from the DB-backed snapshot
+  // (#74); the live stream below only opens while the session is active.
+  const haveSession = !!sessionId;
 
-  // Snapshot seed: the initial state the live stream then tails. staleTime is
-  // Infinity because the EventSource — not refetching — keeps it current.
+  // Snapshot seed: the initial state the live stream then tails (live), or the
+  // persisted history (ended). staleTime is Infinity because the EventSource —
+  // not refetching — keeps a live session current, and an ended one is immutable.
   const { data, isSuccess } = useQuery<Transcript>({
     queryKey: transcriptKey(sessionId ?? ""),
-    enabled,
+    enabled: haveSession,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     queryFn: async () => {
@@ -70,12 +74,14 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
   });
 
   useEffect(() => {
+    // The live tail is only meaningful while the session is active; an ended
+    // session has no stream, just the persisted snapshot above.
     // Gate the stream on snapshot success (FIX 4): if the snapshot resolved AFTER
     // an SSE line write it would clobber the cache and drop that line. Opening
     // only once the snapshot has landed makes that ordering impossible; the
     // first-connect ring replay (idempotent upsert) re-covers the small window
     // between the snapshot capture and the stream opening.
-    if (!enabled || !sessionId || !isSuccess) return;
+    if (!active || !sessionId || !isSuccess) return;
     const key = transcriptKey(sessionId);
     const es = new EventSource(`/api/v1/sessions/${sessionId}/events`);
 
@@ -99,7 +105,7 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     });
 
     return () => es.close();
-  }, [enabled, sessionId, isSuccess, queryClient]);
+  }, [active, sessionId, isSuccess, queryClient]);
 
   return data ?? EMPTY;
 }

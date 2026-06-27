@@ -139,6 +139,67 @@ function liveTransport() {
   });
 }
 
+// endedTransport reports an already-ENDED session (active:false) with a line
+// count, so a fresh mount is the reload-of-an-ended-session case (#74).
+function endedTransport() {
+  const started = new Date(Date.now() - 90 * 60 * 1000); // 1h30m ago
+  const ended = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(started),
+    endedAt: timestampFromDate(new Date()),
+    lineCount: 12,
+  });
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
+      startSession: () => create(StartSessionResponseSchema, { session: ended }),
+      stopSession: () => create(StopSessionResponseSchema, { session: ended }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session reload of an ended session (#74)", () => {
+  it("replays persisted history from the DB-backed snapshot and shows the line count", async () => {
+    // The DB-backed snapshot for an ended session: persisted lines, status idle.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          lines: [
+            { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "Hello Bart" },
+            { id: "a:t1", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "Well met, traveller." },
+          ],
+          status: "idle",
+          typing: { active: false, label: "" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    render(
+      <Providers transport={endedTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // Idle screen, but the persisted transcript replays and the summary shows the
+    // real line count — reload reads the DB, not the in-memory ring.
+    expect(await screen.findByText("Idle")).toBeInTheDocument();
+    expect(await screen.findByText("Hello Bart")).toBeInTheDocument();
+    expect(await screen.findByText("Well met, traveller.")).toBeInTheDocument();
+    expect(screen.getByText(/12 lines transcribed/i)).toBeInTheDocument();
+
+    // No live stream is opened for an ended session.
+    expect(MockEventSource.last()).toBeUndefined();
+  });
+});
+
 describe("Session live transcript (#73)", () => {
   it("seeds from the snapshot then renders streamed lines + typing dots", async () => {
     // Snapshot: live + listening, no lines yet.
