@@ -1,0 +1,60 @@
+/* Session screen — co-located CSS (ADR-0017). Shared gx- layout/component
+ * classes live in styles/components.css; only screen-local tweaks go here.
+ */
+
+.gx-session__header {
+  margin-bottom: var(--spacing-lg);
+}
+
+.gx-session__header h1 {
+  margin: 0;
+}
+
+/* Control row: status badge + elapsed timer on the left, Start/Stop on the right. */
+.gx-session__control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+  flex-wrap: wrap;
+}
+
+.gx-session__status {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+/* Large monospace count-up, HH:MM:SS. */
+.gx-session__timer {
+  font-family: var(--font-mono, monospace);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.gx-session__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+/* Subtle inset summary of the prior session, shown only while idle. */
+.gx-session__last {
+  margin-top: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+
+.gx-session__transcript {
+  margin-top: var(--spacing-xl);
+}
+
+.gx-session__transcript-empty {
+  margin: 0;
+  color: var(--text-muted);
+}

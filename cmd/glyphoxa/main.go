@@ -15,12 +15,12 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -179,11 +179,12 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 // metrics + k8s probes (/metrics, /healthz, /readyz) on the separate internal
 // metricsAddr — so the actuator endpoints stay off the public API surface.
 //
-// When withVoice is set (-mode=all) AND the Discord credentials are present
-// (DISCORD_BOT_TOKEN + -guild + -channel), the existing env-cred voice loop runs
-// concurrently under the same context, so SIGTERM stops both. Missing creds
-// degrade to web-only with a warning rather than failing (matches the #44
-// resilience posture); the single Prometheus recorder feeds both halves.
+// When withVoice is set (-mode=all) the process drives the voice loop in-process
+// via the SessionManager (ADR-0039): the Session screen starts/stops it, the
+// loop is not run at boot, and SIGTERM stops both the web tier and any active
+// session. A web-only run (withVoice false) still serves SessionService but
+// rejects Start — it does not drive the loop. The single Prometheus recorder
+// feeds both halves.
 func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, webAddr, metricsAddr string, withVoice bool) error {
 	dsn := databaseURL()
 	if dsn == "" {
@@ -221,6 +222,22 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		observe.NewMetricsServer(metricsAddr, metrics, observe.ReadinessProbe(pool.Ping), log).Start(ctx)
 	}
 
+	// Base voice config for manager-driven sessions (ADR-0039): the Session screen
+	// starts/stops the live loop in-process via the SessionManager. The Discord
+	// token comes from the environment (the deployment-shared Bot); the guild and
+	// voice channel are sourced per-session from the saved deployment config, not
+	// these flags (#72). The credential-bridge keys (#69) are resolved inside
+	// RunFromDB. enabled = withVoice: only `all` mode drives the loop — a web-only
+	// replica answers GetSession (idle) but rejects Start.
+	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
+	cfg.Logger = log
+	cfg.Metrics = metrics
+	cfg.StageMetrics = metrics
+	runner := func(rctx context.Context, c wirenpc.Config) error {
+		return wirenpc.RunFromDB(rctx, c, pool, cipher)
+	}
+	mgr := session.NewManager(store, runner, cfg, log, withVoice)
+
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
 	// (ADR-0013/0039). The SPA handler is the "/" catch-all; ServeMux's
@@ -228,55 +245,18 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// paths (and client-side deep links) reach the SPA fallback.
 	srv := web.NewServer(web.Config{
 		Addr:   webAddr,
-		Mounts: managementMounts(store, cipher, log),
+		Mounts: managementMounts(store, cipher, log, mgr),
 		Root:   spa.Handler(),
 		Logger: log,
 	})
 
-	// Without the voice half, runWebTier blocks on the web server alone.
-	if !withVoice {
-		return runWebTier(ctx, srv)
-	}
-
-	// all-mode: the voice loop only joins when the Discord credentials are
-	// present. Resolving the token here (not in wirenpc) keeps the no-creds
-	// fallback a local decision: web-only is a healthy all-mode run, not an error.
-	cfg.Token = os.Getenv("DISCORD_BOT_TOKEN")
-	if !voiceEnabled(cfg.Token, cfg.Guild, cfg.Channel) {
-		log.Warn("voice disabled: set DISCORD_BOT_TOKEN, -guild, -channel to enable")
-		return runWebTier(ctx, srv)
-	}
-
-	cfg.Logger = log
-	cfg.Metrics = metrics
-	cfg.StageMetrics = metrics
-
-	// errgroup ties the two halves to one context so SIGTERM (via ctx) stops both.
-	// The web tier is the only fatal half: if it fails, gctx cancels and the voice
-	// loop unwinds. The voice half is best-effort (below) and always returns nil,
-	// so the process exits non-zero only on a web-tier error.
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return runWebTier(gctx, srv) })
-	g.Go(func() error {
-		// Voice is best-effort in all-mode: a voice startup/runtime failure must
-		// NOT tear down the web tier (the #44 resilience posture — the pod keeps
-		// serving /readyz). Log and degrade to web-only by returning nil; the
-		// gctx.Err() guard suppresses the benign cancellation log when SIGTERM is
-		// already stopping both halves.
-		if err := wirenpc.RunFromDB(gctx, cfg, pool, cipher); err != nil && gctx.Err() == nil {
-			log.Error("voice loop exited; continuing web-only", "err", err)
-		}
-		return nil
-	})
-	return g.Wait()
-}
-
-// voiceEnabled reports whether the all-mode voice loop should join: it needs the
-// Discord bot token plus a target guild and channel. Missing any of the three is
-// a healthy web-only all-mode run (ADR-0039), not an error — factored out so the
-// gating decision is unit-tested without Discord credentials.
-func voiceEnabled(token, guild, channel string) bool {
-	return token != "" && guild != "" && channel != ""
+	// Sessions are manager-driven (ADR-0039): the loop starts when the Session
+	// screen asks, not at boot. Run the web tier until SIGTERM, then stop any
+	// active session BEFORE the deferred pool.Close, so a row never stays stuck
+	// 'running' and the loop's ended_at write never races a closing pool.
+	err = runWebTier(ctx, srv)
+	mgr.Shutdown()
+	return err
 }
 
 // managementMounts wires the auth tier and the management Connect services into
@@ -290,7 +270,8 @@ func voiceEnabled(token, guild, channel string) bool {
 // _SECRET / _REDIRECT_URL) — a one-time setup, not code; absent them the gate
 // still stands and the API simply has no way in. cipher seals BYOK provider
 // keys (ADR-0004); it may be nil (saving keys then fails CodeFailedPrecondition).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger) []web.Mount {
+// mgr drives the in-process voice loop for SessionService (#72, ADR-0039).
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger, mgr *session.Manager) []web.Mount {
 	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
 	if clientID == "" {
 		log.Warn("Discord OAuth is not configured; login is disabled until " +
@@ -318,12 +299,14 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 	// decrypted tenant key (ADR-0004 credential bridge). Appended last so the
 	// existing mounts keep their order.
 	voicePath, voiceHandler := rpc.NewVoiceServer(store, cipher, log).Handler(stack.HandlerOptions()...)
+	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
 		web.APIMount(providerPath, providerHandler),
 		web.APIMount(voicePath, voiceHandler),
+		web.APIMount(sessionPath, sessionHandler),
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}
