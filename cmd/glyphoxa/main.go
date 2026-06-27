@@ -293,12 +293,19 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 	campaignPath, campaignHandler := rpc.NewCampaignServer(store).Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	providerPath, providerHandler := rpc.NewProviderServer(store, cipher, log).Handler(stack.HandlerOptions()...)
+	// VoiceService (#70) serves the live provider data the Configuration +
+	// Campaign screens render — the ElevenLabs voice catalog + preview, the Groq
+	// model allowlist, and the async provider-health signal — all via the
+	// decrypted tenant key (ADR-0004 credential bridge). Appended last so the
+	// existing mounts keep their order.
+	voicePath, voiceHandler := rpc.NewVoiceServer(store, cipher, log).Handler(stack.HandlerOptions()...)
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
 		web.APIMount(providerPath, providerHandler),
+		web.APIMount(voicePath, voiceHandler),
 		web.APIMount(sessionPath, sessionHandler),
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},

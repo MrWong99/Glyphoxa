@@ -187,3 +187,14 @@
   gap: var(--spacing-sm);
   margin-top: var(--spacing-xs);
 }
+
+/* Voice select + Preview-voice button row (#70). */
+.gx-editor__voice {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-sm);
+}
+
+.gx-editor__voice .gx-select-field {
+  flex: 1;
+}

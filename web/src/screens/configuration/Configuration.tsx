@@ -6,12 +6,16 @@ import { MessagesSquare, BrainCircuit, AudioLines, RefreshCw } from "lucide-reac
 import {
   CampaignService,
   ProviderService,
+  VoiceService,
+  HealthStatus,
   type ProviderCredential,
+  type ProviderHealth,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
 
 import "./configuration.css";
@@ -19,9 +23,10 @@ import "./configuration.css";
 // The Configuration screen (the design's "Providers" screen). The campaign
 // header reads LIVE GetActiveCampaign; the credential rows drive the write-only
 // BYOK flow (#68, ADR-0004/0039): each secret is sealed server-side and never
-// read back — the screen shows a masked value + Replace and a Healthy /
-// Key-needed badge derived purely from key-presence (the async test-call upgrade
-// is a later stage).
+// read back — the screen shows a masked value + Replace. The status badge starts
+// from key-presence and upgrades async (#70) from VoiceService.GetProviderHealth:
+// a real test-call (ElevenLabs /v1/voices, a Groq ping, a live Discord login that
+// resolves the bot tag) flips it Healthy → Degraded without blocking page load.
 
 // The three secret slots the screen holds, keyed by their wire `provider`. Each
 // renders a SecretRow; Groq/ElevenLabs save via SaveProviderConfig, the Discord
@@ -33,6 +38,10 @@ const BYOK_SLOTS = [
 
 function credentialFor(creds: ProviderCredential[], provider: string): ProviderCredential | undefined {
   return creds.find((c) => c.provider === provider);
+}
+
+function healthFor(health: ProviderHealth[], provider: string): ProviderHealth | undefined {
+  return health.find((h) => h.provider === provider);
 }
 
 export function Configuration() {
@@ -47,6 +56,15 @@ export function Configuration() {
 
   const config = useQuery(ProviderService.method.listProviderConfigs, {});
   const creds = config.data?.credentials ?? [];
+
+  // Async health upgrade (#70): runs the live test-calls off the page-load path.
+  // Until it resolves the badge stays on key-presence; then it flips per provider.
+  const healthQuery = useQuery(VoiceService.method.getProviderHealth, {});
+  const health = healthQuery.data?.providers ?? [];
+
+  // Groq model allowlist (static; Groq has no list-models API, ADR-0039).
+  const groqModels = useQuery(VoiceService.method.listModels, { provider: "groq" });
+  const models = groqModels.data?.models ?? [];
 
   const saveProvider = useMutation(ProviderService.method.saveProviderConfig, { onSuccess: invalidateList });
   const saveDiscord = useMutation(ProviderService.method.saveDiscordSettings, { onSuccess: invalidateList });
@@ -123,7 +141,11 @@ export function Configuration() {
             name={slot.label}
             placeholder={slot.placeholder}
             credential={credentialFor(creds, slot.provider)}
-            onSave={(secret) => saveProvider.mutateAsync({ provider: slot.provider, secret })}
+            health={healthFor(health, slot.provider)}
+            // Groq's model select is the static allowlist (#70); the chosen model
+            // rides along when the key is saved (SaveProviderConfig carries it).
+            models={slot.provider === "groq" ? models : undefined}
+            onSave={(secret, model) => saveProvider.mutateAsync({ provider: slot.provider, secret, model })}
           />
         ))}
       </div>
@@ -138,6 +160,7 @@ export function Configuration() {
             name="Bot token"
             placeholder="Paste the Discord bot token"
             credential={credentialFor(creds, "discord")}
+            health={healthFor(health, "discord")}
             onSave={(secret) =>
               saveDiscord.mutateAsync({ botToken: secret, guildId, voiceChannelId })
             }
@@ -182,17 +205,45 @@ export function Configuration() {
   );
 }
 
+// HealthBadge renders the status dot. An unsaved slot is "Key needed" (presence).
+// A saved slot shows "Healthy" instantly (presence) and downgrades to "Degraded"
+// only once GetProviderHealth reports a failed test-call (#70) — the page never
+// waits on the live call.
+function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealth }) {
+  if (!saved) {
+    return (
+      <Badge variant="warning" dot size="sm">
+        Key needed
+      </Badge>
+    );
+  }
+  if (health?.status === HealthStatus.DEGRADED) {
+    return (
+      <Badge variant="danger" dot size="sm" title={health.detail || undefined}>
+        Degraded
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="success" dot size="sm">
+      Healthy
+    </Badge>
+  );
+}
+
 // SecretRow renders one write-only credential: an editable key field with Save
-// when unsaved (or being replaced), a masked value + Replace once saved, and a
-// Healthy / Key-needed badge from key-presence. onSave seals the secret
-// server-side and resolves once stored; the row then clears and re-reads as
-// masked from the invalidated list.
+// when unsaved (or being replaced), a masked value + Replace once saved, and the
+// status badge. When `models` is supplied (Groq) it also renders the static
+// model allowlist select; the chosen model is passed to onSave. A resolved
+// Discord bot tag (from the live login) is shown under the row.
 function SecretRow({
   icon,
   kind,
   name,
   placeholder,
   credential,
+  health,
+  models,
   onSave,
 }: {
   icon: ReactNode;
@@ -200,20 +251,26 @@ function SecretRow({
   name: string;
   placeholder: string;
   credential?: ProviderCredential;
-  onSave: (secret: string) => Promise<unknown>;
+  health?: ProviderHealth;
+  models?: string[];
+  onSave: (secret: string, model?: string) => Promise<unknown>;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [model, setModel] = useState<string | undefined>(undefined);
 
   const saved = Boolean(credential?.showMasked);
   const masked = saved && !editing;
+  // The select shows the saved model, the operator's pick, or the allowlist
+  // default (first), in that order.
+  const selectedModel = model ?? (credential?.model || undefined) ?? models?.[0];
 
   async function handleSave() {
     if (!value || busy) return;
     setBusy(true);
     try {
-      await onSave(value);
+      await onSave(value, selectedModel);
       setValue("");
       setEditing(false);
     } finally {
@@ -228,7 +285,20 @@ function SecretRow({
         <div className="gx-provider-row__meta">
           <div className="gx-overline">{kind}</div>
           <div className="gx-provider-row__name">{name}</div>
+          {health?.botTag && (
+            <div className="gx-provider-row__tag">Connected as {health.botTag}</div>
+          )}
         </div>
+
+        {models && models.length > 0 && (
+          <Select
+            aria-label={`${name} model`}
+            options={models}
+            value={selectedModel}
+            onValueChange={setModel}
+            placeholder="Model…"
+          />
+        )}
 
         <div className="gx-secret">
           {masked ? (
@@ -276,15 +346,7 @@ function SecretRow({
           )}
         </div>
 
-        {saved ? (
-          <Badge variant="success" dot size="sm">
-            Healthy
-          </Badge>
-        ) : (
-          <Badge variant="warning" dot size="sm">
-            Key needed
-          </Badge>
-        )}
+        <HealthBadge saved={saved} health={health} />
       </div>
     </Card>
   );
