@@ -253,6 +253,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// The store backs incremental line persistence + replay-on-reload (#74,
 	// ADR-0040); the manager finalizes the relay's writer queue on Stop (below).
 	relay := transcript.NewRelay(eventBus, mgr, store, log)
+	// Back-wire the finalizer so Stop drains the relay's writer queue and records
+	// the authoritative line_count (#74). Done after the relay exists because the
+	// relay needs the manager (Snapshot), so the manager is built first.
+	mgr.SetTranscript(relay)
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
