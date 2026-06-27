@@ -24,8 +24,10 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/internal/transcript"
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 func main() {
@@ -234,10 +236,21 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	cfg.Logger = log
 	cfg.Metrics = metrics
 	cfg.StageMetrics = metrics
+	// ONE process-wide event bus (issue #73, ADR-0014): set on the base config
+	// BEFORE the Manager copies it, so the bus pointer flows through every
+	// manager-started session (Manager.base → RunFromDB → connectAndServe) and
+	// the SSE relay can subscribe once and observe events across reconnect cycles
+	// and sessions. Created here so the same instance feeds both halves.
+	eventBus := voiceevent.NewBus()
+	cfg.Bus = eventBus
 	runner := func(rctx context.Context, c wirenpc.Config) error {
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
 	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice)
+
+	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
+	// process bus once and reads the active session from the manager (Snapshot).
+	relay := transcript.NewRelay(eventBus, mgr, log)
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
@@ -246,7 +259,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// paths (and client-side deep links) reach the SPA fallback.
 	srv := web.NewServer(web.Config{
 		Addr:   webAddr,
-		Mounts: managementMounts(store, cipher, log, mgr),
+		Mounts: managementMounts(store, cipher, log, mgr, relay),
 		Root:   spa.Handler(),
 		Logger: log,
 	})
@@ -272,7 +285,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // still stands and the API simply has no way in. cipher seals BYOK provider
 // keys (ADR-0004); it may be nil (saving keys then fails CodeFailedPrecondition).
 // mgr drives the in-process voice loop for SessionService (#72, ADR-0039).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger, mgr *session.Manager) []web.Mount {
+// relay serves the live transcript over SSE + a JSON snapshot (#73, ADR-0014):
+// its two plain net/http reads mount OUTSIDE the Connect /api prefix at
+// /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
+// Connect interceptor chain does not cover them).
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay) []web.Mount {
 	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
 	if clientID == "" {
 		log.Warn("Discord OAuth is not configured; login is disabled until " +
@@ -308,6 +325,13 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 		web.APIMount(providerPath, providerHandler),
 		web.APIMount(voicePath, voiceHandler),
 		web.APIMount(sessionPath, sessionHandler),
+		// The SSE relay + snapshot are PLAIN mounts (not web.APIMount): they want
+		// the full /api/v1/... path, not the /api-stripped Connect method path.
+		// Go 1.22 method+wildcard patterns keep them off the Connect mounts
+		// (/api/glyphoxa.management.v1.*) and the SPA root. auth.RequireSession
+		// validates the glyphoxa_session cookie the EventSource/fetch send.
+		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
+		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}

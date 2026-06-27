@@ -224,6 +224,13 @@ type Config struct {
 	// nothing. The live binary injects the Prometheus adapter; the benchmark
 	// injects its own; the keyless default is the no-op recorder.
 	StageMetrics observe.StageRecorder
+	// Bus, when non-nil, is the process-wide voiceevent.Bus the orchestrator
+	// publishes onto INSTEAD of a fresh per-cycle bus (issue #73, ADR-0014).
+	// The web tier injects ONE bus so the SSE transcript relay can subscribe
+	// once and keep seeing events across reconnect cycles AND across sessions
+	// (single active session, ADR-0039). nil (the env-only voice/bench paths)
+	// keeps today's behavior: connectAndServe makes its own per-cycle bus.
+	Bus *voiceevent.Bus
 	// npcs are the Character NPCs this loop voices. Run resolves them: RunFromDB
 	// loads all Character NPCs in the campaign from storage; the env-only Run path
 	// seeds the single hardcoded NPC when the slice is empty. The roster the loop
@@ -456,7 +463,15 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// tee can publish FirstAudio (A3 hook 1) and the pump can publish FirstOpus
 	// (task #7, the audible-on-wire SLO end) onto the same bus the conversation's
 	// stages publish on and the metrics subscriber reads.
-	bus := voiceevent.NewBus()
+	//
+	// The web tier injects ONE process-wide bus (cfg.Bus, issue #73) so the SSE
+	// transcript relay subscribes once and keeps observing events across reconnect
+	// cycles and sessions; the env-only voice/bench paths leave it nil and get a
+	// fresh per-cycle bus (today's behavior, unchanged).
+	bus := cfg.Bus
+	if bus == nil {
+		bus = voiceevent.NewBus()
+	}
 
 	pump := wire.NewPlaybackPump(sess, cdc, log, bus)
 	defer pump.Close()
