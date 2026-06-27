@@ -2,6 +2,15 @@
  * classes live in styles/components.css; only screen-local layout goes here.
  */
 
+/* Page gutter (#88 slice 1): the screen root had no padding, so the content sat
+ * flush against the topbar and the content edges. Mirror the Configuration
+ * screen's centered, padded container. */
+.gx-campaign-screen {
+  padding: var(--spacing-xl);
+  max-width: var(--content-xl);
+  margin: 0 auto;
+}
+
 .gx-campaign-screen__header {
   margin-bottom: var(--spacing-lg);
 }
@@ -184,8 +193,22 @@
 
 .gx-editor__actions {
   display: flex;
+  align-items: center;
   gap: var(--spacing-sm);
   margin-top: var(--spacing-xs);
+  padding-top: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+/* Inline save cue beside the action buttons. */
+.gx-editor__status {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-success);
+}
+
+.gx-editor__status--error {
+  color: var(--status-danger);
 }
 
 /* Voice select + Preview-voice button row (#70). */

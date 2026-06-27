@@ -502,6 +502,87 @@ textarea.gx-input {
   color: var(--text-strong);
 }
 
+/* ===================== Combobox (components/ui/Combobox.tsx) =============
+ * A filterable, height-bounded picker (cmdk) for large/growing option lists —
+ * the live ElevenLabs voice catalog (#88 slice 2). Reuses the .gx-select trigger
+ * + .gx-select__content popover vocabulary; adds the filter input + bounded list.
+ */
+.gx-combobox__anchor {
+  position: relative;
+}
+.gx-combobox__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  padding-right: var(--spacing-md);
+}
+.gx-combobox__trigger .gx-select-chevron {
+  position: static;
+  flex: 0 0 auto;
+}
+.gx-combobox__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gx-combobox__placeholder {
+  color: var(--text-subtle);
+}
+.gx-combobox__content {
+  position: absolute;
+  top: calc(100% + var(--spacing-xs));
+  left: 0;
+  right: 0;
+  min-width: 100%;
+  padding: 0;
+}
+.gx-combobox__search {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.gx-combobox__search-icon {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.gx-combobox__input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-strong);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+}
+.gx-combobox__input::placeholder {
+  color: var(--text-subtle);
+}
+/* Bound the list so a 28+ catalog scrolls instead of running off-screen. */
+.gx-combobox__list {
+  max-height: calc(var(--layout-2xl) + var(--layout-xl));
+  overflow-y: auto;
+  padding: var(--spacing-xs);
+}
+.gx-combobox__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+.gx-combobox__item[data-selected="true"] {
+  background: rgba(144, 89, 255, 0.18);
+  color: var(--text-strong);
+}
+.gx-combobox__empty {
+  padding: var(--spacing-sm) var(--spacing-md);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+}
+
 /* ===================== Switch (components/forms/Switch.jsx) =============
  * Ported onto a Radix Switch wrapper (ADR-0017): the Radix root carries
  * .gx-switch__track, the thumb .gx-switch__thumb; [data-state=checked] replaces
@@ -574,6 +655,23 @@ textarea.gx-input {
   height: 100%;
   min-height: 0;
   background: var(--surface-base);
+}
+/* Collapsed (#88 slice 4): the topbar toggle hides the sidebar. On wide
+ * viewports this is a focus mode; on narrow ones the sidebar is an off-canvas
+ * drawer (see the breakpoint block below), shut by default. */
+.gx-shell[data-collapsed="true"] > .gx-sidebar {
+  display: none;
+}
+/* Scrim behind the open mobile drawer; inert (and hidden) until the breakpoint
+ * block reveals it. */
+.gx-shell__scrim {
+  display: none;
+  border: none;
+  padding: 0;
+}
+.gx-topbar__toggle {
+  flex: 0 0 auto;
+  margin-left: calc(var(--spacing-xs) * -1);
 }
 .gx-sidebar {
   width: 248px;
@@ -737,7 +835,7 @@ textarea.gx-input {
 .gx-providers__list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--spacing-md);
 }
 .gx-provider-row {
   padding: 16px;
@@ -856,5 +954,63 @@ textarea.gx-input {
   }
   100% {
     background-position: -200% 0;
+  }
+}
+
+/* ===================== Responsive (#88 slice 4) =========================
+ * The shell + screens assumed desktop width. Below the tablet breakpoint the
+ * sidebar becomes an off-canvas drawer the topbar toggle opens, and the multi-
+ * column rows/grids collapse so nothing overflows horizontally.
+ */
+@media (max-width: 880px) {
+  /* Off-canvas drawer: fixed, above the content, shut by default (the shell
+   * starts data-collapsed on small viewports). The toggle slides it in. */
+  .gx-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 60;
+    box-shadow: var(--shadow-lg);
+  }
+  /* When open, a full-bleed scrim sits behind the drawer; clicking it shuts. */
+  .gx-shell:not([data-collapsed="true"]) > .gx-shell__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.55);
+    cursor: pointer;
+  }
+
+  /* Provider key rows reflow instead of running off the edge. */
+  .gx-provider-row {
+    flex-wrap: wrap;
+  }
+  .gx-provider-row .gx-select-field,
+  .gx-provider-row__select {
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 100%;
+  }
+  .gx-secret {
+    margin-left: 0;
+    flex: 1 1 100%;
+  }
+  .gx-secret__edit,
+  .gx-secret__saved {
+    flex-wrap: wrap;
+  }
+
+  /* Two-up grids drop to a single column. */
+  .gx-discord__ids,
+  .gx-defaults__grid,
+  .gx-editor__grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Tighter screen gutters on small viewports. */
+  .gx-providers {
+    padding: var(--spacing-md);
   }
 }
