@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
@@ -39,6 +40,16 @@ var (
 	// ErrVoiceUnavailable is returned by Start when this process does not drive
 	// voice (web-only mode, ADR-0039). Mapped to CodeFailedPrecondition.
 	ErrVoiceUnavailable = errors.New("session: voice is not available in this mode")
+	// ErrDiscordTokenMissing is returned by Start when neither a saved deployment
+	// Bot token nor a DISCORD_BOT_TOKEN env token is available (#87). Mapped to
+	// CodeFailedPrecondition, mirroring ErrDiscordNotConfigured.
+	ErrDiscordTokenMissing = errors.New("session: no Discord bot token configured")
+	// ErrDiscordTokenUndecryptable is returned by Start when a real saved Bot token
+	// cannot be decrypted — booted without $GLYPHOXA_SECRET (nil cipher) or a
+	// ciphertext the cipher won't open (#87). The underlying actionable detail is
+	// wrapped in the chain. Mapped to CodeFailedPrecondition (a self-host
+	// misconfig), not an opaque Internal.
+	ErrDiscordTokenUndecryptable = errors.New("session: saved Discord bot token could not be decrypted")
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
@@ -72,7 +83,8 @@ type activeSession struct {
 type Manager struct {
 	store   Store
 	run     LoopRunner
-	base    wirenpc.Config // Token/Logger/Metrics template; Guild/Channel come from saved config
+	base    wirenpc.Config // Token (env fallback)/Logger/Metrics template; Guild/Channel come from saved config
+	cipher  *crypto.Cipher // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	log     *slog.Logger
 	enabled bool // false in web-only mode: Start is rejected (ADR-0039)
 
@@ -81,14 +93,19 @@ type Manager struct {
 }
 
 // NewManager wraps the store, loop runner and base config in a Manager. base
-// carries the Discord token, logger and metrics recorders; Start overlays the
-// saved guild/channel onto a copy. enabled is false in web-only mode, where the
-// process does not drive voice (Start then fails ErrVoiceUnavailable).
-func NewManager(store Store, run LoopRunner, base wirenpc.Config, log *slog.Logger, enabled bool) *Manager {
+// carries the env-fallback Discord token, logger and metrics recorders; Start
+// overlays the saved guild/channel onto a copy and resolves the Bot token (the
+// saved deployment token decrypted via cipher, else the base env token — #87).
+// cipher may be nil (boot without $GLYPHOXA_SECRET): the env-fallback path still
+// works, but a real saved token then fails Start with a clear precondition
+// (ErrDiscordTokenUndecryptable). enabled is false in
+// web-only mode, where the process does not drive voice (Start fails
+// ErrVoiceUnavailable).
+func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto.Cipher, log *slog.Logger, enabled bool) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, run: run, base: base, log: log, enabled: enabled}
+	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled}
 }
 
 // Start launches the live voice loop for a campaign and records a running
@@ -115,12 +132,27 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		return storage.VoiceSession{}, ErrDiscordNotConfigured
 	}
 
+	// Resolve the Bot token under the hybrid policy (#87): a real saved deployment
+	// token (decrypted via cipher) overrides ENV, else the base env token. Resolve
+	// before writing the row so a missing/undecryptable token leaves no stuck row,
+	// mirroring the guild/channel precondition above.
+	token, err := wirenpc.ResolveDiscordToken(m.cipher, dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext, m.base.Token)
+	if err != nil {
+		// A real saved token that won't decrypt: surface ErrDiscordTokenUndecryptable
+		// (errors.Is at the RPC layer) while keeping the actionable detail in the chain.
+		return storage.VoiceSession{}, fmt.Errorf("%w: %w", ErrDiscordTokenUndecryptable, err)
+	}
+	if token == "" {
+		return storage.VoiceSession{}, ErrDiscordTokenMissing
+	}
+
 	vs, err := m.store.CreateVoiceSession(ctx, campaignID)
 	if err != nil {
 		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
 	}
 
 	cfg := m.base
+	cfg.Token = token
 	cfg.Guild = dep.GuildID
 	cfg.Channel = dep.VoiceChannelID
 

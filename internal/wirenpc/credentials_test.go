@@ -93,6 +93,62 @@ func TestResolveKey(t *testing.T) {
 	}
 }
 
+// TestResolveDiscordToken is issue #87: a UI-started session resolves the saved
+// deployment Bot token under the same hybrid policy as the provider keys. A real
+// saved token (last4 != "env") is DECRYPTED and overrides ENV; an unset or "env"
+// placeholder token falls back to the ENV token (the voice-mode/dev/CI path); and
+// a real saved token the cipher cannot open (or a missing cipher) is a CLEAR
+// error, never a silent fall-through to ENV.
+func TestResolveDiscordToken(t *testing.T) {
+	cipher := newUnitCipher(t)
+	wrong := newUnitCipher(t) // a different key -> cannot open cipher's blobs
+
+	const realToken = "MT234.real.bot.token"
+	const envToken = "env.bot.token"
+	sealed, err := cipher.Seal([]byte(realToken))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		cipher     *crypto.Cipher
+		last4      string
+		ciphertext []byte
+		wantToken  string
+		wantErr    string // substring; "" means no error expected
+	}{
+		{name: "empty last4 -> env fallback", cipher: cipher, last4: "", wantToken: envToken},
+		{name: "env placeholder -> env fallback", cipher: cipher, last4: credPlaceholderLast4, wantToken: envToken},
+		{name: "saved token + cipher -> decrypted", cipher: cipher, last4: crypto.Last4(realToken), ciphertext: sealed, wantToken: realToken},
+		{name: "saved token + nil cipher -> clear error", cipher: nil, last4: crypto.Last4(realToken), ciphertext: sealed, wantErr: "cipher"},
+		{name: "saved token + wrong cipher -> clear error", cipher: wrong, last4: crypto.Last4(realToken), ciphertext: sealed, wantErr: "decrypt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveDiscordToken(tt.cipher, tt.last4, tt.ciphertext, envToken)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ResolveDiscordToken() error = nil, want error containing %q — a real saved token must never resolve to a silent env fall-through (AC3)", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("ResolveDiscordToken() error = %q, want substring %q", err, tt.wantErr)
+				}
+				if got != "" {
+					t.Errorf("ResolveDiscordToken() token = %q on error, want empty", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveDiscordToken() unexpected error: %v", err)
+			}
+			if got != tt.wantToken {
+				t.Errorf("ResolveDiscordToken() = %q, want %q", got, tt.wantToken)
+			}
+		})
+	}
+}
+
 // TestResolveProviderKeys pins the per-component aggregation: each component
 // resolves independently (real keys decrypted, an unbound component -> ""), and
 // a single undecryptable component fails the WHOLE resolution clearly (AC2) so a
