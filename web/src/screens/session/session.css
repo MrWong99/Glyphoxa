@@ -58,3 +58,113 @@
   margin: 0;
   color: var(--text-muted);
 }
+
+/* Live transcript list: one row per line — speaker name, optional tag pill,
+ * timestamp, then the utterance text. */
+.gx-transcript {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  line-height: 1.5;
+}
+
+/* Speaker name, bold in the kind's color (design tokens). */
+.gx-line__who {
+  font-weight: 700;
+  color: var(--text-default);
+}
+.gx-line__who[data-kind="gm"] {
+  color: var(--text-strong);
+}
+.gx-line__who[data-kind="player"] {
+  color: var(--rune);
+}
+.gx-line__who[data-kind="butler"] {
+  color: var(--gold);
+}
+.gx-line__who[data-kind="npc"] {
+  color: var(--text-default);
+}
+
+/* Tiny uppercase pill beside an Agent's name: gold for the Butler, subtle for
+ * a Character NPC. */
+.gx-line__tag {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--border-subtle, var(--text-muted));
+  color: var(--text-subtle);
+}
+.gx-line__tag[data-kind="butler"] {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+.gx-line__ts {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.gx-line__text {
+  color: var(--text-default);
+}
+
+/* Typing / "is speaking" indicator: three blinking dots + a mono label. */
+.gx-typing {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-xs, 4px);
+}
+
+.gx-typing__dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.gx-typing__dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rune);
+  display: inline-block;
+  animation: gx-blink 1.2s infinite ease-in-out both;
+}
+.gx-typing__dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.gx-typing__dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.gx-typing__label {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}
+
+@keyframes gx-blink {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}

@@ -9,6 +9,7 @@ import type { VoiceSession } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useSessionEvents, formatClock } from "./useSessionEvents";
 
 import "./session.css";
 
@@ -91,6 +92,11 @@ export function Session() {
   // The timer runs only while live, counting up from the running session's start.
   const elapsed = useElapsed(active ? tsMs(session?.startedAt) : null);
 
+  // Live transcript: snapshot + SSE tail into the query cache (#73).
+  const transcript = useSessionEvents(session?.id, active);
+  const hasLines = transcript.lines.length > 0;
+  const showTyping = active && transcript.typing.active;
+
   return (
     <div className="gx-session">
       <header className="gx-session__header">
@@ -144,11 +150,40 @@ export function Session() {
       <section className="gx-session__transcript">
         <h2 className="gx-section-title">{active ? "Live transcript" : "Session transcript"}</h2>
         <Card>
-          <p className="gx-session__transcript-empty">
-            {active
-              ? "Listening… transcript lines will appear here."
-              : "Start a session to capture the table's voice transcript."}
-          </p>
+          {!hasLines && !showTyping ? (
+            <p className="gx-session__transcript-empty">
+              {active
+                ? "Listening… transcript lines will appear here."
+                : "Start a session to capture the table's voice transcript."}
+            </p>
+          ) : (
+            <ol className="gx-transcript">
+              {transcript.lines.map((line) => (
+                <li key={line.id} className="gx-line">
+                  <span className="gx-line__who" data-kind={line.kind}>
+                    {line.who}
+                  </span>
+                  {line.tag && (
+                    <span className="gx-line__tag" data-kind={line.kind}>
+                      {line.tag}
+                    </span>
+                  )}
+                  <time className="gx-line__ts">{formatClock(line.ts)}</time>
+                  <span className="gx-line__text">{line.text}</span>
+                </li>
+              ))}
+              {showTyping && (
+                <li className="gx-typing" aria-live="polite" data-testid="typing">
+                  <span className="gx-typing__dots" aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                  <span className="gx-typing__label">{transcript.typing.label}</span>
+                </li>
+              )}
+            </ol>
+          )}
         </Card>
       </section>
     </div>

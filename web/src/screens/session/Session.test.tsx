@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
@@ -16,6 +16,7 @@ import {
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
+import { MockEventSource } from "@/test/mockEventSource";
 import { Session, formatElapsed } from "./Session";
 
 // An in-memory voice-session store served over a router transport (no network):
@@ -111,5 +112,77 @@ describe("Session", () => {
       expect(screen.getByText(/12 lines transcribed/i)).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /start session/i })).toBeInTheDocument();
+  });
+});
+
+// liveTransport reports an already-running session so the transcript hook is
+// enabled immediately (no Start click needed for the SSE assertions).
+function liveTransport() {
+  const current = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "running",
+    startedAt: timestampFromDate(new Date()),
+  });
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: current, active: true }),
+      startSession: () => create(StartSessionResponseSchema, { session: current }),
+      stopSession: () => create(StopSessionResponseSchema, { session: current }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session live transcript (#73)", () => {
+  it("seeds from the snapshot then renders streamed lines + typing dots", async () => {
+    // Snapshot: live + listening, no lines yet.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ lines: [], status: "live", typing: { active: true, label: "Listening to the table…" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // Live badge + the listening indicator (3 dots + label) from the snapshot.
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+    expect(await screen.findByText("Listening to the table…")).toBeInTheDocument();
+    expect(screen.getByTestId("typing")).toBeInTheDocument();
+
+    // The screen opened the live stream; drive a coalesced NPC line + a
+    // "speaking" status frame and assert they render.
+    const es = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("EventSource not opened yet");
+      return inst;
+    });
+    expect(es.url).toContain("/api/v1/sessions/vs1/events");
+
+    act(() => {
+      es.emit("line", {
+        id: "a:t1",
+        who: "Bart",
+        tag: "NPC",
+        kind: "npc",
+        ts: new Date().toISOString(),
+        text: "Well met, traveller.",
+      });
+      es.emit("status", { status: "live", typing: { active: true, label: "Bart is speaking…" } });
+    });
+
+    expect(await screen.findByText("Well met, traveller.")).toBeInTheDocument();
+    expect(screen.getByText("Bart")).toBeInTheDocument();
+    expect(screen.getByText("NPC")).toBeInTheDocument();
+    expect(await screen.findByText("Bart is speaking…")).toBeInTheDocument();
   });
 });
