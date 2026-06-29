@@ -102,7 +102,7 @@ jobs:
       # The SPA imports the generated TS client from gen/ts/*; restore the stubs
       # produced once by the `proto` job before `npm ci`/build (gen/ is gitignored).
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
@@ -136,7 +136,7 @@ jobs:
       # any go build/vet/test — gen/ is gitignored, so without this the module
       # doesn't compile. `path: gen` lands files at ./gen/glyphoxa/...
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
@@ -182,7 +182,7 @@ jobs:
 
       # Restore the generated stubs before any go build/test (gen/ is gitignored).
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
@@ -216,7 +216,7 @@ jobs:
 
       # Restore the generated stubs before any go build/test (gen/ is gitignored).
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
@@ -260,7 +260,7 @@ jobs:
       # be present in the build CONTEXT. Restore it here BEFORE the docker build;
       # .dockerignore does not exclude gen/, so `COPY . .` picks it up.
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
@@ -364,7 +364,7 @@ jobs:
       # Restore the generated stubs into the build context (gen/ is gitignored,
       # not generated inside the image) before this job's own docker build.
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
@@ -438,7 +438,7 @@ jobs:
       # Restore the generated stubs before the lint run (gen/ is gitignored;
       # golangci-lint type-checks the module, so it must compile).
       - name: Download gen artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gen
           path: gen
