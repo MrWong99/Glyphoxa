@@ -71,7 +71,7 @@ jobs:
       # download with `path: gen`, restoring ./gen/glyphoxa/... — the exact
       # import path the generated Go (go_package .../gen/glyphoxa/...) needs.
       - name: Upload gen artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gen
           path: gen
