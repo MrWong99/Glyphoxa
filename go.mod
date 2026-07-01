@@ -8,7 +8,7 @@ require (
 	github.com/disgoorg/disgo v0.19.6
 	github.com/disgoorg/godave v0.1.0
 	github.com/disgoorg/godave/golibdave v0.1.0
-	github.com/disgoorg/godave/libdave v0.1.0
+	github.com/disgoorg/godave/libdave v0.2.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/ggerganov/whisper.cpp/bindings/go v0.0.0-20260227185758-9453b4b9be9b
 	github.com/google/uuid v1.6.0
