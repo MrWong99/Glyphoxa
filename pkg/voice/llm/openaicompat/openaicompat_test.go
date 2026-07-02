@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/openaicompat"
@@ -549,6 +550,103 @@ func TestComplete_MalformedFrame_EmitsEventError(t *testing.T) {
 	for _, ev := range events {
 		if ev.Type == llm.EventDone {
 			t.Error("stream emitted EventDone despite the malformed frame")
+		}
+	}
+}
+
+// TestComplete_HostileChunkFlood_EmitsBudgetError pins the stream budget against
+// the zero-content flood (issue #152): a hostile WithBaseURL gateway streaming
+// choice-less / empty-delta chunks in a tight loop — never a finish_reason, never
+// [DONE] — must terminate with a terminal [llm.EventError] in bounded time, not
+// spin for as long as the caller's context lives. Every received chunk must count
+// against the budget, not only decoded content bytes (which such chunks lack).
+func TestComplete_HostileChunkFlood_EmitsBudgetError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Alternate the two hostile shapes: no choices at all, and a choice whose
+		// delta decodes to zero content bytes. Loop until the client hangs up.
+		frames := []byte(sse(`{"choices":[]}`) + sse(`{"choices":[{"delta":{}}]}`))
+		for {
+			if _, err := w.Write(frames); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // unblocks the streaming goroutine if the budget never trips
+
+	c := newClient(srv.URL)
+	ch, err := c.Complete(ctx, llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	deadline := time.After(15 * time.Second)
+	var last llm.StreamEvent
+	var n int
+	for open := true; open; {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				open = false
+				break
+			}
+			last = ev
+			n++
+		case <-deadline:
+			t.Fatal("stream did not terminate within 15s — chunk flood never tripped the budget")
+		}
+	}
+	if last.Type != llm.EventError {
+		t.Fatalf("last event = %+v (of %d), want EventError from the stream budget", last, n)
+	}
+	if !strings.Contains(last.Err, "exceeded") {
+		t.Errorf("EventError %q does not name the exceeded budget", last.Err)
+	}
+}
+
+// TestComplete_OversizedContentStream_EmitsBudgetError pins the other half of the
+// stream budget: a stream whose decoded content exceeds the byte cap (here 17 MiB
+// of content against the 16 MiB budget) terminates with a terminal
+// [llm.EventError] and never an [llm.EventDone] — the pre-#152 guard, still live.
+func TestComplete_OversizedContentStream_EmitsBudgetError(t *testing.T) {
+	content := strings.Repeat("a", 1<<20) // 1 MiB of content per chunk
+	frame := []byte(sse(`{"choices":[{"delta":{"content":"` + content + `"}}]}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 17; i++ { // 17 MiB decoded content > the 16 MiB budget
+			if _, err := w.Write(frame); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	events := collect(t, ch)
+	last := events[len(events)-1]
+	if last.Type != llm.EventError {
+		t.Fatalf("last event type = %v, want EventError from the stream budget", last.Type)
+	}
+	if !strings.Contains(last.Err, "exceeded") {
+		t.Errorf("EventError %q does not name the exceeded budget", last.Err)
+	}
+	for _, ev := range events {
+		if ev.Type == llm.EventDone {
+			t.Error("stream emitted EventDone despite blowing the budget")
 		}
 	}
 }

@@ -13,12 +13,21 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
 
-// maxStreamBytes caps the decoded size of one completion (summed content and
-// tool-argument bytes). A voice turn's reply is a few KiB; 16 MiB is far past any
-// legitimate completion and bounds memory growth from a misbehaving or hostile
-// WithBaseURL gateway — the same guard the hand-rolled SSE reader carried before
-// the SDK owned the framing.
+// maxStreamBytes caps the approximate raw size of one completion: every chunk's
+// JSON counts against it in full, whether or not it decodes to content — so
+// zero-content frames from a misbehaving or hostile WithBaseURL gateway consume
+// budget too. A voice turn's reply is a few KiB; 16 MiB is far past any
+// legitimate completion. The SDK owns the SSE framing, so the exact wire bytes
+// are not visible here; each chunk's re-serialized JSON ([openai.ChatCompletionChunk.RawJSON])
+// is the closest approximation, and it is never smaller than the decoded content
+// and tool-argument bytes it carries — so the old decoded-content cap is subsumed.
 const maxStreamBytes = 16 * 1024 * 1024
+
+// maxStreamChunks caps the number of chunks in one completion so a flood of tiny
+// zero-content frames — which would erode the byte budget only slowly — still
+// terminates promptly. A legitimate completion streams roughly one chunk per
+// token plus a handful of bookkeeping frames, orders of magnitude below this.
+const maxStreamChunks = 100_000
 
 // Complete implements [llm.Provider]. It opens a streaming chat/completions
 // request via the OpenAI SDK and returns a channel of [llm.StreamEvent]s decoded
@@ -190,7 +199,8 @@ func toTools(defs []llm.ToolDef) []openai.ChatCompletionToolUnionParam {
 // streamEvents drains the SDK chunk stream and emits the corresponding
 // [llm.StreamEvent]s on ch. It closes ch on stream end (after an [llm.EventDone]),
 // ctx cancellation, or the first read/parse error. A parse/transport failure or a
-// response exceeding maxStreamBytes emits a terminal [llm.EventError] first so
+// response exceeding the stream budget (maxStreamBytes raw chunk-JSON bytes or
+// maxStreamChunks chunks) emits a terminal [llm.EventError] first so
 // consumers never mistake a truncated stream for a complete reply; a ctx
 // cancellation closes with neither terminal event. The stream is closed before
 // return so the connection is released.
@@ -244,31 +254,31 @@ func (c *Client) streamEvents(ctx context.Context, stream *ssestream.Stream[open
 		return true
 	}
 
-	// total bounds the summed decoded content + tool-argument bytes so a hostile
-	// endpoint cannot grow memory without limit.
-	var total int
-	overBudget := func(n int) bool {
-		if total += n; total > maxStreamBytes {
-			fail(fmt.Sprintf("%s: response stream exceeded %d bytes", c.name, maxStreamBytes))
-			return true
-		}
-		return false
-	}
+	// The stream budget counts EVERY received chunk — its approximate raw size
+	// (the chunk's JSON) against maxStreamBytes and its count against
+	// maxStreamChunks — so a hostile endpoint can neither grow memory without
+	// limit nor pin the connection open with an endless zero-content flood.
+	var totalBytes, totalChunks int
 
 	for stream.Next() {
 		if ctx.Err() != nil {
 			return
 		}
 		chunk := stream.Current()
+		if totalChunks++; totalChunks > maxStreamChunks {
+			fail(fmt.Sprintf("%s: response stream exceeded %d chunks", c.name, maxStreamChunks))
+			return
+		}
+		if totalBytes += len(chunk.RawJSON()); totalBytes > maxStreamBytes {
+			fail(fmt.Sprintf("%s: response stream exceeded %d bytes", c.name, maxStreamBytes))
+			return
+		}
 		if len(chunk.Choices) == 0 {
 			continue // usage-only or otherwise choice-less trailing chunk
 		}
 		choice := chunk.Choices[0]
 
 		if delta := choice.Delta.Content; delta != "" {
-			if overBudget(len(delta)) {
-				return
-			}
 			if !send(llm.StreamEvent{Type: llm.EventText, Text: delta}) {
 				return
 			}
@@ -288,9 +298,6 @@ func (c *Client) streamEvents(ctx context.Context, stream *ssestream.Stream[open
 				pt.name = tc.Function.Name
 			}
 			if args := tc.Function.Arguments; args != "" {
-				if overBudget(len(args)) {
-					return
-				}
 				pt.args.WriteString(args)
 			}
 		}
