@@ -72,9 +72,13 @@ type Server struct {
 	srv *http.Server
 	log *slog.Logger
 
-	// done is closed once Serve returns (i.e. after the ctx-triggered graceful
-	// Shutdown has fully drained). [Server.Wait] blocks on it so callers can
-	// hold resources (e.g. the DB pool) open until in-flight handlers finish.
+	// done is closed once the server has fully stopped: after Serve returned
+	// AND — when the stop was the ctx-triggered graceful Shutdown — that
+	// Shutdown has returned (drain finished, or abandoned at the grace
+	// deadline). Serve alone returns the instant Shutdown closes the listener,
+	// BEFORE the drain (issue #138), so Serve returning must not signal done by
+	// itself. [Server.Wait] blocks on it so callers can hold resources (e.g.
+	// the DB pool) open until in-flight handlers finish.
 	done chan struct{}
 
 	mu   sync.Mutex // guards addr against the Start writer / Addr readers
@@ -137,23 +141,49 @@ func (s *Server) Start(ctx context.Context) error {
 	s.addr = ln.Addr().String()
 	s.mu.Unlock()
 
-	observe.ShutdownOnCancel(ctx, s.srv)
+	drained := observe.ShutdownOnCancel(ctx, s.srv)
 	go func() {
 		defer close(s.done)
 		s.log.Info("web server listening", "addr", s.addr)
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.log.Error("web server failed", "err", err)
 		}
+		// Serve returns the moment Shutdown closes the listener; the graceful
+		// drain of in-flight requests happens AFTERWARDS, inside Shutdown itself
+		// (issue #138). Hold done open until that drain completes, but only when
+		// a shutdown was actually triggered — a spontaneous Serve failure with a
+		// live ctx has no Shutdown to wait for, and blocking here would hang
+		// Wait forever.
+		select {
+		case <-ctx.Done():
+			<-drained
+		default:
+		}
 	}()
 	return nil
 }
 
+// RegisterOnShutdown registers f to run when the ctx-triggered graceful
+// Shutdown begins (net/http calls it before waiting out the drain). Long-lived
+// streaming handlers — the transcript SSE tail — never go idle on their own, so
+// without a release hook they stall every shutdown for the full grace period;
+// f is how their owner gets told to let go. Register before [Server.Start]:
+// net/http only guarantees callbacks registered before Shutdown is called, and
+// Start wires the cancel-to-Shutdown path.
+func (s *Server) RegisterOnShutdown(f func()) {
+	s.srv.RegisterOnShutdown(f)
+}
+
 // Wait blocks until the server has fully stopped — i.e. after the ctx passed to
-// [Server.Start] is cancelled and the graceful Shutdown has drained in-flight
-// requests and Serve has returned. Callers use it to keep dependencies (the DB
-// pool) alive until handlers finish, instead of racing teardown against drain.
-// Call it only after a successful [Server.Start]; on a bind failure Start
-// returns the error and Wait must not be called (done never closes).
+// [Server.Start] is cancelled, Serve has returned, and the graceful Shutdown
+// has returned. Callers use it to keep dependencies (the DB pool) alive until
+// handlers finish, instead of racing teardown against drain. The guarantee is
+// bounded by [observe.ShutdownGrace]: at the deadline Shutdown gives up and
+// returns WITHOUT closing active connections, so a handler slower than the
+// grace may still be running when Wait returns — teardown after Wait is safe
+// against drained handlers, not against ones that outlive the grace. Call it
+// only after a successful [Server.Start]; on a bind failure Start returns the
+// error and Wait must not be called (done never closes).
 func (s *Server) Wait() {
 	<-s.done
 }

@@ -269,6 +269,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		Root:   spa.Handler(),
 		Logger: log,
 	})
+	// An open SSE tail never goes idle on its own, so it would stall every
+	// graceful shutdown for the full 5s grace period (issue #138). Registering
+	// CloseStreams releases the relay's streams the moment Shutdown begins; the
+	// browser's EventSource reconnects into the restarted process.
+	srv.RegisterOnShutdown(relay.CloseStreams)
 
 	// Sessions are manager-driven (ADR-0039): the loop starts when the Session
 	// screen asks, not at boot. Run the web tier until SIGTERM, then stop any
@@ -345,10 +350,14 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 
 // runWebTier starts the web API server on ctx and blocks until it has fully shut
 // down — Start binds the listener, then Wait returns only after the ctx-triggered
-// graceful Shutdown has drained in-flight handlers, so the caller's deferred
-// pool.Close runs strictly after the drain. Factored out so the keyless
-// default-gate test can boot a fake-handler server and assert clean boot+shutdown
-// without Postgres or Discord credentials.
+// graceful Shutdown has returned (issue #138 pinned this: Serve returning is NOT
+// the end of the drain), so the caller's mgr.Shutdown and deferred pool.Close
+// run after the drain for every handler that finishes within the grace period.
+// The guarantee is bounded, not absolute: at the ShutdownGrace deadline the
+// drain is abandoned — net/http does not close active connections — so a
+// handler slower than the grace can still be running during teardown. Factored
+// out so the keyless default-gate test can boot a fake-handler server and assert
+// clean boot+shutdown without Postgres or Discord credentials.
 func runWebTier(ctx context.Context, srv *web.Server) error {
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("web: start server: %w", err)

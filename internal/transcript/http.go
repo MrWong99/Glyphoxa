@@ -66,7 +66,8 @@ func (r *Relay) detach(s *subscriber) {
 
 // ServeEvents is the SSE live tail: GET /api/v1/sessions/{id}/events. It replays
 // the ring buffer after Last-Event-ID, then streams live frames until the client
-// disconnects or falls too far behind.
+// disconnects, falls too far behind, or the process begins its graceful shutdown
+// (CloseStreams — issue #138).
 func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -97,6 +98,8 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-r.closing:
 			return
 		case <-s.lagged:
 			return

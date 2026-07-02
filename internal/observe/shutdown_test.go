@@ -72,3 +72,68 @@ func TestShutdownOnCancelWaitsForCancel(t *testing.T) {
 		t.Fatal("Serve did not return after cancel")
 	}
 }
+
+// TestShutdownOnCancelSignalsDrainCompletion pins the completion signal (issue
+// #138): the returned channel must stay open while an in-flight request is still
+// draining — Serve returning is NOT the end of the drain — and close once
+// srv.Shutdown finishes, i.e. after the parked handler completes.
+func TestShutdownOnCancelSignalsDrainCompletion(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handlerEntered := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(handlerEntered)
+		<-releaseHandler
+	})
+
+	srv := &http.Server{Handler: mux}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	drained := ShutdownOnCancel(ctx, srv)
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/slow")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-handlerEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler never entered")
+	}
+
+	cancel()
+
+	// Serve returns as soon as Shutdown closes the listener; the drain is still
+	// in progress because the handler is parked, so the completion channel must
+	// still be open.
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("Serve returned %v, want http.ErrServerClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+	select {
+	case <-drained:
+		t.Fatal("completion channel closed while the in-flight handler was still draining")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseHandler)
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion channel never closed after the drain finished")
+	}
+}
