@@ -95,9 +95,12 @@ func TestLive_GroqLlama_TTFT(t *testing.T) {
 	// llama-3.3-70b-versatile, no reasoning_effort (Llama does not think).
 	client := groq.New("")
 
-	// samples bucketed by tier name → the per-tier distribution.
+	// samples bucketed by tier name → the per-tier distribution; failed calls
+	// (provider EventError, truncation, call never started) are counted per
+	// kind instead of polluting the latency samples (#155).
 	ttft := map[string][]float64{}
 	total := map[string][]float64{}
+	fails := map[string]map[string]int{}
 
 	var calls int
 	for _, p := range ttftPrompts {
@@ -106,9 +109,13 @@ func TestLive_GroqLlama_TTFT(t *testing.T) {
 				time.Sleep(delay)
 			}
 			calls++
-			first, tot, text, err := timeOne(t, client, p.system, p.user)
+			first, tot, text, err := timeOne(client, p.system, p.user)
 			if err != nil {
-				t.Logf("[%s #%d] %v", p.name, i, err)
+				t.Logf("[%s #%d] FAILED (%s): %v", p.name, i, failureKind(err), err)
+				if fails[p.name] == nil {
+					fails[p.name] = map[string]int{}
+				}
+				fails[p.name][failureKind(err)]++
 				continue
 			}
 			ttft[p.name] = append(ttft[p.name], first)
@@ -123,10 +130,11 @@ func TestLive_GroqLlama_TTFT(t *testing.T) {
 	for _, p := range ttftPrompts {
 		t.Logf("[%s] ttft_ms  %s", p.name, dist(ttft[p.name]))
 		t.Logf("[%s] total_ms %s", p.name, dist(total[p.name]))
+		t.Logf("[%s] failed   %s", p.name, failSummary(fails[p.name]))
 		any = any || len(ttft[p.name]) > 0
 	}
 	if !any {
-		t.Fatal("no successful samples on any tier — check key/quota")
+		t.Fatal("no successful samples on any tier — check key/quota (and the per-kind failure counts above)")
 	}
 }
 
@@ -134,7 +142,12 @@ func TestLive_GroqLlama_TTFT(t *testing.T) {
 // and the accumulated text. Tools are intentionally omitted: this isolates the
 // LLM-stage TTFT from tool-loop rounds (ADR-0028); the bait prompt still
 // exercises a reasoning-shaped input without adding a second round-trip.
-func timeOne(t *testing.T, c *groq.Client, system, user string) (firstMs, totalMs float64, text string, err error) {
+//
+// Drain/classification lives in drainStream (latency_drain_test.go, no live
+// tag) so the failure modes — mid-stream EventError, truncation — are pinned
+// by keyless unit tests (#155). A non-nil err means the sample must NOT be
+// recorded: only streams that delivered a terminal completion count.
+func timeOne(c *groq.Client, system, user string) (firstMs, totalMs float64, text string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -148,22 +161,8 @@ func timeOne(t *testing.T, c *groq.Client, system, user string) (firstMs, totalM
 	if err != nil {
 		return 0, 0, "", err
 	}
-	var first time.Duration
-	var sawFirst bool
-	for ev := range ch {
-		if ev.Type == llm.EventText && ev.Text != "" {
-			if !sawFirst {
-				first = time.Since(start)
-				sawFirst = true
-			}
-			text += ev.Text
-		}
-	}
-	tot := time.Since(start)
-	if !sawFirst {
-		first = tot
-	}
-	return ms(first), ms(tot), text, nil
+	first, tot, text, err := drainStream(start, ch)
+	return ms(first), ms(tot), text, err
 }
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
