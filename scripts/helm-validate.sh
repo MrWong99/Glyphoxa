@@ -112,7 +112,11 @@ validate_path external-db \
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
 # them or the migrate hook and the app parse a different credential than the
-# one Postgres was initialized with. Obviously-dummy values, never deployed.
-validate_dsn_roundtrip 'us@r/n:me?' 'dummy-p@ss/w:rd?'
+# one Postgres was initialized with. The set includes an interior space AND a
+# literal '+': QueryEscape (sprig urlquery) encodes a space as '+', but
+# net/url userinfo decoding keeps '+' literal — the one character class where
+# the two disagree, so bare urlquery alone fails here too. Obviously-dummy
+# values, never deployed.
+validate_dsn_roundtrip 'us@r/n: m+e?' 'dummy-p@ss/w: r+d?'
 
 echo "helm-validate: OK"
