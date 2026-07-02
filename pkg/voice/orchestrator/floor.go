@@ -35,9 +35,9 @@ import (
 // zero window (the [NewFloor] default) keeps the plain always-supersede
 // behaviour the barge path and the tracer-bullet tests rely on.
 type Floor struct {
-	mu         sync.Mutex
-	cancel     context.CancelFunc // non-nil while a turn holds the floor
-	gen        uint64             // increments per Take; guards stale releases
+	mu          sync.Mutex
+	cancel      context.CancelFunc // non-nil while a turn holds the floor
+	gen         uint64             // increments per Take; guards stale releases
 	lastTake    time.Time          // when the current holder took the floor (coalesce anchor)
 	holderTurn  string             // TurnID of the turn currently holding the floor (for Yield → barge attribution)
 	holderAgent string             // target AgentID of the current holder's route (coalesce is same-target only, #146)

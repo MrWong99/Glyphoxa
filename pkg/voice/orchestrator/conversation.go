@@ -89,10 +89,12 @@ func WithBargeIn(confirmWindow time.Duration) Option {
 
 // WithBargeInCoalesce is [WithBargeIn] plus a floor coalesce window (root cause
 // #2 of the latency investigation): a per-turn [Floor.Take] arriving within
-// coalesceWindow of the previous one is treated as the SAME utterance continuing
-// and yields to the in-flight turn instead of superseding it (see [Floor]). This
-// stops a VAD over-split of one utterance from self-cancelling its own first
-// turn mid-synthesis. A zero coalesceWindow is identical to [WithBargeIn].
+// coalesceWindow of the previous one AND routed to the same target agent is
+// treated as the SAME utterance continuing and yields to the in-flight turn
+// instead of superseding it (see [Floor]). This stops a VAD over-split of one
+// utterance from self-cancelling its own first turn mid-synthesis; a take for a
+// different agent inside the window supersedes as normal (#146). A zero
+// coalesceWindow is identical to [WithBargeIn].
 func WithBargeInCoalesce(confirmWindow, coalesceWindow time.Duration) Option {
 	return func(c *Conversation) {
 		c.bargeConfirm = confirmWindow

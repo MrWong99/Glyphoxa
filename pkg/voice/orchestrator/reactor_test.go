@@ -355,13 +355,15 @@ func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
 	replier.SetFloor(floor)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
 
-	// Two segments of one utterance, back-to-back (well inside the window).
-	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg1", Text: "Bart, what's a room"})
+	// Two segments of one utterance, back-to-back (well inside the window), both
+	// routed to the SAME agent — coalescing is same-target only (#146).
+	bart := voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg1", Text: "Bart, what's a room", Target: bart})
 	// Wait for seg1's producer to actually start and take the floor before seg2.
 	if got := <-started; got != "seg1" {
 		t.Fatalf("first producer started for %q, want seg1", got)
 	}
-	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg2", Text: "and have you seen Gandalf"})
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "seg2", Text: "and have you seen Gandalf", Target: bart})
 
 	// seg1 must run to its natural end without being cancelled by seg2.
 	select {
