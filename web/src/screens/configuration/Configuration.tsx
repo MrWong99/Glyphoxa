@@ -161,9 +161,10 @@ export function Configuration() {
             placeholder="Paste the Discord bot token"
             credential={credentialFor(creds, "discord")}
             health={healthFor(health, "discord")}
-            onSave={(secret) =>
-              saveDiscord.mutateAsync({ botToken: secret, guildId, voiceChannelId })
-            }
+            // Token-only save: the ID fields stay OFF the wire (they have proto3
+            // presence), so replacing the token can never clobber the stored IDs —
+            // even while the config load is still resolving (#142).
+            onSave={(secret) => saveDiscord.mutateAsync({ botToken: secret })}
           />
           <div className="gx-discord__ids">
             <Input

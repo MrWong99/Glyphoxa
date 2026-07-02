@@ -18,6 +18,7 @@ import {
   ProviderHealthSchema,
   ListModelsResponseSchema,
   type ProviderHealth,
+  type SaveDiscordSettingsRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -53,7 +54,15 @@ const GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 // refetch shows the saved credential — proving the write-only round-trip from
 // the screen's side (the RPC never returns a secret value). `opts` seeds already-
 // saved slots and the async health the GetProviderHealth RPC reports (#70).
-function mockBackend(opts: { saved?: Partial<Record<"groq" | "elevenlabs" | "discord", string>>; health?: ProviderHealth[] } = {}) {
+function mockBackend(
+  opts: {
+    saved?: Partial<Record<"groq" | "elevenlabs" | "discord", string>>;
+    health?: ProviderHealth[];
+    // discordSaves captures every SaveDiscordSettings request so tests can pin
+    // the wire shape (#142: a token-only save must omit the ID fields).
+    discordSaves?: SaveDiscordSettingsRequest[];
+  } = {},
+) {
   const state = {
     groq: opts.saved?.groq,
     elevenlabs: opts.saved?.elevenlabs,
@@ -91,9 +100,12 @@ function mockBackend(opts: { saved?: Partial<Record<"groq" | "elevenlabs" | "dis
         });
       },
       saveDiscordSettings: (req) => {
+        opts.discordSaves?.push(req);
         if (req.botToken !== undefined) state.discord = req.botToken.slice(-4);
-        state.guildId = req.guildId;
-        state.voiceChannelId = req.voiceChannelId;
+        // Presence semantics mirror the real server (#142): omitted IDs leave
+        // the stored ones untouched.
+        if (req.guildId !== undefined) state.guildId = req.guildId;
+        if (req.voiceChannelId !== undefined) state.voiceChannelId = req.voiceChannelId;
         return create(SaveDiscordSettingsResponseSchema, {
           credential: cred("discord", "discord", state.discord),
           guildId: state.guildId,
@@ -158,6 +170,26 @@ describe("Configuration", () => {
     // Values survive the invalidation refetch (round-tripped through the RPC).
     expect(await screen.findByDisplayValue("472093001100")).toBeInTheDocument();
     expect(screen.getByDisplayValue("472093774421")).toBeInTheDocument();
+  });
+
+  it("omits the guild/voice IDs from a token-only save (#142)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
+
+    // Operator only edits the bot token — the IDs inputs are untouched (still
+    // seeding from the in-flight config load).
+    const tokenInput = await screen.findByLabelText("Bot token key");
+    fireEvent.change(tokenInput, { target: { value: "test-discord-token-zzzz" } });
+    const botRow = tokenInput.closest(".gx-provider-row") as HTMLElement;
+    fireEvent.click(within(botRow).getByRole("button", { name: "Save" }));
+    expect(await within(botRow).findByText("••••••••")).toBeInTheDocument();
+
+    // The request carries the token and NOTHING else: no guild/voice fields on
+    // the wire, so a slow/failed config load can never clobber the stored IDs.
+    expect(discordSaves).toHaveLength(1);
+    expect(discordSaves[0].botToken).toBe("test-discord-token-zzzz");
+    expect(discordSaves[0].guildId).toBeUndefined();
+    expect(discordSaves[0].voiceChannelId).toBeUndefined();
   });
 
   it("renders the Groq model allowlist select (ListModels)", async () => {
