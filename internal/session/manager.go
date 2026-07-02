@@ -44,6 +44,10 @@ var (
 	// Bot token nor a DISCORD_BOT_TOKEN env token is available (#87). Mapped to
 	// CodeFailedPrecondition, mirroring ErrDiscordNotConfigured.
 	ErrDiscordTokenMissing = errors.New("session: no Discord bot token configured")
+	// ErrManagerClosed is returned by Start after Shutdown: the Manager is in its
+	// terminal closed state and refuses new work (#157) — no store write, no loop.
+	// Mapped to CodeUnavailable.
+	ErrManagerClosed = errors.New("session: the session manager is shut down")
 	// ErrDiscordTokenUndecryptable is returned by Start when a real saved Bot token
 	// cannot be decrypted — booted without $GLYPHOXA_SECRET (nil cipher) or a
 	// ciphertext the cipher won't open (#87). The underlying actionable detail is
@@ -102,6 +106,7 @@ type Manager struct {
 
 	mu     sync.Mutex
 	active *activeSession
+	closed bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
 }
 
 // NewManager wraps the store, loop runner and base config in a Manager. base
@@ -141,6 +146,12 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The closed check lives under the same lock Shutdown takes, so a Start that
+	// wins the lock after Shutdown returned can never insert a row or spawn a
+	// loop nothing will cancel (#157).
+	if m.closed {
+		return storage.VoiceSession{}, ErrManagerClosed
+	}
 	if m.active != nil {
 		return storage.VoiceSession{}, ErrSessionActive
 	}
@@ -268,11 +279,14 @@ func (m *Manager) Snapshot() (storage.VoiceSession, bool) {
 	return m.active.session, true
 }
 
-// Shutdown cancels any active session and waits for its loop to end and the
-// ended_at write to land. The web tier calls it on process shutdown, before the
-// DB pool closes, so a SIGTERM never leaves a row stuck 'running'.
+// Shutdown moves the Manager to its terminal closed state (any later Start
+// fails ErrManagerClosed, #157), then cancels any active session and waits for
+// its loop to end and the ended_at write to land. The web tier calls it on
+// process shutdown, before the DB pool closes, so a SIGTERM never leaves a row
+// stuck 'running'. Idempotent: a second call finds no active session.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	m.closed = true
 	as := m.active
 	m.mu.Unlock()
 	if as == nil {

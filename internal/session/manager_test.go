@@ -27,6 +27,7 @@ type fakeStore struct {
 	sessions map[uuid.UUID]storage.VoiceSession
 	created  int
 	ended    int
+	depReads int
 	tick     int
 }
 
@@ -48,6 +49,7 @@ func (f *fakeStore) now() time.Time {
 func (f *fakeStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.depReads++
 	if f.depErr != nil {
 		return storage.DeploymentConfig{}, f.depErr
 	}
@@ -413,6 +415,66 @@ func TestStartDisabledMode(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, false)
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, session.ErrVoiceUnavailable) {
 		t.Errorf("Start in disabled mode = %v, want ErrVoiceUnavailable", err)
+	}
+}
+
+// TestStartAfterShutdownRefused is #157: Shutdown moves the Manager to a
+// terminal closed state, so a Start that acquires the lock after Shutdown has
+// returned fails fast with ErrManagerClosed — it must not touch the store (no
+// config read, no running row INSERT) and must not spawn a loop nothing will
+// ever cancel.
+func TestStartAfterShutdownRefused(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	mgr.Shutdown()
+
+	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, session.ErrManagerClosed) {
+		t.Errorf("Start after Shutdown = %v, want ErrManagerClosed", err)
+	}
+	store.mu.Lock()
+	depReads, created := store.depReads, store.created
+	store.mu.Unlock()
+	if depReads != 0 || created != 0 {
+		t.Errorf("store touched after Shutdown: depReads=%d created=%d, want 0/0", depReads, created)
+	}
+	select {
+	case <-runner.started:
+		t.Error("loop spawned after Shutdown")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestShutdownIdempotentStopSafe is #157's tail: Shutdown of an active session
+// ends it; a second Shutdown is an idempotent no-op; Stop after Shutdown stays
+// well-defined (ErrNoActiveSession, no panic).
+func TestShutdownIdempotentStopSafe(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	mgr.Shutdown()
+	if _, ended := store.counts(); ended != 1 {
+		t.Errorf("ended rows after Shutdown = %d, want 1", ended)
+	}
+	mgr.Shutdown() // idempotent: no second end write, no hang
+
+	if _, err := mgr.Stop(context.Background()); !errors.Is(err, session.ErrNoActiveSession) {
+		t.Errorf("Stop after Shutdown = %v, want ErrNoActiveSession", err)
+	}
+	if _, ended := store.counts(); ended != 1 {
+		t.Errorf("ended rows after second Shutdown = %d, want still 1", ended)
 	}
 }
 

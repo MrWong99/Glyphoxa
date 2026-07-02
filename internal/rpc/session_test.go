@@ -213,6 +213,20 @@ func TestSessionStartTokenUndecryptable(t *testing.T) {
 	}
 }
 
+// TestSessionStartManagerClosed is #157: a Start refused by the manager's
+// terminal closed state (process shutting down) surfaces CodeUnavailable, not an
+// opaque Internal — the client should retry against the restarted process.
+func TestSessionStartManagerClosed(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeSessionManager{startErr: session.ErrManagerClosed}
+	client := newSessionClient(t, mgr, activeStore())
+
+	_, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("manager-closed code = %v, want Unavailable", connect.CodeOf(err))
+	}
+}
+
 // TestSessionStartNoCampaign fails with FailedPrecondition when there is no
 // active campaign to run a session for.
 func TestSessionStartNoCampaign(t *testing.T) {
