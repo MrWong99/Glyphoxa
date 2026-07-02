@@ -211,11 +211,13 @@
   color: var(--status-danger);
 }
 
-/* Voice select + Preview-voice button row (#70). */
+/* Voice select + Preview-voice button row (#70). Wraps so the inline preview
+ * failure cue (#154) can spill to its own line. */
 .gx-editor__voice {
   display: flex;
   align-items: flex-end;
   gap: var(--spacing-sm);
+  flex-wrap: wrap;
 }
 
 .gx-editor__voice .gx-select-field {
