@@ -17,23 +17,29 @@ type subscriber struct {
 }
 
 // push fans a frame out to every subscriber on the active session. A full
-// channel means a slow reader: it is signalled lagged (once) and skipped — its
-// EventSource reconnects with Last-Event-ID and replays from the ring. Caller
-// holds r.mu, and the bus contract forbids blocking, so the send is
-// non-blocking.
+// channel means a slow reader: it is signalled lagged (once) and from then on
+// receives NOTHING more (#148 Defect A) — delivering any frame past the
+// dropped one would let the client reconnect with a Last-Event-ID beyond the
+// hole and skip it forever. The connection sees a strict prefix of the
+// sequence, so its EventSource reconnect replays the dropped frame from the
+// ring losslessly. Caller holds r.mu, and the bus contract forbids blocking,
+// so the send is non-blocking.
 func (r *Relay) push(f Frame) {
 	for s := range r.subs {
 		if s.id != r.activeID {
 			continue
 		}
 		select {
+		case <-s.lagged:
+			// Already dropped a frame: never send another. Only push closes
+			// lagged, always under r.mu, so this check-then-close is race-free.
+			continue
+		default:
+		}
+		select {
 		case s.ch <- f:
 		default:
-			select {
-			case <-s.lagged:
-			default:
-				close(s.lagged)
-			}
+			close(s.lagged)
 		}
 	}
 }
