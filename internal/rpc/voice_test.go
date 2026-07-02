@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -301,5 +302,72 @@ func TestVoiceRPCs_RequireTenant(t *testing.T) {
 	srv := NewVoiceServer(&fakeVoiceStore{}, voiceTestCipher(t), nil)
 	if _, err := srv.ListVoices(context.Background(), connect.NewRequest(&managementv1.ListVoicesRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Errorf("ListVoices without tenant code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+}
+
+// healthyStore returns a fakeVoiceStore with a saved key for every component
+// plus a deployment bot token, so all three health checks reach their seams.
+func healthyStore(t *testing.T, cipher *crypto.Cipher) *fakeVoiceStore {
+	t.Helper()
+	return &fakeVoiceStore{
+		configs: map[storage.Component]storage.ProviderConfig{
+			storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "groq", "groq-key"),
+			storage.ComponentTTS: savedConfig(t, cipher, storage.ComponentTTS, "elevenlabs", "eleven-key"),
+		},
+		dep: &storage.DeploymentConfig{
+			DiscordBotTokenLast4: "tok9", DiscordBotTokenCiphertext: mustSeal(t, cipher, "bot-token"),
+		},
+	}
+}
+
+// TestGetProviderHealth_ChecksRunConcurrently pins #150: the three provider
+// checks run in parallel, so the RPC's worst case is the slowest single check
+// (~checkDelay), not the sum (~3×checkDelay). Sequential checks would take
+// ~360ms and fail the <300ms bound.
+func TestGetProviderHealth_ChecksRunConcurrently(t *testing.T) {
+	t.Parallel()
+	const checkDelay = 120 * time.Millisecond
+
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	srv.newLister = func(string) tts.VoiceLister { return &slowLister{delay: checkDelay} }
+	srv.pingLLM = func(ctx context.Context, _ string) error {
+		sleepCtx(ctx, checkDelay)
+		return nil
+	}
+	srv.botTag = func(ctx context.Context, _ string) (string, error) {
+		sleepCtx(ctx, checkDelay)
+		return "Glyphoxa#4823", nil
+	}
+
+	start := time.Now()
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	if got := len(resp.Msg.GetProviders()); got != 3 {
+		t.Fatalf("providers = %d, want 3", got)
+	}
+	if elapsed < checkDelay {
+		t.Errorf("elapsed %v < one check's delay %v — checks were skipped, not run", elapsed, checkDelay)
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Errorf("elapsed %v suggests sequential checks; concurrent should be ~%v", elapsed, checkDelay)
+	}
+}
+
+// slowLister blocks ~delay before returning an empty healthy catalog.
+type slowLister struct{ delay time.Duration }
+
+func (s *slowLister) ListVoices(ctx context.Context) ([]tts.Voice, error) {
+	sleepCtx(ctx, s.delay)
+	return nil, nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
 	}
 }

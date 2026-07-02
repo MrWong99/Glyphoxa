@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -225,12 +226,31 @@ func (s *VoiceServer) GetProviderHealth(
 		return nil, err
 	}
 
-	providers := []*managementv1.ProviderHealth{
-		s.healthLLM(ctx, tenantID),
-		s.healthTTS(ctx, tenantID),
-		s.healthDiscord(ctx, tenantID),
+	return connect.NewResponse(&managementv1.GetProviderHealthResponse{
+		Providers: s.probeProviders(ctx, tenantID),
+	}), nil
+}
+
+// probeProviders runs the three per-provider test-calls CONCURRENTLY (#150):
+// the worst case is the slowest single check (bounded by healthCheckTimeout),
+// not the sum of all three.
+func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID) []*managementv1.ProviderHealth {
+	checks := []func(context.Context, uuid.UUID) *managementv1.ProviderHealth{
+		s.healthLLM,
+		s.healthTTS,
+		s.healthDiscord,
 	}
-	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
+	providers := make([]*managementv1.ProviderHealth, len(checks))
+	var wg sync.WaitGroup
+	for i, check := range checks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			providers[i] = check(ctx, tenantID)
+		}()
+	}
+	wg.Wait()
+	return providers
 }
 
 // healthLLM pings Groq with the decrypted LLM key.
