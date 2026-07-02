@@ -324,11 +324,55 @@ func assertPanics(t *testing.T, desc string, fn func()) {
 	fn()
 }
 
+// TestMatcher_ConcurrentHeadRemoveNeverTransfersNameScore pins the snapshot
+// consistency of one TargetMatch pass (#145): the fuzzy index and the roster it
+// is scored against must be captured together. Removing the HEAD agent (Alice,
+// index 0) mid-match reindexes the survivor (Bob) down into Alice's old slot;
+// if the pass scored a pre-Remove index against the post-Remove roster, Bob
+// would inherit Alice's perfect name score and answer an utterance that named
+// a departed NPC. With only the NameMatch heuristic configured, the sole legal
+// outcomes are "Alice" (pre-Remove snapshot) or nobody (post-Remove snapshot)
+// — never Bob.
+func TestMatcher_ConcurrentHeadRemoveNeverTransfersNameScore(t *testing.T) {
+	alice := address.Agent{
+		Target:  voiceevent.AddressTarget{AgentID: "npc-alice", AgentRole: "character", Name: "Alice"},
+		Aliases: []string{"the herbalist", "keeper of the grove"},
+	}
+	bob := address.Agent{
+		Target:  voiceevent.AddressTarget{AgentID: "npc-bob", AgentRole: "character", Name: "Bob"},
+		Aliases: []string{"the blacksmith", "warden of the gate"},
+	}
+	// Padding words widen the scoring pass so a concurrent Remove has a real
+	// window to land in.
+	const utter = "alice would you kindly tell the whole table what really happened at the old stone bridge last night before the rain came down"
+
+	for i := 0; i < 2000; i++ {
+		m := address.NewMatcher(address.Config{
+			Language:   "en",
+			Heuristics: []address.Heuristic{address.NameMatch{Weight: 1.0, Threshold: 0.6}},
+		}, alice, bob)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.Remove("npc-alice")
+		}()
+		got := m.TargetMatch(utter)
+		wg.Wait()
+
+		for _, r := range got {
+			if r.Target.AgentID == "npc-bob" {
+				t.Fatalf("iteration %d: concurrent head Remove transferred Alice's name score to Bob: routed %v", i, routedIDs(got))
+			}
+		}
+	}
+}
+
 // TestMatcher_ConcurrentUse exercises the matcher's locking: many goroutines
 // route, feed interruptions, and churn the roster at once. Run under
 // `go test -race` it pins that the shared conversational state stays guarded and
-// that the lock-free index read sees a consistent index across a concurrent
-// rebuild.
+// that a scoring pass sees a consistent index across a concurrent rebuild.
 func TestMatcher_ConcurrentUse(t *testing.T) {
 	m := address.NewMatcher(address.Config{Language: "en", MaxTargets: -1}, butler, bart)
 	var wg sync.WaitGroup

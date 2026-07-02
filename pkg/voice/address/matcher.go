@@ -3,7 +3,6 @@ package address
 import (
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -119,10 +118,6 @@ func DefaultHeuristics() []Heuristic {
 // use; the bus delivers events synchronously but possibly from different
 // goroutines.
 type Matcher struct {
-	// index is read lock-free by TargetMatch and swapped wholesale by Add/Remove
-	// under m.mu, so a concurrent roster rebuild never tears a scoring pass.
-	index atomic.Pointer[fuzzyIndex]
-
 	nameMatch  NameMatchConfig // retained to rebuild the index on roster changes
 	enc        Encoder         // retained to rebuild the index on roster changes
 	heuristics []Heuristic
@@ -132,7 +127,12 @@ type Matcher struct {
 	maxWords   int
 	clock      func() time.Time
 
-	mu            sync.Mutex
+	mu sync.Mutex
+	// index is rebuilt by Add/Remove in lockstep with agents, and TargetMatch
+	// reads both under the same mutex, so one scoring pass always sees a
+	// mutually consistent index/roster pair (#145): a departed Agent's name
+	// score can never land on a survivor reindexed into its slot.
+	index         *fuzzyIndex
 	agents        []Agent
 	lastAddressed map[string]bool
 	interruptions map[string]time.Time
@@ -203,7 +203,7 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 		lastAddressed: map[string]bool{},
 		interruptions: map[string]time.Time{},
 	}
-	m.index.Store(m.buildIndex())
+	m.index = m.buildIndex()
 	return m
 }
 
@@ -230,9 +230,9 @@ func (m *Matcher) NoteInterruption(agentID string) {
 }
 
 // Add inserts agents into the live roster so they become addressable mid-Voice
-// Session (a Character NPC joining the scene). It rebuilds and atomically swaps
-// the fuzzy index so a concurrent [Matcher.TargetMatch] keeps scoring against a
-// consistent index throughout. It panics if any Agent has an empty
+// Session (a Character NPC joining the scene). It rebuilds and swaps the fuzzy
+// index under the matcher's mutex so a concurrent [Matcher.TargetMatch] keeps
+// scoring against a consistent index/roster pair. It panics if any Agent has an empty
 // Target.AgentID or an AgentID already on the roster (or duplicated within the
 // same call): a roster that cannot uniquely name its targets is a wiring error,
 // matching [NewMatcher]'s contract. Adding nothing is a no-op.
@@ -264,7 +264,7 @@ func (m *Matcher) Add(agents ...Agent) {
 // leaving the scene) and prunes their continuation and interruption state so a
 // later turn never resurrects a departed Agent. Unknown agentIDs are ignored.
 // Removing every Agent is allowed: the matcher then routes to nobody. It
-// rebuilds and atomically swaps the fuzzy index like [Matcher.Add].
+// rebuilds and swaps the fuzzy index under the mutex like [Matcher.Add].
 func (m *Matcher) Remove(agentIDs ...string) {
 	if len(agentIDs) == 0 {
 		return
@@ -292,14 +292,14 @@ func (m *Matcher) Remove(agentIDs ...string) {
 }
 
 // reindexLocked reassigns each Agent's index to its new slice position and swaps
-// in a freshly built fuzzy index. Caller holds m.mu. The index Store is atomic,
-// so TargetMatch's lock-free read always sees a whole index — the old one until
-// the swap, the new one after, never a half-built one.
+// in a freshly built fuzzy index. Caller holds m.mu — the same mutex TargetMatch
+// scores under — so index and roster change together and a scoring pass never
+// pairs one rebuild's index with another's roster (#145).
 func (m *Matcher) reindexLocked() {
 	for i := range m.agents {
 		m.agents[i].index = i
 	}
-	m.index.Store(m.buildIndex())
+	m.index = m.buildIndex()
 }
 
 // TargetMatch scores text against every Agent and returns the addressed set,
@@ -307,11 +307,15 @@ func (m *Matcher) reindexLocked() {
 func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 	now := m.clock()
 	words := tokenize(text)
-	// Read the index lock-free: Add/Remove swap it atomically, so this scoring
-	// pass sees one consistent index even across a concurrent rebuild.
-	nameScores := m.index.Load().scoreAll(words)
 
 	m.mu.Lock()
+
+	// Score the index in the same critical section as the roster it is scored
+	// against: reading it before the lock could pair a pre-Remove index with a
+	// post-Remove roster and hand one agent's name score to the survivor
+	// reindexed into its slot (#145). nameScores stays keyed by m.agents
+	// positions only because index and roster come from one snapshot.
+	nameScores := m.index.scoreAll(words)
 
 	m.pruneLocked(now)
 	m.recordWordsLocked(words, now)
