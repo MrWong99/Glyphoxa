@@ -82,6 +82,14 @@ type VoiceServer struct {
 	// now is the health cache's clock; tests advance it past the TTL.
 	now func() time.Time
 
+	// sessionActive reports whether a live voice session is running (#150):
+	// the Discord health check then short-circuits to healthy without touching
+	// Discord — the session on the same token IS the health signal, and a probe
+	// would race its reconnects for the per-token IDENTIFY budget. nil (not
+	// wired, e.g. web-only mode has no in-process loop to consult) means the
+	// probe always runs.
+	sessionActive func() bool
+
 	// healthMu guards healthCache: one TTL-cached GetProviderHealth result per
 	// tenant (#150). Each entry carries its own mutex, held across a probe, so
 	// concurrent RPCs on an expired entry serialize instead of stampeding the
@@ -116,6 +124,22 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		botTag:      func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
 		now:         time.Now,
 		healthCache: map[uuid.UUID]*healthEntry{},
+	}
+}
+
+// activeSessionSource reports the live voice session, if any.
+// *session.Manager satisfies it; tests drive a fake.
+type activeSessionSource interface {
+	Snapshot() (storage.VoiceSession, bool)
+}
+
+// SetSessions wires the live session source the Discord health check consults
+// (#150). Called once at boot, after the session manager exists and before the
+// server serves, so no lock is needed.
+func (s *VoiceServer) SetSessions(src activeSessionSource) {
+	s.sessionActive = func() bool {
+		_, active := src.Snapshot()
+		return active
 	}
 }
 
@@ -335,8 +359,16 @@ func (s *VoiceServer) healthTTS(ctx context.Context, tenantID uuid.UUID) *manage
 	return healthy("elevenlabs")
 }
 
-// healthDiscord performs a live gateway login and reports the resolved bot tag.
+// healthDiscord proves the Bot token via REST (GET /users/@me, no gateway
+// IDENTIFY — #150) and reports the resolved bot tag. While a voice session is
+// active the check short-circuits to healthy without touching Discord: the
+// live session runs on the same token, so it IS the health signal.
 func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+	if s.sessionActive != nil && s.sessionActive() {
+		h := healthy("discord")
+		h.Detail = "live voice session active"
+		return h
+	}
 	token, err := s.resolveDiscordToken(ctx, tenantID)
 	if err != nil {
 		return degraded("discord", err)

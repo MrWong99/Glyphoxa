@@ -335,7 +335,11 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 	// model allowlist, and the async provider-health signal — all via the
 	// decrypted tenant key (ADR-0004 credential bridge). Appended last so the
 	// existing mounts keep their order.
-	voicePath, voiceHandler := rpc.NewVoiceServer(store, cipher, log).Handler(stack.HandlerOptions()...)
+	voiceSrv := rpc.NewVoiceServer(store, cipher, log)
+	// While a session is live, the Discord health check short-circuits to
+	// healthy off the manager's Snapshot instead of touching Discord (#150).
+	voiceSrv.SetSessions(mgr)
+	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{

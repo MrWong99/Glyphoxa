@@ -442,3 +442,44 @@ func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
 		t.Errorf("counts after TTL expiry = %v, want each vendor probed again (2)", got)
 	}
 }
+
+// fakeSessions is an activeSessionSource whose Snapshot reports a live voice
+// session iff active is true.
+type fakeSessions struct{ active bool }
+
+func (f *fakeSessions) Snapshot() (storage.VoiceSession, bool) {
+	return storage.VoiceSession{}, f.active
+}
+
+// TestGetProviderHealth_ActiveSessionSkipsDiscordProbe pins #150: while a voice
+// session is active, the Discord check short-circuits to healthy WITHOUT
+// touching Discord — the live session (on the same token) IS the health signal,
+// and a probe would race its reconnects for the per-token IDENTIFY budget.
+func TestGetProviderHealth_ActiveSessionSkipsDiscordProbe(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.SetSessions(&fakeSessions{active: true})
+
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	if got := seams.discord.Load(); got != 0 {
+		t.Errorf("discord probed %d times during an active session, want 0", got)
+	}
+	for _, p := range resp.Msg.GetProviders() {
+		if p.GetProvider() == "discord" && p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+			t.Errorf("discord should report healthy during an active session: %+v", p)
+		}
+	}
+	// The other two providers are still probed for real.
+	if got := seams.llm.Load(); got != 1 {
+		t.Errorf("llm probes = %d, want 1", got)
+	}
+	if got := seams.lister.Load(); got != 1 {
+		t.Errorf("tts probes = %d, want 1", got)
+	}
+}
