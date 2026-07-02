@@ -6,6 +6,7 @@ package transcript
 // a write forever (per-write deadline).
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
@@ -155,5 +157,54 @@ func TestServeEvents_StalledClientReleasedWithinWriteDeadline(t *testing.T) {
 
 	waitFor(t, 5*time.Second,
 		"stalled client still holds its subscriber: frame write never timed out",
+		func() bool { return r.subscriberCount() == 0 })
+}
+
+// TestServeEvents_StalledH2CClientReleasedWithinWriteDeadline pins the #148
+// Defect B caveat: SetWriteDeadline must be honored under the web tier's h2c
+// setup (internal/web.NewServer, http.Protocols SetUnencryptedHTTP2), not just
+// on a plain HTTP/1.1 conn. An h2 client that never reads the response body
+// stops replenishing its flow-control window, so the server's DATA writes
+// block on flow control — the bundled HTTP/2 server's per-stream write
+// deadline must fail that write and release the handler.
+func TestServeEvents_StalledH2CClientReleasedWithinWriteDeadline(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	r.writeTimeout = 250 * time.Millisecond
+
+	srv := web.NewServer(web.Config{
+		Addr:   "127.0.0.1:0",
+		Mounts: []web.Mount{{Path: "/api/v1/sessions/", Handler: eventsMux(r)}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("start web server: %v", err)
+	}
+	t.Cleanup(func() { cancel(); srv.Wait() })
+
+	bus.Publish(voiceevent.STTFinal{At: at(0), Text: "warm", TurnID: "w"})
+
+	// Prior-knowledge h2c client, mirroring the gRPC lane of the web tier.
+	protos := new(http.Protocols)
+	protos.SetUnencryptedHTTP2(true)
+	client := &http.Client{Transport: &http.Transport{Protocols: protos}}
+	resp, err := client.Get("http://" + srv.Addr() + "/api/v1/sessions/" + id + "/events")
+	if err != nil {
+		t.Fatalf("h2c get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("want HTTP/2 (h2c), got %s", resp.Proto)
+	}
+	// Deliberately never read resp.Body: the stream's flow-control window is
+	// never replenished and the server's writes block once it is exhausted.
+
+	waitFor(t, 2*time.Second, "SSE handler never attached over h2c", func() bool {
+		return r.subscriberCount() == 1
+	})
+
+	floodBigFrames(bus)
+
+	waitFor(t, 5*time.Second,
+		"stalled h2c client still holds its subscriber: SetWriteDeadline not honored under h2c",
 		func() bool { return r.subscriberCount() == 0 })
 }
