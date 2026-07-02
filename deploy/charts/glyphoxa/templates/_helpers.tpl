@@ -131,6 +131,13 @@ migration has finished and the schema is current.
 The DB connection URL. When the operator sets database.url it wins verbatim
 (external Postgres); otherwise the chart assembles a DSN against the in-cluster
 Postgres Service so the host can never drift from the Service name.
+
+User and password are percent-encoded (#151): the raw values also feed
+POSTGRES_USER/POSTGRES_PASSWORD, so any URL-reserved character Postgres happily
+accepts would otherwise make the DSN unparseable (or parse to the wrong
+credential) for the migrate hook and the app. urlquery leaves alphanumerics
+untouched, so default-style credentials render exactly as before. Host and DB
+name come from the chart, not operator free-text, and stay unescaped.
 */}}
 {{- define "glyphoxa.databaseURL" -}}
 {{- if .Values.database.url -}}
@@ -138,6 +145,6 @@ Postgres Service so the host can never drift from the Service name.
 {{- else -}}
 {{- $host := include "glyphoxa.postgres.fullname" . -}}
 {{- $port := .Values.postgres.service.port | int -}}
-{{- printf "postgres://%s:%s@%s:%d/%s?sslmode=%s" .Values.database.user .Values.database.password $host $port .Values.database.name .Values.database.sslmode -}}
+{{- printf "postgres://%s:%s@%s:%d/%s?sslmode=%s" (.Values.database.user | urlquery) (.Values.database.password | urlquery) $host $port .Values.database.name .Values.database.sslmode -}}
 {{- end -}}
 {{- end }}
