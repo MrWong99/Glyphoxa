@@ -1,0 +1,16 @@
+# Values for the CI schema-validation render ONLY (scripts/helm-validate.sh).
+# The chart has `required` values with no defaults (appSecret + the voice
+# credentials/IDs), so a bare `helm template` fails by design; this file
+# supplies syntactically valid placeholders so the render succeeds and
+# kubeconform has manifests to validate. Nothing here is a real credential and
+# nothing here is ever deployed.
+appSecret: "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=" # base64 of 32 dummy bytes
+discordBotToken: "ci-dummy-discord-bot-token"
+elevenLabsApiKey: "ci-dummy-elevenlabs-api-key"
+geminiApiKey: "ci-dummy-gemini-api-key"
+groqApiKey: "ci-dummy-groq-api-key"
+voice:
+  # Quoted strings, not numbers — snowflakes exceed float64 precision and the
+  # glyphoxa.voice.snowflake helper rejects non-string values.
+  guild: "111111111111111111"
+  channel: "222222222222222222"
