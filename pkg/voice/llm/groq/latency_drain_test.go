@@ -10,6 +10,7 @@ package groq_test
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,26 @@ func failureKind(err error) string {
 	default:
 		return "call-failed"
 	}
+}
+
+// failSummary formats a per-tier failure count for the summary, kinds sorted
+// for a stable log line: "n=3 (provider-error=2 truncated=1)".
+func failSummary(byKind map[string]int) string {
+	var n int
+	kinds := make([]string, 0, len(byKind))
+	for k, c := range byKind {
+		n += c
+		kinds = append(kinds, k)
+	}
+	if n == 0 {
+		return "n=0"
+	}
+	sort.Strings(kinds)
+	parts := make([]string, len(kinds))
+	for i, k := range kinds {
+		parts[i] = fmt.Sprintf("%s=%d", k, byKind[k])
+	}
+	return fmt.Sprintf("n=%d (%s)", n, strings.Join(parts, " "))
 }
 
 // drainStream consumes one completion stream and classifies the outcome. It
@@ -166,5 +187,18 @@ func TestFailureKind_BucketsByCause(t *testing.T) {
 		if got := failureKind(tc.err); got != tc.want {
 			t.Errorf("failureKind(%v): want %q, got %q", tc.err, tc.want, got)
 		}
+	}
+}
+
+// The summary reports failures separately from the latency distribution:
+// total count plus a deterministic per-kind breakdown.
+func TestFailSummary_CountsByKind(t *testing.T) {
+	if got := failSummary(nil); got != "n=0" {
+		t.Errorf("no failures: want %q, got %q", "n=0", got)
+	}
+	got := failSummary(map[string]int{"truncated": 1, "provider-error": 2})
+	want := "n=3 (provider-error=2 truncated=1)"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
 	}
 }
