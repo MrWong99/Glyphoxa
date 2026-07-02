@@ -8,19 +8,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "helm-validate-test: [1/3] gate passes on the real chart with the CI values"
+echo "helm-validate-test: [1/4] gate passes on the real chart with the CI values"
 scripts/helm-validate.sh
 
-echo "helm-validate-test: [2/3] gate fails when the render fails (missing required values)"
+echo "helm-validate-test: [2/4] gate fails when the render fails (missing required values)"
 if HELM_VALIDATE_VALUES=/dev/null scripts/helm-validate.sh >/dev/null 2>&1; then
   echo "helm-validate-test: FAIL — gate exited 0 although the render errored" >&2
   exit 1
 fi
 
-echo "helm-validate-test: [3/3] gate fails when the render is empty (0 resources)"
+echo "helm-validate-test: [3/4] gate fails when the render is empty (0 resources)"
 if HELM_VALIDATE_CHART=scripts/testdata/empty-chart HELM_VALIDATE_VALUES=/dev/null \
   scripts/helm-validate.sh >/dev/null 2>&1; then
   echo "helm-validate-test: FAIL — gate exited 0 although kubeconform saw no resources" >&2
+  exit 1
+fi
+
+echo "helm-validate-test: [4/4] gate fails when the DSN interpolates credentials without URL-escaping (#151)"
+if HELM_VALIDATE_CHART=scripts/testdata/unescaped-dsn-chart HELM_VALIDATE_VALUES=/dev/null \
+  scripts/helm-validate.sh >/dev/null 2>&1; then
+  echo "helm-validate-test: FAIL — gate exited 0 although the DSN does not round-trip a reserved-character password" >&2
   exit 1
 fi
 

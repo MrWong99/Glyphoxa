@@ -1,0 +1,7 @@
+# Defaults so the gate's in-cluster/external render paths succeed; the
+# dsn-roundtrip path overrides user/password with reserved characters.
+database:
+  user: glyphoxa
+  password: glyphoxa
+  name: glyphoxa
+  sslmode: disable
