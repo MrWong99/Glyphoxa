@@ -26,6 +26,16 @@
   margin: 0;
 }
 
+/* Inline save-failure cue under the key field, mirroring the agent editor's
+ * status treatment (#94 / #154). */
+.gx-secret__error {
+  display: block;
+  margin-top: var(--spacing-xs);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-danger);
+}
+
 .gx-secret__mask {
   letter-spacing: 0.18em;
   color: var(--text-subtle);
