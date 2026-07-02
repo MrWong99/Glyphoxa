@@ -411,8 +411,10 @@ func Run(ctx context.Context, cfg Config) error {
 // connectAndServe runs ONE connect-and-serve cycle: build the Discord client,
 // open the gateway, join the channel, assemble the pipeline, and pump audio
 // until ctx is cancelled or the connection drops. It calls connected() once the
-// join succeeds, which resets the caller's backoff so a long-lived session that
-// later drops reconnects promptly. Any error — or a clean return (a dropped
+// join succeeds, marking when serving began; the caller resets its backoff only
+// if the cycle then survives the healthy threshold (issue #141), so a
+// long-lived session that later drops reconnects promptly while a
+// join-then-immediate-fail cycle keeps backing off. Any error — or a clean return (a dropped
 // gateway often reports none) — flows back to runWithReconnect, which decides
 // whether to retry; only a cancelled ctx ends the loop.
 func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func()) error {
@@ -467,9 +469,10 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		return fmt.Errorf("wirenpc: join voice channel: %w", err)
 	}
 	defer sess.Close()
-	// The join succeeded: reset the reconnect backoff so a session that runs for
-	// a while and only later drops reconnects on the initial delay, not a delay
-	// grown by earlier connect failures (issue #44).
+	// The join succeeded: mark when serving began. runWithReconnect resets the
+	// backoff only if this cycle survives the healthy threshold (issue #141), so
+	// a session that serves for a while and later drops reconnects on the initial
+	// delay (issue #44) while a join-then-immediate-fail keeps backing off.
 	connected()
 	log.Info("joined voice channel", "guild", guild, "channel", channel, "npcs", npcNames(cfg.npcs))
 
