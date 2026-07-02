@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -369,5 +370,75 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	select {
 	case <-time.After(d):
 	case <-ctx.Done():
+	}
+}
+
+// countingHealthSeams wires all three provider seams to atomic counters so a
+// test can pin how often the vendors were actually touched.
+type countingHealthSeams struct {
+	lister, llm, discord atomic.Int64
+}
+
+func (c *countingHealthSeams) wire(srv *VoiceServer) {
+	srv.newLister = func(string) tts.VoiceLister {
+		c.lister.Add(1)
+		return &fakeLister{}
+	}
+	srv.pingLLM = func(context.Context, string) error {
+		c.llm.Add(1)
+		return nil
+	}
+	srv.botTag = func(context.Context, string) (string, error) {
+		c.discord.Add(1)
+		return "Glyphoxa#4823", nil
+	}
+}
+
+func (c *countingHealthSeams) counts() [3]int64 {
+	return [3]int64{c.lister.Load(), c.llm.Load(), c.discord.Load()}
+}
+
+// TestGetProviderHealth_CachedWithinTTL pins #150's server-side TTL cache: two
+// health calls within the TTL touch each vendor exactly once (the second is
+// served from cache), and after the TTL expires the vendors are probed again.
+func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+
+	// A controllable clock so the test advances past the TTL without sleeping.
+	now := time.Now()
+	srv.now = func() time.Time { return now }
+
+	ctx := tenantCtx() // ONE tenant: the cache is keyed per tenant
+	req := func() *managementv1.GetProviderHealthResponse {
+		t.Helper()
+		resp, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+		if err != nil {
+			t.Fatalf("GetProviderHealth: %v", err)
+		}
+		return resp.Msg
+	}
+
+	first := req()
+	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+		t.Fatalf("counts after first call = %v, want each vendor touched once", got)
+	}
+
+	second := req()
+	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+		t.Errorf("counts after second call within TTL = %v, want still 1 each (served from cache)", got)
+	}
+	if len(second.GetProviders()) != len(first.GetProviders()) {
+		t.Errorf("cached response shape differs: %v vs %v", second, first)
+	}
+
+	// Advance past the TTL: the next call probes the vendors again.
+	now = now.Add(healthCacheTTL + time.Second)
+	req()
+	if got := seams.counts(); got != [3]int64{2, 2, 2} {
+		t.Errorf("counts after TTL expiry = %v, want each vendor probed again (2)", got)
 	}
 }

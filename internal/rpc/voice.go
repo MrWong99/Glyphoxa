@@ -42,10 +42,15 @@ const defaultPreviewText = "Hello! I'm your voice for this campaign. Roll for in
 // when shorter.
 const previewTimeout = 15 * time.Second
 
-// healthCheckTimeout bounds each provider's health test-call (the Discord
-// gateway login is the slowest), so a hung provider degrades that one badge
-// instead of stalling the whole health probe.
+// healthCheckTimeout bounds each provider's health test-call, so a hung
+// provider degrades that one badge instead of stalling the whole health probe.
+// The checks run concurrently (#150), so this also bounds the whole RPC.
 const healthCheckTimeout = 12 * time.Second
+
+// healthCacheTTL is how long a GetProviderHealth result is served from the
+// server-side cache (#150). The SPA refires the RPC on every window focus;
+// within the TTL those refetches cost zero vendor calls.
+const healthCacheTTL = 60 * time.Second
 
 // voiceStore is the narrow read surface VoiceServer needs to resolve the tenant
 // BYOK keys. *storage.Store satisfies it; tests drive a fake.
@@ -70,9 +75,26 @@ type VoiceServer struct {
 	// pingLLM is the Groq liveness test-call (a real key -> nil). Defaults to a
 	// GET against the Groq models endpoint.
 	pingLLM func(ctx context.Context, apiKey string) error
-	// botTag performs a live Discord gateway login and returns the bot tag.
-	// Defaults to discordtag.Resolve.
+	// botTag proves the Discord token via REST (GET /users/@me — no gateway
+	// IDENTIFY, #150) and returns the bot tag. Defaults to discordtag.Resolve.
 	botTag func(ctx context.Context, token string) (string, error)
+
+	// now is the health cache's clock; tests advance it past the TTL.
+	now func() time.Time
+
+	// healthMu guards healthCache: one TTL-cached GetProviderHealth result per
+	// tenant (#150). Each entry carries its own mutex, held across a probe, so
+	// concurrent RPCs on an expired entry serialize instead of stampeding the
+	// vendors — the waiters are then served the fresh cache.
+	healthMu    sync.Mutex
+	healthCache map[uuid.UUID]*healthEntry
+}
+
+// healthEntry is one tenant's cached provider-health result.
+type healthEntry struct {
+	mu        sync.Mutex
+	at        time.Time // zero until the first probe lands
+	providers []*managementv1.ProviderHealth
 }
 
 var _ managementv1connect.VoiceServiceHandler = (*VoiceServer)(nil)
@@ -85,13 +107,15 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		log = slog.Default()
 	}
 	return &VoiceServer{
-		store:     store,
-		cipher:    cipher,
-		log:       log,
-		newLister: func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
-		newSynth:  func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
-		pingLLM:   livePingGroq,
-		botTag:    func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
+		store:       store,
+		cipher:      cipher,
+		log:         log,
+		newLister:   func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
+		newSynth:    func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
+		pingLLM:     livePingGroq,
+		botTag:      func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
+		now:         time.Now,
+		healthCache: map[uuid.UUID]*healthEntry{},
 	}
 }
 
@@ -217,6 +241,10 @@ func (s *VoiceServer) PreviewVoice(
 // tested status plus the resolved Discord bot tag. A provider with no resolvable
 // key (or a failing test-call) is reported degraded; the screen still renders
 // key-presence instantly and only upgrades the badge from this.
+//
+// The result is cached per tenant for healthCacheTTL (#150): the SPA refires
+// this RPC on every window focus, and within the TTL those refetches are
+// answered from cache without touching any vendor.
 func (s *VoiceServer) GetProviderHealth(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetProviderHealthRequest],
@@ -226,9 +254,35 @@ func (s *VoiceServer) GetProviderHealth(
 		return nil, err
 	}
 
-	return connect.NewResponse(&managementv1.GetProviderHealthResponse{
-		Providers: s.probeProviders(ctx, tenantID),
-	}), nil
+	e := s.healthEntry(tenantID)
+	// The entry lock is held across the probe: concurrent RPCs on a stale entry
+	// serialize, and the waiters are served the then-fresh cache below instead
+	// of stampeding the vendors.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.at.IsZero() && s.now().Sub(e.at) < healthCacheTTL {
+		return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: e.providers}), nil
+	}
+
+	// Probe detached from the request's cancellation (values, e.g. the tenant,
+	// survive): a focus-refetch the browser aborts mid-probe must not poison the
+	// cache with cancellation errors. Each check still bounds itself with
+	// healthCheckTimeout.
+	e.providers = s.probeProviders(context.WithoutCancel(ctx), tenantID)
+	e.at = s.now()
+	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: e.providers}), nil
+}
+
+// healthEntry returns tenantID's cache slot, creating it on first use.
+func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	e, ok := s.healthCache[tenantID]
+	if !ok {
+		e = &healthEntry{}
+		s.healthCache[tenantID] = e
+	}
+	return e
 }
 
 // probeProviders runs the three per-provider test-calls CONCURRENTLY (#150):
