@@ -332,18 +332,20 @@ jobs:
       - name: Helm unittest
         run: helm unittest deploy/charts/glyphoxa
 
-      # Render every value path the chart supports and schema-validate each.
-      # -strict rejects unknown fields; the in-cluster path (4 docs) and the
-      # external-DB path (postgres disabled, 2 docs) are both checked so neither
-      # render branch can regress into an invalid manifest.
+      # Render every value path the chart supports — with the CI dummy values
+      # (deploy/charts/glyphoxa/ci/ci-values.yaml): the chart has `required`
+      # values, so a bare render fails by design — and schema-validate each.
+      # scripts/helm-validate.sh renders to a file (a render error fails the
+      # gate directly) and requires a non-zero validated-resource count. The
+      # former inline pipes had no pipefail and kubeconform exits 0 on empty
+      # stdin, so this gate had validated zero manifests since #42 (#140).
       - name: Render + kubeconform
-        run: |
-          helm template glyphoxa deploy/charts/glyphoxa \
-            | kubeconform -strict -summary -kubernetes-version 1.30.0
-          helm template glyphoxa deploy/charts/glyphoxa \
-            --set postgres.enabled=false \
-            --set database.url='postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require' \
-            | kubeconform -strict -summary -kubernetes-version 1.30.0
+        run: scripts/helm-validate.sh
+
+      # The gate must itself be trusted: assert it fails on a failing render
+      # and on an empty render — the two silent-pass modes of #140.
+      - name: helm-validate self-test
+        run: scripts/helm-validate-test.sh
 
   e2e:
     name: deploy e2e (k3d smoke)

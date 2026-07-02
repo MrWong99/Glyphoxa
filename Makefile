@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint docker-build docker-smoke helm-lint helm-test helm-validate
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint docker-build docker-smoke helm-lint helm-test helm-validate helm-validate-test
 
 # Build voice engine
 build:
@@ -166,10 +166,14 @@ helm-lint:
 helm-test:
 	helm unittest $(HELM_CHART)
 
-# Render both value paths (in-cluster Postgres and external DB) and schema-check
-# each against the upstream Kubernetes schemas.
+# Render both value paths (in-cluster Postgres and external DB) with the CI
+# dummy values and schema-check each against the upstream Kubernetes schemas.
+# Delegates to scripts/helm-validate.sh, which fails on a render error and on
+# an empty render — the two modes the former inline pipes silently passed (#140).
 helm-validate:
-	helm template glyphoxa $(HELM_CHART) | kubeconform -strict -summary -kubernetes-version 1.30.0
-	helm template glyphoxa $(HELM_CHART) --set postgres.enabled=false \
-		--set database.url='postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require' \
-		| kubeconform -strict -summary -kubernetes-version 1.30.0
+	HELM_VALIDATE_CHART=$(HELM_CHART) scripts/helm-validate.sh
+
+# Self-test for the gate above: asserts helm-validate actually fails when the
+# render fails or is empty.
+helm-validate-test:
+	scripts/helm-validate-test.sh

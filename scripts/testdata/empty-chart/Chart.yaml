@@ -1,0 +1,6 @@
+# Fixture for scripts/helm-validate-test.sh: a chart with no templates renders
+# successfully but produces zero manifests — the case kubeconform exits 0 on,
+# which the gate's resource-count guard must catch (issue #140).
+apiVersion: v2
+name: empty-chart
+version: 0.0.0
