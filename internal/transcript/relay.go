@@ -228,12 +228,16 @@ func (r *Relay) project(e voiceevent.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	id := r.currentSessionID()
-	if id == "" {
+	// ONE Snapshot serves both the id comparison and the rollover's UUID/campaign
+	// capture (#149): the manager's mutex is independent of r.mu, so a second read
+	// could see the session already ended and leave the FKs pointing at the
+	// previous session (or uuid.Nil at process start).
+	vs, active := r.sessions.Snapshot()
+	if !active {
 		return // no active session — drop the event (ADR-0039)
 	}
-	if id != r.activeID {
-		r.rollover(id)
+	if vs.ID.String() != r.activeID {
+		r.rollover(vs)
 	}
 
 	switch ev := e.(type) {
@@ -317,17 +321,15 @@ func (r *Relay) currentSessionID() string {
 	return vs.ID.String()
 }
 
-// rollover starts a fresh buffer for a newly-active session id and seeds it with
-// the initial live/listening status frame, so a client connecting mid-session
-// replays a coherent state.
-func (r *Relay) rollover(id string) {
-	r.activeID = id
-	// Capture the typed session + campaign ids persistence needs as FKs (#74).
-	// During a rollover the snapshot is active, so this is the freshly-active row.
-	if vs, ok := r.sessions.Snapshot(); ok {
-		r.activeUUID = vs.ID
-		r.activeCampaignID = vs.CampaignID
-	}
+// rollover starts a fresh buffer for the newly-active session vs — the SAME
+// snapshot the caller compared ids against (#149), so the typed FKs persistence
+// needs can never belong to a different session than activeID — and seeds it
+// with the initial live/listening status frame, so a client connecting
+// mid-session replays a coherent state.
+func (r *Relay) rollover(vs storage.VoiceSession) {
+	r.activeID = vs.ID.String()
+	r.activeUUID = vs.ID
+	r.activeCampaignID = vs.CampaignID
 	r.buf = nil
 	r.lines = nil
 	r.turns = map[string]*turn{}
