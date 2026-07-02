@@ -362,6 +362,45 @@ func TestProviderDiscordSettings_TokenOnlySaveKeepsIDs(t *testing.T) {
 	}
 }
 
+// TestProviderDiscordSettings_EmptyIDsRejected documents the #142 decision for
+// present-but-empty IDs: REJECT with InvalidArgument (mirroring bot_token's
+// "must not be empty when provided") rather than treating "" as an explicit
+// clear. Clearing the IDs is not a supported operation — an empty ID only ever
+// reaches the wire by accident (e.g. the form saving before the config load
+// resolves), and accepting it would reopen the silent-wipe this issue fixes.
+func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
+	t.Parallel()
+	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	ctx := context.Background()
+
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+	})); err != nil {
+		t.Fatalf("save ids: %v", err)
+	}
+
+	for name, req := range map[string]*managementv1.SaveDiscordSettingsRequest{
+		"both empty":  {GuildId: strPtr(""), VoiceChannelId: strPtr("")},
+		"empty guild": {GuildId: strPtr(""), VoiceChannelId: strPtr("472093774421")},
+		"empty voice": {GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("")},
+		"guild only":  {GuildId: strPtr("472093001100")}, // partial presence = the other ID is empty
+	} {
+		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(req))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s: code = %v, want InvalidArgument", name, connect.CodeOf(err))
+		}
+	}
+
+	// The rejected saves left the stored IDs untouched.
+	resp, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("rejected save mutated ids: guild=%q voice=%q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 // TestProviderList_EnvPlaceholderIsKeyNeeded asserts the ADR-0039 seam: a

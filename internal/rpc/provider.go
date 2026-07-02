@@ -213,6 +213,16 @@ func (s *ProviderServer) SaveDiscordSettings(
 		return nil, err
 	}
 
+	// Validate the IDs before any write so a rejected request mutates nothing.
+	// Present-but-empty is REJECTED, not treated as a clear (mirrors bot_token's
+	// empty check): an empty ID only reaches the wire by accident — e.g. the form
+	// saving before the config load resolves — and clearing is unsupported (#142).
+	hasIDs := req.Msg.GuildId != nil || req.Msg.VoiceChannelId != nil
+	if hasIDs && (req.Msg.GetGuildId() == "" || req.Msg.GetVoiceChannelId() == "") {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("guild_id and voice_channel_id must both be non-empty when provided"))
+	}
+
 	var dep storage.DeploymentConfig
 
 	// Bot token first (when the client sent one), so the IDs upsert below returns
@@ -241,7 +251,7 @@ func (s *ProviderServer) SaveDiscordSettings(
 
 	// IDs only when present on the wire (mirrors the token's presence handling):
 	// a token-only save must never touch the stored IDs (#142).
-	if req.Msg.GuildId != nil || req.Msg.VoiceChannelId != nil {
+	if hasIDs {
 		dep, err = s.store.SaveDiscordChannels(ctx, tenantID, req.Msg.GetGuildId(), req.Msg.GetVoiceChannelId())
 		if err != nil {
 			s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
