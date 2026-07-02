@@ -183,6 +183,14 @@ type Relay struct {
 	// blocking so the send drops on overflow, and Finalize sends a flush barrier.
 	// nil when persistence is disabled (store == nil).
 	writeCh chan writeOp
+
+	// closing is closed by CloseStreams when the process begins its graceful
+	// shutdown: every open SSE tail returns so the connections go idle and the
+	// web tier's drain completes promptly (issue #138) — an SSE stream never
+	// goes idle on its own and would otherwise stall shutdown for the full
+	// grace period, only to be abandoned (not closed) at its expiry.
+	closing   chan struct{}
+	closeOnce sync.Once
 }
 
 // NewRelay subscribes to the bus once and returns a Relay ready to serve. The
@@ -199,6 +207,7 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 		log:      log,
 		turns:    map[string]*turn{},
 		subs:     map[*subscriber]struct{}{},
+		closing:  make(chan struct{}),
 	}
 	// One writer goroutine for the process drains the queue (#74). Only started
 	// when persistence is enabled, so the live-only relay keeps its single-state
@@ -287,6 +296,16 @@ func (r *Relay) project(e voiceevent.Event) {
 		r.turn(ev.TurnID).ended = true
 		r.setTyping(r.liveTyping())
 	}
+}
+
+// CloseStreams releases every open SSE tail — and makes any later ServeEvents
+// return right after its replay — so the connections go idle and the web tier's
+// graceful shutdown drains promptly (issue #138). Wired as the web server's
+// RegisterOnShutdown hook; net/http then closes the idled connections. The
+// browser's EventSource sees a clean stream end and reconnects into the
+// restarted process. Idempotent and safe from any goroutine.
+func (r *Relay) CloseStreams() {
+	r.closeOnce.Do(func() { close(r.closing) })
 }
 
 // currentSessionID returns the active session's id, or "" when idle.

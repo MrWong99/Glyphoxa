@@ -168,6 +168,59 @@ func TestSSE_ReplayThenLive(t *testing.T) {
 	}
 }
 
+// TestSSE_CloseStreamsEndsTail pins the shutdown hook (issue #138): CloseStreams
+// must make every open SSE tail return so the connections go idle and the web
+// tier's graceful drain completes promptly instead of waiting out the grace
+// period on never-idle streams. Idempotence matters because net/http runs
+// RegisterOnShutdown callbacks once per Shutdown call but tests and future
+// callers may close twice.
+func TestSSE_CloseStreamsEndsTail(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	relay := transcript.NewRelay(bus, fs, nil, nil)
+	srv := httptest.NewServer(mux(relay))
+	defer srv.Close()
+	id := fs.id.String()
+
+	// A live, idle tail: connected, replayed nothing new, now blocked streaming.
+	bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "hello", TurnID: "t1"})
+	ch, stop := connect(t, srv.URL, id, 0)
+	defer stop()
+	if l := nextLine(t, ch); l.Text != "hello" {
+		t.Fatalf("replayed line = %+v", l)
+	}
+
+	relay.CloseStreams()
+
+	// The handler returns → the response body ends → readFrames closes ch.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected the frame stream to end, got another frame")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE tail did not end after CloseStreams")
+	}
+
+	relay.CloseStreams() // idempotent: a second close must not panic
+
+	// A connection opened AFTER CloseStreams must not hang either: the tail
+	// returns immediately after the replay.
+	ch2, stop2 := connect(t, srv.URL, id, 0)
+	defer stop2()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-ch2:
+			if !ok {
+				return // stream ended, as required
+			}
+		case <-deadline:
+			t.Fatal("post-CloseStreams SSE connection did not end")
+		}
+	}
+}
+
 // TestSnapshotEndpoint returns the current lines + derived status as JSON.
 func TestSnapshotEndpoint(t *testing.T) {
 	bus := voiceevent.NewBus()
