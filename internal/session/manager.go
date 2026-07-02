@@ -57,12 +57,14 @@ var (
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
-// guild/channel (deployment config) and the voice_sessions lifecycle writes.
-// *storage.Store satisfies it; tests use a fake.
+// guild/channel (deployment config), the voice_sessions lifecycle writes, and
+// the boot-time orphan reconciliation (#143). *storage.Store satisfies it;
+// tests use a fake.
 type Store interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	CreateVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
 	EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error)
+	ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error)
 }
 
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
@@ -137,6 +139,27 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 // needed.
 func (m *Manager) SetTranscript(t TranscriptFinalizer) {
 	m.transcript = t
+}
+
+// ReconcileOrphans closes voice_sessions rows still marked 'running' that no
+// live loop owns (#143). Called once at boot, before any session can start: at
+// that point NO loop is live, so every 'running' row is an orphan — stranded by
+// a crash (kill -9 / OOM) or a failed end-write — and is marked ended with the
+// distinguishing storage.VoiceSessionReasonOrphaned. A web-only Manager
+// (enabled=false) never owns rows and skips: another process may be driving
+// voice against the same DB.
+func (m *Manager) ReconcileOrphans(ctx context.Context) error {
+	if !m.enabled {
+		return nil
+	}
+	n, err := m.store.ReconcileOrphanedVoiceSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("session: reconcile orphaned voice sessions: %w", err)
+	}
+	if n > 0 {
+		m.log.Warn("closed orphaned voice sessions left 'running' by a previous run", "count", n)
+	}
+	return nil
 }
 
 // Start launches the live voice loop for a campaign and records a running

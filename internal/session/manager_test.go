@@ -21,15 +21,16 @@ import (
 // (guild/channel source, #72) and records the voice_sessions Create/End calls so
 // the lifecycle can be asserted without Postgres.
 type fakeStore struct {
-	mu       sync.Mutex
-	dep      storage.DeploymentConfig
-	depErr   error
-	sessions map[uuid.UUID]storage.VoiceSession
-	created  int
-	ended    int
-	depReads int
-	tick     int
-	endErr   error // injected EndVoiceSession failure (#143 Defect A)
+	mu         sync.Mutex
+	dep        storage.DeploymentConfig
+	depErr     error
+	sessions   map[uuid.UUID]storage.VoiceSession
+	created    int
+	ended      int
+	depReads   int
+	reconciles int
+	tick       int
+	endErr     error // injected EndVoiceSession failure (#143 Defect A)
 }
 
 func newFakeStore() *fakeStore {
@@ -93,6 +94,31 @@ func (f *fakeStore) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount
 	vs.LineCount = lineCount
 	f.sessions[id] = vs
 	return vs, nil
+}
+
+// ReconcileOrphanedVoiceSessions mirrors the real store's boot reconciliation
+// (#143): every 'running' row flips to 'ended' with the orphaned end reason.
+func (f *fakeStore) ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconciles++
+	var n int64
+	for id, vs := range f.sessions {
+		if vs.Status != storage.VoiceSessionRunning {
+			continue
+		}
+		end := f.now()
+		reason := storage.VoiceSessionReasonOrphaned
+		vs.EndedAt = &end
+		vs.Status = storage.VoiceSessionEnded
+		vs.EndReason = &reason
+		f.sessions[id] = vs
+		n++
+	}
+	return n, nil
 }
 
 func (f *fakeStore) counts() (created, ended int) {
@@ -529,6 +555,55 @@ func TestStartAfterShutdownRefused(t *testing.T) {
 	case <-runner.started:
 		t.Error("loop spawned after Shutdown")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestReconcileOrphansAtStartup is #143's reconciliation: a row still 'running'
+// from a crashed process (kill -9 / OOM — no live loop owns it) is closed at
+// Manager startup, marked ended with the distinguishing orphaned reason, so
+// GetLatestVoiceSession stops mislabeling a dead session as live.
+func TestReconcileOrphansAtStartup(t *testing.T) {
+	store := newFakeStore()
+	orphan := storage.VoiceSession{
+		ID:         uuid.New(),
+		CampaignID: uuid.New(),
+		StartedAt:  time.Date(2026, 6, 27, 11, 0, 0, 0, time.UTC),
+		Status:     storage.VoiceSessionRunning,
+	}
+	store.mu.Lock()
+	store.sessions[orphan.ID] = orphan
+	store.mu.Unlock()
+
+	mgr := newManager(t, store, newBlockingRunner().run, true)
+	if err := mgr.ReconcileOrphans(context.Background()); err != nil {
+		t.Fatalf("ReconcileOrphans: %v", err)
+	}
+
+	store.mu.Lock()
+	row := store.sessions[orphan.ID]
+	store.mu.Unlock()
+	if row.Status != storage.VoiceSessionEnded || row.EndedAt == nil {
+		t.Errorf("orphaned row = %+v, want ended with ended_at", row)
+	}
+	if row.EndReason == nil || *row.EndReason != storage.VoiceSessionReasonOrphaned {
+		t.Errorf("orphaned row end_reason = %v, want %q", row.EndReason, storage.VoiceSessionReasonOrphaned)
+	}
+}
+
+// TestReconcileOrphansWebOnlySkips: a web-only Manager (enabled=false) never
+// created rows and must not touch ones another process may own — reconciliation
+// is a no-op there.
+func TestReconcileOrphansWebOnlySkips(t *testing.T) {
+	store := newFakeStore()
+	mgr := newManager(t, store, newBlockingRunner().run, false)
+	if err := mgr.ReconcileOrphans(context.Background()); err != nil {
+		t.Fatalf("ReconcileOrphans (web-only): %v", err)
+	}
+	store.mu.Lock()
+	reconciles := store.reconciles
+	store.mu.Unlock()
+	if reconciles != 0 {
+		t.Errorf("web-only reconciles = %d, want 0", reconciles)
 	}
 }
 

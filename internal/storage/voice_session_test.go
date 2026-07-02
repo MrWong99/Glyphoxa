@@ -85,6 +85,65 @@ func TestVoiceSessionLifecycle(t *testing.T) {
 	}
 }
 
+// TestReconcileOrphanedVoiceSessions is #143's boot reconciliation against a
+// real Postgres: a row stranded 'running' (crash / failed end-write) is closed
+// with ended_at + the distinguishing end_reason; a cleanly ended row keeps its
+// NULL end_reason; a second reconcile finds nothing (idempotent).
+func TestReconcileOrphanedVoiceSessions(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A cleanly ended session: reconciliation must not touch it.
+	clean, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession (clean): %v", err)
+	}
+	if _, err := st.EndVoiceSession(ctx, clean.ID, 3); err != nil {
+		t.Fatalf("EndVoiceSession (clean): %v", err)
+	}
+
+	// The orphan: still 'running', no live loop (this "process" just booted).
+	orphan, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession (orphan): %v", err)
+	}
+
+	n, err := st.ReconcileOrphanedVoiceSessions(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedVoiceSessions: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("reconciled = %d, want 1", n)
+	}
+
+	got, err := st.GetVoiceSession(ctx, orphan.ID)
+	if err != nil {
+		t.Fatalf("GetVoiceSession (orphan): %v", err)
+	}
+	if got.Status != storage.VoiceSessionEnded || got.EndedAt == nil {
+		t.Errorf("orphan after reconcile = %+v, want ended with ended_at", got)
+	}
+	if got.EndReason == nil || *got.EndReason != storage.VoiceSessionReasonOrphaned {
+		t.Errorf("orphan end_reason = %v, want %q", got.EndReason, storage.VoiceSessionReasonOrphaned)
+	}
+
+	// The clean end stays distinguishable: end_reason NULL.
+	cleanGot, err := st.GetVoiceSession(ctx, clean.ID)
+	if err != nil {
+		t.Fatalf("GetVoiceSession (clean): %v", err)
+	}
+	if cleanGot.EndReason != nil {
+		t.Errorf("clean end_reason = %q, want NULL", *cleanGot.EndReason)
+	}
+
+	// Idempotent: nothing left to close.
+	if n, err := st.ReconcileOrphanedVoiceSessions(ctx); err != nil || n != 0 {
+		t.Errorf("second reconcile = %d, %v; want 0, nil", n, err)
+	}
+}
+
 // TestEndVoiceSessionNotFound asserts ending an unknown id is ErrNotFound (the
 // RPC maps it accordingly).
 func TestEndVoiceSessionNotFound(t *testing.T) {

@@ -15,12 +15,12 @@ import (
 // thin and domain-neutral, mirroring the rest of the storage layer.
 
 const voiceSessionColumns = `
-	id, campaign_id, started_at, ended_at, status, line_count`
+	id, campaign_id, started_at, ended_at, status, line_count, end_reason`
 
 func scanVoiceSession(row pgx.Row) (VoiceSession, error) {
 	var v VoiceSession
 	err := row.Scan(
-		&v.ID, &v.CampaignID, &v.StartedAt, &v.EndedAt, &v.Status, &v.LineCount,
+		&v.ID, &v.CampaignID, &v.StartedAt, &v.EndedAt, &v.Status, &v.LineCount, &v.EndReason,
 	)
 	return v, err
 }
@@ -59,6 +59,24 @@ func (s *Store) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int
 		return VoiceSession{}, fmt.Errorf("storage: end voice session %s: %w", id, err)
 	}
 	return v, nil
+}
+
+// ReconcileOrphanedVoiceSessions closes every Voice Session row still marked
+// 'running' — at startup no live loop exists, so any such row is an orphan from
+// a crash or a failed end-write (#143). Each is stamped ended_at=now(),
+// status='ended' and the distinguishing VoiceSessionReasonOrphaned end_reason
+// (a clean end leaves end_reason NULL). Returns how many rows were closed.
+// Called by the SessionManager at boot, before any session can start.
+func (s *Store) ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE voice_sessions
+		    SET ended_at = now(), status = $1, end_reason = $2
+		  WHERE status = $3`,
+		VoiceSessionEnded, VoiceSessionReasonOrphaned, VoiceSessionRunning)
+	if err != nil {
+		return 0, fmt.Errorf("storage: reconcile orphaned voice sessions: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // GetVoiceSession loads one Voice Session by id, or ErrNotFound.
