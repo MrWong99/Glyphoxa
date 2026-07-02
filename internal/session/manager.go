@@ -85,10 +85,14 @@ type LoopRunner func(ctx context.Context, cfg wirenpc.Config) error
 
 // activeSession is the Manager's record of the one running session: the cancel
 // func that unwinds its loop, the voice_sessions row, and a done channel closed
-// once the loop has exited and the ended_at write has landed.
+// once the loop has exited and the ended_at write has landed (or failed —
+// endErr carries that failure so Stop reports it instead of a stale success,
+// #143 Defect A). session/endErr are written before close(done) and read only
+// after <-done, so done is the synchronization point.
 type activeSession struct {
 	campaignID uuid.UUID
 	session    storage.VoiceSession
+	endErr     error
 	cancel     context.CancelFunc
 	done       chan struct{}
 }
@@ -245,6 +249,10 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 
 	m.mu.Lock()
 	if err != nil {
+		// The row is still 'running' in the DB. Remember the failure so a waiting
+		// Stop surfaces it (#143 Defect A); the startup reconciliation repairs the
+		// row on the next boot. Still clear the active slot — the loop is gone.
+		as.endErr = fmt.Errorf("session: end voice session %s: %w", as.session.ID, err)
 		m.log.Error("end voice session", "err", err, "voice_session", as.session.ID)
 	} else {
 		as.session = ended
@@ -256,9 +264,11 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 }
 
 // Stop cancels the active session's loop and waits for it to end, returning the
-// ended voice_sessions row. ErrNoActiveSession when nothing is running. If ctx is
-// cancelled while waiting, it returns ctx.Err() — the loop still unwinds in the
-// background.
+// ended voice_sessions row. ErrNoActiveSession when nothing is running. If the
+// ended_at write failed, Stop returns the row's true (still-'running') state
+// WITH the failure — never a plain success carrying status='running' (#143). If
+// ctx is cancelled while waiting, it returns ctx.Err() — the loop still unwinds
+// in the background.
 func (m *Manager) Stop(ctx context.Context) (storage.VoiceSession, error) {
 	m.mu.Lock()
 	as := m.active
@@ -270,8 +280,8 @@ func (m *Manager) Stop(ctx context.Context) (storage.VoiceSession, error) {
 	as.cancel()
 	select {
 	case <-as.done:
-		// done closes after runLoop set as.session to the ended row; safe to read.
-		return as.session, nil
+		// done closes after runLoop set as.session/as.endErr; safe to read.
+		return as.session, as.endErr
 	case <-ctx.Done():
 		return storage.VoiceSession{}, ctx.Err()
 	}

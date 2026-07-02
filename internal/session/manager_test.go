@@ -29,6 +29,7 @@ type fakeStore struct {
 	ended    int
 	depReads int
 	tick     int
+	endErr   error // injected EndVoiceSession failure (#143 Defect A)
 }
 
 func newFakeStore() *fakeStore {
@@ -78,6 +79,9 @@ func (f *fakeStore) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.endErr != nil {
+		return storage.VoiceSession{}, f.endErr
+	}
 	f.ended++
 	vs, ok := f.sessions[id]
 	if !ok {
@@ -448,6 +452,37 @@ func TestSlowFinalizeStillEndsRow(t *testing.T) {
 	store.mu.Unlock()
 	if row.Status != storage.VoiceSessionEnded {
 		t.Errorf("stored row status = %q, want ended (end-write must get a fresh deadline)", row.Status)
+	}
+}
+
+// TestStopSurfacesEndWriteFailure is #143 Defect A: when the EndVoiceSession
+// write fails, Stop must NOT report plain success carrying the stale 'running'
+// row — the caller sees the failure (previously it was log-only and StopSession
+// answered success with status='running').
+func TestStopSurfacesEndWriteFailure(t *testing.T) {
+	store := newFakeStore()
+	endErr := errors.New("db down at stop time")
+	store.mu.Lock()
+	store.endErr = endErr
+	store.mu.Unlock()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	got, err := mgr.Stop(context.Background())
+	if err == nil {
+		t.Fatalf("Stop = %+v with nil error, want the end-write failure surfaced", got)
+	}
+	if !errors.Is(err, endErr) {
+		t.Errorf("Stop error = %v, want the underlying end-write failure in the chain", err)
 	}
 }
 
