@@ -7,10 +7,53 @@ package transcript
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
+
+// subscriberCount is a test-only probe for the live subscriber set.
+func (r *Relay) subscriberCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.subs)
+}
+
+// waitFor polls cond until it holds or the bound expires.
+func waitFor(t *testing.T, bound time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
+// eventsMux mounts ServeEvents the way production does (cmd/glyphoxa/main.go).
+func eventsMux(r *Relay) *http.ServeMux {
+	m := http.NewServeMux()
+	m.HandleFunc("GET /api/v1/sessions/{id}/events", r.ServeEvents)
+	return m
+}
+
+// floodBigFrames publishes enough oversized line frames to overrun any socket
+// buffer between the handler and a non-reading client, guaranteeing the
+// handler ends up parked inside a frame write. ~19MB total, far past loopback
+// send+receive buffering.
+func floodBigFrames(bus *voiceevent.Bus) {
+	big := strings.Repeat("x", 64<<10)
+	for i := 0; i < 300; i++ {
+		bus.Publish(voiceevent.STTFinal{At: at(i), Text: big, TurnID: fmt.Sprintf("t%d", i)})
+	}
+}
 
 // TestLaggedDrop_StrictPrefixAndLosslessReplay (#148 Defect A): after frame X
 // is dropped for a slow subscriber, the connection must deliver a strict
@@ -81,4 +124,36 @@ func TestLaggedDrop_StrictPrefixAndLosslessReplay(t *testing.T) {
 			t.Fatalf("replay after seq %d does not contain the dropped frame %d", last, dropped)
 		}
 	}
+}
+
+// TestServeEvents_StalledClientReleasedWithinWriteDeadline (#148 Defect B):
+// a client that stops reading (laptop sleep, TCP zero-window) must not park
+// the SSE handler inside a write forever. With a per-write deadline the
+// blocked write fails, the handler exits and its subscriber entry is cleaned
+// up within a bounded time. Real server + raw TCP client that never reads.
+func TestServeEvents_StalledClientReleasedWithinWriteDeadline(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	r.writeTimeout = 250 * time.Millisecond
+	srv := httptest.NewServer(eventsMux(r))
+	defer srv.Close()
+
+	bus.Publish(voiceevent.STTFinal{At: at(0), Text: "warm", TurnID: "w"})
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET /api/v1/sessions/%s/events HTTP/1.1\r\nHost: stalled\r\n\r\n", id)
+	// Deliberately never read from conn: OS buffers fill, server writes block.
+
+	waitFor(t, 2*time.Second, "SSE handler never attached", func() bool {
+		return r.subscriberCount() == 1
+	})
+
+	floodBigFrames(bus)
+
+	waitFor(t, 5*time.Second,
+		"stalled client still holds its subscriber: frame write never timed out",
+		func() bool { return r.subscriberCount() == 0 })
 }

@@ -184,6 +184,11 @@ type Relay struct {
 	// nil when persistence is disabled (store == nil).
 	writeCh chan writeOp
 
+	// writeTimeout bounds each SSE frame write/flush (#148 Defect B): a client
+	// that stops reading makes the blocked write fail instead of parking the
+	// handler forever. Defaults to defaultWriteTimeout; tests shrink it.
+	writeTimeout time.Duration
+
 	// closing is closed by CloseStreams when the process begins its graceful
 	// shutdown: every open SSE tail returns so the connections go idle and the
 	// web tier's drain completes promptly (issue #138) — an SSE stream never
@@ -202,12 +207,13 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 		log = slog.Default()
 	}
 	r := &Relay{
-		sessions: sessions,
-		store:    store,
-		log:      log,
-		turns:    map[string]*turn{},
-		subs:     map[*subscriber]struct{}{},
-		closing:  make(chan struct{}),
+		sessions:     sessions,
+		store:        store,
+		log:          log,
+		turns:        map[string]*turn{},
+		subs:         map[*subscriber]struct{}{},
+		writeTimeout: defaultWriteTimeout,
+		closing:      make(chan struct{}),
 	}
 	// One writer goroutine for the process drains the queue (#74). Only started
 	// when persistence is enabled, so the live-only relay keeps its single-state

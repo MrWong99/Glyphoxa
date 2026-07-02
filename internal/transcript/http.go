@@ -5,7 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 )
+
+// defaultWriteTimeout bounds each SSE frame write/flush (#148 Defect B). Big
+// enough for any live client on a bad link to drain one frame; small enough
+// that a stalled reader releases its handler well within an operator's
+// patience and does not pin the graceful shutdown drain.
+const defaultWriteTimeout = 5 * time.Second
 
 // subscriber is one live SSE connection's fan-out channel. id is the session it
 // subscribed to: only frames for the matching active session are delivered, so a
@@ -75,11 +82,11 @@ func (r *Relay) detach(s *subscriber) {
 // disconnects, falls too far behind, or the process begins its graceful shutdown
 // (CloseStreams — issue #138).
 func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	fw := r.newFrameWriter(w)
 	id := req.PathValue("id")
 
 	h := w.Header()
@@ -90,15 +97,18 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 	// frames flush promptly.
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	if err := fw.flush(); err != nil {
+		return
+	}
 
 	s, replay := r.attach(id, lastEventID(req))
 	defer r.detach(s)
 
 	for _, f := range replay {
-		writeFrame(w, f)
+		if err := fw.write(f); err != nil {
+			return
+		}
 	}
-	flusher.Flush()
 
 	ctx := req.Context()
 	for {
@@ -110,8 +120,9 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 		case <-s.lagged:
 			return
 		case f := <-s.ch:
-			writeFrame(w, f)
-			flusher.Flush()
+			if err := fw.write(f); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -130,11 +141,70 @@ func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// writeFrame serializes one SSE frame: an id/event/data triple terminated by a
-// blank line. Data is single-line JSON (json.Marshal never emits a raw newline),
-// so no multi-line data folding is needed.
-func writeFrame(w http.ResponseWriter, f Frame) {
-	fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", f.Seq, f.Event, f.Data)
+// frameWriter writes SSE frames bounded by a per-write deadline (#148 Defect
+// B): each write/flush is armed with writeTimeout via
+// http.ResponseController.SetWriteDeadline, so a client that stops reading
+// (laptop sleep, TCP zero-window, exhausted h2c flow-control window) makes the
+// blocked write fail — the handler exits and its subscriber is cleaned up —
+// instead of parking the goroutine in Write forever, where the lagged escape
+// can never fire. Both production paths honor the deadline (HTTP/1.1 conn
+// deadline; the bundled HTTP/2 server's per-stream write deadline under the
+// web tier's h2c Protocols setup — pinned by the h2c hardening test).
+type frameWriter struct {
+	w         http.ResponseWriter
+	rc        *http.ResponseController
+	timeout   time.Duration
+	deadlines bool // writer supports SetWriteDeadline
+}
+
+// newFrameWriter probes deadline support once so an exotic wrapped writer
+// degrades LOUDLY (a warning, unbounded writes) rather than silently killing
+// the stream on its first frame.
+func (r *Relay) newFrameWriter(w http.ResponseWriter) *frameWriter {
+	fw := &frameWriter{w: w, rc: http.NewResponseController(w), timeout: r.writeTimeout, deadlines: true}
+	if err := fw.rc.SetWriteDeadline(time.Time{}); err != nil {
+		fw.deadlines = false
+		r.log.Warn("transcript: response writer does not support write deadlines; stalled-client protection disabled", "err", err)
+	}
+	return fw
+}
+
+// write serializes one SSE frame — an id/event/data triple terminated by a
+// blank line — and flushes it, all under one armed write deadline. Data is
+// single-line JSON (json.Marshal never emits a raw newline), so no multi-line
+// data folding is needed. The deadline is disarmed after a successful flush:
+// the tail can sit idle between frames indefinitely, and under h2c an armed
+// deadline is a stream-reset timer that fires even with no write pending.
+func (fw *frameWriter) write(f Frame) error {
+	if err := fw.arm(time.Now().Add(fw.timeout)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(fw.w, "id: %d\nevent: %s\ndata: %s\n\n", f.Seq, f.Event, f.Data); err != nil {
+		return err
+	}
+	if err := fw.rc.Flush(); err != nil {
+		return err
+	}
+	return fw.arm(time.Time{})
+}
+
+// flush pushes buffered bytes (the response headers) under a write deadline.
+func (fw *frameWriter) flush() error {
+	if err := fw.arm(time.Now().Add(fw.timeout)); err != nil {
+		return err
+	}
+	if err := fw.rc.Flush(); err != nil {
+		return err
+	}
+	return fw.arm(time.Time{})
+}
+
+// arm sets (or clears, for the zero time) the write deadline when supported.
+func (fw *frameWriter) arm(t time.Time) error {
+	if !fw.deadlines {
+		return nil
+	}
+	return fw.rc.SetWriteDeadline(t)
 }
 
 // lastEventID reads the browser's resume cursor from the Last-Event-ID header
