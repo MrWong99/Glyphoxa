@@ -34,6 +34,11 @@ const (
 	testSampleRate    = 16000
 	testFrameMs       = 32
 	testHangoverTicks = 20 // > silero's default 15-frame hangover, so silence endpoints
+
+	// discordStopSilenceFrames is the ~5 explicit Opus silence frames a Discord
+	// sender emits when the speaker stops, before it stops sending packets — the
+	// speaker-stop signal on the wire (disgo's own sender does the same).
+	discordStopSilenceFrames = 5
 )
 
 // stubRecognizer returns a pinned transcript regardless of input, so a flushed
@@ -245,6 +250,73 @@ func TestPipeline_ContinuousSpeechInjectsNoSilence(t *testing.T) {
 	}
 	if got := codec.decodeCount(); got != len(frames) {
 		t.Errorf("decoded %d frames, want %d (every real frame)", got, len(frames))
+	}
+}
+
+// TestPipeline_ArrivalGapMidUtteranceDoesNotEndpoint is issue #147: a transport
+// jitter gap ≥ the VAD hangover in the MIDDLE of a continuous utterance — packet
+// ARRIVAL pauses, but stream time is continuous (contiguous PTS) and Discord sent
+// NO silence frames, so the speaker did not stop — must not endpoint the turn.
+// The silence clock keys on wall-clock arrival, so pre-fix the gap ticks inject
+// ≥ hangover silence frames, silero fires speech_end mid-word, and the resumed
+// speech becomes a second turn (starts=2). Post-fix the clock is armed only by
+// Discord's explicit silence frames (the speaker-stop signal), so the gap injects
+// nothing and the utterance stays ONE turn, endpointed once at the genuine stop.
+func TestPipeline_ArrivalGapMidUtteranceDoesNotEndpoint(t *testing.T) {
+	conv, h, all := newSilenceRig(t, "hello there")
+	// The hello-test clip VAD-splits at an internal pause; slice to its second,
+	// single utterance (speech from ~frame 61 to the clip end, left open) so "one
+	// turn" is unambiguous. Probed with silero at this exact rig geometry.
+	frames := all[46:]
+	gapAt := 85 - 46 // mid-speech: well after speech-start (~61), well before clip end
+	codec := &replayCodec{frames: frames}
+	clk := &fakeSilenceClock{ch: make(chan time.Time)}
+	pipe := NewPipeline(conv, codec, nil, "guild", nil,
+		withSilenceClock(testSampleRate, testFrameMs, func() silenceClock { return clk }))
+
+	inbound := make(chan gxvoice.Frame)
+	done := make(chan error, 1)
+	go func() { done <- pipe.run(t.Context(), inbound) }()
+
+	// pts models Discord's 20 ms packet cadence: contiguous across the arrival
+	// gap (the packets were delayed, not part of a speaker stop).
+	pts := func(i int) time.Duration { return time.Duration(i) * 20 * time.Millisecond }
+	for i := range frames[:gapAt] {
+		inbound <- gxvoice.Frame{PTS: pts(i), Sequence: uint32(i)}
+	}
+	// The jitter gap: no packets ARRIVE for ≥ the hangover, but no Discord
+	// silence frames were seen — the speaker did not stop. The clock must not
+	// advance the VAD here.
+	for range testHangoverTicks {
+		clk.tick()
+	}
+	// Speech resumes: stream time contiguous with the pre-gap frames.
+	for i := range frames[gapAt:] {
+		j := gapAt + i
+		inbound <- gxvoice.Frame{PTS: pts(j), Sequence: uint32(j)}
+	}
+	// The genuine stop: Discord's explicit silence frames, then the packet gap
+	// the clock endpoints through (the #91 shape).
+	for range discordStopSilenceFrames {
+		inbound <- gxvoice.Frame{Silence: true}
+	}
+	for range testHangoverTicks {
+		clk.tick()
+	}
+	close(inbound)
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	starts, ends, finals := eventCounts(h)
+	if starts != 1 {
+		t.Errorf("speech_start=%d, want 1: a mid-utterance arrival gap with continuous PTS and no Discord silence frames must not split the turn", starts)
+	}
+	if ends != 1 {
+		t.Errorf("speech_end=%d, want 1: exactly one endpoint, at the genuine speaker stop", ends)
+	}
+	if finals != 1 {
+		t.Errorf("STTFinal=%d, want 1: the utterance must reach STT as one turn", finals)
 	}
 }
 
