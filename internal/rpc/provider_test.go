@@ -295,8 +295,8 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 	const token = "test-discord-bot-token-3333"
 	saveTok, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
 		BotToken:       &[]string{token}[0],
-		GuildId:        "472093001100",
-		VoiceChannelId: "472093774421",
+		GuildId:        strPtr("472093001100"),
+		VoiceChannelId: strPtr("472093774421"),
 	}))
 	if err != nil {
 		t.Fatalf("save discord: %v", err)
@@ -314,7 +314,7 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 
 	// IDs-only save (no bot_token) must not wipe the token.
 	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: "999", VoiceChannelId: "888",
+		GuildId: strPtr("999"), VoiceChannelId: strPtr("888"),
 	})); err != nil {
 		t.Fatalf("save ids: %v", err)
 	}
@@ -327,6 +327,42 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 		t.Errorf("ids not updated: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
 	}
 }
+
+// TestProviderDiscordSettings_TokenOnlySaveKeepsIDs pins #142: replacing the
+// bot token without sending the IDs must leave the stored Guild / Voice channel
+// IDs untouched — the exact clobber that wiped them when the client saved a
+// token while ListProviderConfigs was still loading.
+func TestProviderDiscordSettings_TokenOnlySaveKeepsIDs(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	client, _ := newProviderClient(t, store, testCipher(t))
+	ctx := context.Background()
+
+	// Operator has IDs saved.
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+	})); err != nil {
+		t.Fatalf("save ids: %v", err)
+	}
+
+	// Token-only save: no ID fields on the wire.
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		BotToken: strPtr("test-discord-bot-token-7777"),
+	})); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	resp, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("token-only save clobbered ids: guild=%q voice=%q, want them untouched",
+			resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // TestProviderList_EnvPlaceholderIsKeyNeeded asserts the ADR-0039 seam: a
 // provider_config still holding the seed's "env" placeholder reads as key-needed,
