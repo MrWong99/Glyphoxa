@@ -30,6 +30,8 @@
 package openaicompat
 
 import (
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -144,6 +146,52 @@ func defaultHTTPClient() *http.Client {
 	}
 }
 
+// errStreamBudget is the read error [budgetBody] returns once a response body
+// exceeds maxStreamBytes. It surfaces through the SDK's SSE decoder as a stream
+// read error, which [Client.streamEvents] reports as a terminal [llm.EventError]
+// — the same surface as any other mid-stream failure.
+var errStreamBudget = fmt.Errorf("response body exceeded %d bytes", maxStreamBytes)
+
+// budgetTransport wraps an [http.RoundTripper] and caps every response body at
+// maxStreamBytes raw bytes. The cap must live BELOW the SDK: openai-go's
+// Stream.Next drains everything after a [DONE] sentinel inside its own loop
+// without returning to the caller, so a hostile gateway that sends [DONE] first
+// and then floods frames forever would bypass any guard in the adapter's chunk
+// loop. A transport-level limit cannot be bypassed — it also bounds shapes the
+// decoder never surfaces as chunks, such as one endless unterminated data: line.
+type budgetTransport struct{ base http.RoundTripper }
+
+func (t budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = &budgetBody{rc: resp.Body, remaining: maxStreamBytes}
+	return resp, nil
+}
+
+// budgetBody is an [io.LimitedReader]-style body that returns errStreamBudget
+// (instead of io.EOF) once remaining is exhausted, so the SDK's decoder sees a
+// hard read error rather than a clean end of stream.
+type budgetBody struct {
+	rc        io.ReadCloser
+	remaining int64
+}
+
+func (b *budgetBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		return 0, errStreamBudget
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.rc.Read(p)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+func (b *budgetBody) Close() error { return b.rc.Close() }
+
 // New constructs a [Client] from opts. The API key is taken verbatim from
 // [WithAPIKey] (the preset resolves it from the provider env var first); an empty
 // key links fine and surfaces a missing-key error at [Client.Complete] time. The
@@ -161,10 +209,21 @@ func New(opts ...Option) *Client {
 		opt(s)
 	}
 
+	// The raw-byte stream budget rides on the transport (see budgetTransport) so
+	// it cannot be bypassed by SSE shapes the SDK never surfaces as chunks. A
+	// caller-supplied client is shallow-copied before its transport is wrapped.
 	httpClient := s.httpClient
 	if httpClient == nil {
 		httpClient = defaultHTTPClient()
+	} else {
+		clone := *httpClient
+		httpClient = &clone
 	}
+	base := httpClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	httpClient.Transport = budgetTransport{base: base}
 
 	// Both the key and the base URL are pinned unconditionally so the SDK's
 	// env-derived defaults (OPENAI_API_KEY / OPENAI_BASE_URL) can never override

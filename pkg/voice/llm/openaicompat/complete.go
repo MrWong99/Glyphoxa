@@ -13,20 +13,24 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 )
 
-// maxStreamBytes caps the approximate raw size of one completion: every chunk's
-// JSON counts against it in full, whether or not it decodes to content — so
-// zero-content frames from a misbehaving or hostile WithBaseURL gateway consume
-// budget too. A voice turn's reply is a few KiB; 16 MiB is far past any
-// legitimate completion. The SDK owns the SSE framing, so the exact wire bytes
-// are not visible here; each chunk's re-serialized JSON ([openai.ChatCompletionChunk.RawJSON])
-// is the closest approximation, and it is never smaller than the decoded content
-// and tool-argument bytes it carries — so the old decoded-content cap is subsumed.
+// maxStreamBytes caps the raw bytes of one completion's response body. The cap
+// is enforced BELOW the SDK, on the HTTP transport (see budgetTransport in
+// openaicompat.go): every wire byte counts, whether or not the SDK ever surfaces
+// it as a chunk — so a hostile or misbehaving WithBaseURL gateway cannot dodge
+// it with zero-content frames, a post-[DONE] flood the SDK drains internally, or
+// one endless unterminated data: line. A voice turn's reply is a few KiB; 16 MiB
+// is far past any legitimate completion. This restores the raw-byte guard the
+// hand-rolled SSE reader had before ADR-0037 handed the framing to the SDK.
+// streamEvents additionally counts each decoded chunk's re-serialized JSON
+// ([openai.ChatCompletionChunk.RawJSON]) against the same budget as defense in
+// depth.
 const maxStreamBytes = 16 * 1024 * 1024
 
-// maxStreamChunks caps the number of chunks in one completion so a flood of tiny
-// zero-content frames — which would erode the byte budget only slowly — still
-// terminates promptly. A legitimate completion streams roughly one chunk per
-// token plus a handful of bookkeeping frames, orders of magnitude below this.
+// maxStreamChunks caps the number of decoded chunks in one completion so a flood
+// of tiny zero-content frames — which would erode the byte budget only slowly —
+// terminates promptly with a specific error. A legitimate completion streams
+// roughly one chunk per token plus a handful of bookkeeping frames, orders of
+// magnitude below this.
 const maxStreamChunks = 100_000
 
 // Complete implements [llm.Provider]. It opens a streaming chat/completions
@@ -254,10 +258,11 @@ func (c *Client) streamEvents(ctx context.Context, stream *ssestream.Stream[open
 		return true
 	}
 
-	// The stream budget counts EVERY received chunk — its approximate raw size
-	// (the chunk's JSON) against maxStreamBytes and its count against
-	// maxStreamChunks — so a hostile endpoint can neither grow memory without
-	// limit nor pin the connection open with an endless zero-content flood.
+	// Defense in depth behind the transport-level raw-byte cap (budgetTransport,
+	// which bounds even streams the SDK drains without surfacing chunks): every
+	// decoded chunk also counts — its re-serialized JSON against maxStreamBytes
+	// and its count against maxStreamChunks — so a zero-content chunk flood trips
+	// a specific budget error here long before the transport cap.
 	var totalBytes, totalChunks int
 
 	for stream.Next() {

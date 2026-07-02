@@ -610,6 +610,62 @@ func TestComplete_HostileChunkFlood_EmitsBudgetError(t *testing.T) {
 	}
 }
 
+// TestComplete_DoneThenFlood_EmitsBudgetError pins the budget below the SDK: a
+// hostile gateway sends the [DONE] sentinel FIRST and then floods choice-less
+// frames forever without closing. openai-go's Stream.Next sets done=true on the
+// sentinel and silently drains every later event inside its own loop — it never
+// returns to the adapter, so any guard in the adapter's chunk loop is bypassed.
+// The raw-byte cap on the transport's response body must still terminate the
+// stream with a terminal [llm.EventError] in bounded time.
+func TestComplete_DoneThenFlood_EmitsBudgetError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("data: [DONE]\n\n")); err != nil {
+			return
+		}
+		frame := []byte(sse(`{"choices":[]}`))
+		for {
+			if _, err := w.Write(frame); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // unblocks the streaming goroutine if the budget never trips
+
+	c := newClient(srv.URL)
+	ch, err := c.Complete(ctx, llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	deadline := time.After(15 * time.Second)
+	var last llm.StreamEvent
+	for open := true; open; {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				open = false
+				break
+			}
+			last = ev
+		case <-deadline:
+			t.Fatal("stream did not terminate within 15s — post-[DONE] flood bypassed the budget")
+		}
+	}
+	if last.Type != llm.EventError {
+		t.Fatalf("last event = %+v, want EventError from the stream budget", last)
+	}
+	if !strings.Contains(last.Err, "exceeded") {
+		t.Errorf("EventError %q does not name the exceeded budget", last.Err)
+	}
+}
+
 // TestComplete_OversizedContentStream_EmitsBudgetError pins the other half of the
 // stream budget: a stream whose decoded content exceeds the byte cap (here 17 MiB
 // of content against the 16 MiB budget) terminates with a terminal
