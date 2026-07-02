@@ -114,6 +114,104 @@ func TestServerRoutesConnectThenShutsDown(t *testing.T) {
 	}
 }
 
+// TestServerAPINamespace404s pins the /api/ fence (#153): any method on an
+// /api/... path no handler claims must get a plain 404 — never the SPA's
+// 200+index.html (which sends EventSource into a reconnect loop and turns
+// version-skewed Connect calls into misleading errors) and never a file-server
+// 405. Real mounts keep winning: the Connect handler and the {id}-wildcard SSE
+// route resolve exactly as before, and the SPA still owns non-API routes.
+func TestServerAPINamespace404s(t *testing.T) {
+	const rootBody = "<div id=\"root\"></div>"
+	root := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(rootBody))
+	})
+	sse := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := web.NewServer(web.Config{
+		Addr: "127.0.0.1:0",
+		Mounts: []web.Mount{
+			mountFake(t, fakeCampaignService{campaign: &managementv1.Campaign{Name: "Lost Mine"}}),
+			{Path: "GET /api/v1/sessions/{id}/events", Handler: sse},
+		},
+		Root: root,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		srv.Wait()
+	})
+	base := "http://" + srv.Addr()
+
+	// Unmounted /api/... paths — including the empty-wildcard SSE shape a
+	// malformed EventSource URL produces — must 404 with a non-HTML body, for
+	// GET and POST alike.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/nope"},
+		{http.MethodPost, "/api/v1/nope"},
+		{http.MethodPost, "/api/glyphoxa.management.v1.GhostService/Call"},
+		{http.MethodGet, "/api/v1/sessions//events"},
+	} {
+		req, err := http.NewRequest(tc.method, base+tc.path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest %s %s: %v", tc.method, tc.path, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s %s: status=%d, want 404", tc.method, tc.path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+			t.Errorf("%s %s: Content-Type=%q, want non-HTML", tc.method, tc.path, ct)
+		}
+		if strings.Contains(string(body), rootBody) {
+			t.Errorf("%s %s: body is the SPA shell %q, want a 404 body", tc.method, tc.path, body)
+		}
+	}
+
+	// The {id}-wildcard SSE route still resolves past the fence.
+	resp, err := http.Get(base + "/api/v1/sessions/" + uuid.NewString() + "/events")
+	if err != nil {
+		t.Fatalf("GET SSE route: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Errorf("SSE route: status=%d Content-Type=%q, want 200 text/event-stream", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+
+	// The Connect mount still resolves past the fence.
+	client := managementv1connect.NewCampaignServiceClient(
+		http.DefaultClient, base+"/api", connect.WithProtoJSON(),
+	)
+	if _, err := client.GetActiveCampaign(
+		context.Background(),
+		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}),
+	); err != nil {
+		t.Fatalf("GetActiveCampaign through the fence: %v", err)
+	}
+
+	// The SPA catch-all still owns non-API app routes.
+	spaResp, err := http.Get(base + "/t/foo/configuration")
+	if err != nil {
+		t.Fatalf("GET SPA route: %v", err)
+	}
+	spaBody, _ := io.ReadAll(spaResp.Body)
+	spaResp.Body.Close()
+	if spaResp.StatusCode != http.StatusOK || !strings.Contains(string(spaBody), rootBody) {
+		t.Errorf("SPA route: status=%d body=%q, want 200 + SPA root", spaResp.StatusCode, spaBody)
+	}
+}
+
 // TestServerSurfacesConnectErrorCodes proves the web server propagates Connect
 // status codes from the mounted handler over the wire, not just success bodies.
 func TestServerSurfacesConnectErrorCodes(t *testing.T) {

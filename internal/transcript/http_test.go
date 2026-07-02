@@ -249,6 +249,30 @@ func TestSnapshotEndpoint(t *testing.T) {
 	}
 }
 
+// TestSnapshotRejectsUnparseableID pins the #153 half owned by this handler: an
+// {id} that is not a UUID is a routing artifact (e.g. ServeMux path-cleaning
+// /api/v1/sessions//events into /api/v1/sessions/events, id="events"), never a
+// real session — it must be 404, not the empty idle view as 200 JSON, so a
+// malformed EventSource URL fails cleanly instead of reconnect-looping.
+func TestSnapshotRejectsUnparseableID(t *testing.T) {
+	bus := voiceevent.NewBus()
+	relay := transcript.NewRelay(bus, &fakeSessions{id: uuid.New(), active: true}, nil, nil)
+	srv := httptest.NewServer(mux(relay))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/sessions/events")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("snapshot for unparseable id: status=%d Content-Type=%q, want 404", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+		t.Fatalf("snapshot for unparseable id: Content-Type=%q, want non-HTML", ct)
+	}
+}
+
 // TestSnapshotIdle returns idle when no session is active.
 func TestSnapshotIdle(t *testing.T) {
 	bus := voiceevent.NewBus()

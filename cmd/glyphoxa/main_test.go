@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,74 @@ type staticSessions struct{ id uuid.UUID }
 
 func (s staticSessions) Snapshot() (storage.VoiceSession, bool) {
 	return storage.VoiceSession{ID: s.id}, true
+}
+
+// TestWebTierEmptyWildcardSessionPathEnds404 pins the #153 flagship case with
+// production mount parity (runWeb's plain mounts: the {id}/events SSE route AND
+// the {id} snapshot route, plus the SPA at "/"): GET /api/v1/sessions//events —
+// the empty {id} wildcard a malformed EventSource URL produces — is path-cleaned
+// by ServeMux into a redirect onto /api/v1/sessions/events, which the SNAPSHOT
+// route claims with id="events". The /api/ fence never sees the cleaned path, so
+// the snapshot handler itself must reject the unparseable id: a
+// redirect-following client must END at 404 with a non-HTML body, not the empty
+// idle view as 200 application/json. A valid-UUID unknown session keeps its
+// 200 JSON snapshot (the #74 reload contract).
+func TestWebTierEmptyWildcardSessionPathEnds404(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bus := voiceevent.NewBus()
+	relay := transcript.NewRelay(bus, staticSessions{id: uuid.New()}, nil, log)
+
+	const rootBody = "<div id=\"root\"></div>"
+	root := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(rootBody))
+	})
+
+	srv := web.NewServer(web.Config{
+		Addr: "127.0.0.1:0",
+		Mounts: []web.Mount{
+			{Path: "GET /api/v1/sessions/{id}/events", Handler: http.HandlerFunc(relay.ServeEvents)},
+			{Path: "GET /api/v1/sessions/{id}", Handler: http.HandlerFunc(relay.ServeSnapshot)},
+		},
+		Root:   root,
+		Logger: log,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		srv.Wait()
+	})
+	base := "http://" + srv.Addr()
+
+	resp, err := http.Get(base + "/api/v1/sessions//events") // follows the mux's clean-path redirect
+	if err != nil {
+		t.Fatalf("GET //events: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /api/v1/sessions//events ended at status=%d Content-Type=%q, want 404", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+		t.Errorf("GET /api/v1/sessions//events: Content-Type=%q, want non-HTML", ct)
+	}
+	if strings.Contains(string(body), rootBody) {
+		t.Errorf("GET /api/v1/sessions//events: body is the SPA shell %q", body)
+	}
+
+	// The snapshot contract for a well-formed id is untouched: a valid-UUID
+	// session (known or not) still gets its 200 JSON view.
+	snap, err := http.Get(base + "/api/v1/sessions/" + uuid.NewString())
+	if err != nil {
+		t.Fatalf("GET snapshot: %v", err)
+	}
+	snap.Body.Close()
+	if snap.StatusCode != http.StatusOK || snap.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("valid-UUID snapshot: status=%d Content-Type=%q, want 200 application/json", snap.StatusCode, snap.Header.Get("Content-Type"))
+	}
 }
 
 // TestRunWebTierClosesSSEStreamsOnShutdown is the end-to-end half of the issue
