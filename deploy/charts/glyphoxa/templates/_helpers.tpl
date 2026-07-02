@@ -135,9 +135,13 @@ Postgres Service so the host can never drift from the Service name.
 User and password are percent-encoded (#151): the raw values also feed
 POSTGRES_USER/POSTGRES_PASSWORD, so any URL-reserved character Postgres happily
 accepts would otherwise make the DSN unparseable (or parse to the wrong
-credential) for the migrate hook and the app. urlquery leaves alphanumerics
-untouched, so default-style credentials render exactly as before. Host and DB
-name come from the chart, not operator free-text, and stay unescaped.
+credential) for the migrate hook and the app. urlquery (Go's QueryEscape)
+encodes a SPACE as '+', but net/url userinfo decoding — what pgx uses — keeps
+'+' literal, so that one character must be re-encoded as %20; a literal '+' in
+the credential is already %2B at that point, so the replace can only ever hit
+an encoded space. urlquery leaves alphanumerics untouched, so default-style
+credentials render exactly as before. Host and DB name come from the chart,
+not operator free-text, and stay unescaped.
 */}}
 {{- define "glyphoxa.databaseURL" -}}
 {{- if .Values.database.url -}}
@@ -145,6 +149,8 @@ name come from the chart, not operator free-text, and stay unescaped.
 {{- else -}}
 {{- $host := include "glyphoxa.postgres.fullname" . -}}
 {{- $port := .Values.postgres.service.port | int -}}
-{{- printf "postgres://%s:%s@%s:%d/%s?sslmode=%s" (.Values.database.user | urlquery) (.Values.database.password | urlquery) $host $port .Values.database.name .Values.database.sslmode -}}
+{{- $user := .Values.database.user | urlquery | replace "+" "%20" -}}
+{{- $password := .Values.database.password | urlquery | replace "+" "%20" -}}
+{{- printf "postgres://%s:%s@%s:%d/%s?sslmode=%s" $user $password $host $port .Values.database.name .Values.database.sslmode -}}
 {{- end -}}
 {{- end }}
