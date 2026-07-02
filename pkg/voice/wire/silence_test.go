@@ -171,13 +171,14 @@ func eventCounts(h *voicetest.Harness) (starts, ends, finals int) {
 }
 
 // TestPipeline_TrailingSilenceEndpointsTrailingUtterance is the tracer bullet
-// (acceptance #1): an utterance followed by trailing silence — driven ONLY by the
-// injected clock, with NO further inbound audio — endpoints within the hangover
-// window. The clip leaves its final utterance open; firing the silence clock past
-// the hangover must close it (speech_end == speech_start) and produce its STTFinal,
-// in speech order. Before the fix the trailing silence was dropped, the trailing
-// utterance never endpointed, and its line appeared only when the next utterance
-// arrived (issue #91).
+// (acceptance #1): an utterance followed by a genuine speaker stop — Discord's
+// explicit silence frames, then NO further packets, the silence driven ONLY by
+// the injected clock — endpoints within the hangover window. The clip leaves its
+// final utterance open; the silence frames arm the clock (#147) and firing it
+// past the hangover must close the utterance (speech_end == speech_start) and
+// produce its STTFinal, in speech order. Before the #91 fix the trailing silence
+// was dropped, the trailing utterance never endpointed, and its line appeared
+// only when the next utterance arrived.
 func TestPipeline_TrailingSilenceEndpointsTrailingUtterance(t *testing.T) {
 	conv, h, frames := newSilenceRig(t, "hello there")
 	codec := &replayCodec{frames: frames}
@@ -190,8 +191,13 @@ func TestPipeline_TrailingSilenceEndpointsTrailingUtterance(t *testing.T) {
 	go func() { done <- pipe.run(t.Context(), inbound) }()
 
 	feedSpeech(inbound, frames)
-	// Trailing silence: fire the clock past the hangover with NO more inbound
-	// audio. Silero must endpoint the open utterance here, not wait for a second.
+	// The speaker stops: Discord's explicit silence frames (the speaker-stop
+	// signal that arms the clock), then a packet gap — fire the clock past the
+	// hangover with NO more inbound audio. Silero must endpoint the open
+	// utterance here, not wait for a second one.
+	for range discordStopSilenceFrames {
+		inbound <- gxvoice.Frame{Silence: true}
+	}
 	for range testHangoverTicks {
 		clk.tick()
 	}
