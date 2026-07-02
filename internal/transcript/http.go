@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // defaultWriteTimeout bounds each SSE frame write/flush (#148 Defect B). Big
@@ -132,8 +134,19 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 // for any other (ended) session it replays the persisted history from the DB with
 // status "idle" (#74, ADR-0040), so a reconnect / reload sees the transcript even
 // after the in-memory ring is gone.
+//
+// An id that does not parse as a UUID is 404, not the empty idle view (#153): it
+// can never name a session (live ids are uuid.UUID.String(), persisted ids are
+// UUID FKs) — it is a routing artifact, e.g. ServeMux path-cleaning the malformed
+// EventSource URL /api/v1/sessions//events into /api/v1/sessions/events, which
+// this route then claims with id="events". A 200 there would mask the broken URL.
 func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
-	view := r.snapshot(req.Context(), req.PathValue("id"))
+	id := req.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	view := r.snapshot(req.Context(), id)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
