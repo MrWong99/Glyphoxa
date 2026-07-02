@@ -70,7 +70,12 @@ func (f *fakeStore) CreateVoiceSession(_ context.Context, campaignID uuid.UUID) 
 	return vs, nil
 }
 
-func (f *fakeStore) EndVoiceSession(_ context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error) {
+func (f *fakeStore) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error) {
+	// A real EndVoiceSession fails on an expired context (#143 Defect B pins
+	// exactly that), so the fake honours ctx like pgx would.
+	if err := ctx.Err(); err != nil {
+		return storage.VoiceSession{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ended++
@@ -398,6 +403,51 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 	}
 	if id, called := fin.seen(); called != 1 || id != vs.ID {
 		t.Errorf("finalize seen id=%s called=%d, want id=%s called=1", id, called, vs.ID)
+	}
+}
+
+// slowFinalizer is a TranscriptFinalizer that consumes its ENTIRE context
+// budget (a flush barrier stuck behind slow line UPSERTs, #143 Defect B) and
+// returns the context error, like the relay would.
+type slowFinalizer struct{}
+
+func (slowFinalizer) Finalize(ctx context.Context, _ uuid.UUID) (int, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+// TestSlowFinalizeStillEndsRow is #143 Defect B: a Finalize that exhausts the
+// whole end budget must NOT hand EndVoiceSession an already-expired context —
+// the end-write gets its own fresh deadline, so the row still lands 'ended'.
+func TestSlowFinalizeStillEndsRow(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+	mgr.SetEndTimeoutForTest(50 * time.Millisecond)
+	mgr.SetTranscript(slowFinalizer{})
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	ended, err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ended.Status != storage.VoiceSessionEnded || ended.EndedAt == nil {
+		t.Errorf("stopped session = %+v, want ended with ended_at", ended)
+	}
+	store.mu.Lock()
+	row := store.sessions[vs.ID]
+	store.mu.Unlock()
+	if row.Status != storage.VoiceSessionEnded {
+		t.Errorf("stored row status = %q, want ended (end-write must get a fresh deadline)", row.Status)
 	}
 }
 

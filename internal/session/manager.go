@@ -102,7 +102,8 @@ type Manager struct {
 	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
 	log        *slog.Logger
-	enabled    bool // false in web-only mode: Start is rejected (ADR-0039)
+	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
+	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
 
 	mu     sync.Mutex
 	active *activeSession
@@ -122,7 +123,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled}
+	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled, endTimeout: endTimeout}
 }
 
 // SetTranscript wires the transcript finalizer the Manager calls on Stop / loop
@@ -214,24 +215,32 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		m.log.Error("voice session loop exited with error", "err", err, "voice_session", as.session.ID)
 	}
 
-	// The run ctx is cancelled on a Stop, so end the row on a detached, bounded
-	// context — otherwise the ended_at write would itself be cancelled.
-	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), endTimeout)
-	defer cancel()
+	// The run ctx is cancelled on a Stop, so both end steps run on detached,
+	// bounded contexts — otherwise the writes would themselves be cancelled.
+	base := context.WithoutCancel(ctx)
 
 	// Drain the live transcript's writer queue and read the authoritative count
 	// BEFORE ending the row, so line_count matches the persisted rows (#74). A
 	// finalize failure logs and falls back to the in-memory count rather than
-	// blocking the session from ending.
+	// blocking the session from ending. Finalize gets its OWN budget: its flush
+	// barrier can queue behind slow line UPSERTs and eat the whole deadline
+	// (#143 Defect B), and the end-write below must not inherit that.
 	lineCount := as.session.LineCount
 	if m.transcript != nil {
-		if n, ferr := m.transcript.Finalize(endCtx, as.session.ID); ferr != nil {
+		finCtx, finCancel := context.WithTimeout(base, m.endTimeout)
+		n, ferr := m.transcript.Finalize(finCtx, as.session.ID)
+		finCancel()
+		if ferr != nil {
 			m.log.Error("finalize transcript before end", "err", ferr, "voice_session", as.session.ID)
 		} else {
 			lineCount = n
 		}
 	}
 
+	// A FRESH deadline for the ended_at write, regardless of what Finalize
+	// consumed (#143): the row landing 'ended' is the invariant that matters.
+	endCtx, cancel := context.WithTimeout(base, m.endTimeout)
+	defer cancel()
 	ended, err := m.store.EndVoiceSession(endCtx, as.session.ID, lineCount)
 
 	m.mu.Lock()
