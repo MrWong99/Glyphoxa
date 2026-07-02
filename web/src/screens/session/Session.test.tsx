@@ -1,8 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { toast } from "sonner";
+
+// The screen surfaces mutation failures as toasts (ADR-0017: sonner). Mock the
+// module so the tests assert the surface without the portal DOM.
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn() },
+  Toaster: () => null,
+}));
 
 import {
   SessionService,
@@ -17,7 +25,7 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { MockEventSource } from "@/test/mockEventSource";
-import { Session, formatElapsed } from "./Session";
+import { Session, formatElapsed, sessionRefetchInterval, SESSION_REFETCH_MS } from "./Session";
 
 // An in-memory voice-session store served over a router transport (no network):
 // active/current/last mutate in this closure so Start → invalidate → refetch
@@ -82,6 +90,21 @@ describe("formatElapsed", () => {
     expect(formatElapsed(65)).toBe("00:01:05");
     expect(formatElapsed(3661)).toBe("01:01:01");
     expect(formatElapsed(-5)).toBe("00:00:00");
+  });
+});
+
+describe("sessionRefetchInterval (#144)", () => {
+  const query = (data?: { active: boolean }) => ({ state: { data } });
+
+  it("polls on a modest interval while a session is active", () => {
+    expect(sessionRefetchInterval(query({ active: true }))).toBe(SESSION_REFETCH_MS);
+    expect(SESSION_REFETCH_MS).toBeGreaterThanOrEqual(1000);
+    expect(SESSION_REFETCH_MS).toBeLessThanOrEqual(15000);
+  });
+
+  it("does not poll while idle or before the first read", () => {
+    expect(sessionRefetchInterval(query({ active: false }))).toBe(false);
+    expect(sessionRefetchInterval(query(undefined))).toBe(false);
   });
 });
 
@@ -197,6 +220,100 @@ describe("Session reload of an ended session (#74)", () => {
 
     // No live stream is opened for an ended session.
     expect(MockEventSource.last()).toBeUndefined();
+  });
+});
+
+// deadSessionTransport models issue #144's failure scenario: the loop died
+// server-side but the client's cached getSession still says active. Stop then
+// fails FailedPrecondition (no active session); the NEXT getSession returns the
+// ended truth. getSession calls are counted so invalidation is observable.
+function deadSessionTransport() {
+  const started = new Date(Date.now() - 90 * 60 * 1000);
+  const live = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "running",
+    startedAt: timestampFromDate(started),
+  });
+  const ended = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(started),
+    endedAt: timestampFromDate(new Date()),
+    lineCount: 12,
+  });
+  let gets = 0;
+  const transport = createRouterTransport(({ service }) => {
+    service(SessionService, {
+      // First read: the stale "active" the screen cached; later reads: the truth.
+      getSession: () =>
+        create(GetSessionResponseSchema, gets++ === 0 ? { session: live, active: true } : { session: ended, active: false }),
+      startSession: () => {
+        throw new ConnectError("session: Discord guild/channel not configured", Code.FailedPrecondition);
+      },
+      stopSession: () => {
+        throw new ConnectError("session: no active voice session", Code.FailedPrecondition);
+      },
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+  return { transport, getSessionCalls: () => gets };
+}
+
+describe("Session mutation failures (#144)", () => {
+  beforeEach(() => {
+    vi.mocked(toast.error).mockClear();
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ lines: [], status: "live", typing: { active: true, label: "Listening to the table…" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+  });
+
+  it("a failing Stop surfaces the error and re-syncs the badge off Live", async () => {
+    const { transport } = deadSessionTransport();
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // The stale cache says Live.
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+
+    // Stop hits ErrNoActiveSession (FailedPrecondition): the error surfaces and
+    // the invalidated query refetches the ended truth — the badge leaves Live.
+    fireEvent.click(screen.getByRole("button", { name: /stop session/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(String(vi.mocked(toast.error).mock.calls[0][0])).toMatch(/no active voice session/i);
+    expect(await screen.findByText("Idle")).toBeInTheDocument();
+  });
+
+  it("a failing Start surfaces the error and invalidates the session query", async () => {
+    const { transport, getSessionCalls } = deadSessionTransport();
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+
+    // Force the idle screen (second getSession read returns ended), then Start.
+    fireEvent.click(screen.getByRole("button", { name: /stop session/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /start session/i }));
+
+    await waitFor(() =>
+      expect(vi.mocked(toast.error).mock.calls.some(([m]) => /not configured/i.test(String(m)))).toBe(true),
+    );
+    // onError invalidated the session query: another getSession read happened
+    // after the failing Start (reads 1: mount, 2: post-Stop; >=3: post-Start).
+    await waitFor(() => expect(getSessionCalls()).toBeGreaterThanOrEqual(3));
   });
 });
 
