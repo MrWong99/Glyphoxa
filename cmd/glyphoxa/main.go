@@ -247,6 +247,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
 	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice)
+	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
+	// left 'running' (crash / failed end-write). No loop is live yet, so every
+	// such row is an orphan; done before the web tier serves so GetSession never
+	// reports a dead session as live. Web-only mode skips inside (it owns no
+	// rows). A failure here is a broken DB — fail the boot loudly.
+	if err := mgr.ReconcileOrphans(ctx); err != nil {
+		return fmt.Errorf("web: %w", err)
+	}
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
 	// process bus once and reads the active session from the manager (Snapshot).

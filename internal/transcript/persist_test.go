@@ -32,7 +32,11 @@ func (f *fakeLineStore) key(sid uuid.UUID, lid string) string { return sid.Strin
 func (f *fakeLineStore) UpsertTranscriptLine(_ context.Context, l storage.TranscriptLine) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.lines[f.key(l.VoiceSessionID, l.LineID)] = l
+	k := f.key(l.VoiceSessionID, l.LineID)
+	if prev, ok := f.lines[k]; ok {
+		l.Seq = prev.Seq // mirror the real UPSERT (#149): seq is fixed at insert time
+	}
+	f.lines[k] = l
 	return nil
 }
 
@@ -142,6 +146,75 @@ func TestSnapshot_EndedSessionReplaysFromDB(t *testing.T) {
 	}
 	if v.Lines[1].ID != "a:t1" || v.Lines[1].Kind != KindNPC || v.Lines[1].Tag != "NPC" || v.Lines[1].Text != "Well met. Sit." {
 		t.Errorf("line[1] = %+v, want coalesced NPC reply", v.Lines[1])
+	}
+}
+
+// funcSessions is a Sessions fake whose Snapshot answer the test scripts per
+// call — the tool for pinning interleavings where the session state changes
+// BETWEEN two Snapshot reads inside one projection.
+type funcSessions struct {
+	mu sync.Mutex
+	fn func() (storage.VoiceSession, bool)
+}
+
+func (f *funcSessions) set(fn func() (storage.VoiceSession, bool)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fn = fn
+}
+
+func (f *funcSessions) Snapshot() (storage.VoiceSession, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fn()
+}
+
+// TestPersist_RolloverTakesOneSnapshot is defect B of #149: the rollover must
+// use ONE sessions.Snapshot() for both the id comparison and the UUID/campaign
+// capture. Pinned interleaving: session A was live, session B replaces it, and
+// B ends between the event's projection (first Snapshot) and the rollover's
+// capture (the buggy second Snapshot). The triggering line must be attributed
+// to B — never to the previous session A and never to uuid.Nil.
+func TestPersist_RolloverTakesOneSnapshot(t *testing.T) {
+	bus := voiceevent.NewBus()
+	sessA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	sessB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	fs := &funcSessions{}
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+	ctx := context.Background()
+
+	// Session A live: one human line lands under A.
+	fs.set(func() (storage.VoiceSession, bool) { return sessA, true })
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hi from A", TurnID: "t1"})
+
+	// A ended, B started. B ends again mid-projection: the FIRST Snapshot of the
+	// next event sees B active, any LATER Snapshot sees no active session.
+	calls := 0
+	fs.set(func() (storage.VoiceSession, bool) {
+		calls++
+		if calls == 1 {
+			return sessB, true
+		}
+		return storage.VoiceSession{}, false
+	})
+	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "hi from B", TurnID: "t2"})
+
+	// Finalize's flush barrier rides the writer queue, so both lines are on disk.
+	if _, err := r.Finalize(ctx, sessB.ID); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	if nilLines, _ := store.ListTranscriptLines(ctx, uuid.Nil); len(nilLines) != 0 {
+		t.Errorf("line persisted under uuid.Nil: %+v", nilLines)
+	}
+	gotA, _ := store.ListTranscriptLines(ctx, sessA.ID)
+	if len(gotA) != 1 || gotA[0].Text != "hi from A" {
+		t.Errorf("session A lines = %+v, want exactly its own line (B's line must not leak into A's replay)", gotA)
+	}
+	gotB, _ := store.ListTranscriptLines(ctx, sessB.ID)
+	if len(gotB) != 1 || gotB[0].Text != "hi from B" || gotB[0].CampaignID != sessB.CampaignID {
+		t.Errorf("session B lines = %+v, want its line attributed to B's UUID + campaign", gotB)
 	}
 }
 

@@ -21,13 +21,16 @@ import (
 // (guild/channel source, #72) and records the voice_sessions Create/End calls so
 // the lifecycle can be asserted without Postgres.
 type fakeStore struct {
-	mu       sync.Mutex
-	dep      storage.DeploymentConfig
-	depErr   error
-	sessions map[uuid.UUID]storage.VoiceSession
-	created  int
-	ended    int
-	tick     int
+	mu         sync.Mutex
+	dep        storage.DeploymentConfig
+	depErr     error
+	sessions   map[uuid.UUID]storage.VoiceSession
+	created    int
+	ended      int
+	depReads   int
+	reconciles int
+	tick       int
+	endErr     error // injected EndVoiceSession failure (#143 Defect A)
 }
 
 func newFakeStore() *fakeStore {
@@ -48,6 +51,7 @@ func (f *fakeStore) now() time.Time {
 func (f *fakeStore) GetDeploymentConfig(_ context.Context, _ uuid.UUID) (storage.DeploymentConfig, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.depReads++
 	if f.depErr != nil {
 		return storage.DeploymentConfig{}, f.depErr
 	}
@@ -68,9 +72,17 @@ func (f *fakeStore) CreateVoiceSession(_ context.Context, campaignID uuid.UUID) 
 	return vs, nil
 }
 
-func (f *fakeStore) EndVoiceSession(_ context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error) {
+func (f *fakeStore) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error) {
+	// A real EndVoiceSession fails on an expired context (#143 Defect B pins
+	// exactly that), so the fake honours ctx like pgx would.
+	if err := ctx.Err(); err != nil {
+		return storage.VoiceSession{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.endErr != nil {
+		return storage.VoiceSession{}, f.endErr
+	}
 	f.ended++
 	vs, ok := f.sessions[id]
 	if !ok {
@@ -82,6 +94,31 @@ func (f *fakeStore) EndVoiceSession(_ context.Context, id uuid.UUID, lineCount i
 	vs.LineCount = lineCount
 	f.sessions[id] = vs
 	return vs, nil
+}
+
+// ReconcileOrphanedVoiceSessions mirrors the real store's boot reconciliation
+// (#143): every 'running' row flips to 'ended' with the orphaned end reason.
+func (f *fakeStore) ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconciles++
+	var n int64
+	for id, vs := range f.sessions {
+		if vs.Status != storage.VoiceSessionRunning {
+			continue
+		}
+		end := f.now()
+		reason := storage.VoiceSessionReasonOrphaned
+		vs.EndedAt = &end
+		vs.Status = storage.VoiceSessionEnded
+		vs.EndReason = &reason
+		f.sessions[id] = vs
+		n++
+	}
+	return n, nil
 }
 
 func (f *fakeStore) counts() (created, ended int) {
@@ -399,6 +436,82 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 	}
 }
 
+// slowFinalizer is a TranscriptFinalizer that consumes its ENTIRE context
+// budget (a flush barrier stuck behind slow line UPSERTs, #143 Defect B) and
+// returns the context error, like the relay would.
+type slowFinalizer struct{}
+
+func (slowFinalizer) Finalize(ctx context.Context, _ uuid.UUID) (int, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+// TestSlowFinalizeStillEndsRow is #143 Defect B: a Finalize that exhausts the
+// whole end budget must NOT hand EndVoiceSession an already-expired context —
+// the end-write gets its own fresh deadline, so the row still lands 'ended'.
+func TestSlowFinalizeStillEndsRow(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+	mgr.SetEndTimeoutForTest(50 * time.Millisecond)
+	mgr.SetTranscript(slowFinalizer{})
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	ended, err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ended.Status != storage.VoiceSessionEnded || ended.EndedAt == nil {
+		t.Errorf("stopped session = %+v, want ended with ended_at", ended)
+	}
+	store.mu.Lock()
+	row := store.sessions[vs.ID]
+	store.mu.Unlock()
+	if row.Status != storage.VoiceSessionEnded {
+		t.Errorf("stored row status = %q, want ended (end-write must get a fresh deadline)", row.Status)
+	}
+}
+
+// TestStopSurfacesEndWriteFailure is #143 Defect A: when the EndVoiceSession
+// write fails, Stop must NOT report plain success carrying the stale 'running'
+// row — the caller sees the failure (previously it was log-only and StopSession
+// answered success with status='running').
+func TestStopSurfacesEndWriteFailure(t *testing.T) {
+	store := newFakeStore()
+	endErr := errors.New("db down at stop time")
+	store.mu.Lock()
+	store.endErr = endErr
+	store.mu.Unlock()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	got, err := mgr.Stop(context.Background())
+	if err == nil {
+		t.Fatalf("Stop = %+v with nil error, want the end-write failure surfaced", got)
+	}
+	if !errors.Is(err, endErr) {
+		t.Errorf("Stop error = %v, want the underlying end-write failure in the chain", err)
+	}
+}
+
 // TestStopWithoutActiveSession returns ErrNoActiveSession.
 func TestStopWithoutActiveSession(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)
@@ -413,6 +526,115 @@ func TestStartDisabledMode(t *testing.T) {
 	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, false)
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, session.ErrVoiceUnavailable) {
 		t.Errorf("Start in disabled mode = %v, want ErrVoiceUnavailable", err)
+	}
+}
+
+// TestStartAfterShutdownRefused is #157: Shutdown moves the Manager to a
+// terminal closed state, so a Start that acquires the lock after Shutdown has
+// returned fails fast with ErrManagerClosed — it must not touch the store (no
+// config read, no running row INSERT) and must not spawn a loop nothing will
+// ever cancel.
+func TestStartAfterShutdownRefused(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	mgr.Shutdown()
+
+	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, session.ErrManagerClosed) {
+		t.Errorf("Start after Shutdown = %v, want ErrManagerClosed", err)
+	}
+	store.mu.Lock()
+	depReads, created := store.depReads, store.created
+	store.mu.Unlock()
+	if depReads != 0 || created != 0 {
+		t.Errorf("store touched after Shutdown: depReads=%d created=%d, want 0/0", depReads, created)
+	}
+	select {
+	case <-runner.started:
+		t.Error("loop spawned after Shutdown")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestReconcileOrphansAtStartup is #143's reconciliation: a row still 'running'
+// from a crashed process (kill -9 / OOM — no live loop owns it) is closed at
+// Manager startup, marked ended with the distinguishing orphaned reason, so
+// GetLatestVoiceSession stops mislabeling a dead session as live.
+func TestReconcileOrphansAtStartup(t *testing.T) {
+	store := newFakeStore()
+	orphan := storage.VoiceSession{
+		ID:         uuid.New(),
+		CampaignID: uuid.New(),
+		StartedAt:  time.Date(2026, 6, 27, 11, 0, 0, 0, time.UTC),
+		Status:     storage.VoiceSessionRunning,
+	}
+	store.mu.Lock()
+	store.sessions[orphan.ID] = orphan
+	store.mu.Unlock()
+
+	mgr := newManager(t, store, newBlockingRunner().run, true)
+	if err := mgr.ReconcileOrphans(context.Background()); err != nil {
+		t.Fatalf("ReconcileOrphans: %v", err)
+	}
+
+	store.mu.Lock()
+	row := store.sessions[orphan.ID]
+	store.mu.Unlock()
+	if row.Status != storage.VoiceSessionEnded || row.EndedAt == nil {
+		t.Errorf("orphaned row = %+v, want ended with ended_at", row)
+	}
+	if row.EndReason == nil || *row.EndReason != storage.VoiceSessionReasonOrphaned {
+		t.Errorf("orphaned row end_reason = %v, want %q", row.EndReason, storage.VoiceSessionReasonOrphaned)
+	}
+}
+
+// TestReconcileOrphansWebOnlySkips: a web-only Manager (enabled=false) never
+// created rows and must not touch ones another process may own — reconciliation
+// is a no-op there.
+func TestReconcileOrphansWebOnlySkips(t *testing.T) {
+	store := newFakeStore()
+	mgr := newManager(t, store, newBlockingRunner().run, false)
+	if err := mgr.ReconcileOrphans(context.Background()); err != nil {
+		t.Fatalf("ReconcileOrphans (web-only): %v", err)
+	}
+	store.mu.Lock()
+	reconciles := store.reconciles
+	store.mu.Unlock()
+	if reconciles != 0 {
+		t.Errorf("web-only reconciles = %d, want 0", reconciles)
+	}
+}
+
+// TestShutdownIdempotentStopSafe is #157's tail: Shutdown of an active session
+// ends it; a second Shutdown is an idempotent no-op; Stop after Shutdown stays
+// well-defined (ErrNoActiveSession, no panic).
+func TestShutdownIdempotentStopSafe(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	mgr.Shutdown()
+	if _, ended := store.counts(); ended != 1 {
+		t.Errorf("ended rows after Shutdown = %d, want 1", ended)
+	}
+	mgr.Shutdown() // idempotent: no second end write, no hang
+
+	if _, err := mgr.Stop(context.Background()); !errors.Is(err, session.ErrNoActiveSession) {
+		t.Errorf("Stop after Shutdown = %v, want ErrNoActiveSession", err)
+	}
+	if _, ended := store.counts(); ended != 1 {
+		t.Errorf("ended rows after second Shutdown = %d, want still 1", ended)
 	}
 }
 

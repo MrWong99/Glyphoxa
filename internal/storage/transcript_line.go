@@ -45,14 +45,17 @@ func scanTranscriptLine(row pgx.Row) (TranscriptLine, error) {
 
 // UpsertTranscriptLine writes (or updates in place) one transcript Line. An Agent
 // reply coalesces across its sentences under one line_id, so a re-write of the
-// same (voice_session_id, line_id) updates the text/seq/ts rather than inserting
-// a new row — keeping COUNT(*) == distinct lines.
+// same (voice_session_id, line_id) updates the text/ts rather than inserting a
+// new row — keeping COUNT(*) == distinct lines. seq is deliberately NOT updated
+// on conflict (#149): it is the replay ordering key, fixed at insert time, so
+// ListTranscriptLines (ORDER BY seq) matches the live-view order even when an
+// interleaved line landed between a reply's sentences.
 func (s *Store) UpsertTranscriptLine(ctx context.Context, l TranscriptLine) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO transcript_line (`+transcriptLineColumns+`)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (voice_session_id, line_id) DO UPDATE
-		    SET seq = EXCLUDED.seq, who = EXCLUDED.who, tag = EXCLUDED.tag,
+		    SET who = EXCLUDED.who, tag = EXCLUDED.tag,
 		        kind = EXCLUDED.kind, ts = EXCLUDED.ts, text = EXCLUDED.text,
 		        updated_at = now()`,
 		l.VoiceSessionID, l.CampaignID, l.LineID, l.Seq,
