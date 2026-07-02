@@ -415,14 +415,19 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// Barge-in: take the floor and run the turn on its own goroutine so the
 		// inbound loop keeps feeding VAD during playback. A barge cancels turnCtx,
 		// which unwinds TTS synthesis and playback and breaks the dispatch loop.
-		turnCtx, release, coalesced := r.floor.Take(ctx, "")
+		// The take carries the route's target agent so the floor's coalesce window
+		// only folds same-target re-takes (#146): a segment routed to a DIFFERENT
+		// agent inside the window ("Bart, hold the door. Greta, run!") supersedes
+		// instead of vanishing.
+		turnCtx, release, coalesced := r.floor.Take(ctx, e.Target.AgentID)
 		if coalesced {
-			// The floor's same-utterance grace window folded this late segment into
-			// the turn already speaking (one utterance VAD-split into two). The
-			// segment is NOT spoken; announce it so the metrics subscriber records a
-			// distinct `yielded` outcome (not `abandoned`) and logs the dropped
-			// transcript — the known residual until real utterance coalescing routes
-			// this text into the surviving turn. No goroutine is spawned.
+			// The floor's same-utterance grace window folded this late same-target
+			// segment into the turn already speaking (one utterance VAD-split in
+			// two). The segment is NOT spoken; announce it so the metrics subscriber
+			// records a distinct `yielded` outcome (not `abandoned`) and logs the
+			// dropped transcript — the known residual until real utterance
+			// coalescing routes this text into the surviving turn. No goroutine is
+			// spawned.
 			release() // no-op on the floor, but keeps the take/release pairing honest
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndSupersedeCoalesced, Text: e.Text})
 			return

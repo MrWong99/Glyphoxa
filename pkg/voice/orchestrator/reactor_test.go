@@ -389,6 +389,78 @@ func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
 	)
 }
 
+// TestReplier_CrossTargetAddressWithinWindowSupersedes pins #146 end-to-end:
+// "Bart, hold the door. Greta, run!" — VAD splits at the internal pause and the
+// address detector routes segment 1 → Bart, segment 2 → Greta, with Greta's
+// take landing inside the floor's coalesce window. The window's "same utterance
+// continuing" inference is provably false across targets, so Greta's
+// directly-addressed turn must be DISPATCHED (her producer runs under a live
+// ctx, superseding Bart's turn) — not silently dropped as supersede_coalesced,
+// which left nobody answering a direct, named address.
+func TestReplier_CrossTargetAddressWithinWindowSupersedes(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+
+	started := make(chan string, 4)
+	bartCancelled := make(chan struct{})
+	gretaRan := make(chan struct{})
+	reply := func(ctx context.Context, e voiceevent.AddressRouted, _ func(orchestrator.Reply) error) error {
+		started <- e.TurnID
+		switch e.TurnID {
+		case "seg-bart":
+			// Bart's turn is mid-generation when Greta's address arrives; a
+			// cross-target supersede must cancel it.
+			select {
+			case <-ctx.Done():
+				close(bartCancelled)
+			case <-time.After(2 * time.Second):
+			}
+		case "seg-greta":
+			if ctx.Err() == nil {
+				close(gretaRan)
+			}
+		}
+		return nil
+	}
+
+	floor := orchestrator.NewFloorWithCoalesce(600 * time.Millisecond)
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(floor)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{
+		TurnID: "seg-bart", Text: "Bart, hold the door",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	// Bart's producer must hold the floor before Greta's segment lands.
+	if got := <-started; got != "seg-bart" {
+		t.Fatalf("first producer started for %q, want seg-bart", got)
+	}
+	h.Bus.Publish(voiceevent.AddressRouted{
+		TurnID: "seg-greta", Text: "Greta, run",
+		Target: voiceevent.AddressTarget{AgentID: "greta", AgentRole: "character", Name: "Greta"},
+	})
+
+	// Greta's turn is dispatched: the addressed agent's producer sees the route.
+	select {
+	case <-gretaRan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Greta's directly-addressed turn was never dispatched — coalesced away by a target-blind floor (#146)")
+	}
+	// Bart's turn was superseded, not left speaking over Greta's.
+	select {
+	case <-bartCancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Bart's in-flight turn must be cancelled by Greta's cross-target supersede")
+	}
+	// The cross-target segment must not be announced as a coalesced drop.
+	for _, ev := range h.Events() {
+		if e, ok := ev.(voiceevent.TurnEnded); ok && e.TurnID == "seg-greta" && e.Reason == voiceevent.TurnEndSupersedeCoalesced {
+			t.Fatal("seg-greta was published as supersede_coalesced — a cross-target address must supersede, not coalesce")
+		}
+	}
+}
+
 // waitTurnEnded subscribes a channel to TurnEnded on bus so a test can block until
 // the async (floor goroutine) turn publishes its end signal — AssertEvent does not
 // poll, so a direct synchronization is needed for the goroutine-driven turns.
