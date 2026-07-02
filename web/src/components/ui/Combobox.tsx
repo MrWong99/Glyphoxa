@@ -8,9 +8,11 @@ import { ChevronDown, Check, Search } from "lucide-react";
 // popover. It reuses the gx-select* trigger vocabulary so it reads as the same
 // control, and adds gx-combobox* classes for the filterable popover.
 //
-// cmdk filters on each item's `value`; we set that to the human-readable label so
-// typeahead matches what the operator sees, and recover the real option value from
-// a closure on select. The selected option's label renders on the trigger.
+// cmdk keys selection/active state on each item's `value`; we set that to the
+// UNIQUE option value (labels can collide — ElevenLabs voice names are not
+// unique, #154) and pass the human-readable label as `keywords` so typeahead
+// still matches what the operator sees. The selected option's label renders on
+// the trigger.
 
 type Option = { value: string; label: string };
 
@@ -111,7 +113,8 @@ export function Combobox({
                 {options.map((o) => (
                   <Command.Item
                     key={o.value}
-                    value={o.label}
+                    value={o.value}
+                    keywords={[o.label]}
                     className="gx-select__item gx-combobox__item"
                     onSelect={() => pick(o.value)}
                   >

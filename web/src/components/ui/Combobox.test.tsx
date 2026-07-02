@@ -23,6 +23,25 @@ describe("Combobox", () => {
     expect(screen.queryByRole("option", { name: /aria/i })).not.toBeInTheDocument();
   });
 
+  it("distinguishes options with identical labels: selecting the second dispatches its value", () => {
+    // ElevenLabs voice names are not unique — two "Rachel"s must stay separate
+    // cmdk identities so keyboard selection lands on the one the operator chose.
+    const dupes = [
+      { value: "voice-rachel-1", label: "Rachel" },
+      { value: "voice-rachel-2", label: "Rachel" },
+    ];
+    const onChange = vi.fn();
+    render(<Combobox label="Voice" options={dupes} value="" onValueChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Voice" }));
+
+    // Arrow from the first Rachel to the second, then confirm with Enter.
+    const input = screen.getByPlaceholderText(/search/i);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onChange).toHaveBeenCalledWith("voice-rachel-2");
+  });
+
   it("fires onValueChange on pick and shows the chosen label on the trigger", () => {
     const onChange = vi.fn();
     const { rerender } = render(
