@@ -53,6 +53,47 @@ validate_path() {
   fi
 }
 
+# check_dsn_roundtrip <rendered> <user> <password> — the assembled DSN must
+# round-trip the exact credentials Postgres is initialized with (issue #151):
+# extract the Secret's database-url from the render, URL-parse it the way pgx
+# (Go net/url) does, and compare the decoded userinfo to the originals. Raw
+# printf interpolation of a reserved-character password fails here.
+check_dsn_roundtrip() {
+  local rendered="$1" user="$2" password="$3"
+  if ! python3 - "${rendered}" "${user}" "${password}" <<'PY'; then
+import re, sys, urllib.parse
+
+rendered, want_user, want_password = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(rendered, encoding="utf-8") as f:
+    text = f.read()
+
+m = re.search(r'^\s*database-url:\s*"([^"]*)"\s*$', text, re.M)
+if not m:
+    sys.exit("no database-url found in the render")
+dsn = m.group(1)
+
+try:
+    url = urllib.parse.urlsplit(dsn)
+    # net/url unescapes %XX in userinfo but leaves '+' literal — mirror that
+    # (unquote, NOT unquote_plus) so the check matches the real consumer.
+    got_user = urllib.parse.unquote(url.username or "")
+    got_password = urllib.parse.unquote(url.password or "")
+except ValueError as err:
+    sys.exit(f"DSN does not URL-parse: {dsn!r}: {err}")
+
+if (got_user, got_password) != (want_user, want_password):
+    sys.exit(
+        f"DSN does not round-trip the credentials: {dsn!r} "
+        f"parses to user={got_user!r} password={got_password!r}, "
+        f"want user={want_user!r} password={want_password!r}"
+    )
+PY
+    echo "helm-validate: FAIL (dsn-roundtrip): see above" >&2
+    exit 1
+  fi
+  echo "helm-validate: dsn-roundtrip: DSN round-trips reserved-character credentials"
+}
+
 # The two render branches the chart supports: in-cluster Postgres (default)
 # and external DB (postgres disabled) — same paths the gate checked before #42
 # broke it.
@@ -60,5 +101,16 @@ validate_path in-cluster-postgres
 validate_path external-db \
   --set postgres.enabled=false \
   --set database.url='postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require'
+
+# Reserved-character credentials (issue #151): the same raw values feed
+# POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
+# them or the migrate hook and the app parse a different credential than the
+# one Postgres was initialized with.
+DSN_USER='us@r/n:me?'
+DSN_PASSWORD='p@ss/w:rd?'
+validate_path dsn-roundtrip \
+  --set-string database.user="${DSN_USER}" \
+  --set-string database.password="${DSN_PASSWORD}"
+check_dsn_roundtrip "${workdir}/dsn-roundtrip.yaml" "${DSN_USER}" "${DSN_PASSWORD}"
 
 echo "helm-validate: OK"

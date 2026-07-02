@@ -1,0 +1,8 @@
+# Fixture for scripts/helm-validate-test.sh (issue #151): a chart whose Secret
+# interpolates database.user/password into the DSN raw — the pre-#151 defect.
+# The validate gate's dsn-roundtrip case must fail on it.
+apiVersion: v2
+name: unescaped-dsn-chart
+description: helm-validate self-test fixture — DSN built without URL-escaping
+type: application
+version: 0.1.0
