@@ -96,6 +96,13 @@ func NewServer(cfg Config) *Server {
 	}
 
 	mux := http.NewServeMux()
+	// Fence the API namespace (#153): an /api/... path no mount claims is a
+	// plain 404, NOT the SPA catch-all below — 200+index.html sends a malformed
+	// EventSource URL into an auto-reconnect loop and turns version-skewed
+	// Connect calls into misleading errors. ServeMux prefers the more specific
+	// pattern, so every real /api mount (Connect prefixes, the {id}-wildcard
+	// SSE route) still wins over this guard.
+	mux.Handle("/api/", http.NotFoundHandler())
 	for _, m := range cfg.Mounts {
 		mux.Handle(m.Path, m.Handler)
 	}
