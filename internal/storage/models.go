@@ -90,10 +90,17 @@ const (
 	VoiceSessionEnded   VoiceSessionStatus = "ended"
 )
 
+// VoiceSessionReasonOrphaned is the end_reason stamped by the boot-time
+// reconciliation (#143): the row was still 'running' but no live loop owned it
+// (crash / kill -9 / a failed end-write), so startup closed it. A NULL
+// end_reason means the session ended through the normal Stop / loop-exit path.
+const VoiceSessionReasonOrphaned = "orphaned: reconciled at startup"
+
 // VoiceSession is one run of the live voice loop — the Bot's presence in one
 // Discord voice channel, bound to a Campaign (CONTEXT.md "Voice Session", #72).
 // EndedAt is nil while running; LineCount records transcript lines produced (0
-// for this stage — the live feed is #73).
+// for this stage — the live feed is #73). EndReason is nil for a clean end and
+// set when the boot reconciliation closed an orphaned row (#143).
 type VoiceSession struct {
 	ID         uuid.UUID
 	CampaignID uuid.UUID
@@ -101,6 +108,7 @@ type VoiceSession struct {
 	EndedAt    *time.Time
 	Status     VoiceSessionStatus
 	LineCount  int
+	EndReason  *string
 }
 
 // Agent is an AI-controlled persona — Butler or Character NPC (ADR-0009).

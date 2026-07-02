@@ -154,6 +154,10 @@ func (s *SessionServer) startError(err error) error {
 			errors.New("the saved Discord bot token could not be decrypted; ensure the server $GLYPHOXA_SECRET is set correctly (ADR-0004)"))
 	case errors.Is(err, session.ErrVoiceUnavailable):
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("voice is not available in this mode"))
+	case errors.Is(err, session.ErrManagerClosed):
+		// The manager is in its terminal closed state (#157): the process is
+		// shutting down. Unavailable, so the client retries the restarted process.
+		return connect.NewError(connect.CodeUnavailable, errors.New("the server is shutting down; try again shortly"))
 	default:
 		s.log.Error("StartSession: manager start failed", "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
