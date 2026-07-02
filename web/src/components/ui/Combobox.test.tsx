@@ -23,6 +23,22 @@ describe("Combobox", () => {
     expect(screen.queryByRole("option", { name: /aria/i })).not.toBeInTheDocument();
   });
 
+  it("clears the search when dismissed without picking, so reopen shows the full list", () => {
+    render(<Combobox label="Voice" options={OPTS} value="" onValueChange={() => {}} />);
+    // Open, filter down to Marcus, then dismiss with Escape (no pick).
+    fireEvent.click(screen.getByRole("button", { name: "Voice" }));
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "marcus" } });
+    expect(screen.queryByRole("option", { name: /rachel/i })).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    // Reopen: the input is empty and the list is unfiltered.
+    fireEvent.click(screen.getByRole("button", { name: "Voice" }));
+    expect(screen.getByPlaceholderText(/search/i)).toHaveValue("");
+    expect(screen.getByRole("option", { name: /rachel/i })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /marcus/i })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /aria/i })).toBeInTheDocument();
+  });
+
   it("distinguishes options with identical labels: selecting the second dispatches its value", () => {
     // ElevenLabs voice names are not unique — two "Rachel"s must stay separate
     // cmdk identities so keyboard selection lands on the one the operator chose.

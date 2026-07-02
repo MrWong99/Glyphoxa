@@ -48,8 +48,13 @@ export function Combobox({
   const selected = options.find((o) => o.value === value);
 
   // Close on outside click / Escape so the popover behaves like a native select.
+  // Whenever the popover is closed — pick, Escape or outside click — the search
+  // resets so the next open shows the full, unfiltered list (#154).
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSearch("");
+      return;
+    }
     const onDown = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
@@ -66,8 +71,7 @@ export function Combobox({
 
   const pick = (optValue: string) => {
     onValueChange?.(optValue);
-    setOpen(false);
-    setSearch("");
+    setOpen(false); // the close effect clears the search
   };
 
   return (
