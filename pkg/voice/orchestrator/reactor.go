@@ -415,7 +415,7 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// Barge-in: take the floor and run the turn on its own goroutine so the
 		// inbound loop keeps feeding VAD during playback. A barge cancels turnCtx,
 		// which unwinds TTS synthesis and playback and breaks the dispatch loop.
-		turnCtx, release, coalesced := r.floor.Take(ctx)
+		turnCtx, release, coalesced := r.floor.Take(ctx, "")
 		if coalesced {
 			// The floor's same-utterance grace window folded this late segment into
 			// the turn already speaking (one utterance VAD-split into two). The
