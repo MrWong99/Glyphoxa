@@ -104,6 +104,40 @@ func TestRunWithReconnect_ResetsBackoffOnConnect(t *testing.T) {
 	}
 }
 
+// TestRunWithReconnect_ImmediatePostJoinFailureKeepsBackoffGrowing pins the
+// issue-#141 fix: a cycle that JOINS successfully (connected() fires) but then
+// fails immediately — the codec-less build's ErrCodecUnavailable, a persistent
+// VAD/ONNX init failure — must count as a connect failure, NOT a healthy
+// session. The delays must keep growing exponentially to the cap; a reset here
+// would hammer Discord's voice join at 1 Hz forever (the exact failure mode
+// the #45 backoff was written to prevent). Uses the production
+// defaultReconnectPolicy (real clock: an immediate failure serves ~0s, far
+// under any healthy threshold) with only the sleep seam faked.
+func TestRunWithReconnect_ImmediatePostJoinFailureKeepsBackoffGrowing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 7, cancel: cancel}
+	p := defaultReconnectPolicy() // initial 1s, max 30s, factor 2
+	p.sleep = fs.sleep
+
+	err := runWithReconnect(ctx, discardLogger(), p,
+		func(ctx context.Context, connected func()) error {
+			connected() // voice join succeeded...
+			return errors.New("wire: opus codec unavailable")
+		})
+
+	if err != nil {
+		t.Fatalf("runWithReconnect returned %v, want nil on ctx-cancel", err)
+	}
+	want := []time.Duration{
+		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+		16 * time.Second, 30 * time.Second, 30 * time.Second,
+	}
+	if !equalDelays(fs.delays, want) {
+		t.Errorf("backoff delays = %v, want %v (join-then-immediate-fail must keep growing, never reset to initial)", fs.delays, want)
+	}
+}
+
 // TestRunWithReconnect_StopsCleanOnCtxCancelInAttempt models SIGTERM landing
 // mid-serve: attempt cancels ctx and then returns an error. The loop must NOT
 // treat that as a transient failure to back off from — it must see the cancelled
