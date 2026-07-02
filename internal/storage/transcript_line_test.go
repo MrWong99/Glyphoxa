@@ -77,6 +77,56 @@ func TestTranscriptLinePersistence(t *testing.T) {
 	}
 }
 
+// TestTranscriptLineUpsertKeepsInsertSeq is defect A of #149: a coalescing
+// re-upsert must NOT move the line's ordering key. An Agent reply inserted at
+// seq S keeps S across later upserts (which still update the text), so replay
+// (ORDER BY seq) matches the live-view/insertion order even when an interleaved
+// human line landed between the reply's sentences.
+func TestTranscriptLineUpsertKeepsInsertSeq(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+
+	ts := func(sec int) time.Time { return time.Date(2026, 6, 27, 18, 0, sec, 0, time.UTC) }
+
+	// Agent reply starts at seq 10; a human backchannel lands at seq 12; the
+	// reply's next sentence re-upserts the SAME line_id at seq 14.
+	steps := []storage.TranscriptLine{
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "a:t1", Seq: 10, Who: "Bart", Tag: "NPC", Kind: "npc", TS: ts(1), Text: "Well met."},
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "u:5", Seq: 12, Who: "Player / DM", Kind: "player", TS: ts(2), Text: "mhm"},
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "a:t1", Seq: 14, Who: "Bart", Tag: "NPC", Kind: "npc", TS: ts(3), Text: "Well met. What'll it be?"},
+	}
+	for _, l := range steps {
+		if err := st.UpsertTranscriptLine(ctx, l); err != nil {
+			t.Fatalf("UpsertTranscriptLine %s seq %d: %v", l.LineID, l.Seq, err)
+		}
+	}
+
+	got, err := st.ListTranscriptLines(ctx, vs.ID)
+	if err != nil {
+		t.Fatalf("ListTranscriptLines: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("list len = %d, want 2: %+v", len(got), got)
+	}
+	// Replay order == insertion order: the reply stays FIRST at its insert seq.
+	if got[0].LineID != "a:t1" || got[0].Seq != 10 {
+		t.Errorf("line[0] = %s seq %d, want a:t1 at insert-time seq 10 (replay must match live order)", got[0].LineID, got[0].Seq)
+	}
+	if got[0].Text != "Well met. What'll it be?" {
+		t.Errorf("line[0] text = %q, want coalesced final text (non-seq updates still apply)", got[0].Text)
+	}
+	if got[1].LineID != "u:5" || got[1].Seq != 12 {
+		t.Errorf("line[1] = %s seq %d, want interjection u:5 at seq 12", got[1].LineID, got[1].Seq)
+	}
+}
+
 // TestTranscriptLineCascade: an unknown session counts zero, and deleting the
 // Voice Session cascades its lines (FK ON DELETE CASCADE).
 func TestTranscriptLineCascade(t *testing.T) {

@@ -44,6 +44,10 @@ var (
 	// Bot token nor a DISCORD_BOT_TOKEN env token is available (#87). Mapped to
 	// CodeFailedPrecondition, mirroring ErrDiscordNotConfigured.
 	ErrDiscordTokenMissing = errors.New("session: no Discord bot token configured")
+	// ErrManagerClosed is returned by Start after Shutdown: the Manager is in its
+	// terminal closed state and refuses new work (#157) — no store write, no loop.
+	// Mapped to CodeUnavailable.
+	ErrManagerClosed = errors.New("session: the session manager is shut down")
 	// ErrDiscordTokenUndecryptable is returned by Start when a real saved Bot token
 	// cannot be decrypted — booted without $GLYPHOXA_SECRET (nil cipher) or a
 	// ciphertext the cipher won't open (#87). The underlying actionable detail is
@@ -53,12 +57,14 @@ var (
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
-// guild/channel (deployment config) and the voice_sessions lifecycle writes.
-// *storage.Store satisfies it; tests use a fake.
+// guild/channel (deployment config), the voice_sessions lifecycle writes, and
+// the boot-time orphan reconciliation (#143). *storage.Store satisfies it;
+// tests use a fake.
 type Store interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	CreateVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
 	EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error)
+	ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error)
 }
 
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
@@ -81,10 +87,14 @@ type LoopRunner func(ctx context.Context, cfg wirenpc.Config) error
 
 // activeSession is the Manager's record of the one running session: the cancel
 // func that unwinds its loop, the voice_sessions row, and a done channel closed
-// once the loop has exited and the ended_at write has landed.
+// once the loop has exited and the ended_at write has landed (or failed —
+// endErr carries that failure so Stop reports it instead of a stale success,
+// #143 Defect A). session/endErr are written before close(done) and read only
+// after <-done, so done is the synchronization point.
 type activeSession struct {
 	campaignID uuid.UUID
 	session    storage.VoiceSession
+	endErr     error
 	cancel     context.CancelFunc
 	done       chan struct{}
 }
@@ -98,10 +108,12 @@ type Manager struct {
 	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
 	log        *slog.Logger
-	enabled    bool // false in web-only mode: Start is rejected (ADR-0039)
+	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
+	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
 
 	mu     sync.Mutex
 	active *activeSession
+	closed bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
 }
 
 // NewManager wraps the store, loop runner and base config in a Manager. base
@@ -117,7 +129,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled}
+	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled, endTimeout: endTimeout}
 }
 
 // SetTranscript wires the transcript finalizer the Manager calls on Stop / loop
@@ -127,6 +139,27 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 // needed.
 func (m *Manager) SetTranscript(t TranscriptFinalizer) {
 	m.transcript = t
+}
+
+// ReconcileOrphans closes voice_sessions rows still marked 'running' that no
+// live loop owns (#143). Called once at boot, before any session can start: at
+// that point NO loop is live, so every 'running' row is an orphan — stranded by
+// a crash (kill -9 / OOM) or a failed end-write — and is marked ended with the
+// distinguishing storage.VoiceSessionReasonOrphaned. A web-only Manager
+// (enabled=false) never owns rows and skips: another process may be driving
+// voice against the same DB.
+func (m *Manager) ReconcileOrphans(ctx context.Context) error {
+	if !m.enabled {
+		return nil
+	}
+	n, err := m.store.ReconcileOrphanedVoiceSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("session: reconcile orphaned voice sessions: %w", err)
+	}
+	if n > 0 {
+		m.log.Warn("closed orphaned voice sessions left 'running' by a previous run", "count", n)
+	}
+	return nil
 }
 
 // Start launches the live voice loop for a campaign and records a running
@@ -141,6 +174,12 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The closed check lives under the same lock Shutdown takes, so a Start that
+	// wins the lock after Shutdown returned can never insert a row or spawn a
+	// loop nothing will cancel (#157).
+	if m.closed {
+		return storage.VoiceSession{}, ErrManagerClosed
+	}
 	if m.active != nil {
 		return storage.VoiceSession{}, ErrSessionActive
 	}
@@ -203,28 +242,40 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		m.log.Error("voice session loop exited with error", "err", err, "voice_session", as.session.ID)
 	}
 
-	// The run ctx is cancelled on a Stop, so end the row on a detached, bounded
-	// context — otherwise the ended_at write would itself be cancelled.
-	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), endTimeout)
-	defer cancel()
+	// The run ctx is cancelled on a Stop, so both end steps run on detached,
+	// bounded contexts — otherwise the writes would themselves be cancelled.
+	base := context.WithoutCancel(ctx)
 
 	// Drain the live transcript's writer queue and read the authoritative count
 	// BEFORE ending the row, so line_count matches the persisted rows (#74). A
 	// finalize failure logs and falls back to the in-memory count rather than
-	// blocking the session from ending.
+	// blocking the session from ending. Finalize gets its OWN budget: its flush
+	// barrier can queue behind slow line UPSERTs and eat the whole deadline
+	// (#143 Defect B), and the end-write below must not inherit that.
 	lineCount := as.session.LineCount
 	if m.transcript != nil {
-		if n, ferr := m.transcript.Finalize(endCtx, as.session.ID); ferr != nil {
+		finCtx, finCancel := context.WithTimeout(base, m.endTimeout)
+		n, ferr := m.transcript.Finalize(finCtx, as.session.ID)
+		finCancel()
+		if ferr != nil {
 			m.log.Error("finalize transcript before end", "err", ferr, "voice_session", as.session.ID)
 		} else {
 			lineCount = n
 		}
 	}
 
+	// A FRESH deadline for the ended_at write, regardless of what Finalize
+	// consumed (#143): the row landing 'ended' is the invariant that matters.
+	endCtx, cancel := context.WithTimeout(base, m.endTimeout)
+	defer cancel()
 	ended, err := m.store.EndVoiceSession(endCtx, as.session.ID, lineCount)
 
 	m.mu.Lock()
 	if err != nil {
+		// The row is still 'running' in the DB. Remember the failure so a waiting
+		// Stop surfaces it (#143 Defect A); the startup reconciliation repairs the
+		// row on the next boot. Still clear the active slot — the loop is gone.
+		as.endErr = fmt.Errorf("session: end voice session %s: %w", as.session.ID, err)
 		m.log.Error("end voice session", "err", err, "voice_session", as.session.ID)
 	} else {
 		as.session = ended
@@ -236,9 +287,11 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 }
 
 // Stop cancels the active session's loop and waits for it to end, returning the
-// ended voice_sessions row. ErrNoActiveSession when nothing is running. If ctx is
-// cancelled while waiting, it returns ctx.Err() — the loop still unwinds in the
-// background.
+// ended voice_sessions row. ErrNoActiveSession when nothing is running. If the
+// ended_at write failed, Stop returns the row's true (still-'running') state
+// WITH the failure — never a plain success carrying status='running' (#143). If
+// ctx is cancelled while waiting, it returns ctx.Err() — the loop still unwinds
+// in the background.
 func (m *Manager) Stop(ctx context.Context) (storage.VoiceSession, error) {
 	m.mu.Lock()
 	as := m.active
@@ -250,8 +303,8 @@ func (m *Manager) Stop(ctx context.Context) (storage.VoiceSession, error) {
 	as.cancel()
 	select {
 	case <-as.done:
-		// done closes after runLoop set as.session to the ended row; safe to read.
-		return as.session, nil
+		// done closes after runLoop set as.session/as.endErr; safe to read.
+		return as.session, as.endErr
 	case <-ctx.Done():
 		return storage.VoiceSession{}, ctx.Err()
 	}
@@ -268,11 +321,14 @@ func (m *Manager) Snapshot() (storage.VoiceSession, bool) {
 	return m.active.session, true
 }
 
-// Shutdown cancels any active session and waits for its loop to end and the
-// ended_at write to land. The web tier calls it on process shutdown, before the
-// DB pool closes, so a SIGTERM never leaves a row stuck 'running'.
+// Shutdown moves the Manager to its terminal closed state (any later Start
+// fails ErrManagerClosed, #157), then cancels any active session and waits for
+// its loop to end and the ended_at write to land. The web tier calls it on
+// process shutdown, before the DB pool closes, so a SIGTERM never leaves a row
+// stuck 'running'. Idempotent: a second call finds no active session.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	m.closed = true
 	as := m.active
 	m.mu.Unlock()
 	if as == nil {
