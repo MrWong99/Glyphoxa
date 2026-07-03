@@ -8,6 +8,6 @@ API keys are bearer-only (`Authorization: Bearer glx_<random>`) for service acco
 
 Tenant scoping uses an `X-Tenant-Id` header on every Connect call, validated server-side against `tenant_members.user_id`. Tenant switching is a DOM update, not a session rotation; two browser tabs can hold two tenants simultaneously.
 
-First-time tenant flow is open-by-default — any authenticated Discord user can create a Tenant on `/onboarding/create-tenant`. Operator config flag `GLYPHOXA_OPEN_TENANT_CREATION=false` disables open creation; falls back to admin-mediated provisioning where existing Tenant owners can create Tenants for other users.
+~~First-time tenant flow is open-by-default — any authenticated Discord user can create a Tenant on `/onboarding/create-tenant`. Operator config flag `GLYPHOXA_OPEN_TENANT_CREATION=false` disables open creation; falls back to admin-mediated provisioning where existing Tenant owners can create Tenants for other users.~~ **Superseded for the single-operator web tier by ADR-0041:** login is gated by the mandatory `GLYPHOXA_OPERATOR_IDS` allowlist, and Tenants are claimed-or-created only for allowlisted Operators. Open tenant creation may return with the multi-tenant tier.
 
 **Why JWT is rejected:** revocation pain, XSS attack surface, refresh-token dance complexity. Server-side sessions revoke instantly with a row delete.

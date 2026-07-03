@@ -11,3 +11,9 @@ Opinionated 2-providers-per-Component matrix:
 - S2S: deferred
 
 Tenant admins paste a key, pick a model from the provider's list-models endpoint, and validate with a test-call button.
+
+## Amendment: per-session spend caps (2026-07-04, #130 — reverses "No spend caps in MVP")
+
+- **Unit: estimated currency.** Spend is estimated from metered usage (LLM tokens, TTS characters, STT audio seconds — streaming STT per ADR-0042 makes STT a duration cost that MUST be metered) via a static price map for the MVP provider matrix. Unknown models use a conservative documented default and log a warning; every surfaced number is labelled an *estimate*, never billing truth.
+- **Scope: per Voice Session**, accumulated in-memory at the same capture points as the Prometheus usage counters (which stay session-unlabelled per ADR-0032 cardinality bounds). Per-tenant monthly budgets are a later, separate layer.
+- **Two independently opt-in thresholds, configured per Tenant by the Operator:** a **soft cap** — crossing it stops new Agent turns (the in-flight Turn completes; human speech keeps being transcribed) and surfaces a spend-cap-reached state on the Session screen — and a **hard cap** — crossing it ends the Voice Session itself (clean stop), the guard for the unattended-weekend case where streaming STT would otherwise keep billing indefinitely behind a soft block. Either may be set alone; both set requires `hard ≥ soft`. Neither set = today's uncapped behavior (self-host default).
