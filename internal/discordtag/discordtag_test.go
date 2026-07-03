@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -65,5 +66,41 @@ func TestResolve_RESTSelfUserNoGateway(t *testing.T) {
 	}
 	if want := "GET /users/@me Bot tok-abc"; reqs[0] != want {
 		t.Errorf("request = %q, want %q", reqs[0], want)
+	}
+}
+
+// TestResolve_NoGoroutineLeakPerCall pins the resolver's per-call footprint:
+// resolving must not leave a background goroutine behind. disgo's
+// rest.NewClient starts a rate-limiter cleanup goroutine (`for range ticker.C`)
+// that its Close never stops — one leaked goroutine + ticker per health probe,
+// forever. Not parallel: it counts process goroutines.
+func TestResolve_NoGoroutineLeakPerCall(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"123","username":"Glyphoxa","discriminator":"4823"}`))
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resolve := func() {
+		t.Helper()
+		if _, err := discordtag.ResolveAt(ctx, "tok", srv.URL, nil); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+	}
+
+	// One warm-up call so shared state (idle HTTP conns etc.) reaches steady state.
+	resolve()
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	const calls = 25
+	for range calls {
+		resolve()
+	}
+	time.Sleep(100 * time.Millisecond) // let per-call teardown finish
+	if growth := runtime.NumGoroutine() - before; growth > 10 {
+		t.Errorf("goroutines grew by %d over %d resolves — a background goroutine leaks per call", growth, calls)
 	}
 }
