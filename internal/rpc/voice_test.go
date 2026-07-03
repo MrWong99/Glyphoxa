@@ -483,3 +483,84 @@ func TestGetProviderHealth_ActiveSessionSkipsDiscordProbe(t *testing.T) {
 		t.Errorf("tts probes = %d, want 1", got)
 	}
 }
+
+// blockingVoiceStore blocks every read until release is closed, IGNORING ctx —
+// the worst-case wedged dependency. After release it delegates to inner.
+type blockingVoiceStore struct {
+	release chan struct{}
+	inner   *fakeVoiceStore
+}
+
+func (b *blockingVoiceStore) GetProviderConfigByComponent(ctx context.Context, id uuid.UUID, c storage.Component) (storage.ProviderConfig, error) {
+	<-b.release
+	return b.inner.GetProviderConfigByComponent(ctx, id, c)
+}
+
+func (b *blockingVoiceStore) GetDeploymentConfig(ctx context.Context, id uuid.UUID) (storage.DeploymentConfig, error) {
+	<-b.release
+	return b.inner.GetDeploymentConfig(ctx, id)
+}
+
+// TestGetProviderHealth_HungStoreDoesNotWedgeTenant pins the probe's hard
+// deadline: the WHOLE probe — store reads included — is bounded, the per-tenant
+// cache entry lock is released on timeout, and a timed-out probe is NOT cached
+// (the next call after the store recovers probes fresh and reports healthy).
+// Pre-fix a hung store read under context.WithoutCancel blocked the entry lock
+// forever, wedging every later health call for the tenant.
+func TestGetProviderHealth_HungStoreDoesNotWedgeTenant(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	bs := &blockingVoiceStore{release: make(chan struct{}), inner: healthyStore(t, cipher)}
+	srv := NewVoiceServer(bs, cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.probeTimeout = 50 * time.Millisecond
+
+	ctx := tenantCtx()
+	call := func(label string) *managementv1.GetProviderHealthResponse {
+		t.Helper()
+		done := make(chan *managementv1.GetProviderHealthResponse, 1)
+		go func() {
+			resp, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+			if err != nil {
+				t.Errorf("%s: GetProviderHealth: %v", label, err)
+				done <- nil
+				return
+			}
+			done <- resp.Msg
+		}()
+		select {
+		case msg := <-done:
+			return msg
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: GetProviderHealth wedged >2s on a hung store read", label)
+			return nil
+		}
+	}
+
+	first := call("first")
+	if first == nil {
+		return
+	}
+	for _, p := range first.GetProviders() {
+		if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_DEGRADED {
+			t.Errorf("first call: %s should be degraded while the store hangs: %+v", p.GetProvider(), p)
+		}
+	}
+
+	// The entry lock must be free again: a second call also returns within bound.
+	call("second")
+
+	// A timed-out probe must not be cached: once the store recovers, the next
+	// call probes fresh and reports healthy.
+	close(bs.release)
+	third := call("third")
+	if third == nil {
+		return
+	}
+	for _, p := range third.GetProviders() {
+		if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+			t.Errorf("after store recovery %s should be healthy: %+v", p.GetProvider(), p)
+		}
+	}
+}

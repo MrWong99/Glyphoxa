@@ -52,6 +52,12 @@ const healthCheckTimeout = 12 * time.Second
 // within the TTL those refetches cost zero vendor calls.
 const healthCacheTTL = 60 * time.Second
 
+// healthProbeTimeout is the hard deadline on the WHOLE health probe — store
+// reads included, which healthCheckTimeout does not cover. The probe runs
+// while the tenant's cache entry lock is held, so without this bound one hung
+// store read would wedge every later health call for the tenant.
+const healthProbeTimeout = healthCheckTimeout + 3*time.Second
+
 // voiceStore is the narrow read surface VoiceServer needs to resolve the tenant
 // BYOK keys. *storage.Store satisfies it; tests drive a fake.
 type voiceStore interface {
@@ -81,6 +87,9 @@ type VoiceServer struct {
 
 	// now is the health cache's clock; tests advance it past the TTL.
 	now func() time.Time
+	// probeTimeout is the whole-probe hard deadline (healthProbeTimeout in
+	// prod); tests shrink it to pin the hung-dependency path.
+	probeTimeout time.Duration
 
 	// sessionActive reports whether a live voice session is running (#150):
 	// the Discord health check then short-circuits to healthy without touching
@@ -115,15 +124,16 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		log = slog.Default()
 	}
 	return &VoiceServer{
-		store:       store,
-		cipher:      cipher,
-		log:         log,
-		newLister:   func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
-		newSynth:    func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
-		pingLLM:     livePingGroq,
-		botTag:      func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
-		now:         time.Now,
-		healthCache: map[uuid.UUID]*healthEntry{},
+		store:        store,
+		cipher:       cipher,
+		log:          log,
+		newLister:    func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
+		newSynth:     func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
+		pingLLM:      livePingGroq,
+		botTag:       func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
+		now:          time.Now,
+		probeTimeout: healthProbeTimeout,
+		healthCache:  map[uuid.UUID]*healthEntry{},
 	}
 }
 
@@ -290,11 +300,19 @@ func (s *VoiceServer) GetProviderHealth(
 
 	// Probe detached from the request's cancellation (values, e.g. the tenant,
 	// survive): a focus-refetch the browser aborts mid-probe must not poison the
-	// cache with cancellation errors. Each check still bounds itself with
-	// healthCheckTimeout.
-	e.providers = s.probeProviders(context.WithoutCancel(ctx), tenantID)
-	e.at = s.now()
-	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: e.providers}), nil
+	// cache with cancellation errors. probeTimeout is the hard deadline on the
+	// whole probe — store reads included — so a hung dependency cannot hold the
+	// entry lock (and with it every later health call for the tenant) forever.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.probeTimeout)
+	defer cancel()
+	providers, complete := s.probeProviders(pctx, tenantID)
+	if complete {
+		// Only a finished probe is cached: a timed-out one would pin
+		// "degraded: deadline exceeded" for the whole TTL, so the next call
+		// retries instead.
+		e.providers, e.at = providers, s.now()
+	}
+	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
 }
 
 // healthEntry returns tenantID's cache slot, creating it on first use.
@@ -310,25 +328,58 @@ func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
 }
 
 // probeProviders runs the three per-provider test-calls CONCURRENTLY (#150):
-// the worst case is the slowest single check (bounded by healthCheckTimeout),
-// not the sum of all three.
-func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID) []*managementv1.ProviderHealth {
-	checks := []func(context.Context, uuid.UUID) *managementv1.ProviderHealth{
-		s.healthLLM,
-		s.healthTTS,
-		s.healthDiscord,
+// the worst case is the slowest single check, not the sum of all three. When
+// ctx expires before every check reports, the still-missing slots are filled
+// with a degraded timeout result, the stuck goroutines are abandoned (their
+// sends land in the buffered channel and are dropped), and complete=false
+// tells the caller not to cache.
+func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID) (providers []*managementv1.ProviderHealth, complete bool) {
+	checks := []struct {
+		name string
+		run  func(context.Context, uuid.UUID) *managementv1.ProviderHealth
+	}{
+		{"groq", s.healthLLM},
+		{"elevenlabs", s.healthTTS},
+		{"discord", s.healthDiscord},
 	}
-	providers := make([]*managementv1.ProviderHealth, len(checks))
-	var wg sync.WaitGroup
+
+	type slot struct {
+		i int
+		h *managementv1.ProviderHealth
+	}
+	results := make(chan slot, len(checks))
 	for i, check := range checks {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-			providers[i] = check(ctx, tenantID)
+			results <- slot{i, check.run(ctx, tenantID)}
 		}()
 	}
-	wg.Wait()
-	return providers
+
+	providers = make([]*managementv1.ProviderHealth, len(checks))
+	for range checks {
+		select {
+		case r := <-results:
+			providers[r.i] = r.h
+		case <-ctx.Done():
+			// Drain checks that finished in the same instant, then mark the
+			// rest timed out.
+			for {
+				select {
+				case r := <-results:
+					providers[r.i] = r.h
+					continue
+				default:
+				}
+				break
+			}
+			for i, check := range checks {
+				if providers[i] == nil {
+					providers[i] = degraded(check.name, fmt.Errorf("health probe timed out: %w", ctx.Err()))
+				}
+			}
+			return providers, false
+		}
+	}
+	return providers, true
 }
 
 // healthLLM pings Groq with the decrypted LLM key.
