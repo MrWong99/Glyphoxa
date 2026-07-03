@@ -83,13 +83,21 @@ func (r *Relay) detach(s *subscriber) {
 // the ring buffer after Last-Event-ID, then streams live frames until the client
 // disconnects, falls too far behind, or the process begins its graceful shutdown
 // (CloseStreams — issue #138).
+//
+// An id that does not parse as a UUID is 404 (#169), same as ServeSnapshot (see
+// its doc comment for the id-class argument): answering 200 would pin a
+// subscriber slot + handler goroutine forever on a stream no session can feed.
 func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	fw := r.newFrameWriter(w)
 	id := req.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	fw := r.newFrameWriter(w)
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")

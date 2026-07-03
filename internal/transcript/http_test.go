@@ -273,6 +273,29 @@ func TestSnapshotRejectsUnparseableID(t *testing.T) {
 	}
 }
 
+// TestEventsRejectsUnparseableID pins the events half of the same id class
+// (#169): a non-UUID {id} can never name a session, so the SSE route must 404
+// like the snapshot route does — not answer 200 text/event-stream and hold a
+// subscriber slot + goroutine forever for a stream no session will ever feed.
+func TestEventsRejectsUnparseableID(t *testing.T) {
+	bus := voiceevent.NewBus()
+	relay := transcript.NewRelay(bus, &fakeSessions{id: uuid.New(), active: true}, nil, nil)
+	srv := httptest.NewServer(mux(relay))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/sessions/not-a-uuid/events")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("events for unparseable id: status=%d Content-Type=%q, want 404", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("events for unparseable id: Content-Type=%q, want no event stream", ct)
+	}
+}
+
 // TestSnapshotIdle returns idle when no session is active.
 func TestSnapshotIdle(t *testing.T) {
 	bus := voiceevent.NewBus()
