@@ -2,16 +2,17 @@
 // PreviewVoice RPC returns a self-contained WAV blob; this wraps it in an object
 // URL and plays it through a transient <audio> element.
 //
-// The element is appended to the document (hidden) for the playback duration:
-// Chrome interrupts detached media elements and rejects play() with "The play()
-// request was interrupted because the media was removed from the document", so
-// a bare `new Audio(url)` never audibly plays (#154). Element and object URL are
-// both released when playback ends, when the media element errors, or when
-// play() rejects (e.g. an autoplay-policy block) — otherwise a failed preview
-// leaks the blob for the document lifetime. The play() rejection is surfaced to
-// the caller so a blocked preview is distinguishable from silence. It is
-// defensively no-op outside a real browser (e.g. jsdom under test, where
-// URL.createObjectURL is unimplemented) so callers can fire-and-forget.
+// Lifecycle hardening (#154): the element is appended to the document (hidden)
+// until playback finishes, pinning a strong reference so nothing — GC pressure
+// or page tooling that manipulates detached media — can interrupt it with "The
+// play() request was interrupted because the media was removed from the
+// document". Element and object URL are both released when playback ends, when
+// the media element errors, or when play() rejects (e.g. an autoplay-policy
+// block) — otherwise a failed preview leaks the blob for the document lifetime.
+// The play() rejection is surfaced to the caller so a blocked preview is
+// distinguishable from silence. It is defensively no-op outside a real browser
+// (e.g. jsdom under test, where URL.createObjectURL is unimplemented) so
+// callers can fire-and-forget.
 export function playAudioBlob(audio: Uint8Array, mimeType: string): Promise<void> {
   let el: HTMLAudioElement;
   let cleanup: () => void;

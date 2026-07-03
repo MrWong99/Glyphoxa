@@ -334,6 +334,7 @@ function SecretRow({
                 onClick={() => {
                   setEditing(true);
                   setValue("");
+                  setSaveError(null); // fresh edit starts without a stale cue
                 }}
               >
                 Replace
@@ -358,6 +359,9 @@ function SecretRow({
                   onClick={() => {
                     setEditing(false);
                     setValue("");
+                    // Back to masked+Healthy — a stale "Couldn't save" alert
+                    // would contradict that state (#154).
+                    setSaveError(null);
                   }}
                 >
                   Cancel
