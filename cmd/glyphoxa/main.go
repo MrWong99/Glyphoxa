@@ -329,13 +329,22 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 
 	campaignPath, campaignHandler := rpc.NewCampaignServer(store).Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
-	providerPath, providerHandler := rpc.NewProviderServer(store, cipher, log).Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
 	// Campaign screens render — the ElevenLabs voice catalog + preview, the Groq
 	// model allowlist, and the async provider-health signal — all via the
-	// decrypted tenant key (ADR-0004 credential bridge). Appended last so the
-	// existing mounts keep their order.
-	voicePath, voiceHandler := rpc.NewVoiceServer(store, cipher, log).Handler(stack.HandlerOptions()...)
+	// decrypted tenant key (ADR-0004 credential bridge). Its mount stays
+	// appended after provider's so the existing mount order is kept.
+	voiceSrv := rpc.NewVoiceServer(store, cipher, log)
+	// While a session is live, the Discord health check short-circuits to
+	// healthy off the manager's Snapshot instead of touching Discord (#150).
+	voiceSrv.SetSessions(mgr)
+	providerSrv := rpc.NewProviderServer(store, cipher, log)
+	// Saving a credential busts the tenant's cached health verdict so the next
+	// health call probes with the new key instead of serving a stale Degraded
+	// badge for up to the cache TTL (#150).
+	providerSrv.SetHealthInvalidator(voiceSrv.InvalidateHealth)
+	providerPath, providerHandler := providerSrv.Handler(stack.HandlerOptions()...)
+	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{

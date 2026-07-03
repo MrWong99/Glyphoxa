@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -41,10 +42,21 @@ const defaultPreviewText = "Hello! I'm your voice for this campaign. Roll for in
 // when shorter.
 const previewTimeout = 15 * time.Second
 
-// healthCheckTimeout bounds each provider's health test-call (the Discord
-// gateway login is the slowest), so a hung provider degrades that one badge
-// instead of stalling the whole health probe.
+// healthCheckTimeout bounds each provider's health test-call, so a hung
+// provider degrades that one badge instead of stalling the whole health probe.
+// The checks run concurrently (#150), so this also bounds the whole RPC.
 const healthCheckTimeout = 12 * time.Second
+
+// healthCacheTTL is how long a GetProviderHealth result is served from the
+// server-side cache (#150). The SPA refires the RPC on every window focus;
+// within the TTL those refetches cost zero vendor calls.
+const healthCacheTTL = 60 * time.Second
+
+// healthProbeTimeout is the hard deadline on the WHOLE health probe — store
+// reads included, which healthCheckTimeout does not cover. The probe runs
+// while the tenant's cache entry lock is held, so without this bound one hung
+// store read would wedge every later health call for the tenant.
+const healthProbeTimeout = healthCheckTimeout + 3*time.Second
 
 // voiceStore is the narrow read surface VoiceServer needs to resolve the tenant
 // BYOK keys. *storage.Store satisfies it; tests drive a fake.
@@ -69,9 +81,49 @@ type VoiceServer struct {
 	// pingLLM is the Groq liveness test-call (a real key -> nil). Defaults to a
 	// GET against the Groq models endpoint.
 	pingLLM func(ctx context.Context, apiKey string) error
-	// botTag performs a live Discord gateway login and returns the bot tag.
-	// Defaults to discordtag.Resolve.
+	// botTag proves the Discord token via REST (GET /users/@me — no gateway
+	// IDENTIFY, #150) and returns the bot tag. Defaults to discordtag.Resolve.
 	botTag func(ctx context.Context, token string) (string, error)
+
+	// now is the health cache's clock; tests advance it past the TTL.
+	now func() time.Time
+	// probeTimeout is the whole-probe hard deadline (healthProbeTimeout in
+	// prod); tests shrink it to pin the hung-dependency path.
+	probeTimeout time.Duration
+
+	// sessionActive reports whether a live voice session is running (#150):
+	// the Discord health check then short-circuits to healthy without touching
+	// Discord — the session on the same token IS the health signal, and a probe
+	// would race its reconnects for the per-token IDENTIFY budget. nil (not
+	// wired, e.g. web-only mode has no in-process loop to consult) means the
+	// probe always runs.
+	sessionActive func() bool
+
+	// healthMu guards healthCache: one TTL-cached GetProviderHealth result per
+	// tenant (#150). Probes are singleflighted per entry: one leader probes,
+	// concurrent callers wait on that SAME probe (each with its own ctx
+	// bail-out) and are handed its result — never a probe of their own.
+	healthMu    sync.Mutex
+	healthCache map[uuid.UUID]*healthEntry
+}
+
+// healthEntry is one tenant's cached provider-health result. mu guards the
+// fields and is only held for state flips — never across a probe.
+type healthEntry struct {
+	mu        sync.Mutex
+	at        time.Time // zero until the first probe lands
+	providers []*managementv1.ProviderHealth
+	// botTag is the last tag a successful Discord probe resolved. It outlives
+	// the TTL so the active-session short-circuit (which does not touch
+	// Discord) can keep reporting "Connected as X#NNNN" instead of blanking
+	// the row for the whole session.
+	botTag string
+	// inflight is non-nil while a leader's probe runs and is closed when it
+	// finishes; callers arriving meanwhile wait on it instead of probing.
+	inflight chan struct{}
+	// lastProbe is the most recent probe's result — set even when a timed-out
+	// probe is not cached, so waiters on that probe still get its answer.
+	lastProbe []*managementv1.ProviderHealth
 }
 
 var _ managementv1connect.VoiceServiceHandler = (*VoiceServer)(nil)
@@ -84,13 +136,32 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		log = slog.Default()
 	}
 	return &VoiceServer{
-		store:     store,
-		cipher:    cipher,
-		log:       log,
-		newLister: func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
-		newSynth:  func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
-		pingLLM:   livePingGroq,
-		botTag:    func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
+		store:        store,
+		cipher:       cipher,
+		log:          log,
+		newLister:    func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
+		newSynth:     func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
+		pingLLM:      livePingGroq,
+		botTag:       func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
+		now:          time.Now,
+		probeTimeout: healthProbeTimeout,
+		healthCache:  map[uuid.UUID]*healthEntry{},
+	}
+}
+
+// activeSessionSource reports the live voice session, if any.
+// *session.Manager satisfies it; tests drive a fake.
+type activeSessionSource interface {
+	Snapshot() (storage.VoiceSession, bool)
+}
+
+// SetSessions wires the live session source the Discord health check consults
+// (#150). Called once at boot, after the session manager exists and before the
+// server serves, so no lock is needed.
+func (s *VoiceServer) SetSessions(src activeSessionSource) {
+	s.sessionActive = func() bool {
+		_, active := src.Snapshot()
+		return active
 	}
 }
 
@@ -216,6 +287,10 @@ func (s *VoiceServer) PreviewVoice(
 // tested status plus the resolved Discord bot tag. A provider with no resolvable
 // key (or a failing test-call) is reported degraded; the screen still renders
 // key-presence instantly and only upgrades the badge from this.
+//
+// The result is cached per tenant for healthCacheTTL (#150): the SPA refires
+// this RPC on every window focus, and within the TTL those refetches are
+// answered from cache without touching any vendor.
 func (s *VoiceServer) GetProviderHealth(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetProviderHealthRequest],
@@ -225,12 +300,162 @@ func (s *VoiceServer) GetProviderHealth(
 		return nil, err
 	}
 
-	providers := []*managementv1.ProviderHealth{
-		s.healthLLM(ctx, tenantID),
-		s.healthTTS(ctx, tenantID),
-		s.healthDiscord(ctx, tenantID),
+	e := s.healthEntry(tenantID)
+	e.mu.Lock()
+	if !e.at.IsZero() && s.now().Sub(e.at) < healthCacheTTL {
+		providers := e.providers
+		e.mu.Unlock()
+		return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
 	}
+
+	// Singleflight: if a probe is already in flight, wait on THAT probe (with
+	// this caller's own ctx bail-out) and take its result — never run a second
+	// probe for the same tenant concurrently or queue behind it for a fresh one.
+	if ch := e.inflight; ch != nil {
+		e.mu.Unlock()
+		select {
+		case <-ch:
+			e.mu.Lock()
+			providers := e.lastProbe
+			e.mu.Unlock()
+			return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
+		case <-ctx.Done():
+			return nil, ctxError(ctx)
+		}
+	}
+
+	// A caller that is already gone must not become a probe leader and burn a
+	// probeTimeout slot on vendors nobody will see.
+	if ctx.Err() != nil {
+		e.mu.Unlock()
+		return nil, ctxError(ctx)
+	}
+
+	// Become the leader: mark the flight, release the lock, probe.
+	ch := make(chan struct{})
+	e.inflight = ch
+	lastBotTag := e.botTag
+	e.mu.Unlock()
+
+	// Probe detached from the request's cancellation (values, e.g. the tenant,
+	// survive): a focus-refetch the browser aborts mid-probe must not poison the
+	// cache with cancellation errors — and waiters on this flight still need the
+	// answer. probeTimeout is the hard deadline on the whole probe — store reads
+	// included — so a hung dependency cannot wedge the tenant's health path.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.probeTimeout)
+	defer cancel()
+	providers, complete := s.probeProviders(pctx, tenantID, lastBotTag)
+
+	e.mu.Lock()
+	e.lastProbe = providers
+	if complete {
+		// Only a finished probe is cached: a timed-out one would pin
+		// "degraded: deadline exceeded" for the whole TTL, so the next call
+		// retries instead.
+		e.providers, e.at = providers, s.now()
+		// Remember the last successfully resolved bot tag for the
+		// active-session short-circuit; a degraded probe keeps the old one.
+		for _, p := range providers {
+			if p.GetProvider() == "discord" && p.GetBotTag() != "" {
+				e.botTag = p.GetBotTag()
+			}
+		}
+	}
+	e.inflight = nil
+	e.mu.Unlock()
+	close(ch) // release the waiters onto lastProbe
+
 	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
+}
+
+// ctxError maps a done request context onto the matching Connect error.
+func ctxError(ctx context.Context) error {
+	code := connect.CodeCanceled
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		code = connect.CodeDeadlineExceeded
+	}
+	return connect.NewError(code, ctx.Err())
+}
+
+// InvalidateHealth drops tenantID's cached health result (#150): called after
+// a credential save so a stale Degraded badge cannot outlive the fix for up to
+// a TTL — the next health call probes the vendors with the new key. The
+// last-known bot tag is dropped too (a new token may be a different bot). Safe
+// under concurrent RPCs: an in-flight probe writes into its own (now orphaned)
+// entry and the next call starts fresh.
+func (s *VoiceServer) InvalidateHealth(tenantID uuid.UUID) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	delete(s.healthCache, tenantID)
+}
+
+// healthEntry returns tenantID's cache slot, creating it on first use.
+func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	e, ok := s.healthCache[tenantID]
+	if !ok {
+		e = &healthEntry{}
+		s.healthCache[tenantID] = e
+	}
+	return e
+}
+
+// probeProviders runs the three per-provider test-calls CONCURRENTLY (#150):
+// the worst case is the slowest single check, not the sum of all three. When
+// ctx expires before every check reports, the still-missing slots are filled
+// with a degraded timeout result, the stuck goroutines are abandoned (their
+// sends land in the buffered channel and are dropped), and complete=false
+// tells the caller not to cache.
+func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, lastBotTag string) (providers []*managementv1.ProviderHealth, complete bool) {
+	checks := []struct {
+		name string
+		run  func(context.Context, uuid.UUID) *managementv1.ProviderHealth
+	}{
+		{"groq", s.healthLLM},
+		{"elevenlabs", s.healthTTS},
+		{"discord", func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+			return s.healthDiscord(ctx, tenantID, lastBotTag)
+		}},
+	}
+
+	type slot struct {
+		i int
+		h *managementv1.ProviderHealth
+	}
+	results := make(chan slot, len(checks))
+	for i, check := range checks {
+		go func() {
+			results <- slot{i, check.run(ctx, tenantID)}
+		}()
+	}
+
+	providers = make([]*managementv1.ProviderHealth, len(checks))
+	for range checks {
+		select {
+		case r := <-results:
+			providers[r.i] = r.h
+		case <-ctx.Done():
+			// Drain checks that finished in the same instant, then mark the
+			// rest timed out.
+			for {
+				select {
+				case r := <-results:
+					providers[r.i] = r.h
+					continue
+				default:
+				}
+				break
+			}
+			for i, check := range checks {
+				if providers[i] == nil {
+					providers[i] = degraded(check.name, fmt.Errorf("health probe timed out: %w", ctx.Err()))
+				}
+			}
+			return providers, false
+		}
+	}
+	return providers, true
 }
 
 // healthLLM pings Groq with the decrypted LLM key.
@@ -261,8 +486,19 @@ func (s *VoiceServer) healthTTS(ctx context.Context, tenantID uuid.UUID) *manage
 	return healthy("elevenlabs")
 }
 
-// healthDiscord performs a live gateway login and reports the resolved bot tag.
-func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+// healthDiscord proves the Bot token via REST (GET /users/@me, no gateway
+// IDENTIFY — #150) and reports the resolved bot tag. While a voice session is
+// active the check short-circuits to healthy without touching Discord — the
+// live session runs on the same token, so it IS the health signal — carrying
+// lastBotTag (the tag of the last successful probe) so the screen's
+// "Connected as X#NNNN" row survives the session.
+func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID, lastBotTag string) *managementv1.ProviderHealth {
+	if s.sessionActive != nil && s.sessionActive() {
+		h := healthy("discord")
+		h.BotTag = lastBotTag
+		h.Detail = "live voice session active"
+		return h
+	}
 	token, err := s.resolveDiscordToken(ctx, tenantID)
 	if err != nil {
 		return degraded("discord", err)

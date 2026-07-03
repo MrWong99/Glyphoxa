@@ -3,7 +3,10 @@ package rpc
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -301,5 +304,490 @@ func TestVoiceRPCs_RequireTenant(t *testing.T) {
 	srv := NewVoiceServer(&fakeVoiceStore{}, voiceTestCipher(t), nil)
 	if _, err := srv.ListVoices(context.Background(), connect.NewRequest(&managementv1.ListVoicesRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Errorf("ListVoices without tenant code = %v, want Unauthenticated", connect.CodeOf(err))
+	}
+}
+
+// healthyStore returns a fakeVoiceStore with a saved key for every component
+// plus a deployment bot token, so all three health checks reach their seams.
+func healthyStore(t *testing.T, cipher *crypto.Cipher) *fakeVoiceStore {
+	t.Helper()
+	return &fakeVoiceStore{
+		configs: map[storage.Component]storage.ProviderConfig{
+			storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "groq", "groq-key"),
+			storage.ComponentTTS: savedConfig(t, cipher, storage.ComponentTTS, "elevenlabs", "eleven-key"),
+		},
+		dep: &storage.DeploymentConfig{
+			DiscordBotTokenLast4: "tok9", DiscordBotTokenCiphertext: mustSeal(t, cipher, "bot-token"),
+		},
+	}
+}
+
+// TestGetProviderHealth_ChecksRunConcurrently pins #150: the three provider
+// checks run in parallel, so the RPC's worst case is the slowest single check
+// (~checkDelay), not the sum (~3×checkDelay). Sequential checks would take
+// ~360ms and fail the <300ms bound.
+func TestGetProviderHealth_ChecksRunConcurrently(t *testing.T) {
+	t.Parallel()
+	const checkDelay = 120 * time.Millisecond
+
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	srv.newLister = func(string) tts.VoiceLister { return &slowLister{delay: checkDelay} }
+	srv.pingLLM = func(ctx context.Context, _ string) error {
+		sleepCtx(ctx, checkDelay)
+		return nil
+	}
+	srv.botTag = func(ctx context.Context, _ string) (string, error) {
+		sleepCtx(ctx, checkDelay)
+		return "Glyphoxa#4823", nil
+	}
+
+	start := time.Now()
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	if got := len(resp.Msg.GetProviders()); got != 3 {
+		t.Fatalf("providers = %d, want 3", got)
+	}
+	if elapsed < checkDelay {
+		t.Errorf("elapsed %v < one check's delay %v — checks were skipped, not run", elapsed, checkDelay)
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Errorf("elapsed %v suggests sequential checks; concurrent should be ~%v", elapsed, checkDelay)
+	}
+}
+
+// slowLister blocks ~delay before returning an empty healthy catalog.
+type slowLister struct{ delay time.Duration }
+
+func (s *slowLister) ListVoices(ctx context.Context) ([]tts.Voice, error) {
+	sleepCtx(ctx, s.delay)
+	return nil, nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
+	}
+}
+
+// countingHealthSeams wires all three provider seams to atomic counters so a
+// test can pin how often the vendors were actually touched.
+type countingHealthSeams struct {
+	lister, llm, discord atomic.Int64
+}
+
+func (c *countingHealthSeams) wire(srv *VoiceServer) {
+	srv.newLister = func(string) tts.VoiceLister {
+		c.lister.Add(1)
+		return &fakeLister{}
+	}
+	srv.pingLLM = func(context.Context, string) error {
+		c.llm.Add(1)
+		return nil
+	}
+	srv.botTag = func(context.Context, string) (string, error) {
+		c.discord.Add(1)
+		return "Glyphoxa#4823", nil
+	}
+}
+
+func (c *countingHealthSeams) counts() [3]int64 {
+	return [3]int64{c.lister.Load(), c.llm.Load(), c.discord.Load()}
+}
+
+// TestGetProviderHealth_CachedWithinTTL pins #150's server-side TTL cache: two
+// health calls within the TTL touch each vendor exactly once (the second is
+// served from cache), and after the TTL expires the vendors are probed again.
+func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+
+	// A controllable clock so the test advances past the TTL without sleeping.
+	now := time.Now()
+	srv.now = func() time.Time { return now }
+
+	ctx := tenantCtx() // ONE tenant: the cache is keyed per tenant
+	req := func() *managementv1.GetProviderHealthResponse {
+		t.Helper()
+		resp, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+		if err != nil {
+			t.Fatalf("GetProviderHealth: %v", err)
+		}
+		return resp.Msg
+	}
+
+	first := req()
+	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+		t.Fatalf("counts after first call = %v, want each vendor touched once", got)
+	}
+
+	second := req()
+	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+		t.Errorf("counts after second call within TTL = %v, want still 1 each (served from cache)", got)
+	}
+	if len(second.GetProviders()) != len(first.GetProviders()) {
+		t.Errorf("cached response shape differs: %v vs %v", second, first)
+	}
+
+	// Advance past the TTL: the next call probes the vendors again.
+	now = now.Add(healthCacheTTL + time.Second)
+	req()
+	if got := seams.counts(); got != [3]int64{2, 2, 2} {
+		t.Errorf("counts after TTL expiry = %v, want each vendor probed again (2)", got)
+	}
+}
+
+// fakeSessions is an activeSessionSource whose Snapshot reports a live voice
+// session iff active is true.
+type fakeSessions struct{ active bool }
+
+func (f *fakeSessions) Snapshot() (storage.VoiceSession, bool) {
+	return storage.VoiceSession{}, f.active
+}
+
+// TestGetProviderHealth_ActiveSessionSkipsDiscordProbe pins #150: while a voice
+// session is active, the Discord check short-circuits to healthy WITHOUT
+// touching Discord — the live session (on the same token) IS the health signal,
+// and a probe would race its reconnects for the per-token IDENTIFY budget.
+func TestGetProviderHealth_ActiveSessionSkipsDiscordProbe(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.SetSessions(&fakeSessions{active: true})
+
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	if got := seams.discord.Load(); got != 0 {
+		t.Errorf("discord probed %d times during an active session, want 0", got)
+	}
+	for _, p := range resp.Msg.GetProviders() {
+		if p.GetProvider() == "discord" && p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+			t.Errorf("discord should report healthy during an active session: %+v", p)
+		}
+	}
+	// The other two providers are still probed for real.
+	if got := seams.llm.Load(); got != 1 {
+		t.Errorf("llm probes = %d, want 1", got)
+	}
+	if got := seams.lister.Load(); got != 1 {
+		t.Errorf("tts probes = %d, want 1", got)
+	}
+}
+
+// blockingVoiceStore blocks every read until release is closed, IGNORING ctx —
+// the worst-case wedged dependency. After release it delegates to inner.
+type blockingVoiceStore struct {
+	release chan struct{}
+	inner   *fakeVoiceStore
+	reads   atomic.Int64 // reads started, so a test can count launched probes
+}
+
+func (b *blockingVoiceStore) GetProviderConfigByComponent(ctx context.Context, id uuid.UUID, c storage.Component) (storage.ProviderConfig, error) {
+	b.reads.Add(1)
+	<-b.release
+	return b.inner.GetProviderConfigByComponent(ctx, id, c)
+}
+
+func (b *blockingVoiceStore) GetDeploymentConfig(ctx context.Context, id uuid.UUID) (storage.DeploymentConfig, error) {
+	b.reads.Add(1)
+	<-b.release
+	return b.inner.GetDeploymentConfig(ctx, id)
+}
+
+// TestGetProviderHealth_HungStoreDoesNotWedgeTenant pins the probe's hard
+// deadline: the WHOLE probe — store reads included — is bounded, the per-tenant
+// cache entry lock is released on timeout, and a timed-out probe is NOT cached
+// (the next call after the store recovers probes fresh and reports healthy).
+// Pre-fix a hung store read under context.WithoutCancel blocked the entry lock
+// forever, wedging every later health call for the tenant.
+func TestGetProviderHealth_HungStoreDoesNotWedgeTenant(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	bs := &blockingVoiceStore{release: make(chan struct{}), inner: healthyStore(t, cipher)}
+	srv := NewVoiceServer(bs, cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.probeTimeout = 50 * time.Millisecond
+
+	ctx := tenantCtx()
+	call := func(label string) *managementv1.GetProviderHealthResponse {
+		t.Helper()
+		done := make(chan *managementv1.GetProviderHealthResponse, 1)
+		go func() {
+			resp, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+			if err != nil {
+				t.Errorf("%s: GetProviderHealth: %v", label, err)
+				done <- nil
+				return
+			}
+			done <- resp.Msg
+		}()
+		select {
+		case msg := <-done:
+			return msg
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: GetProviderHealth wedged >2s on a hung store read", label)
+			return nil
+		}
+	}
+
+	first := call("first")
+	if first == nil {
+		return
+	}
+	for _, p := range first.GetProviders() {
+		if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_DEGRADED {
+			t.Errorf("first call: %s should be degraded while the store hangs: %+v", p.GetProvider(), p)
+		}
+	}
+
+	// The entry lock must be free again: a second call also returns within bound.
+	call("second")
+
+	// A timed-out probe must not be cached: once the store recovers, the next
+	// call probes fresh and reports healthy.
+	close(bs.release)
+	third := call("third")
+	if third == nil {
+		return
+	}
+	for _, p := range third.GetProviders() {
+		if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+			t.Errorf("after store recovery %s should be healthy: %+v", p.GetProvider(), p)
+		}
+	}
+}
+
+// TestGetProviderHealth_ActiveSessionKeepsLastKnownBotTag pins that the
+// active-session short-circuit does not blank the Configuration screen's
+// "Connected as X#NNNN" row: the tag from the last successful probe is
+// returned with the short-circuited healthy result.
+func TestGetProviderHealth_ActiveSessionKeepsLastKnownBotTag(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	sessions := &fakeSessions{}
+	srv.SetSessions(sessions)
+
+	now := time.Now()
+	srv.now = func() time.Time { return now }
+	ctx := tenantCtx()
+
+	discordOf := func(label string) *managementv1.ProviderHealth {
+		t.Helper()
+		resp, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+		if err != nil {
+			t.Fatalf("%s: GetProviderHealth: %v", label, err)
+		}
+		for _, p := range resp.Msg.GetProviders() {
+			if p.GetProvider() == "discord" {
+				return p
+			}
+		}
+		t.Fatalf("%s: no discord slot", label)
+		return nil
+	}
+
+	// No session yet: the probe runs and resolves the tag.
+	if got := discordOf("probe").GetBotTag(); got != "Glyphoxa#4823" {
+		t.Fatalf("probed tag = %q, want Glyphoxa#4823", got)
+	}
+
+	// Session starts; cache expires. The short-circuit must not blank the tag.
+	sessions.active = true
+	now = now.Add(healthCacheTTL + time.Second)
+	p := discordOf("short-circuit")
+	if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+		t.Errorf("discord should be healthy during an active session: %+v", p)
+	}
+	if got := p.GetBotTag(); got != "Glyphoxa#4823" {
+		t.Errorf("short-circuit tag = %q, want the last-known Glyphoxa#4823", got)
+	}
+	if got := seams.discord.Load(); got != 1 {
+		t.Errorf("discord probes = %d, want 1 (short-circuit must not touch Discord)", got)
+	}
+}
+
+// TestSaveCredentials_InvalidateHealthCache pins #150's cache-busting: after
+// the operator saves a new provider key or Discord settings, the next health
+// call probes the vendors fresh instead of serving a stale (possibly Degraded)
+// cached result for up to the TTL — which would imply the new key is also bad.
+func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	voiceSrv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(voiceSrv)
+	now := time.Now()
+	voiceSrv.now = func() time.Time { return now } // TTL never expires on its own
+
+	providerSrv := NewProviderServer(&stubProviderStore{}, cipher, nil)
+	providerSrv.SetHealthInvalidator(voiceSrv.InvalidateHealth)
+
+	ctx := tenantCtx() // same tenant drives saves and health calls
+	health := func(label string) {
+		t.Helper()
+		if _, err := voiceSrv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{})); err != nil {
+			t.Fatalf("%s: GetProviderHealth: %v", label, err)
+		}
+	}
+
+	health("initial")
+	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+		t.Fatalf("counts after initial call = %v, want 1 each", got)
+	}
+
+	// Saving a provider key busts the tenant's cache: the next call probes.
+	if _, err := providerSrv.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "new-groq-key",
+	})); err != nil {
+		t.Fatalf("SaveProviderConfig: %v", err)
+	}
+	health("after key save")
+	if got := seams.counts(); got != [3]int64{2, 2, 2} {
+		t.Errorf("counts after key save = %v, want 2 each (cache busted)", got)
+	}
+
+	// Saving Discord settings busts it too.
+	if _, err := providerSrv.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: ptr("g1"), VoiceChannelId: ptr("c1"),
+	})); err != nil {
+		t.Fatalf("SaveDiscordSettings: %v", err)
+	}
+	health("after discord save")
+	if got := seams.counts(); got != [3]int64{3, 3, 3} {
+		t.Errorf("counts after discord save = %v, want 3 each (cache busted)", got)
+	}
+}
+
+// stubProviderStore is the minimal providerStore for the invalidation test:
+// saves succeed with canned rows (provider_test.go's richer fake lives in the
+// external rpc_test package and is out of reach here).
+type stubProviderStore struct{}
+
+func (stubProviderStore) ListProviderConfigs(context.Context, uuid.UUID) ([]storage.ProviderConfig, error) {
+	return nil, nil
+}
+
+func (stubProviderStore) UpsertProviderConfigs(_ context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error) {
+	out := make([]storage.ProviderConfig, len(configs))
+	for i, n := range configs {
+		out[i] = storage.ProviderConfig{
+			Component: n.Component, Provider: n.Provider,
+			CredentialsCiphertext: n.CredentialsCiphertext, CredentialsLast4: n.CredentialsLast4,
+		}
+	}
+	return out, nil
+}
+
+func (stubProviderStore) GetDeploymentConfig(context.Context, uuid.UUID) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
+}
+
+func (stubProviderStore) SaveDiscordBotToken(context.Context, uuid.UUID, []byte, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, nil
+}
+
+func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
+}
+
+// ptr returns a pointer to v, for proto3 optional scalar fields.
+func ptr[T any](v T) *T { return &v }
+
+// TestGetProviderHealth_CanceledCallersDoNotProbe pins the ctx-aware cache
+// entry: a caller whose request context is already canceled (browser closed
+// the focus-refetch) must return promptly with the ctx error — NOT queue on
+// the entry, become the next probe leader, and burn a full probeTimeout slot.
+// Pre-fix N canceled callers serialized at N x probeTimeout on a hung store.
+func TestGetProviderHealth_CanceledCallersDoNotProbe(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	bs := &blockingVoiceStore{release: make(chan struct{}), inner: healthyStore(t, cipher)}
+	srv := NewVoiceServer(bs, cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.probeTimeout = 200 * time.Millisecond
+
+	canceled, cancel := context.WithCancel(tenantCtx())
+	cancel()
+
+	const n = 5
+	errs := make([]error, n)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = srv.GetProviderHealth(canceled, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if elapsed >= 2*srv.probeTimeout {
+		t.Errorf("%d canceled callers took %v — they serialized full probe slots (probeTimeout %v)", n, elapsed, srv.probeTimeout)
+	}
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("call %d: canceled caller got nil error, want ctx error", i)
+		}
+	}
+}
+
+// TestGetProviderHealth_WaitersShareLeaderProbe pins true singleflight: calls
+// that arrive while a probe is in flight wait on THAT probe and are handed its
+// result — they never launch their own vendor probe. Pre-fix each waiter,
+// finding no fresh cache after the leader's timed-out probe, ran a fresh full
+// probe under the entry lock: N callers serialized at N x probeTimeout and the
+// store saw N probes' worth of reads.
+func TestGetProviderHealth_WaitersShareLeaderProbe(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	bs := &blockingVoiceStore{release: make(chan struct{}), inner: healthyStore(t, cipher)}
+	srv := NewVoiceServer(bs, cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.probeTimeout = 200 * time.Millisecond
+
+	ctx := tenantCtx()
+	const n = 5
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i > 0 {
+				time.Sleep(50 * time.Millisecond) // join while the leader's probe is in flight
+			}
+			if _, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{})); err != nil {
+				t.Errorf("call %d: GetProviderHealth: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if elapsed >= 2*srv.probeTimeout {
+		t.Errorf("%d concurrent callers took %v — waiters ran their own probes instead of sharing the leader's (probeTimeout %v)", n, elapsed, srv.probeTimeout)
+	}
+	// One probe = 3 store reads (LLM config, TTS config, deployment config).
+	if got := bs.reads.Load(); got != 3 {
+		t.Errorf("store reads = %d, want 3 (exactly one probe launched)", got)
 	}
 }
