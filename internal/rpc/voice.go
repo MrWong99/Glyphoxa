@@ -327,6 +327,18 @@ func (s *VoiceServer) GetProviderHealth(
 	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
 }
 
+// InvalidateHealth drops tenantID's cached health result (#150): called after
+// a credential save so a stale Degraded badge cannot outlive the fix for up to
+// a TTL — the next health call probes the vendors with the new key. The
+// last-known bot tag is dropped too (a new token may be a different bot). Safe
+// under concurrent RPCs: an in-flight probe writes into its own (now orphaned)
+// entry and the next call starts fresh.
+func (s *VoiceServer) InvalidateHealth(tenantID uuid.UUID) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	delete(s.healthCache, tenantID)
+}
+
 // healthEntry returns tenantID's cache slot, creating it on first use.
 func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
 	s.healthMu.Lock()

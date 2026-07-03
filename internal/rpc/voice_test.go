@@ -616,3 +616,87 @@ func TestGetProviderHealth_ActiveSessionKeepsLastKnownBotTag(t *testing.T) {
 		t.Errorf("discord probes = %d, want 1 (short-circuit must not touch Discord)", got)
 	}
 }
+
+// TestSaveCredentials_InvalidateHealthCache pins #150's cache-busting: after
+// the operator saves a new provider key or Discord settings, the next health
+// call probes the vendors fresh instead of serving a stale (possibly Degraded)
+// cached result for up to the TTL — which would imply the new key is also bad.
+func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	voiceSrv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(voiceSrv)
+	now := time.Now()
+	voiceSrv.now = func() time.Time { return now } // TTL never expires on its own
+
+	providerSrv := NewProviderServer(&stubProviderStore{}, cipher, nil)
+	providerSrv.SetHealthInvalidator(voiceSrv.InvalidateHealth)
+
+	ctx := tenantCtx() // same tenant drives saves and health calls
+	health := func(label string) {
+		t.Helper()
+		if _, err := voiceSrv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{})); err != nil {
+			t.Fatalf("%s: GetProviderHealth: %v", label, err)
+		}
+	}
+
+	health("initial")
+	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+		t.Fatalf("counts after initial call = %v, want 1 each", got)
+	}
+
+	// Saving a provider key busts the tenant's cache: the next call probes.
+	if _, err := providerSrv.SaveProviderConfig(ctx, connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "new-groq-key",
+	})); err != nil {
+		t.Fatalf("SaveProviderConfig: %v", err)
+	}
+	health("after key save")
+	if got := seams.counts(); got != [3]int64{2, 2, 2} {
+		t.Errorf("counts after key save = %v, want 2 each (cache busted)", got)
+	}
+
+	// Saving Discord settings busts it too.
+	if _, err := providerSrv.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: "g1", VoiceChannelId: "c1",
+	})); err != nil {
+		t.Fatalf("SaveDiscordSettings: %v", err)
+	}
+	health("after discord save")
+	if got := seams.counts(); got != [3]int64{3, 3, 3} {
+		t.Errorf("counts after discord save = %v, want 3 each (cache busted)", got)
+	}
+}
+
+// stubProviderStore is the minimal providerStore for the invalidation test:
+// saves succeed with canned rows (provider_test.go's richer fake lives in the
+// external rpc_test package and is out of reach here).
+type stubProviderStore struct{}
+
+func (stubProviderStore) ListProviderConfigs(context.Context, uuid.UUID) ([]storage.ProviderConfig, error) {
+	return nil, nil
+}
+
+func (stubProviderStore) UpsertProviderConfigs(_ context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error) {
+	out := make([]storage.ProviderConfig, len(configs))
+	for i, n := range configs {
+		out[i] = storage.ProviderConfig{
+			Component: n.Component, Provider: n.Provider,
+			CredentialsCiphertext: n.CredentialsCiphertext, CredentialsLast4: n.CredentialsLast4,
+		}
+	}
+	return out, nil
+}
+
+func (stubProviderStore) GetDeploymentConfig(context.Context, uuid.UUID) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, storage.ErrNotFound
+}
+
+func (stubProviderStore) SaveDiscordBotToken(context.Context, uuid.UUID, []byte, string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{}, nil
+}
+
+func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
+	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
+}

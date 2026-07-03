@@ -70,6 +70,11 @@ type ProviderServer struct {
 	store  providerStore
 	cipher *crypto.Cipher // nil when $GLYPHOXA_SECRET is unset: reads still work, saves fail loudly
 	log    *slog.Logger
+
+	// invalidateHealth busts the tenant's provider-health cache after a
+	// credential save (#150), so a cached Degraded badge cannot outlive the
+	// fixed key for up to a TTL. nil (not wired) skips.
+	invalidateHealth func(tenantID uuid.UUID)
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -82,6 +87,13 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 		log = slog.Default()
 	}
 	return &ProviderServer{store: store, cipher: cipher, log: log}
+}
+
+// SetHealthInvalidator wires the health-cache buster called after a successful
+// credential save (#150). Called once at boot, before the server serves, so no
+// lock is needed.
+func (s *ProviderServer) SetHealthInvalidator(fn func(tenantID uuid.UUID)) {
+	s.invalidateHealth = fn
 }
 
 // Handler builds the Connect HTTP handler for ProviderService and returns its
@@ -194,6 +206,12 @@ func (s *ProviderServer) SaveProviderConfig(
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
+	// The key changed: the cached health verdict (possibly Degraded from the
+	// old key) is stale — bust it so the next health call probes fresh (#150).
+	if s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
+	}
+
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
 		Credential: providerCredential(string(slot.components[0]), slot.provider, saved[0]),
 	}), nil
@@ -239,6 +257,12 @@ func (s *ProviderServer) SaveDiscordSettings(
 	if err != nil {
 		s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	// Discord config changed (token and/or IDs): bust the cached health
+	// verdict so the next health call probes with the new state (#150).
+	if s.invalidateHealth != nil {
+		s.invalidateHealth(tenantID)
 	}
 
 	return connect.NewResponse(&managementv1.SaveDiscordSettingsResponse{
