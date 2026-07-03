@@ -345,6 +345,23 @@ func (r *Relay) rollover(vs storage.VoiceSession) {
 	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: r.typing})})
 }
 
+// endSession emits the terminal `status: idle` frame when session id ends
+// (#144). Called from Finalize — the Manager's loop-exit hook — so attached SSE
+// subscribers learn the session died (self-exit included) instead of watching a
+// silent stream; the frame rides the ring too, so a reconnect replays it.
+func (r *Relay) endSession(id uuid.UUID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if id.String() != r.activeID {
+		// The relay never rolled over to this session (zero bus events) — there is
+		// no buffer to close, and emitting here would inject a spurious idle frame
+		// into the CURRENT session's stream.
+		return
+	}
+	r.typing = Typing{}
+	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "idle", Typing: Typing{}})})
+}
+
 // turn returns the coalescing state for a turn id, creating it on first sight.
 func (r *Relay) turn(id string) *turn {
 	t := r.turns[id]

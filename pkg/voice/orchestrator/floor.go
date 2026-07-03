@@ -25,18 +25,22 @@ import (
 // second Take's supersession cancels the first segment's turn mid-synthesis (a
 // self-cancel with no barge involved). When a coalesce window is configured
 // ([NewFloorWithCoalesce]) a Take arriving within that window of the previous one
-// is treated as the SAME utterance continuing: it does not supersede the
-// in-flight turn but yields to it — the new turn's context comes back already
-// cancelled so its reply is suppressed and the turn already speaking keeps the
-// floor. One utterance then maps to one turn even when VAD over-splits it. A zero
-// window (the [NewFloor] default) keeps the plain always-supersede behaviour the
-// barge path and the tracer-bullet tests rely on.
+// AND routed to the same target agent is treated as the SAME utterance
+// continuing: it does not supersede the in-flight turn but yields to it — the
+// new turn's context comes back already cancelled so its reply is suppressed and
+// the turn already speaking keeps the floor. One utterance then maps to one turn
+// even when VAD over-splits it. A take for a DIFFERENT agent inside the window
+// is not the same utterance continuing — the matcher routed it to someone else
+// ("Bart, hold the door. Greta, run!", #146) — so it supersedes as normal. A
+// zero window (the [NewFloor] default) keeps the plain always-supersede
+// behaviour the barge path and the tracer-bullet tests rely on.
 type Floor struct {
-	mu         sync.Mutex
-	cancel     context.CancelFunc // non-nil while a turn holds the floor
-	gen        uint64             // increments per Take; guards stale releases
-	lastTake   time.Time          // when the current holder took the floor (coalesce anchor)
-	holderTurn string             // TurnID of the turn currently holding the floor (for Yield → barge attribution)
+	mu          sync.Mutex
+	cancel      context.CancelFunc // non-nil while a turn holds the floor
+	gen         uint64             // increments per Take; guards stale releases
+	lastTake    time.Time          // when the current holder took the floor (coalesce anchor)
+	holderTurn  string             // TurnID of the turn currently holding the floor (for Yield → barge attribution)
+	holderAgent string             // target AgentID of the current holder's route (coalesce is same-target only, #146)
 	// speaking is true once the current holder has produced its first audible
 	// frame — the barge gate (ADR-0027). A held-but-silent turn (the pre-audio
 	// LLM "thinking" phase) is NOT speaking, so a human speech_start in that
@@ -66,9 +70,9 @@ func (f *Floor) clock() time.Time {
 func NewFloor() *Floor { return &Floor{now: time.Now} }
 
 // NewFloorWithCoalesce returns an unheld floor whose [Floor.Take] coalesces a
-// re-take arriving within window of the previous take into the turn already
-// holding the floor, rather than superseding it (see [Floor] — root cause #2).
-// A non-positive window behaves like [NewFloor].
+// same-target re-take arriving within window of the previous take into the turn
+// already holding the floor, rather than superseding it (see [Floor] — root
+// cause #2). A non-positive window behaves like [NewFloor].
 func NewFloorWithCoalesce(window time.Duration) *Floor {
 	if window < 0 {
 		window = 0
@@ -77,33 +81,40 @@ func NewFloorWithCoalesce(window time.Duration) *Floor {
 }
 
 // Take derives a per-turn context from parent and installs it as the held floor,
-// returning that context and a release function. A new Take supersedes any turn
+// returning that context and a release function. agentID is the target agent of
+// the route this turn answers ([voiceevent.AddressTarget.AgentID]); it decides
+// whom a coalesce window may fold this take into. A new Take supersedes any turn
 // still holding the floor — its context is cancelled — so two turns never speak
 // at once. release clears the floor (only if this turn still holds it) and
 // cancels the turn's context; it is idempotent and must be called when the turn
 // ends, conventionally via defer.
 //
 // With a coalesce window ([NewFloorWithCoalesce]) a Take landing within that
-// window of the previous one is a split-utterance continuation: it does NOT
-// cancel the in-flight turn. The returned context comes back already cancelled,
-// the returned release is a no-op on the floor, and coalesced is true — so the
-// caller can see this Take yielded (rather than took) the floor and react (e.g.
-// publish [voiceevent.TurnEnded] for the dropped segment) instead of speaking
-// it, while the turn already holding the floor keeps it. On a normal take
+// window of the previous one AND addressing the holder's agent is a
+// split-utterance continuation: it does NOT cancel the in-flight turn. The
+// returned context comes back already cancelled, the returned release is a
+// no-op on the floor, and coalesced is true — so the caller can see this Take
+// yielded (rather than took) the floor and react (e.g. publish
+// [voiceevent.TurnEnded] for the dropped segment) instead of speaking it, while
+// the turn already holding the floor keeps it. A take for a DIFFERENT agent
+// inside the window supersedes as normal (#146): "same utterance continuing" is
+// provably false once the matcher routed the segment to another agent, and
+// coalescing it away would silently drop a direct address. On a normal take
 // coalesced is false.
 //
 // The turn's TurnID is recovered from parent ([voiceevent.TurnIDFrom]) and held
 // so [Floor.Yield] can attribute a barge to the turn it cancelled.
-func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(), coalesced bool) {
+func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Context, release func(), coalesced bool) {
 	ctx, cancel := context.WithCancel(parent)
 
 	f.mu.Lock()
-	if f.cancel != nil && f.coalesce > 0 && f.clock().Sub(f.lastTake) < f.coalesce {
-		// Same-utterance re-take inside the coalesce window: yield to the turn
-		// already holding the floor instead of superseding it. Cancel only THIS
-		// (the late segment's) context and leave the holder untouched. Refresh the
-		// anchor so a run of closely-spaced splits keeps coalescing (each segment
-		// is within the window of the previous one, not just the first).
+	if f.cancel != nil && f.coalesce > 0 && agentID == f.holderAgent && f.clock().Sub(f.lastTake) < f.coalesce {
+		// Same-utterance re-take inside the coalesce window, addressed to the same
+		// agent: yield to the turn already holding the floor instead of superseding
+		// it. Cancel only THIS (the late segment's) context and leave the holder
+		// untouched. Refresh the anchor so a run of closely-spaced splits keeps
+		// coalescing (each segment is within the window of the previous one, not
+		// just the first).
 		f.lastTake = f.clock()
 		f.mu.Unlock()
 		cancel()
@@ -117,6 +128,7 @@ func (f *Floor) Take(parent context.Context) (ctx context.Context, release func(
 	f.cancel = cancel
 	f.lastTake = f.clock()
 	f.holderTurn = voiceevent.TurnIDFrom(parent)
+	f.holderAgent = agentID
 	f.speaking = false // a fresh holder starts silent until it produces audio
 	f.mu.Unlock()
 
@@ -146,6 +158,7 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 	turnID = f.holderTurn
 	f.cancel = nil
 	f.holderTurn = ""
+	f.holderAgent = ""
 	f.speaking = false
 	f.mu.Unlock()
 	if c == nil {

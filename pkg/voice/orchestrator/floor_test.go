@@ -15,7 +15,7 @@ import (
 // usable zero-valued too.
 func TestFloor_ZeroValueUsable(t *testing.T) {
 	var f orchestrator.Floor // zero value, now == nil
-	ctx, release, coalesced := f.Take(context.Background())
+	ctx, release, coalesced := f.Take(context.Background(), "")
 	defer release()
 	if coalesced {
 		t.Fatal("a zero-value floor has no coalesce window; Take must not coalesce")
@@ -33,7 +33,7 @@ func TestFloor_TakeActiveReleaseInactive(t *testing.T) {
 	if f.Active() {
 		t.Fatal("a fresh floor must be inactive")
 	}
-	ctx, release, _ := f.Take(context.Background())
+	ctx, release, _ := f.Take(context.Background(), "")
 	if !f.Active() {
 		t.Fatal("floor must be active after Take")
 	}
@@ -54,7 +54,7 @@ func TestFloor_YieldCancelsHeldTurnAndReportsTrue(t *testing.T) {
 	// The turn carries its TurnID in the parent ctx (as the production reply
 	// reactor does) so Yield can attribute the barge to the cut turn.
 	parent := voiceevent.WithTurnID(context.Background(), "T7")
-	ctx, release, _ := f.Take(parent)
+	ctx, release, _ := f.Take(parent, "")
 	defer release()
 
 	turnID, yielded := f.Yield()
@@ -81,10 +81,10 @@ func TestFloor_YieldOnFreeFloorReportsFalse(t *testing.T) {
 
 func TestFloor_TakeSupersedesPreviousTurn(t *testing.T) {
 	f := orchestrator.NewFloor()
-	ctx1, release1, _ := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background(), "")
 	defer release1()
 
-	ctx2, release2, coalesced := f.Take(context.Background())
+	ctx2, release2, coalesced := f.Take(context.Background(), "")
 	defer release2()
 
 	if coalesced {
@@ -111,7 +111,7 @@ func TestFloor_CoalesceWindowKeepsInFlightTurn(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(500 * time.Millisecond)
 	f.SetClock(func() time.Time { return now })
 
-	ctx1, release1, c1 := f.Take(context.Background())
+	ctx1, release1, c1 := f.Take(context.Background(), "bart")
 	defer release1()
 	if c1 {
 		t.Fatal("the first Take must not coalesce (nothing is holding the floor)")
@@ -119,7 +119,7 @@ func TestFloor_CoalesceWindowKeepsInFlightTurn(t *testing.T) {
 
 	// Second segment arrives 100ms later — inside the 500ms window.
 	now = now.Add(100 * time.Millisecond)
-	ctx2, release2, c2 := f.Take(context.Background())
+	ctx2, release2, c2 := f.Take(context.Background(), "bart")
 	defer release2()
 
 	if !c2 {
@@ -145,6 +145,39 @@ func TestFloor_CoalesceWindowKeepsInFlightTurn(t *testing.T) {
 	}
 }
 
+// TestFloor_CoalesceWindowCrossTargetSupersedes pins #146: the coalesce window
+// folds takes into the in-flight turn only when they address the SAME target
+// agent. A take routed to a DIFFERENT agent inside the window is not "the same
+// utterance continuing" — the matcher routed it elsewhere ("Bart, hold the
+// door. Greta, run!") — so it must supersede the holder as a normal take, not
+// be silently coalesced away.
+func TestFloor_CoalesceWindowCrossTargetSupersedes(t *testing.T) {
+	now := time.Unix(0, 0)
+	f := orchestrator.NewFloorWithCoalesce(600 * time.Millisecond)
+	f.SetClock(func() time.Time { return now })
+
+	ctx1, release1, _ := f.Take(context.Background(), "bart")
+	defer release1()
+
+	// Greta's take lands 100ms later — inside the window, but for another agent.
+	now = now.Add(100 * time.Millisecond)
+	ctx2, release2, coalesced := f.Take(context.Background(), "greta")
+	defer release2()
+
+	if coalesced {
+		t.Fatal("a cross-target take inside the coalesce window must supersede, not coalesce")
+	}
+	if ctx1.Err() == nil {
+		t.Fatal("a cross-target take must cancel the prior holder's ctx (supersede)")
+	}
+	if ctx2.Err() != nil {
+		t.Fatalf("the cross-target turn's ctx must be live so its reply is spoken: %v", ctx2.Err())
+	}
+	if !f.Active() {
+		t.Fatal("the cross-target turn must hold the floor")
+	}
+}
+
 // TestFloor_CoalesceWindowExpiresToSupersession proves the window is bounded: a
 // re-Take after the window elapses is a genuine new utterance and supersedes the
 // prior turn as normal.
@@ -153,12 +186,12 @@ func TestFloor_CoalesceWindowExpiresToSupersession(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(500 * time.Millisecond)
 	f.SetClock(func() time.Time { return now })
 
-	ctx1, release1, _ := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background(), "bart")
 	defer release1()
 
 	// Real conversational gap: past the window.
 	now = now.Add(800 * time.Millisecond)
-	ctx2, release2, coalesced := f.Take(context.Background())
+	ctx2, release2, coalesced := f.Take(context.Background(), "bart")
 	defer release2()
 
 	if coalesced {
@@ -184,16 +217,16 @@ func TestFloor_CoalesceChainKeepsCoalescing(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(300 * time.Millisecond)
 	f.SetClock(func() time.Time { return now })
 
-	ctx1, release1, _ := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background(), "bart")
 	defer release1()
 
 	// Segment 2 at +200ms (inside window of seg1), segment 3 at +400ms (outside
 	// window of seg1 but inside window of seg2 — anchor refreshed).
 	now = now.Add(200 * time.Millisecond)
-	_, r2, c2 := f.Take(context.Background())
+	_, r2, c2 := f.Take(context.Background(), "bart")
 	defer r2()
 	now = now.Add(200 * time.Millisecond)
-	_, r3, c3 := f.Take(context.Background())
+	_, r3, c3 := f.Take(context.Background(), "bart")
 	defer r3()
 
 	if !c2 || !c3 {
@@ -212,9 +245,9 @@ func TestFloor_CoalesceChainKeepsCoalescing(t *testing.T) {
 // the tracer-bullet tests depend on, even on a back-to-back re-take.
 func TestFloor_ZeroCoalesceIsPlainSupersession(t *testing.T) {
 	f := orchestrator.NewFloorWithCoalesce(0)
-	ctx1, release1, _ := f.Take(context.Background())
+	ctx1, release1, _ := f.Take(context.Background(), "")
 	defer release1()
-	ctx2, release2, coalesced := f.Take(context.Background())
+	ctx2, release2, coalesced := f.Take(context.Background(), "")
 	defer release2()
 
 	if coalesced {
@@ -230,8 +263,8 @@ func TestFloor_ZeroCoalesceIsPlainSupersession(t *testing.T) {
 
 func TestFloor_StaleReleaseDoesNotClearNewerTurn(t *testing.T) {
 	f := orchestrator.NewFloor()
-	_, release1, _ := f.Take(context.Background())
-	_, release2, _ := f.Take(context.Background())
+	_, release1, _ := f.Take(context.Background(), "")
+	_, release2, _ := f.Take(context.Background(), "")
 	defer release2()
 
 	// Releasing the first (already-superseded) turn must not wipe the second

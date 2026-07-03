@@ -306,9 +306,12 @@ message SaveDiscordSettingsRequest {
   // stored token unchanged — lets the IDs be saved without re-entering the
   // secret. Write-only: never returned.
   optional string bot_token = 1;
-  // guild_id / voice_channel_id are the non-secret Discord IDs, stored as-is.
-  string guild_id = 2;
-  string voice_channel_id = 3;
+  // guild_id / voice_channel_id are the non-secret Discord IDs. Omit both (no
+  // presence) to leave the stored IDs unchanged — lets the token be replaced
+  // without clobbering the IDs (#142). When present they must be non-empty and
+  // sent together; a present-but-empty ID is rejected (mirrors bot_token).
+  optional string guild_id = 2;
+  optional string voice_channel_id = 3;
 }
 
 // SaveDiscordSettingsResponse returns the Bot token's masked metadata plus the

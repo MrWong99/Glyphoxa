@@ -179,8 +179,10 @@ type TurnEndReason string
 const (
 	// TurnEndSupersedeCoalesced: the floor's same-utterance grace window folded a
 	// late VAD-split segment into the turn already speaking — the late segment is
-	// never spoken (latency investigation root cause #2). [TurnEnded.Text] carries
-	// its dropped transcript.
+	// never spoken (latency investigation root cause #2). Coalescing is
+	// same-target only: a segment routed to a different agent inside the window
+	// supersedes instead (#146), so this reason never marks a cross-target
+	// address. [TurnEnded.Text] carries its dropped transcript.
 	TurnEndSupersedeCoalesced TurnEndReason = "supersede_coalesced"
 	// TurnEndBarge: a confirmed human barge-in cancelled the turn (the floor was
 	// yielded while this turn held it).

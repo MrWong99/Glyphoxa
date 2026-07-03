@@ -108,13 +108,36 @@ type reconnectPolicy struct {
 	initial time.Duration
 	max     time.Duration
 	factor  float64
+	// healthyAfter is how long a cycle must serve after connected() fires before
+	// it counts as a healthy session and resets the backoff to initial. A cycle
+	// that joins but fails sooner (codec-less build, broken ONNX init — issue
+	// #141) is a connect failure: the delay keeps growing to its cap instead of
+	// retrying the Discord voice join at 1 Hz forever. Zero means reset on join.
+	healthyAfter time.Duration
 	// sleep blocks for d or until ctx is cancelled (returns ctx.Err() if
 	// cancelled first). Injected so tests drive the backoff without real waits.
 	sleep func(ctx context.Context, d time.Duration) error
+	// now reports the current time for the healthyAfter measurement. Injected so
+	// tests fake a long-serving session in milliseconds; nil means time.Now.
+	now func() time.Time
 }
 
+// healthySessionDuration is how long a session must serve post-join before the
+// reconnect backoff forgives past failures and resets to the initial delay.
+// Sized to the backoff cap: a session must outlive the maximum backoff before
+// the loop trusts it, so a persistent join-then-fail cycle (issue #141) settles
+// at cap cadence instead of resetting to 1 Hz.
+const healthySessionDuration = 30 * time.Second
+
 func defaultReconnectPolicy() reconnectPolicy {
-	return reconnectPolicy{initial: time.Second, max: 30 * time.Second, factor: 2, sleep: sleepCtx}
+	return reconnectPolicy{
+		initial:      time.Second,
+		max:          30 * time.Second,
+		factor:       2,
+		healthyAfter: healthySessionDuration,
+		sleep:        sleepCtx,
+		now:          time.Now,
+	}
 }
 
 // sleepCtx blocks for d or until ctx is cancelled, returning ctx.Err() on
@@ -143,14 +166,28 @@ func nextDelay(d time.Duration, p reconnectPolicy) time.Duration {
 // when ctx is cancelled; every other return from attempt — an error OR a clean
 // session-close (nil) — is a lost connection and triggers a backed-off
 // reconnect. attempt is handed a connected callback it calls once the join
-// succeeds, which resets the backoff so a long-lived session that later drops
-// reconnects promptly instead of inheriting a grown delay.
+// succeeds; the backoff resets to initial only if the cycle then serves for at
+// least p.healthyAfter (issue #141), so a long-lived session that later drops
+// reconnects promptly while a join-then-immediate-fail cycle keeps growing its
+// delay instead of hammering the Discord voice join at 1 Hz.
 func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, attempt func(ctx context.Context, connected func()) error) error {
+	now := p.now
+	if now == nil {
+		now = time.Now
+	}
 	delay := p.initial
 	for {
-		err := attempt(ctx, func() { delay = p.initial })
+		// connectedAt is written by the callback inside attempt and read after
+		// attempt returns — connectAndServe invokes it synchronously, same
+		// goroutine, so no lock. The delay is only consumed post-return, so
+		// deciding the reset here is equivalent to arming a timer on connect.
+		var connectedAt time.Time
+		err := attempt(ctx, func() { connectedAt = now() })
 		if ctx.Err() != nil {
 			return nil // shutdown requested — stop retrying, exit clean (fixes SIGTERM->exit1)
+		}
+		if !connectedAt.IsZero() && now().Sub(connectedAt) >= p.healthyAfter {
+			delay = p.initial // served healthily — forgive past failures (issue #44)
 		}
 		if err != nil {
 			log.Warn("voice connection failed; reconnecting", "err", err, "backoff", delay)
@@ -374,8 +411,10 @@ func Run(ctx context.Context, cfg Config) error {
 // connectAndServe runs ONE connect-and-serve cycle: build the Discord client,
 // open the gateway, join the channel, assemble the pipeline, and pump audio
 // until ctx is cancelled or the connection drops. It calls connected() once the
-// join succeeds, which resets the caller's backoff so a long-lived session that
-// later drops reconnects promptly. Any error — or a clean return (a dropped
+// join succeeds, marking when serving began; the caller resets its backoff only
+// if the cycle then survives the healthy threshold (issue #141), so a
+// long-lived session that later drops reconnects promptly while a
+// join-then-immediate-fail cycle keeps backing off. Any error — or a clean return (a dropped
 // gateway often reports none) — flows back to runWithReconnect, which decides
 // whether to retry; only a cancelled ctx ends the loop.
 func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func()) error {
@@ -430,9 +469,10 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		return fmt.Errorf("wirenpc: join voice channel: %w", err)
 	}
 	defer sess.Close()
-	// The join succeeded: reset the reconnect backoff so a session that runs for
-	// a while and only later drops reconnects on the initial delay, not a delay
-	// grown by earlier connect failures (issue #44).
+	// The join succeeded: mark when serving began. runWithReconnect resets the
+	// backoff only if this cycle survives the healthy threshold (issue #141), so
+	// a session that serves for a while and later drops reconnects on the initial
+	// delay (issue #44) while a join-then-immediate-fail keeps backing off.
 	connected()
 	log.Info("joined voice channel", "guild", guild, "channel", channel, "npcs", npcNames(cfg.npcs))
 

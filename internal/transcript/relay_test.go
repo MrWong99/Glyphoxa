@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -320,6 +321,80 @@ func TestPublish_DoesNotBlockOnLaggedSubscriber(t *testing.T) {
 	case <-s.lagged:
 	case <-time.After(time.Second):
 		t.Fatal("a lagged subscriber was never signalled")
+	}
+}
+
+// TestFinalize_DeliversTerminalIdleFrame is issue #144: when the active session
+// ends (the Manager calls Finalize at every loop exit — Stop, self-exit,
+// Shutdown), an attached SSE subscriber receives a terminal `status: idle` frame
+// on the existing channel, and the frame lands in the ring so a reconnect
+// replays it. Without it the open EventSource just goes quiet and the screen
+// shows "Live" forever.
+func TestFinalize_DeliversTerminalIdleFrame(t *testing.T) {
+	bus, r, fs, id := liveRelay(t)
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hello", TurnID: "t1"})
+
+	s, _ := r.attach(id, 0)
+	defer r.detach(s)
+
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	select {
+	case f := <-s.ch:
+		if f.Event != "status" {
+			t.Fatalf("terminal frame event = %q, want status", f.Event)
+		}
+		var st status
+		if err := json.Unmarshal(f.Data, &st); err != nil {
+			t.Fatalf("unmarshal terminal frame: %v", err)
+		}
+		if st.Status != "idle" || st.Typing.Active {
+			t.Fatalf("terminal frame = %+v, want idle with inactive typing", st)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no terminal frame delivered to the attached subscriber after Finalize")
+	}
+
+	// The frame is buffered too, so a reconnecting EventSource replays it.
+	frames := r.Frames(id, 0)
+	last := frames[len(frames)-1]
+	if last.Event != "status" || !json.Valid(last.Data) {
+		t.Fatalf("ring's last frame = %+v, want the terminal status frame", last)
+	}
+	var st status
+	if err := json.Unmarshal(last.Data, &st); err != nil {
+		t.Fatalf("unmarshal buffered terminal frame: %v", err)
+	}
+	if st.Status != "idle" {
+		t.Fatalf("buffered terminal frame status = %q, want idle", st.Status)
+	}
+}
+
+// TestFinalize_OtherSessionDoesNotPolluteBuffer (#144): a Finalize for a session
+// the relay never rolled over to (e.g. a session that produced zero bus events)
+// must NOT inject an idle frame into the CURRENT session's buffer — its
+// subscribers would see their live session spuriously flip idle.
+func TestFinalize_OtherSessionDoesNotPolluteBuffer(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hello", TurnID: "t1"})
+
+	s, _ := r.attach(id, 0)
+	defer r.detach(s)
+	before := len(r.Frames(id, 0))
+
+	if _, err := r.Finalize(context.Background(), uuid.New()); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	select {
+	case f := <-s.ch:
+		t.Fatalf("live subscriber received a frame for another session's end: %+v", f)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := len(r.Frames(id, 0)); got != before {
+		t.Fatalf("buffer grew from %d to %d frames on another session's Finalize", before, got)
 	}
 }
 

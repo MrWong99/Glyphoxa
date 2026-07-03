@@ -17,7 +17,7 @@ func TestBargeIn_InstantYieldsActiveFloor(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	parent := voiceevent.WithTurnID(context.Background(), "T1")
-	turnCtx, release, _ := floor.Take(parent)
+	turnCtx, release, _ := floor.Take(parent, "")
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
@@ -42,7 +42,7 @@ func TestBargeIn_PublishesTurnEndedWithTurnID(t *testing.T) {
 	floor := orchestrator.NewFloor()
 	// The turn holds the floor with its TurnID in ctx, as the reply reactor wires it.
 	parent := voiceevent.WithTurnID(context.Background(), "T42")
-	_, release, _ := floor.Take(parent)
+	_, release, _ := floor.Take(parent, "")
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
@@ -68,7 +68,7 @@ func TestBargeIn_NoBargeWhileHolderNotYetSpeaking(t *testing.T) {
 	floor := orchestrator.NewFloor()
 	// The turn holds the floor (Take at AddressRouted) but no FirstOpus yet.
 	parent := voiceevent.WithTurnID(context.Background(), "T1")
-	turnCtx, release, _ := floor.Take(parent)
+	turnCtx, release, _ := floor.Take(parent, "")
 	defer release()
 
 	// Confirm window 0 would yield instantly on a merely-held floor (the old bug);
@@ -89,7 +89,7 @@ func TestBargeIn_BargesOnceHolderIsSpeaking(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	parent := voiceevent.WithTurnID(context.Background(), "T2")
-	turnCtx, release, _ := floor.Take(parent)
+	turnCtx, release, _ := floor.Take(parent, "")
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
@@ -114,7 +114,7 @@ func TestBargeIn_SpeakingSignalForStaleTurnIgnored(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	parent := voiceevent.WithTurnID(context.Background(), "T3")
-	turnCtx, release, _ := floor.Take(parent)
+	turnCtx, release, _ := floor.Take(parent, "")
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
@@ -147,7 +147,7 @@ func TestBargeIn_SoftOverlapDoesNotCancel(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	parent := voiceevent.WithTurnID(context.Background(), "T1")
-	turnCtx, release, _ := floor.Take(parent)
+	turnCtx, release, _ := floor.Take(parent, "")
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 200*time.Millisecond).Bind(t.Context(), h.Bus))
@@ -167,7 +167,7 @@ func TestBargeIn_ConfirmWindowCrossingCancels(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	parent := voiceevent.WithTurnID(context.Background(), "T1")
-	turnCtx, release, _ := floor.Take(parent)
+	turnCtx, release, _ := floor.Take(parent, "")
 	defer release()
 
 	t.Cleanup(orchestrator.NewBargeIn(floor, 20*time.Millisecond).Bind(t.Context(), h.Bus))
