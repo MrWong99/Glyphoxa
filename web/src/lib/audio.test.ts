@@ -3,35 +3,31 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { playAudioBlob } from "./audio";
 
 // jsdom has no real media pipeline: Audio.play is unimplemented and
-// URL.createObjectURL doesn't exist. These stubs stand in so the tests can
-// observe the object-URL lifecycle (#154 item 3: a failed preview must revoke
-// its URL and surface the play() rejection instead of leaking silently).
-class FakeAudio {
-  static instances: FakeAudio[] = [];
-  static playImpl: () => Promise<void> = () => Promise.resolve();
-  src: string;
-  private listeners = new Map<string, Array<() => void>>();
-  constructor(src: string) {
-    this.src = src;
-    FakeAudio.instances.push(this);
-  }
-  addEventListener(type: string, fn: () => void) {
-    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
-  }
-  dispatch(type: string) {
-    for (const fn of this.listeners.get(type) ?? []) fn();
-  }
-  play() {
-    return FakeAudio.playImpl();
-  }
+// URL.createObjectURL doesn't exist. The stub below stands in a REAL <audio>
+// DOM node (so attachment is observable) with a controllable play().
+//
+// Lifecycle contract under test (#154): Chrome interrupts detached media
+// elements ("The play() request was interrupted because the media was removed
+// from the document"), so the element must live in the document for the whole
+// playback, and both the element and its object URL must be released on
+// ended / error / play() rejection.
+const instances: HTMLAudioElement[] = [];
+let playImpl: () => Promise<void>;
+
+function FakeAudio(src: string): HTMLAudioElement {
+  const el = document.createElement("audio");
+  el.src = src;
+  Object.defineProperty(el, "play", { value: () => playImpl(), configurable: true });
+  instances.push(el);
+  return el;
 }
 
 const createObjectURL = vi.fn(() => "blob:preview");
 const revokeObjectURL = vi.fn();
 
 beforeEach(() => {
-  FakeAudio.instances = [];
-  FakeAudio.playImpl = () => Promise.resolve();
+  instances.length = 0;
+  playImpl = () => Promise.resolve();
   createObjectURL.mockClear();
   revokeObjectURL.mockClear();
   vi.stubGlobal("Audio", FakeAudio);
@@ -43,30 +39,43 @@ afterEach(() => {
   vi.unstubAllGlobals();
   delete (URL as unknown as Record<string, unknown>).createObjectURL;
   delete (URL as unknown as Record<string, unknown>).revokeObjectURL;
+  document.body.innerHTML = "";
 });
 
 describe("playAudioBlob", () => {
-  it("rejects and revokes the object URL when play() fails", async () => {
-    FakeAudio.playImpl = () => Promise.reject(new Error("autoplay blocked"));
+  it("keeps the element attached (hidden) to the document while playing", async () => {
+    await playAudioBlob(new Uint8Array([1, 2]), "audio/wav");
+
+    // Detached media gets interrupted by Chrome — the element must be in the
+    // document for the playback duration, invisible to the operator.
+    expect(instances[0].isConnected).toBe(true);
+    expect(instances[0].style.display).toBe("none");
+  });
+
+  it("rejects, revokes the object URL and detaches when play() fails", async () => {
+    playImpl = () => Promise.reject(new Error("autoplay blocked"));
 
     await expect(playAudioBlob(new Uint8Array([1, 2]), "audio/wav")).rejects.toThrow(
       /autoplay blocked/,
     );
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview");
+    expect(instances[0].isConnected).toBe(false);
   });
 
-  it("still revokes the object URL when playback reaches ended", async () => {
+  it("revokes the object URL and detaches when playback reaches ended", async () => {
     await playAudioBlob(new Uint8Array([1, 2]), "audio/wav");
     expect(revokeObjectURL).not.toHaveBeenCalled();
 
-    FakeAudio.instances[0].dispatch("ended");
+    instances[0].dispatchEvent(new Event("ended"));
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview");
+    expect(instances[0].isConnected).toBe(false);
   });
 
-  it("revokes the object URL when the media element errors", async () => {
+  it("revokes the object URL and detaches when the media element errors", async () => {
     await playAudioBlob(new Uint8Array([1, 2]), "audio/wav");
 
-    FakeAudio.instances[0].dispatch("error");
+    instances[0].dispatchEvent(new Event("error"));
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview");
+    expect(instances[0].isConnected).toBe(false);
   });
 });

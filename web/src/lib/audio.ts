@@ -1,29 +1,43 @@
 // Browser audio playback for the Preview-voice affordance (#70). The VoiceService
 // PreviewVoice RPC returns a self-contained WAV blob; this wraps it in an object
-// URL and plays it through a transient <audio> element. The URL is revoked when
-// playback ends, when the media element errors, or when play() rejects (e.g. an
-// autoplay-policy block) — otherwise a failed preview leaks the blob for the
-// document lifetime (#154). The play() rejection is surfaced to the caller so a
-// blocked preview is distinguishable from silence. It is defensively no-op
-// outside a real browser (e.g. jsdom under test, where URL.createObjectURL is
-// unimplemented) so callers can fire-and-forget.
+// URL and plays it through a transient <audio> element.
+//
+// The element is appended to the document (hidden) for the playback duration:
+// Chrome interrupts detached media elements and rejects play() with "The play()
+// request was interrupted because the media was removed from the document", so
+// a bare `new Audio(url)` never audibly plays (#154). Element and object URL are
+// both released when playback ends, when the media element errors, or when
+// play() rejects (e.g. an autoplay-policy block) — otherwise a failed preview
+// leaks the blob for the document lifetime. The play() rejection is surfaced to
+// the caller so a blocked preview is distinguishable from silence. It is
+// defensively no-op outside a real browser (e.g. jsdom under test, where
+// URL.createObjectURL is unimplemented) so callers can fire-and-forget.
 export function playAudioBlob(audio: Uint8Array, mimeType: string): Promise<void> {
-  let url: string;
   let el: HTMLAudioElement;
+  let cleanup: () => void;
   try {
     if (typeof Audio === "undefined" || typeof URL?.createObjectURL !== "function") {
       return Promise.resolve();
     }
     const blob = new Blob([audio as BlobPart], { type: mimeType || "audio/wav" });
-    url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
     el = new Audio(url);
-    el.addEventListener("ended", () => URL.revokeObjectURL(url), { once: true });
-    el.addEventListener("error", () => URL.revokeObjectURL(url), { once: true });
+    let done = false;
+    cleanup = () => {
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(url);
+      el.remove();
+    };
+    el.addEventListener("ended", cleanup, { once: true });
+    el.addEventListener("error", cleanup, { once: true });
+    el.style.display = "none";
+    document.body.appendChild(el);
   } catch {
     return Promise.resolve();
   }
   return Promise.resolve(el.play()).catch((err: unknown) => {
-    URL.revokeObjectURL(url);
+    cleanup();
     throw err;
   });
 }
