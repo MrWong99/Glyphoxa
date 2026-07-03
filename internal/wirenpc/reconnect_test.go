@@ -35,6 +35,15 @@ func (f *fakeSleep) sleep(ctx context.Context, d time.Duration) error {
 	return nil
 }
 
+// fakeClock is the injected reconnectPolicy.now: tests advance it manually to
+// fake a session serving for minutes without wall-clock waits. connected() and
+// Advance both run on runWithReconnect's goroutine (attempt calls the callback
+// synchronously), so no locking.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) Now() time.Time          { return c.t }
+func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
+
 // TestRunWithReconnect_RetriesWithGrowingBackoff pins the core issue-#44
 // invariant: when Discord never connects (attempt always errors), the loop does
 // not exit — it retries on a capped-exponential schedule. With initial=1s
@@ -66,28 +75,36 @@ func TestRunWithReconnect_RetriesWithGrowingBackoff(t *testing.T) {
 	}
 }
 
-// TestRunWithReconnect_ResetsBackoffOnConnect pins the reset contract AND that
-// the schedule re-grows from the reset baseline: a connection that succeeds
-// (calls connected()) and only later drops must reconnect on the INITIAL delay,
-// not inherit the grown backoff from earlier failures — and if reconnection then
-// keeps failing it must back off again 1s, 2s, 4s. attempt errors twice without
-// connecting (delays 1s, 2s), the 3rd call connects-then-drops (reset → 1s), and
-// calls 4–5 fail again, so delays[2:5] must be 1s, 2s, 4s. This catches both a
-// missing reset and a reset that fails to re-advance.
-func TestRunWithReconnect_ResetsBackoffOnConnect(t *testing.T) {
+// TestRunWithReconnect_ResetsBackoffAfterHealthySession pins the reset contract
+// AND that the schedule re-grows from the reset baseline: a session that serves
+// at least the healthy threshold and only later drops must reconnect on the
+// INITIAL delay, not inherit the grown backoff from earlier failures — and if
+// reconnection then keeps failing it must back off again 1s, 2s, 4s. attempt
+// errors twice without connecting (delays 1s, 2s), the 3rd call connects and
+// serves past healthyAfter before dropping (reset → 1s), and calls 4–5 fail
+// again, so delays[2:5] must be 1s, 2s, 4s. This catches both a missing reset
+// and a reset that fails to re-advance. Adjusted for issue #141: the reset used
+// to key on connected() alone (the buggy reset point); it now requires the
+// healthy serve duration, faked here by advancing the injected clock.
+func TestRunWithReconnect_ResetsBackoffAfterHealthySession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fs := &fakeSleep{cancelAt: 6, cancel: cancel}
-	p := reconnectPolicy{initial: time.Second, max: 30 * time.Second, factor: 2, sleep: fs.sleep}
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	p := defaultReconnectPolicy() // healthyAfter = healthySessionDuration
+	p.sleep = fs.sleep
+	p.now = clk.Now
 
 	calls := 0
 	err := runWithReconnect(ctx, discardLogger(), p,
 		func(ctx context.Context, connected func()) error {
 			calls++
 			if calls == 3 {
-				connected() // session established, then drops
+				connected()                            // session established...
+				clk.Advance(healthySessionDuration)    // ...serves the full healthy threshold...
+				return errors.New("gateway went away") // ...then drops
 			}
-			return errors.New("connection dropped")
+			return errors.New("connection refused")
 		})
 
 	if err != nil {
@@ -96,11 +113,76 @@ func TestRunWithReconnect_ResetsBackoffOnConnect(t *testing.T) {
 	if len(fs.delays) < 5 {
 		t.Fatalf("recorded %d delays, want >= 5", len(fs.delays))
 	}
-	// delays[2] is the backoff AFTER the connected 3rd attempt — the initial delay
+	// delays[2] is the backoff AFTER the healthy 3rd attempt — the initial delay
 	// (reset fired). delays[3], delays[4] prove the schedule re-grows from there.
 	wantAfterReset := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	if !equalDelays(fs.delays[2:5], wantAfterReset) {
-		t.Errorf("backoff after a connected attempt = %v, want %v (reset on connect, then re-grow)", fs.delays[2:5], wantAfterReset)
+		t.Errorf("backoff after a healthy session = %v, want %v (reset after healthy serve, then re-grow)", fs.delays[2:5], wantAfterReset)
+	}
+}
+
+// TestRunWithReconnect_ImmediatePostJoinFailureKeepsBackoffGrowing pins the
+// issue-#141 fix: a cycle that JOINS successfully (connected() fires) but then
+// fails immediately — the codec-less build's ErrCodecUnavailable, a persistent
+// VAD/ONNX init failure — must count as a connect failure, NOT a healthy
+// session. The delays must keep growing exponentially to the cap; a reset here
+// would hammer Discord's voice join at 1 Hz forever (the exact failure mode
+// the #45 backoff was written to prevent). Uses the production
+// defaultReconnectPolicy (real clock: an immediate failure serves ~0s, far
+// under any healthy threshold) with only the sleep seam faked.
+func TestRunWithReconnect_ImmediatePostJoinFailureKeepsBackoffGrowing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 7, cancel: cancel}
+	p := defaultReconnectPolicy() // initial 1s, max 30s, factor 2
+	p.sleep = fs.sleep
+
+	err := runWithReconnect(ctx, discardLogger(), p,
+		func(ctx context.Context, connected func()) error {
+			connected() // voice join succeeded...
+			return errors.New("wire: opus codec unavailable")
+		})
+
+	if err != nil {
+		t.Fatalf("runWithReconnect returned %v, want nil on ctx-cancel", err)
+	}
+	want := []time.Duration{
+		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+		16 * time.Second, 30 * time.Second, 30 * time.Second,
+	}
+	if !equalDelays(fs.delays, want) {
+		t.Errorf("backoff delays = %v, want %v (join-then-immediate-fail must keep growing, never reset to initial)", fs.delays, want)
+	}
+}
+
+// TestRunWithReconnect_SubThresholdSessionKeepsBackoffGrowing pins the
+// boundary: a session that joins and serves for a while — but less than the
+// healthy threshold — before dropping is still a connect failure, not a healthy
+// session. Serving healthyAfter-1s each cycle must never reset the delay.
+// Distinct from the immediate-failure test: some serving happened, just not
+// enough to forgive past failures.
+func TestRunWithReconnect_SubThresholdSessionKeepsBackoffGrowing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fs := &fakeSleep{cancelAt: 4, cancel: cancel}
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	p := defaultReconnectPolicy()
+	p.sleep = fs.sleep
+	p.now = clk.Now
+
+	err := runWithReconnect(ctx, discardLogger(), p,
+		func(ctx context.Context, connected func()) error {
+			connected()                                       // join succeeded...
+			clk.Advance(healthySessionDuration - time.Second) // ...serves, but one second short...
+			return errors.New("gateway went away")            // ...then drops
+		})
+
+	if err != nil {
+		t.Fatalf("runWithReconnect returned %v, want nil on ctx-cancel", err)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+	if !equalDelays(fs.delays, want) {
+		t.Errorf("backoff delays = %v, want %v (sub-threshold sessions must not reset the backoff)", fs.delays, want)
 	}
 }
 
