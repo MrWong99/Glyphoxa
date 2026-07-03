@@ -23,6 +23,32 @@ describe("Combobox", () => {
     expect(screen.queryByRole("option", { name: /aria/i })).not.toBeInTheDocument();
   });
 
+  it("filters on the label only — an opaque voice id never matches typeahead", () => {
+    // Real ElevenLabs ids are 20-char base62 blobs; with cmdk's default filter
+    // the item value joins the search haystack, so an id subsequence ("wam" ⊂
+    // 21m00Tcm4TlvDq8ikWAM) keeps "Rachel" visible though nothing the operator
+    // can see matches. Filtering must score the label alone.
+    const opts = [
+      { value: "21m00Tcm4TlvDq8ikWAM", label: "Rachel" },
+      { value: "AZnzlk1XvdvUeBnXmlld", label: "Domi" },
+    ];
+    render(
+      <Combobox label="Voice" options={opts} value="" onValueChange={() => {}} emptyText="No matches" />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Voice" }));
+
+    // A label substring still filters correctly.
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "rach" } });
+    expect(screen.getByRole("option", { name: /rachel/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /domi/i })).not.toBeInTheDocument();
+
+    // An id-only match must show nothing.
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "wam" } });
+    expect(screen.queryByRole("option", { name: /rachel/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /domi/i })).not.toBeInTheDocument();
+    expect(screen.getByText("No matches")).toBeInTheDocument();
+  });
+
   it("clears the search when dismissed without picking, so reopen shows the full list", () => {
     render(<Combobox label="Voice" options={OPTS} value="" onValueChange={() => {}} />);
     // Open, filter down to Marcus, then dismiss with Escape (no pick).

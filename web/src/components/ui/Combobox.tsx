@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Command } from "cmdk";
+import { Command, defaultFilter } from "cmdk";
 import { ChevronDown, Check, Search } from "lucide-react";
 
 // Combobox — a filterable, height-bounded picker for large/growing option lists
@@ -10,11 +10,18 @@ import { ChevronDown, Check, Search } from "lucide-react";
 //
 // cmdk keys selection/active state on each item's `value`; we set that to the
 // UNIQUE option value (labels can collide — ElevenLabs voice names are not
-// unique, #154) and pass the human-readable label as `keywords` so typeahead
-// still matches what the operator sees. The selected option's label renders on
-// the trigger.
+// unique, #154) and pass the human-readable label as `keywords`. A custom
+// label-only filter keeps typeahead matching what the operator sees (never the
+// opaque id). The selected option's label renders on the trigger.
 
 type Option = { value: string; label: string };
+
+// cmdk's default filter scores `value + " " + keywords.join(" ")`, so an opaque
+// vendor id (e.g. an ElevenLabs voice id like 21m00Tcm4TlvDq8ikWAM) would join
+// the typeahead haystack and match searches nothing visible matches. Score the
+// human-readable keywords (the label) alone; the value stays pure identity.
+const labelOnlyFilter = (value: string, search: string, keywords?: string[]) =>
+  defaultFilter(keywords?.length ? keywords.join(" ") : value, search);
 
 export function Combobox({
   label = null,
@@ -101,7 +108,11 @@ export function Combobox({
 
         {open && (
           <div className="gx-select__content gx-combobox__content">
-            <Command className="gx-combobox__command" label={ariaLabel || label || "Options"}>
+            <Command
+              className="gx-combobox__command"
+              label={ariaLabel || label || "Options"}
+              filter={labelOnlyFilter}
+            >
               <div className="gx-combobox__search">
                 <Search size={14} className="gx-combobox__search-icon" />
                 <Command.Input
