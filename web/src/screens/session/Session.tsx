@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { Play, Square } from "lucide-react";
+import { toast } from "sonner";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 
 import { SessionService, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
@@ -27,6 +28,18 @@ export function formatElapsed(totalSeconds: number): string {
   return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
     .map((n) => String(n).padStart(2, "0"))
     .join(":");
+}
+
+// SESSION_REFETCH_MS is the getSession poll cadence while a session is live —
+// belt and suspenders for #144: even if the SSE terminal frame is missed, a
+// session that dies server-side flips the badge within one interval.
+export const SESSION_REFETCH_MS = 5000;
+
+// sessionRefetchInterval is the getSession refetchInterval policy: poll while
+// the last read said active, stop polling when idle. Exported so the config is
+// pinned by a unit test.
+export function sessionRefetchInterval(query: { state: { data?: { active?: boolean } } }): number | false {
+  return query.state.data?.active ? SESSION_REFETCH_MS : false;
 }
 
 // tsMs converts a protobuf Timestamp to epoch milliseconds, or null when unset.
@@ -71,7 +84,7 @@ function lastSummary(session: VoiceSession): string {
 
 export function Session() {
   const queryClient = useQueryClient();
-  const { data } = useQuery(SessionService.method.getSession, {});
+  const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
   const campaignQ = useQuery(CampaignService.method.getActiveCampaign, {});
   const campaignName = campaignQ.data?.campaign?.name;
 
@@ -86,8 +99,21 @@ export function Session() {
       }),
     });
 
-  const start = useMutation(SessionService.method.startSession, { onSuccess: () => void invalidate() });
-  const stop = useMutation(SessionService.method.stopSession, { onSuccess: () => void invalidate() });
+  // A failing Start/Stop must not be swallowed (#144): surface it (ADR-0017:
+  // sonner) and invalidate — a Stop that hits "no active session" means the
+  // loop already died server-side, and the refetch snaps the badge off Live.
+  const onError = (verb: string) => (err: Error) => {
+    toast.error(`Couldn't ${verb} the session: ${err.message}`);
+    void invalidate();
+  };
+  const start = useMutation(SessionService.method.startSession, {
+    onSuccess: () => void invalidate(),
+    onError: onError("start"),
+  });
+  const stop = useMutation(SessionService.method.stopSession, {
+    onSuccess: () => void invalidate(),
+    onError: onError("stop"),
+  });
 
   // The timer runs only while live, counting up from the running session's start.
   const elapsed = useElapsed(active ? tsMs(session?.startedAt) : null);

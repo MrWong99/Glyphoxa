@@ -130,11 +130,14 @@ func (c *tickerClock) stop()                   { c.t.Stop() }
 // Option configures a [Pipeline] at construction.
 type Option func(*Pipeline)
 
-// WithSilenceClock enables the continuous silence clock (issue #91): during
-// inbound silence and packet gaps the pipeline feeds synthesized PCM silence into
-// the VAD at the orchestrator frame cadence, so a paused speaker's utterance
-// endpoints within the silero hangover window rather than coalescing with the next
-// utterance. sampleRate and frameMs are the orchestrator's frame geometry (the
+// WithSilenceClock enables the continuous silence clock (issue #91): once a
+// speaker stop is signalled by Discord's explicit Opus silence frames, the
+// pipeline feeds synthesized PCM silence into the VAD at the orchestrator frame
+// cadence through the packet gap that follows, so a paused speaker's utterance
+// endpoints within the silero hangover window rather than coalescing with the
+// next utterance. A packet-arrival gap WITHOUT that signal — transport jitter
+// mid-utterance — injects nothing, so it cannot falsely split a turn (issue
+// #147). sampleRate and frameMs are the orchestrator's frame geometry (the
 // VAD/STT rate, e.g. 16000 Hz / 32 ms): they shape the synthesized silence frame
 // AND set the tick interval. Without this option the pipeline keeps the pre-#91
 // behaviour, dropping inbound silence frames untouched.
@@ -228,8 +231,20 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 	// is injected while speech flows (continuous speech must not endpoint). Disabled
 	// when no [WithSilenceClock] was given: the loop then just drops inbound silence
 	// frames, the pre-#91 behaviour.
+	//
+	// The clock injects only while ARMED (#147): a wall-clock arrival gap alone is
+	// NOT evidence the speaker stopped — a ≥ hangover transport jitter burst
+	// mid-utterance would otherwise be endpointed as if the speaker had paused,
+	// splitting one turn in two and losing half of it. The speaker-stop signal on
+	// the wire is Discord's explicit Opus silence frames (a sender emits ~5 before
+	// it stops transmitting; the frame's PTS stream time carries no gap during
+	// arrival jitter), so a silence frame arms the clock and every real frame
+	// disarms it. If all stop-silence frames are lost, the utterance endpoints at
+	// the next arming signal or the shutdown Flush — the pre-#91 worst case —
+	// instead of risking a false mid-utterance split.
 	var clk silenceClock
 	var clockTicks <-chan time.Time
+	armed := false
 	if p.silenceOn {
 		clk = p.newClock()
 		defer clk.stop()
@@ -241,8 +256,13 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-clockTicks:
-			// Audio has been idle for one frame interval: advance the VAD with one
-			// frame of silence so a paused speaker's utterance endpoints.
+			if !armed {
+				// Packets stopped ARRIVING but no Discord silence frame said the
+				// speaker stopped: an unarmed tick is transport jitter, not a pause.
+				continue
+			}
+			// The speaker stopped and audio has been idle for one frame interval:
+			// advance the VAD with one frame of silence so the utterance endpoints.
 			if err := p.conv.Feed(p.silence); err != nil {
 				p.log.Debug("feed silence frame", "err", err)
 			}
@@ -251,15 +271,18 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 				return nil // session closed
 			}
 			if frame.Silence {
-				// A Discord Opus silence frame: the speaker has stopped. Do NOT decode
-				// it and do NOT reset the silence clock — let the clock keep advancing
-				// the VAD hangover through this frame and the packet gap that follows, so
-				// the utterance endpoints (issue #91). Pre-#91 this `continue` dropped the
-				// frame with nothing left to advance the VAD.
+				// A Discord Opus silence frame: the speaker has stopped. Arm the
+				// clock, but do NOT decode the frame and do NOT reset the clock — let
+				// it keep advancing the VAD hangover through this frame and the packet
+				// gap that follows, so the utterance endpoints (issue #91). Pre-#91
+				// this `continue` dropped the frame with nothing left to advance the VAD.
+				armed = true
 				continue
 			}
-			// Real audio arrived: reset the idle clock so no synthesized silence is
-			// injected while frames keep flowing.
+			// Real audio arrived: the speaker is talking again. Disarm and reset the
+			// idle clock so no synthesized silence is injected while frames keep
+			// flowing — not even through an arrival gap (#147).
+			armed = false
 			if clk != nil {
 				clk.reset()
 			}

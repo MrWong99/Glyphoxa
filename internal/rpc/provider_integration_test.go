@@ -168,7 +168,7 @@ func TestProviderService_Integration(t *testing.T) {
 	// Discord settings: token sealed in deployment_config, IDs stored plain.
 	const botToken = "test-discord-bot-token-dddd"
 	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		BotToken: &[]string{botToken}[0], GuildId: "472093001100", VoiceChannelId: "472093774421",
+		BotToken: &[]string{botToken}[0], GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
 	})); err != nil {
 		t.Fatalf("SaveDiscordSettings: %v", err)
 	}

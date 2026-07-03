@@ -68,6 +68,9 @@ export function Configuration() {
 
   const saveProvider = useMutation(ProviderService.method.saveProviderConfig, { onSuccess: invalidateList });
   const saveDiscord = useMutation(ProviderService.method.saveDiscordSettings, { onSuccess: invalidateList });
+  // Separate mutation instance for the IDs form so its error/pending state is
+  // its own — a bot-token failure paints the SecretRow, not this form (#142).
+  const saveDiscordIds = useMutation(ProviderService.method.saveDiscordSettings, { onSuccess: invalidateList });
 
   // Guild / Voice channel IDs are controlled, seeded from the RPC. A `dirty` ref
   // guards the seed so a slow first load (or a post-save refetch) can never
@@ -161,9 +164,10 @@ export function Configuration() {
             placeholder="Paste the Discord bot token"
             credential={credentialFor(creds, "discord")}
             health={healthFor(health, "discord")}
-            onSave={(secret) =>
-              saveDiscord.mutateAsync({ botToken: secret, guildId, voiceChannelId })
-            }
+            // Token-only save: the ID fields stay OFF the wire (they have proto3
+            // presence), so replacing the token can never clobber the stored IDs —
+            // even while the config load is still resolving (#142).
+            onSave={(secret) => saveDiscord.mutateAsync({ botToken: secret })}
           />
           <div className="gx-discord__ids">
             <Input
@@ -185,11 +189,22 @@ export function Configuration() {
             <Button
               variant="primary"
               size="sm"
-              onClick={() => saveDiscord.mutate({ guildId, voiceChannelId })}
-              disabled={saveDiscord.isPending}
+              onClick={() => saveDiscordIds.mutate({ guildId, voiceChannelId })}
+              // Locked until BOTH IDs are non-empty: the server rejects
+              // present-but-empty IDs (#142), so a half-filled save must not be
+              // offered — clicking it used to fail with no visible trace.
+              disabled={saveDiscordIds.isPending || !guildId || !voiceChannelId}
             >
               Save Discord settings
             </Button>
+            {/* Inline failure cue, mirroring the SecretRow save-error treatment:
+                a rejected save must leave visible evidence the IDs were NOT
+                stored, or it resurfaces as a session-start failure (#142). */}
+            {saveDiscordIds.isError && (
+              <span className="gx-discord__error" role="alert">
+                Couldn&apos;t save: {saveDiscordIds.error.message}
+              </span>
+            )}
           </div>
         </div>
       </Card>

@@ -61,6 +61,16 @@
 .gx-discord__save {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+/* Inline save-failure cue for the IDs form, mirroring the SecretRow error
+ * treatment (#142 / #154). */
+.gx-discord__error {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-danger);
 }
 
 /* Resolved Discord bot tag from the live gateway login (#70), under the name. */

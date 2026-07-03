@@ -295,8 +295,8 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 	const token = "test-discord-bot-token-3333"
 	saveTok, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
 		BotToken:       &[]string{token}[0],
-		GuildId:        "472093001100",
-		VoiceChannelId: "472093774421",
+		GuildId:        strPtr("472093001100"),
+		VoiceChannelId: strPtr("472093774421"),
 	}))
 	if err != nil {
 		t.Fatalf("save discord: %v", err)
@@ -314,7 +314,7 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 
 	// IDs-only save (no bot_token) must not wipe the token.
 	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: "999", VoiceChannelId: "888",
+		GuildId: strPtr("999"), VoiceChannelId: strPtr("888"),
 	})); err != nil {
 		t.Fatalf("save ids: %v", err)
 	}
@@ -327,6 +327,81 @@ func TestProviderDiscordSettings_TokenAndChannels(t *testing.T) {
 		t.Errorf("ids not updated: %q / %q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
 	}
 }
+
+// TestProviderDiscordSettings_TokenOnlySaveKeepsIDs pins #142: replacing the
+// bot token without sending the IDs must leave the stored Guild / Voice channel
+// IDs untouched — the exact clobber that wiped them when the client saved a
+// token while ListProviderConfigs was still loading.
+func TestProviderDiscordSettings_TokenOnlySaveKeepsIDs(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	client, _ := newProviderClient(t, store, testCipher(t))
+	ctx := context.Background()
+
+	// Operator has IDs saved.
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+	})); err != nil {
+		t.Fatalf("save ids: %v", err)
+	}
+
+	// Token-only save: no ID fields on the wire.
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		BotToken: strPtr("test-discord-bot-token-7777"),
+	})); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	resp, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("token-only save clobbered ids: guild=%q voice=%q, want them untouched",
+			resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+// TestProviderDiscordSettings_EmptyIDsRejected documents the #142 decision for
+// present-but-empty IDs: REJECT with InvalidArgument (mirroring bot_token's
+// "must not be empty when provided") rather than treating "" as an explicit
+// clear. Clearing the IDs is not a supported operation — an empty ID only ever
+// reaches the wire by accident (e.g. the form saving before the config load
+// resolves), and accepting it would reopen the silent-wipe this issue fixes.
+func TestProviderDiscordSettings_EmptyIDsRejected(t *testing.T) {
+	t.Parallel()
+	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	ctx := context.Background()
+
+	if _, err := client.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
+		GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("472093774421"),
+	})); err != nil {
+		t.Fatalf("save ids: %v", err)
+	}
+
+	for name, req := range map[string]*managementv1.SaveDiscordSettingsRequest{
+		"both empty":  {GuildId: strPtr(""), VoiceChannelId: strPtr("")},
+		"empty guild": {GuildId: strPtr(""), VoiceChannelId: strPtr("472093774421")},
+		"empty voice": {GuildId: strPtr("472093001100"), VoiceChannelId: strPtr("")},
+		"guild only":  {GuildId: strPtr("472093001100")}, // partial presence = the other ID is empty
+	} {
+		_, err := client.SaveDiscordSettings(ctx, connect.NewRequest(req))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s: code = %v, want InvalidArgument", name, connect.CodeOf(err))
+		}
+	}
+
+	// The rejected saves left the stored IDs untouched.
+	resp, err := client.ListProviderConfigs(ctx, connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.Msg.GetGuildId() != "472093001100" || resp.Msg.GetVoiceChannelId() != "472093774421" {
+		t.Errorf("rejected save mutated ids: guild=%q voice=%q", resp.Msg.GetGuildId(), resp.Msg.GetVoiceChannelId())
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // TestProviderList_EnvPlaceholderIsKeyNeeded asserts the ADR-0039 seam: a
 // provider_config still holding the seed's "env" placeholder reads as key-needed,

@@ -200,8 +200,9 @@ func (s *ProviderServer) SaveProviderConfig(
 }
 
 // SaveDiscordSettings stores the Discord bot token (when present) and the
-// non-secret Guild / Voice channel IDs. An omitted bot_token leaves the stored
-// token untouched; the column-isolated upserts mean the token Save and the IDs
+// non-secret Guild / Voice channel IDs (when present). Every field has wire
+// presence: an omitted bot_token leaves the stored token untouched, and omitted
+// IDs leave the stored IDs untouched (#142) — so the token Save and the IDs
 // Save never clobber each other.
 func (s *ProviderServer) SaveDiscordSettings(
 	ctx context.Context,
@@ -211,6 +212,18 @@ func (s *ProviderServer) SaveDiscordSettings(
 	if err != nil {
 		return nil, err
 	}
+
+	// Validate the IDs before any write so a rejected request mutates nothing.
+	// Present-but-empty is REJECTED, not treated as a clear (mirrors bot_token's
+	// empty check): an empty ID only reaches the wire by accident — e.g. the form
+	// saving before the config load resolves — and clearing is unsupported (#142).
+	hasIDs := req.Msg.GuildId != nil || req.Msg.VoiceChannelId != nil
+	if hasIDs && (req.Msg.GetGuildId() == "" || req.Msg.GetVoiceChannelId() == "") {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("guild_id and voice_channel_id must both be non-empty when provided"))
+	}
+
+	var dep storage.DeploymentConfig
 
 	// Bot token first (when the client sent one), so the IDs upsert below returns
 	// the row with the freshly-saved token last4.
@@ -229,16 +242,21 @@ func (s *ProviderServer) SaveDiscordSettings(
 			s.log.Error("SaveDiscordSettings: seal failed", "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
-		if _, err := s.store.SaveDiscordBotToken(ctx, tenantID, sealed, last4); err != nil {
+		dep, err = s.store.SaveDiscordBotToken(ctx, tenantID, sealed, last4)
+		if err != nil {
 			s.log.Error("SaveDiscordSettings: save token failed", "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 	}
 
-	dep, err := s.store.SaveDiscordChannels(ctx, tenantID, req.Msg.GetGuildId(), req.Msg.GetVoiceChannelId())
-	if err != nil {
-		s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	// IDs only when present on the wire (mirrors the token's presence handling):
+	// a token-only save must never touch the stored IDs (#142).
+	if hasIDs {
+		dep, err = s.store.SaveDiscordChannels(ctx, tenantID, req.Msg.GetGuildId(), req.Msg.GetVoiceChannelId())
+		if err != nil {
+			s.log.Error("SaveDiscordSettings: save channels failed", "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
 	}
 
 	return connect.NewResponse(&managementv1.SaveDiscordSettingsResponse{
