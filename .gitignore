@@ -26,6 +26,8 @@ coverage.html
 # Environment
 .env
 .env.*
+# ...but keep the committed placeholder template (see docs/configuration.md).
+!.env.example
 
 # OS
 .DS_Store
