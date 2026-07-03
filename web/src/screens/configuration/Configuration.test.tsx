@@ -192,6 +192,22 @@ describe("Configuration", () => {
     expect(discordSaves[0].voiceChannelId).toBeUndefined();
   });
 
+  it("disables the IDs save until both IDs are non-empty (#142)", async () => {
+    renderScreen();
+
+    // Fresh install: guild pasted, voice still blank. The server rejects
+    // present-but-empty IDs, so the client must not offer the save at all —
+    // a click here used to fail invisibly and leave nothing stored.
+    const guild = await screen.findByLabelText("Guild ID");
+    fireEvent.change(guild, { target: { value: "472093001100" } });
+    const save = screen.getByRole("button", { name: /save discord settings/i });
+    expect(save).toBeDisabled();
+
+    // Both filled -> the save unlocks.
+    fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
+    expect(save).toBeEnabled();
+  });
+
   it("renders the Groq model allowlist select (ListModels)", async () => {
     renderScreen();
     // The Groq row's model select defaults to the first allowlisted model.

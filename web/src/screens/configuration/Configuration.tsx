@@ -187,7 +187,10 @@ export function Configuration() {
               variant="primary"
               size="sm"
               onClick={() => saveDiscord.mutate({ guildId, voiceChannelId })}
-              disabled={saveDiscord.isPending}
+              // Locked until BOTH IDs are non-empty: the server rejects
+              // present-but-empty IDs (#142), so a half-filled save must not be
+              // offered — clicking it used to fail with no visible trace.
+              disabled={saveDiscord.isPending || !guildId || !voiceChannelId}
             >
               Save Discord settings
             </Button>
