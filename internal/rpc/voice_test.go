@@ -659,7 +659,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 
 	// Saving Discord settings busts it too.
 	if _, err := providerSrv.SaveDiscordSettings(ctx, connect.NewRequest(&managementv1.SaveDiscordSettingsRequest{
-		GuildId: "g1", VoiceChannelId: "c1",
+		GuildId: ptr("g1"), VoiceChannelId: ptr("c1"),
 	})); err != nil {
 		t.Fatalf("SaveDiscordSettings: %v", err)
 	}
@@ -700,3 +700,6 @@ func (stubProviderStore) SaveDiscordBotToken(context.Context, uuid.UUID, []byte,
 func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error) {
 	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
 }
+
+// ptr returns a pointer to v, for proto3 optional scalar fields.
+func ptr[T any](v T) *T { return &v }
