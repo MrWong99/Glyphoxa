@@ -258,6 +258,32 @@ describe("Campaign", () => {
     expect(await screen.findByText("ElevenLabs · Rachel")).toBeInTheDocument();
   });
 
+  it("surfaces an error cue when the voice preview fails", async () => {
+    // A degraded TTS (PreviewVoice rejects) must render, not just stop the spinner.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        listVoices: () => create(ListVoicesResponseSchema, { voices: [] }),
+        previewVoice: () => {
+          throw new Error("tts unavailable");
+        },
+      });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    fireEvent.click(screen.getByRole("button", { name: /preview voice/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't preview/i);
+  });
+
   it("previews the selected voice via the PreviewVoice RPC", async () => {
     const { previewCalls } = renderScreen();
     fireEvent.click(await screen.findByText("Bart"));

@@ -273,6 +273,7 @@ function SecretRow({
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [model, setModel] = useState<string | undefined>(undefined);
 
   const saved = Boolean(credential?.showMasked);
@@ -284,10 +285,15 @@ function SecretRow({
   async function handleSave() {
     if (!value || busy) return;
     setBusy(true);
+    setSaveError(null);
     try {
       await onSave(value, selectedModel);
       setValue("");
       setEditing(false);
+    } catch (err) {
+      // A rejected save (e.g. FailedPrecondition when the sealing secret is
+      // unset) must leave visible evidence — the key was NOT stored (#154).
+      setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -328,6 +334,7 @@ function SecretRow({
                 onClick={() => {
                   setEditing(true);
                   setValue("");
+                  setSaveError(null); // fresh edit starts without a stale cue
                 }}
               >
                 Replace
@@ -352,12 +359,21 @@ function SecretRow({
                   onClick={() => {
                     setEditing(false);
                     setValue("");
+                    // Back to masked+Healthy — a stale "Couldn't save" alert
+                    // would contradict that state (#154).
+                    setSaveError(null);
                   }}
                 >
                   Cancel
                 </Button>
               )}
             </div>
+          )}
+          {/* Inline failure cue, mirroring the agent editor's save status (#94). */}
+          {saveError && (
+            <span className="gx-secret__error" role="alert">
+              Couldn't save: {saveError}
+            </span>
           )}
         </div>
 

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Command } from "cmdk";
+import { Command, defaultFilter } from "cmdk";
 import { ChevronDown, Check, Search } from "lucide-react";
 
 // Combobox — a filterable, height-bounded picker for large/growing option lists
@@ -8,11 +8,20 @@ import { ChevronDown, Check, Search } from "lucide-react";
 // popover. It reuses the gx-select* trigger vocabulary so it reads as the same
 // control, and adds gx-combobox* classes for the filterable popover.
 //
-// cmdk filters on each item's `value`; we set that to the human-readable label so
-// typeahead matches what the operator sees, and recover the real option value from
-// a closure on select. The selected option's label renders on the trigger.
+// cmdk keys selection/active state on each item's `value`; we set that to the
+// UNIQUE option value (labels can collide — ElevenLabs voice names are not
+// unique, #154) and pass the human-readable label as `keywords`. A custom
+// label-only filter keeps typeahead matching what the operator sees (never the
+// opaque id). The selected option's label renders on the trigger.
 
 type Option = { value: string; label: string };
+
+// cmdk's default filter scores `value + " " + keywords.join(" ")`, so an opaque
+// vendor id (e.g. an ElevenLabs voice id like 21m00Tcm4TlvDq8ikWAM) would join
+// the typeahead haystack and match searches nothing visible matches. Score the
+// human-readable keywords (the label) alone; the value stays pure identity.
+const labelOnlyFilter = (value: string, search: string, keywords?: string[]) =>
+  defaultFilter(keywords?.length ? keywords.join(" ") : value, search);
 
 export function Combobox({
   label = null,
@@ -46,8 +55,13 @@ export function Combobox({
   const selected = options.find((o) => o.value === value);
 
   // Close on outside click / Escape so the popover behaves like a native select.
+  // Whenever the popover is closed — pick, Escape or outside click — the search
+  // resets so the next open shows the full, unfiltered list (#154).
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSearch("");
+      return;
+    }
     const onDown = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
@@ -64,8 +78,7 @@ export function Combobox({
 
   const pick = (optValue: string) => {
     onValueChange?.(optValue);
-    setOpen(false);
-    setSearch("");
+    setOpen(false); // the close effect clears the search
   };
 
   return (
@@ -95,7 +108,11 @@ export function Combobox({
 
         {open && (
           <div className="gx-select__content gx-combobox__content">
-            <Command className="gx-combobox__command" label={ariaLabel || label || "Options"}>
+            <Command
+              className="gx-combobox__command"
+              label={ariaLabel || label || "Options"}
+              filter={labelOnlyFilter}
+            >
               <div className="gx-combobox__search">
                 <Search size={14} className="gx-combobox__search-icon" />
                 <Command.Input
@@ -111,7 +128,8 @@ export function Combobox({
                 {options.map((o) => (
                   <Command.Item
                     key={o.value}
-                    value={o.label}
+                    value={o.value}
+                    keywords={[o.label]}
                     className="gx-select__item gx-combobox__item"
                     onSelect={() => pick(o.value)}
                   >

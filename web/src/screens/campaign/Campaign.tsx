@@ -228,10 +228,19 @@ function AgentEditor({
     return opts;
   }, [voices, voice]);
 
+  // Preview failures — a degraded-TTS RPC rejection or a blocked/failed
+  // play() — render an inline cue instead of vanishing (#154, mirrors the
+  // save status treatment from #94).
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const playPreview = async () => {
     if (!voice) return;
-    const res = await preview.mutateAsync({ voiceId: voice, text: "" });
-    playAudioBlob(res.audio, res.mimeType);
+    setPreviewError(null);
+    try {
+      const res = await preview.mutateAsync({ voiceId: voice, text: "" });
+      await playAudioBlob(res.audio, res.mimeType);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const save = () =>
@@ -304,6 +313,11 @@ function AgentEditor({
         >
           Preview voice
         </Button>
+        {previewError && (
+          <span className="gx-editor__status gx-editor__status--error" role="alert">
+            Couldn't preview: {previewError}
+          </span>
+        )}
       </div>
 
       <div className="gx-editor__switch">

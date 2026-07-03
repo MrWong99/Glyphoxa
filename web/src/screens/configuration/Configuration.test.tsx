@@ -171,6 +171,85 @@ describe("Configuration", () => {
     expect(screen.queryByText(/test-groq-secret-eeee/)).not.toBeInTheDocument();
   });
 
+  it("renders an error in the row when saving a provider key fails", async () => {
+    // A backend whose Save rejects (e.g. FailedPrecondition when the sealing
+    // secret is unset) must leave visible evidence, not just un-busy the button.
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
+        listModels: () => create(ListModelsResponseSchema, { models: GROQ_MODELS }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
+      });
+      service(ProviderService, {
+        listProviderConfigs: () =>
+          create(ListProviderConfigsResponseSchema, {
+            credentials: [cred("discord", "discord"), cred("llm", "groq"), cred("tts", "elevenlabs")],
+            guildId: "",
+            voiceChannelId: "",
+          }),
+        saveProviderConfig: () => {
+          throw new Error("secret sealing unavailable");
+        },
+      });
+    });
+    renderScreen(transport);
+
+    const groqInput = await screen.findByLabelText("Groq key");
+    fireEvent.change(groqInput, { target: { value: "sk-will-fail" } });
+    const groqRow = groqInput.closest(".gx-provider-row") as HTMLElement;
+    fireEvent.click(within(groqRow).getByRole("button", { name: "Save" }));
+
+    // The failure renders in the row…
+    const alert = await within(groqRow).findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't save/i);
+    // …and the key field stays editable for a retry, badge still unsaved.
+    expect(within(groqRow).getByLabelText("Groq key")).toBeInTheDocument();
+    expect(within(groqRow).getByText(/key needed/i)).toBeInTheDocument();
+  });
+
+  it("clears the save error when the Replace edit is cancelled", async () => {
+    // Replace on a SAVED key → failing save → Cancel returns the row to the
+    // masked+Healthy state; a stale "Couldn't save" alert must not linger there.
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
+        listModels: () => create(ListModelsResponseSchema, { models: GROQ_MODELS }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () =>
+          create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, CAMPAIGN) }),
+      });
+      service(ProviderService, {
+        listProviderConfigs: () =>
+          create(ListProviderConfigsResponseSchema, {
+            credentials: [cred("discord", "discord"), cred("llm", "groq", "eeee"), cred("tts", "elevenlabs")],
+          }),
+        saveProviderConfig: () => {
+          throw new Error("secret sealing unavailable");
+        },
+      });
+    });
+    renderScreen(transport);
+
+    // The Groq key is saved → masked with a Replace affordance.
+    const mask = await screen.findByLabelText("Groq saved");
+    const groqRow = mask.closest(".gx-provider-row") as HTMLElement;
+    fireEvent.click(within(groqRow).getByRole("button", { name: /replace/i }));
+
+    // Replacement attempt fails → alert renders.
+    fireEvent.change(within(groqRow).getByLabelText("Groq key"), { target: { value: "sk-new" } });
+    fireEvent.click(within(groqRow).getByRole("button", { name: "Save" }));
+    expect(await within(groqRow).findByRole("alert")).toHaveTextContent(/couldn't save/i);
+
+    // Cancel returns to the masked view — the stale alert goes with it.
+    fireEvent.click(within(groqRow).getByRole("button", { name: /cancel/i }));
+    expect(within(groqRow).getByLabelText("Groq saved")).toBeInTheDocument();
+    expect(within(groqRow).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("persists Guild ID and Voice channel ID", async () => {
     renderScreen();
 
