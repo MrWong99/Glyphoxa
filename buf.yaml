@@ -8,13 +8,3 @@ lint:
 breaking:
   use:
     - FILE
-  # #142: SaveDiscordSettingsRequest.guild_id/voice_channel_id gained proto3
-  # `optional` (explicit presence) so a token-only save can't clobber the stored
-  # IDs. Wire encoding is unchanged for string scalars; the flagged break is the
-  # presence semantics + the generated-API shape (string -> *string), and both
-  # consumers (Go server, web SPA) live in this repo and regenerate together.
-  # Narrowest exception: one rule, one file. Removable once this is on main —
-  # later runs compare against the already-optional fields.
-  ignore_only:
-    FIELD_SAME_CARDINALITY:
-      - proto/glyphoxa/management/v1/management.proto
