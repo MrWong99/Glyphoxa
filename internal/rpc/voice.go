@@ -100,14 +100,15 @@ type VoiceServer struct {
 	sessionActive func() bool
 
 	// healthMu guards healthCache: one TTL-cached GetProviderHealth result per
-	// tenant (#150). Each entry carries its own mutex, held across a probe, so
-	// concurrent RPCs on an expired entry serialize instead of stampeding the
-	// vendors — the waiters are then served the fresh cache.
+	// tenant (#150). Probes are singleflighted per entry: one leader probes,
+	// concurrent callers wait on that SAME probe (each with its own ctx
+	// bail-out) and are handed its result — never a probe of their own.
 	healthMu    sync.Mutex
 	healthCache map[uuid.UUID]*healthEntry
 }
 
-// healthEntry is one tenant's cached provider-health result.
+// healthEntry is one tenant's cached provider-health result. mu guards the
+// fields and is only held for state flips — never across a probe.
 type healthEntry struct {
 	mu        sync.Mutex
 	at        time.Time // zero until the first probe lands
@@ -117,6 +118,12 @@ type healthEntry struct {
 	// Discord) can keep reporting "Connected as X#NNNN" instead of blanking
 	// the row for the whole session.
 	botTag string
+	// inflight is non-nil while a leader's probe runs and is closed when it
+	// finishes; callers arriving meanwhile wait on it instead of probing.
+	inflight chan struct{}
+	// lastProbe is the most recent probe's result — set even when a timed-out
+	// probe is not cached, so waiters on that probe still get its answer.
+	lastProbe []*managementv1.ProviderHealth
 }
 
 var _ managementv1connect.VoiceServiceHandler = (*VoiceServer)(nil)
@@ -294,23 +301,53 @@ func (s *VoiceServer) GetProviderHealth(
 	}
 
 	e := s.healthEntry(tenantID)
-	// The entry lock is held across the probe: concurrent RPCs on a stale entry
-	// serialize, and the waiters are served the then-fresh cache below instead
-	// of stampeding the vendors.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if !e.at.IsZero() && s.now().Sub(e.at) < healthCacheTTL {
-		return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: e.providers}), nil
+		providers := e.providers
+		e.mu.Unlock()
+		return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
 	}
+
+	// Singleflight: if a probe is already in flight, wait on THAT probe (with
+	// this caller's own ctx bail-out) and take its result — never run a second
+	// probe for the same tenant concurrently or queue behind it for a fresh one.
+	if ch := e.inflight; ch != nil {
+		e.mu.Unlock()
+		select {
+		case <-ch:
+			e.mu.Lock()
+			providers := e.lastProbe
+			e.mu.Unlock()
+			return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
+		case <-ctx.Done():
+			return nil, ctxError(ctx)
+		}
+	}
+
+	// A caller that is already gone must not become a probe leader and burn a
+	// probeTimeout slot on vendors nobody will see.
+	if ctx.Err() != nil {
+		e.mu.Unlock()
+		return nil, ctxError(ctx)
+	}
+
+	// Become the leader: mark the flight, release the lock, probe.
+	ch := make(chan struct{})
+	e.inflight = ch
+	lastBotTag := e.botTag
+	e.mu.Unlock()
 
 	// Probe detached from the request's cancellation (values, e.g. the tenant,
 	// survive): a focus-refetch the browser aborts mid-probe must not poison the
-	// cache with cancellation errors. probeTimeout is the hard deadline on the
-	// whole probe — store reads included — so a hung dependency cannot hold the
-	// entry lock (and with it every later health call for the tenant) forever.
+	// cache with cancellation errors — and waiters on this flight still need the
+	// answer. probeTimeout is the hard deadline on the whole probe — store reads
+	// included — so a hung dependency cannot wedge the tenant's health path.
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.probeTimeout)
 	defer cancel()
-	providers, complete := s.probeProviders(pctx, tenantID, e.botTag)
+	providers, complete := s.probeProviders(pctx, tenantID, lastBotTag)
+
+	e.mu.Lock()
+	e.lastProbe = providers
 	if complete {
 		// Only a finished probe is cached: a timed-out one would pin
 		// "degraded: deadline exceeded" for the whole TTL, so the next call
@@ -324,7 +361,20 @@ func (s *VoiceServer) GetProviderHealth(
 			}
 		}
 	}
+	e.inflight = nil
+	e.mu.Unlock()
+	close(ch) // release the waiters onto lastProbe
+
 	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
+}
+
+// ctxError maps a done request context onto the matching Connect error.
+func ctxError(ctx context.Context) error {
+	code := connect.CodeCanceled
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		code = connect.CodeDeadlineExceeded
+	}
+	return connect.NewError(code, ctx.Err())
 }
 
 // InvalidateHealth drops tenantID's cached health result (#150): called after

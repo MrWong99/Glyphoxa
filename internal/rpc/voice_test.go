@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -489,14 +490,17 @@ func TestGetProviderHealth_ActiveSessionSkipsDiscordProbe(t *testing.T) {
 type blockingVoiceStore struct {
 	release chan struct{}
 	inner   *fakeVoiceStore
+	reads   atomic.Int64 // reads started, so a test can count launched probes
 }
 
 func (b *blockingVoiceStore) GetProviderConfigByComponent(ctx context.Context, id uuid.UUID, c storage.Component) (storage.ProviderConfig, error) {
+	b.reads.Add(1)
 	<-b.release
 	return b.inner.GetProviderConfigByComponent(ctx, id, c)
 }
 
 func (b *blockingVoiceStore) GetDeploymentConfig(ctx context.Context, id uuid.UUID) (storage.DeploymentConfig, error) {
+	b.reads.Add(1)
 	<-b.release
 	return b.inner.GetDeploymentConfig(ctx, id)
 }
@@ -703,3 +707,87 @@ func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, gui
 
 // ptr returns a pointer to v, for proto3 optional scalar fields.
 func ptr[T any](v T) *T { return &v }
+
+// TestGetProviderHealth_CanceledCallersDoNotProbe pins the ctx-aware cache
+// entry: a caller whose request context is already canceled (browser closed
+// the focus-refetch) must return promptly with the ctx error — NOT queue on
+// the entry, become the next probe leader, and burn a full probeTimeout slot.
+// Pre-fix N canceled callers serialized at N x probeTimeout on a hung store.
+func TestGetProviderHealth_CanceledCallersDoNotProbe(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	bs := &blockingVoiceStore{release: make(chan struct{}), inner: healthyStore(t, cipher)}
+	srv := NewVoiceServer(bs, cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.probeTimeout = 200 * time.Millisecond
+
+	canceled, cancel := context.WithCancel(tenantCtx())
+	cancel()
+
+	const n = 5
+	errs := make([]error, n)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = srv.GetProviderHealth(canceled, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if elapsed >= 2*srv.probeTimeout {
+		t.Errorf("%d canceled callers took %v — they serialized full probe slots (probeTimeout %v)", n, elapsed, srv.probeTimeout)
+	}
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("call %d: canceled caller got nil error, want ctx error", i)
+		}
+	}
+}
+
+// TestGetProviderHealth_WaitersShareLeaderProbe pins true singleflight: calls
+// that arrive while a probe is in flight wait on THAT probe and are handed its
+// result — they never launch their own vendor probe. Pre-fix each waiter,
+// finding no fresh cache after the leader's timed-out probe, ran a fresh full
+// probe under the entry lock: N callers serialized at N x probeTimeout and the
+// store saw N probes' worth of reads.
+func TestGetProviderHealth_WaitersShareLeaderProbe(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	bs := &blockingVoiceStore{release: make(chan struct{}), inner: healthyStore(t, cipher)}
+	srv := NewVoiceServer(bs, cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	srv.probeTimeout = 200 * time.Millisecond
+
+	ctx := tenantCtx()
+	const n = 5
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i > 0 {
+				time.Sleep(50 * time.Millisecond) // join while the leader's probe is in flight
+			}
+			if _, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{})); err != nil {
+				t.Errorf("call %d: GetProviderHealth: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if elapsed >= 2*srv.probeTimeout {
+		t.Errorf("%d concurrent callers took %v — waiters ran their own probes instead of sharing the leader's (probeTimeout %v)", n, elapsed, srv.probeTimeout)
+	}
+	// One probe = 3 store reads (LLM config, TTS config, deployment config).
+	if got := bs.reads.Load(); got != 3 {
+		t.Errorf("store reads = %d, want 3 (exactly one probe launched)", got)
+	}
+}
