@@ -105,9 +105,18 @@ function mockBackend(
       saveDiscordSettings: (req) => {
         opts.discordSaves?.push(req);
         if (opts.discordSaveError) throw new ConnectError(opts.discordSaveError, Code.Internal);
-        if (req.botToken !== undefined) state.discord = req.botToken.slice(-4);
         // Presence semantics mirror the real server (#142): omitted IDs leave
-        // the stored ones untouched.
+        // the stored ones untouched, and present-but-empty is REJECTED exactly
+        // like internal/rpc/provider.go — so a client that regresses into
+        // sending blank IDs fails loudly here instead of silently diverging.
+        const hasIDs = req.guildId !== undefined || req.voiceChannelId !== undefined;
+        if (hasIDs && (!req.guildId || !req.voiceChannelId)) {
+          throw new ConnectError(
+            "guild_id and voice_channel_id must both be non-empty when provided",
+            Code.InvalidArgument,
+          );
+        }
+        if (req.botToken !== undefined) state.discord = req.botToken.slice(-4);
         if (req.guildId !== undefined) state.guildId = req.guildId;
         if (req.voiceChannelId !== undefined) state.voiceChannelId = req.voiceChannelId;
         return create(SaveDiscordSettingsResponseSchema, {
