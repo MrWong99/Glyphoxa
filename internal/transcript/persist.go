@@ -99,7 +99,15 @@ func (r *Relay) writeLoop() {
 // barrier rides the SAME queue as the line tees, so FIFO ordering guarantees every
 // line emitted before Finalize has been written when the count runs. Persistence
 // disabled (no store) returns 0.
+//
+// Finalize is also the relay's session-end signal (#144): the Manager calls it
+// at EVERY loop exit — Stop, self-exit (Discord outage, wirenpc error) and
+// Shutdown — so it pushes the terminal `status: idle` frame to the attached SSE
+// subscribers here, before the flush, independent of whether persistence is
+// enabled. Without it a self-terminated session leaves the open EventSource
+// silent and the screen "Live" forever.
 func (r *Relay) Finalize(ctx context.Context, id uuid.UUID) (int, error) {
+	r.endSession(id)
 	if r.writeCh == nil {
 		return 0, nil
 	}
