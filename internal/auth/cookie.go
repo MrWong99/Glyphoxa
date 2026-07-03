@@ -32,6 +32,14 @@ func newToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// NewToken is the exported seam over [newToken] for callers outside the OAuth
+// flow that must mint a session/CSRF secret with the same crypto/rand entropy as
+// the login path — the GLYPHOXA_DEV_MODE auto-auth boot (ADR-0041) issues its
+// dev session this way.
+func NewToken() (string, error) {
+	return newToken()
+}
+
 // cookieValue reads a single cookie value out of a request/response header set,
 // returning "" when absent. It works for both a net/http request and a Connect
 // request's Header() (which carries the inbound Cookie header).

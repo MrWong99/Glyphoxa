@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -188,6 +189,19 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 // rejects Start — it does not drive the loop. The single Prometheus recorder
 // feeds both halves.
 func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRecorder, webAddr, metricsAddr string, withVoice bool) error {
+	// Boot preflight (ADR-0041, issue #112): a web/all-Mode Web Instance with no
+	// usable login must fail loud, not look healthy. Unless the GLYPHOXA_DEV_MODE
+	// opt-out is set, the three DISCORD_OAUTH_* vars AND a non-empty operator
+	// allowlist are mandatory; requireWebEnv names every missing one. Run before
+	// opening the pool so a mis-configured deploy fails fast. Dev-mode skips this
+	// and instead auto-authenticates on a forced loopback bind (below).
+	dev := devMode(os.Getenv)
+	if !dev {
+		if err := requireWebEnv(os.Getenv); err != nil {
+			return err
+		}
+	}
+
 	dsn := databaseURL()
 	if dsn == "" {
 		return fmt.Errorf("web/all modes require a database; set $GLYPHOXA_DATABASE_URL (or $DATABASE_URL)")
@@ -271,10 +285,29 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// (ADR-0013/0039). The SPA handler is the "/" catch-all; ServeMux's
 	// longest-prefix match keeps /api/ and /auth/ ahead of it, so only non-API
 	// paths (and client-side deep links) reach the SPA fallback.
+	mounts := managementMounts(store, cipher, log, mgr, relay)
+	root := spa.Handler()
+	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
+	// operator on every request and pin the bind to loopback, so a dev instance
+	// needs no OAuth and a mis-set flag in production is structurally unreachable.
+	// Wrapping the mounts + SPA root routes every request through the existing
+	// interceptor stack / RequireSession / CSRF gate already authenticated. This
+	// replaces the manual DB-session-insert dev flow.
+	if dev {
+		forced, wrap, err := enableDevMode(ctx, store, webAddr, log, time.Now)
+		if err != nil {
+			return fmt.Errorf("web: %w", err)
+		}
+		webAddr = forced
+		for i := range mounts {
+			mounts[i].Handler = wrap(mounts[i].Handler)
+		}
+		root = wrap(root)
+	}
 	srv := web.NewServer(web.Config{
 		Addr:   webAddr,
-		Mounts: managementMounts(store, cipher, log, mgr, relay),
-		Root:   spa.Handler(),
+		Mounts: mounts,
+		Root:   root,
 		Logger: log,
 	})
 	// An open SSE tail never goes idle on its own, so it would stall every
@@ -309,12 +342,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
 func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay) []web.Mount {
+	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
+	// #112): a non-dev web/all Instance never reaches here without all three set,
+	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
+	// these routes — so the old silent warn-and-continue is gone, replaced by the
+	// fatal preflight in runWeb.
 	clientID := os.Getenv("DISCORD_OAUTH_CLIENT_ID")
-	if clientID == "" {
-		log.Warn("Discord OAuth is not configured; login is disabled until " +
-			"DISCORD_OAUTH_CLIENT_ID, DISCORD_OAUTH_CLIENT_SECRET and " +
-			"DISCORD_OAUTH_REDIRECT_URL are set")
-	}
 	discord := auth.NewDiscordClient(auth.DiscordConfig{
 		ClientID:     clientID,
 		ClientSecret: os.Getenv("DISCORD_OAUTH_CLIENT_SECRET"),
