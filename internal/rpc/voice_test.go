@@ -564,3 +564,55 @@ func TestGetProviderHealth_HungStoreDoesNotWedgeTenant(t *testing.T) {
 		}
 	}
 }
+
+// TestGetProviderHealth_ActiveSessionKeepsLastKnownBotTag pins that the
+// active-session short-circuit does not blank the Configuration screen's
+// "Connected as X#NNNN" row: the tag from the last successful probe is
+// returned with the short-circuited healthy result.
+func TestGetProviderHealth_ActiveSessionKeepsLastKnownBotTag(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	srv := NewVoiceServer(healthyStore(t, cipher), cipher, nil)
+	var seams countingHealthSeams
+	seams.wire(srv)
+	sessions := &fakeSessions{}
+	srv.SetSessions(sessions)
+
+	now := time.Now()
+	srv.now = func() time.Time { return now }
+	ctx := tenantCtx()
+
+	discordOf := func(label string) *managementv1.ProviderHealth {
+		t.Helper()
+		resp, err := srv.GetProviderHealth(ctx, connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+		if err != nil {
+			t.Fatalf("%s: GetProviderHealth: %v", label, err)
+		}
+		for _, p := range resp.Msg.GetProviders() {
+			if p.GetProvider() == "discord" {
+				return p
+			}
+		}
+		t.Fatalf("%s: no discord slot", label)
+		return nil
+	}
+
+	// No session yet: the probe runs and resolves the tag.
+	if got := discordOf("probe").GetBotTag(); got != "Glyphoxa#4823" {
+		t.Fatalf("probed tag = %q, want Glyphoxa#4823", got)
+	}
+
+	// Session starts; cache expires. The short-circuit must not blank the tag.
+	sessions.active = true
+	now = now.Add(healthCacheTTL + time.Second)
+	p := discordOf("short-circuit")
+	if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+		t.Errorf("discord should be healthy during an active session: %+v", p)
+	}
+	if got := p.GetBotTag(); got != "Glyphoxa#4823" {
+		t.Errorf("short-circuit tag = %q, want the last-known Glyphoxa#4823", got)
+	}
+	if got := seams.discord.Load(); got != 1 {
+		t.Errorf("discord probes = %d, want 1 (short-circuit must not touch Discord)", got)
+	}
+}

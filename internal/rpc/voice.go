@@ -112,6 +112,11 @@ type healthEntry struct {
 	mu        sync.Mutex
 	at        time.Time // zero until the first probe lands
 	providers []*managementv1.ProviderHealth
+	// botTag is the last tag a successful Discord probe resolved. It outlives
+	// the TTL so the active-session short-circuit (which does not touch
+	// Discord) can keep reporting "Connected as X#NNNN" instead of blanking
+	// the row for the whole session.
+	botTag string
 }
 
 var _ managementv1connect.VoiceServiceHandler = (*VoiceServer)(nil)
@@ -305,12 +310,19 @@ func (s *VoiceServer) GetProviderHealth(
 	// entry lock (and with it every later health call for the tenant) forever.
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.probeTimeout)
 	defer cancel()
-	providers, complete := s.probeProviders(pctx, tenantID)
+	providers, complete := s.probeProviders(pctx, tenantID, e.botTag)
 	if complete {
 		// Only a finished probe is cached: a timed-out one would pin
 		// "degraded: deadline exceeded" for the whole TTL, so the next call
 		// retries instead.
 		e.providers, e.at = providers, s.now()
+		// Remember the last successfully resolved bot tag for the
+		// active-session short-circuit; a degraded probe keeps the old one.
+		for _, p := range providers {
+			if p.GetProvider() == "discord" && p.GetBotTag() != "" {
+				e.botTag = p.GetBotTag()
+			}
+		}
 	}
 	return connect.NewResponse(&managementv1.GetProviderHealthResponse{Providers: providers}), nil
 }
@@ -333,14 +345,16 @@ func (s *VoiceServer) healthEntry(tenantID uuid.UUID) *healthEntry {
 // with a degraded timeout result, the stuck goroutines are abandoned (their
 // sends land in the buffered channel and are dropped), and complete=false
 // tells the caller not to cache.
-func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID) (providers []*managementv1.ProviderHealth, complete bool) {
+func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, lastBotTag string) (providers []*managementv1.ProviderHealth, complete bool) {
 	checks := []struct {
 		name string
 		run  func(context.Context, uuid.UUID) *managementv1.ProviderHealth
 	}{
 		{"groq", s.healthLLM},
 		{"elevenlabs", s.healthTTS},
-		{"discord", s.healthDiscord},
+		{"discord", func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+			return s.healthDiscord(ctx, tenantID, lastBotTag)
+		}},
 	}
 
 	type slot struct {
@@ -412,11 +426,14 @@ func (s *VoiceServer) healthTTS(ctx context.Context, tenantID uuid.UUID) *manage
 
 // healthDiscord proves the Bot token via REST (GET /users/@me, no gateway
 // IDENTIFY — #150) and reports the resolved bot tag. While a voice session is
-// active the check short-circuits to healthy without touching Discord: the
-// live session runs on the same token, so it IS the health signal.
-func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+// active the check short-circuits to healthy without touching Discord — the
+// live session runs on the same token, so it IS the health signal — carrying
+// lastBotTag (the tag of the last successful probe) so the screen's
+// "Connected as X#NNNN" row survives the session.
+func (s *VoiceServer) healthDiscord(ctx context.Context, tenantID uuid.UUID, lastBotTag string) *managementv1.ProviderHealth {
 	if s.sessionActive != nil && s.sessionActive() {
 		h := healthy("discord")
+		h.BotTag = lastBotTag
 		h.Detail = "live voice session active"
 		return h
 	}
