@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
@@ -61,6 +61,9 @@ function mockBackend(
     // discordSaves captures every SaveDiscordSettings request so tests can pin
     // the wire shape (#142: a token-only save must omit the ID fields).
     discordSaves?: SaveDiscordSettingsRequest[];
+    // discordSaveError makes SaveDiscordSettings fail (simulates a server-side
+    // failure) so tests can pin that the screen surfaces the rejection.
+    discordSaveError?: string;
   } = {},
 ) {
   const state = {
@@ -101,6 +104,7 @@ function mockBackend(
       },
       saveDiscordSettings: (req) => {
         opts.discordSaves?.push(req);
+        if (opts.discordSaveError) throw new ConnectError(opts.discordSaveError, Code.Internal);
         if (req.botToken !== undefined) state.discord = req.botToken.slice(-4);
         // Presence semantics mirror the real server (#142): omitted IDs leave
         // the stored ones untouched.
@@ -206,6 +210,21 @@ describe("Configuration", () => {
     // Both filled -> the save unlocks.
     fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
     expect(save).toBeEnabled();
+  });
+
+  it("surfaces a failed IDs save as a visible alert (#142)", async () => {
+    renderScreen(mockBackend({ discordSaveError: "database is down" }));
+
+    // Both IDs filled, save offered — but the RPC fails. The rejection must
+    // leave visible evidence: nothing was stored, and a silent failure here
+    // resurfaces later as an unrelated-looking session-start precondition error.
+    fireEvent.change(await screen.findByLabelText("Guild ID"), { target: { value: "472093001100" } });
+    fireEvent.change(screen.getByLabelText("Voice channel ID"), { target: { value: "472093774421" } });
+    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't save/i);
+    expect(alert).toHaveTextContent(/database is down/);
   });
 
   it("renders the Groq model allowlist select (ListModels)", async () => {
