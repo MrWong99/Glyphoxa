@@ -99,7 +99,9 @@ const screenRoute = createRoute({
   },
 });
 
-const routeTree = rootRoute.addChildren([
+// Exported so tests can mount the real tree on a memory history and pin the
+// Go↔TS ?error=not_authorized contract (see router.test.tsx).
+export const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
   tenantRoute.addChildren([tenantIndexRoute, screenRoute]),

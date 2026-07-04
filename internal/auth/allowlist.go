@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -36,3 +37,22 @@ func (a OperatorAllowlist) Contains(id string) bool {
 // Len is the number of distinct snowflakes on the allowlist; zero means the gate
 // is unconfigured and every login is rejected.
 func (a OperatorAllowlist) Len() int { return len(a.ids) }
+
+// Malformed returns the entries that cannot be Discord User snowflakes — a
+// snowflake is decimal digits only — sorted for stable error text. Such an
+// entry (a pasted username, a quoted value) can never match a real Discord
+// User, so it silently locks the operator out while still counting as a
+// "configured" allowlist; the boot preflight (#112) fails loud on it instead.
+func (a OperatorAllowlist) Malformed() []string {
+	var bad []string
+	for id := range a.ids {
+		for _, r := range id {
+			if r < '0' || r > '9' {
+				bad = append(bad, id)
+				break
+			}
+		}
+	}
+	slices.Sort(bad)
+	return bad
+}
