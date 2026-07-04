@@ -27,11 +27,20 @@ const rootRoute = createRootRoute({
 });
 
 // /login — the Discord-only OAuth entry (ADR-0016). It lives OUTSIDE the tenant
-// shell so it never triggers the AuthGate (which would loop).
+// shell so it never triggers the AuthGate (which would loop). The OAuth callback
+// bounces an operator-allowlist rejection here with ?error=not_authorized
+// (ADR-0041); validateSearch surfaces it as a typed search param so the screen
+// can render the not-authorized banner.
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  component: Login,
+  validateSearch: (search: Record<string, unknown>): { error?: string } => ({
+    error: typeof search.error === "string" ? search.error : undefined,
+  }),
+  component: function LoginScreen() {
+    const { error } = loginRoute.useSearch();
+    return <Login notAuthorized={error === "not_authorized"} />;
+  },
 });
 
 // "/" → the default tenant's Configuration (boot flow stand-in for this stage).
@@ -90,7 +99,9 @@ const screenRoute = createRoute({
   },
 });
 
-const routeTree = rootRoute.addChildren([
+// Exported so tests can mount the real tree on a memory history and pin the
+// Go↔TS ?error=not_authorized contract (see router.test.tsx).
+export const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
   tenantRoute.addChildren([tenantIndexRoute, screenRoute]),

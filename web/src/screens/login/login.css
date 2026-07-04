@@ -41,6 +41,19 @@
   color: var(--text-subtle, #9a93a8);
 }
 
+/* Operator-allowlist rejection banner (ADR-0041, #103). Inline + role=alert —
+   the login screen is outside the Toaster host, so no sonner toast here. */
+.gx-login__error {
+  margin: 0;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--status-danger, #ff5c7a);
+  border-radius: var(--radius-sm, 8px);
+  color: var(--status-danger, #ff5c7a);
+  font-size: var(--body-sm, 0.875rem);
+  text-align: left;
+}
+
 .gx-login__soon {
   display: flex;
   flex-direction: column;
