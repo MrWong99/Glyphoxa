@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# e2e-deploy-smoke.sh — issue #37: prove the whole deploy chain converges on the
-# CURRENT kube context (an ephemeral k3d/kind cluster), WITHOUT live Discord
-# credentials. It helm-installs the chart and asserts, in order:
+# e2e-deploy-smoke.sh — issue #37 (extended by #118): prove the whole deploy chain
+# converges on the CURRENT kube context (an ephemeral k3d/kind cluster), WITHOUT
+# live Discord credentials. It helm-installs the chart and asserts, in order:
 #
 #   Postgres Ready → migrate Job Completed → seed Job Completed
 #     → voice Deployment Available → /readyz returns 200
+#     → web Deployment Available → the web Service serves the console root (200)
 #
 # then tears the release down. The cluster lifecycle is the caller's concern (the
 # CI workflow creates/deletes the k3d cluster and imports the image); this script
@@ -32,6 +33,8 @@ IMAGE_TAG="${IMAGE_TAG:-e2e}"
 TIMEOUT="${TIMEOUT:-300s}"
 # Local port the /readyz check forwards the metrics listener to.
 READYZ_LOCAL_PORT="${READYZ_LOCAL_PORT:-19090}"
+# Local port the console-root check forwards the web Service to.
+WEB_LOCAL_PORT="${WEB_LOCAL_PORT:-18080}"
 
 # Object names mirror the chart helpers: glyphoxa.<component>.fullname renders as
 # <release>-<component> (deploy/charts/glyphoxa/templates/_helpers.tpl).
@@ -39,6 +42,7 @@ PG="${RELEASE}-postgres"
 MIGRATE="${RELEASE}-migrate"
 SEED="${RELEASE}-seed"
 VOICE="${RELEASE}-voice"
+WEB="${RELEASE}-web"
 
 VALUES_FILE="$(mktemp)"
 PF_PID=""
@@ -49,7 +53,7 @@ dump_diagnostics() {
   log "DIAGNOSTICS (namespace ${NAMESPACE})"
   kubectl -n "$NAMESPACE" get all,jobs -o wide 2>/dev/null || true
   kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
-  for c in postgres migrate seed voice; do
+  for c in postgres migrate seed voice web; do
     log "describe + logs: component=${c}"
     kubectl -n "$NAMESPACE" describe pod -l "app.kubernetes.io/component=${c}" 2>/dev/null || true
     kubectl -n "$NAMESPACE" logs -l "app.kubernetes.io/component=${c}" --all-containers --tail=80 2>/dev/null || true
@@ -93,14 +97,27 @@ voice:
   enabled: true
   guild: "111111111111111111"
   channel: "222222222222222222"
+web:
+  enabled: true
+  # Dummy-but-syntactically-valid OAuth credentials + a numeric operator snowflake.
+  # requireWebEnv (ADR-0041, #112) only checks they are present + parseable, not
+  # that Discord accepts them — OAuth is exercised on an actual login, which this
+  # unattended smoke never performs — so the Web Instance boots to /readyz=200 on
+  # the DB-backed readiness alone, exactly like the voice pod with a placeholder
+  # token. A live OAuth login round-trip is issue #128's smoke.
+  oauth:
+    clientId: "ci-not-a-real-oauth-client-id"
+    clientSecret: "ci-not-a-real-oauth-client-secret"
+    redirectUrl: "http://localhost:8080/auth/discord/callback"
+  operatorIds: "111111111111111111"
 EOF
 
 log "helm install ${RELEASE} (chart ${CHART}, image ${IMAGE_REPO}:${IMAGE_TAG})"
 # --wait blocks until the ORDERED pre-install hook chain succeeds — Postgres
 # (weight -10) up, migrate Job (-5) Completed, seed Job (-4) Completed — and then
-# the voice Deployment reaches Available. So a zero exit here already proves the
-# whole chain converged; the explicit asserts below name the exact link on a
-# regression and double as the issue-#37 acceptance checklist.
+# BOTH the voice and web Deployments reach Available. So a zero exit here already
+# proves the whole chain converged; the explicit asserts below name the exact
+# link on a regression and double as the #37/#118 acceptance checklist.
 helm install "$RELEASE" "$CHART" \
   --namespace "$NAMESPACE" --create-namespace \
   --values "$VALUES_FILE" \
@@ -139,5 +156,35 @@ if [ -z "$ready" ]; then
   echo "FAIL: /readyz did not return 200 within the window"
   exit 1
 fi
+kill "$PF_PID" 2>/dev/null || true
+PF_PID=""
 
-log "PASS: deploy chain converged — Postgres → migrate → seed → voice Available → /readyz 200"
+log "assert: web Deployment Available"
+# The Web Instance (#118) boots with the dummy OAuth creds + operator snowflake
+# above; requireWebEnv (ADR-0041) is satisfied by their presence, and readiness
+# is the same DB-backed /readyz on the internal metrics port, so it reaches
+# Available without a live Discord login.
+kubectl -n "$NAMESPACE" wait --for=condition=Available "deployment/${WEB}" --timeout "$TIMEOUT"
+
+log "assert: the web Service serves the console root (200)"
+# Port-forward the web SERVICE (not the pod) so the Service's selector + the
+# named http targetPort are exercised end to end, then curl the console root: the
+# SPA handler returns index.html (200) for GET /. This proves the public Connect
+# API port is reachable through the Service. The authenticated RPC surface + a
+# live OAuth round-trip are issue #128's smoke.
+kubectl -n "$NAMESPACE" port-forward "service/${WEB}" "${WEB_LOCAL_PORT}:80" >/dev/null 2>&1 &
+PF_PID=$!
+served=""
+for _ in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:${WEB_LOCAL_PORT}/" >/dev/null 2>&1; then
+    served=1
+    break
+  fi
+  sleep 1
+done
+if [ -z "$served" ]; then
+  echo "FAIL: the web Service did not serve the console root (200) within the window"
+  exit 1
+fi
+
+log "PASS: deploy chain converged — Postgres → migrate → seed → voice Available → /readyz 200 → web Available → console root 200"
