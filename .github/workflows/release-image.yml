@@ -47,6 +47,28 @@ jobs:
         env:
           BUF_TOKEN: ${{ secrets.BUF_REGISTRY_TOKEN }}
 
+      # The SPA bundle is context-fed, not built in the image (ADR-0034
+      # amendment, #114). ci.yml's docker-build jobs download the `spa-dist`
+      # artifact ci.yml's `web` job uploads, but artifacts don't cross workflows
+      # (same reason this workflow self-generates gen/ above), so publish builds
+      # the SPA itself: Vite emits into internal/spa/dist (build.outDir), which
+      # `COPY . .` then embeds. The build imports the generated gen/ts stubs, so
+      # it must run AFTER `buf generate`.
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web deps
+        run: npm ci
+        working-directory: web
+
+      - name: Build SPA
+        run: npm run build
+        working-directory: web
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 

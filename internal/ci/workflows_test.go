@@ -38,6 +38,49 @@ type step struct {
 // because the broken job (release-image.yml's publish) only runs on a release
 // tag. That is exactly how #75 shipped the regression reported in #139.
 func TestDockerBuildJobsProvisionGeneratedStubs(t *testing.T) {
+	eachDockerBuildJob(t, func(t *testing.T, file, jobName string, steps []step, build int) {
+		if !provisionsGen(steps[:build]) {
+			t.Errorf(
+				"%s: job %q runs docker/build-push-action (step %d) without an earlier step providing gen/ "+
+					"(`buf generate` or download-artifact `gen`); the Dockerfile's `COPY . .` + `go build` "+
+					"cannot compile without the gitignored stubs in the context",
+				file, jobName, build,
+			)
+		}
+	})
+}
+
+// TestDockerBuildJobsEmbedRealSPA enforces the build-context contract the #114
+// ADR-0034 amendment adds ("The SPA bundle is context-fed, not built in the
+// image"): every workflow job that runs a docker build of this repo must, in an
+// earlier step of the same job, provision the REAL built SPA bundle into
+// internal/spa/dist — either by downloading the `spa-dist` artifact (ci.yml's
+// `web` job builds and uploads it) or by building it in-job (release-image.yml's
+// publish can't cross-workflow the artifact, so it runs `npm run build` itself,
+// exactly as it self-generates gen/).
+//
+// Like the gen invariant, this is cross-file and latent: without it a docker
+// build silently embeds the committed placeholder index.html instead of the
+// console, and the release path only runs on a v* tag — long after the PR that
+// broke it merged.
+func TestDockerBuildJobsEmbedRealSPA(t *testing.T) {
+	eachDockerBuildJob(t, func(t *testing.T, file, jobName string, steps []step, build int) {
+		if !provisionsRealSPA(steps[:build]) {
+			t.Errorf(
+				"%s: job %q runs docker/build-push-action (step %d) without an earlier step providing the real "+
+					"SPA bundle (download-artifact `spa-dist` or `npm run build`); the Dockerfile's `COPY . .` "+
+					"would then embed the committed placeholder internal/spa/dist/index.html, not the console",
+				file, jobName, build,
+			)
+		}
+	})
+}
+
+// eachDockerBuildJob parses every workflow file and invokes fn for each job that
+// runs a docker/build-push-action step, passing that step's index so callers can
+// assert on the steps that precede it.
+func eachDockerBuildJob(t *testing.T, fn func(t *testing.T, file, jobName string, steps []step, build int)) {
+	t.Helper()
 	files, err := filepath.Glob(filepath.Join("..", "..", ".github", "workflows", "*.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -66,14 +109,7 @@ func TestDockerBuildJobsProvisionGeneratedStubs(t *testing.T) {
 			if build < 0 {
 				continue
 			}
-			if !provisionsGen(job.Steps[:build]) {
-				t.Errorf(
-					"%s: job %q runs docker/build-push-action (step %d) without an earlier step providing gen/ "+
-						"(`buf generate` or download-artifact `gen`); the Dockerfile's `COPY . .` + `go build` "+
-						"cannot compile without the gitignored stubs in the context",
-					filepath.Base(file), jobName, build,
-				)
-			}
+			fn(t, filepath.Base(file), jobName, job.Steps, build)
 		}
 	}
 }
@@ -98,6 +134,24 @@ func provisionsGen(steps []step) bool {
 		}
 		if strings.HasPrefix(s.Uses, "actions/download-artifact") {
 			if name, ok := s.With["name"].(string); ok && name == "gen" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// provisionsRealSPA reports whether any of the given steps puts the real built
+// SPA bundle into the working tree (internal/spa/dist): building it in-job with
+// `npm run build`, or restoring the `spa-dist` artifact uploaded by ci.yml's
+// `web` job.
+func provisionsRealSPA(steps []step) bool {
+	for _, s := range steps {
+		if strings.Contains(s.Run, "npm run build") {
+			return true
+		}
+		if strings.HasPrefix(s.Uses, "actions/download-artifact") {
+			if name, ok := s.With["name"].(string); ok && name == "spa-dist" {
 				return true
 			}
 		}

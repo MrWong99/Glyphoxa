@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint docker-build docker-smoke helm-lint helm-test helm-validate helm-validate-test
+.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
 
 # Build voice engine
 build:
@@ -142,14 +142,32 @@ DOCKER_IMAGE ?= glyphoxa:smoke
 # Depends on `proto`: gen/ is gitignored and NOT generated inside the image
 # (buf/node stay out of the builder), so it must exist in the build context on
 # the host before `docker build` ships it. `make proto` runs `buf generate` first.
+#
+# The SPA bundle is context-fed too (ADR-0034 amendment, #114): a node-free
+# `make docker-build` embeds the committed placeholder index.html, so run
+# `make spa` first to build the real console into internal/spa/dist and ship it
+# (CI feeds this via the `web` job's `spa-dist` artifact instead).
 docker-build: proto
 	docker build -t $(DOCKER_IMAGE) .
 
+# Build the real Vite + React console into internal/spa/dist (vite.config.ts
+# build.outDir) so a following `make docker-build` embeds the console rather than
+# the placeholder fallback (#114). Requires Node; the pure-Go build path does not.
+spa:
+	cd web && npm ci && npm run build
+
 # Run the container smoke test (issue #31) against $(DOCKER_IMAGE). Asserts the
-# CLI works, ldd resolves every native dep, the bundled ONNX runtime exists, and
-# the process is non-root. Build the image first (make docker-build).
+# CLI works, ldd resolves every native dep, the bundled ONNX runtime exists, the
+# process is non-root, and the embedded web root is the real console (#114).
+# Build the image first (make docker-build).
 docker-smoke:
 	./scripts/container-smoke.sh $(DOCKER_IMAGE)
+
+# Self-test for the embedded-console gate above: proves container-smoke.sh FAILS
+# on a placeholder-only image and PASSES only on a real build, so the gate can't
+# silently no-op (the #140 discipline, mirrored for #114). Needs only Docker.
+docker-smoke-test:
+	./scripts/container-smoke-test.sh
 
 # --- Helm chart (ADR-0034, issue #34) --------------------------------------
 # The deploy chart stands up a pgvector Postgres and applies the schema via a
