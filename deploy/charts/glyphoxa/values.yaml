@@ -218,9 +218,11 @@ web:
 
   # Single replica for v1.0 (ADR-0039): the self-host web tier holds sessions
   # in-process, and cross-pod session control is deferred, so this is pinned to
-  # one pod. Unlike voice (Recreate — one gateway per channel), web uses the
-  # default RollingUpdate: it holds no hard single-instance external resource, so
-  # a brief upgrade surge is harmless. Scaling out is a design change (a session
+  # one pod. The update strategy tracks the Mode: `web` uses RollingUpdate (no
+  # in-process loop, so an upgrade surge is harmless), while `all` uses Recreate
+  # like voice — it drives a session loop in-process, so two pods would run two
+  # loops on one Discord token AND a surged pod's boot-time orphan sweep would
+  # close the old pod's live session. Scaling out is a design change (a session
   # backplane), not a value.
 
   # Optional per-workload image override. When repository/tag are set here they

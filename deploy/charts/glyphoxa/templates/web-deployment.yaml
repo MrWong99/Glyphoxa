@@ -8,10 +8,15 @@ mandatory operator allowlist (ADR-0041).
 - ONE replica, by intent: the self-host web tier holds sessions in-process and
   cross-pod session control is deferred (ADR-0039), so scaling out is a design
   change (a session backplane), not a value.
-- RollingUpdate (the k8s default), NOT Recreate like voice: web holds no hard
-  single-instance external resource — voice must be Recreate because two pods
-  would fight over one Discord gateway/channel — so a brief upgrade surge is
-  harmless and keeps the console available across an image bump.
+- Update strategy depends on Mode. `web` Mode holds no in-process session loop,
+  so it uses RollingUpdate (the k8s default) — a brief upgrade surge is harmless
+  and keeps the console available across an image bump. `all` Mode drives voice
+  sessions in-process, so it uses Recreate like voice: a RollingUpdate surge
+  would (a) run a second loop on the same DISCORD_BOT_TOKEN and (b) let the new
+  pod's boot-time ReconcileOrphans (#143) close the OLD pod's still-live session
+  row — its "no loop is live at boot" invariant is violated during the surge,
+  corrupting the old pod's transcript finalization on Stop. Recreate tears the
+  old pod down first, so at most one loop ever runs.
 - NOT a Helm hook: a plain resource applies after every pre-install/pre-upgrade
   hook, so the migrate (-5) and seed (-4) hooks have completed before this pod
   starts.
@@ -46,10 +51,18 @@ spec:
   # Single pod for v1.0 — the web tier holds sessions in-process and cross-pod
   # session control is deferred (see the header).
   replicas: 1
-  # RollingUpdate (default), unlike voice's Recreate: no single-instance external
-  # resource to serialize on, so a surge on upgrade is harmless.
+  {{- if eq .Values.web.mode "all" }}
+  # `all` Mode drives voice sessions in-process — Recreate (like voice) so an
+  # upgrade never runs two loops on one Discord token and never lets a surged
+  # pod's boot-time ReconcileOrphans close the old pod's live session (see header).
+  strategy:
+    type: Recreate
+  {{- else }}
+  # web-only Mode has no in-process loop to serialize on, so RollingUpdate
+  # (default) is safe and keeps the console available across an image bump.
   strategy:
     type: RollingUpdate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
