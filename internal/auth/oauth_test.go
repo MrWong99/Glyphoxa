@@ -31,26 +31,33 @@ func (f *fakeDiscord) Exchange(_ context.Context, code string) (auth.DiscordUser
 	return f.user, nil
 }
 
-// fakeOAuthStore records the writes the callback performs.
+// fakeOAuthStore records the writes the callback performs, counting each call so
+// a rejected login can be asserted to have written NOTHING.
 type fakeOAuthStore struct {
-	upserted storage.UpsertUserParams
-	resolved uuid.UUID
-	created  storage.NewSession
-	userID   uuid.UUID
-	tenantID uuid.UUID
+	upserted    storage.UpsertUserParams
+	resolved    uuid.UUID
+	created     storage.NewSession
+	userID      uuid.UUID
+	tenantID    uuid.UUID
+	upsertCalls int
+	resolveN    int
+	createCalls int
 }
 
 func (f *fakeOAuthStore) UpsertUser(_ context.Context, p storage.UpsertUserParams) (storage.User, error) {
+	f.upsertCalls++
 	f.upserted = p
 	return storage.User{ID: f.userID, DiscordUserID: p.DiscordUserID, Name: p.Name, Avatar: p.Avatar, Role: "operator"}, nil
 }
 
 func (f *fakeOAuthStore) ResolveOperatorTenant(_ context.Context, userID uuid.UUID) (storage.Tenant, error) {
+	f.resolveN++
 	f.resolved = userID
 	return storage.Tenant{ID: f.tenantID, Name: "Glyphoxa"}, nil
 }
 
 func (f *fakeOAuthStore) CreateSession(_ context.Context, n storage.NewSession) (storage.Session, error) {
+	f.createCalls++
 	f.created = n
 	return storage.Session{ID: uuid.New(), UserID: n.UserID, Token: n.Token, ExpiresAt: n.ExpiresAt}, nil
 }
@@ -58,7 +65,7 @@ func (f *fakeOAuthStore) CreateSession(_ context.Context, n storage.NewSession) 
 func TestOAuthLogin_RedirectsAndSetsState(t *testing.T) {
 	t.Parallel()
 	disc := &fakeDiscord{authBase: "https://discord/authorize"}
-	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", nil)
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.ParseOperatorAllowlist(""), nil)
 
 	rec := httptest.NewRecorder()
 	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil))
@@ -94,7 +101,8 @@ func TestOAuthCallback_IssuesSessionCookie(t *testing.T) {
 	t.Parallel()
 	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora", GlobalName: "Sora Vance", AvatarURL: "https://cdn/a.png"}}
 	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
-	o := auth.NewOAuth(store, disc, "/", nil)
+	// The fake user's snowflake IS on the allowlist (multi-value, whitespace-tolerant).
+	o := auth.NewOAuth(store, disc, "/", auth.ParseOperatorAllowlist("42, 77 99"), nil)
 
 	// A valid callback presents the state cookie matching the state param + a code.
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
@@ -150,7 +158,7 @@ func TestOAuthCallback_IssuesSessionCookie(t *testing.T) {
 func TestOAuthCallback_BadState_Rejected(t *testing.T) {
 	t.Parallel()
 	store := &fakeOAuthStore{}
-	o := auth.NewOAuth(store, &fakeDiscord{}, "/", nil)
+	o := auth.NewOAuth(store, &fakeDiscord{}, "/", auth.ParseOperatorAllowlist(""), nil)
 
 	// State cookie does not match the state param.
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?code=c&state=mismatch", nil)
@@ -164,5 +172,49 @@ func TestOAuthCallback_BadState_Rejected(t *testing.T) {
 	}
 	if store.created.Token != "" {
 		t.Error("session created despite state mismatch")
+	}
+}
+
+// A Discord User whose snowflake is NOT on the operator allowlist (ADR-0041) is
+// denied a session and a Tenant binding: the callback rejects BEFORE any store
+// write and bounces to /login?error=not_authorized. No session, no Tenant write,
+// no auto-created Tenant.
+func TestOAuthCallback_NotAllowlisted_Rejected(t *testing.T) {
+	t.Parallel()
+	disc := &fakeDiscord{user: auth.DiscordUser{ID: "999", Username: "stranger", GlobalName: "Stranger"}}
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
+	// Allowlist holds other snowflakes; "999" is absent.
+	o := auth.NewOAuth(store, disc, "/", auth.ParseOperatorAllowlist("42, 77"), nil)
+
+	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
+	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)
+	req.AddCookie(&http.Cookie{Name: "glyphoxa_oauth_state", Value: "st-1"})
+
+	rec := httptest.NewRecorder()
+	o.Callback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/login?error=not_authorized" {
+		t.Errorf("Location = %q, want /login?error=not_authorized", loc)
+	}
+
+	// No session, no Tenant write, no user upsert — the gate ran first.
+	if store.upsertCalls != 0 {
+		t.Errorf("UpsertUser called %d times, want 0", store.upsertCalls)
+	}
+	if store.resolveN != 0 {
+		t.Errorf("ResolveOperatorTenant called %d times, want 0", store.resolveN)
+	}
+	if store.createCalls != 0 {
+		t.Errorf("CreateSession called %d times, want 0", store.createCalls)
+	}
+
+	// No session/csrf cookies were issued to the rejected user.
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "glyphoxa_session" || c.Name == "glyphoxa_csrf" {
+			t.Errorf("issued %s cookie to a rejected user", c.Name)
+		}
 	}
 }

@@ -320,7 +320,11 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 		ClientSecret: os.Getenv("DISCORD_OAUTH_CLIENT_SECRET"),
 		RedirectURL:  os.Getenv("DISCORD_OAUTH_REDIRECT_URL"),
 	})
-	oauth := auth.NewOAuth(store, discord, "/", log)
+	// GLYPHOXA_OPERATOR_IDS is the mandatory operator allowlist (ADR-0041): the
+	// single authorization gate at the OAuth callback. A Discord User whose
+	// snowflake is absent is denied a session before any Tenant write.
+	allowlist := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
+	oauth := auth.NewOAuth(store, discord, "/", allowlist, log)
 	authServer := auth.NewAuthServer(store, log)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and

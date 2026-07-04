@@ -35,15 +35,23 @@ const stateCookieTTL = 10 * time.Minute
 type OAuth struct {
 	store    OAuthStore
 	discord  DiscordOAuth
+	allow    OperatorAllowlist // the mandatory operator gate (ADR-0041)
 	ttl      time.Duration
 	redirect string // where the callback sends the browser after login
 	now      func() time.Time
 	log      *slog.Logger
 }
 
+// notAuthorizedRedirect is where the callback sends a Discord User who is not on
+// the operator allowlist: the login screen with a non-leaky not_authorized
+// signal (ADR-0041). This is the only redirect that carries an ?error= param —
+// bad-state/missing-code still fail with http.Error.
+const notAuthorizedRedirect = "/login?error=not_authorized"
+
 // NewOAuth builds the OAuth handlers. appRedirect is the post-login destination
-// (the SPA root, "/").
-func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, log *slog.Logger) *OAuth {
+// (the SPA root, "/"). allow is the mandatory operator allowlist (ADR-0041): a
+// Discord User whose snowflake is absent is denied a session at the callback.
+func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, allow OperatorAllowlist, log *slog.Logger) *OAuth {
 	if appRedirect == "" {
 		appRedirect = "/"
 	}
@@ -53,6 +61,7 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, log *s
 	return &OAuth{
 		store:    store,
 		discord:  discord,
+		allow:    allow,
 		ttl:      defaultSessionTTL,
 		redirect: appRedirect,
 		now:      time.Now,
@@ -107,6 +116,16 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		// The raw error can carry endpoint/status detail; log it, return generic.
 		o.log.Error("oauth callback: discord exchange", "err", err)
 		http.Error(w, "discord sign-in failed", http.StatusBadGateway)
+		return
+	}
+
+	// The mandatory operator allowlist is THE gate (ADR-0041). Reject a Discord
+	// User whose snowflake is absent BEFORE any UpsertUser / ResolveOperatorTenant
+	// / CreateSession — no session, no Tenant write, no auto-created Tenant — and
+	// bounce to the login screen with a non-leaky not_authorized signal.
+	if !o.allow.Contains(du.ID) {
+		o.log.Warn("oauth callback: rejected non-allowlisted Discord user", "discord_user_id", du.ID)
+		http.Redirect(w, r, notAuthorizedRedirect, http.StatusFound)
 		return
 	}
 

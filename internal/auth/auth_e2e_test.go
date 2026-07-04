@@ -96,7 +96,9 @@ func TestAuthEndToEnd(t *testing.T) {
 	disc := &fakeDiscord{user: auth.DiscordUser{
 		ID: "555", Username: "sora", GlobalName: "Sora Vance", AvatarURL: "https://cdn/a.png",
 	}}
-	o := auth.NewOAuth(store, disc, "/", nil)
+	// The operator snowflake is on the mandatory allowlist (ADR-0041) so the
+	// callback issues a real session.
+	o := auth.NewOAuth(store, disc, "/", auth.ParseOperatorAllowlist("555"), nil)
 
 	// 1. OAuth callback issues a real session — capture the cookies.
 	cbReq := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?code=c&state=st", nil)

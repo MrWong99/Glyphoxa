@@ -16,4 +16,17 @@ describe("Login", () => {
     expect(screen.getByRole("button", { name: /github/i })).toBeDisabled();
     expect(screen.getAllByText(/coming soon/i).length).toBeGreaterThanOrEqual(2);
   });
+
+  it("shows a friendly not-authorized banner when notAuthorized is set", () => {
+    render(<Login notAuthorized />);
+    const banner = screen.getByRole("alert");
+    expect(banner).toHaveTextContent(/allowlist/i);
+    // The Discord link stays available so the operator can retry with the right account.
+    expect(screen.getByRole("link", { name: /continue with discord/i })).toBeInTheDocument();
+  });
+
+  it("renders no banner on a normal first visit", () => {
+    render(<Login />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
