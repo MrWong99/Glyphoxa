@@ -170,8 +170,8 @@ log "assert: the web Service serves the console root (200)"
 # Port-forward the web SERVICE (not the pod) so the Service's selector + the
 # named http targetPort are exercised end to end, then curl the console root: the
 # SPA handler returns index.html (200) for GET /. This proves the public Connect
-# API port is reachable through the Service. The authenticated RPC surface + a
-# live OAuth round-trip are issue #128's smoke.
+# API port is reachable through the Service. A live OAuth login round-trip is
+# issue #128's smoke.
 kubectl -n "$NAMESPACE" port-forward "service/${WEB}" "${WEB_LOCAL_PORT}:80" >/dev/null 2>&1 &
 PF_PID=$!
 served=""
@@ -187,4 +187,25 @@ if [ -z "$served" ]; then
   exit 1
 fi
 
-log "PASS: deploy chain converged — Postgres → migrate → seed → voice Available → /readyz 200 → web Available → console root 200"
+log "assert: unauthenticated GetCurrentUser returns 401 (the auth gate stands)"
+# The corrected #118 AC: the console's current-user probe must be REJECTED for a
+# request with no session. AuthServer.GetCurrentUser is reachable unauthenticated
+# (it is in the public set) but returns Connect CodeUnauthenticated, which the
+# Connect protocol maps to HTTP 401 — the SPA's "-> /login" signal. A regression
+# that exposed it as 200 would be an auth-bypass smell; assert the 401 explicitly
+# so the smoke catches it. POST an empty Connect (JSON) request through the same
+# Service port-forward; retry briefly for a freshly re-checked forward.
+code=""
+for _ in $(seq 1 30); do
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' --data '{}' \
+    "http://127.0.0.1:${WEB_LOCAL_PORT}/api/glyphoxa.management.v1.AuthService/GetCurrentUser" 2>/dev/null || true)"
+  [ -n "$code" ] && [ "$code" != "000" ] && break
+  sleep 1
+done
+if [ "$code" != "401" ]; then
+  echo "FAIL: unauthenticated GetCurrentUser returned ${code:-<none>}, want 401 (auth gate)"
+  exit 1
+fi
+
+log "PASS: deploy chain converged — Postgres → migrate → seed → voice Available → /readyz 200 → web Available → console root 200 → GetCurrentUser 401"

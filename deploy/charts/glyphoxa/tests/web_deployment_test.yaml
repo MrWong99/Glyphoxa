@@ -35,14 +35,27 @@ tests:
           path: spec.replicas
           value: 1
 
-  - it: uses the default RollingUpdate strategy (not Recreate like voice)
-    # Web holds no hard single-instance external resource (voice holds one Discord
-    # gateway per channel and must be Recreate), so a brief upgrade surge is
-    # harmless; RollingUpdate keeps the console available across an image bump.
+  - it: uses RollingUpdate in web Mode (no in-process session loop to serialize on)
+    # web-only Mode holds no in-process loop, so a brief upgrade surge is harmless;
+    # RollingUpdate keeps the console available across an image bump.
     asserts:
       - equal:
           path: spec.strategy.type
           value: RollingUpdate
+
+  - it: uses Recreate in all Mode so an upgrade never runs two in-process session loops
+    # `all` Mode drives voice sessions in-process. A RollingUpdate surge would (a)
+    # run a second loop on the same DISCORD_BOT_TOKEN and (b) let the surged pod's
+    # boot-time ReconcileOrphans (#143) close the OLD pod's still-live session row
+    # (its "no loop is live at boot" invariant is violated during the surge).
+    # Recreate tears the old pod down first, like voice-deployment.yaml.
+    set:
+      web:
+        mode: all
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
 
   - it: is NOT a Helm hook so it applies after the migrate and seed hooks
     asserts:
