@@ -73,6 +73,13 @@ spec:
         {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: web
       annotations:
+        # Roll the pod when the app Secret's content changes. The web tier's env
+        # (incl. the derived discord-oauth-redirect-url, #121) is captured at
+        # container start, so toggling ingress/oauth values on `helm upgrade`
+        # rewrites the Secret but otherwise leaves this pod spec byte-identical —
+        # no rollout, stale env, redirect_uri mismatch until a manual restart.
+        # Hashing the rendered Secret here makes any change force a rollout.
+        checksum/secret: {{ include "glyphoxa.secretStringData" . | sha256sum }}
         # Advertise the metrics-only listener for annotation-based Prometheus
         # scrape discovery (ADR-0032). The public `http` port is never scraped.
         prometheus.io/scrape: "true"

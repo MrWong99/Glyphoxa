@@ -1,0 +1,63 @@
+{{/*
+Web Ingress (#121) — the opt-in external exposure for the Web Instance Service
+(#118). OFF by default; enabling it needs only ingress.host, which routes to the
+web Service's PUBLIC `http` port (the Connect API + console) under a Prefix `/`.
+
+- TLS terminates HERE (ADR-0039): the app behind the ingress stays plaintext, so
+  the Service/pod are untouched — only spec.tls references a Secret by name. That
+  Secret is either operator-supplied (ingress.tls.secretName) or, opt-in,
+  provisioned by cert-manager into a release-derived name via the cluster-issuer
+  annotation. A host-only Ingress with neither is a valid plain-HTTP route.
+- The advertised OAuth redirect URL is derived from ingress.host (see the
+  glyphoxa.web.oauthRedirectURL helper + secret.yaml) so the Discord callback can
+  never drift from the host this Ingress terminates.
+- It backs the web Service, which only exists when web.enabled — so an Ingress
+  without it is a guaranteed 404; reject that combination at render time.
+- A plain (non-hook) resource like the web Service it fronts.
+*/}}
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.web.enabled }}
+{{- fail "ingress.enabled requires web.enabled: the Ingress fronts the web Service, which is only rendered when web.enabled — enabling the Ingress without it would route to a non-existent backend (#121)." }}
+{{- end }}
+{{- $host := required "ingress.host is required when ingress.enabled: it is the single host the Ingress routes to the web Service (and drives the Discord OAuth redirect URL). Enabling the Ingress needs only this (#121)." .Values.ingress.host }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "glyphoxa.web.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  {{- if .Values.ingress.certManager.enabled }}
+  annotations:
+    # cert-manager provisions the certificate for the TLS Secret named below from
+    # this ClusterIssuer (opt-in). Absent this, an externally supplied Secret is
+    # referenced directly and no annotation is emitted.
+    cert-manager.io/cluster-issuer: {{ required "ingress.certManager.clusterIssuer is required when ingress.certManager.enabled: the cert-manager ClusterIssuer that provisions the TLS certificate (e.g. letsencrypt-prod)." .Values.ingress.certManager.clusterIssuer | quote }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if or .Values.ingress.certManager.enabled .Values.ingress.tls.secretName }}
+  # TLS terminates at the ingress (ADR-0039): HTTPS is decrypted here and the
+  # request proxied to the plaintext web Service. The Secret is either supplied
+  # by the operator or provisioned by cert-manager into the name below.
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ include "glyphoxa.web.tlsSecretName" . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "glyphoxa.web.fullname" . }}
+                # The Service's NAMED public port, so web.service.port changes
+                # follow the name without editing the Ingress.
+                port:
+                  name: http
+{{- end }}

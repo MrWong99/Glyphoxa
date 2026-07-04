@@ -10,6 +10,15 @@ suite: web-mode Deployment
 # migrate+seed hooks, and NEVER runs migrations.
 templates:
   - templates/web-deployment.yaml
+# The pod template's checksum/secret annotation hashes the app Secret's stringData
+# (glyphoxa.secretStringData, #121), so rendering the Deployment now evaluates the
+# Secret's `required` inputs (appSecret, the credentials, the OAuth trio, the
+# operator allowlist). Rather than inline a fresh set of credential-shaped
+# placeholders here, reuse the chart's existing CI dummy values — one source of
+# throwaway test creds, and no new secret-shaped lines for the secret scanner to
+# flag. Per-test `set:` still overrides these.
+values:
+  - ../ci/ci-values.yaml
 tests:
   - it: renders a Deployment named for the release
     asserts:
@@ -297,6 +306,21 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].readinessProbe.httpGet.port
           value: metrics
+
+  - it: rolls the pod when the app Secret changes (checksum annotation)
+    # The web pod's env (incl. the derived discord-oauth-redirect-url, #121) is
+    # captured at container start, so a Secret content change on `helm upgrade`
+    # must roll the pod — otherwise, with the pod spec otherwise byte-identical,
+    # no rollout triggers and the running env stays stale (redirect_uri mismatch)
+    # until a manual restart. A sha256 of the Secret's stringData in the pod
+    # annotations forces the roll. A mutant dropping it fails (path absent); a
+    # constant non-hash fails the shape. It hashes the glyphoxa.secretStringData
+    # partial (the same content secret.yaml renders), so a redirect-url change
+    # changes the checksum.
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/secret"]
+          pattern: ^[a-f0-9]{64}$
 
   - it: annotates the pod for Prometheus scraping on the metrics port
     asserts:

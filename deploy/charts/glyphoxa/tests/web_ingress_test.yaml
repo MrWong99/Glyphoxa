@@ -1,0 +1,207 @@
+suite: web Ingress
+# The opt-in Ingress (#121) fronts the Web Instance Service (#118): it routes a
+# configured host to the Service's public `http` port (the Connect API + console)
+# and, when configured, terminates TLS at the ingress while the app behind stays
+# plaintext (ADR-0039). Off by default; enabling it needs only a host. TLS comes
+# either from an externally supplied Secret or, opt-in, from cert-manager via a
+# cluster-issuer annotation. It is a plain (non-hook) resource like the Service.
+templates:
+  - templates/web-ingress.yaml
+tests:
+  - it: is off by default (opt-in)
+    # Ingress is a separate exposure decision; a bare install stays ClusterIP.
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders an Ingress named for the release when enabled with a host
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - isKind:
+          of: Ingress
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-web
+
+  - it: is networking.k8s.io/v1
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - equal:
+          path: apiVersion
+          value: networking.k8s.io/v1
+
+  - it: requires only a host to enable — fails fast with an actionable message if absent
+    # "enabling it requires only setting the host": an enabled Ingress with no host
+    # can route nothing, so reject it at render time rather than ship a dead route.
+    set:
+      ingress:
+        enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "ingress.host is required"
+
+  - it: refuses to front a disabled Web Instance
+    # The Ingress backend is the web Service, which only exists when web.enabled;
+    # an Ingress without it is a guaranteed 404, so fail the render instead.
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+      web:
+        enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "ingress.enabled requires web.enabled"
+
+  - it: routes the configured host to the web Service's public http port
+    # The single rule points the host at the web Service by name, at its NAMED
+    # `http` port — so a change to web.service.port follows the name without also
+    # editing the Ingress — under a Prefix `/` path (the whole console + API).
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - equal:
+          path: spec.rules[0].host
+          value: glyphoxa.example.com
+      - equal:
+          path: spec.rules[0].http.paths[0].path
+          value: /
+      - equal:
+          path: spec.rules[0].http.paths[0].pathType
+          value: Prefix
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.name
+          value: RELEASE-NAME-glyphoxa-web
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.port.name
+          value: http
+
+  - it: sets the ingress class when one is configured
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        className: nginx
+    asserts:
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+
+  - it: carries the standard chart labels plus the web component
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: web
+      - equal:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+          value: Helm
+
+  # --- TLS: externally supplied secret (cert-manager OFF) -------------------
+  - it: terminates TLS at the ingress using an externally supplied secret
+    # A TLS section references the operator's own Secret by name for the same
+    # host; the app behind the ingress stays plaintext (ADR-0039).
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        tls:
+          secretName: glyphoxa-web-tls
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: glyphoxa.example.com
+      - equal:
+          path: spec.tls[0].secretName
+          value: glyphoxa-web-tls
+      - notExists:
+          path: metadata.annotations["cert-manager.io/cluster-issuer"]
+
+  - it: omits TLS when neither an external secret nor cert-manager is configured
+    # An enabled-with-just-a-host Ingress is a valid plain-HTTP route (e.g. TLS
+    # terminated further out); no TLS block is emitted then.
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - notExists:
+          path: spec.tls
+
+  # --- TLS: cert-manager (opt-in) -------------------------------------------
+  - it: adds the cert-manager cluster-issuer annotation when cert-manager is enabled
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        certManager:
+          enabled: true
+          clusterIssuer: letsencrypt-prod
+    asserts:
+      - equal:
+          path: metadata.annotations["cert-manager.io/cluster-issuer"]
+          value: letsencrypt-prod
+
+  - it: provisions the TLS secret cert-manager writes into, defaulting its name from the release
+    # With cert-manager on and no explicit secret name, the TLS section names a
+    # release-derived Secret for cert-manager to provision.
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        certManager:
+          enabled: true
+          clusterIssuer: letsencrypt-prod
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: glyphoxa.example.com
+      - equal:
+          path: spec.tls[0].secretName
+          value: RELEASE-NAME-glyphoxa-web-tls
+
+  - it: honours an explicit TLS secret name even with cert-manager on
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        tls:
+          secretName: my-own-tls
+        certManager:
+          enabled: true
+          clusterIssuer: letsencrypt-prod
+    asserts:
+      - equal:
+          path: spec.tls[0].secretName
+          value: my-own-tls
+
+  - it: requires a cluster-issuer when cert-manager is enabled
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+        certManager:
+          enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "ingress.certManager.clusterIssuer is required"
+
+  - it: is NOT a Helm hook so it applies alongside the web Service
+    set:
+      ingress:
+        enabled: true
+        host: glyphoxa.example.com
+    asserts:
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]

@@ -69,4 +69,23 @@ on GLYPHOXA_OPERATOR_IDS to obtain a session (ADR-0041).
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.web.fullname" . }}
   kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "glyphoxa.web.fullname" . }} 8080:{{ .Values.web.service.port }}
   # then open http://127.0.0.1:8080/
+{{- if .Values.ingress.enabled }}
+
+An Ingress publishes the operator console at:
+
+  {{ include "glyphoxa.web.ingressScheme" . }}://{{ .Values.ingress.host }}/
+
+The Discord OAuth redirect URL is derived from that host (#121) — register it on
+the Discord application (ADR-0016) so the callback resolves:
+
+  {{ include "glyphoxa.web.oauthRedirectURL" . }}
+{{- if .Values.ingress.certManager.enabled }}
+
+cert-manager provisions the TLS certificate into Secret
+{{ include "glyphoxa.web.tlsSecretName" . }} via ClusterIssuer {{ .Values.ingress.certManager.clusterIssuer }}.
+{{- else if .Values.ingress.tls.secretName }}
+
+TLS terminates at the ingress using the supplied Secret {{ .Values.ingress.tls.secretName }}.
+{{- end }}
+{{- end }}
 {{- end }}
