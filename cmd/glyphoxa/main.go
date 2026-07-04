@@ -217,6 +217,25 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	defer pool.Close()
 	store := storage.New(pool)
 
+	// Boot-time session sweep (ADR-0041 amendment, issue #184): the allowlist
+	// gates only NEW logins at the OAuth callback, so sessions issued before the
+	// gate existed — or before a snowflake was removed — would stay valid for up
+	// to 30 days. The allowlist is parsed at boot, so a restart is exactly when
+	// a grant change takes effect: revoke every session whose owner is no longer
+	// allowlisted (including leftover GLYPHOXA_DEV_MODE sessions). Dev mode has
+	// no allowlist and skips the sweep.
+	if !dev {
+		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
+		revoked, err := store.RevokeSessionsOutsideAllowlist(ctx, allow.IDs())
+		if err != nil {
+			return fmt.Errorf("web: revoke sessions outside the operator allowlist: %w", err)
+		}
+		if revoked > 0 {
+			log.Warn("revoked sessions of users not on the operator allowlist (ADR-0041)",
+				"count", revoked)
+		}
+	}
+
 	// The BYOK credential cipher (ADR-0004) is best-effort at boot: without
 	// $GLYPHOXA_SECRET the web tier still serves (Configuration reads work), but
 	// saving a provider key / Bot token fails loudly (CodeFailedPrecondition) —

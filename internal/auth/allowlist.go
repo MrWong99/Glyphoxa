@@ -56,3 +56,15 @@ func (a OperatorAllowlist) Malformed() []string {
 	slices.Sort(bad)
 	return bad
 }
+
+// IDs returns the allowlisted snowflakes, sorted for determinism. The boot-time
+// session sweep (#184) hands them to storage, which cannot import this package
+// (auth already depends on storage).
+func (a OperatorAllowlist) IDs() []string {
+	ids := make([]string, 0, len(a.ids))
+	for id := range a.ids {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}

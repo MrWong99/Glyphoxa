@@ -139,6 +139,29 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return nil
 }
 
+// RevokeSessionsOutsideAllowlist deletes every session whose owning user's
+// discord_user_id is not on the operator allowlist (ADR-0041 amendment, issue
+// #184). The allowlist gates only NEW logins at the OAuth callback; this sweep
+// is the revocation half, run at every non-dev web/all boot — which is exactly
+// when a grant change takes effect, since the env var is parsed at boot. It
+// also clears leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is
+// never allowlisted). An empty allowlist is refused defensively: it would
+// revoke every session, and the boot preflight guarantees a non-empty list at
+// the only call site.
+func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserIDs []string) (int64, error) {
+	if len(discordUserIDs) == 0 {
+		return 0, errors.New("storage: refusing to revoke sessions against an empty allowlist")
+	}
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM sessions USING users
+		  WHERE sessions.user_id = users.id
+		    AND users.discord_user_id <> ALL($1)`, discordUserIDs)
+	if err != nil {
+		return 0, fmt.Errorf("storage: revoke sessions outside allowlist: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ResolveOperatorTenant binds the single seeded Tenant to the first operator and
 // returns it (ADR-0039). It is idempotent and atomic: if a tenant is already
 // bound to the user it is returned; otherwise the earliest claimable tenant —

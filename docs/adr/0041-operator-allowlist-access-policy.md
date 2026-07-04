@@ -2,6 +2,15 @@
 
 The shipped Discord OAuth login (ADR-0016/0039) authenticates but does not authorize: any Discord User completing the flow is upserted, claims-or-creates a Tenant, and receives a 30-day session (`internal/auth/oauth.go`). This ADR closes that gap with a **mandatory operator allowlist** as the single gate.
 
+## Amendment: boot-time session revocation sweep (2026-07-04, #184)
+
+The allowlist as shipped gated only **new** logins: `storage.AuthenticateSession` never re-checks the owning user against the allowlist, so sessions issued before the gate existed (the pre-gate stranger hole this ADR closes) — or before a snowflake was removed — stayed valid for their full 30-day TTL with no revocation path.
+
+**Decided: revocation is a boot-time sweep.** Every non-dev `web`/`all` boot deletes all sessions whose owner's `discord_user_id` is not on the parsed allowlist (`storage.RevokeSessionsOutsideAllowlist`), immediately after the pool opens. Rationale: the allowlist is parsed at boot, so a restart is already the moment any grant change takes effect — a sweep at that moment makes the restart apply the change *fully*. Side benefit: leftover `GLYPHOXA_DEV_MODE` sessions (the synthetic dev operator is never allowlisted) are flushed by the first real boot. Dev mode skips the sweep (it has no allowlist; an empty list would revoke everything — storage refuses it defensively).
+
+- **Per-request re-check** (Contains() after AuthenticateSession) — rejected *for now*: the only session-minting paths are the gated callback and the loopback-only dev seed, so it adds wiring (allowlist threaded through the interceptor stack + RequireSession, dev-mode carve-out) without closing a real hole. **It becomes mandatory the day the allowlist is runtime-editable** (config UI) — revisit then.
+- **Upgrade note**: instances that ran pre-gate builds with OAuth configured should also audit `tenant` for stranger-claimed rows — those are data, not sessions; the sweep does not touch them.
+
 ## What this decides
 
 - **`GLYPHOXA_OPERATOR_IDS` is the gate.** A comma/whitespace-separated list of Discord User snowflakes, checked at the OAuth callback. A Discord User not on the list is rejected *before* any session issuance or Tenant write and redirected to the login screen with a `not_authorized` signal.
