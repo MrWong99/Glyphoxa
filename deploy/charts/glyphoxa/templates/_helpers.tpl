@@ -142,6 +142,46 @@ override either field independently.
 {{- end }}
 
 {{/*
+The Web Instance's TLS Secret name (#121). An externally supplied
+ingress.tls.secretName wins verbatim; otherwise a release-derived name that
+cert-manager provisions the certificate into when the cert-manager path is on.
+*/}}
+{{- define "glyphoxa.web.tlsSecretName" -}}
+{{- .Values.ingress.tls.secretName | default (printf "%s-tls" (include "glyphoxa.web.fullname" .)) -}}
+{{- end }}
+
+{{/*
+The external scheme the Ingress presents (#121). TLS terminates at the ingress
+(ADR-0039) whenever a Secret is referenced — either an external one or the
+cert-manager-provisioned one — so the operator reaches the console over https;
+a host-only Ingress with no TLS is plain http (e.g. TLS terminated further out).
+This drives the OAuth redirect URL's scheme so the advertised callback matches
+what the browser actually hits.
+*/}}
+{{- define "glyphoxa.web.ingressScheme" -}}
+{{- if or .Values.ingress.certManager.enabled .Values.ingress.tls.secretName -}}https{{- else -}}http{{- end -}}
+{{- end }}
+
+{{/*
+The Discord OAuth redirect URL the Web Instance advertises (DISCORD_OAUTH_REDIRECT_URL).
+With the Ingress enabled it is DERIVED from ingress.host plus the fixed callback
+path the OAuth handler serves (/auth/discord/callback, cmd/glyphoxa/main.go), so
+the redirect the Web Instance sends Discord can never drift from the host the
+Ingress actually terminates (AC #121). With the Ingress disabled (self-host
+behind an external reverse proxy) the operator's explicit web.oauth.redirectUrl
+is authoritative and required. Keeping the derivation here means both the app
+Secret (which the pod reads) and the install notes resolve one source of truth.
+*/}}
+{{- define "glyphoxa.web.oauthRedirectURL" -}}
+{{- if .Values.ingress.enabled -}}
+{{- $host := required "ingress.host is required when ingress.enabled: it drives both the Ingress route and the Discord OAuth redirect URL the Web Instance advertises (#121)." .Values.ingress.host -}}
+{{- printf "%s://%s/auth/discord/callback" (include "glyphoxa.web.ingressScheme" .) $host -}}
+{{- else -}}
+{{- required "web.oauth.redirectUrl is required when web.enabled and ingress is disabled: the Discord OAuth redirect URL registered on the application. With an Ingress enabled it is derived from ingress.host instead." .Values.web.oauth.redirectUrl -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Hook ordering weights. The DB resources (Secret, Service, StatefulSet) come up
 first, then the migrate Job, then the seed Job, then the serving workloads. All
 are pre-install/pre-upgrade hooks EXCEPT the voice + web Deployments, which are

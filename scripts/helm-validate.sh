@@ -115,6 +115,21 @@ validate_path external-db \
 # needs none of the web OAuth credentials.
 validate_path web-disabled --set web.enabled=false
 
+# The Ingress render paths (#121 AC): enabled with an externally supplied TLS
+# Secret (cert-manager off) and enabled with the cert-manager cluster-issuer
+# path must each produce a schema-valid networking.k8s.io/v1 Ingress. Only a
+# host is needed to enable; the redirect URL is derived from it (so the ci-values
+# web.oauth.redirectUrl is ignored on these paths).
+validate_path ingress-external-tls \
+  --set ingress.enabled=true \
+  --set ingress.host=glyphoxa.example.com \
+  --set ingress.tls.secretName=glyphoxa-web-tls
+validate_path ingress-cert-manager \
+  --set ingress.enabled=true \
+  --set ingress.host=glyphoxa.example.com \
+  --set ingress.certManager.enabled=true \
+  --set ingress.certManager.clusterIssuer=letsencrypt-prod
+
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
 # them or the migrate hook and the app parse a different credential than the

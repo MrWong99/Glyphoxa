@@ -288,6 +288,45 @@ web:
     timeoutSeconds: 3
     failureThreshold: 3
 
+# Opt-in Ingress + TLS for the Web Instance (#121, ADR-0039). OFF by default: a
+# bare install keeps the web Service ClusterIP-only. Enabling it needs ONLY a
+# host — the Ingress then routes that host to the web Service's public `http`
+# port (the Connect API + console). TLS terminates AT the ingress (the app
+# behind it stays plaintext, ADR-0039): supply your own TLS Secret by name, or
+# opt into cert-manager to provision one. When enabled, the Discord OAuth
+# redirect URL the Web Instance advertises is DERIVED from `host` (+ the fixed
+# /auth/discord/callback path) so the callback can never drift from the Ingress
+# host — `web.oauth.redirectUrl` is then ignored (it is only used when the
+# Ingress is disabled, e.g. behind an external reverse proxy).
+ingress:
+  # Off by default — Ingress is a separate exposure decision from the Service.
+  enabled: false
+
+  # The single external host the Ingress routes to the web Service. REQUIRED when
+  # ingress.enabled (the render fails fast otherwise): enabling the Ingress needs
+  # only this. It also drives the derived Discord OAuth redirect URL.
+  host: ""
+
+  # The IngressClass that serves this Ingress (which controller: nginx, traefik,
+  # …). Empty leaves it unset so the cluster's default IngressClass is used.
+  className: ""
+
+  # TLS termination at the ingress (ADR-0039). Set `secretName` to reference an
+  # EXTERNALLY supplied TLS Secret (a kubernetes.io/tls Secret you created). Leave
+  # it empty and enable cert-manager below to have the certificate provisioned
+  # into a release-derived Secret instead. With neither set, the Ingress serves
+  # plain HTTP (e.g. TLS terminated by an upstream load balancer).
+  tls:
+    secretName: ""
+
+  # Opt-in cert-manager path. When enabled, a `cert-manager.io/cluster-issuer`
+  # annotation is added and cert-manager provisions the TLS Secret (the name from
+  # `tls.secretName`, or a release-derived default). `clusterIssuer` is REQUIRED
+  # when enabled. Leave disabled to use an externally supplied `tls.secretName`.
+  certManager:
+    enabled: false
+    clusterIssuer: ""
+
 # Pod-level knobs shared by the workloads this chart renders.
 podSecurityContext: {}
 nodeSelector: {}
