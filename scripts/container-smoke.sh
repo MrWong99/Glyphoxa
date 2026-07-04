@@ -35,6 +35,41 @@ run_in_image() {
 	docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c "$*"
 }
 
+# assert_spa is the embedded-console gate (#114, ADR-0034 amendment "the SPA
+# bundle is context-fed"). The image must serve the REAL Vite build at the web
+# root, not the committed placeholder index.html. The SPA is go:embed'd INTO the
+# binary (internal/spa/dist), so it is not a file on disk to stat — instead we
+# grep the binary for the distinguishing bytes:
+#   - a real build overwrites index.html to reference a content-hashed bundle
+#     (/assets/index-<hash>.js|css), and go:embed bakes those bytes in;
+#   - the placeholder is a single <div id="root"> line with NO /assets/.
+# The check is two-sided: a hashed asset reference must be PRESENT and the exact
+# placeholder one-liner must be ABSENT, so a bundle embedded alongside a stale
+# placeholder fails as loudly as a missing one.
+assert_spa() {
+	printf '[5] embedded web root is the real console, not the placeholder\n'
+	if run_in_image "grep -aEq '/assets/index-[A-Za-z0-9_-]+\.js' $BIN_PATH"; then
+		ok 'binary embeds a hashed /assets/index-*.js reference (real console)'
+	else
+		bad 'no hashed /assets/ reference in the binary — embedded web root is the placeholder, not a real console build'
+	fi
+	if run_in_image "grep -aqF '<!doctype html><html><body><div id=\"root\"></div></body></html>' $BIN_PATH"; then
+		bad 'binary still contains the committed placeholder index.html one-liner (a real build must overwrite it)'
+	else
+		ok 'committed placeholder index.html one-liner is absent'
+	fi
+}
+
+# summary prints the pass/fail tally and exits: non-zero if any assertion failed.
+summary() {
+	printf '\n== summary: %d passed, %d failed ==\n' "$pass" "$fail"
+	if [ "$fail" -ne 0 ]; then
+		exit 1
+	fi
+	printf 'all container smoke assertions passed\n'
+	exit 0
+}
+
 printf '== Glyphoxa container smoke test ==\n'
 printf 'image: %s\n\n' "$IMAGE"
 
@@ -42,6 +77,14 @@ printf 'image: %s\n\n' "$IMAGE"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	printf 'FAIL: image %q does not exist — build it first (make docker-build / docker build -t %q .)\n' "$IMAGE" "$IMAGE" >&2
 	exit 1
+fi
+
+# SMOKE_ONLY=spa runs ONLY the embedded-console gate and exits. scripts/
+# container-smoke-test.sh uses this to point the gate at tiny placeholder/real
+# fixture images without the full native runtime the other checks assert.
+if [ "${SMOKE_ONLY:-}" = "spa" ]; then
+	assert_spa
+	summary
 fi
 
 # ---------------------------------------------------------------------------
@@ -125,10 +168,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5. The embedded web root is the REAL console build, not the placeholder (#114).
+# ---------------------------------------------------------------------------
+assert_spa
+
+# ---------------------------------------------------------------------------
 # Summary.
 # ---------------------------------------------------------------------------
-printf '\n== summary: %d passed, %d failed ==\n' "$pass" "$fail"
-if [ "$fail" -ne 0 ]; then
-	exit 1
-fi
-printf 'all container smoke assertions passed\n'
+summary

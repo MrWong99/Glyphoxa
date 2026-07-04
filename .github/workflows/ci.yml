@@ -81,10 +81,11 @@ jobs:
   # Build the Vite + React SPA and run its vitest suite (ADR-0013/0039). Depends
   # on `proto` because the SPA's typed Connect client imports the generated
   # gen/ts/* stubs (gen/ is gitignored, produced once by `proto` and fanned out
-  # as the `gen` artifact — same pattern as the Go `test` job). The Go `test`/
-  # `image`/`e2e` jobs keep compiling without a node step because the committed
-  # placeholder internal/spa/dist/index.html satisfies the //go:embed; shipping
-  # the REAL built SPA inside the container image is a follow-up.
+  # as the `gen` artifact — same pattern as the Go `test` job). The Go `test` job
+  # keeps compiling without a node step because the committed placeholder
+  # internal/spa/dist/index.html satisfies the //go:embed; the `image`/`e2e`
+  # docker builds instead download the `spa-dist` artifact this job uploads, so
+  # the shipped image embeds the REAL console (#114, ADR-0034).
   web:
     name: web (vite build + vitest)
     needs: [proto]
@@ -111,9 +112,24 @@ jobs:
         run: npm ci
         working-directory: web
 
+      # vite.config.ts builds into ../internal/spa/dist (build.outDir), so the
+      # real bundle lands where Go's //go:embed picks it up. That directory is
+      # the artifact the docker-build jobs consume (#114, ADR-0034 amendment).
       - name: Build SPA
         run: npm run build
         working-directory: web
+
+      # Fan the real built bundle out so the `image`/`e2e` docker builds embed
+      # the console instead of the committed placeholder index.html — exactly the
+      # `gen` artifact pattern above, but for the SPA. Uploading internal/spa/dist
+      # (not just dist/) keeps the download landing back at the same path.
+      - name: Upload spa-dist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: spa-dist
+          path: internal/spa/dist
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Test
         run: npm run test
@@ -250,7 +266,10 @@ jobs:
 
   image:
     name: container image (build + smoke)
-    needs: [proto]
+    # `web` is added so its `spa-dist` artifact (the real built console) exists
+    # to download into the build context before the docker build — otherwise the
+    # image embeds the committed placeholder index.html (#114, ADR-0034).
+    needs: [proto, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -264,6 +283,16 @@ jobs:
         with:
           name: gen
           path: gen
+
+      # Same story for the SPA bundle: the real Vite build is context-fed, not
+      # built in the image (ADR-0034 amendment). Restore the `web` job's
+      # `spa-dist` into internal/spa/dist so `COPY . .` + //go:embed ship the
+      # real console; .dockerignore does not exclude internal/spa/dist.
+      - name: Download spa-dist artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: spa-dist
+          path: internal/spa/dist
 
       # buildx + layer caching keeps the slow native build (whisper.cpp +
       # libopus + libdave + CGO) off the critical path on warm caches. This is a
@@ -290,6 +319,13 @@ jobs:
       # the process runs as a non-root uid.
       - name: Container smoke test
         run: ./scripts/container-smoke.sh glyphoxa:smoke
+
+      # The smoke test's embedded-console check must itself be trusted (the same
+      # #140 lesson the helm-validate self-test enforces): assert it FAILS on a
+      # placeholder-only image and PASSES only on a real build, so the gate can't
+      # silently no-op if the artifact wiring above ever regresses.
+      - name: Container smoke self-test
+        run: ./scripts/container-smoke-test.sh
 
   helm:
     name: helm chart (lint + unittest + kubeconform)
@@ -357,8 +393,10 @@ jobs:
     # SEPARATE job from the fast `test` suite (ADR-0033) so the heavy image build
     # + cluster spin-up never slows unit feedback.
     # `image` stays for cache ordering; `proto` is added because this job runs
-    # its OWN docker build and so needs gen/ in its build context too.
-    needs: [image, proto]
+    # its OWN docker build and so needs gen/ in its build context too. `web` is
+    # added for the same reason with the SPA: this job's build must embed the
+    # real console, so it downloads the `spa-dist` artifact too (#114).
+    needs: [image, proto, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -370,6 +408,15 @@ jobs:
         with:
           name: gen
           path: gen
+
+      # Restore the real SPA bundle into the build context too (context-fed, not
+      # built in the image — ADR-0034) so this job's docker build embeds the
+      # console, not the placeholder.
+      - name: Download spa-dist artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: spa-dist
+          path: internal/spa/dist
 
       # Rebuild the single image (ADR-0034) from the warm gha cache and LOAD it
       # into the local daemon so k3d can import it. cache-from only (no cache-to)
