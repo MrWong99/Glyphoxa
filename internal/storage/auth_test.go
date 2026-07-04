@@ -238,3 +238,68 @@ func TestResolveOperatorTenantTakesOverDevTenant(t *testing.T) {
 		t.Errorf("TenantForUser(real) after dev re-resolve = %s, %v; want %s", tid, err, seededID)
 	}
 }
+
+// TestRevokeSessionsOutsideAllowlist is the boot-time revocation sweep (#184,
+// ADR-0041 amendment): sessions of users NOT on the operator allowlist —
+// pre-gate strangers, removed snowflakes, the synthetic dev operator — are
+// deleted; allowlisted users' sessions survive. An empty allowlist is refused
+// (it would revoke everything).
+func TestRevokeSessionsOutsideAllowlist(t *testing.T) {
+	st := migrated(t)
+	ctx := context.Background()
+
+	mkSession := func(userID uuid.UUID, token string) {
+		t.Helper()
+		if _, err := st.CreateSession(ctx, storage.NewSession{
+			UserID: userID, Token: token, ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("CreateSession(%s): %v", token, err)
+		}
+	}
+
+	keeper, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: "777000000000000000"})
+	if err != nil {
+		t.Fatalf("upsert keeper: %v", err)
+	}
+	stranger, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: "666000000000000000"})
+	if err != nil {
+		t.Fatalf("upsert stranger: %v", err)
+	}
+	dev, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: storage.DevOperatorDiscordID})
+	if err != nil {
+		t.Fatalf("upsert dev operator: %v", err)
+	}
+	mkSession(keeper.ID, "keeper-tok")
+	mkSession(stranger.ID, "stranger-tok-1")
+	mkSession(stranger.ID, "stranger-tok-2")
+	mkSession(dev.ID, "dev-tok")
+
+	// Empty allowlist is a bug at the call site, not a revoke-the-world request.
+	if _, err := st.RevokeSessionsOutsideAllowlist(ctx, nil); err == nil {
+		t.Fatal("RevokeSessionsOutsideAllowlist(empty) = nil, want a refusal error")
+	}
+
+	revoked, err := st.RevokeSessionsOutsideAllowlist(ctx, []string{"777000000000000000"})
+	if err != nil {
+		t.Fatalf("RevokeSessionsOutsideAllowlist: %v", err)
+	}
+	if revoked != 3 {
+		t.Errorf("revoked = %d sessions, want 3 (2 stranger + 1 dev)", revoked)
+	}
+
+	// The allowlisted operator stays logged in; everyone else is out.
+	if _, err := st.AuthenticateSession(ctx, "keeper-tok"); err != nil {
+		t.Errorf("keeper session was revoked: %v", err)
+	}
+	for _, tok := range []string{"stranger-tok-1", "stranger-tok-2", "dev-tok"} {
+		if _, err := st.AuthenticateSession(ctx, tok); !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("AuthenticateSession(%s) = %v, want ErrNotFound", tok, err)
+		}
+	}
+
+	// Idempotent: a second sweep finds nothing left to revoke.
+	again, err := st.RevokeSessionsOutsideAllowlist(ctx, []string{"777000000000000000"})
+	if err != nil || again != 0 {
+		t.Errorf("second sweep = (%d, %v), want (0, nil)", again, err)
+	}
+}

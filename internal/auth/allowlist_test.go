@@ -72,3 +72,16 @@ func TestOperatorAllowlistMalformed(t *testing.T) {
 		})
 	}
 }
+
+// IDs feeds the boot-time session sweep (#184): all entries, sorted, and empty
+// for the zero-value gate.
+func TestOperatorAllowlistIDs(t *testing.T) {
+	t.Parallel()
+	if got := auth.ParseOperatorAllowlist("").IDs(); len(got) != 0 {
+		t.Errorf("IDs() on an empty allowlist = %q, want none", got)
+	}
+	got := auth.ParseOperatorAllowlist("99, 77 88,77").IDs()
+	if want := []string{"77", "88", "99"}; !slices.Equal(got, want) {
+		t.Errorf("IDs() = %q, want %q (sorted, deduped)", got, want)
+	}
+}
