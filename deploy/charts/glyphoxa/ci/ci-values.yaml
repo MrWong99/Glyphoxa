@@ -1,9 +1,9 @@
 # Values for the CI schema-validation render ONLY (scripts/helm-validate.sh).
 # The chart has `required` values with no defaults (appSecret + the voice
-# credentials/IDs), so a bare `helm template` fails by design; this file
-# supplies syntactically valid placeholders so the render succeeds and
-# kubeconform has manifests to validate. Nothing here is a real credential and
-# nothing here is ever deployed.
+# credentials/IDs + the web OAuth credentials/operator allowlist), so a bare
+# `helm template` fails by design; this file supplies syntactically valid
+# placeholders so the render succeeds and kubeconform has manifests to validate.
+# Nothing here is a real credential and nothing here is ever deployed.
 appSecret: "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=" # base64 of 32 dummy bytes
 discordBotToken: "ci-dummy-discord-bot-token"
 elevenLabsApiKey: "ci-dummy-elevenlabs-api-key"
@@ -14,3 +14,11 @@ voice:
   # glyphoxa.voice.snowflake helper rejects non-string values.
   guild: "111111111111111111"
   channel: "222222222222222222"
+web:
+  # The Web Instance (#118) is on by default, so a render needs its required
+  # OAuth credentials + a non-empty operator allowlist (ADR-0041) or it fails.
+  oauth:
+    clientId: "ci-dummy-oauth-client-id"
+    clientSecret: "ci-dummy-oauth-client-secret"
+    redirectUrl: "http://localhost:8080/auth/discord/callback"
+  operatorIds: "111111111111111111"

@@ -23,6 +23,21 @@ What this release stands up (ADR-0034):
     {{ .Values.voice.metricsPort }}. It never migrates: if the schema is behind
     it fails fast (EnsureCurrent) rather than serving.
 {{- end }}
+{{- if .Values.web.enabled }}
+  - A web-mode Deployment (single replica) + Service running
+      glyphoxa -mode {{ .Values.web.mode }}
+    serving the operator console + the Connect API behind a Discord-OAuth login
+    with a mandatory operator allowlist (ADR-0041). Reach it in-cluster at:
+      {{ include "glyphoxa.web.fullname" . }}:{{ .Values.web.service.port }}
+    The /healthz, /readyz, /metrics endpoints stay on the internal metrics port
+    {{ .Values.web.metricsPort }}, never the public API port. It never migrates:
+    if the schema is behind it fails fast (EnsureCurrent) rather than serving.
+
+    NOTE (ADR-0039): Mode `all` drives voice sessions IN-PROCESS in this single
+    pod. Cross-pod session control across a SEPARATE Voice Instance is DEFERRED —
+    the control-RPC transport is not built — so the web tier is a single pod for
+    v1.0 (replicas are not a tunable).
+{{- end }}
 
 Verify the schema is current:
 
@@ -44,4 +59,14 @@ crashlooping. The channel join itself is the manual, live-credential check.
 
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.voice.fullname" . }}
   kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "glyphoxa.voice.fullname" . }} -f
+{{- end }}
+{{- if .Values.web.enabled }}
+
+Reach the operator console: port-forward the web Service and open the root in a
+browser (the SPA), then complete the Discord OAuth login. A Discord User must be
+on GLYPHOXA_OPERATOR_IDS to obtain a session (ADR-0041).
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.web.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "glyphoxa.web.fullname" . }} 8080:{{ .Values.web.service.port }}
+  # then open http://127.0.0.1:8080/
 {{- end }}

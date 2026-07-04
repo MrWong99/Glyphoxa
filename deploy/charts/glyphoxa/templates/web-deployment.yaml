@@ -1,0 +1,207 @@
+{{/*
+Web-mode Deployment (#118, ADR-0039) — the operator console + Connect API tier.
+
+It runs the single image as `glyphoxa -mode web` (or `all`), serving the SPA and
+the auth-gated Connect API behind a Discord-OAuth login (ADR-0016) with a
+mandatory operator allowlist (ADR-0041).
+
+- ONE replica, by intent: the self-host web tier holds sessions in-process and
+  cross-pod session control is deferred (ADR-0039), so scaling out is a design
+  change (a session backplane), not a value.
+- Update strategy depends on Mode. `web` Mode holds no in-process session loop,
+  so it uses RollingUpdate (the k8s default) — a brief upgrade surge is harmless
+  and keeps the console available across an image bump. `all` Mode drives voice
+  sessions in-process, so it uses Recreate like voice: a RollingUpdate surge
+  would (a) run a second loop on the same DISCORD_BOT_TOKEN and (b) let the new
+  pod's boot-time ReconcileOrphans (#143) close the OLD pod's still-live session
+  row — its "no loop is live at boot" invariant is violated during the surge,
+  corrupting the old pod's transcript finalization on Stop. Recreate tears the
+  old pod down first, so at most one loop ever runs.
+- NOT a Helm hook: a plain resource applies after every pre-install/pre-upgrade
+  hook, so the migrate (-5) and seed (-4) hooks have completed before this pod
+  starts.
+- It NEVER migrates: no `migrate` arg, no migrate initContainer. EnsureCurrent
+  (#32) fails the pod fast if the schema is behind, rather than auto-migrating
+  under a serving process.
+- Credentials come from the app Secret (ADR-0034): GLYPHOXA_SECRET (the cipher
+  key — the web RPC layer DECRYPTS BYOK provider credentials for Provider Config
+  CRUD, ADR-0004; voice deliberately does NOT read this), DISCORD_BOT_TOKEN (the
+  base session bot), the three provider keys (BYOK env fallback), the three
+  Discord OAuth credentials, and GLYPHOXA_OPERATOR_IDS (the mandatory allowlist,
+  ADR-0041). Without the OAuth trio + a non-empty allowlist the process refuses
+  to boot; those Secret keys are `required` when web.enabled (see secret.yaml).
+- Two container ports: the PUBLIC `http` port (the Connect API + console, the
+  Service targets it) and the INTERNAL `metrics` port. Health/metrics (#33,
+  ADR-0032) — /metrics, /healthz, /readyz — are served on the metrics port ONLY,
+  kept off the public API port; liveness targets /healthz (process-up), readiness
+  targets /readyz (a DB ping). The metrics port is advertised for Prometheus via
+  prometheus.io/* pod annotations.
+*/}}
+{{- if .Values.web.enabled }}
+{{- $webAddr := printf ":%d" (int .Values.web.port) }}
+{{- $metricsAddr := printf ":%d" (int .Values.web.metricsPort) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "glyphoxa.web.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  # Single pod for v1.0 — the web tier holds sessions in-process and cross-pod
+  # session control is deferred (see the header).
+  replicas: 1
+  {{- if eq .Values.web.mode "all" }}
+  # `all` Mode drives voice sessions in-process — Recreate (like voice) so an
+  # upgrade never runs two loops on one Discord token and never lets a surged
+  # pod's boot-time ReconcileOrphans close the old pod's live session (see header).
+  strategy:
+    type: Recreate
+  {{- else }}
+  # web-only Mode has no in-process loop to serialize on, so RollingUpdate
+  # (default) is safe and keeps the console available across an image bump.
+  strategy:
+    type: RollingUpdate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+      annotations:
+        # Advertise the metrics-only listener for annotation-based Prometheus
+        # scrape discovery (ADR-0032). The public `http` port is never scraped.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.web.metricsPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ include "glyphoxa.web.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.web.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - -mode
+            - {{ include "glyphoxa.web.mode" .Values.web.mode }}
+            - -web-addr
+            - {{ $webAddr | quote }}
+            - -metrics-addr
+            - {{ $metricsAddr | quote }}
+          env:
+            # The DB the Connect handlers read/write and /readyz pings. Same key
+            # the migrate/seed hooks used, so the host can never drift.
+            - name: GLYPHOXA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: database-url
+            # The credential cipher (ADR-0004): the web RPC layer decrypts saved
+            # BYOK provider credentials with it. Voice never reads this key.
+            - name: GLYPHOXA_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: app-secret
+            # The base session bot token; a saved per-deployment token (decrypted
+            # via GLYPHOXA_SECRET) overrides it per session (#87).
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: discord-bot-token
+            # Provider keys the adapters read as the BYOK env fallback (ADR-0004).
+            - name: ELEVENLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: elevenlabs-api-key
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: gemini-api-key
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: groq-api-key
+            # Discord OAuth application credentials (ADR-0016/0039): the login the
+            # SPA sends the operator through. All three are `required` when
+            # web.enabled — the process refuses to boot without them (ADR-0041).
+            - name: DISCORD_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: discord-oauth-client-id
+            - name: DISCORD_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: discord-oauth-client-secret
+            - name: DISCORD_OAUTH_REDIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: discord-oauth-redirect-url
+            # The mandatory operator allowlist (ADR-0041): the single
+            # authorization gate at the OAuth callback and the boot-time session
+            # sweep. Non-empty is `required` when web.enabled.
+            - name: GLYPHOXA_OPERATOR_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: operator-ids
+            # JSON logs for cluster log aggregation (ADR-0032).
+            - name: GLYPHOXA_LOG_FORMAT
+              value: json
+          ports:
+            # The PUBLIC Connect API + console port (the Service targets it).
+            - name: http
+              containerPort: {{ .Values.web.port }}
+              protocol: TCP
+            # The INTERNAL metrics/probe port (never Service-exposed).
+            - name: metrics
+              containerPort: {{ .Values.web.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: {{ .Values.web.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.web.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.web.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.web.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: {{ .Values.web.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.web.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.web.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.web.readinessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

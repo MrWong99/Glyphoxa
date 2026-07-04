@@ -1,0 +1,376 @@
+suite: web-mode Deployment
+# The web Deployment runs the single image in `web` (or `all`) Mode: the operator
+# console (SPA) + the Connect API behind a Discord-OAuth gate (#118, ADR-0039). It
+# consumes GLYPHOXA_DATABASE_URL, GLYPHOXA_SECRET (it decrypts BYOK provider
+# credentials — unlike voice), the Discord bot token, the three provider keys, and
+# the three Discord OAuth credentials + the operator allowlist from the app Secret.
+# It exposes a public `http` port (the Connect API) AND an internal `metrics` port,
+# and serves /healthz, /readyz, /metrics on the metrics port only — never the
+# public API port (ADR-0032). It is NOT a Helm hook: it applies after the
+# migrate+seed hooks, and NEVER runs migrations.
+templates:
+  - templates/web-deployment.yaml
+tests:
+  - it: renders a Deployment named for the release
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-web
+
+  - it: is disabled when web.enabled is false
+    set:
+      web:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: runs exactly one replica for the single-pod web tier
+    # The self-host web tier holds sessions in-process and cross-pod session
+    # control is deferred (ADR-0039), so the workload is pinned to a single pod.
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: uses RollingUpdate in web Mode (no in-process session loop to serialize on)
+    # web-only Mode holds no in-process loop, so a brief upgrade surge is harmless;
+    # RollingUpdate keeps the console available across an image bump.
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: RollingUpdate
+
+  - it: uses Recreate in all Mode so an upgrade never runs two in-process session loops
+    # `all` Mode drives voice sessions in-process. A RollingUpdate surge would (a)
+    # run a second loop on the same DISCORD_BOT_TOKEN and (b) let the surged pod's
+    # boot-time ReconcileOrphans (#143) close the OLD pod's still-live session row
+    # (its "no loop is live at boot" invariant is violated during the surge).
+    # Recreate tears the old pod down first, like voice-deployment.yaml.
+    set:
+      web:
+        mode: all
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  - it: is NOT a Helm hook so it applies after the migrate and seed hooks
+    asserts:
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]
+
+  - it: runs `glyphoxa` in web mode with the public API + metrics addresses
+    # The whole arg vector, in order: -mode from web.mode, -web-addr from web.port
+    # (the public Connect API), -metrics-addr from web.metricsPort (the internal
+    # actuator port, kept off the public API surface).
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - -mode
+            - web
+            - -web-addr
+            - ":8080"
+            - -metrics-addr
+            - ":9090"
+
+  - it: runs `all` Mode when web.mode is all
+    # `all` drives the voice loop in-process for single-pod sessions (ADR-0039).
+    set:
+      web:
+        mode: all
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: all
+
+  - it: rejects an invalid Mode rather than deploying a pod that exits at runtime
+    # An unknown -mode makes the binary exit(2); the render fails fast instead.
+    set:
+      web:
+        mode: voice
+    asserts:
+      - failedTemplate:
+          errorPattern: 'web.mode must be "web" or "all"'
+
+  - it: runs the configured image
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/mrwong99/glyphoxa:0.1.0
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: honours an overridden top-level image repository and tag
+    set:
+      image:
+        repository: ghcr.io/example/glyphoxa
+        tag: v9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/glyphoxa:v9.9.9
+
+  - it: lets the web block override the image independently of the shared image
+    set:
+      web:
+        image:
+          repository: ghcr.io/example/glyphoxa-web
+          tag: web-1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/example/glyphoxa-web:web-1.2.3
+
+  - it: sources GLYPHOXA_DATABASE_URL from the DB connection Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: database-url
+
+  - it: sources GLYPHOXA_SECRET (the credential cipher) from the Secret
+    # Unlike voice, the web tier DECRYPTS BYOK provider credentials for Provider
+    # Config CRUD (ADR-0004), so it reads the app-secret cipher key.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: app-secret
+
+  - it: sources DISCORD_BOT_TOKEN and the three provider keys from the Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DISCORD_BOT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: discord-bot-token
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: ELEVENLABS_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: elevenlabs-api-key
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GEMINI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: gemini-api-key
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GROQ_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: groq-api-key
+
+  - it: sources the three Discord OAuth credentials from the Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DISCORD_OAUTH_CLIENT_ID
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: discord-oauth-client-id
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DISCORD_OAUTH_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: discord-oauth-client-secret
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DISCORD_OAUTH_REDIRECT_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: discord-oauth-redirect-url
+
+  - it: sources the mandatory operator allowlist from the Secret
+    # GLYPHOXA_OPERATOR_IDS is the single authorization gate (ADR-0041); without
+    # it the Web Instance refuses to boot.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OPERATOR_IDS
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: operator-ids
+
+  - it: emits JSON logs in the cluster
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_LOG_FORMAT
+            value: json
+
+  - it: exposes the public http port and the internal metrics port as named ports
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: http
+            containerPort: 8080
+            protocol: TCP
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9090
+            protocol: TCP
+
+  - it: derives the public web address and http container port from web.port together
+    # A custom port must flow to BOTH the -web-addr flag and the http container
+    # port, or the Service would target a port the process isn't serving.
+    set:
+      web:
+        port: 8888
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: ":8888"
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: http
+            containerPort: 8888
+            protocol: TCP
+
+  - it: derives the metrics address and container port from web.metricsPort together
+    set:
+      web:
+        metricsPort: 9999
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: ":9999"
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9999
+            protocol: TCP
+
+  - it: probes liveness against /healthz on the internal metrics port, never the public API port
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: metrics
+
+  - it: probes readiness against /readyz on the internal metrics port, never the public API port
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: metrics
+
+  - it: annotates the pod for Prometheus scraping on the metrics port
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["prometheus.io/scrape"]
+          value: "true"
+      - equal:
+          path: spec.template.metadata.annotations["prometheus.io/port"]
+          value: "9090"
+      - equal:
+          path: spec.template.metadata.annotations["prometheus.io/path"]
+          value: /metrics
+
+  - it: sets resource requests and limits
+    asserts:
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.requests.memory
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+      - isNotNullOrEmpty:
+          path: spec.template.spec.containers[0].resources.limits.memory
+
+  - it: hardens the web container's securityContext by default
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value:
+            - ALL
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: lets the operator override the container securityContext
+    set:
+      web:
+        securityContext:
+          readOnlyRootFilesystem: false
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: false
+
+  - it: does NOT run migrations
+    # The migrate hook owns the schema; EnsureCurrent fails the pod fast if it is
+    # behind. The pod must never carry a `migrate` arg or a migrate initContainer.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: migrate
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: selects its pods with the standard selector labels plus the web component
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: glyphoxa
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/instance"]
+          value: RELEASE-NAME
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: web
+      - equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/component"]
+          value: web
