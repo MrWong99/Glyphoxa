@@ -117,7 +117,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _login(self):
         if BREAK == "login_status":
-            self._body(200, "no redirect")
+            # Only the STATUS differs: keep the correct Location + state cookie so
+            # this break isolates the 302-status assertion (an empty Location would
+            # also trip the host/client_id/redirect checks and mask its deletion).
+            self._body(
+                200,
+                "no redirect",
+                extra_headers=[
+                    ("Location", login_location()),
+                    ("Set-Cookie", "glyphoxa_oauth_state=%s; Path=/; HttpOnly; SameSite=Lax" % STATE),
+                ],
+            )
             return
         headers = [("Location", login_location())]
         if BREAK != "login_cookie":
