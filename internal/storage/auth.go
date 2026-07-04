@@ -19,6 +19,14 @@ import (
 
 const userColumns = `id, discord_user_id, name, avatar, role, created_at, updated_at`
 
+// DevOperatorDiscordID is the synthetic Discord identity the GLYPHOXA_DEV_MODE
+// boot upserts as the dev operator (ADR-0041). It is deliberately NOT a real
+// snowflake so it can never collide with a genuine Discord user. It lives here
+// because ResolveOperatorTenant treats a tenant bound to it as still claimable:
+// the first REAL operator login takes the tenant (and everything configured in
+// dev mode) over, instead of being stranded next to it in a fresh empty tenant.
+const DevOperatorDiscordID = "glyphoxa-dev-operator"
+
 func scanUser(row pgx.Row) (User, error) {
 	var u User
 	err := row.Scan(
@@ -133,9 +141,11 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 
 // ResolveOperatorTenant binds the single seeded Tenant to the first operator and
 // returns it (ADR-0039). It is idempotent and atomic: if a tenant is already
-// bound to the user it is returned; otherwise the earliest unbound tenant (the
-// seed's) is claimed; otherwise — a fresh DB with no seed — a new 'Glyphoxa'
-// tenant is created bound to the user. Called once on OAuth login.
+// bound to the user it is returned; otherwise the earliest claimable tenant —
+// unbound (the seed's) or held by the synthetic dev operator (ADR-0041
+// GLYPHOXA_DEV_MODE, see [DevOperatorDiscordID]) — is claimed; otherwise — a
+// fresh DB with no seed — a new 'Glyphoxa' tenant is created bound to the user.
+// Called once on OAuth login and by the dev-mode boot.
 func (s *Store) ResolveOperatorTenant(ctx context.Context, userID uuid.UUID) (Tenant, error) {
 	var t Tenant
 	err := s.InTx(ctx, func(tx *Store) error {
@@ -150,15 +160,22 @@ func (s *Store) ResolveOperatorTenant(ctx context.Context, userID uuid.UUID) (Te
 			return fmt.Errorf("storage: find bound tenant: %w", err)
 		}
 
-		// Claim the earliest unbound tenant (the seeded one), locking it so two
-		// concurrent first-logins can't both claim the same row.
+		// Claim the earliest claimable tenant, locking it so two concurrent
+		// first-logins can't both claim the same row. A tenant held by the
+		// synthetic dev operator is claimable too: the caller reaching this
+		// step is a DIFFERENT user (their own binding was checked above), so a
+		// real first login takes over what dev mode configured rather than
+		// being stranded next to it.
 		row = tx.db.QueryRow(ctx,
 			`UPDATE tenant SET operator_user_id = $1, updated_at = now()
 			  WHERE id = (
-			      SELECT id FROM tenant WHERE operator_user_id IS NULL
-			       ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+			      SELECT t.id FROM tenant t
+			        LEFT JOIN users u ON u.id = t.operator_user_id
+			       WHERE t.operator_user_id IS NULL OR u.discord_user_id = $2
+			       ORDER BY t.created_at, t.id LIMIT 1
+			         FOR UPDATE OF t SKIP LOCKED
 			  )
-			  RETURNING id, name, created_at, updated_at`, userID)
+			  RETURNING id, name, created_at, updated_at`, userID, DevOperatorDiscordID)
 		switch err := row.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.UpdatedAt); {
 		case err == nil:
 			return nil

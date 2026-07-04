@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -77,17 +78,14 @@ func TestDevModeAutoAuthEndToEnd(t *testing.T) {
 	store := bootMigratedStore(t)
 	ctx := context.Background()
 
-	sess, csrf, err := seedDevSession(ctx, store, time.Now)
-	if err != nil {
-		t.Fatalf("seedDevSession: %v", err)
-	}
-
 	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
 	authServer := auth.NewAuthServer(store, nil)
 	mux := http.NewServeMux()
 	mux.Handle(authServer.Handler(stack.HandlerOptions()...))
-	// The whole tier is wrapped exactly as runWeb wraps its mounts in dev-mode.
-	srv := httptest.NewServer(devAuthMiddleware(sess, csrf, mux))
+	// The whole tier is wrapped exactly as runWeb wraps its mounts in dev-mode:
+	// devSessions seeds lazily on the first request and re-seeds after a logout.
+	d := &devSessions{store: store, authn: store, now: time.Now}
+	srv := httptest.NewServer(devAuthMiddleware(d, slog.New(slog.DiscardHandler), mux))
 	t.Cleanup(srv.Close)
 
 	client := managementv1connect.NewAuthServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
@@ -106,5 +104,16 @@ func TestDevModeAutoAuthEndToEnd(t *testing.T) {
 	// admits it (AC2 — mutations are not 403'd in dev-mode).
 	if _, err := client.Logout(ctx, connect.NewRequest(&managementv1.LogoutRequest{})); err != nil {
 		t.Fatalf("Logout (dev-mode, no client CSRF header): %v", err)
+	}
+
+	// Logout deleted the seeded session row. The next request must be re-seeded
+	// and authenticate again — without re-seeding, a dev instance would 401
+	// every request until a process restart.
+	resp, err = client.GetCurrentUser(ctx, connect.NewRequest(&managementv1.GetCurrentUserRequest{}))
+	if err != nil {
+		t.Fatalf("GetCurrentUser after Logout (re-seeded dev session): %v", err)
+	}
+	if got := resp.Msg.GetUser().GetName(); got != "Dev Operator" {
+		t.Errorf("re-seeded user = %q, want %q", got, "Dev Operator")
 	}
 }

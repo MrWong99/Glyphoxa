@@ -111,6 +111,27 @@ func TestRequireWebEnv(t *testing.T) {
 		t.Errorf("requireWebEnv with a whitespace allowlist returned %v, want an error naming GLYPHOXA_OPERATOR_IDS", err)
 	}
 
+	// Present but useless allowlists fail the parse-based check (the same parser
+	// as the #103 runtime gate): separators only parses to zero entries, and a
+	// non-snowflake entry can never match a login — either way the deploy would
+	// look healthy while nobody can log in, the exact state #112 prevents.
+	sepOnly := map[string]string{}
+	for k, v := range all {
+		sepOnly[k] = v
+	}
+	sepOnly["GLYPHOXA_OPERATOR_IDS"] = " , ,, "
+	if err := requireWebEnv(envMap(sepOnly)); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_OPERATOR_IDS") {
+		t.Errorf("requireWebEnv with a separators-only allowlist returned %v, want an error naming GLYPHOXA_OPERATOR_IDS", err)
+	}
+	malformed := map[string]string{}
+	for k, v := range all {
+		malformed[k] = v
+	}
+	malformed["GLYPHOXA_OPERATOR_IDS"] = "MrWong99, 770000000000000000"
+	if err := requireWebEnv(envMap(malformed)); err == nil || !strings.Contains(err.Error(), "MrWong99") {
+		t.Errorf("requireWebEnv with a non-snowflake entry returned %v, want an error naming the bad entry", err)
+	}
+
 	// Nothing set → every variable is named.
 	err := requireWebEnv(envMap(map[string]string{}))
 	if err == nil {
@@ -128,7 +149,9 @@ func TestRequireWebEnv(t *testing.T) {
 	}
 }
 
-// TestDevMode: the opt-out is on only when GLYPHOXA_DEV_MODE holds a non-blank value.
+// TestDevMode: the opt-out is on only when GLYPHOXA_DEV_MODE holds a non-blank
+// value that is not an explicit falsy spelling — an operator writing
+// GLYPHOXA_DEV_MODE=false to disable the auth bypass must get it disabled.
 func TestDevMode(t *testing.T) {
 	cases := []struct {
 		val  string
@@ -136,8 +159,14 @@ func TestDevMode(t *testing.T) {
 	}{
 		{"", false},
 		{"   ", false},
+		{"0", false},
+		{"false", false},
+		{"FALSE", false},
+		{" no ", false},
+		{"off", false},
 		{"1", true},
 		{"true", true},
+		{"yes", true},
 	}
 	for _, c := range cases {
 		if got := devMode(envMap(map[string]string{"GLYPHOXA_DEV_MODE": c.val})); got != c.want {
@@ -178,8 +207,8 @@ func TestSeedDevSession(t *testing.T) {
 	if sess == "" || csrf == "" || sess == csrf {
 		t.Fatalf("tokens must be non-empty and distinct: session=%q csrf=%q", sess, csrf)
 	}
-	if store.upsertedDiscordID != devOperatorDiscordID {
-		t.Errorf("upserted discord id = %q, want %q", store.upsertedDiscordID, devOperatorDiscordID)
+	if store.upsertedDiscordID != storage.DevOperatorDiscordID {
+		t.Errorf("upserted discord id = %q, want %q", store.upsertedDiscordID, storage.DevOperatorDiscordID)
 	}
 	if store.tenantForUser != store.userID {
 		t.Errorf("ResolveOperatorTenant called with %v, want the upserted user %v", store.tenantForUser, store.userID)
@@ -213,7 +242,12 @@ func TestDevAuthMiddleware(t *testing.T) {
 		}
 		gotCSRFHeader = r.Header.Get("X-CSRF-Token")
 	})
-	h := devAuthMiddleware("sess-tok", "csrf-tok", inner)
+	// A cached, still-valid pair (anyTokenAuth accepts it) is injected as-is.
+	d := &devSessions{
+		store: &fakeOAuthStore{}, authn: anyTokenAuth{}, now: time.Now,
+		session: "sess-tok", csrf: "csrf-tok",
+	}
+	h := devAuthMiddleware(d, slog.New(slog.DiscardHandler), inner)
 
 	// A request carrying a STALE session cookie must be overwritten, not merged.
 	req := httptest.NewRequest(http.MethodPost, "/api/anything", nil)
@@ -231,6 +265,76 @@ func TestDevAuthMiddleware(t *testing.T) {
 	}
 }
 
+// deadTokenAuth rejects every session token, standing in for a session row that
+// a Logout deleted or a TTL expired.
+type deadTokenAuth struct{}
+
+func (deadTokenAuth) AuthenticateSession(_ context.Context, _ string) (storage.User, error) {
+	return storage.User{}, storage.ErrNotFound
+}
+
+// TestDevAuthMiddleware_ReseedsDeadSession: when the cached dev session no
+// longer authenticates (the SPA's Logout deleted the row, or the 24h TTL
+// expired), the middleware re-seeds a fresh session instead of 401ing every
+// request until a process restart, and injects the NEW token.
+func TestDevAuthMiddleware_ReseedsDeadSession(t *testing.T) {
+	store := &fakeOAuthStore{}
+	d := &devSessions{
+		store: store, authn: deadTokenAuth{}, now: time.Now,
+		session: "logged-out-tok", csrf: "old-csrf",
+	}
+	var gotSess string
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie(auth.SessionCookieName); err == nil {
+			gotSess = c.Value
+		}
+	})
+	h := devAuthMiddleware(d, slog.New(slog.DiscardHandler), inner)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/anything", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("re-seed created %d sessions, want 1", len(store.sessions))
+	}
+	if gotSess == "logged-out-tok" || gotSess != store.sessions[0].Token {
+		t.Errorf("injected session = %q, want the freshly minted %q (not the dead token)", gotSess, store.sessions[0].Token)
+	}
+}
+
+// TestDevAuthMiddleware_RefusesProxiedRequests: a request carrying reverse-proxy
+// evidence is 403'd BEFORE any session is stamped — the loopback bind stops
+// container port-mappings, but a same-host proxy still dials 127.0.0.1, and
+// auto-authenticating proxied traffic would hand every visitor the operator
+// console (ADR-0041).
+func TestDevAuthMiddleware_RefusesProxiedRequests(t *testing.T) {
+	for _, header := range []string{"X-Forwarded-For", "X-Forwarded-Proto", "Forwarded"} {
+		t.Run(header, func(t *testing.T) {
+			reached := false
+			inner := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { reached = true })
+			d := &devSessions{
+				store: &fakeOAuthStore{}, authn: anyTokenAuth{}, now: time.Now,
+				session: "sess-tok", csrf: "csrf-tok",
+			}
+			h := devAuthMiddleware(d, slog.New(slog.DiscardHandler), inner)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/anything", nil)
+			req.Header.Set(header, "203.0.113.7")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 for a request carrying %s", rec.Code, header)
+			}
+			if reached {
+				t.Errorf("inner handler reached despite proxy evidence (%s)", header)
+			}
+		})
+	}
+}
+
 // TestEnableDevMode ties the opt-out together: it forces the loopback bind, logs a
 // loud insecure-mode Warn, and returns a wrapper that auto-authenticates a
 // cookieless request through the REAL auth.RequireSession guard (AC2).
@@ -239,7 +343,7 @@ func TestEnableDevMode(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	addr, wrap, err := enableDevMode(context.Background(), store, "0.0.0.0:8080", log, time.Now)
+	addr, wrap, err := enableDevMode(context.Background(), store, anyTokenAuth{}, "0.0.0.0:8080", log, time.Now)
 	if err != nil {
 		t.Fatalf("enableDevMode: %v", err)
 	}

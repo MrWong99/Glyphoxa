@@ -294,7 +294,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// interceptor stack / RequireSession / CSRF gate already authenticated. This
 	// replaces the manual DB-session-insert dev flow.
 	if dev {
-		forced, wrap, err := enableDevMode(ctx, store, webAddr, log, time.Now)
+		forced, wrap, err := enableDevMode(ctx, store, store, webAddr, log, time.Now)
 		if err != nil {
 			return fmt.Errorf("web: %w", err)
 		}
