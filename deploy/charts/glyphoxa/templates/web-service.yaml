@@ -1,0 +1,32 @@
+{{/*
+Web Service (#118) — exposes the Web Instance's PUBLIC Connect API + console
+`http` port in-cluster.
+
+- It targets the container's NAMED `http` port, so a change to web.port follows
+  the name without also editing the Service.
+- It exposes ONLY the public port. The internal metrics/probe port (/metrics,
+  /healthz, /readyz) stays off the Service (ADR-0032): only the kubelet and
+  Prometheus reach it, via the pod directly.
+- ClusterIP by default — Ingress/TLS is a separate slice (#121). It is a plain
+  (non-hook) resource applied after the migrate/seed hooks, and is gated on
+  web.enabled together with the Deployment.
+*/}}
+{{- if .Values.web.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "glyphoxa.web.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  type: {{ .Values.web.service.type }}
+  selector:
+    {{- include "glyphoxa.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: {{ .Values.web.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

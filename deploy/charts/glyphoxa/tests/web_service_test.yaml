@@ -1,0 +1,94 @@
+suite: web Service
+# The web Service exposes the Web Instance's PUBLIC Connect API + console `http`
+# port in-cluster (#118). It targets the container's named `http` port (never the
+# internal metrics/probe port, ADR-0032) and selects the web pods by the standard
+# selector labels + the web component. ClusterIP by default — Ingress/TLS is a
+# separate slice (#121). It is disabled together with the Deployment when
+# web.enabled is false.
+templates:
+  - templates/web-service.yaml
+tests:
+  - it: renders a Service named for the release
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-web
+
+  - it: is disabled when web.enabled is false
+    set:
+      web:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: is NOT a Helm hook so it applies after the migrate and seed hooks
+    asserts:
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]
+
+  - it: is a ClusterIP Service by default
+    # Ingress/TLS is issue #121; this slice exposes the API in-cluster only.
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+
+  - it: honours an overridden service type
+    set:
+      web:
+        service:
+          type: NodePort
+    asserts:
+      - equal:
+          path: spec.type
+          value: NodePort
+
+  - it: exposes the public http port and targets the container's named http port
+    # The Service port is web.service.port (80 by default); it targets the
+    # container's NAMED `http` port, so a change to web.port follows the name
+    # without also editing the Service.
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 80
+      - equal:
+          path: spec.ports[0].targetPort
+          value: http
+      - equal:
+          path: spec.ports[0].name
+          value: http
+      - equal:
+          path: spec.ports[0].protocol
+          value: TCP
+
+  - it: does NOT expose the internal metrics/probe port
+    # /metrics, /healthz, /readyz stay off the public Service (ADR-0032): only the
+    # kubelet + Prometheus reach them, via the pod's metrics port.
+    asserts:
+      - lengthEqual:
+          path: spec.ports
+          count: 1
+
+  - it: selects the web pods by the standard selector labels plus the web component
+    asserts:
+      - equal:
+          path: spec.selector["app.kubernetes.io/name"]
+          value: glyphoxa
+      - equal:
+          path: spec.selector["app.kubernetes.io/instance"]
+          value: RELEASE-NAME
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: web
+
+  - it: carries the standard chart labels plus the web component
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: web
+      - equal:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+          value: Helm

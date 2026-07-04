@@ -175,6 +175,121 @@ voice:
     timeoutSeconds: 3
     failureThreshold: 3
 
+# Web Instance (#118, ADR-0039): the single image run as `glyphoxa -mode web`
+# (or `all`), serving the operator console (SPA) + the Connect API behind a
+# Discord-OAuth gate. Like voice it is a plain (non-hook) workload, so it applies
+# after the migrate (-5) and seed (-4) hooks — the schema is current and the demo
+# data seeded before it starts — and it NEVER migrates (EnsureCurrent fails the
+# pod fast if the schema is behind). Unlike voice it also gets a Service (it is
+# k8s-reachable) and reads GLYPHOXA_SECRET (its RPC layer decrypts BYOK provider
+# credentials for Provider Config CRUD, ADR-0004) — which voice never does.
+web:
+  # Enable/disable the Web Instance (Deployment + Service). ON by default so a
+  # bare `helm install` serves the operator console — which means it requires the
+  # three Discord OAuth credentials AND a non-empty operator allowlist below
+  # (ADR-0041): a Web Instance REFUSES TO BOOT without a usable login, so those
+  # four values are `required` when web.enabled and the render fails fast with an
+  # actionable message if any is empty (mirroring voice's required guild/channel).
+  # For a DB-prep-only or voice-only install, set this false.
+  enabled: true
+
+  # Process Mode (ADR-0005). `web` serves the console + Connect API only; `all`
+  # ADDITIONALLY drives the voice loop in-process so the Session screen can
+  # start/stop a live NPC in the same pod (ADR-0039). Cross-pod session control
+  # across a SEPARATE Voice Instance is DEFERRED — the control-RPC transport is
+  # not built — so `all` is a single-pod arrangement, not a multi-replica
+  # backplane. Must be `web` or `all`; any other value fails the render.
+  mode: web
+
+  # Discord OAuth application credentials (ADR-0016/0039) and the mandatory
+  # operator allowlist (ADR-0041). All four are REQUIRED when web.enabled — a Web
+  # Instance refuses to boot without a usable login, so the render fails fast if
+  # any is empty. `operatorIds` is a comma/whitespace-separated list of Discord
+  # User snowflakes (Developer Mode → Copy ID); a Discord User whose snowflake is
+  # absent is rejected before any session is issued or Tenant written. Intended
+  # use is a single entry; multiple entries are a documented edge (e.g. a second
+  # test account). For real deploys, prefer templating these from an external
+  # Secret over committing them to values.
+  oauth:
+    clientId: ""
+    clientSecret: ""
+    redirectUrl: ""
+  operatorIds: ""
+
+  # Single replica for v1.0 (ADR-0039): the self-host web tier holds sessions
+  # in-process, and cross-pod session control is deferred, so this is pinned to
+  # one pod. The update strategy tracks the Mode: `web` uses RollingUpdate (no
+  # in-process loop, so an upgrade surge is harmless), while `all` uses Recreate
+  # like voice — it drives a session loop in-process, so two pods would run two
+  # loops on one Discord token AND a surged pod's boot-time orphan sweep would
+  # close the old pod's live session. Scaling out is a design change (a session
+  # backplane), not a value.
+
+  # Optional per-workload image override. When repository/tag are set here they
+  # win over the shared top-level `image`; otherwise the web pod runs the same
+  # image as the migrate/seed Jobs and the voice pod (one image, ADR-0034).
+  image:
+    repository: ""
+    tag: ""
+
+  # The public Connect API + console port the container serves on (-web-addr) and
+  # the Service targets. Named `http` on the container to keep it distinct from
+  # the internal `metrics` port.
+  port: 8080
+
+  # The Service that exposes the public `http` port in-cluster. ClusterIP by
+  # default (Ingress/TLS is issue #121); `port` is the Service's own port, which
+  # targets the container's named `http` port.
+  service:
+    type: ClusterIP
+    port: 80
+
+  # The metrics-only HTTP listener (ADR-0032): /metrics for scraping plus the
+  # /healthz liveness and /readyz readiness probes (-metrics-addr). Kept OFF the
+  # public API port — the probes and scrape target this internal port, never the
+  # externally-reachable `http` port. Named `metrics` and advertised via
+  # prometheus.io/* pod annotations for annotation-based scrape discovery.
+  metricsPort: 9090
+
+  # Resource requests/limits for the serving pod. Lighter than voice by default
+  # (no ONNX VAD / audio path in web-only Mode); tune up for `all` Mode, which
+  # runs the voice loop in-process.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  # Container securityContext, hardened by default and overridable. The image
+  # runs as USER 65532 (#31); the web tier writes nothing to its rootfs at boot,
+  # so a read-only rootfs holds. Set to {} in a values file to drop the block.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Probe tuning. Liveness targets /healthz (process-up, ignores DB health so a
+  # DB blip can't get the pod killed); readiness targets /readyz (DB ping — 200
+  # only when the schema is current and reachable). Both hit the internal metrics
+  # port, never the public API port (ADR-0032).
+  livenessProbe:
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
 # Pod-level knobs shared by the workloads this chart renders.
 podSecurityContext: {}
 nodeSelector: {}

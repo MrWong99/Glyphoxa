@@ -103,11 +103,17 @@ PY
 
 # The two render branches the chart supports: in-cluster Postgres (default)
 # and external DB (postgres disabled) — same paths the gate checked before #42
-# broke it.
+# broke it. Both render the Web Instance (#118, enabled by default) + the voice
+# Deployment, so the new web Deployment + Service are schema-validated on both.
 validate_path in-cluster-postgres
 validate_path external-db \
   --set postgres.enabled=false \
   --set database.url='postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require'
+
+# The Web-Instance-disabled render path (#118 AC): the chart must still render
+# (and validate) with web.enabled=false — a voice-only / DB-prep install that
+# needs none of the web OAuth credentials.
+validate_path web-disabled --set web.enabled=false
 
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode

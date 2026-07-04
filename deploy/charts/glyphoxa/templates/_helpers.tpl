@@ -64,6 +64,25 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-voice" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "glyphoxa.web.fullname" -}}
+{{- printf "%s-web" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Validate the Web Instance Mode (ADR-0005). `web` serves the operator console +
+Connect API only; `all` additionally drives the voice loop in-process for
+single-pod sessions (ADR-0039). Any other value would deploy a pod that exits(2)
+at runtime ("unknown mode"), so reject it at render time with an actionable
+message instead — mirroring the snowflake guard's fail-fast philosophy.
+*/}}
+{{- define "glyphoxa.web.mode" -}}
+{{- if or (eq . "web") (eq . "all") -}}
+{{- . -}}
+{{- else -}}
+{{- fail (printf "web.mode must be \"web\" or \"all\", got %q — \"web\" serves the console + Connect API only; \"all\" additionally drives the in-process voice loop (ADR-0039, single-pod)." .) -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Render a Discord snowflake ID (guild/channel) as an exact string, rejecting any
 non-string value with an actionable error.
@@ -112,18 +131,30 @@ ONNX tags without moving the migrate/seed Jobs.
 {{- end }}
 
 {{/*
+The web Deployment's image. Like [glyphoxa.voice.image] it defaults to the
+shared [glyphoxa.image] (one image, ADR-0034) but lets web.image.repository/tag
+override either field independently.
+*/}}
+{{- define "glyphoxa.web.image" -}}
+{{- $repo := .Values.web.image.repository | default .Values.image.repository -}}
+{{- $tag := .Values.web.image.tag | default .Values.image.tag | default .Chart.AppVersion -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end }}
+
+{{/*
 Hook ordering weights. The DB resources (Secret, Service, StatefulSet) come up
 first, then the migrate Job, then the seed Job, then the serving workloads. All
-are pre-install/pre-upgrade hooks EXCEPT the voice Deployment (#36), which is a
-plain resource applied after every hook — so the migration and seed always
-precede it. Weights sort ascending; lower runs first; Helm waits for each
+are pre-install/pre-upgrade hooks EXCEPT the voice + web Deployments, which are
+plain resources applied after every hook — so the migration and seed always
+precede them. Weights sort ascending; lower runs first; Helm waits for each
 weight's hook Jobs to complete before the next, so the seed only starts once the
 migration has finished and the schema is current.
 
   -10  DB Secret + Postgres Service + StatefulSet
    -5  migrate Job
    -4  seed Job
-    0  voice Deployment (#36 — a plain resource, applied after every hook)
+    0  voice Deployment (#36) + web Deployment/Service (#118) — plain resources,
+       applied after every hook
 */}}
 {{- define "glyphoxa.dbHookWeight" -}}-10{{- end }}
 
