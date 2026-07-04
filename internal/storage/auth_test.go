@@ -180,3 +180,61 @@ func TestResolveOperatorTenantSeedsWhenEmpty(t *testing.T) {
 		t.Errorf("seeded tenant = %+v, want a 'Glyphoxa' tenant", bound)
 	}
 }
+
+// TestResolveOperatorTenantTakesOverDevTenant asserts the first REAL operator
+// login claims a tenant previously bound to the synthetic GLYPHOXA_DEV_MODE
+// operator (ADR-0041): everything configured in dev mode hands over instead of
+// being stranded next to a fresh empty tenant. The dev operator does not steal
+// a real operator's binding back.
+func TestResolveOperatorTenantTakesOverDevTenant(t *testing.T) {
+	st := migrated(t)
+	ctx := context.Background()
+
+	seededID, err := st.CreateTenant(ctx, "Seeded Tenant")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	dev, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: storage.DevOperatorDiscordID})
+	if err != nil {
+		t.Fatalf("upsert dev operator: %v", err)
+	}
+
+	// A dev-mode boot claims the seeded tenant like a first login would.
+	devTenant, err := st.ResolveOperatorTenant(ctx, dev.ID)
+	if err != nil {
+		t.Fatalf("ResolveOperatorTenant(dev): %v", err)
+	}
+	if devTenant.ID != seededID {
+		t.Fatalf("dev operator claimed %s, want the seeded %s", devTenant.ID, seededID)
+	}
+
+	// The first real login takes the dev-held tenant over.
+	real, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: "777000000000000000"})
+	if err != nil {
+		t.Fatalf("upsert real operator: %v", err)
+	}
+	taken, err := st.ResolveOperatorTenant(ctx, real.ID)
+	if err != nil {
+		t.Fatalf("ResolveOperatorTenant(real): %v", err)
+	}
+	if taken.ID != seededID {
+		t.Errorf("real operator resolved %s, want the dev-held seeded tenant %s", taken.ID, seededID)
+	}
+	if tid, err := st.TenantForUser(ctx, real.ID); err != nil || tid != seededID {
+		t.Errorf("TenantForUser(real) = %s, %v; want %s", tid, err, seededID)
+	}
+
+	// The dev operator lost the binding and does NOT steal it back — a later
+	// dev-mode boot on the same DB gets a different (fresh) tenant instead,
+	// and the real operator's binding survives.
+	devAgain, err := st.ResolveOperatorTenant(ctx, dev.ID)
+	if err != nil {
+		t.Fatalf("ResolveOperatorTenant(dev, again): %v", err)
+	}
+	if devAgain.ID == seededID {
+		t.Error("dev operator re-claimed the tenant a real operator took over")
+	}
+	if tid, err := st.TenantForUser(ctx, real.ID); err != nil || tid != seededID {
+		t.Errorf("TenantForUser(real) after dev re-resolve = %s, %v; want %s", tid, err, seededID)
+	}
+}
