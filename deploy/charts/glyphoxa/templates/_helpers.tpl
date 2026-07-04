@@ -142,6 +142,37 @@ override either field independently.
 {{- end }}
 
 {{/*
+The app Secret's stringData body (the key: value lines under `stringData:`),
+factored into a named template so both secret.yaml renders it AND the web
+Deployment can sha256 it for its checksum/secret pod annotation (#121) — a
+cross-template `include` of the whole Secret file is not visible to a
+single-template helm-unittest suite, but a named partial always is. Keys are
+unindented here; the caller applies `nindent 2`. The DB + cipher keys are
+unconditional; the shared credential keys are gated on voice-or-web and the web
+OAuth keys on web, each `required` under its gate so a deploy can never start
+with an empty credential.
+*/}}
+{{- define "glyphoxa.secretStringData" -}}
+database-url: {{ include "glyphoxa.databaseURL" . | quote }}
+username: {{ .Values.database.user | quote }}
+password: {{ .Values.database.password | quote }}
+database: {{ .Values.database.name | quote }}
+app-secret: {{ required "appSecret is required: a base64-encoded 32-byte credential-cipher key (ADR-0004) the seed Job uses to seal placeholder provider credentials. Generate one with `openssl rand -base64 32`." .Values.appSecret | quote }}
+{{- if or .Values.voice.enabled .Values.web.enabled }}
+discord-bot-token: {{ required "discordBotToken is required when voice.enabled or web.enabled: the Discord bot token the voice pod joins the gateway with (and the web tier's base session bot)." .Values.discordBotToken | quote }}
+elevenlabs-api-key: {{ required "elevenLabsApiKey is required when voice.enabled or web.enabled: the ElevenLabs API key the STT/TTS adapters read." .Values.elevenLabsApiKey | quote }}
+gemini-api-key: {{ required "geminiApiKey is required when voice.enabled or web.enabled: the Gemini API key." .Values.geminiApiKey | quote }}
+groq-api-key: {{ required "groqApiKey is required when voice.enabled or web.enabled: the Groq API key the LLM adapter reads." .Values.groqApiKey | quote }}
+{{- end }}
+{{- if .Values.web.enabled }}
+discord-oauth-client-id: {{ required "web.oauth.clientId is required when web.enabled: the Discord OAuth application's Client ID (ADR-0016/0039). A Web Instance refuses to boot without a usable login (ADR-0041)." .Values.web.oauth.clientId | quote }}
+discord-oauth-client-secret: {{ required "web.oauth.clientSecret is required when web.enabled: the Discord OAuth application's Client Secret." .Values.web.oauth.clientSecret | quote }}
+discord-oauth-redirect-url: {{ include "glyphoxa.web.oauthRedirectURL" . | quote }}
+operator-ids: {{ required "web.operatorIds is required when web.enabled: a comma/whitespace-separated list of Discord User snowflakes (the operator allowlist, ADR-0041). A Web Instance refuses to boot without at least one." .Values.web.operatorIds | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 The Web Instance's TLS Secret name (#121). An externally supplied
 ingress.tls.secretName wins verbatim; otherwise a release-derived name that
 cert-manager provisions the certificate into when the cert-manager path is on.
@@ -164,20 +195,29 @@ what the browser actually hits.
 
 {{/*
 The Discord OAuth redirect URL the Web Instance advertises (DISCORD_OAUTH_REDIRECT_URL).
-With the Ingress enabled it is DERIVED from ingress.host plus the fixed callback
+
+An explicitly set web.oauth.redirectUrl ALWAYS wins — an operator override is
+authoritative regardless of the Ingress. This is the escape hatch for an external
+load balancer that terminates TLS in front of a plain-HTTP Ingress: the app's own
+Ingress is http but the browser hits https, so the operator registers the https
+callback explicitly and the chart must not clobber it with a derived http:// value
+(else the browser withholds the Secure state cookie → login dead-ends).
+
+Only when it is unset is the URL DERIVED from ingress.host plus the fixed callback
 path the OAuth handler serves (/auth/discord/callback, cmd/glyphoxa/main.go), so
-the redirect the Web Instance sends Discord can never drift from the host the
-Ingress actually terminates (AC #121). With the Ingress disabled (self-host
-behind an external reverse proxy) the operator's explicit web.oauth.redirectUrl
-is authoritative and required. Keeping the derivation here means both the app
-Secret (which the pod reads) and the install notes resolve one source of truth.
+the redirect can never drift from the host the Ingress terminates (AC #121). With
+the Ingress disabled AND no explicit value there is nothing to advertise, so the
+render fails fast (required). Keeping the resolution here means the app Secret
+(which the pod reads) and the install notes share one source of truth.
 */}}
 {{- define "glyphoxa.web.oauthRedirectURL" -}}
-{{- if .Values.ingress.enabled -}}
+{{- if .Values.web.oauth.redirectUrl -}}
+{{- .Values.web.oauth.redirectUrl -}}
+{{- else if .Values.ingress.enabled -}}
 {{- $host := required "ingress.host is required when ingress.enabled: it drives both the Ingress route and the Discord OAuth redirect URL the Web Instance advertises (#121)." .Values.ingress.host -}}
 {{- printf "%s://%s/auth/discord/callback" (include "glyphoxa.web.ingressScheme" .) $host -}}
 {{- else -}}
-{{- required "web.oauth.redirectUrl is required when web.enabled and ingress is disabled: the Discord OAuth redirect URL registered on the application. With an Ingress enabled it is derived from ingress.host instead." .Values.web.oauth.redirectUrl -}}
+{{- required "web.oauth.redirectUrl is required when web.enabled and the Ingress is disabled: the Discord OAuth redirect URL registered on the application. With an Ingress enabled it is derived from ingress.host instead." .Values.web.oauth.redirectUrl -}}
 {{- end -}}
 {{- end }}
 
