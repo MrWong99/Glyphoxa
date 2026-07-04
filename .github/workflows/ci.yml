@@ -401,6 +401,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The web-tier HTTP assertions in the smoke (#128 real-console + OAuth flow)
+      # must themselves be trusted (the same #140/#114 lesson): assert they FAIL
+      # on a placeholder page or a broken OAuth handler and PASS only on a correct
+      # one, against a cluster-free local fixture. Runs first so a regressed gate
+      # fails fast, before the multi-minute image build + k3d spin-up below.
+      - name: Deploy smoke self-test (web HTTP assertions)
+        run: ./scripts/e2e-deploy-smoke-test.sh
+
       # Restore the generated stubs into the build context (gen/ is gitignored,
       # not generated inside the image) before this job's own docker build.
       - name: Download gen artifact
