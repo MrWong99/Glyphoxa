@@ -89,6 +89,10 @@ make build
 ./bin/glyphoxa --config config.yaml
 ```
 
+For the **web tier** (Discord-OAuth operator login), copy `.env.example` to
+`.env`, fill it in, and follow the setup runbook in
+[docs/configuration.md](docs/configuration.md).
+
 ### Development
 
 ```bash
@@ -159,7 +163,7 @@ Comprehensive guides for developers and contributors — see the [full documenta
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Prerequisites, build, first run |
 | [Architecture](docs/architecture.md) | System layers, data flow, key packages |
-| [Configuration](docs/configuration.md) | Complete config field reference |
+| [Configuration](docs/configuration.md) | Environment variables + Discord-OAuth / operator-allowlist setup runbook |
 | [Providers](docs/providers.md) | Provider system, adding new providers |
 | [NPC Agents](docs/npc-agents.md) | NPC definition, entities, campaigns |
 | [Memory](docs/memory.md) | 3-layer memory system |
