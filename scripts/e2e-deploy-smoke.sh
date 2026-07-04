@@ -65,9 +65,6 @@ OAUTH_CLIENT_SECRET="${OAUTH_CLIENT_SECRET:-ci-not-a-real-oauth-client-secret}"
 OAUTH_REDIRECT_URL="${OAUTH_REDIRECT_URL:-http://localhost:8080/auth/discord/callback}"
 OPERATOR_IDS="${OPERATOR_IDS:-111111111111111111}"
 
-# The committed placeholder index.html, verbatim (internal/spa/dist/index.html) —
-# what the web root serves when the real Vite build was NOT embedded (#114).
-PLACEHOLDER_INDEX='<!doctype html><html><body><div id="root"></div></body></html>'
 # The Connect API base the SPA calls; a management RPC is <base>/<Service>/<Method>.
 API_BASE="/api/glyphoxa.management.v1"
 # Discord's OAuth2 authorize endpoint the login redirect must target (ADR-0016).
@@ -92,11 +89,35 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # then let printf interpret the escapes; there are no '+'-encoded spaces here).
 urldecode() { local s="${1//+/ }"; printf '%b' "${s//%/\\x}"; }
 
-# http_status prints the HTTP status code of METHOD URL (default GET), following
-# NO redirects so a 302 is observed as a 302. Extra args pass through to curl.
+# http_status prints the HTTP status code of METHOD URL, following NO redirects
+# so a 302 is observed as a 302. Extra args pass through to curl. It retries
+# while the connection itself fails (curl's 000) so a transient drop on a
+# freshly established port-forward does not fail the assertion — but returns the
+# first REAL code (incl. a 4xx, which is often the expected result) at once.
 http_status() {
   local method="$1" url="$2"; shift 2
-  curl -s -o /dev/null -w '%{http_code}' -X "$method" "$@" "$url" 2>/dev/null || true
+  local code=""
+  for _ in $(seq 1 10); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X "$method" "$@" "$url" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != "000" ] && break
+    sleep 1
+  done
+  printf '%s' "${code:-000}"
+}
+
+# http_headers prints the response headers of GET URL (no redirect followed),
+# retrying past a transient connection drop the same way. Empty result / non-zero
+# return means it never connected within the window.
+http_headers() {
+  local url="$1" out=""
+  for _ in $(seq 1 10); do
+    if out="$(curl -s -o /dev/null -D - "$url" 2>/dev/null)" && [ -n "$out" ]; then
+      printf '%s' "$out"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 # --- web HTTP assertions (each takes the base URL) --------------------------
@@ -117,17 +138,15 @@ assert_console_served() {
 
 # assert_real_console is the #114 embedded-console gate, now over HTTP against
 # the cluster-served page instead of grep'ing the binary: the served root must
-# reference a content-hashed Vite bundle (/assets/index-<hash>.js) AND must NOT
-# be the committed placeholder one-liner. Two-sided, so a real bundle served
-# alongside a stale placeholder fails as loudly as a missing one.
+# reference a content-hashed Vite bundle (/assets/index-<hash>.js). A real build
+# overwrites the committed placeholder index.html (a bare <div id="root">, no
+# /assets/ ref) with exactly that reference, so its presence distinguishes the
+# two — over HTTP the root is one document, so the single check suffices.
 assert_real_console() {
   local base="$1" body
   body="$(curl -fsS "${base}/" 2>/dev/null)" || fail "could not fetch the console root for the real-vs-placeholder check"
   printf '%s' "$body" | grep -Eq '/assets/index-[A-Za-z0-9_-]+\.js' \
     || fail "the served console root has no hashed /assets/index-*.js reference — it is the placeholder, not a real console build"
-  if [ "$body" = "$PLACEHOLDER_INDEX" ]; then
-    fail "the served console root is the committed placeholder index.html one-liner (a real build must overwrite it)"
-  fi
 }
 
 # assert_login_redirect checks GET /auth/discord/login starts the OAuth flow
@@ -136,7 +155,7 @@ assert_real_console() {
 # redirect, so Discord is never contacted — the server builds the URL itself.
 assert_login_redirect() {
   local base="$1" headers status location setcookie
-  headers="$(curl -s -o /dev/null -D - "${base}/auth/discord/login" 2>/dev/null)" \
+  headers="$(http_headers "${base}/auth/discord/login")" \
     || fail "could not reach the OAuth login endpoint"
   status="$(printf '%s' "$headers" | awk 'NR==1{print $2}')"
   [ "$status" = "302" ] || fail "OAuth login returned ${status:-<none>}, want a 302 redirect to Discord"

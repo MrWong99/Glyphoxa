@@ -18,9 +18,18 @@ can be exercised without a cluster:
                                                 request with no session cookie).
 
 $FIXTURE_BREAK breaks exactly ONE property so the self-test can prove each
-assertion actually gates:
-  placeholder | login_status | login_location | login_cookie
-  | callback_accepts | getcurrentuser_open | protected_rpc_open
+assertion actually gates on its OWN dedicated mutation (a break that trips two
+properties at once would let either assertion be deleted unnoticed):
+  placeholder              -> served root is the placeholder (no hashed asset)
+  login_status             -> login answers 200, not a 302
+  login_wrong_host         -> login 302s somewhere that is not Discord authorize
+  login_wrong_client_id    -> login redirect carries the wrong client_id
+  login_wrong_redirect_uri -> login redirect carries the wrong redirect_uri
+  login_cookie             -> login redirect sets no state cookie
+  callback_accepts_forged  -> callback accepts a forged (mismatched) state
+  callback_accepts_missing -> callback accepts a missing state
+  getcurrentuser_open      -> unauthenticated GetCurrentUser answers 200
+  protected_rpc_open       -> a protected RPC answers 200 without a session
 """
 import os
 import sys
@@ -43,20 +52,30 @@ REAL_CONSOLE = (
 # The committed placeholder index.html, verbatim (internal/spa/dist/index.html).
 PLACEHOLDER = '<!doctype html><html><body><div id="root"></div></body></html>'
 
-AUTHORIZE_URL = "https://discord.com/api/oauth2/authorize"
+DISCORD_AUTHORIZE_URL = "https://discord.com/api/oauth2/authorize"
 
 
-def authorize_location():
+def authorize_location(base=DISCORD_AUTHORIZE_URL, client_id=CLIENT_ID, redirect=REDIRECT_URL):
     q = urlencode(
         {
-            "client_id": CLIENT_ID,
-            "redirect_uri": REDIRECT_URL,
+            "client_id": client_id,
+            "redirect_uri": redirect,
             "response_type": "code",
             "scope": "identify",
             "state": STATE,
         }
     )
-    return AUTHORIZE_URL + "?" + q
+    return base + "?" + q
+
+
+def login_location():
+    if BREAK == "login_wrong_host":
+        return authorize_location(base="https://evil.example/api/oauth2/authorize")
+    if BREAK == "login_wrong_client_id":
+        return authorize_location(client_id="some-other-app-id")
+    if BREAK == "login_wrong_redirect_uri":
+        return authorize_location(redirect="http://evil.example/steal")
+    return authorize_location()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -74,7 +93,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
         if path == "/":
             self._body(200, PLACEHOLDER if BREAK == "placeholder" else REAL_CONSOLE)
             return
@@ -82,9 +101,7 @@ class Handler(BaseHTTPRequestHandler):
             self._login()
             return
         if path == "/auth/discord/callback":
-            # A real callback with a forged/missing state is a 400; the "accepts"
-            # break lets the forgery through (200) so the assertion must catch it.
-            self._body(200 if BREAK == "callback_accepts" else 400, "callback")
+            self._callback(query)
             return
         self._body(404, "not found")
 
@@ -102,12 +119,7 @@ class Handler(BaseHTTPRequestHandler):
         if BREAK == "login_status":
             self._body(200, "no redirect")
             return
-        location = (
-            "https://evil.example/authorize?response_type=code&scope=identify"
-            if BREAK == "login_location"
-            else authorize_location()
-        )
-        headers = [("Location", location)]
+        headers = [("Location", login_location())]
         if BREAK != "login_cookie":
             headers.append(
                 (
@@ -120,6 +132,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _callback(self, query):
+        # The real callback 400s a forged (mismatched-state) AND a missing-state
+        # request, both BEFORE any Discord exchange. Each "accepts" break lets
+        # exactly ONE of those through (200) so its assertion has its own mutation.
+        has_state = "state=" in query
+        if BREAK == "callback_accepts_forged":
+            code = 200 if has_state else 400
+        elif BREAK == "callback_accepts_missing":
+            code = 200 if not has_state else 400
+        else:
+            code = 400
+        self._body(code, "callback")
 
 
 def main():

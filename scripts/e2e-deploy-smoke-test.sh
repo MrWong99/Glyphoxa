@@ -29,8 +29,13 @@ trap cleanup EXIT
 # start_fixture BREAK starts the fixture server with the named property broken
 # ("" = fully correct) and waits until it answers, replacing any prior server.
 start_fixture() {
-  local brk="$1"
-  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
+  local brk="$1" old="$SERVER_PID"
+  if [ -n "$old" ]; then
+    kill "$old" 2>/dev/null || true
+    # Reap the old server before rebinding so the replacement never races it to
+    # the port (EADDRINUSE) while it is slow to die.
+    wait "$old" 2>/dev/null || true
+  fi
   SERVER_PID=""
   FIXTURE_BREAK="$brk" python3 "$SERVER_PY" "$PORT" &
   SERVER_PID=$!
@@ -67,31 +72,52 @@ expect_fail() {
   fi
 }
 
-echo "e2e-deploy-smoke-test: [1/7] gate passes on a fully correct web tier"
+# One case per assertion property: each fixture breaks exactly ONE thing, so a
+# case flips red<->green iff its dedicated assertion is present. This defeats the
+# mutation blind spot where a break trips several properties at once and any one
+# of the overlapping assertions could be deleted unnoticed.
+
+echo "e2e-deploy-smoke-test: [1/11] gate passes on a fully correct web tier"
 start_fixture ""
 expect_pass "correct console + OAuth handlers accepted"
 
-echo "e2e-deploy-smoke-test: [2/7] gate fails when the served root is the placeholder"
+echo "e2e-deploy-smoke-test: [2/11] real-vs-placeholder: served root is the placeholder"
 start_fixture "placeholder"
-expect_fail "placeholder console rejected (real-vs-placeholder assertion)"
+expect_fail "placeholder console rejected (hashed /assets ref required)"
 
-echo "e2e-deploy-smoke-test: [3/7] gate fails when login does not redirect to Discord"
-start_fixture "login_location"
-expect_fail "login must 302 to the Discord authorize URL with the client id + redirect"
+echo "e2e-deploy-smoke-test: [3/11] login redirect: answers 200 instead of a 302"
+start_fixture "login_status"
+expect_fail "login must be a 302 redirect"
 
-echo "e2e-deploy-smoke-test: [4/7] gate fails when login sets no state cookie"
+echo "e2e-deploy-smoke-test: [4/11] login redirect: target host is not Discord authorize"
+start_fixture "login_wrong_host"
+expect_fail "login must 302 to the Discord authorize URL"
+
+echo "e2e-deploy-smoke-test: [5/11] login redirect: wrong client_id"
+start_fixture "login_wrong_client_id"
+expect_fail "login redirect must carry the configured client_id"
+
+echo "e2e-deploy-smoke-test: [6/11] login redirect: wrong redirect_uri"
+start_fixture "login_wrong_redirect_uri"
+expect_fail "login redirect must carry the configured redirect_uri"
+
+echo "e2e-deploy-smoke-test: [7/11] login redirect: no state cookie"
 start_fixture "login_cookie"
 expect_fail "login must set the anti-forgery state cookie"
 
-echo "e2e-deploy-smoke-test: [5/7] gate fails when the callback accepts a forged state"
-start_fixture "callback_accepts"
-expect_fail "callback must refuse a forged/missing OAuth state"
+echo "e2e-deploy-smoke-test: [8/11] callback: accepts a forged (mismatched) state"
+start_fixture "callback_accepts_forged"
+expect_fail "callback must refuse a forged OAuth state"
 
-echo "e2e-deploy-smoke-test: [6/7] gate fails when the unauthenticated current-user probe is 200"
+echo "e2e-deploy-smoke-test: [9/11] callback: accepts a missing state"
+start_fixture "callback_accepts_missing"
+expect_fail "callback must refuse a missing OAuth state"
+
+echo "e2e-deploy-smoke-test: [10/11] auth gate: unauthenticated GetCurrentUser is 200"
 start_fixture "getcurrentuser_open"
 expect_fail "unauthenticated GetCurrentUser must be 401"
 
-echo "e2e-deploy-smoke-test: [7/7] gate fails when a protected RPC answers without a session cookie"
+echo "e2e-deploy-smoke-test: [11/11] auth gate: a protected RPC answers without a session cookie"
 start_fixture "protected_rpc_open"
 expect_fail "a protected RPC without a session cookie must be refused (401)"
 
