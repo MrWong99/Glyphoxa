@@ -159,6 +159,91 @@ func encodeVector(v []float32) string {
 	return b.String()
 }
 
+// ChunkMatch is one Transcript Chunk returned by ANN retrieval together with its
+// cosine distance to the query vector (#119, ADR-0011). Distance comes from
+// pgvector's <=> operator: smaller = nearer, ascending order = nearest first.
+type ChunkMatch struct {
+	Chunk    TranscriptChunk
+	Distance float64
+}
+
+func scanChunkMatch(row pgx.Row) (ChunkMatch, error) {
+	var (
+		m    ChunkMatch
+		vsID uuid.NullUUID // column nullable (ADR-0011 SEAM); may be NULL
+	)
+	err := row.Scan(
+		&m.Chunk.ID, &m.Chunk.CampaignID, &vsID, &m.Chunk.Content,
+		&m.Chunk.SpeakerDiscordUserIDs, &m.Chunk.ParticipatedAgentIDs,
+		&m.Chunk.EmbeddingModel, &m.Chunk.StartedAt, &m.Chunk.CreatedAt,
+		&m.Distance,
+	)
+	m.Chunk.VoiceSessionID = vsID.UUID // uuid.Nil when NULL
+	return m, err
+}
+
+// SearchChunksByAgent is NPC-knowledge retrieval (ADR-0011): the k Transcript
+// Chunks in campaignID nearest the query vector by cosine distance whose
+// participated set CONTAINS agentID — "what this NPC could personally know". A
+// multi-agent chunk is returned for every one of its participants (containment,
+// not equality). NULL-embedding rows are excluded (partial HNSW index).
+func (s *Store) SearchChunksByAgent(ctx context.Context, campaignID, agentID uuid.UUID, query []float32, k int) ([]ChunkMatch, error) {
+	return s.searchChunks(ctx, campaignID, &agentID, query, k)
+}
+
+// SearchChunksByCampaign is world-context retrieval (ADR-0011): the k Transcript
+// Chunks in campaignID nearest the query vector by cosine distance, participants
+// ignored — topical Campaign context the NPC "may not personally know".
+// NULL-embedding rows are excluded (partial HNSW index).
+func (s *Store) SearchChunksByCampaign(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]ChunkMatch, error) {
+	return s.searchChunks(ctx, campaignID, nil, query, k)
+}
+
+// searchChunks runs the shared ANN query for both retrieval modes: cosine
+// distance (<=>) against the query vector, ascending (nearest first), matching
+// the partial HNSW vector_cosine_ops index. It is always scoped to one Campaign
+// and to non-null embeddings; a non-nil agentID adds the participated-set
+// containment filter (NPC-knowledge mode). k <= 0 is a caller bug and errors
+// rather than silently defaulting. The query vector reuses encodeVector + a
+// server-side ::vector cast, so storage carries no pgvector-go dependency.
+func (s *Store) searchChunks(ctx context.Context, campaignID uuid.UUID, agentID *uuid.UUID, query []float32, k int) ([]ChunkMatch, error) {
+	if k <= 0 {
+		return nil, fmt.Errorf("storage: search chunks: k must be > 0, got %d", k)
+	}
+	// $1 campaign, $2 query vector (also the <=> operand), [$3 agent], $N limit.
+	args := []any{campaignID, encodeVector(query)}
+	agentFilter := ""
+	if agentID != nil {
+		args = append(args, *agentID)
+		agentFilter = " AND participated_agent_ids @> ARRAY[$3]::uuid[]"
+	}
+	args = append(args, k)
+	sql := `SELECT ` + transcriptChunkColumns + `, embedding <=> $2::vector AS distance
+		   FROM transcript_chunk
+		  WHERE campaign_id = $1 AND embedding IS NOT NULL` + agentFilter + `
+		  ORDER BY distance
+		  LIMIT $` + strconv.Itoa(len(args))
+
+	rows, err := s.db.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("storage: search transcript chunks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ChunkMatch
+	for rows.Next() {
+		m, err := scanChunkMatch(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan chunk match: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: search transcript chunks: %w", err)
+	}
+	return out, nil
+}
+
 // GetEmbeddingsProviderConfig returns the most-recently-updated 'embeddings'
 // Provider Config, or ErrNotFound when none is bound. Process-wide (no tenant
 // filter), mirroring GetActiveCampaign's single-operator posture (ADR-0039): the
