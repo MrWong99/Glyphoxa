@@ -663,3 +663,91 @@ func TestLoopExitClearsActive(t *testing.T) {
 		t.Errorf("ended rows = %d, want 1 after self-exit", ended)
 	}
 }
+
+// fakeChunkFinalizer is a stand-in ChunkFinalizer (#104): it records the id it was
+// flushed for, the store's ended-count AT flush time (to prove the flush ran
+// BEFORE EndVoiceSession), and can inject an error to prove a flush failure does
+// not fail Stop.
+type fakeChunkFinalizer struct {
+	mu           sync.Mutex
+	store        *fakeStore
+	id           uuid.UUID
+	called       int
+	endedAtFlush int
+	err          error
+}
+
+func (f *fakeChunkFinalizer) FlushSession(_ context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called++
+	f.id = id
+	created, ended := f.store.counts()
+	_ = created
+	f.endedAtFlush = ended
+	return f.err
+}
+
+func (f *fakeChunkFinalizer) seen() (uuid.UUID, int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.id, f.called, f.endedAtFlush
+}
+
+// TestStopFlushesChunkBeforeEnd is #104: on Stop / loop exit the Manager flushes
+// the active session's open Transcript Chunk BEFORE ending the row.
+func TestStopFlushesChunkBeforeEnd(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+	flusher := &fakeChunkFinalizer{store: store}
+	mgr.SetChunkFlusher(flusher)
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	if _, err := mgr.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	id, called, endedAtFlush := flusher.seen()
+	if called != 1 || id != vs.ID {
+		t.Errorf("chunk flush seen id=%s called=%d, want id=%s called=1", id, called, vs.ID)
+	}
+	if endedAtFlush != 0 {
+		t.Errorf("EndVoiceSession ran (ended=%d) before the chunk flush; want flush first", endedAtFlush)
+	}
+}
+
+// TestStopSucceedsDespiteChunkFlushError is #104: a chunk-flush failure logs and
+// never fails Stop — the row still ends cleanly.
+func TestStopSucceedsDespiteChunkFlushError(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+	mgr.SetChunkFlusher(&fakeChunkFinalizer{store: store, err: errors.New("chunk writer wedged")})
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	ended, err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("Stop returned %v, want nil (a chunk-flush error must not fail Stop)", err)
+	}
+	if ended.Status != storage.VoiceSessionEnded {
+		t.Errorf("stopped session status = %q, want ended despite the flush error", ended.Status)
+	}
+}

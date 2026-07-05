@@ -78,6 +78,16 @@ type TranscriptFinalizer interface {
 	Finalize(ctx context.Context, id uuid.UUID) (int, error)
 }
 
+// ChunkFinalizer closes a session's open Transcript Chunk on Stop / loop exit
+// (#104, ADR-0011): a lone trailing utterance is flushed ONLY here, at session
+// end. *transcript.Chunker satisfies it; defined here (not imported) so the
+// manager does NOT depend on the transcript package — the chunker already depends
+// on the manager via Sessions, and the reverse import would cycle (mirrors
+// TranscriptFinalizer). nil (no chunking / voice-standalone) is a no-op.
+type ChunkFinalizer interface {
+	FlushSession(ctx context.Context, sessionID uuid.UUID) error
+}
+
 // LoopRunner runs the live voice loop until ctx is cancelled. Production wraps
 // wirenpc.RunFromDB (which loads the campaign roster and resolves the
 // credential-bridge keys, #69) bound to the app pool + cipher; tests inject a
@@ -107,6 +117,7 @@ type Manager struct {
 	base       wirenpc.Config      // Token (env fallback)/Logger/Metrics template; Guild/Channel come from saved config
 	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
+	chunker    ChunkFinalizer      // closes the open Transcript Chunk on Stop (#104); nil = no chunking
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
@@ -139,6 +150,15 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 // needed.
 func (m *Manager) SetTranscript(t TranscriptFinalizer) {
 	m.transcript = t
+}
+
+// SetChunkFlusher wires the chunk finalizer the Manager calls on Stop / loop exit
+// (#104). Like SetTranscript it is set once at boot, after the chunker is built
+// (the chunker needs the Manager via Sessions), before any session can start, so
+// no lock is needed. nil leaves chunking off (voice-standalone, same posture as
+// line persistence).
+func (m *Manager) SetChunkFlusher(f ChunkFinalizer) {
+	m.chunker = f
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no
@@ -262,6 +282,19 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		} else {
 			lineCount = n
 		}
+	}
+
+	// Close the session's open Transcript Chunk (#104, ADR-0011): a lone trailing
+	// utterance is flushed ONLY here, at session end. Best-effort with its OWN
+	// budget (like Finalize) — a flush failure logs and never blocks the row from
+	// ending. Distinct from the line grain above (ADR-0040): the two persist
+	// independently.
+	if m.chunker != nil {
+		chunkCtx, chunkCancel := context.WithTimeout(base, m.endTimeout)
+		if err := m.chunker.FlushSession(chunkCtx, as.session.ID); err != nil {
+			m.log.Warn("flush transcript chunk before end", "err", err, "voice_session", as.session.ID)
+		}
+		chunkCancel()
 	}
 
 	// A FRESH deadline for the ended_at write, regardless of what Finalize
