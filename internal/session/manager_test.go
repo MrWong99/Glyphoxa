@@ -31,6 +31,7 @@ type fakeStore struct {
 	reconciles int
 	tick       int
 	endErr     error // injected EndVoiceSession failure (#143 Defect A)
+	agents     []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
 }
 
 func newFakeStore() *fakeStore {
@@ -119,6 +120,13 @@ func (f *fakeStore) ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, 
 		n++
 	}
 	return n, nil
+}
+
+// ListAgents serves the campaign's roster for the mute-all path (#211).
+func (f *fakeStore) ListAgents(_ context.Context, _ uuid.UUID) ([]storage.Agent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]storage.Agent(nil), f.agents...), nil
 }
 
 func (f *fakeStore) counts() (created, ended int) {

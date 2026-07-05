@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
 // endTimeout bounds the ended_at write after the loop exits, so a Stop / shutdown
@@ -66,6 +68,9 @@ type Store interface {
 	CreateVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
 	EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error)
 	ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error)
+	// ListAgents returns the Active Campaign's roster (Butler + Character NPCs) so
+	// mute-all (#211) can target EVERY Agent, not just the voiced wirenpc Roster.
+	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 }
 
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
@@ -108,6 +113,11 @@ type activeSession struct {
 	endErr     error
 	cancel     context.CancelFunc
 	done       chan struct{}
+	// muted is the volatile, session-local per-Agent mute set (#211), keyed by
+	// AgentID. Fresh-empty per Start, so every new Voice Session begins with all
+	// Agents unmuted (AC5) — there is NO DB column and NO migration; the set dies
+	// with the session. Guarded by Manager.mu.
+	muted map[string]struct{}
 }
 
 // Manager owns at most one live voice session at a time (the single-active
@@ -141,7 +151,12 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled, endTimeout: endTimeout}
+	m := &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled, endTimeout: endTimeout}
+	// The Manager IS the live mute view (#211): it owns the session-local mute set,
+	// so wire it as the base voice config's MuteView. Every session Start copies
+	// base, so each session's Conversation reads this Manager's set.
+	m.base.Mutes = m
+	return m
 }
 
 // SetTranscript wires the transcript finalizer the Manager calls on Stop / loop
@@ -267,6 +282,7 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		session:    vs,
 		cancel:     cancel,
 		done:       make(chan struct{}),
+		muted:      map[string]struct{}{}, // fresh: every new session starts all-unmuted (AC5)
 	}
 	m.active = as
 	go m.runLoop(runCtx, as, cfg)
@@ -392,4 +408,135 @@ func (m *Manager) Shutdown() {
 	}
 	as.cancel()
 	<-as.done
+}
+
+// Muted reports whether the Agent with agentID is muted in the live session,
+// satisfying [orchestrator.MuteView] (#211). It is the authoritative live read the
+// voice loop's replier gate consults per route. Idle (no active session) is
+// always unmuted — the feature is off between sessions.
+func (m *Manager) Muted(agentID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil {
+		return false
+	}
+	_, ok := m.active.muted[agentID]
+	return ok
+}
+
+// MutedAgentIDs is a sorted snapshot of the currently-muted Agent ids, or nil when
+// idle. It backs GetSession's reload truth (AC5): a mid-session page reload reads
+// the true current mute state from here.
+func (m *Manager) MutedAgentIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil {
+		return nil
+	}
+	return mutedIDsLocked(m.active.muted)
+}
+
+// SetAgentMute mutes or unmutes one Agent in the live session, returning the
+// resulting sorted muted-id set (#211). It refuses when idle (ErrNoActiveSession,
+// AC4). The set is written UNDER m.mu and the resulting MuteChanged is published
+// OUTSIDE it — the bus fan-out touches other locks (the relay, the wirenpc
+// roster), so publishing under m.mu risks a lock-order inversion. The write
+// happening BEFORE the publish is load-bearing: the replier gate reading the set
+// on this event always sees the change. An idempotent re-mute (no actual change)
+// publishes nothing.
+func (m *Manager) SetAgentMute(agentID string, muted bool) ([]string, error) {
+	m.mu.Lock()
+	if m.active == nil {
+		m.mu.Unlock()
+		return nil, ErrNoActiveSession
+	}
+	changed := applyMuteLocked(m.active.muted, agentID, muted)
+	ids := mutedIDsLocked(m.active.muted)
+	bus := m.base.Bus
+	m.mu.Unlock()
+
+	if changed && bus != nil {
+		bus.Publish(voiceevent.MuteChanged{At: time.Now(), AgentID: agentID, Muted: muted})
+	}
+	return ids, nil
+}
+
+// SetAllMute mutes or unmutes EVERY Agent of the Active Campaign (Butler +
+// Character NPCs, from store.ListAgents — not just the voiced wirenpc Roster),
+// returning the resulting sorted muted-id set (#211). It refuses when idle
+// (ErrNoActiveSession). The campaign is captured under m.mu, the roster is listed
+// with m.mu released (the store read may block), then the set is re-locked and
+// applied only if the SAME session is still active — a session that ended (or a
+// new one that started) while listing aborts with ErrNoActiveSession. One
+// MuteChanged per ACTUAL change is published OUTSIDE m.mu.
+func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) {
+	m.mu.Lock()
+	as := m.active
+	if as == nil {
+		m.mu.Unlock()
+		return nil, ErrNoActiveSession
+	}
+	campaignID := as.campaignID
+	m.mu.Unlock()
+
+	agents, err := m.store.ListAgents(ctx, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("session: list agents for mute-all: %w", err)
+	}
+
+	m.mu.Lock()
+	if m.active != as {
+		// The session ended or rolled over while we listed agents: abort rather than
+		// mutate a set that no longer belongs to this session.
+		m.mu.Unlock()
+		return nil, ErrNoActiveSession
+	}
+	changes := make([]voiceevent.MuteChanged, 0, len(agents))
+	for _, a := range agents {
+		id := a.ID.String()
+		if applyMuteLocked(m.active.muted, id, muted) {
+			changes = append(changes, voiceevent.MuteChanged{AgentID: id, Muted: muted})
+		}
+	}
+	ids := mutedIDsLocked(m.active.muted)
+	bus := m.base.Bus
+	m.mu.Unlock()
+
+	if bus != nil {
+		now := time.Now()
+		for _, c := range changes {
+			c.At = now
+			bus.Publish(c)
+		}
+	}
+	return ids, nil
+}
+
+// applyMuteLocked sets or clears agentID in the mute set, reporting whether the
+// set actually changed (so an idempotent re-mute publishes nothing). Caller holds
+// Manager.mu.
+func applyMuteLocked(set map[string]struct{}, agentID string, muted bool) bool {
+	_, was := set[agentID]
+	if muted == was {
+		return false
+	}
+	if muted {
+		set[agentID] = struct{}{}
+	} else {
+		delete(set, agentID)
+	}
+	return true
+}
+
+// mutedIDsLocked returns the muted ids as a sorted slice. Caller holds Manager.mu.
+func mutedIDsLocked(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
