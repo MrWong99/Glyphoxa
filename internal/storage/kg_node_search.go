@@ -13,7 +13,7 @@ import (
 // (tsvector) only"). The kg_node.fts generated column (migration 00011) weights
 // name over body; SearchNodes ranks matches with ts_rank. This is the GM-facing
 // wiki search, so gm_private Nodes are INCLUDED — the NPC-prompt exclusion lives
-// only in ListPublicNodes and is unchanged.
+// only in AgentNodeFacts (#133) and is unchanged.
 
 // BuildTSQuery turns a raw GM query string into a safe to_tsquery('simple') input.
 // tsquery operator characters (& | ! ( ) : * …) are never passed through as
