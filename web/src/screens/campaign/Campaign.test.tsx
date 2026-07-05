@@ -154,6 +154,40 @@ function renderScreen() {
   return { npcs, previewCalls, grants };
 }
 
+// scopedTransport serves a single scope-supporting Tool (remember_knowledge)
+// whose grant state mutates in-closure and records every UpdateToolGrant call, so
+// a test can prove what the grant Switch versus the Save-scope button actually
+// send (#215). It mirrors the handler: a granted=true call with an empty config
+// stores no scope (a fresh grant), and granted=false clears it.
+function scopedTransport(initial: { granted: boolean; config: string }) {
+  const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+  const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+  const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+  let state = { ...initial };
+  const calls: { granted: boolean; config: string }[] = [];
+  const entry = () =>
+    create(ToolGrantSchema, {
+      toolName: "remember_knowledge",
+      description: "Remember a fact.",
+      granted: state.granted,
+      config: state.config,
+      supportsScope: true,
+    });
+  const transport = createRouterTransport(({ service }) => {
+    service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+    service(CampaignService, {
+      getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+      listToolGrants: () => create(ListToolGrantsResponseSchema, { grants: [entry()] }),
+      updateToolGrant: (req) => {
+        calls.push({ granted: req.granted, config: req.config });
+        state = { granted: req.granted, config: req.granted ? req.config : "" };
+        return create(UpdateToolGrantResponseSchema, { grant: entry() });
+      },
+    });
+  });
+  return { transport, calls, state: () => state };
+}
+
 describe("Campaign", () => {
   it("renders the live campaign title and roster", async () => {
     renderScreen();
@@ -440,5 +474,55 @@ describe("Campaign", () => {
     fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
     fireEvent.click(screen.getByRole("button", { name: /save scope/i }));
     await waitFor(() => expect(configs).toContain('{"scope":"campaign"}'));
+  });
+
+  it("the grant Switch never persists an unsaved scope edit; only Save scope does (#215)", async () => {
+    const { transport, calls } = scopedTransport({ granted: true, config: '{"scope":"self"}' });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    const scope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
+    expect(scope.value).toBe('{"scope":"self"}');
+
+    // Edit the scope but do NOT click Save scope, then flip the grant Switch off.
+    fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
+    fireEvent.click(screen.getByLabelText("remember_knowledge"));
+
+    // The toggle mutation fired for the revoke and carried NO config — the unsaved
+    // draft was never sent, so a stray edit can't silently persist on a toggle.
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].granted).toBe(false);
+    expect(calls[0].config).toBe("");
+  });
+
+  it("toggling a grant off then on does not resurrect the pre-revoke scope (#215)", async () => {
+    const { transport, calls, state } = scopedTransport({ granted: true, config: '{"scope":"self"}' });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    const sw = await screen.findByLabelText("remember_knowledge");
+    expect(sw).toBeChecked();
+
+    // Revoke (deletes the row), then re-grant.
+    fireEvent.click(sw);
+    await waitFor(() => expect(screen.getByLabelText("remember_knowledge")).not.toBeChecked());
+    fireEvent.click(screen.getByLabelText("remember_knowledge"));
+    await waitFor(() => expect(screen.getByLabelText("remember_knowledge")).toBeChecked());
+
+    // The re-grant is a FRESH grant with no scope — the deleted config is gone, not
+    // resurrected from local state — and the reappeared editor shows the server
+    // value (empty), not the stale pre-revoke draft.
+    expect(state().config).toBe("");
+    const rescope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
+    expect(rescope.value).toBe("");
+    const onCall = calls[calls.length - 1];
+    expect(onCall.granted).toBe(true);
+    expect(onCall.config).toBe("");
   });
 });
