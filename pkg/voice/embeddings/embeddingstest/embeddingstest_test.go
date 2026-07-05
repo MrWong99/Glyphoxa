@@ -163,3 +163,22 @@ func TestFixed_UnknownText_Errors(t *testing.T) {
 		t.Fatal("Fixed.Embed with unmapped text returned nil error")
 	}
 }
+
+// TestFixed_ReturnsCopy_NotFixtureAlias guards that a consumer mutating a
+// returned vector cannot corrupt the shared fixture map — the returned slice
+// must not alias the map's backing array.
+func TestFixed_ReturnsCopy_NotFixtureAlias(t *testing.T) {
+	f := embeddingstest.Fixed{"x": {1, 2, 3}}
+	out, err := f.Embed(context.Background(), []string{"x"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	out[0][0] = 99 // a hostile consumer mutating its result
+	again, err := f.Embed(context.Background(), []string{"x"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if again[0][0] != 1 {
+		t.Errorf("fixture corrupted: got %v, want original 1 (returned slice aliased the map)", again[0][0])
+	}
+}

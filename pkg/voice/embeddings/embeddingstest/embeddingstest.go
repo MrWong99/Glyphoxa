@@ -60,7 +60,12 @@ func vectorFor(text string) []float32 {
 		// Top 53 bits → float64 in [0,1), then scale to [-1,1).
 		f := float64(u>>11)/(1<<53)*2 - 1
 		v[i] = float32(f)
-		norm += f * f
+		// The explicit float64() conversion rounds the product to float64 before
+		// the add, a Go-spec fusion barrier: without it a target (e.g. arm64) may
+		// fuse mul+add into one FMA, giving low-bit-different norms per platform.
+		// Downstream waves commit fixtures against these vectors, so cross-platform
+		// bit-stability is load-bearing.
+		norm += float64(f * f)
 	}
 	norm = math.Sqrt(norm)
 	if norm == 0 {
@@ -105,7 +110,9 @@ func (f Fixed) Embed(_ context.Context, texts []string) ([][]float32, error) {
 		if !ok {
 			return nil, fmt.Errorf("embeddingstest.Fixed: no vector mapped for %q", t)
 		}
-		out[i] = v
+		// Copy so a consumer that mutates a returned vector can't corrupt the
+		// shared fixture backing array (the map value).
+		out[i] = append([]float32(nil), v...)
 	}
 	return out, nil
 }
