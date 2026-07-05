@@ -81,6 +81,19 @@ func devMode(getenv func(string) string) bool {
 	return true
 }
 
+// sttStreaming reports whether the GLYPHOXA_STT_STREAMING opt-in enables the
+// streaming-STT transport (ADR-0042, issue #180). Same truthy parse as [devMode]:
+// blank or an explicit falsy spelling ("0"/"false"/"no"/"off", any case) is OFF;
+// anything else is ON. Default OFF keeps the batch STT path byte-for-byte, so the
+// streaming path ships dark until an operator opts in.
+func sttStreaming(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_STT_STREAMING"))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
 // forceLoopback rewrites a listen address to bind 127.0.0.1, preserving the port
 // (":8080" → "127.0.0.1:8080", "0.0.0.0:9000" → "127.0.0.1:9000"). GLYPHOXA_DEV_MODE
 // pins the host to loopback so a mis-set flag in production is blunted: a

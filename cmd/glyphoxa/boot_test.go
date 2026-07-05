@@ -175,6 +175,31 @@ func TestDevMode(t *testing.T) {
 	}
 }
 
+// TestSTTStreaming: the streaming-STT opt-in (ADR-0042, issue #180) is on only
+// when GLYPHOXA_STT_STREAMING holds a non-blank, non-falsy value, so the batch
+// path stays the byte-for-byte default until an operator explicitly opts in.
+func TestSTTStreaming(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"   ", false},
+		{"0", false},
+		{"false", false},
+		{"OFF", false},
+		{" no ", false},
+		{"1", true},
+		{"true", true},
+		{"yes", true},
+	}
+	for _, c := range cases {
+		if got := sttStreaming(envMap(map[string]string{"GLYPHOXA_STT_STREAMING": c.val})); got != c.want {
+			t.Errorf("sttStreaming(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
 // TestForceLoopback pins the listen host to 127.0.0.1 while preserving the port,
 // so a GLYPHOXA_DEV_MODE instance is structurally unreachable from a container
 // port-mapping (ADR-0041) regardless of the configured -web-addr.
