@@ -68,7 +68,32 @@ type PrometheusRecorder struct {
 	// backfill worker (#116) Sets it too. Always Set-from-COUNT, never Inc/Dec, so
 	// it stays idempotent across writers and restarts.
 	embeddingBacklog prometheus.Gauge
+
+	// memory recall (#122, ADR-0042/0032): NPC Hot Context recalls by outcome —
+	// a speculation hit, an inline miss, or a degraded/unconfigured skip. The
+	// outcome label is a bounded three-value enum (ADR-0032).
+	memoryRecall *prometheus.CounterVec // outcome
 }
+
+// RecallOutcome is the bounded outcome label on the NPC memory-recall counter
+// (glyphoxa_voice_memory_recall_total, #122). Exactly three values reach a series
+// (ADR-0032): a speculation hit reused a partial-prefetched query, an inline miss
+// embedded+searched within the turn budget, and a skip degraded to no-memory
+// (budget exceeded, provider/DB down, or a defensive guard).
+type RecallOutcome string
+
+const (
+	// RecallHit: the final utterance matched a speculated partial, so the
+	// prefetched vector/world chunks were reused at zero added turn latency.
+	RecallHit RecallOutcome = "hit"
+	// RecallMiss: no usable speculation, so recall embedded and searched inline
+	// within the bounded-sync budget (ADR-0042).
+	RecallMiss RecallOutcome = "miss"
+	// RecallSkip: recall degraded to no-memory — the budget elapsed, the
+	// embeddings/DB path failed, or a defensive guard (unparseable agent id / no
+	// active session) tripped. A barge cancel is NOT a skip (it counts nothing).
+	RecallSkip RecallOutcome = "skip"
+)
 
 // NewPrometheusRecorder builds the adapter and registers every glyphoxa_voice_*
 // series on a fresh registry, plus the standard process/Go collectors so
@@ -143,12 +168,17 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		Help:      "Transcript chunks awaiting embedding (embedding IS NULL).",
 	})
 
+	r.memoryRecall = counterVec("memory_recall_total",
+		"NPC memory recalls by outcome (#122, ADR-0042): a speculation hit, an inline miss, or a degraded skip.",
+		"outcome")
+
 	reg.MustRegister(
 		r.framesDropped, r.undecodable, r.daveDecryptErrs, r.sessions,
 		r.playbackTotal, r.bargeCancels,
 		r.responseLatency, r.vadHangover, r.addressDetect, r.codecDecode,
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
+		r.memoryRecall,
 		// Standard runtime collectors so /metrics also reports process/Go health.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
@@ -218,6 +248,14 @@ func (r *PrometheusRecorder) ProviderError(s Stage, p Provider) {
 }
 func (r *PrometheusRecorder) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
 	r.turnTotal.WithLabelValues(string(outcome), string(reason)).Inc()
+}
+
+// MemoryRecall counts one NPC memory recall by its bounded outcome (#122,
+// ADR-0042/0032). It is the standalone recall-metrics sink the internal/recall
+// component records against (its local Metrics interface), separate from the
+// StageRecorder contract: recall is not an orchestrator stage.
+func (r *PrometheusRecorder) MemoryRecall(o RecallOutcome) {
+	r.memoryRecall.WithLabelValues(string(o)).Inc()
 }
 
 // SetEmbeddingBacklog publishes the current count of transcript chunks awaiting an

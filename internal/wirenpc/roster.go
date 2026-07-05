@@ -106,8 +106,11 @@ func (r *Roster) RemoveNPC(agentID string) {
 
 // rosterDepsForLive builds the production rosterDeps: every NPC's Replier is
 // constructed from the shared tool-engine, so N Character NPCs reuse one Groq
-// client and one synthesizer rather than each opening their own.
-func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger) rosterDeps {
+// client and one synthesizer rather than each opening their own. memory is the
+// shared NPC memory recaller (#122); every NPC's loop consults the SAME recaller,
+// which scopes retrieval by the addressed AgentID per turn. A nil memory disables
+// recall (AC6).
+func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller) rosterDeps {
 	return rosterDeps{
 		replierFor: func(spec npcSpec) *agent.Replier {
 			return agent.NewReplier(agent.Config{
@@ -119,6 +122,7 @@ func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns 
 				Engine:       engine,
 				Synthesizer:  synth,
 				HistoryTurns: historyTurns,
+				Memory:       memory,
 				OnError: func(err error) {
 					log.Warn("agent reply failed", "npc", spec.name, "err", err)
 				},

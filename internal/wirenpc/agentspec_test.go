@@ -164,7 +164,7 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// assert it succeeds, and that the matcher routes a named utterance to the
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
-	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil, providerKeys{}, false)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 
 	// The two NPCs must assemble into a Roster that routes each by name to its own
 	// identity — the end-to-end multi-NPC acceptance bar.
-	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil, providerKeys{}, false)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("buildConversation from 2 DB NPCs: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	npcs := []npcSpec{hardcodedNPC()}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil, providerKeys{}, false)
+	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("first buildConversation: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	}
 	cleanup1() // end of reconnect cycle 1
 
-	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil, providerKeys{}, false)
+	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("second buildConversation after cleanup: %v — cleanup destroyed the shared ONNX env?", err)
 	}

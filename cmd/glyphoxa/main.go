@@ -21,6 +21,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/recall"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
@@ -321,20 +322,36 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		metrics.SetEmbeddingBacklog(n)
 	}
 
-	// Async embedding backfill worker (#116, ADR-0011): a background loop that
-	// claims chunks written with embedding NULL, embeds their text, and UPDATEs
-	// each row — draining the backlog gauge toward zero and making the chunks
-	// returnable by embedding-filtered retrieval. It needs only the DB + the
-	// embeddings provider (not the voice loop), so it runs in web AND all mode.
-	// A resolve failure (an unsupported provider OR a config-read error) is
-	// loud-but-non-fatal: log ERROR and skip the worker — the backlog gauge then
-	// exposes the permanent stall rather than the process crashing. The worker
-	// rides the process signal ctx, so SIGTERM stops it and any in-flight provider
-	// call aborts with the same context.
+	// Resolve the process embeddings provider ONCE and share it across the two
+	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
+	// backlog, and the NPC memory recaller (#122) embeds utterances for Hot Context
+	// retrieval. Resolving it twice would open two independent clients. A resolve
+	// failure (an unsupported provider OR a config-read error) is loud-but-non-fatal
+	// for BOTH: the backlog gauge exposes the permanent stall and NPC memory recall
+	// stays disabled (AC6 — Agent turns behave exactly as before), rather than
+	// crashing the process.
 	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
-		log.Error("embeddings provider unavailable, backfill disabled", "err", err)
+		log.Error("embeddings provider unavailable; embedding backfill and NPC memory recall disabled", "err", err)
 	} else {
+		// Backfill worker (#116, ADR-0011): claims chunks written with embedding NULL,
+		// embeds their text, and UPDATEs each row — draining the gauge toward zero and
+		// making the chunks returnable by embedding-filtered retrieval. It needs only
+		// the DB + provider (not the voice loop), so it runs in web AND all mode. It
+		// rides the process signal ctx, so SIGTERM stops it and any in-flight provider
+		// call aborts with the same context.
 		go embedworker.New(store, provider, model, metrics, log, embedworker.Config{}).Run(ctx)
+
+		// NPC memory recall (#122, ADR-0011/0042): one recaller over the shared
+		// provider + the process store (ANN retriever, #119) + the session Manager
+		// (the active Campaign) + the process bus (STTPartial speculation). Set on the
+		// Manager's base voice config so every manager-started session's Agent loops
+		// fill the reserved Hot Context memory slot; a slow/unavailable path degrades
+		// to no-memory within the turn budget. Bound to the run ctx — AfterFunc drops
+		// the bus subscription and stops the speculator on shutdown. In web-only mode
+		// the Manager starts no sessions, so the recaller stays dormant (bus idle).
+		recaller := recall.New(provider, store, mgr, eventBus, metrics, log, recall.Config{})
+		context.AfterFunc(ctx, recaller.Close)
+		mgr.SetMemory(recaller)
 	}
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
