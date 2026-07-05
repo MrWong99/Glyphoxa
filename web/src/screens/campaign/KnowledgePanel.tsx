@@ -1,7 +1,20 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { EyeOff, Plus, StickyNote } from "lucide-react";
+import {
+  EyeOff,
+  Plus,
+  Pencil,
+  Trash2,
+  User,
+  VenetianMask,
+  MapPin,
+  Flag,
+  Gem,
+  GitBranch,
+  StickyNote,
+  type LucideIcon,
+} from "lucide-react";
 
 import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
 import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
@@ -10,21 +23,59 @@ import { Badge } from "@/components/ui/Badge";
 import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
+import { Select } from "@/components/ui/Select";
 
-// The Knowledge panel (#126) backs the Campaign screen's "Knowledge" view on the
-// live CampaignService ListNodes/CreateNode RPCs (ADR-0008 v1.0). For this slice
-// the only Node type authored from the UI is a Note ("entry", GM-facing copy —
-// the code keeps the Node domain term). Public entries are injected into NPC
-// prompts; a GM-private entry never reaches the table (the gm_private flag). Full
-// 7-type authoring, search and edges arrive in later slices.
+// The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
+// on the live CampaignService node RPCs (ADR-0008 v1.0). An "entry" is the
+// GM-facing name for a Node (the code keeps the Node domain term). This slice
+// authors all seven Node types (type chosen once on create — immutable per
+// ADR-0008), edits and deletes entries, and groups the list by type. Public
+// entries are injected into NPC prompts; a gm_private entry never reaches the
+// table. Type-filter chips + fulltext search arrive in #131.
 
-// noteColor is the design's Note type-color, applied to the entry icon.
-const noteColor = "#8b93a7";
+type TypeMeta = { label: string; color: string; Icon: LucideIcon };
+
+// Per-type label, design color, and lucide icon (approved #129 design). The Note
+// entry's neutral grey doubles as the defensive fallback for an unknown type.
+const TYPE_META: Record<number, TypeMeta> = {
+  [NodeType.CHARACTER]: { label: "Character", color: "#4fa9ff", Icon: User },
+  [NodeType.NPC]: { label: "NPC", color: "#9059ff", Icon: VenetianMask },
+  [NodeType.LOCATION]: { label: "Location", color: "#35c48d", Icon: MapPin },
+  [NodeType.FACTION]: { label: "Faction", color: "#ffbd4f", Icon: Flag },
+  [NodeType.ITEM]: { label: "Item", color: "#ff7139", Icon: Gem },
+  [NodeType.PLOT_THREAD]: { label: "Plot thread", color: "#ff4f5e", Icon: GitBranch },
+  [NodeType.NOTE]: { label: "Note", color: "#8b93a7", Icon: StickyNote },
+};
+
+// The authorable types in enum order; UNSPECIFIED (0) is never offered, and this
+// order also drives the grouped list and the type-select options.
+const TYPE_ORDER: NodeType[] = [
+  NodeType.CHARACTER,
+  NodeType.NPC,
+  NodeType.LOCATION,
+  NodeType.FACTION,
+  NodeType.ITEM,
+  NodeType.PLOT_THREAD,
+  NodeType.NOTE,
+];
+
+const TYPE_OPTIONS = TYPE_ORDER.map((t) => ({ value: String(t), label: TYPE_META[t].label }));
+const TYPE_HINT = TYPE_ORDER.map((t) => TYPE_META[t].label).join(" · ");
+
+function metaOf(t: NodeType): TypeMeta {
+  return TYPE_META[t] ?? TYPE_META[NodeType.NOTE];
+}
+
+// alphaBg tints a type color to the design's 14%-alpha tile background (0x24 ≈ 14%).
+function alphaBg(color: string): string {
+  return `${color}24`;
+}
 
 export function KnowledgePanel() {
   const queryClient = useQueryClient();
   const { data, status, error } = useQuery(CampaignService.method.listNodes, {});
   const nodes = useMemo(() => data?.nodes ?? [], [data]);
+  const [editing, setEditing] = useState<Node | null>(null);
 
   const invalidateNodes = () =>
     queryClient.invalidateQueries({
@@ -35,6 +86,15 @@ export function KnowledgePanel() {
     });
 
   const createNode = useMutation(CampaignService.method.createNode, {
+    onSuccess: () => void invalidateNodes(),
+  });
+  const updateNode = useMutation(CampaignService.method.updateNode, {
+    onSuccess: () => {
+      setEditing(null);
+      void invalidateNodes();
+    },
+  });
+  const deleteNode = useMutation(CampaignService.method.deleteNode, {
     onSuccess: () => void invalidateNodes(),
   });
 
@@ -49,11 +109,35 @@ export function KnowledgePanel() {
     );
   }
 
+  // Group by type in enum order; empty groups are dropped so the list only shows
+  // the types actually present.
+  const groups = TYPE_ORDER.map((t) => ({
+    type: t,
+    items: nodes.filter((n) => n.nodeType === t),
+  })).filter((g) => g.items.length > 0);
+
+  const removeNode = (n: Node) =>
+    deleteNode.mutate(
+      { id: n.id },
+      { onSuccess: () => setEditing((e) => (e?.id === n.id ? null : e)) },
+    );
+
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
-        {nodes.map((n) => (
-          <KnowledgeCard key={n.id} node={n} />
+        {groups.map((g) => (
+          <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
+            <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
+            {g.items.map((n) => (
+              <KnowledgeCard
+                key={n.id}
+                node={n}
+                onEdit={() => setEditing(n)}
+                onDelete={() => removeNode(n)}
+                deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
+              />
+            ))}
+          </section>
         ))}
         {nodes.length === 0 && (
           <p className="gx-kg-empty">
@@ -62,74 +146,171 @@ export function KnowledgePanel() {
         )}
       </div>
 
-      <AddEntry
-        pending={createNode.isPending}
-        error={createNode.isError ? createNode.error.message : null}
-        onAdd={(name, body, gmPrivate, reset) =>
-          createNode.mutate(
-            { nodeType: NodeType.NOTE, name, body, gmPrivate },
-            { onSuccess: reset },
-          )
+      <EntryEditor
+        key={editing?.id ?? "new"}
+        node={editing}
+        pending={editing ? updateNode.isPending : createNode.isPending}
+        error={
+          editing
+            ? updateNode.isError
+              ? updateNode.error.message
+              : null
+            : createNode.isError
+              ? createNode.error.message
+              : null
         }
+        onCancel={() => setEditing(null)}
+        onDelete={editing ? () => removeNode(editing) : undefined}
+        onSubmit={(fields, reset) => {
+          if (editing) {
+            updateNode.mutate({
+              id: editing.id,
+              name: fields.name,
+              body: fields.body,
+              gmPrivate: fields.gmPrivate,
+            });
+          } else {
+            createNode.mutate(
+              { nodeType: fields.nodeType, name: fields.name, body: fields.body, gmPrivate: fields.gmPrivate },
+              { onSuccess: reset },
+            );
+          }
+        }}
       />
     </div>
   );
 }
 
-// KnowledgeCard renders one entry: the Note icon, name, a "Note" type badge, a
-// "GM private" badge (EyeOff) when private, and a one-line body snippet.
-function KnowledgeCard({ node }: { node: Node }) {
+// KnowledgeCard renders one entry: a type-colored icon tile, the name, a
+// type-colored badge, a "GM private" badge (EyeOff) when private, a one-line body
+// snippet, and edit/delete affordances.
+function KnowledgeCard({
+  node,
+  onEdit,
+  onDelete,
+  deleting,
+}: {
+  node: Node;
+  onEdit: () => void;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
+  const meta = metaOf(node.nodeType);
   return (
     <Card className="gx-kg-card">
-      <span className="gx-kg-card__icon" style={{ color: noteColor }} aria-hidden>
-        <StickyNote size={16} />
+      <span
+        className="gx-kg-card__icon"
+        style={{ color: meta.color, background: alphaBg(meta.color) }}
+        aria-hidden
+      >
+        <meta.Icon size={16} />
       </span>
       <div className="gx-kg-card__meta">
         <div className="gx-kg-card__head">
           <span className="gx-kg-card__name">{node.name}</span>
-          <Badge variant="neutral" size="sm">
-            Note
+          <Badge
+            size="sm"
+            className="gx-kg-card__type"
+            style={{ color: meta.color, background: alphaBg(meta.color) }}
+          >
+            {meta.label}
           </Badge>
           {node.gmPrivate && (
-            <Badge variant="warning" size="sm">
+            <Badge variant="neutral" size="sm">
               <EyeOff size={11} /> GM private
             </Badge>
           )}
         </div>
         {node.body && <span className="gx-kg-card__snippet">{node.body}</span>}
       </div>
+      <div className="gx-kg-card__actions">
+        <button
+          type="button"
+          className="gx-kg-iconbtn"
+          aria-label={`Edit ${node.name}`}
+          onClick={onEdit}
+        >
+          <Pencil size={14} />
+        </button>
+        <button
+          type="button"
+          className="gx-kg-iconbtn gx-kg-iconbtn--danger"
+          aria-label={`Delete ${node.name}`}
+          onClick={onDelete}
+          disabled={deleting}
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
     </Card>
   );
 }
 
-// AddEntry is the sticky create form: Name, Content, and the GM-private switch.
-// The type is fixed to Note for this slice.
-function AddEntry({
+type EditorFields = { nodeType: NodeType; name: string; body: string; gmPrivate: boolean };
+
+// EntryEditor is the sticky editor card. In create mode it offers the Type select
+// (all seven types) plus Name/Content/GM-private; in edit mode the type is fixed
+// (immutable, ADR-0008) so the select is disabled, and a delete button + Cancel
+// appear. Remounting on a key change (editing id) resets its fields.
+function EntryEditor({
+  node,
   pending,
   error,
-  onAdd,
+  onSubmit,
+  onDelete,
+  onCancel,
 }: {
+  node: Node | null;
   pending: boolean;
   error: string | null;
-  onAdd: (name: string, body: string, gmPrivate: boolean, reset: () => void) => void;
+  onSubmit: (fields: EditorFields, reset: () => void) => void;
+  onDelete?: () => void;
+  onCancel: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [body, setBody] = useState("");
-  const [gmPrivate, setGmPrivate] = useState(false);
+  const isEdit = node != null;
+  const [nodeType, setNodeType] = useState<NodeType>(node?.nodeType ?? NodeType.NOTE);
+  const [name, setName] = useState(node?.name ?? "");
+  const [body, setBody] = useState(node?.body ?? "");
+  const [gmPrivate, setGmPrivate] = useState(node?.gmPrivate ?? false);
 
   const reset = () => {
+    setNodeType(NodeType.NOTE);
     setName("");
     setBody("");
     setGmPrivate(false);
   };
-  const add = () => {
+  const submit = () => {
     if (name.trim() === "") return;
-    onAdd(name.trim(), body, gmPrivate, reset);
+    onSubmit({ nodeType, name: name.trim(), body, gmPrivate }, reset);
   };
 
   return (
     <Card accent className="gx-kg-editor">
-      <h2 className="gx-kg-editor__title">Add entry</h2>
+      <div className="gx-kg-editor__bar">
+        <h2 className="gx-kg-editor__title">{isEdit ? "Edit entry" : "Add entry"}</h2>
+        {isEdit && onDelete && (
+          <button
+            type="button"
+            className="gx-kg-iconbtn gx-kg-iconbtn--danger"
+            aria-label="Delete entry"
+            onClick={onDelete}
+            disabled={pending}
+          >
+            <Trash2 size={15} />
+          </button>
+        )}
+      </div>
+
+      <div className="gx-field">
+        <Select
+          label="Type"
+          options={TYPE_OPTIONS}
+          value={String(nodeType)}
+          onValueChange={(v) => setNodeType(Number(v) as NodeType)}
+          disabled={isEdit}
+        />
+        <span className="gx-field__hint">{TYPE_HINT}</span>
+      </div>
 
       <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="What is it called?" />
 
@@ -161,12 +342,22 @@ function AddEntry({
       </div>
 
       <div className="gx-kg-editor__actions">
-        <Button variant="primary" iconStart={<Plus size={14} />} onClick={add} disabled={pending || name.trim() === ""}>
-          {pending ? "Adding…" : "Add entry"}
+        <Button
+          variant="primary"
+          iconStart={isEdit ? undefined : <Plus size={14} />}
+          onClick={submit}
+          disabled={pending || name.trim() === ""}
+        >
+          {pending ? "Saving…" : isEdit ? "Save entry" : "Add entry"}
         </Button>
+        {isEdit && (
+          <Button variant="ghost" onClick={onCancel} disabled={pending}>
+            Cancel
+          </Button>
+        )}
         {error && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            Couldn't add: {error}
+            Couldn't save: {error}
           </span>
         )}
       </div>

@@ -27,6 +27,17 @@ if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
+// jsdom implements none of the Pointer Capture APIs that Radix Select (the KG
+// entry Type picker, #129) probes when opening its listbox. Stub them so the
+// dropdown mounts and its options are selectable under test — the observable
+// behaviour is the chosen NodeType, not pointer capture.
+if (typeof Element !== "undefined") {
+  const el = Element.prototype as unknown as Record<string, unknown>;
+  el.hasPointerCapture ??= () => false;
+  el.setPointerCapture ??= () => {};
+  el.releasePointerCapture ??= () => {};
+}
+
 // jsdom has no EventSource; the Session screen opens one for the live transcript
 // (#73). Install the mock globally so every test renders without crashing, and a
 // transcript test can drive frames via MockEventSource.last().
