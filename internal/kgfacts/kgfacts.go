@@ -42,6 +42,11 @@ const (
 	// MaxFactChars caps one fact's body length in runes; a longer body is
 	// rune-safe-truncated with a trailing ellipsis.
 	MaxFactChars = 500
+	// MaxNameChars caps a fact's Node-name length in runes. Without it a single
+	// pathological name could push one fact past MaxBlockChars — and since the read
+	// is newest-first, that oversized fact would land first and the deterministic
+	// prefix-stop would drop the ENTIRE block (review finding, PR #202).
+	MaxNameChars = 200
 	// MaxBlockChars bounds the whole assembled facts block (header + joins + facts)
 	// so the prompt budget holds regardless of wiki size (#126 AC4).
 	MaxBlockChars = 4000
@@ -210,11 +215,12 @@ func renderFacts(nodes []storage.KGNode) []string {
 	return out
 }
 
-// renderFact renders one Node as "### <Name> (<TypeLabel>)\n<Body>", with the body
-// trimmed and rune-safe-truncated to MaxFactChars. A bodiless Node emits only its
-// header line (no dangling newline).
+// renderFact renders one Node as "### <Name> (<TypeLabel>)\n<Body>". The name is
+// rune-safe-truncated to MaxNameChars and the body to MaxFactChars, each with a
+// trailing ellipsis when cut, so no single Node can blow the block budget. A
+// bodiless Node emits only its header line (no dangling newline).
 func renderFact(n storage.KGNode) string {
-	head := fmt.Sprintf("### %s (%s)", n.Name, typeLabel(n.Type))
+	head := fmt.Sprintf("### %s (%s)", truncateRunes(n.Name, MaxNameChars), typeLabel(n.Type))
 	body := truncateRunes(strings.TrimSpace(n.Body), MaxFactChars)
 	if body == "" {
 		return head
