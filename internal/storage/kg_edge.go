@@ -96,6 +96,11 @@ func ValidateEdge(t KGEdgeType, from, to KGNodeType) error {
 		}
 	case KGEdgeKnows, KGEdgeOwns, KGEdgeEnemyOf, KGEdgeAllyOf, KGEdgeMentionedIn:
 		// Loose/social types: unconstrained on both ends by design.
+	default:
+		// An unknown edge type is never valid — reject defensively rather than
+		// falling through to nil (the DB enum is the real gate, but the RPC layer
+		// also validates before ever reaching storage).
+		return ErrInvalidEdge
 	}
 	return nil
 }
