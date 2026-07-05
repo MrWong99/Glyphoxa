@@ -45,6 +45,29 @@ func (s *Store) GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (De
 	return d, nil
 }
 
+// GetLatestDeploymentConfig returns the most-recently-updated deployment config,
+// or ErrNotFound when none is saved. The standing presence (#102, ADR-0010)
+// reads this at boot, before any request — so, like GetActiveCampaign, it has no
+// tenant context and reads the single-operator global latest (ADR-0039). More
+// than one deployment_config row only exists under the deferred multi-tenant
+// tier; this returns the newest, and a later WHERE tenant_id = $1 narrows it
+// then (as GetDeploymentConfig already does for the request path).
+func (s *Store) GetLatestDeploymentConfig(ctx context.Context) (DeploymentConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+deploymentConfigColumns+`
+		   FROM deployment_config
+		  ORDER BY updated_at DESC, tenant_id DESC
+		  LIMIT 1`)
+	d, err := scanDeploymentConfig(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeploymentConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return DeploymentConfig{}, fmt.Errorf("storage: get latest deployment_config: %w", err)
+	}
+	return d, nil
+}
+
 // SaveDiscordBotToken upserts only the deployment Bot token columns (sealed
 // ciphertext + last4), leaving the Guild / Voice channel IDs untouched. It
 // returns the resulting row. The ciphertext is the caller-sealed secret.

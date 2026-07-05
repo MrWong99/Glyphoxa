@@ -1,0 +1,394 @@
+package presence
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
+)
+
+// interactionTimeout bounds a handler's work well under Discord's 3s
+// initial-response deadline: past it Discord drops the interaction token and the
+// reply fails. Every dispatched handler runs on a context deadlined to this.
+const interactionTimeout = 2500 * time.Millisecond
+
+// commandGroup is the single grouped-command prefix v1.0 ships (ADR-0010):
+// admin/session commands register as `/glyphoxa <sub>`, merged into one
+// SlashCommandCreate. High-frequency commands (e.g. /roll) stay flat.
+const commandGroup = "glyphoxa"
+
+// commandGroupDescription is the top-level description Discord requires for the
+// merged /glyphoxa command (its subcommands carry their own descriptions).
+const commandGroupDescription = "Glyphoxa game-master commands"
+
+// Handler runs one slash-command interaction. It owns the user-facing reply:
+// domain errors (a malformed argument) are reported with ic.ReplyEphemeral and
+// the handler returns nil; a returned error is an UNEXPECTED failure, which the
+// Registry logs and answers with a generic ephemeral message. Either way the
+// interaction is never left silently un-answered.
+type Handler func(ctx context.Context, ic *Interaction) error
+
+// AutocompleteHandler produces choices for an in-progress option value. A nil
+// AutocompleteHandler on a Command means the command has no autocomplete.
+type AutocompleteHandler func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error)
+
+// Command is one registered slash command. Path is either a flat name ("roll")
+// or a grouped `"glyphoxa <sub>"` (ADR-0010) — the Registry merges every
+// "glyphoxa *" Path into ONE /glyphoxa SlashCommandCreate whose subcommands are
+// the individual Paths.
+type Command struct {
+	Path        string
+	Description string
+	Options     []discord.ApplicationCommandOption
+	// GMOnly false = anyone in the configured Guild (Gate.CheckGuild only); true
+	// = operator-allowlisted GM (Gate.CheckGM).
+	GMOnly bool
+	Handle Handler
+	// Autocomplete is optional. A GM-only command returns empty choices to a
+	// non-operator so a command's option names never leak (handled by dispatch).
+	Autocomplete AutocompleteHandler
+}
+
+// Registry holds the slash-command surface: it produces the per-Guild command
+// definitions and dispatches inbound interactions to the registered handler,
+// authorizing each server-side via the Gate. It is the shared contract issues
+// #108/#120/#211 register additional commands against.
+type Registry struct {
+	gate *Gate
+	log  *slog.Logger
+
+	mu    sync.RWMutex
+	cmds  map[string]Command // dispatch key -> command
+	order []string           // registration order, for deterministic Definitions
+}
+
+// NewRegistry builds an empty Registry over a Gate. Register commands at boot,
+// before the presence opens its gateway.
+func NewRegistry(gate *Gate, log *slog.Logger) *Registry {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Registry{gate: gate, log: log, cmds: map[string]Command{}}
+}
+
+// Register adds commands to the surface. Boot-time only (before the first
+// Ensure); the dispatch key is the command's Path.
+func (r *Registry) Register(cmds ...Command) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range cmds {
+		if _, dup := r.cmds[c.Path]; !dup {
+			r.order = append(r.order, c.Path)
+		}
+		r.cmds[c.Path] = c
+	}
+}
+
+// Definitions is the per-Guild registration payload: flat commands as their own
+// SlashCommandCreate, and every "glyphoxa <sub>" merged into ONE /glyphoxa
+// command carrying each sub as a SubCommand option (ADR-0010). Flat commands
+// come first, then the merged group, in registration order.
+func (r *Registry) Definitions() []discord.ApplicationCommandCreate {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var flat []discord.ApplicationCommandCreate
+	group := discord.SlashCommandCreate{Name: commandGroup, Description: commandGroupDescription}
+	haveGroup := false
+
+	for _, path := range r.order {
+		c := r.cmds[path]
+		prefix, sub, isSub := strings.Cut(path, " ")
+		if !isSub {
+			flat = append(flat, discord.SlashCommandCreate{
+				Name:        path,
+				Description: c.Description,
+				Options:     c.Options,
+			})
+			continue
+		}
+		if prefix != commandGroup {
+			// Only the /glyphoxa group exists in v1.0; a stray grouped Path is a
+			// programming error, but drop it rather than emit a bad command.
+			r.log.Warn("presence: ignoring command with unknown group prefix", "path", path)
+			continue
+		}
+		haveGroup = true
+		group.Options = append(group.Options, discord.ApplicationCommandOptionSubCommand{
+			Name:        sub,
+			Description: c.Description,
+			Options:     c.Options,
+		})
+	}
+
+	defs := make([]discord.ApplicationCommandCreate, 0, len(flat)+1)
+	defs = append(defs, flat...)
+	if haveGroup {
+		defs = append(defs, group)
+	}
+	return defs
+}
+
+// HandleCommand is the disgo listener for slash-command interactions. It builds
+// an Interaction over the event and dispatches it; every path answers the
+// interaction (a reply or an ephemeral error), never a silent drop.
+func (r *Registry) HandleCommand(e *events.ApplicationCommandInteractionCreate) {
+	data, ok := e.Data.(discord.SlashCommandInteractionData)
+	if !ok {
+		// We register only slash commands, so a non-slash application command is
+		// never expected; ignore it rather than panic on the type assertion.
+		return
+	}
+	ic := &Interaction{
+		guildID: snowflakePtrString(e.GuildID()),
+		userID:  e.User().ID.String(),
+		opts:    data,
+		resp:    &eventResponder{event: e},
+	}
+	r.dispatch(context.Background(), dispatchKey(data.CommandName(), data.SubCommandName), ic)
+}
+
+// dispatch is the transport-agnostic command core: look up, authorize, run. It
+// is separated from HandleCommand so it can be unit-tested with a fake
+// Interaction (a fake responder + fake options), no live Discord event needed.
+func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
+	cmd, ok := r.lookup(key)
+	if !ok {
+		_ = ic.ReplyEphemeral("Unknown command.")
+		r.log.Warn("presence: unknown slash command", "command", key)
+		return
+	}
+	if err := r.authorize(cmd, ic.guildID, ic.userID); err != nil {
+		_ = ic.ReplyEphemeral(gateMessage(err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(base, interactionTimeout)
+	defer cancel()
+	if err := cmd.Handle(ctx, ic); err != nil {
+		r.log.Error("presence: slash command handler failed", "command", key, "err", err)
+		_ = ic.ReplyEphemeral("Something went wrong handling that command.")
+	}
+}
+
+// HandleAutocomplete is the disgo listener for autocomplete interactions. It
+// always responds with a choice slice (possibly empty), so a focused option
+// never hangs.
+func (r *Registry) HandleAutocomplete(e *events.AutocompleteInteractionCreate) {
+	data := e.Data
+	ac := &Autocomplete{
+		guildID: snowflakePtrString(e.GuildID()),
+		userID:  e.User().ID.String(),
+		data:    data,
+	}
+	choices := r.autocompleteChoices(context.Background(), dispatchKey(data.CommandName, data.SubCommandName), ac)
+	_ = e.AutocompleteResult(choices)
+}
+
+// autocompleteChoices is the testable autocomplete core: it returns the handler
+// choices, or an EMPTY (never nil) slice when the command is unknown, has no
+// autocomplete, the invoker is not authorized (no name leak), or the handler
+// fails.
+func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Autocomplete) []discord.AutocompleteChoice {
+	empty := []discord.AutocompleteChoice{}
+	cmd, ok := r.lookup(key)
+	if !ok || cmd.Autocomplete == nil {
+		return empty
+	}
+	if err := r.authorize(cmd, ac.guildID, ac.userID); err != nil {
+		return empty
+	}
+	ctx, cancel := context.WithTimeout(base, interactionTimeout)
+	defer cancel()
+	choices, err := cmd.Autocomplete(ctx, ac)
+	if err != nil {
+		r.log.Error("presence: autocomplete handler failed", "command", key, "err", err)
+		return empty
+	}
+	if choices == nil {
+		return empty
+	}
+	return choices
+}
+
+// authorize applies the command's server-side permission rule: GM-only commands
+// require an allowlisted operator in the configured Guild, others just require
+// the configured Guild.
+func (r *Registry) authorize(cmd Command, guildID, userID string) error {
+	if cmd.GMOnly {
+		return r.gate.CheckGM(guildID, userID)
+	}
+	return r.gate.CheckGuild(guildID)
+}
+
+func (r *Registry) lookup(key string) (Command, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	c, ok := r.cmds[key]
+	return c, ok
+}
+
+// dispatchKey is the map key for an inbound interaction: the flat command name,
+// or "<name> <sub>" for a grouped subcommand — matching Command.Path.
+func dispatchKey(name string, sub *string) string {
+	if sub != nil {
+		return name + " " + *sub
+	}
+	return name
+}
+
+// gateMessage maps a Gate denial to its distinct ephemeral text.
+func gateMessage(err error) string {
+	switch {
+	case errors.Is(err, ErrNotOperator):
+		return "You're not authorized to use this command."
+	case errors.Is(err, ErrWrongGuild):
+		return "This command isn't available here."
+	default:
+		return "You can't use this command."
+	}
+}
+
+// Interaction is the handler's view of one slash-command interaction: its option
+// values, the invoker's identity, and the reply methods. The response path is
+// injectable (responder) so the Registry dispatches in unit tests without a live
+// Discord connection.
+type Interaction struct {
+	guildID string
+	userID  string
+	opts    optionSource
+	resp    responder
+}
+
+// GuildID is the Guild the interaction happened in, or "" for a DM.
+func (ic *Interaction) GuildID() string { return ic.guildID }
+
+// UserID is the invoking Discord User's snowflake.
+func (ic *Interaction) UserID() string { return ic.userID }
+
+// String reads a string option by name; ok is false when it was not supplied.
+func (ic *Interaction) String(name string) (string, bool) {
+	if ic.opts == nil {
+		return "", false
+	}
+	return ic.opts.OptString(name)
+}
+
+// Int reads an integer option by name; ok is false when it was not supplied.
+func (ic *Interaction) Int(name string) (int64, bool) {
+	if ic.opts == nil {
+		return 0, false
+	}
+	v, ok := ic.opts.OptInt(name)
+	return int64(v), ok
+}
+
+// Reply answers the interaction with a public in-channel message.
+func (ic *Interaction) Reply(content string) error { return ic.resp.reply(content, false) }
+
+// ReplyEphemeral answers with a message only the invoker sees.
+func (ic *Interaction) ReplyEphemeral(content string) error { return ic.resp.reply(content, true) }
+
+// Defer acknowledges the interaction with a "thinking…" placeholder, buying a
+// slow handler time past the 3s deadline; it later sends the real reply with
+// Followup.
+func (ic *Interaction) Defer(ephemeral bool) error { return ic.resp.deferResponse(ephemeral) }
+
+// Followup sends a message after a Defer.
+func (ic *Interaction) Followup(content string, ephemeral bool) error {
+	return ic.resp.followup(content, ephemeral)
+}
+
+// Autocomplete is the handler's view of one autocomplete interaction.
+type Autocomplete struct {
+	guildID string
+	userID  string
+	data    discord.AutocompleteInteractionData
+}
+
+// Focused is the option the user is currently typing (its name and partial
+// value). The value is decoded defensively: disgo's own accessor panics on a
+// non-string or absent value, but an autocomplete can fire before any character
+// is typed, so this returns "" rather than crash the gateway goroutine.
+func (ac *Autocomplete) Focused() (name, value string) {
+	f := ac.data.Focused()
+	if len(f.Value) == 0 {
+		return f.Name, ""
+	}
+	var s string
+	if err := json.Unmarshal(f.Value, &s); err == nil {
+		return f.Name, s
+	}
+	return f.Name, strings.TrimSpace(string(f.Value))
+}
+
+// UserID is the invoking Discord User's snowflake.
+func (ac *Autocomplete) UserID() string { return ac.userID }
+
+// GuildID is the Guild the interaction happened in, or "" for a DM.
+func (ac *Autocomplete) GuildID() string { return ac.guildID }
+
+// optionSource is the option-reading surface an Interaction needs;
+// discord.SlashCommandInteractionData satisfies it in production, a fake map in
+// tests.
+type optionSource interface {
+	OptString(name string) (string, bool)
+	OptInt(name string) (int, bool)
+}
+
+// responder is the injectable interaction-response sink: production wraps the
+// disgo event, tests record the calls.
+type responder interface {
+	reply(content string, ephemeral bool) error
+	deferResponse(ephemeral bool) error
+	followup(content string, ephemeral bool) error
+}
+
+// eventResponder is the production responder over a live slash-command event.
+type eventResponder struct {
+	event *events.ApplicationCommandInteractionCreate
+}
+
+func (r *eventResponder) reply(content string, ephemeral bool) error {
+	return r.event.CreateMessage(ephemeralMessage(content, ephemeral))
+}
+
+func (r *eventResponder) deferResponse(ephemeral bool) error {
+	return r.event.DeferCreateMessage(ephemeral)
+}
+
+func (r *eventResponder) followup(content string, ephemeral bool) error {
+	_, err := r.event.Client().Rest.CreateFollowupMessage(
+		r.event.ApplicationID(), r.event.Token(), ephemeralMessage(content, ephemeral))
+	return err
+}
+
+// ephemeralMessage builds a MessageCreate, flagged ephemeral when requested.
+func ephemeralMessage(content string, ephemeral bool) discord.MessageCreate {
+	mc := discord.MessageCreate{Content: content}
+	if ephemeral {
+		mc.Flags = mc.Flags.Add(discord.MessageFlagEphemeral)
+	}
+	return mc
+}
+
+// snowflakePtrString renders an optional Guild snowflake as a string, "" for a
+// nil (DM) pointer.
+func snowflakePtrString(id *snowflake.ID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
+}
+
+// compile-time proof the production responder satisfies the seam.
+var _ responder = (*eventResponder)(nil)
+
+// compile-time proof disgo's slash data satisfies the option seam.
+var _ optionSource = discord.SlashCommandInteractionData{}

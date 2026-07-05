@@ -75,6 +75,12 @@ type ProviderServer struct {
 	// credential save (#150), so a cached Degraded badge cannot outlive the
 	// fixed key for up to a TTL. nil (not wired) skips.
 	invalidateHealth func(tenantID uuid.UUID)
+
+	// refreshPresence reconciles the standing Discord presence after a Discord
+	// settings change (#102), so a newly-saved Bot token / Guild registers the
+	// slash-command surface without a restart. Fired in a goroutine (presence
+	// Ensure does network I/O). nil (web-only, or not wired) skips.
+	refreshPresence func()
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -94,6 +100,15 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 // lock is needed.
 func (s *ProviderServer) SetHealthInvalidator(fn func(tenantID uuid.UUID)) {
 	s.invalidateHealth = fn
+}
+
+// SetPresenceRefresher wires the standing-presence reconciler fired after a
+// successful SaveDiscordSettings (#102), mirroring SetHealthInvalidator. Called
+// once at boot, before the server serves, so no lock is needed. fn is invoked in
+// a goroutine because presence.Ensure does network I/O (OpenGateway) that must
+// not block the RPC response.
+func (s *ProviderServer) SetPresenceRefresher(fn func()) {
+	s.refreshPresence = fn
 }
 
 // Handler builds the Connect HTTP handler for ProviderService and returns its
@@ -281,6 +296,14 @@ func (s *ProviderServer) SaveDiscordSettings(
 	// verdict so the next health call probes with the new state (#150).
 	if s.invalidateHealth != nil {
 		s.invalidateHealth(tenantID)
+	}
+
+	// Reconcile the standing presence out-of-band so the new token / Guild
+	// registers the slash-command surface without a restart (#102). Only after a
+	// successful save — the error returns above skip it. In a goroutine because
+	// Ensure opens a gateway (network I/O) and must not block this response.
+	if s.refreshPresence != nil {
+		go s.refreshPresence()
 	}
 
 	return connect.NewResponse(&managementv1.SaveDiscordSettingsResponse{
