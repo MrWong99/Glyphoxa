@@ -3,6 +3,7 @@ package recall
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -11,12 +12,16 @@ import (
 // specCache holds the recaller's single speculated utterance (latest only): the
 // normalized query text, the embedded vector, and the world-context chunks
 // prefetched with that vector. A Recall whose normalized final matches norm reuses
-// vec + world and skips the inline embed (the "hit" path). Guarded by cacheMu.
+// vec (skipping the inline embed) and, when worldOK, the prefetched world chunks —
+// the "hit" path. worldOK is false when the vector embedded but the world prefetch
+// failed, so a hit knows to fetch world inline rather than return empty. Guarded by
+// cacheMu.
 type specCache struct {
-	norm  string
-	vec   []float32
-	world []storage.ChunkMatch
-	valid bool
+	norm    string
+	vec     []float32
+	world   []storage.ChunkMatch
+	worldOK bool
+	valid   bool
 }
 
 // onPartial is the bus callback for [voiceevent.STTPartial]. The bus delivers
@@ -59,9 +64,7 @@ func (r *Recaller) speculateLoop() {
 		case <-r.ctx.Done():
 			return
 		case <-r.signal:
-			if text, ok := r.takePending(); ok {
-				r.maybeSpeculate(text)
-			}
+			r.drainAndSpeculate()
 			// Notify a white-box test that one pass completed (non-blocking).
 			select {
 			case r.speculated <- struct{}{}:
@@ -71,26 +74,57 @@ func (r *Recaller) speculateLoop() {
 	}
 }
 
-// maybeSpeculate embeds text and prefetches its world-context chunks when the text
-// is worth it: at least [minSpeculateWords] words, changed since the last embed,
-// and no more than one embed per [minEmbedInterval]. World context is prefetched
-// here (the vector is in hand); NPC-knowledge is deferred to Recall (the target
-// agent is unknown during speech). On success it replaces the single-slot cache.
-func (r *Recaller) maybeSpeculate(text string) {
-	norm := normalize(text)
-	if wordCount(norm) < minSpeculateWords {
+// drainAndSpeculate speculates on the latest pending text, honoring the embed rate
+// limit WITHOUT dropping the candidate: when [maybeSpeculate] reports the interval
+// has not elapsed, it waits out the remainder and retries on the latest text (a
+// newer partial supersedes, else the same one). Without this the last pre-final
+// partial inside the interval window would never be embedded — a systematic
+// speculation miss on exactly the utterance the final matches.
+func (r *Recaller) drainAndSpeculate() {
+	text, ok := r.takePending()
+	if !ok {
 		return
 	}
+	for {
+		wait := r.maybeSpeculate(text)
+		if wait <= 0 {
+			return
+		}
+		if err := r.sleep(r.ctx, wait); err != nil {
+			return // Close cancelled the recaller
+		}
+		if newer, ok := r.takePending(); ok {
+			text = newer
+		}
+	}
+}
+
+// maybeSpeculate embeds text and prefetches its world-context chunks when the text
+// is worth it: at least [minSpeculateWords] words and changed since the last embed.
+// It returns 0 when the pass is done (embedded, or permanently skipped as too-short
+// / unchanged); it returns a positive duration when the embed rate limit
+// ([minEmbedInterval]) has not yet elapsed — the remaining wait the caller sleeps
+// before retrying, so the candidate is deferred, never dropped. World context is
+// prefetched here (the vector is in hand); NPC-knowledge is deferred to Recall (the
+// target agent is unknown during speech). On success it replaces the single-slot
+// cache.
+func (r *Recaller) maybeSpeculate(text string) time.Duration {
+	norm := normalize(text)
+	if wordCount(norm) < minSpeculateWords {
+		return 0 // no retrieval signal in a one/two-word interim
+	}
 	if norm == r.lastEmbedNorm {
-		return // unchanged since the last embed
+		return 0 // unchanged since the last embed
 	}
 	now := r.now()
-	if !r.lastEmbedAt.IsZero() && now.Sub(r.lastEmbedAt) < minEmbedInterval {
-		return // rate-limited; the next partial after the interval is embedded
+	if !r.lastEmbedAt.IsZero() {
+		if since := now.Sub(r.lastEmbedAt); since < minEmbedInterval {
+			return minEmbedInterval - since // defer, do not drop (finding 2)
+		}
 	}
 	campaignID, ok := r.campaign()
 	if !ok {
-		return // no active session to scope the prefetch
+		return 0 // no active session to scope the prefetch
 	}
 	// Commit to this attempt BEFORE the call so a failing/hung provider is not
 	// hammered and the same text is not re-embedded on the next tick.
@@ -103,34 +137,37 @@ func (r *Recaller) maybeSpeculate(text string) {
 	vecs, err := r.embedder.Embed(ctx, []string{text})
 	if err != nil || len(vecs) != 1 {
 		r.log.Warn("memory speculation: embed failed; will retry on the next partial", "err", err)
-		return
+		return 0
 	}
-	// Prefetch world context with the vector. A failure still caches the vector so a
-	// later hit skips the (expensive) embed and only owes the NPC-knowledge query.
+	// Prefetch world context with the vector. A failure still caches the vector
+	// (worldOK false) so a later hit skips the (expensive) embed and fetches world
+	// inline, rather than silently returning empty world.
 	world, err := r.retriever.SearchChunksByCampaign(ctx, campaignID, vecs[0], r.k)
+	worldOK := err == nil
 	if err != nil {
 		r.log.Warn("memory speculation: world prefetch failed; caching vector only", "err", err)
 		world = nil
 	}
-	r.storeCache(norm, vecs[0], world)
+	r.storeCache(norm, vecs[0], world, worldOK)
+	return 0
 }
 
 // storeCache replaces the single speculated entry (latest utterance only).
-func (r *Recaller) storeCache(norm string, vec []float32, world []storage.ChunkMatch) {
+func (r *Recaller) storeCache(norm string, vec []float32, world []storage.ChunkMatch, worldOK bool) {
 	r.cacheMu.Lock()
-	r.cache = specCache{norm: norm, vec: vec, world: world, valid: true}
+	r.cache = specCache{norm: norm, vec: vec, world: world, worldOK: worldOK, valid: true}
 	r.cacheMu.Unlock()
 }
 
-// cacheLookup returns the cached vector and world chunks when norm matches the
-// speculated query, and whether it was a hit.
-func (r *Recaller) cacheLookup(norm string) (vec []float32, world []storage.ChunkMatch, hit bool) {
+// cacheLookup returns the cached entry when norm matches the speculated query, and
+// whether it was a hit.
+func (r *Recaller) cacheLookup(norm string) (specCache, bool) {
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
 	if r.cache.valid && r.cache.norm == norm {
-		return r.cache.vec, r.cache.world, true
+		return r.cache, true
 	}
-	return nil, nil, false
+	return specCache{}, false
 }
 
 // wordCount counts whitespace-separated tokens in an already-normalized string.

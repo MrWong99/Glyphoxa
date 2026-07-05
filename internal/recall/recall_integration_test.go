@@ -13,7 +13,6 @@ package recall
 import (
 	"context"
 	"database/sql"
-	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -35,8 +34,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
-
-func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 const pgImage = "pgvector/pgvector:pg17"
 
@@ -209,19 +206,24 @@ func TestRecall_Integration_FactLandsInCorrectSection(t *testing.T) {
 		t.Fatalf("AC1: established fact not recalled into the prompt:\n%s", sys)
 	}
 	iWitnessed := strings.Index(sys, "You personally witnessed:")
-	iSecondHand := strings.Index(sys, "You may have heard second-hand")
-	if iWitnessed < 0 || iSecondHand < 0 || iWitnessed > iSecondHand {
-		t.Fatalf("AC2: both memory sections must be present, witnessed before second-hand:\n%s", sys)
+	iWorld := strings.Index(sys, "You may know these from around the campaign")
+	if iWitnessed < 0 || iWorld < 0 || iWitnessed > iWorld {
+		t.Fatalf("AC2: both memory sections must be present, witnessed before world context:\n%s", sys)
 	}
-	witnessed, secondHand := sys[iWitnessed:iSecondHand], sys[iSecondHand:]
+	witnessed, world := sys[iWitnessed:iWorld], sys[iWorld:]
 	if !strings.Contains(witnessed, rubyText) {
 		t.Errorf("AC2: participated fact not in the witnessed section:\n%s", witnessed)
 	}
 	if strings.Contains(witnessed, dragText) {
 		t.Errorf("AC2: a non-participated fact leaked into the witnessed section:\n%s", witnessed)
 	}
-	if !strings.Contains(secondHand, dragText) {
-		t.Errorf("AC2: campaign fact not framed as second-hand:\n%s", secondHand)
+	if !strings.Contains(world, dragText) {
+		t.Errorf("AC2: campaign fact not framed as world context:\n%s", world)
+	}
+	// Dedup (finding 1a): the participated fact must appear ONLY in the witnessed
+	// section, never duplicated into world context with contradictory framing.
+	if strings.Contains(world, rubyText) {
+		t.Errorf("AC2: participated fact duplicated into the world-context section:\n%s", world)
 	}
 
 	// Recall OFF (AC6): the same turn without a recaller never mentions the fact.

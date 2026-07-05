@@ -540,8 +540,11 @@ func (r *Replier) systemPrompt(mem Memory) string {
 }
 
 // memoryBlock renders the recalled [Memory] as a flat-text prompt section that
-// distinguishes NPC-knowledge (personally witnessed) from world context (framed
-// as possibly second-hand rumor, ADR-0011). An empty half omits its whole
+// distinguishes NPC-knowledge (personally witnessed) from world context. Per
+// ADR-0011 world context is "topical, may not personally know" — so it is framed
+// as things the Agent may know of but may not have witnessed first-hand, NOT as an
+// assertion the Agent was absent (a chunk it participated in but that fell outside
+// its NPC-knowledge top-k can still land here). An empty half omits its whole
 // subsection; a zero Memory yields "" so the block is dropped entirely.
 func memoryBlock(mem Memory) string {
 	if mem.IsZero() {
@@ -557,7 +560,7 @@ func memoryBlock(mem Memory) string {
 		}
 	}
 	if len(mem.World) > 0 {
-		b.WriteString("\n\nYou may have heard second-hand (you were not present; treat as rumor):")
+		b.WriteString("\n\nYou may know these from around the campaign, though you may not have witnessed them personally:")
 		for _, c := range mem.World {
 			b.WriteString("\n- ")
 			b.WriteString(c)

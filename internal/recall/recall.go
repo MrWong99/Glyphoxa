@@ -110,7 +110,8 @@ type Recaller struct {
 	budget    time.Duration
 	k         int
 
-	now func() time.Time // injected in tests; time.Now in production
+	now   func() time.Time                                 // injected in tests; time.Now in production
+	sleep func(ctx context.Context, d time.Duration) error // injected in tests; a ctx-aware timer in production
 
 	// speculation state (see speculate.go)
 	ctx         context.Context
@@ -138,6 +139,16 @@ type Recaller struct {
 // speculator goroutine immediately; call [Recaller.Close] on shutdown to release
 // both.
 func New(embedder embeddings.Provider, retriever Retriever, sessions Sessions, bus *voiceevent.Bus, metrics Metrics, log *slog.Logger, cfg Config) *Recaller {
+	r := newRecaller(embedder, retriever, sessions, metrics, log, cfg)
+	r.start(bus)
+	return r
+}
+
+// newRecaller builds the Recaller struct with production seams but does NOT
+// subscribe or start the goroutine — the split lets white-box tests inject the
+// now/sleep clock seams BEFORE the speculator goroutine reads them (no data race),
+// then call [Recaller.start]. Production goes through [New].
+func newRecaller(embedder embeddings.Provider, retriever Retriever, sessions Sessions, metrics Metrics, log *slog.Logger, cfg Config) *Recaller {
 	cfg = cfg.withDefaults()
 	if log == nil {
 		log = slog.Default()
@@ -146,7 +157,7 @@ func New(embedder embeddings.Provider, retriever Retriever, sessions Sessions, b
 		metrics = discardMetrics{}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &Recaller{
+	return &Recaller{
 		embedder:   embedder,
 		retriever:  retriever,
 		sessions:   sessions,
@@ -155,20 +166,39 @@ func New(embedder embeddings.Provider, retriever Retriever, sessions Sessions, b
 		budget:     cfg.Budget,
 		k:          cfg.K,
 		now:        time.Now,
+		sleep:      sleepCtx,
 		ctx:        ctx,
 		cancel:     cancel,
 		signal:     make(chan struct{}, 1),
 		specDone:   make(chan struct{}),
 		speculated: make(chan struct{}, 1),
 	}
-	r.unsubscribe = voiceevent.On(bus, r.onPartial)
-	go r.speculateLoop()
-	return r
 }
 
-// Close unsubscribes from the bus and stops the speculator goroutine. It is
-// idempotent-safe only once (a second call blocks on the closed done channel);
-// wire it once, on process shutdown. Tests defer it.
+// start subscribes to the bus and launches the speculator goroutine. Called once
+// by [New] (production) or a white-box test after seams are set.
+func (r *Recaller) start(bus *voiceevent.Bus) {
+	r.unsubscribe = voiceevent.On(bus, r.onPartial)
+	go r.speculateLoop()
+}
+
+// sleepCtx blocks for d or until ctx is cancelled, returning ctx.Err() on cancel.
+// A timer (not time.Sleep) so a cancelled ctx returns immediately.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// Close unsubscribes from the bus and stops the speculator goroutine. Idempotent:
+// unsubscribe and cancel are each no-ops on a second call, and the closed done
+// channel returns immediately — but wire it once, on process shutdown. Tests defer
+// it.
 func (r *Recaller) Close() {
 	r.unsubscribe()
 	r.cancel()
@@ -204,9 +234,27 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	}
 
 	norm := normalize(utterance)
-	vec, world, hit := r.cacheLookup(norm)
+	cached, hit := r.cacheLookup(norm)
 
-	if !hit {
+	var vec []float32
+	var world []storage.ChunkMatch
+	switch {
+	case hit && cached.worldOK:
+		// Full speculation hit: reuse the vector AND the prefetched world chunks.
+		vec = cached.vec
+		world = cached.world
+	case hit:
+		// The vector was cached but its world prefetch had failed (worldOK false):
+		// reuse the vector (skip the embed) and fetch world inline within the budget,
+		// so a hit never silently returns empty world.
+		vec = cached.vec
+		w, err := r.retriever.SearchChunksByCampaign(ctx, campaignID, vec, r.k)
+		if err != nil {
+			return r.degrade(ctx, fmt.Errorf("search world chunks (hit, prefetch had failed): %w", err))
+		}
+		world = w
+	default:
+		// Miss: embed the utterance and run BOTH modes inline under the budget.
 		vecs, err := r.embedder.Embed(ctx, []string{utterance})
 		if err != nil {
 			return r.degrade(ctx, fmt.Errorf("embed utterance: %w", err))
@@ -228,6 +276,11 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	if err != nil {
 		return r.degrade(ctx, fmt.Errorf("search agent chunks: %w", err))
 	}
+
+	// A chunk the NPC participated in can also land in the campaign-wide top-k;
+	// drop it from World so a fact is never framed BOTH as personally witnessed and
+	// as possibly-not-witnessed (ADR-0011). Personal wins.
+	world = excludeByID(world, chunkIDSet(personal))
 
 	if hit {
 		r.metrics.MemoryRecall(observe.RecallHit)
@@ -271,6 +324,33 @@ func chunkContents(matches []storage.ChunkMatch) []string {
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
 		out = append(out, m.Chunk.Content)
+	}
+	return out
+}
+
+// chunkIDSet collects the chunk ids of a match set.
+func chunkIDSet(matches []storage.ChunkMatch) map[uuid.UUID]bool {
+	if len(matches) == 0 {
+		return nil
+	}
+	s := make(map[uuid.UUID]bool, len(matches))
+	for _, m := range matches {
+		s[m.Chunk.ID] = true
+	}
+	return s
+}
+
+// excludeByID returns the matches whose chunk id is not in exclude, preserving
+// order. It allocates a fresh slice so the cached prefetch slice is never mutated.
+func excludeByID(matches []storage.ChunkMatch, exclude map[uuid.UUID]bool) []storage.ChunkMatch {
+	if len(matches) == 0 || len(exclude) == 0 {
+		return matches
+	}
+	out := make([]storage.ChunkMatch, 0, len(matches))
+	for _, m := range matches {
+		if !exclude[m.Chunk.ID] {
+			out = append(out, m)
+		}
 	}
 	return out
 }

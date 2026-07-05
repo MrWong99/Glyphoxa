@@ -51,13 +51,14 @@ func (f *fakeEmbedder) callCount() int {
 }
 
 type fakeRetriever struct {
-	mu           sync.Mutex
-	byAgentCalls int
-	byCampCalls  int
-	agentChunks  []storage.ChunkMatch
-	campChunks   []storage.ChunkMatch
-	agentErr     error
-	campErr      error
+	mu            sync.Mutex
+	byAgentCalls  int
+	byCampCalls   int
+	agentChunks   []storage.ChunkMatch
+	campChunks    []storage.ChunkMatch
+	agentErr      error
+	campErr       error
+	campFailFirst bool // fail only the FIRST ByCampaign call (a failed speculation prefetch)
 }
 
 func (f *fakeRetriever) SearchChunksByAgent(_ context.Context, _, _ uuid.UUID, _ []float32, _ int) ([]storage.ChunkMatch, error) {
@@ -73,9 +74,13 @@ func (f *fakeRetriever) SearchChunksByAgent(_ context.Context, _, _ uuid.UUID, _
 func (f *fakeRetriever) SearchChunksByCampaign(_ context.Context, _ uuid.UUID, _ []float32, _ int) ([]storage.ChunkMatch, error) {
 	f.mu.Lock()
 	f.byCampCalls++
+	n := f.byCampCalls
 	f.mu.Unlock()
 	if f.campErr != nil {
 		return nil, f.campErr
+	}
+	if f.campFailFirst && n == 1 {
+		return nil, errors.New("world prefetch failed")
 	}
 	return f.campChunks, nil
 }
@@ -126,15 +131,55 @@ func (f *fakeMetrics) total() int {
 
 // --- helpers ---
 
+func testLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
 func fixedVec() []float32 { return []float32{0.1, 0.2, 0.3} }
 
+// chunkMatch builds a match with a fresh unique chunk id, so distinct chunks in a
+// test never accidentally collide under the personal↔world dedup.
 func chunkMatch(content string) storage.ChunkMatch {
-	return storage.ChunkMatch{Chunk: storage.TranscriptChunk{Content: content}}
+	return storage.ChunkMatch{Chunk: storage.TranscriptChunk{ID: uuid.New(), Content: content}}
+}
+
+// chunkMatchID builds a match with a caller-chosen id, so a test can make the SAME
+// chunk appear in both the personal and world result sets (the dedup case).
+func chunkMatchID(id uuid.UUID, content string) storage.ChunkMatch {
+	return storage.ChunkMatch{Chunk: storage.TranscriptChunk{ID: id, Content: content}}
+}
+
+// fakeClock is a deterministic clock + ctx-aware sleep seam: sleeping simply
+// advances the clock, so rate-limit deferral is exercised without real waits.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Unix(1_700_000_000, 0)} }
+
+func (c *fakeClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+
+func (c *fakeClock) sleep(_ context.Context, d time.Duration) error {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+	return nil
 }
 
 func newTestRecaller(t *testing.T, emb embeddings.Provider, ret Retriever, sess Sessions, m Metrics, bus *voiceevent.Bus, cfg Config) *Recaller {
 	t.Helper()
-	r := New(emb, ret, sess, bus, m, slog.New(slog.DiscardHandler), cfg)
+	r := New(emb, ret, sess, bus, m, testLogger(), cfg)
+	t.Cleanup(r.Close)
+	return r
+}
+
+// newSeamRecaller builds a recaller with injected now/sleep seams (set BEFORE the
+// speculator starts, so no data race) for deterministic speculator-gating tests.
+func newSeamRecaller(t *testing.T, emb embeddings.Provider, ret Retriever, sess Sessions, m Metrics, bus *voiceevent.Bus, cfg Config, clock *fakeClock) *Recaller {
+	t.Helper()
+	r := newRecaller(emb, ret, sess, m, testLogger(), cfg)
+	r.now = clock.now
+	r.sleep = clock.sleep
+	r.start(bus)
 	t.Cleanup(r.Close)
 	return r
 }
@@ -346,5 +391,157 @@ func TestRecall_UnparseableAgentID_Skips(t *testing.T) {
 	}
 	if emb.callCount() != 0 {
 		t.Errorf("must not embed with a bad agent id; calls = %d", emb.callCount())
+	}
+}
+
+// TestRecall_DedupsPersonalOutOfWorld pins finding 1a: a chunk the NPC
+// participated in that ALSO lands in the campaign-wide top-k is dropped from World,
+// so a fact is never framed both as personally witnessed AND as world context.
+func TestRecall_DedupsPersonalOutOfWorld(t *testing.T) {
+	shared := uuid.New()
+	emb := &fakeEmbedder{vec: fixedVec()}
+	ret := &fakeRetriever{
+		agentChunks: []storage.ChunkMatch{chunkMatchID(shared, "I saw the ritual myself.")},
+		campChunks: []storage.ChunkMatch{
+			chunkMatchID(shared, "I saw the ritual myself."), // same chunk, campaign-wide
+			chunkMatch("Bandits were spotted on the road."),  // world-only
+		},
+	}
+	m := newFakeMetrics()
+	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, voiceevent.NewBus(), Config{})
+
+	mem := r.Recall(context.Background(), uuid.NewString(), "what happened at the ritual")
+
+	if len(mem.Personal) != 1 || mem.Personal[0] != "I saw the ritual myself." {
+		t.Errorf("personal = %v, want the witnessed chunk", mem.Personal)
+	}
+	if len(mem.World) != 1 || mem.World[0] != "Bandits were spotted on the road." {
+		t.Errorf("world = %v, want ONLY the world-only chunk (participated chunk deduped out)", mem.World)
+	}
+}
+
+// TestRecall_HitWithFailedPrefetch_FetchesWorldInline pins finding 3: when the
+// speculation world prefetch failed (vector cached, worldOK false), a later hit
+// reuses the vector (no re-embed) and fetches world inline within the budget rather
+// than silently returning empty world — still counting a hit.
+func TestRecall_HitWithFailedPrefetch_FetchesWorldInline(t *testing.T) {
+	emb := &fakeEmbedder{vec: fixedVec()}
+	ret := &fakeRetriever{
+		campFailFirst: true, // the speculation world prefetch fails
+		agentChunks:   []storage.ChunkMatch{chunkMatch("I served the duke.")},
+		campChunks:    []storage.ChunkMatch{chunkMatch("The duke rides north.")},
+	}
+	m := newFakeMetrics()
+	bus := voiceevent.NewBus()
+	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, bus, Config{})
+
+	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the duke?", UtteranceID: "u1"})
+	waitSpeculated(t, r)
+	if emb.callCount() != 1 {
+		t.Fatalf("speculator embed = %d, want 1", emb.callCount())
+	}
+	if ret.campN() != 1 {
+		t.Fatalf("byCamp = %d, want 1 (the failed prefetch)", ret.campN())
+	}
+
+	mem := r.Recall(context.Background(), uuid.NewString(), "do you remember the duke")
+
+	if emb.callCount() != 1 {
+		t.Errorf("a hit must not re-embed; calls = %d, want 1", emb.callCount())
+	}
+	if ret.campN() != 2 {
+		t.Errorf("byCamp = %d, want 2 (failed prefetch + inline hit-fetch)", ret.campN())
+	}
+	if len(mem.World) != 1 || mem.World[0] != "The duke rides north." {
+		t.Errorf("world not fetched inline after a failed prefetch: %v", mem.World)
+	}
+	if len(mem.Personal) != 1 {
+		t.Errorf("personal = %v", mem.Personal)
+	}
+	if m.count(observe.RecallHit) != 1 {
+		t.Errorf("hit = %d, want 1", m.count(observe.RecallHit))
+	}
+}
+
+// TestSpeculator_SkipsShortPartials pins the ≥3-word gate: a one/two-word interim
+// carries no retrieval signal and must not embed.
+func TestSpeculator_SkipsShortPartials(t *testing.T) {
+	emb := &fakeEmbedder{vec: fixedVec()}
+	bus := voiceevent.NewBus()
+	r := newSeamRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+		newFakeMetrics(), bus, Config{}, newFakeClock())
+
+	bus.Publish(voiceevent.STTPartial{Text: "do you", UtteranceID: "u1"}) // 2 words
+	waitSpeculated(t, r)
+	if emb.callCount() != 0 {
+		t.Errorf("a short partial embedded; calls = %d, want 0", emb.callCount())
+	}
+}
+
+// TestSpeculator_SkipsUnchangedNorm pins the changed-since-last-embed gate: a
+// partial whose normalized form equals the last embed is skipped even inside the
+// interval window.
+func TestSpeculator_SkipsUnchangedNorm(t *testing.T) {
+	emb := &fakeEmbedder{vec: fixedVec()}
+	bus := voiceevent.NewBus()
+	r := newSeamRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+		newFakeMetrics(), bus, Config{}, newFakeClock())
+
+	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the knight?", UtteranceID: "u1"})
+	waitSpeculated(t, r)
+	if emb.callCount() != 1 {
+		t.Fatalf("first embed = %d, want 1", emb.callCount())
+	}
+
+	// Same normalized text (different case/punct) → unchanged → skip.
+	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
+	waitSpeculated(t, r)
+	if emb.callCount() != 1 {
+		t.Errorf("an unchanged-norm partial re-embedded; calls = %d, want 1", emb.callCount())
+	}
+}
+
+// TestSpeculator_RateLimitDefersNotDrops pins finding 2 + the ≥200ms spacing gate:
+// a NEW candidate arriving inside the interval window is DEFERRED and embedded once
+// the interval elapses — never dropped (the last pre-final partial must still
+// speculate). Driven through the injected now/sleep clock so it is deterministic.
+func TestSpeculator_RateLimitDefersNotDrops(t *testing.T) {
+	emb := &fakeEmbedder{vec: fixedVec()}
+	bus := voiceevent.NewBus()
+	r := newSeamRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+		newFakeMetrics(), bus, Config{}, newFakeClock())
+
+	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
+	waitSpeculated(t, r)
+	if emb.callCount() != 1 {
+		t.Fatalf("first embed = %d, want 1", emb.callCount())
+	}
+
+	// New text within the window (clock not advanced): deferred, not dropped.
+	bus.Publish(voiceevent.STTPartial{Text: "do you recall the golden crown", UtteranceID: "u1"})
+	waitSpeculated(t, r)
+	if emb.callCount() != 2 {
+		t.Errorf("a rate-limited candidate was dropped; calls = %d, want 2 (deferred then embedded)", emb.callCount())
+	}
+}
+
+// TestMailbox_LatestWins pins the 1-slot latest-wins mailbox under a partial flood:
+// only the newest text survives to the speculator. Tests the mailbox directly (no
+// goroutine) so it is deterministic.
+func TestMailbox_LatestWins(t *testing.T) {
+	r := newRecaller(&fakeEmbedder{}, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+		newFakeMetrics(), testLogger(), Config{})
+	t.Cleanup(r.cancel)
+
+	r.onPartial(voiceevent.STTPartial{Text: "one"})
+	r.onPartial(voiceevent.STTPartial{Text: "two"})
+	r.onPartial(voiceevent.STTPartial{Text: "three"})
+
+	got, ok := r.takePending()
+	if !ok || got != "three" {
+		t.Errorf("takePending = (%q, %v), want (three, true) — latest wins", got, ok)
+	}
+	if _, ok := r.takePending(); ok {
+		t.Error("mailbox not empty after a drain")
 	}
 }

@@ -90,9 +90,10 @@ func TestSystemPrompt_Memory_LabeledSectionsInSlotOrder(t *testing.T) {
 	if !strings.Contains(sys, "A dragon was seen near the northern pass.") {
 		t.Errorf("system prompt missing world chunk: %q", sys)
 	}
-	// World context framed as second-hand / rumor (ADR-0011).
-	if !strings.Contains(strings.ToLower(sys), "second-hand") && !strings.Contains(strings.ToLower(sys), "rumor") {
-		t.Errorf("world context not framed as possibly second-hand: %q", sys)
+	// World context framed as "may not personally know" (ADR-0011), NOT an
+	// assertion the NPC was absent.
+	if !strings.Contains(strings.ToLower(sys), "may not have witnessed") {
+		t.Errorf("world context not framed as possibly-not-witnessed (ADR-0011): %q", sys)
 	}
 
 	// Slot order: Persona precedes the memory block precedes the markup.
@@ -131,8 +132,8 @@ func TestSystemPrompt_Memory_OmitsEmptyHalves(t *testing.T) {
 		t.Errorf("system prompt missing personal chunk: %q", sys)
 	}
 	// No world subsection when World is empty.
-	if strings.Contains(strings.ToLower(sys), "second-hand") || strings.Contains(strings.ToLower(sys), "rumor") {
-		t.Errorf("empty World half must omit its second-hand subsection: %q", sys)
+	if strings.Contains(strings.ToLower(sys), "may not have witnessed") {
+		t.Errorf("empty World half must omit its world-context subsection: %q", sys)
 	}
 }
 
