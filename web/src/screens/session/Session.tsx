@@ -1,15 +1,16 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
-import { useQueryClient } from "@tanstack/react-query";
-import { Play, Square } from "lucide-react";
+import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { Play, Square, Search } from "lucide-react";
 import { toast } from "sonner";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 
 import { SessionService, CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { VoiceSession } from "@gen/glyphoxa/management/v1/management_pb";
+import type { VoiceSession, TranscriptLineMatch } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import { useSessionEvents, formatClock } from "./useSessionEvents";
 
 import "./session.css";
@@ -45,6 +46,13 @@ export function sessionRefetchInterval(query: { state: { data?: { active?: boole
 // tsMs converts a protobuf Timestamp to epoch milliseconds, or null when unset.
 function tsMs(ts: VoiceSession["startedAt"] | undefined): number | null {
   return ts ? Number(timestampMs(ts)) : null;
+}
+
+// matchClock renders a search hit's protobuf Timestamp as HH:MM:SS, matching the
+// transcript line timestamps (reusing formatClock via the RFC3339 instant).
+function matchClock(ts: TranscriptLineMatch["ts"] | undefined): string {
+  const ms = ts ? Number(timestampMs(ts)) : null;
+  return ms == null ? "" : formatClock(new Date(ms).toISOString());
 }
 
 // useElapsed ticks a once-per-second elapsed-seconds counter from a start instant
@@ -123,6 +131,21 @@ export function Session() {
   const hasLines = transcript.lines.length > 0;
   const showTyping = active && transcript.typing.active;
 
+  // Transcript search deep-link (#120): clicking a search hit highlights (and,
+  // where the browser supports it, scrolls to) that line in the rendered
+  // transcript. A hit for a line not in the current view — e.g. an older session —
+  // simply sets the highlight with nothing to scroll to (ADR-0011 amendment).
+  const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
+  const jumpToLine = (lineId: string) => {
+    setHighlightedLineId(lineId);
+    const el = document.querySelector(`[data-line-id="${lineId}"]`);
+    try {
+      (el as HTMLElement | null)?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    } catch {
+      // jsdom / older browsers: scrollIntoView is a no-op; the highlight still applies.
+    }
+  };
+
   return (
     <div className="gx-session">
       <header className="gx-session__header">
@@ -175,6 +198,7 @@ export function Session() {
 
       <section className="gx-session__transcript">
         <h2 className="gx-section-title">{active ? "Live transcript" : "Session transcript"}</h2>
+        <TranscriptSearch onJump={jumpToLine} />
         <Card>
           {!hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
@@ -185,7 +209,12 @@ export function Session() {
           ) : (
             <ol className="gx-transcript">
               {transcript.lines.map((line) => (
-                <li key={line.id} className="gx-line">
+                <li
+                  key={line.id}
+                  className={`gx-line${highlightedLineId === line.id ? " gx-line--highlighted" : ""}`}
+                  data-line-id={line.id}
+                  data-highlighted={highlightedLineId === line.id ? "true" : undefined}
+                >
                   <span className="gx-line__who" data-kind={line.kind}>
                     {line.who}
                   </span>
@@ -212,6 +241,75 @@ export function Session() {
           )}
         </Card>
       </section>
+    </div>
+  );
+}
+
+// TranscriptSearch is the Session screen's transcript search box (#120, ADR-0011
+// amendment). It debounces the raw box value into a SearchTranscriptLines query
+// that runs ONLY while the trimmed query is non-empty — an empty box is the prompt
+// state, no RPC (keepPreviousData holds the last matches steady across keystrokes).
+// The server scopes the search to the operator's Active Campaign and shares the
+// one storage search path with /glyphoxa search (AC4/AC5). Each hit renders its
+// speaker, tag, timestamp, and matched text; clicking it asks the parent to
+// deep-link the line in the rendered transcript (onJump).
+function TranscriptSearch({ onJump }: { onJump: (lineId: string) => void }) {
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const trimmed = debounced.trim();
+  const searching = trimmed !== "";
+  const searchQuery = useQuery(
+    SessionService.method.searchTranscriptLines,
+    { query: debounced },
+    // retry:false surfaces a failure promptly; a typeahead re-fires on the next
+    // keystroke anyway. keepPreviousData avoids flashing empty between keystrokes.
+    { enabled: searching, placeholderData: keepPreviousData, retry: false },
+  );
+  const lines = searchQuery.data?.lines ?? [];
+
+  return (
+    <div className="gx-tsearch">
+      <Input
+        type="search"
+        aria-label="Search the transcript"
+        icon={<Search size={15} />}
+        placeholder="Search the transcript — speakers and text"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        className="gx-tsearch__input"
+      />
+      {searching &&
+        (searchQuery.isError ? (
+          <p className="gx-session__transcript-empty" role="alert">
+            Couldn't search the transcript: {searchQuery.error?.message}
+          </p>
+        ) : lines.length > 0 ? (
+          <ul className="gx-tsearch__results" data-testid="transcript-search-results">
+            {lines.map((m) => (
+              <li key={`${m.sessionId}:${m.lineId}`}>
+                <button type="button" className="gx-tsearch__result" onClick={() => onJump(m.lineId)}>
+                  <span className="gx-line__who" data-kind={m.kind}>
+                    {m.who}
+                  </span>
+                  {m.tag && (
+                    <span className="gx-line__tag" data-kind={m.kind}>
+                      {m.tag}
+                    </span>
+                  )}
+                  <time className="gx-line__ts">{matchClock(m.ts)}</time>
+                  <span className="gx-tsearch__text">{m.text}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          !searchQuery.isPending && <p className="gx-tsearch__empty">No lines match “{trimmed}”.</p>
+        ))}
     </div>
   );
 }

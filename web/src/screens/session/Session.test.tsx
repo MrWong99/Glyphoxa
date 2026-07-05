@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
 import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
@@ -21,6 +21,8 @@ import {
   StopSessionResponseSchema,
   GetActiveCampaignResponseSchema,
   CampaignSchema,
+  TranscriptLineMatchSchema,
+  SearchTranscriptLinesResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -436,5 +438,139 @@ describe("Session live transcript (#73)", () => {
     act(() => es.emit("open", null));
     act(() => es.emit("open", null));
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+});
+
+// searchTransport is an ended session whose persisted transcript renders, plus a
+// transcript-search RPC that filters a fixed match set by substring (a stand-in
+// for the server-side tsvector search). searchCalls records the debounced queries.
+function searchTransport(searchCalls: string[]) {
+  const started = new Date(Date.now() - 60 * 60 * 1000);
+  const ended = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(started),
+    endedAt: timestampFromDate(new Date()),
+    lineCount: 2,
+  });
+  const matches = [
+    create(TranscriptLineMatchSchema, {
+      sessionId: "vs1", lineId: "a:t1", who: "Bart", tag: "NPC", kind: "npc",
+      ts: timestampFromDate(new Date()), text: "Well met, traveller.",
+    }),
+    create(TranscriptLineMatchSchema, {
+      sessionId: "vs1", lineId: "u:1", who: "Player / DM", kind: "player",
+      ts: timestampFromDate(new Date()), text: "Where is the dragon?",
+    }),
+  ];
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
+      searchTranscriptLines: (req) => {
+        searchCalls.push(req.query);
+        const q = req.query.toLowerCase();
+        return create(SearchTranscriptLinesResponseSchema, {
+          lines: matches.filter((m) => m.text.toLowerCase().includes(q)),
+        });
+      },
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+// persistedTranscriptFetch stubs the DB-backed snapshot so the ended session's
+// transcript renders (needed for the click-to-highlight deep-link).
+function persistedTranscriptFetch() {
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        lines: [
+          { id: "a:t1", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "Well met, traveller." },
+          { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "Where is the dragon?" },
+        ],
+        status: "idle",
+        typing: { active: false, label: "" },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+}
+
+function renderSearch(searchCalls: string[] = []) {
+  render(
+    <Providers transport={searchTransport(searchCalls)} queryClient={makeQueryClient()}>
+      <Session />
+    </Providers>,
+  );
+}
+
+describe("Session transcript search (#120)", () => {
+  beforeEach(persistedTranscriptFetch);
+
+  it("renders ranked matches with speaker + time for a query, no RPC before typing", async () => {
+    const searchCalls: string[] = [];
+    renderSearch(searchCalls);
+
+    await screen.findByText("Idle");
+    const box = screen.getByRole("searchbox", { name: /search the transcript/i });
+    expect(searchCalls).toHaveLength(0);
+
+    fireEvent.change(box, { target: { value: "dragon" } });
+
+    const results = await screen.findByTestId("transcript-search-results");
+    await waitFor(() => expect(within(results).getByText("Where is the dragon?")).toBeInTheDocument());
+    expect(within(results).getByText("Player / DM")).toBeInTheDocument();
+    expect(searchCalls.at(-1)).toBe("dragon");
+    // A term matching only one line does not surface the other.
+    expect(within(results).queryByText("Well met, traveller.")).not.toBeInTheDocument();
+  });
+
+  it("shows a graceful no-match message", async () => {
+    renderSearch();
+    await screen.findByText("Idle");
+    fireEvent.change(screen.getByRole("searchbox", { name: /search the transcript/i }), {
+      target: { value: "unicorn" },
+    });
+    expect(await screen.findByText(/no lines match/i)).toHaveTextContent(/unicorn/);
+  });
+
+  it("highlights the transcript line when a result is clicked (deep-link)", async () => {
+    renderSearch();
+    // The persisted transcript renders both lines.
+    expect(await screen.findByText("Where is the dragon?")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: /search the transcript/i }), {
+      target: { value: "dragon" },
+    });
+    const results = await screen.findByTestId("transcript-search-results");
+    fireEvent.click(await within(results).findByText("Where is the dragon?"));
+
+    await waitFor(() => {
+      const li = document.querySelector('[data-line-id="u:1"]');
+      expect(li).toHaveAttribute("data-highlighted", "true");
+    });
+  });
+
+  it("fires no RPC for a whitespace box and drops results when cleared", async () => {
+    const searchCalls: string[] = [];
+    renderSearch(searchCalls);
+    await screen.findByText("Idle");
+    const box = screen.getByRole("searchbox", { name: /search the transcript/i });
+
+    fireEvent.change(box, { target: { value: "   " } });
+    await new Promise((r) => setTimeout(r, 250)); // outlast the debounce
+    expect(searchCalls).toHaveLength(0);
+
+    fireEvent.change(box, { target: { value: "dragon" } });
+    await screen.findByTestId("transcript-search-results");
+    fireEvent.change(box, { target: { value: "" } });
+    await waitFor(() =>
+      expect(screen.queryByTestId("transcript-search-results")).not.toBeInTheDocument(),
+    );
   });
 });
