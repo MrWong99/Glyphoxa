@@ -142,6 +142,21 @@ type Agent struct {
 	UpdatedAt    time.Time
 }
 
+// ToolGrant is an Agent's persisted permission to invoke one named Tool
+// (ADR-0029) — the DB shape of the in-memory Grant the live loop hydrates into a
+// GrantSet (#113). Config is the optional per-grant scope/config (jsonb): nil
+// when the grant carries no narrowing (dice), a scope blob for a Tool granted
+// differently per Agent. It reaches the Tool handler at execution time and is
+// enforced there, never by the LLM.
+type ToolGrant struct {
+	ID        uuid.UUID
+	AgentID   uuid.UUID
+	ToolName  string
+	Config    json.RawMessage
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // User is a human operator authenticated via Discord OAuth (ADR-0016). The
 // Discord snowflake is the stable identity key; Name/Avatar are display-only and
 // refreshed from Discord on each login.

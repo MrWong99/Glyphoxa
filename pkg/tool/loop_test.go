@@ -229,6 +229,49 @@ func TestLoopCanceledContextStops(t *testing.T) {
 	}
 }
 
+// TestLoopPassesGrantConfigToHandler pins ADR-0029's per-grant scoping: the
+// Config carried on a Grant reaches the Tool handler as grantConfig at execution
+// time (the only place scope is enforced — never the LLM). It is the tool-side of
+// #113's DB-hydrated config: a grant loaded from a tool_agent_grant row with a
+// jsonb scope must land, unchanged, in Execute — the model cannot widen it.
+func TestLoopPassesGrantConfigToHandler(t *testing.T) {
+	var gotConfig any
+	captor := stubTool{
+		name:     "scoped",
+		readOnly: true,
+		exec: func(_ context.Context, _ json.RawMessage, grant any) (string, error) {
+			gotConfig = grant
+			return "done", nil
+		},
+	}
+	r := NewRegistry()
+	r.MustRegister(captor)
+	scope := json.RawMessage(`{"scope":"self"}`)
+	gs := NewGrantSet(r, Grant{ToolName: "scoped", Config: scope})
+
+	p := &scriptedProvider{
+		t: t,
+		steps: []scriptStep{
+			{reply: AssistantMessage{ToolCalls: []ToolCall{
+				{ID: "c1", Name: "scoped", Input: json.RawMessage(`{}`)},
+			}}},
+			{reply: AssistantMessage{Text: "ok"}},
+		},
+	}
+	loop := NewLoop(p, gs)
+	if _, err := loop.Run(context.Background(), []Message{{Role: RoleUser, Text: "go"}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got, ok := gotConfig.(json.RawMessage)
+	if !ok {
+		t.Fatalf("handler received grantConfig of type %T, want json.RawMessage", gotConfig)
+	}
+	if string(got) != string(scope) {
+		t.Errorf("handler grantConfig = %q, want %q (scope must reach the handler unchanged)", got, scope)
+	}
+}
+
 func TestLoopNoToolsImmediateAnswer(t *testing.T) {
 	p := &scriptedProvider{t: t, steps: []scriptStep{{reply: AssistantMessage{Text: "just talking"}}}}
 	loop := diceLoop(t, p)

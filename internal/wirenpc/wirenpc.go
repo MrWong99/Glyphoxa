@@ -221,6 +221,12 @@ type npcSpec struct {
 	persona string
 	voice   tts.Voice
 	aliases []string
+	// grants are this NPC's Tool Grants (ADR-0029): the DB-path (RunFromDB)
+	// hydrates them from the Agent's tool_agent_grant rows, the env-only path
+	// uses the in-code default. buildConversation resolves each into a
+	// per-NPC GrantSet against the shared Registry, so the LLM only ever sees the
+	// Tools this NPC is granted (#113). nil ⇒ granted nothing.
+	grants []tool.Grant
 }
 
 // hardcodedNPC is the original in-code "Bart" definition. It is the seed source
@@ -237,6 +243,10 @@ func hardcodedNPC() npcSpec {
 		// codec path is encode-only (Discord Opus is 48 kHz — no resampler).
 		voice:   npcVoice(),
 		aliases: []string{"innkeeper", "barkeep"},
+		// The env-only path has no DB to hydrate from, so it carries the in-code
+		// default grant (dice) directly — the persisted equivalent the seed writes
+		// for the DB path (#113).
+		grants: []tool.Grant{{ToolName: diceToolName}},
 	}
 }
 
@@ -733,9 +743,12 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	ttsStage := orchestrator.NewTTS(bus, synth)
 	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
 
-	// The `dice` grant stays in code: Tool Grants are a #6 table, not yet
-	// seeded. With no grants the tool engine degrades to a single completion
-	// through the same path.
+	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each
+	// NPC carries its own grants (spec.grants — from its tool_agent_grant rows on
+	// the DB path, the in-code default on the env-only path), resolved into a
+	// per-NPC GrantSet against ONE shared Registry. So the LLM only ever sees the
+	// Tools that NPC is granted, and an NPC with no grant rows is shown no Tool at
+	// all — least-privilege, data-driven, not compiled in.
 	//
 	// Groq is the live LLM provider (see the function doc). Its key is keys.llm:
 	// the decrypted saved BYOK key (issue #69) when one is configured, otherwise
@@ -744,22 +757,26 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// (docs/agents/live-npc-run.md). There is no Anthropic key, so wiring the
 	// Anthropic adapter here would pass the keyless cassette tests (which replay
 	// Anthropic) but fail the live run — Groq is the only correct default for a
-	// runnable NPC. One engine is shared across every NPC in the Roster — they
-	// reuse one client rather than each opening their own.
+	// runnable NPC. The Groq client and the Registry are shared across every NPC
+	// — only the GrantSet differs per NPC — so N NPCs reuse one client rather than
+	// each opening their own.
 	provider := newLLM(keys.llm)
 	reg := tool.NewRegistry()
 	reg.MustRegister(tool.NewDice())
-	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
-	toolEngine := agenttool.NewEngine(provider, grants, groq.DefaultModel, 0, 0,
-		// Groq is the wired provider (see the function doc), so the per-round
-		// LLM spans (A3) are labelled groq. The no-op recorder keeps the keyless
-		// path silent; the live binary / benchmark inject a real one.
-		agenttool.WithMetrics(stageMetrics, observe.ProviderGroq))
+	engineFor := func(spec npcSpec) agent.Engine {
+		grants := tool.NewGrantSet(reg, spec.grants...)
+		return agenttool.NewEngine(provider, grants, groq.DefaultModel, 0, 0,
+			// Groq is the wired provider (see the function doc), so the per-round
+			// LLM spans (A3) are labelled groq. The no-op recorder keeps the keyless
+			// path silent; the live binary / benchmark inject a real one.
+			agenttool.WithMetrics(stageMetrics, observe.ProviderGroq))
+	}
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
-	// in the Matcher and its Replier (over the shared engine) in the Cast. The
-	// Matcher is built from the first NPC and grown for the rest.
-	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log, memory, facts, language))
+	// in the Matcher and its Replier (over a per-NPC engine carrying that NPC's
+	// GrantSet) in the Cast. The Matcher is built from the first NPC and grown for
+	// the rest.
+	roster := newRoster(rosterDepsForLive(engineFor, newTTS(keys.tts), 16, log, memory, facts, language))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}

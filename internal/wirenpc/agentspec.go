@@ -12,6 +12,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -47,6 +48,12 @@ const (
 	// stores a sealed placeholder so the NOT NULL column is satisfied without
 	// persisting a secret.
 	credPlaceholderLast4 = "env"
+
+	// diceToolName is the [tool.Tool.Name] of the built-in dice Tool — the demo
+	// NPC's (and the auto-Butler's) default Tool Grant (ADR-0009 Q14). The seed
+	// grants it to Bart so the live loop hydrates his dice ability from the DB
+	// (#113); the Butler's dice grant is seeded by the auto-Butler trigger.
+	diceToolName = "dice"
 )
 
 // SeedNPC creates the demo Tenant, Campaign (which auto-creates its Butler via
@@ -139,7 +146,7 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 			return err
 		}
 
-		_, err = tx.CreateAgent(ctx, storage.NewAgent{
+		bartID, err := tx.CreateAgent(ctx, storage.NewAgent{
 			CampaignID:            campaignID,
 			Role:                  storage.AgentRoleCharacter,
 			Name:                  npc.name,
@@ -149,6 +156,18 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 			LLMProviderConfigID:   uuid.NullUUID{UUID: llmCfgID, Valid: true},
 			AddressOnly:           false, // a lone Character NPC catches unaddressed speech
 			Aliases:               npc.aliases,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Seed Bart's dice Tool Grant so the live loop hydrates his dice ability
+		// from the DB (#113) — the persisted equivalent of the in-code default
+		// grant this replaces. The auto-Butler's dice grant lands via the trigger
+		// (migration 00013); Bart is a Character, so his grant is explicit here.
+		_, err = tx.CreateToolGrant(ctx, storage.NewToolGrant{
+			AgentID:  bartID,
+			ToolName: diceToolName,
 		})
 		return err
 	})
@@ -214,9 +233,45 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 		if err != nil {
 			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 		}
+		// Hydrate this NPC's Tool Grants from its DB rows (#113): tool
+		// availability is data-driven, not compiled in. An NPC with no rows gets
+		// no grants, so its GrantSet declares no Tool to the LLM (least-privilege).
+		//
+		// CONTRACT: grants are read ONCE here — at RunFromDB, i.e. per Voice
+		// Session start — and the resulting GrantSet is read-only for the
+		// session's life. A grant row added or removed mid-session (e.g. a GM
+		// toggle via #117) takes effect on the NEXT Voice Session, not the running
+		// one.
+		grantRows, err := st.ListToolGrants(ctx, c.ID)
+		if err != nil {
+			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
+		}
+		spec.grants = grantsFromRows(grantRows)
 		specs = append(specs, spec)
 	}
 	return specs, primary, campaign, nil
+}
+
+// grantsFromRows maps an Agent's persisted Tool Grant rows to the in-memory
+// [tool.Grant]s the live loop hydrates into a [tool.GrantSet] (#113, ADR-0029) —
+// the identical shape the orchestrator already consumes, so the loop never knows
+// the grants came from the DB. A row's jsonb config becomes Grant.Config as a
+// [json.RawMessage] (nil when the column is NULL — dice's shape), which the Tool
+// handler receives as grantConfig at execution time and enforces there, never
+// the LLM. No rows yields no grants: the Agent is shown no Tool at all.
+func grantsFromRows(rows []storage.ToolGrant) []tool.Grant {
+	if len(rows) == 0 {
+		return nil
+	}
+	grants := make([]tool.Grant, 0, len(rows))
+	for _, r := range rows {
+		g := tool.Grant{ToolName: r.ToolName}
+		if len(r.Config) > 0 {
+			g.Config = r.Config // json.RawMessage; the handler decodes its scope
+		}
+		grants = append(grants, g)
+	}
+	return grants
 }
 
 // npcSpecFromAgent maps a storage.Agent (vendor-neutral) to the voice-domain
