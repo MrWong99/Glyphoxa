@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
@@ -24,7 +24,10 @@ import { KnowledgePanel } from "./KnowledgePanel";
 // CampaignService node RPCs mutate a closure so create/edit/delete each round-trip
 // through invalidate → refetch, and the recorded requests prove the chosen
 // NodeType, the update fields, and the delete id reach the wire.
-function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
+function mockTransport(
+  seed?: ReturnType<typeof create<typeof NodeSchema>>[],
+  opts: { failDelete?: boolean } = {},
+) {
   const nodes =
     seed ??
     [
@@ -80,6 +83,9 @@ function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
       },
       deleteNode: (req) => {
         deleteCalls.push(req);
+        if (opts.failDelete) {
+          throw new ConnectError("delete boom", Code.Internal);
+        }
         const i = nodes.findIndex((n) => n.id === req.id);
         if (i >= 0) nodes.splice(i, 1);
         return create(DeleteNodeResponseSchema, {});
@@ -89,8 +95,11 @@ function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
   return { transport, nodes, createCalls, updateCalls, deleteCalls, searchCalls };
 }
 
-function renderPanel(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
-  const ctx = mockTransport(seed);
+function renderPanel(
+  seed?: ReturnType<typeof create<typeof NodeSchema>>[],
+  opts?: { failDelete?: boolean },
+) {
+  const ctx = mockTransport(seed, opts);
   render(
     <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
       <KnowledgePanel />
@@ -172,6 +181,19 @@ describe("KnowledgePanel", () => {
     await screen.findByText(/no entries yet/i);
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0].id).toBe("n1");
+  });
+
+  it("surfaces a failed delete as an alert instead of a silently dead button", async () => {
+    renderPanel(undefined, { failDelete: true });
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+
+    // The failure is announced, not swallowed — and the entry is still present.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't delete/i);
+    expect(alert).toHaveTextContent(/delete boom/i);
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
   });
 
   it("groups the list by node type", async () => {

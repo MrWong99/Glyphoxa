@@ -151,6 +151,22 @@ export function KnowledgePanel() {
       { onSuccess: () => setEditing((e) => (e?.id === n.id ? null : e)) },
     );
 
+  // The editor's alert line. The active save (create or edit) takes precedence;
+  // a failed delete — which otherwise leaves the button looking dead (#204) —
+  // falls back into the same role=alert line so it is never swallowed.
+  const saveError = editing
+    ? updateNode.isError
+      ? updateNode.error.message
+      : null
+    : createNode.isError
+      ? createNode.error.message
+      : null;
+  const editorError = saveError
+    ? `Couldn't save: ${saveError}`
+    : deleteNode.isError
+      ? `Couldn't delete: ${deleteNode.error.message}`
+      : null;
+
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
@@ -191,15 +207,7 @@ export function KnowledgePanel() {
         key={editing?.id ?? "new"}
         node={editing}
         pending={editing ? updateNode.isPending : createNode.isPending}
-        error={
-          editing
-            ? updateNode.isError
-              ? updateNode.error.message
-              : null
-            : createNode.isError
-              ? createNode.error.message
-              : null
-        }
+        error={editorError}
         onCancel={() => setEditing(null)}
         onDelete={editing ? () => removeNode(editing) : undefined}
         onSubmit={(fields, reset) => {
@@ -398,7 +406,7 @@ function EntryEditor({
         )}
         {error && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            Couldn't save: {error}
+            {error}
           </span>
         )}
       </div>
