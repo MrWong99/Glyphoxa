@@ -445,8 +445,15 @@ function ToolRow({
     onError: (err) => toast.error(`Couldn't update ${grant.toolName}: ${err.message}`),
   });
 
-  const toggle = (granted: boolean) =>
-    update.mutate({ agentId, toolName: grant.toolName, granted, config: scope });
+  // The grant Switch never carries the local scope draft (#215): turning a grant
+  // ON creates a FRESH grant with no scope (empty config → SQL NULL), turning it
+  // OFF deletes the row. Only "Save scope" persists config. Resetting the draft to
+  // the server value on every toggle stops an unsaved edit from silently
+  // persisting and stops an off→on from resurrecting the pre-revoke scope.
+  const toggle = (granted: boolean) => {
+    setScope(grant.config);
+    update.mutate({ agentId, toolName: grant.toolName, granted });
+  };
   const saveScope = () =>
     update.mutate({ agentId, toolName: grant.toolName, granted: true, config: scope });
 

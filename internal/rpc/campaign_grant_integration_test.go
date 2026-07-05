@@ -106,6 +106,53 @@ func TestToolGrants_Integration(t *testing.T) {
 	}
 }
 
+// TestToolGrants_GhostAgent_Integration proves the #215 existence pre-check
+// against a real Postgres: a Character NPC is created, granted dice (a real
+// tool_agent_grant row), then deleted — the FK CASCADE removes the grant, leaving
+// a dangling agent_id (the stale second tab). Operating on the now-ghost id is
+// CodeNotFound on BOTH grant RPCs, not the 500 the FK violation would otherwise
+// surface on the write (the unit fakes can't see the FK — this is the coverage
+// the follow-up adds).
+func TestToolGrants_GhostAgent_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, _ := seedStore(t, dsn)
+	ctx := context.Background()
+
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewCampaignServer(store).Handler())
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	created, err := client.CreateAgent(ctx, connect.NewRequest(&managementv1.CreateAgentRequest{Name: "Doomed"}))
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	ghost := created.Msg.GetAgent().GetId()
+
+	// A real grant row exists, then the Agent is deleted: the FK CASCADE
+	// (tool_agent_grant.agent_id) removes the grant, leaving a dangling id.
+	if _, err := client.UpdateToolGrant(ctx, connect.NewRequest(&managementv1.UpdateToolGrantRequest{
+		AgentId: ghost, ToolName: "dice", Granted: true,
+	})); err != nil {
+		t.Fatalf("UpdateToolGrant(grant): %v", err)
+	}
+	if _, err := client.DeleteAgent(ctx, connect.NewRequest(&managementv1.DeleteAgentRequest{Id: ghost})); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+
+	_, listErr := client.ListToolGrants(ctx, connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: ghost}))
+	if got := connect.CodeOf(listErr); got != connect.CodeNotFound {
+		t.Errorf("ListToolGrants(ghost) code = %v, want NotFound", got)
+	}
+	_, updErr := client.UpdateToolGrant(ctx, connect.NewRequest(&managementv1.UpdateToolGrantRequest{
+		AgentId: ghost, ToolName: "dice", Granted: true,
+	}))
+	if got := connect.CodeOf(updErr); got != connect.CodeNotFound {
+		t.Errorf("UpdateToolGrant(ghost) code = %v, want NotFound", got)
+	}
+}
+
 // listGrants is a small helper that lists an Agent's grant states or fails the test.
 func listGrants(t *testing.T, client managementv1connect.CampaignServiceClient, agentID string) []*managementv1.ToolGrant {
 	t.Helper()
@@ -128,25 +175,19 @@ func grantedNames(grants []*managementv1.ToolGrant) []string {
 }
 
 // hydratedDeclarations replays the #113 hydration path against the persisted rows
-// using the PUBLIC tool package the live loop shares: read the Agent's Tool Grant
-// rows, build a real GrantSet over the built-in Registry, and return the Tool
-// names it would declare to the LLM. This is exactly what loadSeededNPCs does at
-// Voice Session start, so it proves a grant mutation takes effect on the next
-// session without new plumbing (AC4).
+// through the SAME canonical mapper the live loop uses ([storage.GrantsFromRows],
+// via wirenpc.grantsFromRows): read the Agent's Tool Grant rows, build a real
+// GrantSet over the built-in Registry, and return the Tool names it would declare
+// to the LLM. Calling the shared mapper — rather than reimplementing it here —
+// means this AC4 assertion can never drift from what loadSeededNPCs actually
+// hydrates at Voice Session start (issue #215).
 func hydratedDeclarations(t *testing.T, store *storage.Store, agentID uuid.UUID) []string {
 	t.Helper()
 	rows, err := store.ListToolGrants(context.Background(), agentID)
 	if err != nil {
 		t.Fatalf("hydrate: ListToolGrants(%s): %v", agentID, err)
 	}
-	grants := make([]tool.Grant, 0, len(rows))
-	for _, r := range rows {
-		g := tool.Grant{ToolName: r.ToolName}
-		if len(r.Config) > 0 {
-			g.Config = r.Config
-		}
-		grants = append(grants, g)
-	}
+	grants := storage.GrantsFromRows(rows)
 	decls := tool.NewGrantSet(tool.BuiltinRegistry(), grants...).Declarations()
 	names := make([]string, len(decls))
 	for i, d := range decls {

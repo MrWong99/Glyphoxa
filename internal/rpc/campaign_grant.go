@@ -35,6 +35,12 @@ func (s *CampaignServer) ListToolGrants(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
+	// Pre-check the Agent exists so a stale tab (Agent deleted elsewhere) reads a
+	// clean CodeNotFound instead of a fabricated full-catalog-ungranted list
+	// (issue #215) — the sibling CRUD missing-Agent mapping (campaign_crud.go).
+	if err := s.requireAgent(ctx, agentID); err != nil {
+		return nil, err
+	}
 
 	grants, err := s.toolGrantsFor(ctx, agentID)
 	if err != nil {
@@ -65,6 +71,12 @@ func (s *CampaignServer) UpdateToolGrant(
 	registered, ok := s.tools.Get(m.GetToolName())
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown tool"))
+	}
+	// Pre-check the Agent exists so granting for a deleted Agent (stale second
+	// tab) is CodeNotFound, not a tool_agent_grant FK violation surfaced as a 500
+	// (issue #215) — mirrors the sibling UpdateAgent/DeleteAgent mapping.
+	if err := s.requireAgent(ctx, agentID); err != nil {
+		return nil, err
 	}
 
 	if m.GetGranted() {
@@ -105,6 +117,21 @@ func (s *CampaignServer) UpdateToolGrant(
 	// The Tool is registered, so toolGrantsFor always emits an entry for it.
 	slog.Default().Error("UpdateToolGrant: toggled tool missing from catalog", "tool", registered.Name())
 	return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+}
+
+// requireAgent maps a missing Agent to CodeNotFound (any other lookup failure to
+// CodeInternal) so both grant handlers reject a stale-tab agent_id up front
+// rather than persist against — or fabricate a catalog for — an Agent the FK no
+// longer has (issue #215). Identical shape to the sibling CRUD mutations.
+func (s *CampaignServer) requireAgent(ctx context.Context, agentID uuid.UUID) error {
+	if _, err := s.store.GetAgent(ctx, agentID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
+		}
+		slog.Default().Error("tool grant: agent lookup failed", "agent_id", agentID, "err", err)
+		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return nil
 }
 
 // toolGrantsFor joins the built-in Tool catalog with an Agent's persisted grant
