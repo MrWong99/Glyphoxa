@@ -307,10 +307,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		reg.Register(presence.RollCommand(tool.NewDice()))
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
-		// session; set BEFORE the Manager copies cfg into its base config.
+		// session; set BEFORE the Manager copies cfg into its base config. Note:
+		// pres.Ensure is deliberately NOT called here — it opens the gateway, whose
+		// interaction goroutines read `mgr` via the /glyphoxa search resolver, so it
+		// must run AFTER mgr is assigned (below) to establish the happens-before edge.
 		cfg.Client = pres.ClientProvider()
-		// The GM session commands (#108) register below, once the Manager exists,
-		// and Ensure runs after them so all commands are in one registration.
+		// The GM session commands (#108) + /glyphoxa search (#120) register below,
+		// once the Manager exists, and Ensure runs after them so all commands are in
+		// one registration.
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {

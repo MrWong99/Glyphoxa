@@ -24,6 +24,17 @@ const transcriptSearchLimit = 5
 // otherwise hang the handler indefinitely, so the handler caps its own DB work.
 const transcriptSearchTimeout = 10 * time.Second
 
+// Discord rejects a message whose content exceeds 2000 characters (a Followup over
+// it 400s and the GM sees nothing), so replies are bounded: discordMessageLimit is
+// the hard cap, maxQuoteChars caps a single quoted line (a coalesced Agent reply is
+// multi-sentence and can be long), and maxQueryEcho caps an echoed query (a string
+// option can be up to 6000 chars).
+const (
+	discordMessageLimit = 2000
+	maxQuoteChars       = 200
+	maxQueryEcho        = 100
+)
+
 // TranscriptSearch is the storage surface /glyphoxa search needs: the ONE shared
 // search path (AC4 — the same storage.SearchTranscriptLines the web RPC calls)
 // plus the stored Active Campaign fallback. The live Voice Session's campaign is
@@ -87,7 +98,7 @@ func SearchCommand(search TranscriptSearch, activeCampaign func() (uuid.UUID, bo
 				return fmt.Errorf("presence: search transcript for campaign %s: %w", campaignID, err)
 			}
 			if len(lines) == 0 {
-				return ic.ReplyEphemeral(fmt.Sprintf("No lines match %q.", query))
+				return ic.ReplyEphemeral(fmt.Sprintf("No lines match %q.", truncateRunes(query, maxQueryEcho)))
 			}
 			return ic.ReplyEphemeral(formatTranscriptMatches(query, lines))
 		},
@@ -118,16 +129,34 @@ func resolveSearchCampaign(ctx context.Context, search TranscriptSearch, activeC
 // formatTranscriptMatches renders the top matches as an ephemeral reply: a header
 // plus each hit quoted with its speaker (and pill tag, e.g. "Bart (NPC)") and a
 // UTC HH:MM:SS timestamp (ADR-0011 amendment: quotes lines with speaker +
-// timestamp). UTC keeps it deterministic — the bot has no per-user timezone.
+// timestamp). UTC keeps it deterministic — the bot has no per-user timezone. Every
+// quoted line is truncated (a coalesced Agent reply can be long) and the whole
+// reply is kept under Discord's 2000-char cap: a line that would push it over is
+// dropped rather than risking a 400 that hides ALL the matches from the GM.
 func formatTranscriptMatches(query string, lines []storage.TranscriptLine) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Top matches for %q:\n", query)
+	fmt.Fprintf(&b, "Top matches for %q:", truncateRunes(query, maxQueryEcho))
 	for _, l := range lines {
 		who := l.Who
 		if l.Tag != "" {
 			who = fmt.Sprintf("%s (%s)", l.Who, l.Tag)
 		}
-		fmt.Fprintf(&b, "**%s** · %s — %q\n", who, l.TS.UTC().Format("15:04:05"), l.Text)
+		line := fmt.Sprintf("\n**%s** · %s — %q", who, l.TS.UTC().Format("15:04:05"), truncateRunes(l.Text, maxQuoteChars))
+		if b.Len()+len(line) > discordMessageLimit {
+			break
+		}
+		b.WriteString(line)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
+}
+
+// truncateRunes clips s to at most max runes (never bytes — German campaigns), so
+// a long line or query can't blow the Discord content cap; a clipped value gets a
+// trailing ellipsis to signal the cut.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Play, Square, Search } from "lucide-react";
@@ -133,9 +133,15 @@ export function Session() {
 
   // Transcript search deep-link (#120): clicking a search hit highlights (and,
   // where the browser supports it, scrolls to) that line in the rendered
-  // transcript. A hit for a line not in the current view — e.g. an older session —
-  // simply sets the highlight with nothing to scroll to (ADR-0011 amendment).
+  // transcript. A hit for a line NOT in the current view — e.g. an older session —
+  // can't scroll anywhere, so the search box shows an inline "not in the view" hint
+  // instead of a dead click (ADR-0011 amendment). renderedLineIds is the set of
+  // line ids currently on screen, so the search box can tell the two apart.
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
+  const renderedLineIds = useMemo(
+    () => new Set(transcript.lines.map((l) => l.id)),
+    [transcript.lines],
+  );
   const jumpToLine = (lineId: string) => {
     setHighlightedLineId(lineId);
     const el = document.querySelector(`[data-line-id="${lineId}"]`);
@@ -198,7 +204,7 @@ export function Session() {
 
       <section className="gx-session__transcript">
         <h2 className="gx-section-title">{active ? "Live transcript" : "Session transcript"}</h2>
-        <TranscriptSearch onJump={jumpToLine} />
+        <TranscriptSearch onJump={jumpToLine} renderedLineIds={renderedLineIds} />
         <Card>
           {!hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
@@ -252,8 +258,16 @@ export function Session() {
 // The server scopes the search to the operator's Active Campaign and shares the
 // one storage search path with /glyphoxa search (AC4/AC5). Each hit renders its
 // speaker, tag, timestamp, and matched text; clicking it asks the parent to
-// deep-link the line in the rendered transcript (onJump).
-function TranscriptSearch({ onJump }: { onJump: (lineId: string) => void }) {
+// deep-link the line in the rendered transcript (onJump). A hit whose line is not
+// in the rendered transcript (renderedLineIds) — an older session's line — shows an
+// inline "not in the view" hint on that result rather than clicking to nothing.
+function TranscriptSearch({
+  onJump,
+  renderedLineIds,
+}: {
+  onJump: (lineId: string) => void;
+  renderedLineIds: Set<string>;
+}) {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   useEffect(() => {
@@ -271,6 +285,15 @@ function TranscriptSearch({ onJump }: { onJump: (lineId: string) => void }) {
     { enabled: searching, placeholderData: keepPreviousData, retry: false },
   );
   const lines = searchQuery.data?.lines ?? [];
+
+  // The clicked hit whose line isn't in the rendered transcript — flagged for the
+  // inline hint. Cleared on a new query so a stale hint never lingers.
+  const [notInViewLineId, setNotInViewLineId] = useState<string | null>(null);
+  useEffect(() => setNotInViewLineId(null), [debounced]);
+  const openHit = (lineId: string) => {
+    onJump(lineId);
+    setNotInViewLineId(renderedLineIds.has(lineId) ? null : lineId);
+  };
 
   return (
     <div className="gx-tsearch">
@@ -292,7 +315,7 @@ function TranscriptSearch({ onJump }: { onJump: (lineId: string) => void }) {
           <ul className="gx-tsearch__results" data-testid="transcript-search-results">
             {lines.map((m) => (
               <li key={`${m.sessionId}:${m.lineId}`}>
-                <button type="button" className="gx-tsearch__result" onClick={() => onJump(m.lineId)}>
+                <button type="button" className="gx-tsearch__result" onClick={() => openHit(m.lineId)}>
                   <span className="gx-line__who" data-kind={m.kind}>
                     {m.who}
                   </span>
@@ -304,6 +327,11 @@ function TranscriptSearch({ onJump }: { onJump: (lineId: string) => void }) {
                   <time className="gx-line__ts">{matchClock(m.ts)}</time>
                   <span className="gx-tsearch__text">{m.text}</span>
                 </button>
+                {notInViewLineId === m.lineId && (
+                  <span className="gx-tsearch__hint" role="note">
+                    From an earlier session — not in the view.
+                  </span>
+                )}
               </li>
             ))}
           </ul>

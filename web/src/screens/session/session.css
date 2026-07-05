@@ -124,6 +124,15 @@
   color: var(--text-muted);
 }
 
+/* Inline hint on a hit whose line isn't in the rendered transcript (an older
+ * session): explains why the click didn't scroll anywhere. */
+.gx-tsearch__hint {
+  display: block;
+  padding: 0 var(--spacing-sm) var(--spacing-xs, 4px);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 /* Deep-link highlight: the line a search hit points at, briefly emphasized. */
 .gx-line--highlighted {
   background: var(--rune-soft, rgba(120, 160, 255, 0.14));

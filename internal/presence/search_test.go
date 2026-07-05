@@ -247,3 +247,71 @@ func TestSearchCommandNonOperatorDenied(t *testing.T) {
 		t.Fatalf("denial = %+v, want one ephemeral reply", resp.replies)
 	}
 }
+
+// TestSearchCommandTruncatesLongLine (#120 review): a coalesced Agent reply can be
+// long; the quoted line is truncated (…) so it never blows Discord's 2000-char
+// content cap and 400s the Followup (which would hide ALL matches from the GM).
+func TestSearchCommandTruncatesLongLine(t *testing.T) {
+	campaignID := uuid.New()
+	long := strings.Repeat("dragon fire ", 60) // ~720 chars, well over the per-line cap
+	fake := &fakeTranscriptSearch{
+		campaign: storage.Campaign{ID: campaignID},
+		lines: []storage.TranscriptLine{
+			{VoiceSessionID: uuid.New(), CampaignID: campaignID, LineID: "a:t1", Seq: 1, Who: "Bart", Tag: "NPC", Kind: "npc", TS: time.Date(2026, 6, 27, 18, 0, 1, 0, time.UTC), Text: long},
+		},
+	}
+	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "dragon")
+
+	if len(resp.followups) != 1 {
+		t.Fatalf("want one Followup, got %+v", resp.followups)
+	}
+	body := resp.followups[0].content
+	if !strings.Contains(body, "…") {
+		t.Errorf("long line was not truncated (no ellipsis); got:\n%s", body)
+	}
+	if strings.Contains(body, long) {
+		t.Errorf("reply carries the full untruncated line; got len %d", len([]rune(body)))
+	}
+	if n := len([]rune(body)); n > discordMessageLimit {
+		t.Errorf("reply is %d runes, want <= %d (Discord cap)", n, discordMessageLimit)
+	}
+}
+
+// TestFormatTranscriptMatchesCapsTotalLength (#120 review): even 5 pathologically
+// long lines never produce a reply over the Discord content cap — a line that would
+// push it over is dropped, so the message always sends.
+func TestFormatTranscriptMatchesCapsTotalLength(t *testing.T) {
+	lines := make([]storage.TranscriptLine, transcriptSearchLimit)
+	for i := range lines {
+		lines[i] = storage.TranscriptLine{
+			Who:  strings.Repeat("W", 900), // long speaker label, untruncated, forces the total-cap break
+			Kind: "npc",
+			TS:   time.Date(2026, 6, 27, 18, 0, i, 0, time.UTC),
+			Text: strings.Repeat("x", 1000),
+		}
+	}
+	got := formatTranscriptMatches("q", lines)
+	if len(got) > discordMessageLimit {
+		t.Errorf("formatted reply is %d bytes, want <= %d (Discord cap)", len(got), discordMessageLimit)
+	}
+}
+
+// TestSearchCommandGiantQueryNoMatch (#120 review): a string option can be up to
+// 6000 chars; the no-match reply echoes only a truncated query, so it stays well
+// under the Discord cap and never 400s.
+func TestSearchCommandGiantQueryNoMatch(t *testing.T) {
+	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: uuid.New()}} // no lines -> no match
+	giant := strings.Repeat("a", 6000)
+	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, giant)
+
+	if len(resp.followups) != 1 {
+		t.Fatalf("want one Followup, got %+v", resp.followups)
+	}
+	body := resp.followups[0].content
+	if !strings.Contains(body, "No lines match") || !strings.Contains(body, "…") {
+		t.Errorf("giant-query no-match reply = %q, want a no-match line with a truncated (…) query", body)
+	}
+	if n := len([]rune(body)); n > discordMessageLimit {
+		t.Errorf("no-match reply is %d runes, want <= %d (Discord cap)", n, discordMessageLimit)
+	}
+}
