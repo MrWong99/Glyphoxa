@@ -64,6 +64,11 @@ type Registry struct {
 	gate *Gate
 	log  *slog.Logger
 
+	// responseTimeout bounds a handler until it first responds (Discord's 3s
+	// deadline); a Defer stops it so a slow deferred handler's own work is not
+	// killed. Field (not the const) so tests drive it with a short deadline.
+	responseTimeout time.Duration
+
 	mu    sync.RWMutex
 	cmds  map[string]Command // dispatch key -> command
 	order []string           // registration order, for deterministic Definitions
@@ -75,7 +80,7 @@ func NewRegistry(gate *Gate, log *slog.Logger) *Registry {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Registry{gate: gate, log: log, cmds: map[string]Command{}}
+	return &Registry{gate: gate, log: log, cmds: map[string]Command{}, responseTimeout: interactionTimeout}
 }
 
 // Register adds commands to the surface. Boot-time only (before the first
@@ -169,8 +174,17 @@ func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
 		_ = ic.ReplyEphemeral(gateMessage(err))
 		return
 	}
-	ctx, cancel := context.WithTimeout(base, interactionTimeout)
+	// Bound the handler by Discord's ~3s first-response deadline via a watchdog
+	// that cancels the ctx. A Defer (which ACKs within that window and opens the
+	// minutes-long follow-up window) stops the watchdog so a slow deferred handler
+	// — #120's transcript search — is not killed at the deadline. After a Defer,
+	// ic routes replies through Followup, so a handler error still reaches the
+	// user instead of a Discord 40060 ("already acknowledged") on CreateMessage.
+	ctx, cancel := context.WithCancel(base)
 	defer cancel()
+	watchdog := time.AfterFunc(r.responseTimeout, cancel)
+	defer watchdog.Stop()
+	ic.onDefer = func() { watchdog.Stop() }
 	if err := cmd.Handle(ctx, ic); err != nil {
 		r.log.Error("presence: slash command handler failed", "command", key, "err", err)
 		_ = ic.ReplyEphemeral("Something went wrong handling that command.")
@@ -204,7 +218,7 @@ func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Aut
 	if err := r.authorize(cmd, ac.guildID, ac.userID); err != nil {
 		return empty
 	}
-	ctx, cancel := context.WithTimeout(base, interactionTimeout)
+	ctx, cancel := context.WithTimeout(base, r.responseTimeout)
 	defer cancel()
 	choices, err := cmd.Autocomplete(ctx, ac)
 	if err != nil {
@@ -264,6 +278,13 @@ type Interaction struct {
 	userID  string
 	opts    optionSource
 	resp    responder
+	// deferred is set once Defer succeeds: after it, Reply/ReplyEphemeral route
+	// through Followup, because the interaction is already acknowledged and a
+	// fresh CreateMessage would be a Discord 40060 ("already acknowledged").
+	deferred bool
+	// onDefer is installed by dispatch to stop the first-response watchdog when
+	// the handler Defers; nil when the Interaction is invoked outside dispatch.
+	onDefer func()
 }
 
 // GuildID is the Guild the interaction happened in, or "" for a DM.
@@ -289,16 +310,39 @@ func (ic *Interaction) Int(name string) (int64, bool) {
 	return int64(v), ok
 }
 
-// Reply answers the interaction with a public in-channel message.
-func (ic *Interaction) Reply(content string) error { return ic.resp.reply(content, false) }
+// Reply answers the interaction with a public in-channel message (a Followup
+// once the interaction has been Deferred).
+func (ic *Interaction) Reply(content string) error { return ic.reply(content, false) }
 
-// ReplyEphemeral answers with a message only the invoker sees.
-func (ic *Interaction) ReplyEphemeral(content string) error { return ic.resp.reply(content, true) }
+// ReplyEphemeral answers with a message only the invoker sees (a Followup once
+// Deferred).
+func (ic *Interaction) ReplyEphemeral(content string) error { return ic.reply(content, true) }
+
+// reply routes a message to the correct Discord response call: a fresh
+// CreateMessage before a Defer, a Followup after (a post-ACK CreateMessage is a
+// 40060). This makes both a handler's domain-error reply and the Registry's
+// generic-error reply reach the user after a Defer.
+func (ic *Interaction) reply(content string, ephemeral bool) error {
+	if ic.deferred {
+		return ic.resp.followup(content, ephemeral)
+	}
+	return ic.resp.reply(content, ephemeral)
+}
 
 // Defer acknowledges the interaction with a "thinking…" placeholder, buying a
 // slow handler time past the 3s deadline; it later sends the real reply with
-// Followup.
-func (ic *Interaction) Defer(ephemeral bool) error { return ic.resp.deferResponse(ephemeral) }
+// Followup (or Reply, which routes to Followup once deferred). Defer also stops
+// the dispatch first-response watchdog so the handler's own work is not killed.
+func (ic *Interaction) Defer(ephemeral bool) error {
+	if err := ic.resp.deferResponse(ephemeral); err != nil {
+		return err
+	}
+	ic.deferred = true
+	if ic.onDefer != nil {
+		ic.onDefer()
+	}
+	return nil
+}
 
 // Followup sends a message after a Defer.
 func (ic *Interaction) Followup(content string, ephemeral bool) error {

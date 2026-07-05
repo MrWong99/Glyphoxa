@@ -85,15 +85,18 @@ func parseDiceExpr(expr string) (count, sides int, err error) {
 	return count, sides, nil
 }
 
-// parseNonNegative parses a base-10 non-negative integer, rejecting signs and
-// any non-digit so "+2" / "-2" / "2x" never slip through as a valid dice count.
+// parseNonNegative parses a base-10 non-negative integer. It rejects anything
+// that is not purely digits BEFORE strconv.Atoi, because Atoi accepts a leading
+// sign — so this is what makes "+2" / "-2" / "2x" malformed dice parts rather
+// than sneaking through as a count.
 func parseNonNegative(s string) (int, error) {
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, err
+	if s == "" {
+		return 0, fmt.Errorf("empty number")
 	}
-	if n < 0 {
-		return 0, fmt.Errorf("negative value %d", n)
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("non-digit %q in %q", r, s)
+		}
 	}
-	return n, nil
+	return strconv.Atoi(s)
 }

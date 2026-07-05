@@ -72,7 +72,9 @@ func TestRollDefaultCountIsOne(t *testing.T) {
 }
 
 func TestRollMalformedAndOutOfBoundsAreGraceful(t *testing.T) {
-	for _, expr := range []string{"banana", "0d6", "2d1", "101d6", "", "d", "2d"} {
+	// Includes signed parts ("+2d6", "2d+6", "-1d6") — a dice count/sides is plain
+	// digits, so a leading sign is malformed (issue #6: parse and comment agree).
+	for _, expr := range []string{"banana", "0d6", "2d1", "101d6", "", "d", "2d", "+2d6", "2d+6", "-1d6", "2d6d8"} {
 		underTest, _ := seededDicePair()
 		resp := runRoll(t, underTest, expr)
 		if len(resp.replies) != 1 {

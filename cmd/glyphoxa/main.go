@@ -409,7 +409,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// request; nil in web-only mode (no presence).
 	var presenceRefresh func()
 	if pres != nil {
-		presenceRefresh = func() { _ = pres.Ensure(context.Background()) }
+		presenceRefresh = func() {
+			if err := pres.Ensure(context.Background()); err != nil {
+				log.Warn("presence: refresh after Discord settings save failed; "+
+					"will retry on the next save or Voice Session cycle", "err", err)
+			}
+		}
 	}
 	mounts := managementMounts(store, cipher, log, mgr, relay, presenceRefresh)
 	root := spa.Handler()

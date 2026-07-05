@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
@@ -68,10 +69,15 @@ type Presence struct {
 	register    commandRegistrar
 	closeClient func(client *bot.Client)
 
+	// mu serializes Ensure/Close so builds and registrations never overlap; token
+	// is Ensure-local state guarded by it. The read-hot client and guildID are
+	// ATOMICS, not mu-guarded, so the Gate's GuildID() and the voice loop's
+	// Client() never block on a rebuild that holds mu across OpenGateway +
+	// SetGuildCommands REST (seconds of network I/O).
 	mu      sync.Mutex
-	client  *bot.Client
-	token   string // token the current client was built with
-	guildID string // last-ensured configured Guild ("" in wait-state)
+	token   string                     // token the current client was built with
+	client  atomic.Pointer[bot.Client] // nil = wait-state
+	guildID atomic.Value               // string; last-ensured configured Guild ("" in wait-state)
 }
 
 // New builds a Presence. envToken is the DISCORD_BOT_TOKEN fallback (the
@@ -88,6 +94,7 @@ func New(store Store, cipher *crypto.Cipher, reg *Registry, envToken string, log
 		envToken: envToken,
 		log:      log,
 	}
+	p.guildID.Store("")
 	p.build = defaultClientBuilder(reg, log)
 	p.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	p.register = restRegister
@@ -129,66 +136,87 @@ func (p *Presence) Ensure(ctx context.Context) error {
 	}
 
 	rebuilt := false
-	if p.client == nil || token != p.token {
-		if p.client != nil {
-			p.closeClient(p.client)
-			p.client = nil
+	client := p.client.Load()
+	if client == nil || token != p.token {
+		if old := p.client.Load(); old != nil {
+			p.closeClient(old)
+			p.client.Store(nil)
 		}
-		client, err := p.build(token)
+		c, err := p.build(token)
 		if err != nil {
 			return fmt.Errorf("presence: build Discord client: %w", err)
 		}
-		if err := p.open(ctx, client); err != nil {
-			p.closeClient(client)
+		if err := p.open(ctx, c); err != nil {
+			p.closeClient(c)
 			return fmt.Errorf("presence: open gateway: %w", err)
 		}
-		p.client = client
+		client = c
+		p.client.Store(c)
 		p.token = token
 		rebuilt = true
 		p.log.Info("presence: standing Discord gateway up")
 	}
 
 	guild := dep.GuildID
-	oldGuild := p.guildID
-	if guild != "" && (rebuilt || guild != oldGuild) {
+	oldGuild, _ := p.guildID.Load().(string)
+	switch {
+	case guild == "":
+		// The Guild was cleared while a token is still configured: best-effort
+		// remove the commands from the old Guild so a stale /roll doesn't linger.
+		if oldGuild != "" {
+			if err := p.register(ctx, client, oldGuild, nil); err != nil {
+				p.log.Warn("presence: clear commands from removed guild", "guild", oldGuild, "err", err)
+			}
+		}
+	case rebuilt || guild != oldGuild:
 		if oldGuild != "" && oldGuild != guild {
-			if err := p.register(ctx, p.client, oldGuild, nil); err != nil {
+			if err := p.register(ctx, client, oldGuild, nil); err != nil {
 				p.log.Warn("presence: clear old guild commands", "guild", oldGuild, "err", err)
 			}
 		}
-		if err := p.register(ctx, p.client, guild, p.reg.Definitions()); err != nil {
+		if err := p.register(ctx, client, guild, p.reg.Definitions()); err != nil {
 			return fmt.Errorf("presence: register guild commands: %w", err)
 		}
 		p.log.Info("presence: registered slash commands", "guild", guild)
 	}
-	p.guildID = guild
+	p.guildID.Store(guild)
 	return nil
 }
 
 // GuildID is the last-ensured configured Guild, "" while in the wait-state. It
-// backs the Gate's Guild check.
+// backs the Gate's Guild check and reads an atomic, so an in-flight interaction
+// never blocks on a token rebuild that holds mu across REST calls.
 func (p *Presence) GuildID() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.guildID
+	v, _ := p.guildID.Load().(string)
+	return v
 }
 
 // Client returns the standing shared client, or ErrNoClient in the wait-state.
+// It reads an atomic, so the voice loop's acquireClient never blocks on a
+// rebuild in progress.
 func (p *Presence) Client() (*bot.Client, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.client == nil {
+	c := p.client.Load()
+	if c == nil {
 		return nil, ErrNoClient
 	}
-	return p.client, nil
+	return c, nil
 }
 
 // ClientProvider adapts the presence to the wirenpc shared-client seam: each
-// Voice Session cycle borrows this one client instead of dialing its own. A
-// wait-state returns ErrNoClient, which the reconnect loop treats as a transient
-// failure and retries (self-healing across presence rebuilds).
+// Voice Session cycle borrows this one client instead of dialing its own. When
+// the presence is in the wait-state (never ensured, or a prior Ensure failed on
+// a Discord blip), the provider re-runs Ensure so the standing client self-heals
+// on the next Voice Session cycle instead of staying dead until a restart —
+// runWithReconnect's backoff paces the retries. A still-failing Ensure surfaces
+// its error, which the reconnect loop treats as transient.
 func (p *Presence) ClientProvider() wirenpc.ClientProvider {
-	return func(context.Context) (*bot.Client, error) {
+	return func(ctx context.Context) (*bot.Client, error) {
+		if c, err := p.Client(); err == nil {
+			return c, nil
+		}
+		if err := p.Ensure(ctx); err != nil {
+			return nil, err
+		}
 		return p.Client()
 	}
 }
@@ -198,9 +226,9 @@ func (p *Presence) ClientProvider() wirenpc.ClientProvider {
 func (p *Presence) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.client != nil {
-		p.closeClient(p.client)
-		p.client = nil
+	if c := p.client.Load(); c != nil {
+		p.closeClient(c)
+		p.client.Store(nil)
 	}
 }
 
