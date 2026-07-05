@@ -236,6 +236,12 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 		// Hydrate this NPC's Tool Grants from its DB rows (#113): tool
 		// availability is data-driven, not compiled in. An NPC with no rows gets
 		// no grants, so its GrantSet declares no Tool to the LLM (least-privilege).
+		//
+		// CONTRACT: grants are read ONCE here — at RunFromDB, i.e. per Voice
+		// Session start — and the resulting GrantSet is read-only for the
+		// session's life. A grant row added or removed mid-session (e.g. a GM
+		// toggle via #117) takes effect on the NEXT Voice Session, not the running
+		// one.
 		grantRows, err := st.ListToolGrants(ctx, c.ID)
 		if err != nil {
 			return nil, storage.LoadedAgent{}, storage.Campaign{}, err

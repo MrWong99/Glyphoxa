@@ -191,3 +191,60 @@ func TestListToolGrantsEmpty(t *testing.T) {
 		t.Errorf("ListToolGrants(random) = (%+v, %v), want ([], nil)", g, err)
 	}
 }
+
+// TestBackfillGrantsExistingButler covers the 00013 backfill statement in
+// isolation: a Butler that already existed BEFORE the migration must gain its
+// dice grant when 00013 applies. Every other test creates Butlers via the
+// already-extended trigger and TestMigrateUpDown runs an empty DB, so this is
+// the only coverage of the backfill. It migrates through 00012 (the schema
+// before tool_agent_grant exists, where the unextended 00002 trigger inserts a
+// grantless Butler), creates a Campaign to get such a Butler, then applies 00013
+// and asserts the backfill granted it dice.
+func TestBackfillGrantsExistingButler(t *testing.T) {
+	dsn := startPostgres(t)
+	db := openSQL(t, dsn)
+	pool := openPool(t, dsn)
+	ctx := context.Background()
+
+	provider, err := storage.NewMigrationProvider(db)
+	if err != nil {
+		t.Fatalf("NewMigrationProvider: %v", err)
+	}
+
+	// Apply through 00012 only — tool_agent_grant does not exist yet, and the
+	// auto-Butler trigger here is the unextended 00002 version (Butler, no grant).
+	if _, err := provider.UpTo(ctx, 12); err != nil {
+		t.Fatalf("migrate up to 00012: %v", err)
+	}
+
+	st := storage.New(pool)
+	tenantID, err := st.CreateTenant(ctx, "Backfill Co")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campaignID, err := st.CreateCampaign(ctx, storage.NewCampaign{TenantID: tenantID, Name: "Old Campaign"})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	butler, err := st.GetButler(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("GetButler at v12: %v", err)
+	}
+
+	// Apply 00013: creates the table, extends the trigger, AND backfills the
+	// pre-existing Butler created above.
+	if _, err := provider.UpTo(ctx, 13); err != nil {
+		t.Fatalf("migrate up to 00013: %v", err)
+	}
+
+	grants, err := st.ListToolGrants(ctx, butler.ID)
+	if err != nil {
+		t.Fatalf("ListToolGrants after backfill: %v", err)
+	}
+	if len(grants) != 1 || grants[0].ToolName != "dice" {
+		t.Fatalf("pre-existing Butler has grants %+v after backfill, want exactly [dice]", grants)
+	}
+	if grants[0].Config != nil {
+		t.Errorf("backfilled dice grant config = %q, want nil", grants[0].Config)
+	}
+}
