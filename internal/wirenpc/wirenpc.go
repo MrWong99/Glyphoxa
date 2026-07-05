@@ -31,6 +31,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -287,6 +288,15 @@ type Config struct {
 	// adapters. An empty key means "adapter ENV fallback", so the zero value (the
 	// env-only Run path) reproduces today's behavior untouched.
 	keys providerKeys
+
+	// Memory is the NPC memory recaller injected into every NPC's Agent loop
+	// (#122, ADR-0011/0042): it fills the Hot Context memory slot each turn. The
+	// web tier resolves one recaller (over the shared embeddings provider + the
+	// process store/bus) and sets it on the session Manager's base config; it flows
+	// through connectAndServe → buildConversation → the Roster. nil (voice/bench
+	// standalone, or an unavailable embeddings/DB path) disables recall entirely,
+	// so Agent turns behave exactly as before (AC6).
+	Memory agent.MemoryRecaller
 }
 
 // RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
@@ -537,7 +547,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming)
+	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -659,7 +669,7 @@ var (
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -728,7 +738,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over the shared engine) in the Cast. The
 	// Matcher is built from the first NPC and grown for the rest.
-	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log))
+	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log, memory))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}

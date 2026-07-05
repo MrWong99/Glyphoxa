@@ -85,6 +85,33 @@ type StreamingEngine interface {
 	GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (full string, err error)
 }
 
+// Memory is the recalled Hot Context memory slot (ADR-0011/0042): the Transcript
+// Chunks an Agent may reference this turn, split by retrieval mode. Personal is
+// NPC-knowledge — chunks the Agent personally participated in ("witnessed") —
+// while World is campaign-wide topical context the Agent may not have been present
+// for, framed as possibly second-hand (ADR-0011). Each string is one chunk's
+// content. A zero Memory (both empty) injects nothing, leaving the prompt
+// byte-identical to the no-memory path.
+type Memory struct {
+	// Personal is NPC-knowledge: chunks the Agent participated in.
+	Personal []string
+	// World is campaign-wide context — framed "may be second-hand" (ADR-0011).
+	World []string
+}
+
+// IsZero reports whether the Memory carries no chunks in either mode — the
+// signal to omit the whole memory block from the system prompt.
+func (m Memory) IsZero() bool { return len(m.Personal) == 0 && len(m.World) == 0 }
+
+// MemoryRecaller retrieves the Hot Context [Memory] for one turn: the chunks the
+// Agent (agentID) may reference given the current utterance. It NEVER returns an
+// error — degradation (an embeddings/DB timeout or an unavailable provider)
+// yields a zero Memory rather than stalling the turn (ADR-0042). Implementations
+// respect ctx: a barge-in cancels retrieval and yields zero Memory.
+type MemoryRecaller interface {
+	Recall(ctx context.Context, agentID, utterance string) Memory
+}
+
 // Config configures a [Replier].
 type Config struct {
 	// Persona is the Agent this loop voices.
@@ -135,6 +162,13 @@ type Config struct {
 	// negative disables the deadline (the turn is still cancellable via the
 	// caller's ctx, e.g. barge-in).
 	TurnTimeout time.Duration
+
+	// Memory recalls the Hot Context memory chunks injected into the system prompt
+	// each turn (ADR-0011/0042). It is consulted under the turn ctx, OUTSIDE the
+	// history lock (it is network-adjacent), and never blocks the turn: a slow or
+	// unavailable path degrades to a zero Memory. nil disables recall entirely —
+	// the prompt is then byte-identical to the pre-memory behavior (AC6).
+	Memory MemoryRecaller
 }
 
 // DefaultTurnTimeout is the per-turn LLM deadline applied when
@@ -237,7 +271,15 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 	r.mu.Lock()
 	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
 	r.trimHistoryLocked()
-	messages := r.hotContextLocked()
+	r.mu.Unlock()
+
+	// Recall runs BETWEEN the two lock sections, never under r.mu: it is
+	// network-adjacent (embeddings + DB) and must not hold the loop's lock across
+	// that call (ADR-0042). It respects ctx, so a barge cancels it.
+	mem := r.recall(ctx, text)
+
+	r.mu.Lock()
+	messages := r.hotContextLocked(mem)
 	r.mu.Unlock()
 
 	reply, err := r.engine.Generate(ctx, messages)
@@ -295,7 +337,14 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	r.mu.Lock()
 	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
 	r.trimHistoryLocked()
-	messages := r.hotContextLocked()
+	r.mu.Unlock()
+
+	// Recall between the lock sections (see [Replier.turn]): outside r.mu, under
+	// ctx, degrading to zero Memory rather than stalling the streaming turn.
+	mem := r.recall(ctx, text)
+
+	r.mu.Lock()
+	messages := r.hotContextLocked(mem)
 	r.mu.Unlock()
 
 	streamer, ok := r.engine.(StreamingEngine)
@@ -442,33 +491,77 @@ func (e providerEngine) Generate(ctx context.Context, messages []llm.Message) (s
 	return b.String(), nil
 }
 
+// recall consults the configured [MemoryRecaller] for this turn's Hot Context
+// memory, keyed by the Agent's id and the current utterance. A nil recaller (the
+// unconfigured default) returns a zero Memory, so the prompt stays byte-identical
+// to the pre-memory path (AC6). The recaller never errors and respects ctx.
+func (r *Replier) recall(ctx context.Context, text string) Memory {
+	if r.cfg.Memory == nil {
+		return Memory{}
+	}
+	return r.cfg.Memory.Recall(ctx, r.cfg.Persona.AgentID, text)
+}
+
 // hotContextLocked assembles the Hot Context message list for one call: the
-// system prompt (Persona + KG-facts placeholder + audio-markup instruction)
-// followed by the recent Transcript (the bounded history). Caller holds r.mu.
-func (r *Replier) hotContextLocked() []llm.Message {
+// system prompt (Persona + recalled memory + audio-markup instruction) followed
+// by the recent Transcript (the bounded history). mem is the memory recalled for
+// this turn (zero when unconfigured or degraded). Caller holds r.mu.
+func (r *Replier) hotContextLocked(mem Memory) []llm.Message {
 	msgs := make([]llm.Message, 0, len(r.history)+1)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt()})
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem)})
 	msgs = append(msgs, r.history...)
 	return msgs
 }
 
-// systemPrompt builds the system prompt from the three Hot Context inputs:
-// the Persona, a KG-facts placeholder (the KG layer lands later — ADR-0008),
-// and the Voice's provider-specific audio-markup instruction from
-// [tts.Synthesizer.AudioMarkupPrompt] (required by ADR-0022).
-func (r *Replier) systemPrompt() string {
+// systemPrompt builds the system prompt from the three Hot Context inputs in slot
+// order: the Persona, the recalled memory block (the reserved Hot Context memory
+// slot, ADR-0011/0042/0012 — memory touches the SYSTEM prompt only), and the
+// Voice's provider-specific audio-markup instruction from
+// [tts.Synthesizer.AudioMarkupPrompt] (required by ADR-0022). A zero mem omits
+// the memory block entirely, leaving the prompt byte-identical to today (AC6).
+func (r *Replier) systemPrompt(mem Memory) string {
 	var b strings.Builder
 	if p := strings.TrimSpace(r.cfg.Persona.Markdown); p != "" {
 		b.WriteString(p)
 	}
-	// KG facts placeholder: the per-Campaign knowledge graph is wired in later
-	// (ADR-0008). Hot Context reserves the slot now so the prompt shape is
-	// stable when facts arrive.
+	if block := memoryBlock(mem); block != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(block)
+	}
 	if markup := r.cfg.Synthesizer.AudioMarkupPrompt(r.cfg.Persona.Voice); markup != "" {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(markup)
+	}
+	return b.String()
+}
+
+// memoryBlock renders the recalled [Memory] as a flat-text prompt section that
+// distinguishes NPC-knowledge (personally witnessed) from world context (framed
+// as possibly second-hand rumor, ADR-0011). An empty half omits its whole
+// subsection; a zero Memory yields "" so the block is dropped entirely.
+func memoryBlock(mem Memory) string {
+	if mem.IsZero() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Things you remember from this campaign")
+	if len(mem.Personal) > 0 {
+		b.WriteString("\n\nYou personally witnessed:")
+		for _, c := range mem.Personal {
+			b.WriteString("\n- ")
+			b.WriteString(c)
+		}
+	}
+	if len(mem.World) > 0 {
+		b.WriteString("\n\nYou may have heard second-hand (you were not present; treat as rumor):")
+		for _, c := range mem.World {
+			b.WriteString("\n- ")
+			b.WriteString(c)
+		}
 	}
 	return b.String()
 }

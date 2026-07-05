@@ -20,6 +20,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 )
 
 // endTimeout bounds the ended_at write after the loop exits, so a Stop / shutdown
@@ -159,6 +160,17 @@ func (m *Manager) SetTranscript(t TranscriptFinalizer) {
 // line persistence).
 func (m *Manager) SetChunkFlusher(f ChunkFinalizer) {
 	m.chunker = f
+}
+
+// SetMemory wires the NPC memory recaller onto the base voice config every
+// manager-started session copies (#122): it flows through Start → RunFromDB →
+// connectAndServe → buildConversation into each NPC's Agent loop. Like
+// SetTranscript / SetChunkFlusher it is set once at boot — the recaller needs the
+// Manager as its Sessions source (the active Campaign), so the Manager is built
+// first and the recaller back-wired — before any session can start, so no lock is
+// needed. nil (an unavailable embeddings/DB path) leaves recall off (AC6).
+func (m *Manager) SetMemory(r agent.MemoryRecaller) {
+	m.base.Memory = r
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no

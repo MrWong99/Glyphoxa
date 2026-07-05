@@ -56,6 +56,10 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.TurnOutcome(TurnAbandoned, ReasonTTSError)
 	rec.TurnOutcome(TurnAbandoned, ReasonProviderError)
 
+	rec.MemoryRecall(RecallHit)
+	rec.MemoryRecall(RecallMiss)
+	rec.MemoryRecall(RecallSkip)
+
 	out := scrape(t, rec)
 
 	// Every family is present and namespaced glyphoxa_voice_* (embedding_backlog
@@ -81,6 +85,9 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		`glyphoxa_voice_turn_total{outcome="abandoned",reason="barge"} 1`,
 		`glyphoxa_voice_turn_total{outcome="abandoned",reason="tts_error"} 1`,
 		`glyphoxa_voice_turn_total{outcome="abandoned",reason="provider_error"} 1`,
+		`glyphoxa_voice_memory_recall_total{outcome="hit"} 1`,
+		`glyphoxa_voice_memory_recall_total{outcome="miss"} 1`,
+		`glyphoxa_voice_memory_recall_total{outcome="skip"} 1`,
 		`glyphoxa_embedding_backlog 0`,
 	}
 	for _, want := range wantSubstrings {
