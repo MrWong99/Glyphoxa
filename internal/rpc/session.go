@@ -100,9 +100,12 @@ func (s *SessionServer) GetSession(
 		}), nil
 	}
 
-	// Idle: surface the last session for the active campaign, if any. A missing
-	// campaign or no prior session is the never-run state, not an error.
-	campaign, err := s.store.GetActiveCampaign(ctx)
+	// Idle: surface the last session for the active campaign, if any. Resolve it
+	// with the SAME profile-first startCampaign StartSession binds (durable
+	// /glyphoxa use selection → most-recent fallback, #216/#220) so the idle summary
+	// never describes a different campaign than Start would run or search would scope
+	// to. A missing campaign or no prior session is the never-run state, not an error.
+	campaign, err := s.startCampaign(ctx)
 	if errors.Is(err, storage.ErrNotFound) {
 		return connect.NewResponse(&managementv1.GetSessionResponse{Active: false}), nil
 	}
