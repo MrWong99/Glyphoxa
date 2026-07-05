@@ -299,6 +299,24 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// relay needs the manager (Snapshot), so the manager is built first.
 	mgr.SetTranscript(relay)
 
+	// The Transcript Chunk writer (#104, ADR-0011) subscribes to the SAME process
+	// bus and folds utterances into 3–6-utterance chunks written with embedding
+	// NULL (the async embedding pipeline, #116, fills them later); it refreshes the
+	// embedding-backlog gauge from the DB after each write. The manager closes its
+	// open chunk on Stop / loop exit. This CHUNK grain is independent of the relay's
+	// line grain (ADR-0040). Voice-standalone mode does not chunk (same posture as
+	// line persistence).
+	chunker := transcript.NewChunker(eventBus, mgr, store, metrics, log, transcript.ChunkerConfig{})
+	mgr.SetChunkFlusher(chunker)
+	// Seed the backlog gauge from the DB at boot so it reads the true count before
+	// the first chunk is written (idempotent Set-from-COUNT, ADR-0032). A read
+	// failure logs and leaves the gauge at 0 rather than failing the boot.
+	if n, err := store.CountUnembeddedChunks(ctx); err != nil {
+		log.Warn("seed embedding-backlog gauge", "err", err)
+	} else {
+		metrics.SetEmbeddingBacklog(n)
+	}
+
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
 	// (ADR-0013/0039). The SPA handler is the "/" catch-all; ServeMux's

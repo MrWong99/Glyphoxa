@@ -63,9 +63,10 @@ type PrometheusRecorder struct {
 	// response_latency — every turn records one terminal outcome.
 	turnTotal *prometheus.CounterVec // outcome, reason
 
-	// embedding backlog: spec-complete stub (ADR-0032). The persistence/embedding
-	// layer isn't coded yet, so nothing Sets this — registered so the /metrics
-	// surface matches ADR-0032 and a reviewer diffing the two sees no gap.
+	// embedding backlog (ADR-0032): chunks awaiting embedding. The chunk writer
+	// (#104) Sets it from CountUnembeddedChunks after each write; the future
+	// backfill worker (#116) Sets it too. Always Set-from-COUNT, never Inc/Dec, so
+	// it stays idempotent across writers and restarts.
 	embeddingBacklog prometheus.Gauge
 }
 
@@ -139,7 +140,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	r.embeddingBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, // process-level, not a voice subsystem metric (ADR-0032)
 		Name:      "embedding_backlog",
-		Help:      "Transcript chunks awaiting embedding (embedding IS NULL). Stub until the embedding layer lands.",
+		Help:      "Transcript chunks awaiting embedding (embedding IS NULL).",
 	})
 
 	reg.MustRegister(
@@ -217,6 +218,15 @@ func (r *PrometheusRecorder) ProviderError(s Stage, p Provider) {
 }
 func (r *PrometheusRecorder) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
 	r.turnTotal.WithLabelValues(string(outcome), string(reason)).Inc()
+}
+
+// SetEmbeddingBacklog publishes the current count of transcript chunks awaiting an
+// embedding (#104, ADR-0032). Callers Set from a COUNT(*) — never Inc/Dec — so the
+// gauge is idempotent across the chunk writer, the future backfill worker (#116)
+// and process restarts: whoever last counted wins, and a restart re-seeds it from
+// the DB rather than resuming a drifted in-memory delta.
+func (r *PrometheusRecorder) SetEmbeddingBacklog(n int) {
+	r.embeddingBacklog.Set(float64(n))
 }
 
 // Static assertions that the one adapter satisfies both contracts. The
