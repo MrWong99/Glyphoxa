@@ -112,6 +112,17 @@ type MemoryRecaller interface {
 	Recall(ctx context.Context, agentID, utterance string) Memory
 }
 
+// FactsRecaller fills the KG-facts slot of Hot Context (ADR-0008 v1.5 / #126): the
+// gm-public Knowledge Graph Node facts the Agent's Campaign wants injected into its
+// system prompt, each element an already-rendered fact string. It shares the
+// [MemoryRecaller] contract: it NEVER errors, respects ctx (a barge-in yields nil),
+// and degrades to nil rather than stalling the turn. A nil FactsRecaller (the
+// unconfigured default) leaves the slot empty, so the prompt is byte-identical to
+// the pre-facts path.
+type FactsRecaller interface {
+	Facts(ctx context.Context, agentID string) []string
+}
+
 // Config configures a [Replier].
 type Config struct {
 	// Persona is the Agent this loop voices.
@@ -169,6 +180,13 @@ type Config struct {
 	// unavailable path degrades to a zero Memory. nil disables recall entirely —
 	// the prompt is then byte-identical to the pre-memory behavior (AC6).
 	Memory MemoryRecaller
+
+	// Facts fills the reserved KG-facts slot of the system prompt each turn (#126,
+	// ADR-0008): the Campaign's gm-public Knowledge Graph Node facts. Consulted
+	// under the turn ctx alongside Memory, OUTSIDE the history lock, never blocking
+	// the turn: a slow/unavailable path degrades to nil. nil disables facts — the
+	// slot stays empty and the prompt is byte-identical to the pre-facts behavior.
+	Facts FactsRecaller
 }
 
 // DefaultTurnTimeout is the per-turn LLM deadline applied when
@@ -273,13 +291,14 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 	r.trimHistoryLocked()
 	r.mu.Unlock()
 
-	// Recall runs BETWEEN the two lock sections, never under r.mu: it is
-	// network-adjacent (embeddings + DB) and must not hold the loop's lock across
-	// that call (ADR-0042). It respects ctx, so a barge cancels it.
+	// Recall + facts run BETWEEN the two lock sections, never under r.mu: they are
+	// network-/DB-adjacent and must not hold the loop's lock across the call
+	// (ADR-0042). Both respect ctx, so a barge cancels them.
 	mem := r.recall(ctx, text)
+	facts := r.facts(ctx)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem)
+	messages := r.hotContextLocked(mem, facts)
 	r.mu.Unlock()
 
 	reply, err := r.engine.Generate(ctx, messages)
@@ -339,12 +358,13 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	r.trimHistoryLocked()
 	r.mu.Unlock()
 
-	// Recall between the lock sections (see [Replier.turn]): outside r.mu, under
-	// ctx, degrading to zero Memory rather than stalling the streaming turn.
+	// Recall + facts between the lock sections (see [Replier.turn]): outside r.mu,
+	// under ctx, each degrading to nothing rather than stalling the streaming turn.
 	mem := r.recall(ctx, text)
+	facts := r.facts(ctx)
 
 	r.mu.Lock()
-	messages := r.hotContextLocked(mem)
+	messages := r.hotContextLocked(mem, facts)
 	r.mu.Unlock()
 
 	streamer, ok := r.engine.(StreamingEngine)
@@ -502,27 +522,47 @@ func (r *Replier) recall(ctx context.Context, text string) Memory {
 	return r.cfg.Memory.Recall(ctx, r.cfg.Persona.AgentID, text)
 }
 
+// facts consults the configured [FactsRecaller] for this turn's Hot Context
+// KG-facts, keyed by the Agent's id. A nil recaller (the unconfigured default)
+// returns no facts, so the reserved slot stays empty and the prompt is
+// byte-identical to the pre-facts path (#126). The recaller never errors and
+// respects ctx.
+func (r *Replier) facts(ctx context.Context) []string {
+	if r.cfg.Facts == nil {
+		return nil
+	}
+	return r.cfg.Facts.Facts(ctx, r.cfg.Persona.AgentID)
+}
+
 // hotContextLocked assembles the Hot Context message list for one call: the
-// system prompt (Persona + recalled memory + audio-markup instruction) followed
-// by the recent Transcript (the bounded history). mem is the memory recalled for
-// this turn (zero when unconfigured or degraded). Caller holds r.mu.
-func (r *Replier) hotContextLocked(mem Memory) []llm.Message {
+// system prompt (Persona + KG facts + recalled memory + audio-markup instruction)
+// followed by the recent Transcript (the bounded history). mem is the memory
+// recalled for this turn and facts are the KG-facts (each nil/zero when
+// unconfigured or degraded). Caller holds r.mu.
+func (r *Replier) hotContextLocked(mem Memory, facts []string) []llm.Message {
 	msgs := make([]llm.Message, 0, len(r.history)+1)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem)})
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem, facts)})
 	msgs = append(msgs, r.history...)
 	return msgs
 }
 
-// systemPrompt builds the system prompt from the three Hot Context inputs in slot
-// order: the Persona, the recalled memory block (the reserved Hot Context memory
-// slot, ADR-0011/0042/0012 — memory touches the SYSTEM prompt only), and the
-// Voice's provider-specific audio-markup instruction from
-// [tts.Synthesizer.AudioMarkupPrompt] (required by ADR-0022). A zero mem omits
-// the memory block entirely, leaving the prompt byte-identical to today (AC6).
-func (r *Replier) systemPrompt(mem Memory) string {
+// systemPrompt builds the system prompt from the Hot Context inputs in slot order:
+// the Persona, the KG-facts block (the reserved facts slot, ADR-0008/#126), the
+// recalled memory block (ADR-0011/0042/0012 — both touch the SYSTEM prompt only),
+// and the Voice's provider-specific audio-markup instruction from
+// [tts.Synthesizer.AudioMarkupPrompt] (required by ADR-0022). Empty facts AND a
+// zero mem omit their blocks entirely, leaving the prompt byte-identical to the
+// pre-facts/pre-memory path (#126 / AC6).
+func (r *Replier) systemPrompt(mem Memory, facts []string) string {
 	var b strings.Builder
 	if p := strings.TrimSpace(r.cfg.Persona.Markdown); p != "" {
 		b.WriteString(p)
+	}
+	if block := factsBlock(facts); block != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(block)
 	}
 	if block := memoryBlock(mem); block != "" {
 		if b.Len() > 0 {
@@ -536,6 +576,22 @@ func (r *Replier) systemPrompt(mem Memory) string {
 		}
 		b.WriteString(markup)
 	}
+	return b.String()
+}
+
+// factsBlock renders the KG-facts slot as a flat-text prompt section: a fixed
+// header followed by the already-rendered fact strings joined by blank lines. The
+// agent is a dumb joiner — the fact strings arrive fully formatted from the
+// FactsRecaller (#126). No facts yields "" so the block is dropped entirely
+// (the byte-identical guarantee).
+func factsBlock(facts []string) string {
+	if len(facts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## What you know about the world")
+	b.WriteString("\n\n")
+	b.WriteString(strings.Join(facts, "\n\n"))
 	return b.String()
 }
 

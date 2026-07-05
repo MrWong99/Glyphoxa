@@ -20,6 +20,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
+	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
@@ -353,6 +354,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		context.AfterFunc(ctx, recaller.Close)
 		mgr.SetMemory(recaller)
 	}
+
+	// NPC KG-facts recall (#126, ADR-0008): the reserved Hot Context KG-facts slot,
+	// filled per turn from the active Campaign's gm-public Nodes. UNCONDITIONAL —
+	// OUTSIDE the embeddings-provider branch above — because it needs no embeddings
+	// provider, only the process store (an indexed OLTP read) and the session
+	// Manager (the active Campaign). Gating it on the provider would silently lose
+	// the feature on keyless deployments. It owns no goroutine/subscription, so
+	// there is nothing to Close.
+	mgr.SetFacts(kgfacts.New(store, mgr, metrics, log, kgfacts.Config{}))
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /

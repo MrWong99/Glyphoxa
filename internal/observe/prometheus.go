@@ -73,7 +73,29 @@ type PrometheusRecorder struct {
 	// a speculation hit, an inline miss, or a degraded/unconfigured skip. The
 	// outcome label is a bounded three-value enum (ADR-0032).
 	memoryRecall *prometheus.CounterVec // outcome
+
+	// KG facts (#126, ADR-0008/0032): NPC Hot Context KG-fact reads by outcome —
+	// facts injected (ok), no public Nodes / no session (empty), or a degraded read
+	// (timeout/DB error). Process-level (like embedding_backlog), bounded 3-value
+	// outcome label (ADR-0032).
+	kgFacts *prometheus.CounterVec // outcome
 }
+
+// FactsOutcome is the bounded outcome label on the KG-fact-read counter
+// (glyphoxa_kg_facts_total, #126). Exactly three values reach a series (ADR-0032):
+// facts were injected, the read found none to inject, or it degraded to nothing.
+type FactsOutcome string
+
+const (
+	// FactsOK: at least one gm-public Node fact was injected into the prompt.
+	FactsOK FactsOutcome = "ok"
+	// FactsEmpty: the read succeeded but had nothing to inject — no public Nodes,
+	// or no active session to scope the Campaign.
+	FactsEmpty FactsOutcome = "empty"
+	// FactsDegraded: the read degraded to no-facts — the budget elapsed or the DB
+	// read failed. A barge cancel is NOT degraded (it counts nothing).
+	FactsDegraded FactsOutcome = "degraded"
+)
 
 // RecallOutcome is the bounded outcome label on the NPC memory-recall counter
 // (glyphoxa_voice_memory_recall_total, #122). Exactly three values reach a series
@@ -172,13 +194,21 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		"NPC memory recalls by outcome (#122, ADR-0042): a speculation hit, an inline miss, or a degraded skip.",
 		"outcome")
 
+	// Process-level (namespace only, no voice subsystem) like embedding_backlog: the
+	// KG-fact read is an OLTP read shared by any NPC turn, not a voice-pipeline stage.
+	r.kgFacts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "kg_facts_total",
+		Help:      "NPC Hot Context KG-fact reads by outcome (#126): facts injected (ok), none to inject (empty), or degraded.",
+	}, []string{"outcome"})
+
 	reg.MustRegister(
 		r.framesDropped, r.undecodable, r.daveDecryptErrs, r.sessions,
 		r.playbackTotal, r.bargeCancels,
 		r.responseLatency, r.vadHangover, r.addressDetect, r.codecDecode,
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
-		r.memoryRecall,
+		r.memoryRecall, r.kgFacts,
 		// Standard runtime collectors so /metrics also reports process/Go health.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
@@ -256,6 +286,14 @@ func (r *PrometheusRecorder) TurnOutcome(outcome TurnOutcome, reason TurnReason)
 // StageRecorder contract: recall is not an orchestrator stage.
 func (r *PrometheusRecorder) MemoryRecall(o RecallOutcome) {
 	r.memoryRecall.WithLabelValues(string(o)).Inc()
+}
+
+// KGFacts counts one NPC Hot Context KG-fact read by its bounded outcome (#126,
+// ADR-0008/0032). It is the standalone facts-metrics sink the internal/kgfacts
+// component records against (its local Metrics interface), separate from the
+// StageRecorder contract: the KG read is not an orchestrator stage.
+func (r *PrometheusRecorder) KGFacts(o FactsOutcome) {
+	r.kgFacts.WithLabelValues(string(o)).Inc()
 }
 
 // SetEmbeddingBacklog publishes the current count of transcript chunks awaiting an

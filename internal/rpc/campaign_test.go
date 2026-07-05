@@ -48,6 +48,12 @@ func (fakeReader) UpdateAgent(context.Context, storage.AgentUpdate) (storage.Age
 func (fakeReader) DeleteAgent(context.Context, uuid.UUID) error {
 	return nil
 }
+func (fakeReader) CreateNode(context.Context, storage.NewKGNode) (storage.KGNode, error) {
+	return storage.KGNode{}, nil
+}
+func (fakeReader) ListNodes(context.Context, uuid.UUID) ([]storage.KGNode, error) {
+	return nil, nil
+}
 
 // newClient stands up the CampaignServer handler behind an httptest server and
 // returns a Connect-JSON client for it. WithProtoJSON forces the JSON codec on

@@ -15,6 +15,147 @@
   margin-bottom: var(--spacing-lg);
 }
 
+/* Title + Cast|Knowledge seg-control on one row (#126). */
+.gx-campaign-screen__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+/* Segmented control (Cast | Knowledge), mirroring the Session screen's seg. */
+.gx-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-inset, var(--surface-card));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+}
+
+.gx-seg > button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: var(--spacing-xs) var(--spacing-md);
+  border-radius: var(--radius-pill);
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.gx-seg > button:hover {
+  color: var(--text-strong);
+}
+
+.gx-seg > button[data-active="true"] {
+  background: var(--surface-card);
+  color: var(--text-strong);
+  box-shadow: var(--glow-arcane-soft);
+}
+
+/* Knowledge view: list left, sticky editor card right (mirrors the roster grid). */
+.gx-kg-layout {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .gx-kg-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.gx-kg-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+}
+
+.gx-kg-card__icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.gx-kg-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.gx-kg-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+.gx-kg-card__name {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-kg-card__snippet {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-kg-empty {
+  padding: var(--spacing-md);
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+}
+
+/* Sticky create card on the right. */
+.gx-kg-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+  position: sticky;
+  top: var(--spacing-lg);
+}
+
+.gx-kg-editor__title {
+  font-size: var(--heading-sm, var(--body-lg));
+  color: var(--text-strong);
+  margin: 0;
+}
+
+.gx-kg-editor__switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-editor__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
 .gx-campaign-screen__sub {
   display: flex;
   align-items: center;

@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
+import { KnowledgePanel } from "./KnowledgePanel";
 
 import "./campaign.css";
 
@@ -55,6 +56,10 @@ export function Campaign() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = roster.find((a) => a.id === selectedId) ?? roster[0];
 
+  // Cast (roster editor) vs Knowledge (KG entries) — the design's seg-control
+  // beside the title. Cast is the default so the roster is what loads first (#71).
+  const [view, setView] = useState<"cast" | "knowledge">("cast");
+
   const invalidateRoster = () =>
     queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
@@ -76,43 +81,57 @@ export function Campaign() {
     },
   });
 
-  if (status === "pending") {
-    return (
-      <div className="gx-campaign-screen">
-        <h1>Campaign</h1>
-        <div className="gx-skeleton" data-testid="roster-loading" />
-      </div>
-    );
-  }
-  if (status === "error") {
-    return (
-      <div className="gx-campaign-screen">
-        <h1>Campaign</h1>
-        <p className="gx-campaign__error" role="alert">
-          Could not load the campaign: {error.message}
-        </p>
-      </div>
-    );
-  }
-
   const campaign = data?.campaign;
   const npcs = roster.filter((a) => !isButler(a));
 
   return (
     <div className="gx-campaign-screen">
       <header className="gx-campaign-screen__header">
-        <h1>{campaign?.name ?? "Campaign"}</h1>
+        <div className="gx-campaign-screen__title-row">
+          <h1>{campaign?.name ?? "Campaign"}</h1>
+          <div className="gx-seg" role="tablist" aria-label="Campaign view">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "cast"}
+              data-active={view === "cast" ? "true" : undefined}
+              onClick={() => setView("cast")}
+            >
+              Cast
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "knowledge"}
+              data-active={view === "knowledge" ? "true" : undefined}
+              onClick={() => setView("knowledge")}
+            >
+              Knowledge
+            </button>
+          </div>
+        </div>
         <div className="gx-campaign-screen__sub">
           {campaign?.system && <span className="gx-campaign-screen__system">{campaign.system}</span>}
           <span className="gx-campaign-screen__lede">
-            One Butler is required; add as many NPCs as your table needs.
+            {view === "knowledge"
+              ? "What the world knows. Public entries prime your NPCs; GM-private ones stay yours."
+              : "One Butler is required; add as many NPCs as your table needs."}
           </span>
         </div>
       </header>
 
-      <div className="gx-roster-layout">
-        {/* Roster list */}
-        <div className="gx-roster">
+      {view === "knowledge" ? (
+        <KnowledgePanel />
+      ) : status === "pending" ? (
+        <div className="gx-skeleton" data-testid="roster-loading" />
+      ) : status === "error" ? (
+        <p className="gx-campaign__error" role="alert">
+          Could not load the campaign: {error.message}
+        </p>
+      ) : (
+        <div className="gx-roster-layout">
+          {/* Roster list */}
+          <div className="gx-roster">
           {roster.map((a) => (
             <button
               key={a.id}
@@ -181,7 +200,8 @@ export function Campaign() {
             deleting={deleteAgent.isPending}
           />
         )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

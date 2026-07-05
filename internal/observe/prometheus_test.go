@@ -60,6 +60,10 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.MemoryRecall(RecallMiss)
 	rec.MemoryRecall(RecallSkip)
 
+	rec.KGFacts(FactsOK)
+	rec.KGFacts(FactsEmpty)
+	rec.KGFacts(FactsDegraded)
+
 	out := scrape(t, rec)
 
 	// Every family is present and namespaced glyphoxa_voice_* (embedding_backlog
@@ -89,6 +93,9 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		`glyphoxa_voice_memory_recall_total{outcome="miss"} 1`,
 		`glyphoxa_voice_memory_recall_total{outcome="skip"} 1`,
 		`glyphoxa_embedding_backlog 0`,
+		`glyphoxa_kg_facts_total{outcome="ok"} 1`,
+		`glyphoxa_kg_facts_total{outcome="empty"} 1`,
+		`glyphoxa_kg_facts_total{outcome="degraded"} 1`,
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(out, want) {

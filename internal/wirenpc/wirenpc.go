@@ -303,6 +303,15 @@ type Config struct {
 	// standalone, or an unavailable embeddings/DB path) disables recall entirely,
 	// so Agent turns behave exactly as before (AC6).
 	Memory agent.MemoryRecaller
+
+	// Facts is the NPC KG-facts recaller injected into every NPC's Agent loop (#126,
+	// ADR-0008): it fills the reserved Hot Context KG-facts slot each turn with the
+	// Campaign's gm-public Node facts. The web tier resolves one recaller (over the
+	// process store + session Manager) and sets it on the session Manager's base
+	// config; it flows through connectAndServe → buildConversation → the Roster like
+	// Memory. nil (voice/bench standalone) disables facts entirely, so the prompt is
+	// byte-identical to the pre-facts behavior (#126).
+	Facts agent.FactsRecaller
 }
 
 // RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
@@ -554,7 +563,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory)
+	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory, cfg.Facts)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -681,7 +690,7 @@ var (
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -750,7 +759,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over the shared engine) in the Cast. The
 	// Matcher is built from the first NPC and grown for the rest.
-	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log, memory, language))
+	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log, memory, facts, language))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}
