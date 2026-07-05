@@ -15,17 +15,21 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
+// testAgent is a valid Agent uuid used across the unit tests — Facts now parses the
+// agentID string, so the render/cap tests must pass a real uuid to reach the read.
+var testAgent = uuid.New()
+
 // fakeNodes is a scripted kgfacts.Nodes: it returns fixed Nodes or an error, and
 // can block until ctx is cancelled to exercise the budget timeout.
 type fakeNodes struct {
-	nodes   []storage.KGNode
-	err     error
-	block   bool // block until ctx done, then return ctx.Err()
-	gotCamp uuid.UUID
+	nodes    []storage.KGNode
+	err      error
+	block    bool // block until ctx done, then return ctx.Err()
+	gotAgent uuid.UUID
 }
 
-func (f *fakeNodes) ListPublicNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error) {
-	f.gotCamp = campaignID
+func (f *fakeNodes) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]storage.KGNode, error) {
+	f.gotAgent = agentID
 	if f.block {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -78,7 +82,7 @@ func TestFacts_RenderFormatExact(t *testing.T) {
 	m := &fakeMetrics{}
 	r := newRecaller(t, nodes, activeSessions(camp), m)
 
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if len(facts) != 3 {
 		t.Fatalf("got %d facts, want 3", len(facts))
 	}
@@ -91,8 +95,8 @@ func TestFacts_RenderFormatExact(t *testing.T) {
 	if facts[2] != "### The Heist (Plot thread)\nSomeone plans a robbery." {
 		t.Errorf("fact[2] = %q (want the 'Plot thread' TypeLabel)", facts[2])
 	}
-	if nodes.gotCamp != camp {
-		t.Errorf("read scoped to %s, want active campaign %s", nodes.gotCamp, camp)
+	if nodes.gotAgent != testAgent {
+		t.Errorf("read scoped to agent %s, want the parsed Facts agent %s", nodes.gotAgent, testAgent)
 	}
 	if m.count(observe.FactsOK) != 1 {
 		t.Errorf("want one ok outcome, got %v", m.outcomes)
@@ -108,7 +112,7 @@ func TestFacts_EmptyBodyRendersHeaderOnly(t *testing.T) {
 	}}
 	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if len(facts) != 1 || facts[0] != "### Loose end (Note)" {
 		t.Errorf("empty-body fact = %q, want header only", facts)
 	}
@@ -123,7 +127,7 @@ func TestFacts_TruncatesBodyByRunes(t *testing.T) {
 	}}
 	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if len(facts) != 1 {
 		t.Fatalf("got %d facts, want 1", len(facts))
 	}
@@ -152,7 +156,7 @@ func TestFacts_TruncatesLongName(t *testing.T) {
 	}}
 	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if len(facts) != 2 {
 		t.Fatalf("got %d facts, want 2 (a long name must not kill the block)", len(facts))
 	}
@@ -180,7 +184,7 @@ func TestFacts_CapsAtMaxFacts(t *testing.T) {
 	nodes := &fakeNodes{nodes: ns}
 	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if len(facts) != kgfacts.MaxFacts {
 		t.Fatalf("got %d facts, want the MaxFacts cap %d", len(facts), kgfacts.MaxFacts)
 	}
@@ -205,7 +209,7 @@ func TestFacts_CapsAtMaxBlockChars(t *testing.T) {
 	nodes := &fakeNodes{nodes: ns}
 	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if len(facts) == 0 {
 		t.Fatal("no facts returned")
 	}
@@ -225,7 +229,7 @@ func TestFacts_NoSession_Nil(t *testing.T) {
 	m := &fakeMetrics{}
 	r := newRecaller(t, &fakeNodes{}, fakeSessions{ok: false}, m)
 
-	if facts := r.Facts(context.Background(), "bart"); facts != nil {
+	if facts := r.Facts(context.Background(), testAgent.String()); facts != nil {
 		t.Errorf("facts with no session = %v, want nil", facts)
 	}
 	if m.count(observe.FactsDegraded) != 0 {
@@ -233,18 +237,44 @@ func TestFacts_NoSession_Nil(t *testing.T) {
 	}
 }
 
-// TestFacts_NoPublicNodes_Empty pins that a read finding no public Nodes returns
-// nil and counts an empty outcome (not degraded).
-func TestFacts_NoPublicNodes_Empty(t *testing.T) {
+// TestFacts_UnlinkedAgent_Empty pins the #133 behaviour change: an Agent whose
+// neighbourhood read is empty (an UNLINKED Character NPC — no linked Node, so no
+// own facts and no neighbours) gets an EMPTY facts slot, counted empty (not
+// degraded). There is deliberately no campaign-wide fallback.
+func TestFacts_UnlinkedAgent_Empty(t *testing.T) {
 	camp := uuid.New()
 	m := &fakeMetrics{}
 	r := newRecaller(t, &fakeNodes{nodes: nil}, activeSessions(camp), m)
 
-	if facts := r.Facts(context.Background(), "bart"); facts != nil {
+	if facts := r.Facts(context.Background(), testAgent.String()); facts != nil {
 		t.Errorf("facts = %v, want nil", facts)
 	}
 	if m.count(observe.FactsEmpty) != 1 || m.count(observe.FactsDegraded) != 0 {
 		t.Errorf("want one empty, zero degraded: %v", m.outcomes)
+	}
+}
+
+// TestFacts_InvalidAgentID_Empty pins that an unparseable or empty agentID string
+// (a Persona with no persisted uuid) yields no facts, counted empty (not degraded),
+// and never reaches the storage read.
+func TestFacts_InvalidAgentID_Empty(t *testing.T) {
+	camp := uuid.New()
+	for _, bad := range []string{"", "not-a-uuid", "bart"} {
+		m := &fakeMetrics{}
+		nodes := &fakeNodes{nodes: []storage.KGNode{
+			{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Unreached", Body: "x"},
+		}}
+		r := newRecaller(t, nodes, activeSessions(camp), m)
+
+		if facts := r.Facts(context.Background(), bad); facts != nil {
+			t.Errorf("facts for agentID %q = %v, want nil", bad, facts)
+		}
+		if nodes.gotAgent != uuid.Nil {
+			t.Errorf("agentID %q reached the storage read as %s", bad, nodes.gotAgent)
+		}
+		if m.count(observe.FactsEmpty) != 1 || m.count(observe.FactsDegraded) != 0 {
+			t.Errorf("agentID %q: want one empty, zero degraded: %v", bad, m.outcomes)
+		}
 	}
 }
 
@@ -255,7 +285,7 @@ func TestFacts_DBError_DegradedNil(t *testing.T) {
 	m := &fakeMetrics{}
 	r := newRecaller(t, &fakeNodes{err: errors.New("db down")}, activeSessions(camp), m)
 
-	if facts := r.Facts(context.Background(), "bart"); facts != nil {
+	if facts := r.Facts(context.Background(), testAgent.String()); facts != nil {
 		t.Errorf("facts on DB error = %v, want nil", facts)
 	}
 	if m.count(observe.FactsDegraded) != 1 {
@@ -273,7 +303,7 @@ func TestFacts_CtxCancel_SilentNil(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // barge before the read starts
 
-	if facts := r.Facts(ctx, "bart"); facts != nil {
+	if facts := r.Facts(ctx, testAgent.String()); facts != nil {
 		t.Errorf("facts on cancelled ctx = %v, want nil", facts)
 	}
 	if len(m.outcomes) != 0 {
@@ -290,7 +320,7 @@ func TestFacts_BudgetTimeout_DegradedNil(t *testing.T) {
 		kgfacts.Config{Budget: 20 * time.Millisecond})
 
 	start := time.Now()
-	facts := r.Facts(context.Background(), "bart")
+	facts := r.Facts(context.Background(), testAgent.String())
 	if facts != nil {
 		t.Errorf("facts on budget timeout = %v, want nil", facts)
 	}
