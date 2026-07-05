@@ -90,10 +90,11 @@ func TestActiveCampaignPersistsAcrossReopen(t *testing.T) {
 }
 
 // TestActiveCampaignOverridesImplicitDefault is the ADR-0009 resolution
-// precedence at the storage grain: the operator's explicit selection (step 2)
-// diverges from — and is honored over — the most-recently-created implicit
-// default (step 3, GetActiveCampaign). #108's resolveActiveCampaign layers the
-// live-session step on top of this.
+// precedence at the storage grain: the operator's explicit selection
+// (GetActiveCampaignForUser) diverges from — and is honored over — the
+// most-recently-created implicit default (GetActiveCampaign). This is what lets
+// the web StartSession honor the durable /glyphoxa use choice (#108) while
+// keeping GetActiveCampaign as its fresh-install fallback.
 func TestActiveCampaignOverridesImplicitDefault(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, older := seedCampaign(t, dsn)
@@ -118,11 +119,12 @@ func TestActiveCampaignOverridesImplicitDefault(t *testing.T) {
 	}
 }
 
-// TestGetActiveCampaignForUserFallsThroughOnDeletedCampaign proves the FK's ON
-// DELETE SET NULL clears a stale selection: deleting the chosen campaign makes
-// GetActiveCampaignForUser return ErrNotFound (so resolution falls to step 3),
-// and a user with a NULL selection is likewise ErrNotFound.
-func TestGetActiveCampaignForUserFallsThroughOnDeletedCampaign(t *testing.T) {
+// TestGetActiveCampaignForUserClearedOnDeletedCampaign proves the FK's ON DELETE
+// SET NULL clears a stale selection: deleting the chosen campaign makes
+// GetActiveCampaignForUser return ErrNotFound (so the slash surface then fails
+// with the /use hint, and the web tier falls back to GetActiveCampaign), and a
+// user with a NULL selection is likewise ErrNotFound.
+func TestGetActiveCampaignForUserClearedOnDeletedCampaign(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, _ := seedCampaign(t, dsn)
 	ctx := context.Background()

@@ -31,8 +31,6 @@ type fakeSessionStore struct {
 	byIDErr    error
 	forUser    *storage.Campaign
 	forUserErr error
-	active     *storage.Campaign
-	activeErr  error
 	setErr     error
 	setCalls   []setActiveCall
 }
@@ -65,16 +63,6 @@ func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (st
 		return storage.Campaign{}, storage.ErrNotFound
 	}
 	return *f.forUser, nil
-}
-
-func (f *fakeSessionStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
-	if f.activeErr != nil {
-		return storage.Campaign{}, f.activeErr
-	}
-	if f.active == nil {
-		return storage.Campaign{}, storage.ErrNotFound
-	}
-	return *f.active, nil
 }
 
 // startCall records the (tenant, campaign) a Start was driven with.
@@ -213,8 +201,10 @@ func TestStartSuccessUsesResolvedCampaign(t *testing.T) {
 	if resp.deferred == nil {
 		t.Error("start did not Defer before the slow work")
 	}
-	if len(resp.followups) != 1 || resp.followups[0].ephemeral || !strings.Contains(resp.followups[0].content, "Lost Mine") {
-		t.Errorf("followup = %+v, want one public confirmation naming the campaign", resp.followups)
+	// The confirmation is ephemeral: the first followup after Defer(true) inherits
+	// ephemerality in the real client, and no AC requires a public reply.
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral || !strings.Contains(resp.followups[0].content, "Lost Mine") {
+		t.Errorf("followup = %+v, want one ephemeral confirmation naming the campaign", resp.followups)
 	}
 }
 
@@ -236,7 +226,8 @@ func TestStartAlreadyActive(t *testing.T) {
 }
 
 func TestStartNoActiveCampaign(t *testing.T) {
-	// No live session, no selection, no campaign at all → the run-/use hint.
+	// No live session and no durable selection → fail with the run-/use hint (the
+	// slash surface has no most-recently-created fallback, ADR-0009).
 	store := &fakeSessionStore{}
 	voice := &fakeVoice{}
 	reg := testRegistry(testGuild, operatorID)
@@ -282,8 +273,9 @@ func TestEndSuccess(t *testing.T) {
 	if resp.deferred == nil {
 		t.Error("end did not Defer before the slow work")
 	}
-	if len(resp.followups) != 1 || resp.followups[0].ephemeral {
-		t.Errorf("followup = %+v, want one public confirmation", resp.followups)
+	// Ephemeral confirmation (see TestStartSuccessUsesResolvedCampaign).
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Errorf("followup = %+v, want one ephemeral confirmation", resp.followups)
 	}
 }
 
@@ -323,35 +315,28 @@ func TestSessionCommandsRefusedForNonGM(t *testing.T) {
 func TestResolveActiveCampaignOrder(t *testing.T) {
 	live := campaign("Live Session Campaign")
 	selected := campaign("Selected Campaign")
-	fallback := campaign("Fallback Campaign")
 	ctx := context.Background()
 
-	// (1) A live Voice Session wins over everything.
+	// (1) A live Voice Session wins even over a durable selection.
 	s1 := &fakeSessionStore{
 		byID:    map[uuid.UUID]storage.Campaign{live.ID: live},
 		forUser: &selected,
-		active:  &fallback,
 	}
 	v1 := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: live.ID}}
 	if c, err := resolveActiveCampaign(ctx, s1, v1, operatorID); err != nil || c.ID != live.ID {
 		t.Errorf("step 1: got %s, %v; want live session campaign %s", c.ID, err, live.ID)
 	}
 
-	// (2) No live session → the operator's durable selection beats the fallback.
-	s2 := &fakeSessionStore{forUser: &selected, active: &fallback}
+	// (2) No live session → the operator's durable selection.
+	s2 := &fakeSessionStore{forUser: &selected}
 	if c, err := resolveActiveCampaign(ctx, s2, &fakeVoice{}, operatorID); err != nil || c.ID != selected.ID {
 		t.Errorf("step 2: got %s, %v; want selection %s", c.ID, err, selected.ID)
 	}
 
-	// (3) No session, no selection → the most-recently-created fallback.
-	s3 := &fakeSessionStore{active: &fallback}
-	if c, err := resolveActiveCampaign(ctx, s3, &fakeVoice{}, operatorID); err != nil || c.ID != fallback.ID {
-		t.Errorf("step 3: got %s, %v; want fallback %s", c.ID, err, fallback.ID)
-	}
-
-	// Nothing anywhere → ErrNoActiveCampaign.
+	// (3) No session and no selection → FAIL (no most-recently-created fallback on
+	// the slash surface, ADR-0009).
 	if _, err := resolveActiveCampaign(ctx, &fakeSessionStore{}, &fakeVoice{}, operatorID); err != ErrNoActiveCampaign {
-		t.Errorf("empty: err = %v, want ErrNoActiveCampaign", err)
+		t.Errorf("no session + no selection: err = %v, want ErrNoActiveCampaign", err)
 	}
 }
 
@@ -392,5 +377,48 @@ func TestGlyphoxaUseEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(reply.Content, "Lost Mine") {
 		t.Errorf("reply = %q, want a confirmation naming the campaign", reply.Content)
+	}
+}
+
+// TestGlyphoxaUseAutocompleteEndToEnd routes a real grouped `/glyphoxa use`
+// AUTOCOMPLETE JSON interaction through HandleAutocomplete: disgo flattens the
+// subcommand into AutocompleteInteractionData.SubCommandName + Focused option, so
+// this pins that flattening (against a disgo upgrade) for a grouped autocomplete
+// — #213's e2e only covers a FLAT autocomplete. It asserts the focused substring
+// filters the campaigns and each choice carries the campaign UUID as its value.
+func TestGlyphoxaUseAutocompleteEndToEnd(t *testing.T) {
+	lost := campaign("Lost Mine")
+	store := &fakeSessionStore{list: []storage.Campaign{campaign("Curse of Strahd"), lost}}
+	reg := testRegistry(testGuild, operatorID)
+	reg.Register(UseCommand(store))
+
+	payload := `{
+		"id": "1", "application_id": "2", "type": 4, "token": "t", "version": 1,
+		"guild_id": "` + testGuild + `",
+		"member": {"user": {"id": "` + operatorID + `", "username": "gm"}},
+		"data": {"id": "3", "name": "glyphoxa",
+			"options": [{"type": 1, "name": "use", "options": [{"type": 3, "name": "campaign", "value": "lost", "focused": true}]}]}
+	}`
+	var ai discord.AutocompleteInteraction
+	if err := json.Unmarshal([]byte(payload), &ai); err != nil {
+		t.Fatalf("unmarshal grouped autocomplete: %v", err)
+	}
+
+	var got discord.AutocompleteResult
+	e := &events.AutocompleteInteractionCreate{
+		AutocompleteInteraction: ai,
+		Respond: func(_ discord.InteractionResponseType, data discord.InteractionResponseData, _ ...rest.RequestOpt) error {
+			got = data.(discord.AutocompleteResult)
+			return nil
+		},
+	}
+	reg.HandleAutocomplete(e)
+
+	if len(got.Choices) != 1 {
+		t.Fatalf("grouped autocomplete choices = %+v, want only the 'lost' match", got.Choices)
+	}
+	c := got.Choices[0].(discord.AutocompleteChoiceString)
+	if c.Name != "Lost Mine" || c.Value != lost.ID.String() {
+		t.Errorf("choice = %+v, want name 'Lost Mine' value %s", c, lost.ID)
 	}
 }

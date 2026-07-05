@@ -26,10 +26,12 @@ type SessionManager interface {
 	Snapshot() (storage.VoiceSession, bool)
 }
 
-// SessionStore is the narrow storage surface SessionServer needs: the active
-// campaign to scope a session, and the latest ended session for the idle
+// SessionStore is the narrow storage surface SessionServer needs: the operator's
+// durable Active Campaign selection (#108), the most-recently-created campaign as
+// the fallback that scopes a session, and the latest ended session for the idle
 // last-session summary (#72).
 type SessionStore interface {
+	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
 }
@@ -117,12 +119,12 @@ func (s *SessionServer) StartSession(
 		return nil, err
 	}
 
-	campaign, err := s.store.GetActiveCampaign(ctx)
+	campaign, err := s.startCampaign(ctx)
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active campaign to start a session for"))
 	}
 	if err != nil {
-		s.log.Error("StartSession: get active campaign failed", "err", err)
+		s.log.Error("StartSession: resolve active campaign failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -133,6 +135,27 @@ func (s *SessionServer) StartSession(
 	return connect.NewResponse(&managementv1.StartSessionResponse{
 		Session: toProtoVoiceSession(vs),
 	}), nil
+}
+
+// startCampaign resolves the campaign a web Start binds to, honoring the durable
+// /glyphoxa use selection so the web Start button and the slash command agree
+// (ADR-0009, #108): the logged-in operator's active_campaign_id when set, else the
+// most-recently-created campaign — kept as the fallback so a fresh install that
+// has never run /glyphoxa use still starts. The slash surface is strict (no
+// fallback) because it has the /use affordance; the web has no such hint, so it
+// keeps the legacy default.
+func (s *SessionServer) startCampaign(ctx context.Context) (storage.Campaign, error) {
+	if u, ok := auth.CurrentUser(ctx); ok && u.DiscordUserID != "" {
+		c, err := s.store.GetActiveCampaignForUser(ctx, u.DiscordUserID)
+		if err == nil {
+			return c, nil
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			return storage.Campaign{}, err
+		}
+		// No durable selection yet — fall back to the implicit default.
+	}
+	return s.store.GetActiveCampaign(ctx)
 }
 
 // startError maps a manager Start failure onto a Connect status code: the

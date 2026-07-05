@@ -8,9 +8,10 @@
 -- OAuth web tier upserts (00003) — so one column serves both surfaces.
 --
 -- ON DELETE SET NULL: deleting the chosen campaign clears the selection rather
--- than cascading the user away; Active Campaign resolution then falls through to
--- the most-recently-created fallback (ADR-0009 step 3), so a stale pointer can
--- never wedge the two commands that depend on it.
+-- than cascading the user away. The slash-command surface then has no Active
+-- Campaign and asks the GM to run /glyphoxa use again (ADR-0009: it has NO
+-- most-recently-created fallback); the web tier keeps that fallback for
+-- fresh-install UX. Either way a stale pointer can never wedge a command.
 
 ALTER TABLE users
     ADD COLUMN active_campaign_id uuid REFERENCES campaign (id) ON DELETE SET NULL;

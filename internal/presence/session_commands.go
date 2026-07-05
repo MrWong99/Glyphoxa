@@ -25,22 +25,22 @@ const sessionOpTimeout = 30 * time.Second
 // discordChoiceLimit is Discord's hard cap on autocomplete choices per response.
 const discordChoiceLimit = 25
 
-// ErrNoActiveCampaign is returned by resolveActiveCampaign when every ADR-0009
-// step comes up empty: no live Voice Session, no durable /glyphoxa use selection,
-// and no campaign at all to fall back to.
+// ErrNoActiveCampaign is returned by resolveActiveCampaign when neither a live
+// Voice Session nor the operator's durable /glyphoxa use selection resolves a
+// campaign. The slash surface deliberately has NO most-recently-created fallback
+// (ADR-0009): it fails and tells the GM to run /glyphoxa use — an affordance the
+// GM has right there.
 var ErrNoActiveCampaign = errors.New("presence: no active campaign")
 
 // SessionStore is the storage surface the /glyphoxa session commands need:
 // listing campaigns for `use` and its autocomplete, loading one by id, durably
-// persisting the operator's Active Campaign choice, and the two Active Campaign
-// resolution reads (the per-operator selection, then the most-recently-created
-// fallback). *storage.Store satisfies it; tests use a fake.
+// persisting the operator's Active Campaign choice, and reading that per-operator
+// selection back. *storage.Store satisfies it; tests use a fake.
 type SessionStore interface {
 	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
 	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
-	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 }
 
 // VoiceControl is the in-process voice-loop control surface /glyphoxa start and
@@ -55,7 +55,7 @@ type VoiceControl interface {
 
 // UseCommand builds `/glyphoxa use <campaign>` (ADR-0010, GM only): it durably
 // records the operator's Active Campaign choice so both the slash-command surface
-// and the web Session screen honor one explicit selection instead of the implicit
+// and the web Session screen honor one explicit selection over the implicit
 // most-recently-created default (AC1). The `campaign` option resolves by campaign
 // UUID (the value an autocomplete choice carries) or, as a free-text fallback, by
 // case-insensitive name; an unresolvable input is answered with a graceful
@@ -107,9 +107,9 @@ func UseCommand(store SessionStore) Command {
 // Active Campaign (ADR-0009) and drives the SAME in-process session.Manager the
 // web Start button uses, binding a Voice Session to that campaign (AC2/AC4). It
 // Defers first — the manager write is a domain operation that must not race
-// Discord's 3s deadline — then Follows up with a public confirmation, or an
-// ephemeral precondition error mirroring the web surface (no campaign, already
-// active, Discord unconfigured, …).
+// Discord's 3s deadline — then follows up with the outcome (an ephemeral
+// confirmation, or an ephemeral precondition error mirroring the web surface:
+// no campaign, already active, Discord unconfigured, …).
 func StartCommand(store SessionStore, voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa start",
@@ -124,7 +124,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 
 			c, err := resolveActiveCampaign(ctx, store, voice, ic.UserID())
 			if errors.Is(err, ErrNoActiveCampaign) {
-				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use <campaign> first.")
+				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
 			}
 			if err != nil {
 				return fmt.Errorf("presence: resolve active campaign: %w", err)
@@ -136,7 +136,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 				}
 				return fmt.Errorf("presence: start voice session: %w", err)
 			}
-			return ic.Reply(fmt.Sprintf("Voice session running for %q.", c.Name))
+			return ic.ReplyEphemeral(fmt.Sprintf("Voice session running for %q.", c.Name))
 		},
 	}
 }
@@ -145,7 +145,8 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 // in-process session.Manager the web Stop button uses, so ending is reflected in
 // the one session record both surfaces read (AC2/AC4). Ending when none is
 // running returns a clear ephemeral error (AC3). Like start it Defers, because
-// Stop waits on the loop unwinding plus the ended_at write.
+// Stop waits on the loop unwinding plus the ended_at write, and follows up
+// ephemerally.
 func EndCommand(voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa end",
@@ -164,17 +165,18 @@ func EndCommand(voice VoiceControl) Command {
 				}
 				return fmt.Errorf("presence: stop voice session: %w", err)
 			}
-			return ic.Reply("Voice session ended.")
+			return ic.ReplyEphemeral("Voice session ended.")
 		},
 	}
 }
 
 // resolveActiveCampaign resolves the operator's Active Campaign in the ADR-0009
 // order: (1) the campaign of the live Voice Session, if one is running; (2) the
-// operator's durable /glyphoxa use selection; (3) the most-recently-created
-// campaign (the legacy implicit default the web surface still uses, kept so the
-// two surfaces agree before any explicit selection). ErrNoActiveCampaign only
-// when all three come up empty.
+// operator's durable /glyphoxa use selection; else (3) FAIL with
+// ErrNoActiveCampaign. There is deliberately NO most-recently-created fallback on
+// the slash surface (unlike the web tier) — the GM has the /glyphoxa use
+// affordance right there, so the strict path avoids silently binding the wrong
+// campaign.
 func resolveActiveCampaign(ctx context.Context, store SessionStore, voice VoiceControl, discordUserID string) (storage.Campaign, error) {
 	// (1) A live Voice Session pins the Active Campaign to its own campaign, so
 	// start/end operate on exactly what is running (and a second start collides).
@@ -191,14 +193,7 @@ func resolveActiveCampaign(ctx context.Context, store SessionStore, voice VoiceC
 	}
 
 	// (2) The operator's explicit, durable choice.
-	if c, err := store.GetActiveCampaignForUser(ctx, discordUserID); err == nil {
-		return c, nil
-	} else if !errors.Is(err, storage.ErrNotFound) {
-		return storage.Campaign{}, err
-	}
-
-	// (3) Legacy implicit default: the most-recently-created campaign.
-	c, err := store.GetActiveCampaign(ctx)
+	c, err := store.GetActiveCampaignForUser(ctx, discordUserID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return storage.Campaign{}, ErrNoActiveCampaign
 	}
