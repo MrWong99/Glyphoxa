@@ -179,9 +179,10 @@ func (s *CampaignServer) SearchNodes(
 	return connect.NewResponse(&managementv1.SearchNodesResponse{Nodes: out}), nil
 }
 
-// toProtoNode maps a storage.KGNode onto its wire representation.
+// toProtoNode maps a storage.KGNode onto its wire representation. agent_id carries
+// the NPC-Node ↔ Agent link (#132) when set, else empty.
 func toProtoNode(n storage.KGNode) *managementv1.Node {
-	return &managementv1.Node{
+	pn := &managementv1.Node{
 		Id:         n.ID.String(),
 		CampaignId: n.CampaignID.String(),
 		NodeType:   toProtoNodeType(n.Type),
@@ -191,6 +192,10 @@ func toProtoNode(n storage.KGNode) *managementv1.Node {
 		CreatedAt:  timestamppb.New(n.CreatedAt),
 		UpdatedAt:  timestamppb.New(n.UpdatedAt),
 	}
+	if n.AgentID.Valid {
+		pn.AgentId = n.AgentID.UUID.String()
+	}
+	return pn
 }
 
 // toStorageNodeType maps a wire NodeType onto the storage enum. The UNSPECIFIED

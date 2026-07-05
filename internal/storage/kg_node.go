@@ -39,8 +39,12 @@ type KGNode struct {
 	Name       string
 	Body       string
 	GMPrivate  bool
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// AgentID is the optional NPC-Node ↔ Character NPC Agent link (#132, ADR-0008
+	// amendment): the "voiced by" cast Agent. Only an NPC Node may carry it (DB
+	// CHECK); NULL when the Node is wiki-only or not an NPC.
+	AgentID   uuid.NullUUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // NewKGNode is the input to CreateNode. node_type is set once at insert and never
@@ -54,12 +58,12 @@ type NewKGNode struct {
 }
 
 const kgNodeColumns = `
-	id, campaign_id, node_type, name, body, gm_private, created_at, updated_at`
+	id, campaign_id, node_type, name, body, gm_private, agent_id, created_at, updated_at`
 
 func scanKGNode(row pgx.Row) (KGNode, error) {
 	var n KGNode
 	err := row.Scan(
-		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate,
+		&n.ID, &n.CampaignID, &n.Type, &n.Name, &n.Body, &n.GMPrivate, &n.AgentID,
 		&n.CreatedAt, &n.UpdatedAt,
 	)
 	return n, err

@@ -37,6 +37,10 @@ type campaignStore interface {
 	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 	UpdateNode(ctx context.Context, u storage.KGNodeUpdate) (storage.KGNode, error)
 	DeleteNode(ctx context.Context, id uuid.UUID) error
+	CreateEdge(ctx context.Context, e storage.NewKGEdge) (storage.KGEdge, error)
+	DeleteEdge(ctx context.Context, id uuid.UUID) error
+	NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
+	SetNodeAgent(ctx context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 }
 

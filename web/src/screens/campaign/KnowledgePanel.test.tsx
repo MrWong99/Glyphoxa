@@ -289,4 +289,18 @@ describe("KnowledgePanel", () => {
     expect(await screen.findByText("Secret pact")).toBeInTheDocument();
     expect(screen.getByText("GM private")).toBeInTheDocument();
   });
+
+  it("marks an agent-linked NPC entry with a Linked agent badge (#132)", async () => {
+    renderPanel([
+      create(NodeSchema, {
+        id: "n1",
+        campaignId: "c1",
+        nodeType: NodeType.NPC,
+        name: "Bart",
+        agentId: "ag1",
+      }),
+    ]);
+    expect(await screen.findByText("Bart")).toBeInTheDocument();
+    expect(screen.getByText("Linked agent")).toBeInTheDocument();
+  });
 });
