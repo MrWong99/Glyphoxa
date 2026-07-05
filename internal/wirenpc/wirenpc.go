@@ -336,6 +336,15 @@ type Config struct {
 	// Memory. nil (voice/bench standalone) disables facts entirely, so the prompt is
 	// byte-identical to the pre-facts behavior (#126).
 	Facts agent.FactsRecaller
+
+	// Mutes is the live per-Agent mute view (#211): the session Manager satisfies it
+	// (its volatile, session-local mute set), and the web tier sets it on the base
+	// voice config so every manager-started session copies it. It flows through
+	// connectAndServe (which subscribes roster.SetMuted to MuteChanged and seeds the
+	// current mute state on connect — a mid-session Discord reconnect re-applies the
+	// mutes) → buildConversation (orchestrator.WithMute). nil is the feature-off
+	// default: voice standalone / the benchmark are byte-for-byte unchanged.
+	Mutes orchestrator.MuteView
 }
 
 // RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
@@ -618,7 +627,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory, cfg.Facts)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -626,6 +635,13 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// buildConversation). Without it each reconnect cycle (issue #44) would leak a
 	// Silero session that nothing ever closed.
 	defer cleanup()
+
+	// Mute control (#211): subscribe roster.SetMuted to MuteChanged so a GM mute
+	// (web panel or /glyphoxa mute) de-routes the NPC live, and seed the current
+	// mute state so a mid-session Discord RECONNECT re-applies the mutes onto the
+	// freshly-rebuilt roster. nil Mutes = feature off, so both are inert (voice
+	// standalone / bench unchanged).
+	defer wireMutes(bus, roster, cfg.Mutes)()
 
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
 	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with
@@ -745,7 +761,28 @@ var (
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller) (*orchestrator.Conversation, *Roster, func(), error) {
+// wireMutes subscribes roster.SetMuted to [voiceevent.MuteChanged] on bus (so a
+// GM mute from either surface de-routes / restores the NPC live) and seeds the
+// current mute state from mutes, so a mid-session Discord RECONNECT — which
+// rebuilds the roster from scratch — re-applies the mutes that were in effect
+// (#211). It returns the unsubscribe func; the caller defers it for the cycle's
+// lifetime. A nil mutes view still subscribes (a mute can arrive after connect)
+// but seeds nothing.
+func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView) func() {
+	unsub := voiceevent.On(bus, func(e voiceevent.MuteChanged) {
+		roster.SetMuted(e.AgentID, e.Muted)
+	})
+	if mutes != nil {
+		for id := range roster.specs {
+			if mutes.Muted(id) {
+				roster.SetMuted(id, true)
+			}
+		}
+	}
+	return unsub
+}
+
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -845,6 +882,11 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// batch path, so this option is unconditional — buildStreamManager returns nil
 		// unless GLYPHOXA_STT_STREAMING is set AND the adapter is a StreamingRecognizer.
 		orchestrator.WithStreamingSTT(streamMgr),
+		// Per-Agent mute (#211): the replier discards a muted addressee's route
+		// before taking the floor, and a MuteCut reactor cuts the floor when the
+		// speaking Agent is muted. A nil view is the feature-off default (voice
+		// standalone / bench), so this option is unconditional.
+		orchestrator.WithMute(mutes),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).

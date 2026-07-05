@@ -40,6 +40,12 @@ type Roster struct {
 	// shared tool-engine (so N NPCs share one Groq client); tests inject scripted
 	// engines through it. Always non-nil after [newRoster].
 	replierFor func(npcSpec) *agent.Replier
+
+	// specs retains each held NPC's spec by agentID so [Roster.SetMuted] can
+	// rebuild its matcher Agent on unmute (#211) — a mute drops the NPC from the
+	// Matcher but keeps its spec here, since the Cast entry is deliberately left
+	// untouched. Populated by [Roster.AddNPC], pruned by [Roster.RemoveNPC].
+	specs map[string]npcSpec
 }
 
 // rosterDeps carries what a [Roster] needs to assemble an NPC beyond the NPC's
@@ -66,6 +72,7 @@ func newRoster(deps rosterDeps) *Roster {
 		cast:       agent.NewCast(),
 		replierFor: deps.replierFor,
 		language:   matcherLanguage(deps.language),
+		specs:      map[string]npcSpec{},
 	}
 }
 
@@ -110,6 +117,7 @@ func (r *Roster) AddNPC(spec npcSpec) {
 		r.matcher.Add(matcherAgent(spec))
 	}
 	r.cast.Add(r.replierFor(spec))
+	r.specs[spec.agentID] = spec
 }
 
 // RemoveNPC drops the NPC with agentID from the scene: it leaves the Matcher (so
@@ -122,6 +130,32 @@ func (r *Roster) RemoveNPC(agentID string) {
 		r.matcher.Remove(agentID)
 	}
 	r.cast.Remove(agentID)
+	delete(r.specs, agentID)
+}
+
+// SetMuted toggles one NPC's mute in the live scene (#211). It is deliberately
+// MATCHER-ONLY: muting drops the NPC from the address Matcher (so nothing routes
+// to it — its name/aliases stop matching AND its lastAddressed is pruned so an
+// unnamed continuation re-routes / the remaining-NPC fallback emerges), while
+// unmuting re-adds its matcher Agent from the retained spec. The Cast is NEVER
+// touched, so the NPC's SAME [agent.Replier] — and its ADR-0012 delivered-only
+// history — survives a mute and is intact the instant it is unmuted (AC3 "context
+// intact"). A muted NPC therefore stays in the scene (the conversation keeps
+// accruing around it) but produces no audio and no transcript line.
+//
+// This is NOT [Roster.RemoveNPC]: removing the Cast entry would destroy the
+// Replier and its history, the exact failure to avoid. Muting an id the Roster
+// never held is a no-op.
+func (r *Roster) SetMuted(agentID string, muted bool) {
+	spec, ok := r.specs[agentID]
+	if !ok || r.matcher == nil {
+		return // unknown NPC (or no matcher yet): nothing to route or de-route
+	}
+	if muted {
+		r.matcher.Remove(agentID)
+		return
+	}
+	r.matcher.Add(matcherAgent(spec))
 }
 
 // rosterDepsForLive builds the production rosterDeps: every NPC's Replier is
