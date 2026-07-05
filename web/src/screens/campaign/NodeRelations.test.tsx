@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
@@ -35,6 +35,8 @@ function edgeTransport(opts: {
   outgoing?: PbEdge[];
   incoming?: PbEdge[];
   others?: PbNode[];
+  setAgentError?: boolean;
+  deleteError?: boolean;
 }) {
   const outgoing = opts.outgoing ?? [];
   const incoming = opts.incoming ?? [];
@@ -73,12 +75,18 @@ function edgeTransport(opts: {
       },
       deleteEdge: (req) => {
         deleteCalls.push(req);
+        if (opts.deleteError) {
+          throw new ConnectError("edge not found", Code.NotFound);
+        }
         const i = outgoing.findIndex((e) => e.id === req.id);
         if (i >= 0) outgoing.splice(i, 1);
         return create(DeleteEdgeResponseSchema, {});
       },
       setNodeAgent: (req) => {
         setAgentCalls.push(req);
+        if (opts.setAgentError) {
+          throw new ConnectError("agent already linked to another node", Code.AlreadyExists);
+        }
         const node = create(NodeSchema, { ...opts.node, agentId: req.agentId });
         return create(SetNodeAgentResponseSchema, { node });
       },
@@ -211,5 +219,53 @@ describe("NodeRelations", () => {
     // The relations section still renders (its header appears), but no agent link.
     await screen.findByRole("button", { name: /add relation/i });
     expect(screen.queryByRole("combobox", { name: /voiced by/i })).toBeNull();
+  });
+
+  // Finding 1: the select must DISPLAY the newly chosen agent after the link
+  // succeeds — the value can't stay pinned to the stale `editing` snapshot.
+  it("displays the newly linked agent in the Voiced by select after success", async () => {
+    renderRelations(npcNode, { node: npcNode });
+    const combo = await screen.findByRole("combobox", { name: /voiced by/i });
+    expect(combo).toHaveTextContent(/none/i);
+
+    await pick("Voiced by", "Bart");
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: /voiced by/i })).toHaveTextContent("Bart"),
+    );
+  });
+
+  // Finding 2: a setNodeAgent failure (e.g. the agent already voices another
+  // node — reachable, options aren't filtered) must surface, not vanish.
+  it("surfaces a setNodeAgent failure as an alert", async () => {
+    renderRelations(npcNode, { node: npcNode, setAgentError: true });
+    await screen.findByRole("combobox", { name: /voiced by/i });
+
+    await pick("Voiced by", "Bart");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't link/i);
+  });
+
+  // Finding 2: a deleteEdge failure must surface too.
+  it("surfaces a deleteEdge failure as an alert", async () => {
+    renderRelations(npcNode, {
+      node: npcNode,
+      deleteError: true,
+      outgoing: [
+        create(EdgeSchema, {
+          id: "e1",
+          fromNodeId: "n1",
+          toNodeId: "loc",
+          edgeType: EdgeType.RESIDES_IN,
+          toNodeName: "Barrow",
+          toNodeType: NodeType.LOCATION,
+        }),
+      ],
+    });
+    await screen.findByText("Barrow");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't delete/i);
   });
 });

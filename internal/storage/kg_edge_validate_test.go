@@ -59,6 +59,10 @@ func TestValidateEdge(t *testing.T) {
 		{"parent_of location→char rejected (bad subject)", storage.KGEdgeParentOf, loc, char, true},
 		{"parent_of char→location rejected (bad target)", storage.KGEdgeParentOf, char, loc, true},
 		{"parent_of item→item rejected", storage.KGEdgeParentOf, item, item, true},
+
+		// An unknown edge type (never a valid enum value) is rejected defensively —
+		// it must not silently fall through to "valid".
+		{"unknown edge type rejected", storage.KGEdgeType("teleports_to"), char, loc, true},
 	}
 
 	for _, tc := range cases {

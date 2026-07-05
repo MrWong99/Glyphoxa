@@ -100,6 +100,13 @@ export function NodeRelations({ node }: { node: PbNode }) {
   const [relType, setRelType] = useState<string>("");
   const [target, setTarget] = useState<string>("");
 
+  // The linked agent is held locally so the select reflects a fresh choice: the
+  // `node` prop is a snapshot of the editor's `editing` state that setNodeAgent
+  // does not update, so a controlled value={node.agentId} would keep showing the
+  // stale link. Seeded from the prop (NodeRelations remounts per edited node) and
+  // refreshed from the SetNodeAgentResponse on success.
+  const [linkedAgentId, setLinkedAgentId] = useState(node.agentId);
+
   const createEdge = useMutation(CampaignService.method.createEdge, {
     onSuccess: () => {
       setAdding(false);
@@ -112,7 +119,10 @@ export function NodeRelations({ node }: { node: PbNode }) {
     onSuccess: () => void invalidateEdges(),
   });
   const setNodeAgent = useMutation(CampaignService.method.setNodeAgent, {
-    onSuccess: () => void invalidateNodes(),
+    onSuccess: (res) => {
+      setLinkedAgentId(res.node?.agentId ?? "");
+      void invalidateNodes();
+    },
   });
 
   const submitEdge = () => {
@@ -129,7 +139,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
           <Select
             label="Voiced by"
             options={castOptions}
-            value={node.agentId ? node.agentId : AGENT_NONE}
+            value={linkedAgentId ? linkedAgentId : AGENT_NONE}
             onValueChange={(v) =>
               setNodeAgent.mutate({ nodeId: node.id, agentId: v === AGENT_NONE ? "" : v })
             }
@@ -138,6 +148,11 @@ export function NodeRelations({ node }: { node: PbNode }) {
           <span className="gx-field__hint">
             Optional. Links this entry to a cast NPC — it then knows its own entry and its relations.
           </span>
+          {setNodeAgent.isError && (
+            <span className="gx-editor__status gx-editor__status--error" role="alert">
+              Couldn't link agent: {setNodeAgent.error.message}
+            </span>
+          )}
         </div>
       )}
 
@@ -195,6 +210,11 @@ export function NodeRelations({ node }: { node: PbNode }) {
           <OutgoingRow key={e.id} edge={e} onDelete={() => deleteEdge.mutate({ id: e.id })} />
         ))}
         {outgoing.length === 0 && <p className="gx-kg-relations__empty">No outgoing relations yet.</p>}
+        {deleteEdge.isError && (
+          <span className="gx-editor__status gx-editor__status--error" role="alert">
+            Couldn't delete relation: {deleteEdge.error.message}
+          </span>
+        )}
       </section>
 
       {incoming.length > 0 && (
