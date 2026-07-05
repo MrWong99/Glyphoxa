@@ -38,6 +38,11 @@ type Conversation struct {
 	bargeConfirm  time.Duration
 	floorCoalesce time.Duration
 	bargeEnabled  bool
+
+	// mutes is the live mute view ([WithMute], #211): nil = feature off. When set,
+	// Register gates the replier's routes on it and — when barge-in built the floor
+	// — binds a [MuteCut] reactor beside [BargeIn].
+	mutes MuteView
 }
 
 // Option configures a [Conversation] at construction.
@@ -164,6 +169,10 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		} else {
 			replier = NewReplier(c.tts, c.reply, c.onError)
 		}
+		// Live mute view (#211): the replier discards a muted addressee's route
+		// before taking the floor, so an addressed-but-muted Agent opens no turn.
+		// Independent of barge-in; nil is the feature-off default.
+		replier.mutes = c.mutes
 		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the
@@ -178,6 +187,12 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 			}
 			replier.floor = c.floor
 			reactors = append(reactors, NewBargeIn(c.floor, c.bargeConfirm))
+			// Mute cut (#211): muting the Agent that is speaking cuts its floor. Bound
+			// beside BargeIn (before the replier) on the same floor; only when a mute
+			// view is wired.
+			if c.mutes != nil {
+				reactors = append(reactors, NewMuteCut(c.floor))
+			}
 		}
 		reactors = append(reactors, replier)
 	}
