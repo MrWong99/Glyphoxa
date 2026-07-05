@@ -288,6 +288,12 @@ type Config struct {
 	// adapters. An empty key means "adapter ENV fallback", so the zero value (the
 	// env-only Run path) reproduces today's behavior untouched.
 	keys providerKeys
+	// language is the Campaign Language (CONTEXT.md) of the campaign the npcs
+	// were loaded from: it selects the Roster matcher's phonetic encoder (#199).
+	// RunFromDB sets it from the campaign row; the env-only Run path leaves it
+	// "", which — like any code without a registered encoder — resolves to "en"
+	// (see matcherLanguage), preserving the pre-#199 behavior.
+	language string
 
 	// Memory is the NPC memory recaller injected into every NPC's Agent loop
 	// (#122, ADR-0011/0042): it fills the Hot Context memory slot each turn. The
@@ -333,7 +339,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	}
 
 	st := storage.New(pool)
-	npcs, primary, tenantID, err := loadSeededNPCs(ctx, st)
+	npcs, primary, campaign, err := loadSeededNPCs(ctx, st)
 	if err != nil {
 		return err
 	}
@@ -345,13 +351,14 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	// A decryption failure (e.g. a real saved key with the wrong/absent cipher)
 	// is fatal here, before any Discord connection — the operator sees a clear
 	// error instead of an NPC that silently ran on the wrong (env) key.
-	keys, err := resolveSessionKeys(ctx, st, tenantID, primary, cipher)
+	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, cipher)
 	if err != nil {
 		return err
 	}
 
 	cfg.npcs = npcs
 	cfg.keys = keys
+	cfg.language = campaign.Language
 	return Run(ctx, cfg)
 }
 
@@ -547,7 +554,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory)
+	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -656,6 +663,11 @@ var (
 // programmatic control surface for adding/removing NPCs at runtime (#49); the
 // caller owns it for the cycle's lifetime. npcs must be non-empty.
 //
+// language is the Campaign Language of the campaign the npcs belong to: it
+// selects the Roster matcher's phonetic encoder (#199). A code with no
+// registered encoder — including the env-only path's "" — resolves to "en"
+// (see matcherLanguage).
+//
 // All NPCs share ONE Groq tool-engine (one client, the `dice` grant in code —
 // Tool Grants are a #6 table, not yet seeded). The LLM provider is Groq (model
 // llama-3.3-70b-versatile via the OpenAI-compat endpoint). The DB Agent's
@@ -669,7 +681,7 @@ var (
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -738,7 +750,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over the shared engine) in the Cast. The
 	// Matcher is built from the first NPC and grown for the rest.
-	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log, memory))
+	roster := newRoster(rosterDepsForLive(toolEngine, newTTS(keys.tts), 16, log, memory, language))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}
