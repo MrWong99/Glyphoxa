@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
@@ -292,6 +293,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// surviving with no Voice Session active. Built only when this Instance drives
 	// voice (`all` mode); a web-only replica runs no Bot. Declared at function
 	// scope so the shutdown path below can Close it after the Manager drains.
+	// Declared before the presence block so /glyphoxa search can resolve the live
+	// Voice Session's campaign lazily (the closure below): the Manager is built
+	// AFTER the presence (it needs cfg.Client from pres.ClientProvider), yet the
+	// command surface must be registered before pres.Ensure. Assigned a few lines
+	// down; the closure is only invoked at command time, long after boot.
+	var mgr *session.Manager
 	var pres *presence.Presence
 	if withVoice {
 		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
@@ -302,7 +309,23 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.GuildID()
 		})
 		reg := presence.NewRegistry(gate, log)
-		reg.Register(presence.RollCommand(tool.NewDice()))
+		// /glyphoxa search scopes to the operator's Active Campaign (ADR-0041 GM
+		// only, #120): the live session's campaign when one is running, else the
+		// stored Active Campaign (resolved inside the command). Same scope precedence
+		// as the web SearchTranscriptLines RPC (AC5); one shared storage search path.
+		activeCampaign := func() (uuid.UUID, bool) {
+			if mgr == nil {
+				return uuid.Nil, false
+			}
+			if vs, active := mgr.Snapshot(); active {
+				return vs.CampaignID, true
+			}
+			return uuid.Nil, false
+		}
+		reg.Register(
+			presence.RollCommand(tool.NewDice()),
+			presence.SearchCommand(store, activeCampaign),
+		)
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
 		// session; set BEFORE the Manager copies cfg into its base config.
@@ -319,7 +342,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	runner := func(rctx context.Context, c wirenpc.Config) error {
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
-	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice)
+	mgr = session.NewManager(store, runner, cfg, cipher, log, withVoice)
 	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
 	// left 'running' (crash / failed end-write). No loop is live yet, so every
 	// such row is an orphan; done before the web tier serves so GetSession never
