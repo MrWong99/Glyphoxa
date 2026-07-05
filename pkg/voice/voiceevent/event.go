@@ -39,6 +39,28 @@ type VADSpeechEnd struct {
 // EventName implements [Event].
 func (VADSpeechEnd) EventName() string { return "vad.speech_end" }
 
+// STTPartial is the MUTABLE interim hypothesis of the in-progress utterance
+// (ADR-0042/0020). Text REPLACES all previous partials for the same UtteranceID —
+// it is not cumulative. Only [STTFinal] reaches Address Detection and the
+// Transcript (ADR-0012); a partial is a live-view/speculation signal, never
+// routed and never persisted.
+//
+// A partial may be published CONCURRENTLY with other turns' events: it originates
+// on the streaming adapter's read goroutine (the [FirstAudio] precedent), so a
+// metrics/SSE subscriber may observe it interleaved. Consumers MUST correlate by
+// UtteranceID and never assume "latest partial": utterance N+1's partial can
+// precede utterance N's STTFinal.
+type STTPartial struct {
+	At   time.Time
+	Text string
+	// UtteranceID is minted at the local VAD speech_start ([NewUtteranceID]) and
+	// joins this utterance's partials to the [STTFinal] its manual commit yields.
+	UtteranceID string
+}
+
+// EventName implements [Event].
+func (STTPartial) EventName() string { return "stt.partial" }
+
 // STTFinal is an authoritative transcript for one completed utterance, as
 // committed by the STT provider. Per ADR-0021 the same event is emitted on
 // the cassette-replay and live paths; the orchestrator does not distinguish.
@@ -59,6 +81,10 @@ type STTFinal struct {
 	Text        string
 	TurnID      string
 	SpeechEndAt time.Time
+	// UtteranceID joins this final to the [STTPartial]s of the utterance it came
+	// from (ADR-0042), minted at the local VAD speech_start. It is empty on the
+	// batch path (no stream, no partials) — the byte-for-byte no-streaming default.
+	UtteranceID string
 }
 
 // EventName implements [Event].

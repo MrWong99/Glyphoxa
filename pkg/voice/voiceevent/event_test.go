@@ -32,6 +32,34 @@ func TestSTTFinal_EventName(t *testing.T) {
 	}
 }
 
+func TestSTTPartial_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := STTPartial{}.EventName()
+	if got != "stt.partial" {
+		t.Errorf("EventName = %q, want %q", got, "stt.partial")
+	}
+}
+
+// TestNewUtteranceID_UniqueNonEmpty pins that utterance ids are minted non-empty
+// and distinct (ADR-0042): they join an utterance's partials to its final, so a
+// collision would cross-link two utterances' streams.
+func TestNewUtteranceID_UniqueNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[string]bool, 128)
+	for range 128 {
+		id := NewUtteranceID()
+		if id == "" {
+			t.Fatal("NewUtteranceID returned an empty id")
+		}
+		if seen[id] {
+			t.Fatalf("NewUtteranceID returned a duplicate id %q", id)
+		}
+		seen[id] = true
+	}
+}
+
 func TestAddressRouted_EventName(t *testing.T) {
 	t.Parallel()
 

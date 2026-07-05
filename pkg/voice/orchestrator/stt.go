@@ -125,16 +125,29 @@ func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator.STT.Transcribe: %w", err)
 	}
-	// A turn is born here (A3): mint its correlation id and carry forward the
-	// segment's speech-end time (from the Segmenter via ctx) so the headline
-	// response-latency span is anchored at the true end-of-speech.
+	s.PublishFinal(ctx, t)
+	return nil
+}
+
+// PublishFinal fans an authoritative [stt.Transcript] out as a
+// [voiceevent.STTFinal]. A turn is born here (A3): its TurnID is minted fresh,
+// and the per-segment correlation the ctx carries — the [Segmenter]'s speech-end
+// time (so the headline response-latency span is anchored at true end-of-speech)
+// and, on the streaming path, the utterance id (ADR-0042, joining this final to
+// its partials) — is stamped on the event.
+//
+// It is the shared publish tail of both transcription paths: the batch
+// [STT.Transcribe] above, and the [StreamManager] commit path, which resolves a
+// streamed commit and publishes the committed text directly (skipping the batch
+// POST) while keeping TurnID/SpeechEndAt minted exactly as today.
+func (s *STT) PublishFinal(ctx context.Context, t stt.Transcript) {
 	s.bus.Publish(voiceevent.STTFinal{
 		At:          time.Now(),
 		Text:        t.Text,
 		TurnID:      voiceevent.NewTurnID(),
 		SpeechEndAt: speechEndAtFrom(ctx),
+		UtteranceID: utteranceIDFrom(ctx),
 	})
-	return nil
 }
 
 // speechEndAtKey carries the segment's [voiceevent.VADSpeechEnd.At] from the
@@ -155,4 +168,26 @@ func withSpeechEndAt(ctx context.Context, at time.Time) context.Context {
 func speechEndAtFrom(ctx context.Context) time.Time {
 	at, _ := ctx.Value(speechEndAtKey{}).(time.Time)
 	return at
+}
+
+// utteranceIDKey carries the streaming utterance id (ADR-0042) from the
+// [Segmenter] to [STT.PublishFinal] without widening the publish signature —
+// pattern-copied from [speechEndAtKey]. Unexported and orchestrator-internal.
+type utteranceIDKey struct{}
+
+// withUtteranceID returns ctx carrying the utterance's correlation id; an empty
+// id (the batch path, which has no stream and no partials) leaves ctx unchanged,
+// so [utteranceIDFrom] yields "" and STTFinal.UtteranceID stays empty.
+func withUtteranceID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, utteranceIDKey{}, id)
+}
+
+// utteranceIDFrom recovers the streaming utterance id, or "" when the segment was
+// transcribed without one (the batch path, or a direct Transcribe call).
+func utteranceIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(utteranceIDKey{}).(string)
+	return id
 }
