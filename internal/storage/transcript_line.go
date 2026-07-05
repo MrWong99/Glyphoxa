@@ -106,3 +106,44 @@ func (s *Store) CountTranscriptLines(ctx context.Context, sessionID uuid.UUID) (
 	}
 	return n, nil
 }
+
+// SearchTranscriptLines returns a Campaign's persisted transcript Lines whose text
+// matches the query, ranked by relevance (#120, ADR-0011 amendment). This is the
+// SINGLE user-facing search path — both the web SearchTranscriptLines RPC and the
+// `/glyphoxa search` slash command call exactly this method (AC4: no divergent
+// search logic). The match is served by the transcript_line_fts_idx GIN index
+// (fts @@ q), not a substring scan, and ranked with ts_rank (a line that mentions
+// the term more often ranks higher), then newest-first, then a stable tiebreak.
+// The query is scoped by campaign_id, so another Campaign's transcript is NEVER
+// returned (AC5). The raw query is sanitized by BuildTSQuery (the same helper the
+// KG search uses), so injected tsquery operators can only ever split words; an
+// empty result from that yields (nil, nil) — no matches, not an error.
+func (s *Store) SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]TranscriptLine, error) {
+	tsq := BuildTSQuery(query)
+	if tsq == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT `+transcriptLineColumns+`
+		   FROM transcript_line, to_tsquery('simple', $2) q
+		  WHERE campaign_id = $1 AND fts @@ q
+		  ORDER BY ts_rank(fts, q) DESC, ts DESC, voice_session_id, line_id
+		  LIMIT $3`, campaignID, tsq, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: search transcript lines for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []TranscriptLine
+	for rows.Next() {
+		l, err := scanTranscriptLine(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan transcript line search row: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: search transcript lines for campaign %s: %w", campaignID, err)
+	}
+	return out, nil
+}
