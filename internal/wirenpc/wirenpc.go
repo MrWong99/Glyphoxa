@@ -700,7 +700,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	sttStage := orchestrator.NewSTT(bus, recognizer,
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
 	ttsStage := orchestrator.NewTTS(bus, synth)
-	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics)
+	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
 
 	// The `dice` grant stays in code: Tool Grants are a #6 table, not yet
 	// seeded. With no grants the tool engine degrades to a single completion
@@ -769,12 +769,17 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 // keeping it a small pure function lets the gating be unit-tested without standing
 // up the whole Silero/ONNX pipeline. The provider label is elevenlabs (the only
 // streaming STT adapter in the MVP matrix, ADR-0039).
-func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder) *orchestrator.StreamManager {
+func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) *orchestrator.StreamManager {
 	if !streaming {
 		return nil
 	}
 	sr, ok := recognizer.(stt.StreamingRecognizer)
 	if !ok {
+		// Opting in but the wired provider can't stream is a misconfiguration worth
+		// surfacing — otherwise the operator sees the batch path with no hint why.
+		if log != nil {
+			log.Warn("STT streaming requested but provider does not support it; using batch")
+		}
 		return nil
 	}
 	return orchestrator.NewStreamManager(sr,

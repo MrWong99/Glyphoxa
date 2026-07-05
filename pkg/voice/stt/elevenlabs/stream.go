@@ -141,7 +141,7 @@ func (c *Client) openStream(ctx context.Context, cfg stt.StreamConfig, pingInter
 
 	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u, hdr)
 	if err != nil {
-		return nil, &stt.StreamError{Code: stt.CodeTransport, Fatal: true, Err: dialError(err, resp)}
+		return nil, dialStreamError(err, resp)
 	}
 
 	s := &stream{
@@ -190,6 +190,20 @@ func dialError(err error, resp *http.Response) error {
 		return fmt.Errorf("websocket dial: HTTP %d: %w", resp.StatusCode, err)
 	}
 	return fmt.Errorf("websocket dial: %w", err)
+}
+
+// dialStreamError classifies a websocket-handshake failure. An HTTP 401/403 on the
+// upgrade response is a durable credential/permission rejection, so it carries the
+// auth_error code — the stream manager backs a durable rejection off straight to
+// the cap (ADR-0042) instead of the ~6 fast redials (1,2,4,8,16,30s) a revoked key
+// would otherwise get. Every other handshake failure is a transport blip. Always
+// Fatal: the session never opened.
+func dialStreamError(err error, resp *http.Response) *stt.StreamError {
+	code := stt.CodeTransport
+	if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		code = "auth_error"
+	}
+	return &stt.StreamError{Code: code, Fatal: true, Err: dialError(err, resp)}
 }
 
 // wsWrite is one queued client->server write: either an audio chunk (commit

@@ -216,7 +216,14 @@ func (m *StreamManager) maintain(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			continue // transport dial failure: back off and retry
+			// An auth-class dial rejection (401/403 → auth_error) is durable: jump the
+			// backoff to the cap so a revoked key is not hammered with fast redials.
+			if authClassCodes[serr.Code] {
+				m.mu.Lock()
+				m.backoff = m.backoffMax
+				m.mu.Unlock()
+			}
+			continue // dial failure: back off and retry
 		}
 		if ctx.Err() != nil {
 			return
@@ -385,6 +392,10 @@ func (m *StreamManager) awaitCommit(ch <-chan stt.CommitResult, sentAt time.Time
 		m.resetBackoff()
 		return res.Transcript, true
 	case <-timer.C:
+		// Record the span on timeout too: a stalled provider is exactly what this
+		// series exists to surface, and the batch adapter records its call on failure
+		// as well (batch parity).
+		m.metrics.STTRequest(m.provider, m.now().Sub(sentAt))
 		return stt.Transcript{}, false
 	}
 }

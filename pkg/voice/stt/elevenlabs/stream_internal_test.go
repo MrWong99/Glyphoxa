@@ -58,6 +58,43 @@ func TestWritePump_SendsKeepalivePing(t *testing.T) {
 	}
 }
 
+// TestOpenStream_Unauthorized_MapsToAuthError pins that an HTTP 401/403 on the
+// websocket handshake surfaces as a *StreamError with the auth_error code (not the
+// generic transport code), so the stream manager backs a revoked/forbidden key off
+// straight to the cap instead of ~6 fast redials.
+func TestOpenStream_Unauthorized_MapsToAuthError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"unauthorized", http.StatusUnauthorized},
+		{"forbidden", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status) // reject the upgrade
+			}))
+			defer srv.Close()
+
+			c := New("k", WithBaseURL(srv.URL))
+			_, err := c.OpenStream(context.Background(), stt.StreamConfig{SampleRate: 16000})
+			if err == nil {
+				t.Fatal("OpenStream returned nil on a rejected handshake; want an error")
+			}
+			var se *stt.StreamError
+			if !errors.As(err, &se) {
+				t.Fatalf("error %v is not a *stt.StreamError", err)
+			}
+			if se.Code != "auth_error" {
+				t.Errorf("dial error code = %q, want auth_error for HTTP %d", se.Code, tc.status)
+			}
+			if !se.Fatal {
+				t.Error("a rejected handshake must be Fatal (the session never opened)")
+			}
+		})
+	}
+}
+
 // TestSend_WriteQueueFull_RestoresAggregatedAudio pins Finding 4: when a flush
 // cannot be enqueued (write queue full), Send reports a recoverable queue-full
 // *StreamError AND keeps the flushed bytes in the aggregation buffer so no

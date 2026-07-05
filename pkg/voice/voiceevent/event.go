@@ -50,6 +50,13 @@ func (VADSpeechEnd) EventName() string { return "vad.speech_end" }
 // metrics/SSE subscriber may observe it interleaved. Consumers MUST correlate by
 // UtteranceID and never assume "latest partial": utterance N+1's partial can
 // precede utterance N's STTFinal.
+//
+// UtteranceID is stamped manager-side from the CURRENT utterance, so for up to
+// ~one round-trip after a new speech_start an in-flight partial for the PREVIOUS
+// utterance can arrive carrying the new utterance's id (a stale-text partial).
+// Speculation consumers must tolerate this: the STTFinal's normalized match
+// against the speculated query self-heals it, and a mismatch falls back to inline
+// retrieval (ADR-0042).
 type STTPartial struct {
 	At   time.Time
 	Text string

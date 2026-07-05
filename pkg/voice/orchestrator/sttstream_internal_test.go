@@ -332,9 +332,13 @@ func TestStreamManager_AwaitCommitEmptyIsFinal(t *testing.T) {
 
 // TestStreamManager_AwaitCommitTimesOut pins the commit-timeout guard (R2): a
 // stalled pending commit falls back to batch (ok=false) rather than wedging the
-// worker.
+// worker, and it STILL records an stt_request span — a stalled provider is exactly
+// what the series surfaces (batch parity).
 func TestStreamManager_AwaitCommitTimesOut(t *testing.T) {
-	m := NewStreamManager(&fakeStreamingRecognizer{}, WithCommitTimeout(20*time.Millisecond))
+	spy := &spyStage{}
+	m := NewStreamManager(&fakeStreamingRecognizer{},
+		WithStreamMetrics(spy, observe.ProviderElevenLabs),
+		WithCommitTimeout(20*time.Millisecond))
 	ch := make(chan stt.CommitResult) // never resolves
 
 	start := time.Now()
@@ -343,6 +347,43 @@ func TestStreamManager_AwaitCommitTimesOut(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("awaitCommit blocked %v; the commit timeout did not fire", elapsed)
+	}
+	if spy.requests() != 1 {
+		t.Errorf("commit timeout recorded %d stt_request spans, want 1 (a stalled provider is a recorded round-trip)", spy.requests())
+	}
+}
+
+// TestStreamManager_AuthDialBacksOffAtCap pins that an auth-class DIAL rejection
+// (401/403 → auth_error from the adapter) jumps the re-establish backoff straight
+// to the cap, so a revoked key is not hammered with the 1,2,4,8,16,30s fast redials
+// a plain transport failure would get.
+func TestStreamManager_AuthDialBacksOffAtCap(t *testing.T) {
+	rec := &fakeStreamingRecognizer{openErr: &stt.StreamError{Code: "auth_error", Fatal: true, Err: errors.New("HTTP 401")}}
+	m := NewStreamManager(rec, WithStreamBackoff(time.Second, 30*time.Second))
+
+	delays := make(chan time.Duration, 1)
+	m.sleep = func(ctx context.Context, d time.Duration) error {
+		select {
+		case delays <- d:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		<-ctx.Done() // hold until the test cancels, so only the first sleep is observed
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := m.bind(ctx, voiceevent.NewBus())
+	defer stop()
+	defer cancel()
+
+	select {
+	case d := <-delays:
+		if d != 30*time.Second {
+			t.Errorf("first backoff after an auth-class dial = %v, want the 30s cap", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no backoff sleep observed after an auth-class dial failure")
 	}
 }
 
