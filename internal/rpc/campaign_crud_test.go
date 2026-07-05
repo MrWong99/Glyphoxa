@@ -39,12 +39,14 @@ type fakeCampaignStore struct {
 
 	created []storage.NewAgent
 
-	// KG Node state (#126): nodes backs ListNodes; nodesCreated records the
-	// storage inputs; nodeCreateErr forces the create failure path.
+	// KG Node state (#126, #129): nodes backs ListNodes/Update/Delete; nodesCreated
+	// records the storage inputs; the *Err hooks force each failure path.
 	nodes         []storage.KGNode
 	nodesCreated  []storage.NewKGNode
 	nodeCreateErr error
 	nodeListErr   error
+	nodeUpdateErr error
+	nodeDeleteErr error
 }
 
 func newFakeStore() *fakeCampaignStore {
@@ -141,6 +143,34 @@ func (f *fakeCampaignStore) CreateNode(_ context.Context, n storage.NewKGNode) (
 
 func (f *fakeCampaignStore) ListNodes(_ context.Context, _ uuid.UUID) ([]storage.KGNode, error) {
 	return f.nodes, f.nodeListErr
+}
+
+func (f *fakeCampaignStore) UpdateNode(_ context.Context, u storage.KGNodeUpdate) (storage.KGNode, error) {
+	if f.nodeUpdateErr != nil {
+		return storage.KGNode{}, f.nodeUpdateErr
+	}
+	for i := range f.nodes {
+		if f.nodes[i].ID == u.ID {
+			f.nodes[i].Name = u.Name
+			f.nodes[i].Body = u.Body
+			f.nodes[i].GMPrivate = u.GMPrivate
+			return f.nodes[i], nil
+		}
+	}
+	return storage.KGNode{}, storage.ErrNotFound
+}
+
+func (f *fakeCampaignStore) DeleteNode(_ context.Context, id uuid.UUID) error {
+	if f.nodeDeleteErr != nil {
+		return f.nodeDeleteErr
+	}
+	for i := range f.nodes {
+		if f.nodes[i].ID == id {
+			f.nodes = append(f.nodes[:i], f.nodes[i+1:]...)
+			return nil
+		}
+	}
+	return storage.ErrNotFound
 }
 
 // crudClient stands up the full CampaignService handler over an httptest server
