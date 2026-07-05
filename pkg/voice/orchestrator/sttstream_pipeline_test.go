@@ -32,7 +32,6 @@ type scriptedStream struct {
 	onPartial  func(string)
 	partialIdx int
 	sends      int
-	commits    int
 }
 
 func (s *scriptedStream) Send(audio.Frame) error {
@@ -60,7 +59,6 @@ func (s *scriptedStream) Send(audio.Frame) error {
 func (s *scriptedStream) Commit() (<-chan stt.CommitResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.commits++
 	ch := make(chan stt.CommitResult, 1)
 	ch <- s.committed
 	return ch, nil
