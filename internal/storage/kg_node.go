@@ -164,6 +164,62 @@ func (s *Store) ListNodes(ctx context.Context, campaignID uuid.UUID) ([]KGNode, 
 // the finer per-block/per-fact caps on top.
 const kgFactsCap = 50
 
+// kgNodeColumnsN is kgNodeColumns aliased for the neighbourhood join, which reads
+// Node columns from `kg_node n` joined to a ranked CTE — the bare list would be
+// ambiguous.
+const kgNodeColumnsN = `
+	n.id, n.campaign_id, n.node_type, n.name, n.body, n.gm_private, n.agent_id, n.created_at, n.updated_at`
+
+// AgentNodeFacts returns the edge-aware Hot Context fact set for a Character NPC
+// Agent (#133, ADR-0008 amendment): the Agent's own linked Node plus its
+// edge-adjacent Nodes (a single hop in BOTH edge directions), gm-public only,
+// newest-first within hop, capped — one round trip inside the kgfacts budget.
+//
+// Semantics: traversal STARTS from the linked Node regardless of its gm_private,
+// but gm_private filters SURFACING — the own Node and any neighbour that is
+// gm_private is walked (its edges still expand) yet never returned, so a GM-only
+// fact never reaches the prompt. An Agent with no linked Node yields an empty set
+// (no campaign-wide fallback: the NPC injects only its own neighbourhood). The
+// UNION dedupes multi-edge neighbours; min(hop) keeps the own Node at hop 0 even
+// if an Edge also makes it a neighbour of itself's neighbour.
+func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode, error) {
+	rows, err := s.db.Query(ctx,
+		`WITH own AS (
+		     SELECT id FROM kg_node WHERE agent_id = $1
+		 ),
+		 hood AS (
+		     SELECT id, 0 AS hop FROM own
+		     UNION SELECT e.to_node_id,   1 FROM kg_edge e JOIN own o ON e.from_node_id = o.id
+		     UNION SELECT e.from_node_id, 1 FROM kg_edge e JOIN own o ON e.to_node_id   = o.id
+		 ),
+		 ranked AS (
+		     SELECT id, min(hop) AS hop FROM hood GROUP BY id
+		 )
+		 SELECT `+kgNodeColumnsN+`
+		   FROM kg_node n
+		   JOIN ranked r ON r.id = n.id
+		  WHERE NOT n.gm_private
+		  ORDER BY r.hop, n.updated_at DESC, n.id
+		  LIMIT $2`, agentID, kgFactsCap)
+	if err != nil {
+		return nil, fmt.Errorf("storage: agent node facts for agent %s: %w", agentID, err)
+	}
+	defer rows.Close()
+
+	var out []KGNode
+	for rows.Next() {
+		n, err := scanKGNode(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan agent node fact: %w", err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: agent node facts for agent %s: %w", agentID, err)
+	}
+	return out, nil
+}
+
 // ListPublicNodes returns the Campaign's gm-public Nodes ordered newest-first
 // (updated_at DESC, id), capped — the Hot Context prompt-injection read (#126).
 // gm_private Nodes are excluded so a GM-only fact never reaches an NPC's prompt.
