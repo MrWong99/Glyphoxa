@@ -137,6 +137,71 @@ func TestToolGrantRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpsertToolGrant covers the #117 grant-mutation path: UpsertToolGrant both
+// GRANTS a Tool (inserts a row) and EDITS an existing grant's scope config
+// (updates in place, no UNIQUE violation), so the RPC toggle-on and scope-edit
+// share one storage call. The nil-config insert is the dice shape.
+func TestUpsertToolGrant(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	charID, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaignID,
+		Role:       storage.AgentRoleCharacter,
+		Name:       "Toggler",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// First upsert INSERTS the grant (no row existed) with no scope config.
+	if err := st.UpsertToolGrant(ctx, storage.NewToolGrant{AgentID: charID, ToolName: "dice"}); err != nil {
+		t.Fatalf("UpsertToolGrant (insert): %v", err)
+	}
+	grants, err := st.ListToolGrants(ctx, charID)
+	if err != nil {
+		t.Fatalf("ListToolGrants: %v", err)
+	}
+	if len(grants) != 1 || grants[0].ToolName != "dice" || grants[0].Config != nil {
+		t.Fatalf("after insert = %+v, want exactly [dice] with nil config", grants)
+	}
+
+	// Second upsert of the SAME (agent, tool) must UPDATE in place, not violate
+	// the UNIQUE index — this is the RPC's scope-edit path.
+	scope := json.RawMessage(`{"scope":"self"}`)
+	if err := st.UpsertToolGrant(ctx, storage.NewToolGrant{AgentID: charID, ToolName: "dice", Config: scope}); err != nil {
+		t.Fatalf("UpsertToolGrant (update): %v", err)
+	}
+	grants, err = st.ListToolGrants(ctx, charID)
+	if err != nil {
+		t.Fatalf("ListToolGrants after update: %v", err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("upsert created a duplicate row: %+v", grants)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grants[0].Config, &got); err != nil {
+		t.Fatalf("updated config not valid JSON: %v (%q)", err, grants[0].Config)
+	}
+	if got["scope"] != "self" {
+		t.Errorf("scope config not updated: %+v", got)
+	}
+
+	// Upserting nil config back clears the scope (SQL NULL) in place.
+	if err := st.UpsertToolGrant(ctx, storage.NewToolGrant{AgentID: charID, ToolName: "dice"}); err != nil {
+		t.Fatalf("UpsertToolGrant (clear): %v", err)
+	}
+	grants, err = st.ListToolGrants(ctx, charID)
+	if err != nil {
+		t.Fatalf("ListToolGrants after clear: %v", err)
+	}
+	if len(grants) != 1 || grants[0].Config != nil {
+		t.Fatalf("after clear = %+v, want [dice] with nil config", grants)
+	}
+}
+
 // TestToolGrantUniquePerTool asserts the UNIQUE(agent_id, tool_name) index: an
 // Agent grants a Tool at most once (ADR-0029).
 func TestToolGrantUniquePerTool(t *testing.T) {

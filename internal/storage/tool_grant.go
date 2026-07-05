@@ -86,6 +86,31 @@ func (s *Store) CreateToolGrant(ctx context.Context, g NewToolGrant) (uuid.UUID,
 	return id, nil
 }
 
+// UpsertToolGrant grants a Tool to an Agent, or edits an existing grant's scope
+// Config in place — the #117 mutation path. It INSERTs the (agent_id, tool_name)
+// row when absent and UPDATEs its Config when present, keyed off the
+// UNIQUE(agent_id, tool_name) index, so "grant on" and "edit scope" are one call
+// and a repeated grant never trips the unique constraint. An empty Config stores
+// SQL NULL (no narrowing — dice's shape), so re-upserting nil clears a prior
+// scope. The Agent's next Voice Session hydrates the resulting row (#113).
+func (s *Store) UpsertToolGrant(ctx context.Context, g NewToolGrant) error {
+	// A nil interface encodes to SQL NULL; a non-empty blob goes in as jsonb.
+	var config any
+	if len(g.Config) > 0 {
+		config = []byte(g.Config)
+	}
+	_, err := s.db.Exec(ctx,
+		`INSERT INTO tool_agent_grant (agent_id, tool_name, config)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (agent_id, tool_name)
+		 DO UPDATE SET config = EXCLUDED.config, updated_at = now()`,
+		g.AgentID, g.ToolName, config)
+	if err != nil {
+		return fmt.Errorf("storage: upsert tool grant (%s/%s): %w", g.AgentID, g.ToolName, err)
+	}
+	return nil
+}
+
 // DeleteToolGrant removes an Agent's grant of the named Tool. Deleting a grant
 // that is not present yields ErrNotFound (so the caller can tell "removed" from
 // "was never there"). Removing the row is how a GM revokes a Tool: after
