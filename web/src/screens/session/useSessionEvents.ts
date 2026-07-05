@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useMuteCache } from "./muteCache";
+
 // useSessionEvents is the SSE transcript client (#73, ADR-0014 Hop-B). When a
 // voice session is live it seeds a TanStack query from the JSON snapshot
 // (GET /api/v1/sessions/:id) then keeps it fresh by amending the SAME cache
@@ -53,6 +55,10 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 
 export function useSessionEvents(sessionId: string | undefined, active: boolean): Transcript {
   const queryClient = useQueryClient();
+  // The SSE "mute" frame patches the SHARED getSession cache (not the transcript
+  // cache), so the Voice panel reflects a mute from EITHER surface without a
+  // reload (#211, AC5). patchOne is referentially stable, so it is a safe effect dep.
+  const { patchOne } = useMuteCache();
   // Fetch the snapshot for ANY session that exists — live OR ended. A reload of
   // an ended session replays its persisted history from the DB-backed snapshot
   // (#74); the live stream below only opens while the session is active.
@@ -103,9 +109,13 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
       const s = JSON.parse((e as MessageEvent).data) as { status: "live" | "idle"; typing: TypingState };
       queryClient.setQueryData<Transcript>(key, (prev) => ({ ...(prev ?? EMPTY), status: s.status, typing: s.typing }));
     });
+    es.addEventListener("mute", (e) => {
+      const m = JSON.parse((e as MessageEvent).data) as { agent_id: string; muted: boolean };
+      patchOne(m.agent_id, m.muted);
+    });
 
     return () => es.close();
-  }, [active, sessionId, isSuccess, queryClient]);
+  }, [active, sessionId, isSuccess, queryClient, patchOne]);
 
   return data ?? EMPTY;
 }

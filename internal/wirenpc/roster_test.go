@@ -315,6 +315,244 @@ func TestRoster_RemoveNPC_GoesSilentAndStopsContinuations(t *testing.T) {
 	}
 }
 
+// TestRoster_SetMuted_DropsAndRestoresMatching pins the matcher-only mute (#211):
+// a muted NPC is never matched by name/alias nor caught as an unnamed
+// continuation (its lastAddressed is pruned), so a 2-NPC scene's unnamed speech
+// re-routes to the remaining NPC; unmuting makes it addressable again.
+func TestRoster_SetMuted_DropsAndRestoresMatching(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{
+		specFor("aldra", "Aldra", ""),
+		specFor("bram", "Bram", ""),
+	}
+	lines := map[string]string{"aldra": "Aldra here.", "bram": "Bram here."}
+	roster, publish := testRoster(t, bus, synth, specs, lines)
+
+	publish("Bram, stay a while.")
+	if got := synth.spokenBy("bram"); len(got) != 1 {
+		t.Fatalf("Bram spoke %d times before mute, want 1", len(got))
+	}
+
+	roster.SetMuted("bram", true)
+
+	// Named: muted Bram says nothing (its name no longer matches — it left the Matcher).
+	publish("Bram, are you there?")
+	if got := synth.spokenBy("bram"); len(got) != 1 {
+		t.Fatalf("muted Bram spoke when named (%d total), want 1 (silent)", len(got))
+	}
+	// Unnamed: the continuation must NOT resurrect Bram (his lastAddressed was
+	// pruned) — it re-routes to the remaining NPC (Aldra), who stays reachable.
+	publish("Anyone still around?")
+	if got := synth.spokenBy("bram"); len(got) != 1 {
+		t.Fatalf("muted Bram caught an unnamed continuation (%d total), want 1 — lastAddressed not pruned", len(got))
+	}
+	if got := synth.spokenBy("aldra"); len(got) < 1 {
+		t.Fatal("with Bram muted the remaining NPC (Aldra) must still catch unnamed speech — the 2-NPC fallback")
+	}
+
+	roster.SetMuted("bram", false)
+
+	// Unmuted: Bram is addressable again.
+	publish("Bram, welcome back.")
+	if got := synth.spokenBy("bram"); len(got) != 2 {
+		t.Fatalf("unmuted Bram spoke %d times total, want 2 (addressable again)", len(got))
+	}
+}
+
+// TestRoster_SetMuted_UnmuteKeepsReplierHistory pins AC3's "context intact":
+// SetMuted touches ONLY the Matcher, never the Cast, so a muted-then-unmuted NPC
+// keeps its SAME agent.Replier — its conversation history (ADR-0012 delivered-only
+// commit log) survives the mute. Implementing mute as RemoveNPC would destroy that
+// history; this proves it does not.
+func TestRoster_SetMuted_UnmuteKeepsReplierHistory(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{
+		specFor("aldra", "Aldra", ""),
+		specFor("bram", "Bram", ""),
+	}
+	// Real agent.Repliers (over scripted engines) so history accumulates per turn.
+	aldra := replierFor(specs[0], "Aldra here.", synth)
+	bram := replierFor(specs[1], "Bram here.", synth)
+	roster := newRosterFor(specs, []*agent.Replier{aldra, bram}, synth)
+
+	ttsStage := orchestrator.NewTTS(bus, synth)
+	detector := orchestrator.NewAddressDetector(roster.matcher)
+	replier := orchestrator.NewStreamReplier(ttsStage, roster.cast.ReplyStream(), nil)
+	t.Cleanup(orchestrator.Bind(context.Background(), bus, detector, replier))
+	publish := func(text string) { bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: text}) }
+
+	publish("Bram, tell me a tale.")
+	before := len(bram.HistorySnapshot())
+	if before != 2 { // user + assistant
+		t.Fatalf("Bram history after turn 1 = %d messages, want 2", before)
+	}
+
+	roster.SetMuted("bram", true)
+	roster.SetMuted("bram", false)
+
+	publish("Bram, and then?")
+	hist := bram.HistorySnapshot()
+	if len(hist) != 4 {
+		t.Fatalf("Bram history after unmute+turn 2 = %d messages, want 4 (turn 1 preserved — same Replier survived the mute)", len(hist))
+	}
+	// Turn 1's user message must still be first — the mute did not reset the log.
+	if !strings.Contains(hist[0].Text, "tell me a tale") {
+		t.Fatalf("Bram history[0] = %q, want turn 1's message preserved", hist[0].Text)
+	}
+}
+
+// TestRoster_SetMuted_UnknownIDNoOp proves muting an id the Roster never held is a
+// clean no-op (it neither panics nor touches the Matcher).
+func TestRoster_SetMuted_UnknownIDNoOp(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("bart", "Bart", "")}
+	lines := map[string]string{"bart": "What'll it be?"}
+	roster, publish := testRoster(t, bus, synth, specs, lines)
+
+	roster.SetMuted("ghost", true) // unknown id
+	publish("Bart, a room please.")
+	if got := synth.spokenBy("bart"); len(got) != 1 {
+		t.Fatalf("Bart spoke %d times after an unknown-id mute, want 1 (no-op)", len(got))
+	}
+}
+
+// fixedMutes is a fixed-membership orchestrator.MuteView for the wireMutes tests.
+type fixedMutes map[string]bool
+
+func (m fixedMutes) Muted(agentID string) bool { return m[agentID] }
+
+// TestWireMutes_AppliesBusEvents pins the live control path (#211): a MuteChanged
+// on the bus de-routes the NPC via the roster, and an unmute restores it —
+// without touching the Cast.
+func TestWireMutes_AppliesBusEvents(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
+	roster := newRosterFor(specs, []*agent.Replier{
+		replierFor(specs[0], "Aldra here.", synth),
+		replierFor(specs[1], "Bram here.", synth),
+	}, synth)
+
+	t.Cleanup(wireMutes(bus, roster, nil))
+
+	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: true})
+	if routedTo(roster, "Bram, are you there?") == "bram" {
+		t.Fatal("after a mute bus event, naming Bram still routed to Bram — he must have left the Matcher")
+	}
+	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: false})
+	routed := roster.matcher.TargetMatch("Bram, are you there?")
+	if len(routed) != 1 || routed[0].Target.AgentID != "bram" {
+		t.Fatalf("after an unmute bus event, naming Bram routed to %v, want [bram]", routed)
+	}
+}
+
+// TestWireMutes_ConcurrentSeedAndBusEvents_RaceClean pins the Roster-lock fix
+// (#211): SetMuted is called from the bus-event goroutine (a GM mute) AND the seed
+// goroutine (connectAndServe re-applying mutes on a mid-session reconnect). Both
+// mutate the Roster's muted/specs maps, so without the lock this is a concurrent
+// map write (a runtime FATAL). Run with -race.
+func TestWireMutes_ConcurrentSeedAndBusEvents_RaceClean(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", ""), specFor("cyra", "Cyra", "")}
+	roster := newRosterFor(specs, []*agent.Replier{
+		replierFor(specs[0], "a", synth),
+		replierFor(specs[1], "b", synth),
+		replierFor(specs[2], "c", synth),
+	}, synth)
+	ids := []string{"aldra", "bram", "cyra"}
+	view := fixedMutes{"bram": true}
+
+	t.Cleanup(wireMutes(bus, roster, view)) // subscribes (bus-event → SetMuted) + seeds once
+
+	var wg sync.WaitGroup
+	// Bus-event side: each MuteChanged fires the subscription's SetMuted on THIS
+	// goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			bus.Publish(voiceevent.MuteChanged{AgentID: ids[i%len(ids)], Muted: i%2 == 0})
+		}
+	}()
+	// Seed side: connectAndServe's reconnect reconcile, hammered concurrently.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			roster.ApplyMutes(view.Muted)
+		}
+	}()
+	wg.Wait()
+}
+
+// TestWireMutes_ReReadsAuthoritativeViewNotPayload pins the cross-op ordering fix
+// (#211): wireMutes applies the AUTHORITATIVE view (mutes.Muted), never the
+// event's payload — so a stale/reordered MuteChanged (e.g. a mute-all event that
+// straddled a later unmute) cannot de-sync the matcher from the Manager. A
+// payload that disagrees with the view is ignored in favour of the view.
+func TestWireMutes_ReReadsAuthoritativeViewNotPayload(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
+	roster := newRosterFor(specs, []*agent.Replier{
+		replierFor(specs[0], "Aldra here.", synth),
+		replierFor(specs[1], "Bram here.", synth),
+	}, synth)
+
+	view := fixedMutes{} // authoritative: bram currently UNMUTED
+	t.Cleanup(wireMutes(bus, roster, view))
+
+	// A stale event claims bram is muted, but the view says unmuted → ignored.
+	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: true})
+	if got := routedTo(roster, "Bram, are you there?"); got != "bram" {
+		t.Fatalf("a stale {bram,true} event de-routed Bram against the view (routed to %q) — payload was trusted over the view", got)
+	}
+
+	// Flip the authoritative view to muted; a stale {bram,false} event must not
+	// re-route him.
+	view["bram"] = true
+	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: false})
+	if routedTo(roster, "Bram, are you there?") == "bram" {
+		t.Fatal("a stale {bram,false} event routed to Bram against the muted view — payload trusted over the view")
+	}
+}
+
+// TestWireMutes_SeedsFromView pins the reconnect re-apply (#211, AC5): on connect
+// a freshly-rebuilt roster seeds the current mute state from the view, so an NPC
+// muted before a Discord reconnect stays muted after it — with no bus event.
+func TestWireMutes_SeedsFromView(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
+	roster := newRosterFor(specs, []*agent.Replier{
+		replierFor(specs[0], "Aldra here.", synth),
+		replierFor(specs[1], "Bram here.", synth),
+	}, synth)
+
+	t.Cleanup(wireMutes(bus, roster, fixedMutes{"bram": true}))
+
+	if routedTo(roster, "Bram, are you there?") == "bram" {
+		t.Fatal("a roster seeded with Bram muted still routed his name to Bram, want de-routed")
+	}
+	// The un-muted NPC is unaffected by the seed.
+	if got := routedTo(roster, "Aldra, hello"); got != "aldra" {
+		t.Fatalf("seed muted the wrong NPC: Aldra routed to %q, want aldra", got)
+	}
+}
+
+// routedTo returns the AgentID the matcher routes text to, or "" for no route.
+func routedTo(r *Roster, text string) string {
+	routed := r.matcher.TargetMatch(text)
+	if len(routed) == 0 {
+		return ""
+	}
+	return routed[0].Target.AgentID
+}
+
 // TestRoster_SingleNPCBehaviorPreserved pins the Stage-2 acceptance bar: with a
 // Roster holding exactly one NPC, both a named utterance and an unnamed one route
 // to it (the lone-NPC fallback) — identical to the pre-Roster single-NPC loop.

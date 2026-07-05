@@ -15,6 +15,11 @@ func (f *Floor) SetClock(now func() time.Time) {
 // Conversation.Register.
 func (r *Replier) SetFloor(floor *Floor) { r.floor = floor }
 
+// SetMutes installs the live mute view on the replier for the mute-gate tests
+// (external test package, #211). Production wiring sets r.mutes inside
+// Conversation.Register from [WithMute].
+func (r *Replier) SetMutes(v MuteView) { r.mutes = v }
+
 // SetErrorHandler installs onError on the segmenter for the off-loop STT error
 // tests (external test package). Production wiring sets it inside
 // Conversation.Register from [WithErrorHandler].

@@ -274,3 +274,76 @@ func TestFloor_StaleReleaseDoesNotClearNewerTurn(t *testing.T) {
 		t.Fatal("a stale release must not clear the newer turn's floor")
 	}
 }
+
+// TestFloor_YieldAgentCutsMatchingHolder pins the per-Agent mute cut (#211): a
+// YieldAgent whose agentID matches the current holder's target cancels that turn
+// and reports its TurnID — the same hard cut Yield does, but keyed to one Agent.
+func TestFloor_YieldAgentCutsMatchingHolder(t *testing.T) {
+	f := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "Tm")
+	ctx, release, _ := f.Take(parent, "bart")
+	defer release()
+
+	turnID, yielded := f.YieldAgent("bart")
+	if !yielded {
+		t.Fatal("YieldAgent must report true when the matching Agent holds the floor")
+	}
+	if turnID != "Tm" {
+		t.Fatalf("YieldAgent returned turnID %q, want the held turn's Tm", turnID)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("YieldAgent must cancel the matching holder's turn ctx")
+	}
+	if f.Active() {
+		t.Fatal("floor must be free after a matching YieldAgent")
+	}
+}
+
+// TestFloor_YieldAgentIgnoresNonHolder proves a mute of an Agent that is NOT the
+// current holder is a no-op: the speaking Agent keeps the floor (a muted
+// addressee must never disturb whoever holds the floor, AC3).
+func TestFloor_YieldAgentIgnoresNonHolder(t *testing.T) {
+	f := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "Tb")
+	ctx, release, _ := f.Take(parent, "bart")
+	defer release()
+
+	turnID, yielded := f.YieldAgent("greta")
+	if yielded || turnID != "" {
+		t.Fatalf("YieldAgent for a non-holder must report (\"\", false), got (%q, %v)", turnID, yielded)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("YieldAgent for a non-holder must NOT cancel the current holder's turn")
+	}
+	if !f.Active() {
+		t.Fatal("the current holder must keep the floor after a non-matching YieldAgent")
+	}
+}
+
+// TestFloor_YieldAgentCutsHeldButSilentTurn pins AC2: muting the holder kills its
+// turn even in the pre-audio (held-but-silent LLM "thinking") phase — YieldAgent
+// deliberately ignores f.speaking, unlike the barge gate, so a just-muted Agent
+// never starts speaking after the fact.
+func TestFloor_YieldAgentCutsHeldButSilentTurn(t *testing.T) {
+	f := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "Ts")
+	ctx, release, _ := f.Take(parent, "bart") // never marked speaking (no FirstOpus)
+	defer release()
+
+	turnID, yielded := f.YieldAgent("bart")
+	if !yielded || turnID != "Ts" {
+		t.Fatalf("YieldAgent must cut a held-but-silent turn: got (%q, %v)", turnID, yielded)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("YieldAgent must cancel a held-but-silent (pre-audio) holder — a mute kills the thinking turn too")
+	}
+}
+
+// TestFloor_YieldAgentOnFreeFloorReportsFalse proves a mute with nothing speaking
+// is a clean no-op.
+func TestFloor_YieldAgentOnFreeFloorReportsFalse(t *testing.T) {
+	f := orchestrator.NewFloor()
+	if turnID, yielded := f.YieldAgent("bart"); yielded || turnID != "" {
+		t.Fatalf("YieldAgent on a free floor must report (\"\", false), got (%q, %v)", turnID, yielded)
+	}
+}

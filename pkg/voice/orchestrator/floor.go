@@ -168,6 +168,35 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 	return turnID, true
 }
 
+// YieldAgent cancels the turn holding the floor ONLY when agentID is that turn's
+// target Agent, reporting the cut turn's TurnID and yielded=true; otherwise it is
+// a no-op reporting ("", false) and the floor is left untouched. It is the
+// per-Agent mute cut (#211): muting the Agent that is speaking cuts it, while
+// muting anyone else never disturbs whoever holds the floor (AC3).
+//
+// Unlike the barge gate ([Floor.Speaking]) this deliberately ignores f.speaking:
+// a mute is a deliberate GM action that kills a held-but-silent pre-audio turn
+// too (the LLM "thinking" phase), so a just-muted Agent never starts speaking
+// after the fact (AC2). Mechanically identical to [Floor.Yield] once the holder
+// matches — the same forward-boundary hard cut (ADR-0027) — differing only in the
+// holder-match guard.
+func (f *Floor) YieldAgent(agentID string) (turnID string, yielded bool) {
+	f.mu.Lock()
+	if f.cancel == nil || f.holderAgent != agentID {
+		f.mu.Unlock()
+		return "", false
+	}
+	c := f.cancel
+	turnID = f.holderTurn
+	f.cancel = nil
+	f.holderTurn = ""
+	f.holderAgent = ""
+	f.speaking = false
+	f.mu.Unlock()
+	c()
+	return turnID, true
+}
+
 // Active reports whether a turn currently holds the floor (a turn is in flight,
 // from its [Floor.Take] until release/Yield — which spans the pre-audio LLM phase
 // as well as playback). It is a point-in-time read; callers must tolerate the

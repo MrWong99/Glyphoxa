@@ -472,6 +472,13 @@ type Replier struct {
 	// mid-sentence (ADR-0027). Nil keeps the default synchronous dispatch. Set
 	// only via the orchestrator wiring ([WithBargeIn]); not part of [NewReplier].
 	floor *Floor
+
+	// mutes, when non-nil, is the live mute view (#211, [WithMute]): a route whose
+	// target Agent is muted is discarded before the floor is taken, so an
+	// addressed-but-muted Agent opens no turn — no floor churn, no LLM call, no
+	// TTS, no transcript line, and it can never supersede whoever holds the floor
+	// (AC3). Set only via the orchestrator wiring; not part of [NewReplier].
+	mutes MuteView
 }
 
 // NewReplier wires ttsStage and reply together. Both must be non-nil; passing
@@ -522,11 +529,24 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// its own error (a real TTS/provider failure) before producing audio so the
 		// metrics subscriber records the precise reason, not the coarse no-first-audio
 		// TTL reap (#20) — mirroring the floor branch below. The sync path has no
-		// barge/supersede, so a non-cancelled ctx is the only guard needed.
+		// barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
+		// mute gate (#211) below lives in the floor branch only; the no-floor path
+		// never wires a MuteView in prod (mute needs the barge-in floor to cut a
+		// speaker), so a muted addressee here is unreachable, not silently voiced.
 		if r.floor == nil {
 			if reason := r.dispatchAll(ctx, e); reason != "" && ctx.Err() == nil {
 				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
 			}
+			return
+		}
+		// Muted addressee (#211, AC3): discard the route BEFORE taking the floor, so
+		// a muted Agent opens no turn (no floor churn, no LLM call, no TTS, no
+		// transcript line) and can never supersede whoever holds the floor. The
+		// Manager writes its mute set before publishing MuteChanged, so this read is
+		// authoritative. Announce a mute-reason TurnEnded for the routed TurnID so
+		// the metrics subscriber records the precise cause.
+		if r.mutes != nil && r.mutes.Muted(e.Target.AgentID) {
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
 			return
 		}
 		// Barge-in: take the floor and run the turn on its own goroutine so the
@@ -547,6 +567,16 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 			// spawned.
 			release() // no-op on the floor, but keeps the take/release pairing honest
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndSupersedeCoalesced, Text: e.Text})
+			return
+		}
+		// Race closure (#211): the mute view can flip to muted between the pre-Take
+		// check and this Take (a Discord/web mute landing exactly then). Re-check now
+		// that this turn holds the floor: if muted, release it and end the turn with
+		// the mute reason before any goroutine, TTS or transcript — airtight because
+		// the Manager writes the set before publishing MuteChanged.
+		if r.mutes != nil && r.mutes.Muted(e.Target.AgentID) {
+			release()
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
 			return
 		}
 		go func() {

@@ -311,9 +311,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// interaction goroutines read `mgr` via the /glyphoxa search resolver, so it
 		// must run AFTER mgr is assigned (below) to establish the happens-before edge.
 		cfg.Client = pres.ClientProvider()
-		// The GM session commands (#108) + /glyphoxa search (#120) register below,
-		// once the Manager exists, and Ensure runs after them so all commands are in
-		// one registration.
+		// Ensure is deferred until after the Manager is built: the GM session commands
+		// (#108), /glyphoxa search (#120) and /glyphoxa mute/muteall (#211) all need
+		// the Manager, so they register below and the single Ensure then registers the
+		// FULL command surface in one per-Guild registration.
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {
@@ -344,6 +345,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			presence.StartCommand(store, mgr),
 			presence.EndCommand(mgr),
 			presence.SearchCommand(store, mgr),
+			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
+			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
+			presence.MuteCommand(mgr, store),
+			presence.MuteAllCommand(mgr),
 		)
 		// Bring the presence up at boot (AC: the commands appear with no Voice
 		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
