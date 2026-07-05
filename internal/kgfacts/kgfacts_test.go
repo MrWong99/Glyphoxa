@@ -138,6 +138,34 @@ func TestFacts_TruncatesBodyByRunes(t *testing.T) {
 	}
 }
 
+// TestFacts_TruncatesLongName pins the PR #202 finding: a pathologically long
+// Node name is rune-capped so it can't single-handedly blow MaxBlockChars. Since
+// the read is newest-first, an un-capped huge name would land first and the
+// deterministic prefix-stop would drop the whole block; here the second Node must
+// still surface.
+func TestFacts_TruncatesLongName(t *testing.T) {
+	camp := uuid.New()
+	huge := strings.Repeat("A", 5000) // one name larger than MaxBlockChars
+	nodes := &fakeNodes{nodes: []storage.KGNode{
+		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: huge, Body: "short"},
+		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Small", Body: "also short"},
+	}}
+	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
+
+	facts := r.Facts(context.Background(), "bart")
+	if len(facts) != 2 {
+		t.Fatalf("got %d facts, want 2 (a long name must not kill the block)", len(facts))
+	}
+	head, _, _ := strings.Cut(facts[0], "\n")
+	if !strings.Contains(head, "…") {
+		t.Errorf("long name not truncated: %.40q", head)
+	}
+	// The header is bounded: name (≤ MaxNameChars + ellipsis) + "### " + " (Note)".
+	if got := len([]rune(head)); got > kgfacts.MaxNameChars+20 {
+		t.Errorf("header still oversized: %d runes", got)
+	}
+}
+
 // TestFacts_CapsAtMaxFacts pins the MaxFacts cap: a wiki larger than the cap yields
 // exactly MaxFacts facts, the deterministic storage-order prefix.
 func TestFacts_CapsAtMaxFacts(t *testing.T) {

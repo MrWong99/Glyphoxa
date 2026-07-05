@@ -46,7 +46,7 @@ func (s *CampaignServer) CreateNode(
 	created, err := s.store.CreateNode(ctx, storage.NewKGNode{
 		CampaignID: c.ID,
 		Type:       nodeType,
-		Name:       m.GetName(),
+		Name:       strings.TrimSpace(m.GetName()),
 		Body:       m.GetBody(),
 		GMPrivate:  m.GetGmPrivate(),
 	})
@@ -104,7 +104,7 @@ func (s *CampaignServer) UpdateNode(
 
 	updated, err := s.store.UpdateNode(ctx, storage.KGNodeUpdate{
 		ID:        id,
-		Name:      m.GetName(),
+		Name:      strings.TrimSpace(m.GetName()),
 		Body:      m.GetBody(),
 		GMPrivate: m.GetGmPrivate(),
 	})
