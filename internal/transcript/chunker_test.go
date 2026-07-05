@@ -364,6 +364,68 @@ func TestChunker_ZeroDeliveredTurnLogsNothing(t *testing.T) {
 	}
 }
 
+// TestChunker_SupersededDispatchPurged is #104 + ADR-0012: dispatch is serial
+// single-in-flight and FirstAudio(sN) precedes TTSInvoked(sN+1), so a sentence
+// still pending when the NEXT dispatch arrives start-errored (never delivered). It
+// is purged, not committed — the delivered sentence's text lands, not the unheard
+// one, and the FirstAudio pairing does not shift.
+func TestChunker_SupersededDispatchPurged(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "start-errored", TurnID: "t1"}) // no FirstAudio
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "delivered", TurnID: "t1"})
+	bus.Publish(voiceevent.FirstAudio{At: at(3), TurnID: "t1"})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 || got[0].Content != "Bart: delivered" {
+		t.Fatalf("content = %+v, want the delivered sentence only (superseded dead dispatch purged)", got)
+	}
+	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
+		t.Errorf("participated = %v, want [%s]", got[0].ParticipatedAgentIDs, agentID)
+	}
+}
+
+// TestChunker_RecoveredMidTurnErrorKeepsPairing is #104 + ADR-0012 — the reachable
+// FIFO/purge pin (a depth-2 pending where BOTH commit cannot occur: serial
+// single-in-flight dispatch means FirstAudio(sN) precedes TTSInvoked(sN+1), so
+// pending never holds two undelivered sentences at once). A middle sentence that
+// start-errors while the turn recovers (s1 delivered, s2 lost, s3 delivered) must
+// commit only s1 and s3, in order, coalesced into the one utterance — never the
+// unheard s2, and without shifting s3 onto s2's slot.
+func TestChunker_RecoveredMidTurnErrorKeepsPairing(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "Well met.", at(2))                                     // delivered
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "lost", TurnID: "t1"}) // start-error, no FirstAudio
+	agentReply(bus, "t1", "Sit.", at(4))                                          // recovers, delivered
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 || got[0].Content != "Bart: Well met. Sit." {
+		t.Fatalf("content = %+v, want only s1 + s3 in order (lost middle sentence excluded)", got)
+	}
+	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
+		t.Errorf("participated = %v, want [%s]", got[0].ParticipatedAgentIDs, agentID)
+	}
+}
+
 // TestChunker_ContinuationAcrossChunkClose is #104 rule 4: when a turn's first
 // delivered sentence is the fifth utterance, the chunk closes with that sentence;
 // the turn's next delivered sentence opens a CONTINUATION utterance in the next

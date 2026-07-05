@@ -234,15 +234,26 @@ func (c *Chunker) appendHuman(ev voiceevent.STTFinal) {
 
 // bufferAgentSentence records one DISPATCHED sentence. TTSInvoked is a dispatch
 // attempt, not delivery (ADR-0012 / event.go), so nothing enters the chunk here:
-// the sentence is buffered FIFO and committed only when its FirstAudio confirms it
-// reached the room. Every dispatch is buffered (empty sentences included) so
-// pending stays 1:1 with dispatch attempts and the FirstAudio pairing holds. A
-// sentence for a turn already ended (barge / tts_error) is dropped + logged.
+// the sentence is buffered and committed only when its FirstAudio confirms it
+// reached the room. A sentence for a turn already ended (barge / tts_error) is
+// dropped + logged.
+//
+// Dispatch is serial single-in-flight and FirstAudio(sN) is published inline
+// before Dispatch(sN) returns (orchestrator.dispatchStream + wire/tee), so
+// FirstAudio(sN) always precedes TTSInvoked(sN+1) on the bus. A sentence still
+// pending when the NEXT dispatch arrives therefore start-errored and was never
+// delivered — purge it (never commit unheard text, ADR-0012), else a mid-turn
+// start-error the turn recovers from would commit the lost sentence AND shift the
+// FirstAudio pairing of every later sentence by one.
 func (c *Chunker) bufferAgentSentence(ev voiceevent.TTSInvoked) {
 	t := c.turn(ev.TurnID)
 	if t.ended {
 		c.log.Warn("transcript: chunk sentence after turn ended, dropping", "turn", ev.TurnID)
 		return
+	}
+	if n := len(t.pending); n > 0 {
+		c.log.Warn("transcript: undelivered dispatched sentence superseded, dropping", "turn", ev.TurnID, "dropped", n)
+		t.pending = t.pending[:0]
 	}
 	t.pending = append(t.pending, ev.Sentence)
 }
