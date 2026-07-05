@@ -529,7 +529,10 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// its own error (a real TTS/provider failure) before producing audio so the
 		// metrics subscriber records the precise reason, not the coarse no-first-audio
 		// TTL reap (#20) — mirroring the floor branch below. The sync path has no
-		// barge/supersede, so a non-cancelled ctx is the only guard needed.
+		// barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
+		// mute gate (#211) below lives in the floor branch only; the no-floor path
+		// never wires a MuteView in prod (mute needs the barge-in floor to cut a
+		// speaker), so a muted addressee here is unreachable, not silently voiced.
 		if r.floor == nil {
 			if reason := r.dispatchAll(ctx, e); reason != "" && ctx.Err() == nil {
 				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})

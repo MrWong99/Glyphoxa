@@ -25,8 +25,10 @@ type SessionManager interface {
 	Stop(ctx context.Context) (storage.VoiceSession, error)
 	Snapshot() (storage.VoiceSession, bool)
 	// SetAgentMute / SetAllMute toggle the live per-Agent mute set (#211), returning
-	// the resulting sorted muted-id set; both fail ErrNoActiveSession when idle.
-	SetAgentMute(agentID string, muted bool) ([]string, error)
+	// the resulting sorted muted-id set; both fail ErrNoActiveSession when idle, and
+	// SetAgentMute fails ErrAgentNotInCampaign for an agent outside the active
+	// session's Campaign (validated atomically against that session).
+	SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error)
 	SetAllMute(ctx context.Context, muted bool) ([]string, error)
 	// MutedAgentIDs is the reload truth (AC5): the muted set while active, nil idle.
 	MutedAgentIDs() []string
@@ -38,9 +40,6 @@ type SessionManager interface {
 type SessionStore interface {
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
-	// ListAgents is the Active Campaign roster (#211): SetAgentMute validates the
-	// target agent_id is an Agent of the active session's campaign.
-	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 }
 
 // SessionServer implements the Connect SessionService over a SessionManager +
@@ -195,43 +194,25 @@ func (s *SessionServer) StopSession(
 // SetAgentMute mutes or unmutes one Agent of the Active Campaign in the live
 // Voice Session (#211). It refuses when no session is active
 // (CodeFailedPrecondition) and rejects an agent_id that is not an Agent of the
-// active session's campaign — or an unparsable id — with CodeNotFound.
+// active session's campaign — or an unparsable id — with CodeNotFound. The
+// Manager validates campaign membership atomically against the SAME session it
+// writes, so a session swap can't slip a foreign agent into the new session's set.
 func (s *SessionServer) SetAgentMute(
 	ctx context.Context,
 	req *connect.Request[managementv1.SetAgentMuteRequest],
 ) (*connect.Response[managementv1.SetAgentMuteResponse], error) {
-	vs, active := s.mgr.Snapshot()
-	if !active {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
-	}
-
 	notFound := connect.NewError(connect.CodeNotFound, errors.New("no such Agent in the Active Campaign"))
-	agentID, err := uuid.Parse(req.Msg.GetAgentId())
-	if err != nil {
-		return nil, notFound
-	}
-	agents, err := s.store.ListAgents(ctx, vs.CampaignID)
-	if err != nil {
-		s.log.Error("SetAgentMute: list agents failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	found := false
-	for _, a := range agents {
-		if a.ID == agentID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, notFound
+	if _, err := uuid.Parse(req.Msg.GetAgentId()); err != nil {
+		return nil, notFound // a non-UUID id names no Agent (session-independent)
 	}
 
-	ids, err := s.mgr.SetAgentMute(req.Msg.GetAgentId(), req.Msg.GetMuted())
-	if errors.Is(err, session.ErrNoActiveSession) {
-		// The session ended between the snapshot and the mute write.
+	ids, err := s.mgr.SetAgentMute(ctx, req.Msg.GetAgentId(), req.Msg.GetMuted())
+	switch {
+	case errors.Is(err, session.ErrNoActiveSession):
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
-	}
-	if err != nil {
+	case errors.Is(err, session.ErrAgentNotInCampaign):
+		return nil, notFound
+	case err != nil:
 		s.log.Error("SetAgentMute: manager mute failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}

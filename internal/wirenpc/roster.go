@@ -46,6 +46,13 @@ type Roster struct {
 	// Matcher but keeps its spec here, since the Cast entry is deliberately left
 	// untouched. Populated by [Roster.AddNPC], pruned by [Roster.RemoveNPC].
 	specs map[string]npcSpec
+	// muted tracks which NPCs are currently dropped from the Matcher (#211), so
+	// [Roster.SetMuted] is IDEMPOTENT: it touches the Matcher only on an actual
+	// mute↔unmute transition. Load-bearing — [address.Matcher.Add] panics on a
+	// duplicate agent, so a re-applied unmute (the authoritative-view re-read in
+	// wireMutes fires SetMuted per event, sometimes for an already-correct state)
+	// must be a no-op, not a re-Add.
+	muted map[string]struct{}
 }
 
 // rosterDeps carries what a [Roster] needs to assemble an NPC beyond the NPC's
@@ -73,6 +80,7 @@ func newRoster(deps rosterDeps) *Roster {
 		replierFor: deps.replierFor,
 		language:   matcherLanguage(deps.language),
 		specs:      map[string]npcSpec{},
+		muted:      map[string]struct{}{},
 	}
 }
 
@@ -131,6 +139,7 @@ func (r *Roster) RemoveNPC(agentID string) {
 	}
 	r.cast.Remove(agentID)
 	delete(r.specs, agentID)
+	delete(r.muted, agentID)
 }
 
 // SetMuted toggles one NPC's mute in the live scene (#211). It is deliberately
@@ -145,17 +154,23 @@ func (r *Roster) RemoveNPC(agentID string) {
 //
 // This is NOT [Roster.RemoveNPC]: removing the Cast entry would destroy the
 // Replier and its history, the exact failure to avoid. Muting an id the Roster
-// never held is a no-op.
+// never held is a no-op, and re-applying the current state (mute an already-muted
+// NPC, unmute an already-unmuted one) is idempotent — no Matcher churn.
 func (r *Roster) SetMuted(agentID string, muted bool) {
 	spec, ok := r.specs[agentID]
 	if !ok || r.matcher == nil {
 		return // unknown NPC (or no matcher yet): nothing to route or de-route
 	}
+	if _, alreadyMuted := r.muted[agentID]; muted == alreadyMuted {
+		return // already in the requested state: idempotent no-op (Matcher.Add panics on a dup)
+	}
 	if muted {
 		r.matcher.Remove(agentID)
+		r.muted[agentID] = struct{}{}
 		return
 	}
 	r.matcher.Add(matcherAgent(spec))
+	delete(r.muted, agentID)
 }
 
 // rosterDepsForLive builds the production rosterDeps: every NPC's Replier is

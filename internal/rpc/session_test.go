@@ -23,14 +23,15 @@ import (
 // fakeSessionManager mimics the SessionManager's single-active lifecycle so the
 // handler's error mapping + snapshot wiring can be unit-tested without Discord.
 type fakeSessionManager struct {
-	mu         sync.Mutex
-	active     bool
-	current    storage.VoiceSession
-	startErr   error
-	stopErr    error
-	startCalls int
-	muted      map[string]struct{}
-	rosterIDs  []string // ids SetAllMute mutes (the campaign roster the real Manager lists)
+	mu               sync.Mutex
+	active           bool
+	current          storage.VoiceSession
+	startErr         error
+	stopErr          error
+	startCalls       int
+	muted            map[string]struct{}
+	rosterIDs        []string // ids SetAllMute mutes (the campaign roster the real Manager lists)
+	campaignAgentIDs []string // ids SetAgentMute accepts; others → ErrAgentNotInCampaign (Manager validates now)
 }
 
 func (f *fakeSessionManager) Start(_ context.Context, _, campaignID uuid.UUID) (storage.VoiceSession, error) {
@@ -75,11 +76,14 @@ func (f *fakeSessionManager) Snapshot() (storage.VoiceSession, bool) {
 	return f.current, f.active
 }
 
-func (f *fakeSessionManager) SetAgentMute(agentID string, muted bool) ([]string, error) {
+func (f *fakeSessionManager) SetAgentMute(_ context.Context, agentID string, muted bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.active {
 		return nil, session.ErrNoActiveSession
+	}
+	if !f.inRoster(agentID) {
+		return nil, session.ErrAgentNotInCampaign
 	}
 	if f.muted == nil {
 		f.muted = map[string]struct{}{}
@@ -90,6 +94,15 @@ func (f *fakeSessionManager) SetAgentMute(agentID string, muted bool) ([]string,
 		delete(f.muted, agentID)
 	}
 	return f.mutedIDsLocked(), nil
+}
+
+func (f *fakeSessionManager) inRoster(agentID string) bool {
+	for _, id := range f.campaignAgentIDs {
+		if id == agentID {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeSessionManager) SetAllMute(_ context.Context, muted bool) ([]string, error) {
@@ -136,8 +149,6 @@ type fakeSessionStore struct {
 	campaignErr error
 	latest      storage.VoiceSession
 	latestErr   error
-	agents      []storage.Agent // the Active Campaign roster (#211 mute validation)
-	agentsErr   error
 }
 
 func (f *fakeSessionStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
@@ -152,13 +163,6 @@ func (f *fakeSessionStore) GetLatestVoiceSession(context.Context, uuid.UUID) (st
 		return storage.VoiceSession{}, f.latestErr
 	}
 	return f.latest, nil
-}
-
-func (f *fakeSessionStore) ListAgents(context.Context, uuid.UUID) ([]storage.Agent, error) {
-	if f.agentsErr != nil {
-		return nil, f.agentsErr
-	}
-	return f.agents, nil
 }
 
 func newSessionClient(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore) managementv1connect.SessionServiceClient {
@@ -229,10 +233,11 @@ func TestSessionStartStopReflectsSnapshot(t *testing.T) {
 	}
 }
 
-// activeMgr returns a fake manager already in an active session for campaignID.
-func activeMgr(t *testing.T, campaignID uuid.UUID) *fakeSessionManager {
+// activeMgr returns a fake manager already in an active session for campaignID,
+// whose Campaign roster (SetAgentMute membership check) is agentIDs.
+func activeMgr(t *testing.T, campaignID uuid.UUID, agentIDs ...string) *fakeSessionManager {
 	t.Helper()
-	mgr := &fakeSessionManager{}
+	mgr := &fakeSessionManager{campaignAgentIDs: agentIDs}
 	if _, err := mgr.Start(context.Background(), uuid.New(), campaignID); err != nil {
 		t.Fatalf("activate fake manager: %v", err)
 	}
@@ -245,8 +250,8 @@ func TestSetAgentMute_Success(t *testing.T) {
 	t.Parallel()
 	campaign := storage.Campaign{ID: uuid.New()}
 	agent := storage.Agent{ID: uuid.New(), CampaignID: campaign.ID, Name: "Bart"}
-	mgr := activeMgr(t, campaign.ID)
-	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound, agents: []storage.Agent{agent}}
+	mgr := activeMgr(t, campaign.ID, agent.ID.String())
+	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound}
 	client := newSessionClient(t, mgr, store)
 
 	resp, err := client.SetAgentMute(context.Background(),
@@ -286,8 +291,8 @@ func TestSetAgentMute_UnknownAgentNotFound(t *testing.T) {
 	t.Parallel()
 	campaign := storage.Campaign{ID: uuid.New()}
 	inRoster := storage.Agent{ID: uuid.New(), CampaignID: campaign.ID}
-	mgr := activeMgr(t, campaign.ID)
-	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound, agents: []storage.Agent{inRoster}}
+	mgr := activeMgr(t, campaign.ID, inRoster.ID.String())
+	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound}
 	client := newSessionClient(t, mgr, store)
 
 	// A valid UUID that is not in the roster.
@@ -348,8 +353,8 @@ func TestGetSession_CarriesMutedAgentIds(t *testing.T) {
 	t.Parallel()
 	campaign := storage.Campaign{ID: uuid.New()}
 	agent := storage.Agent{ID: uuid.New(), CampaignID: campaign.ID}
-	mgr := activeMgr(t, campaign.ID)
-	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound, agents: []storage.Agent{agent}}
+	mgr := activeMgr(t, campaign.ID, agent.ID.String())
+	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound}
 	client := newSessionClient(t, mgr, store)
 
 	if _, err := client.SetAgentMute(context.Background(),
@@ -372,6 +377,36 @@ func TestGetSession_CarriesMutedAgentIds(t *testing.T) {
 	}
 	if got := resp.Msg.GetMutedAgentIds(); len(got) != 0 {
 		t.Fatalf("idle GetSession muted ids = %v, want empty", got)
+	}
+}
+
+// TestSessionMute_CSRFGuardsMutationNotRead pins the mutation guard (#211): with
+// the CSRF interceptor mounted and no double-submit token, the state-changing
+// SetAgentMute/SetAllMute are rejected PermissionDenied, while the
+// side-effect-free GetSession (NO_SIDE_EFFECTS) is exempt and reaches the handler.
+// It fails if someone later mis-marks a mute RPC NO_SIDE_EFFECTS.
+func TestSessionMute_CSRFGuardsMutationNotRead(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+		connect.WithInterceptors(auth.NewCSRFInterceptor()),
+	))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+	ctx := context.Background()
+
+	_, agentErr := client.SetAgentMute(ctx, connect.NewRequest(&managementv1.SetAgentMuteRequest{AgentId: uuid.NewString(), Muted: true}))
+	if got := connect.CodeOf(agentErr); got != connect.CodePermissionDenied {
+		t.Errorf("SetAgentMute code = %v, want PermissionDenied (CSRF-guarded mutation)", got)
+	}
+	_, allErr := client.SetAllMute(ctx, connect.NewRequest(&managementv1.SetAllMuteRequest{Muted: true}))
+	if got := connect.CodeOf(allErr); got != connect.CodePermissionDenied {
+		t.Errorf("SetAllMute code = %v, want PermissionDenied (CSRF-guarded mutation)", got)
+	}
+	// The read is exempt — no token still reaches the handler.
+	if _, err := client.GetSession(ctx, connect.NewRequest(&managementv1.GetSessionRequest{})); connect.CodeOf(err) == connect.CodePermissionDenied {
+		t.Error("GetSession must be CSRF-exempt (NO_SIDE_EFFECTS read)")
 	}
 }
 

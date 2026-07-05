@@ -449,6 +449,38 @@ func TestWireMutes_AppliesBusEvents(t *testing.T) {
 	}
 }
 
+// TestWireMutes_ReReadsAuthoritativeViewNotPayload pins the cross-op ordering fix
+// (#211): wireMutes applies the AUTHORITATIVE view (mutes.Muted), never the
+// event's payload — so a stale/reordered MuteChanged (e.g. a mute-all event that
+// straddled a later unmute) cannot de-sync the matcher from the Manager. A
+// payload that disagrees with the view is ignored in favour of the view.
+func TestWireMutes_ReReadsAuthoritativeViewNotPayload(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", "")}
+	roster := newRosterFor(specs, []*agent.Replier{
+		replierFor(specs[0], "Aldra here.", synth),
+		replierFor(specs[1], "Bram here.", synth),
+	}, synth)
+
+	view := fixedMutes{} // authoritative: bram currently UNMUTED
+	t.Cleanup(wireMutes(bus, roster, view))
+
+	// A stale event claims bram is muted, but the view says unmuted → ignored.
+	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: true})
+	if got := routedTo(roster, "Bram, are you there?"); got != "bram" {
+		t.Fatalf("a stale {bram,true} event de-routed Bram against the view (routed to %q) — payload was trusted over the view", got)
+	}
+
+	// Flip the authoritative view to muted; a stale {bram,false} event must not
+	// re-route him.
+	view["bram"] = true
+	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: false})
+	if routedTo(roster, "Bram, are you there?") == "bram" {
+		t.Fatal("a stale {bram,false} event routed to Bram against the muted view — payload trusted over the view")
+	}
+}
+
 // TestWireMutes_SeedsFromView pins the reconnect re-apply (#211, AC5): on connect
 // a freshly-rebuilt roster seeds the current mute state from the view, so an NPC
 // muted before a Discord reconnect stays muted after it — with no bus event.

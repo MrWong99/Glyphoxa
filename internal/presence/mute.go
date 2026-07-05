@@ -17,7 +17,7 @@ import (
 // *session.Manager satisfies it structurally — no import, mirroring the RPC seam.
 type SessionMuter interface {
 	Snapshot() (storage.VoiceSession, bool)
-	SetAgentMute(agentID string, muted bool) ([]string, error)
+	SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error)
 	SetAllMute(ctx context.Context, muted bool) ([]string, error)
 }
 
@@ -93,10 +93,11 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			if !found {
 				return ic.ReplyEphemeral(fmt.Sprintf("No Agent named %q in the Active Campaign.", strings.TrimSpace(input)))
 			}
-			if _, err := mgr.SetAgentMute(agent.ID.String(), true); err != nil {
-				// The only expected failure is a session ending between the snapshot and
-				// the write; surface it as the same ephemeral guard rather than a generic
-				// error, so a racing Stop reads cleanly.
+			if _, err := mgr.SetAgentMute(ctx, agent.ID.String(), true); err != nil {
+				// The expected failures are a session ending between the snapshot and the
+				// write, or the resolved Agent no longer being in the (now-different)
+				// active Campaign; both surface as the same ephemeral guard rather than a
+				// generic error, so a racing Stop / session swap reads cleanly.
 				return ic.ReplyEphemeral("No Voice Session is active.")
 			}
 			return ic.ReplyEphemeral(fmt.Sprintf("%s is muted.", agent.Name))

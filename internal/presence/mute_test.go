@@ -30,7 +30,7 @@ func (f *fakeMuter) Snapshot() (storage.VoiceSession, bool) {
 	return storage.VoiceSession{CampaignID: f.campaignID}, f.active
 }
 
-func (f *fakeMuter) SetAgentMute(id string, muted bool) ([]string, error) {
+func (f *fakeMuter) SetAgentMute(_ context.Context, id string, muted bool) ([]string, error) {
 	f.agentCalls = append(f.agentCalls, muteCall{id, muted})
 	return f.mutedIDs, nil
 }

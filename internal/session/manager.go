@@ -57,6 +57,11 @@ var (
 	// wrapped in the chain. Mapped to CodeFailedPrecondition (a self-host
 	// misconfig), not an opaque Internal.
 	ErrDiscordTokenUndecryptable = errors.New("session: saved Discord bot token could not be decrypted")
+	// ErrAgentNotInCampaign is returned by SetAgentMute when the target agent_id is
+	// not an Agent of the active session's Campaign (#211) — validated atomically
+	// against the SAME session the mute writes to, so a session swap can't sneak a
+	// foreign agent into the new session's mute set. Mapped to CodeNotFound.
+	ErrAgentNotInCampaign = errors.New("session: no such Agent in the Active Campaign")
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
@@ -136,6 +141,16 @@ type Manager struct {
 	mu     sync.Mutex
 	active *activeSession
 	closed bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
+
+	// pubMu serializes the whole write-set→publish-MuteChanged sequence across the
+	// mute ops (#211), so two overlapping ops (a per-Agent toggle racing a mute-all)
+	// can never publish events in the reverse order of their set writes — which
+	// would let a stale event de-sync the wirenpc matcher from the authoritative
+	// set. Ordered AFTER m.mu: an op takes pubMu, then m.mu for the set write, drops
+	// m.mu, publishes while still holding pubMu, then drops pubMu. Muted() (the
+	// re-read subscribers do during that publish) takes only m.mu, which is free —
+	// no inversion.
+	pubMu sync.Mutex
 }
 
 // NewManager wraps the store, loop runner and base config in a Manager. base
@@ -438,15 +453,41 @@ func (m *Manager) MutedAgentIDs() []string {
 
 // SetAgentMute mutes or unmutes one Agent in the live session, returning the
 // resulting sorted muted-id set (#211). It refuses when idle (ErrNoActiveSession,
-// AC4). The set is written UNDER m.mu and the resulting MuteChanged is published
-// OUTSIDE it — the bus fan-out touches other locks (the relay, the wirenpc
-// roster), so publishing under m.mu risks a lock-order inversion. The write
-// happening BEFORE the publish is load-bearing: the replier gate reading the set
-// on this event always sees the change. An idempotent re-mute (no actual change)
-// publishes nothing.
-func (m *Manager) SetAgentMute(agentID string, muted bool) ([]string, error) {
+// AC4) and rejects an agentID that is not an Agent of the active session's
+// Campaign with ErrAgentNotInCampaign.
+//
+// Validation and the write are SESSION-ATOMIC (mirrors SetAllMute): the active
+// session is captured, its Campaign is listed with m.mu released (the store read
+// may block), then the set is written only if the SAME session is still active —
+// so a session swap between the roster read and the write can never sneak a
+// foreign agent (valid in the old Campaign, not the new) into the new session's
+// mute set. The write-then-publish runs under pubMu so it is globally ordered
+// against a concurrent SetAllMute (no reverse-order events).
+func (m *Manager) SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error) {
 	m.mu.Lock()
-	if m.active == nil {
+	as := m.active
+	if as == nil {
+		m.mu.Unlock()
+		return nil, ErrNoActiveSession
+	}
+	campaignID := as.campaignID
+	m.mu.Unlock()
+
+	agents, err := m.store.ListAgents(ctx, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("session: list agents for mute: %w", err)
+	}
+	if !agentInList(agents, agentID) {
+		return nil, ErrAgentNotInCampaign
+	}
+
+	m.pubMu.Lock()
+	defer m.pubMu.Unlock()
+
+	m.mu.Lock()
+	if m.active != as {
+		// The session ended or rolled over between the roster read and the write:
+		// abort rather than mutate a set that belongs to a different session.
 		m.mu.Unlock()
 		return nil, ErrNoActiveSession
 	}
@@ -467,8 +508,9 @@ func (m *Manager) SetAgentMute(agentID string, muted bool) ([]string, error) {
 // (ErrNoActiveSession). The campaign is captured under m.mu, the roster is listed
 // with m.mu released (the store read may block), then the set is re-locked and
 // applied only if the SAME session is still active — a session that ended (or a
-// new one that started) while listing aborts with ErrNoActiveSession. One
-// MuteChanged per ACTUAL change is published OUTSIDE m.mu.
+// new one that started) while listing aborts with ErrNoActiveSession. The apply +
+// its per-change MuteChanged burst run under pubMu, so the whole mute-all is
+// ordered atomically against a concurrent per-Agent toggle.
 func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) {
 	m.mu.Lock()
 	as := m.active
@@ -483,6 +525,9 @@ func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) 
 	if err != nil {
 		return nil, fmt.Errorf("session: list agents for mute-all: %w", err)
 	}
+
+	m.pubMu.Lock()
+	defer m.pubMu.Unlock()
 
 	m.mu.Lock()
 	if m.active != as {
@@ -510,6 +555,16 @@ func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) 
 		}
 	}
 	return ids, nil
+}
+
+// agentInList reports whether agentID (a UUID string) names an Agent in agents.
+func agentInList(agents []storage.Agent, agentID string) bool {
+	for _, a := range agents {
+		if a.ID.String() == agentID {
+			return true
+		}
+	}
+	return false
 }
 
 // applyMuteLocked sets or clears agentID in the mute set, reporting whether the
