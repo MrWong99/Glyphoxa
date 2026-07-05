@@ -180,7 +180,6 @@ message SetNodeAgentResponse {
   // node is the updated Node.
   Node node = 1;
 }
-
 // NodeType is a Knowledge Graph Node's type (CONTEXT.md "Node", ADR-0008 v1.0).
 // The full 7-value set ships now; #126 only creates NOTE from the UI, but the
 // wire type is complete so later slices (#129) need no proto change.

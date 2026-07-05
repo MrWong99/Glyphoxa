@@ -49,6 +49,29 @@ func TestCreateNode_MapsAndPersists(t *testing.T) {
 	}
 }
 
+func TestCreateNode_TrimsName(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
+	client := crudClient(t, store)
+
+	resp, err := client.CreateNode(context.Background(),
+		connect.NewRequest(&managementv1.CreateNodeRequest{
+			NodeType: managementv1.NodeType_NODE_TYPE_NOTE, Name: "  Bob  ",
+		}))
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	// The stored name — and the echoed one — must be trimmed, not " Bob " (which
+	// would render "###  Bob " into a prompt).
+	if store.nodesCreated[0].Name != "Bob" {
+		t.Errorf("stored name = %q, want trimmed %q", store.nodesCreated[0].Name, "Bob")
+	}
+	if resp.Msg.GetNode().GetName() != "Bob" {
+		t.Errorf("echoed name = %q, want trimmed", resp.Msg.GetNode().GetName())
+	}
+}
+
 func TestCreateNode_UnspecifiedTypeIsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
@@ -135,6 +158,20 @@ func TestListNodes_NoCampaignIsNotFound(t *testing.T) {
 	}
 }
 
+func TestListNodes_StorageErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
+	store.nodeListErr = errAny
+	client := crudClient(t, store)
+
+	_, err := client.ListNodes(context.Background(),
+		connect.NewRequest(&managementv1.ListNodesRequest{}))
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("code = %v, want Internal", got)
+	}
+}
+
 func TestUpdateNode_MapsAndPersists(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
@@ -162,6 +199,26 @@ func TestUpdateNode_MapsAndPersists(t *testing.T) {
 	}
 	if store.nodes[0].Name != "Old Harbor" || !store.nodes[0].GMPrivate {
 		t.Errorf("storage not updated: %+v", store.nodes[0])
+	}
+}
+
+func TestUpdateNode_TrimsName(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	store := newFakeStore()
+	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "old"}}
+	client := crudClient(t, store)
+
+	resp, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: id.String(), Name: "  Alice  "}))
+	if err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+	if store.nodes[0].Name != "Alice" {
+		t.Errorf("stored name = %q, want trimmed %q", store.nodes[0].Name, "Alice")
+	}
+	if resp.Msg.GetNode().GetName() != "Alice" {
+		t.Errorf("echoed name = %q, want trimmed", resp.Msg.GetNode().GetName())
 	}
 }
 
