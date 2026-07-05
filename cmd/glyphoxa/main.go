@@ -328,21 +328,33 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		)
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
-		// session; set BEFORE the Manager copies cfg into its base config.
+		// session; set BEFORE the Manager copies cfg into its base config. Note:
+		// pres.Ensure is deliberately NOT called here — it opens the gateway, whose
+		// interaction goroutines read `mgr` via the /glyphoxa search resolver, so it
+		// must run AFTER mgr is assigned (below) to establish the happens-before edge.
 		cfg.Client = pres.ClientProvider()
-		// Bring the presence up at boot (AC: /roll appears with no Voice Session).
-		// Non-fatal: a bad or absent Bot token must not kill the web tier — it
-		// stays in the wait-state and the RPC refresher retries on the next save.
-		if err := pres.Ensure(ctx); err != nil {
-			log.Warn("presence: initial ensure failed; the slash-command surface "+
-				"will retry when Discord settings are next saved", "err", err)
-		}
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
 	mgr = session.NewManager(store, runner, cfg, cipher, log, withVoice)
+
+	// Bring the standing presence up at boot AFTER mgr is assigned (#120 review):
+	// pres.Ensure opens the gateway, whose interaction goroutines read `mgr` via the
+	// /glyphoxa search campaign resolver. Assigning mgr before Ensure spawns those
+	// goroutines establishes the happens-before edge, so the resolver never reads a
+	// stale nil mgr (which would silently fall back to the wrong campaign mid-session)
+	// and there is no data race. Non-fatal: a bad or absent Bot token must not kill
+	// the web tier — it stays in the wait-state and the RPC refresher retries on the
+	// next save. Registration already happened above, before this Ensure.
+	if pres != nil {
+		if err := pres.Ensure(ctx); err != nil {
+			log.Warn("presence: initial ensure failed; the slash-command surface "+
+				"will retry when Discord settings are next saved", "err", err)
+		}
+	}
+
 	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
 	// left 'running' (crash / failed end-write). No loop is live yet, so every
 	// such row is an orphan; done before the web tier serves so GetSession never

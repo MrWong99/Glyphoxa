@@ -463,6 +463,11 @@ function searchTransport(searchCalls: string[]) {
       sessionId: "vs1", lineId: "u:1", who: "Player / DM", kind: "player",
       ts: timestampFromDate(new Date()), text: "Where is the dragon?",
     }),
+    // A hit from an EARLIER session — its line id is not in the rendered transcript.
+    create(TranscriptLineMatchSchema, {
+      sessionId: "vsOld", lineId: "old:9", who: "Grumnir", kind: "npc",
+      ts: timestampFromDate(new Date()), text: "ancient dragon lore",
+    }),
   ];
   return createRouterTransport(({ service }) => {
     service(SessionService, {
@@ -554,6 +559,26 @@ describe("Session transcript search (#120)", () => {
       const li = document.querySelector('[data-line-id="u:1"]');
       expect(li).toHaveAttribute("data-highlighted", "true");
     });
+  });
+
+  it("hints when a clicked hit is from an earlier session not in the view", async () => {
+    renderSearch();
+    expect(await screen.findByText("Where is the dragon?")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: /search the transcript/i }), {
+      target: { value: "dragon" },
+    });
+    const results = await screen.findByTestId("transcript-search-results");
+
+    // The out-of-view hit (older session) shows the hint on click.
+    fireEvent.click(await within(results).findByText("ancient dragon lore"));
+    expect(await within(results).findByText(/not in the view/i)).toBeInTheDocument();
+
+    // Clicking an in-view hit clears it — that line IS in the rendered transcript.
+    fireEvent.click(within(results).getByText("Where is the dragon?"));
+    await waitFor(() =>
+      expect(within(results).queryByText(/not in the view/i)).not.toBeInTheDocument(),
+    );
   });
 
   it("fires no RPC for a whitespace box and drops results when cleared", async () => {
