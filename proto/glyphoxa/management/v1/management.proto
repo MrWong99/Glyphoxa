@@ -94,6 +94,80 @@ service CampaignService {
   rpc SearchNodes(SearchNodesRequest) returns (SearchNodesResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // ListToolGrants returns, for one Agent, EVERY built-in Tool (the ADR-0028
+  // Registry is the available-Tools source) paired with the Agent's current grant
+  // state — granted or not, its per-grant scope config, and whether the Tool
+  // supports a scope. It backs the Campaign screen's per-Agent grant toggles
+  // (#117). An unparsable agent_id is CodeInvalidArgument. It is a read
+  // (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc ListToolGrants(ListToolGrantsRequest) returns (ListToolGrantsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // UpdateToolGrant toggles an Agent's grant of one Tool on or off and edits its
+  // per-grant scope config (ADR-0029). granted=true upserts the row (with the
+  // supplied config); granted=false removes it (idempotent — revoking an
+  // already-ungranted Tool succeeds). The change takes effect in the Agent's NEXT
+  // Voice Session via the hydration path (#113), not any running one. An
+  // unparsable agent_id or an unknown/invalid config is CodeInvalidArgument; an
+  // unregistered tool_name is CodeInvalidArgument. State-changing: the auth + CSRF
+  // interceptors guard it exactly like the other CampaignService mutations.
+  rpc UpdateToolGrant(UpdateToolGrantRequest) returns (UpdateToolGrantResponse);
+}
+
+// ToolGrant is one built-in Tool's availability and grant state for a single
+// Agent (#117, ADR-0028/0029): the Tool's identity and description, whether the
+// Agent is granted it, the per-grant scope config, and whether the Tool accepts a
+// scope. The LLM is only ever shown granted Tools (least-privilege); this is the
+// GM-facing editor view, so it lists ungranted Tools too.
+message ToolGrant {
+  // tool_name is the built-in Tool's stable [Tool.Name] (e.g. "dice").
+  string tool_name = 1;
+  // description is the Tool's natural-language summary (the editor's hint text).
+  string description = 2;
+  // granted is true when the Agent currently holds this Tool grant.
+  bool granted = 3;
+  // config is the per-grant scope blob as raw JSON (empty = no narrowing, dice's
+  // shape). It round-trips verbatim through UpdateToolGrant; the Tool handler is
+  // the only place it is interpreted, never the LLM (ADR-0029).
+  string config = 4;
+  // supports_scope is true when a per-grant config can narrow the Tool's authority
+  // — the bit the editor keys its scope UI off. dice is false → no scope editor.
+  bool supports_scope = 5;
+}
+
+// ListToolGrantsRequest names the Agent whose grant states to list.
+message ListToolGrantsRequest {
+  // agent_id is the Agent (Butler or Character NPC) to list grant state for.
+  string agent_id = 1;
+}
+
+// ListToolGrantsResponse carries one entry per built-in Tool, in Tool-name order,
+// each with the Agent's current grant state.
+message ListToolGrantsResponse {
+  // grants is every built-in Tool paired with this Agent's grant state.
+  repeated ToolGrant grants = 1;
+}
+
+// UpdateToolGrantRequest toggles one Agent's grant of one Tool (and its scope).
+message UpdateToolGrantRequest {
+  // agent_id is the Agent whose grant to change.
+  string agent_id = 1;
+  // tool_name is the built-in Tool to grant or revoke; must be registered.
+  string tool_name = 2;
+  // granted turns the grant on (upsert) or off (remove).
+  bool granted = 3;
+  // config is the per-grant scope blob as raw JSON, applied when granted=true and
+  // ignored when granted=false. Empty = no narrowing. Non-empty must be valid JSON.
+  string config = 4;
+}
+
+// UpdateToolGrantResponse carries the resulting grant state for the toggled Tool,
+// read back after the mutation so the client renders the persisted truth.
+message UpdateToolGrantResponse {
+  // grant is the toggled Tool's grant state after the change.
+  ToolGrant grant = 1;
 }
 
 // EdgeType is a Knowledge Graph Edge's type (CONTEXT.md "Edge", ADR-0008 v1.0).

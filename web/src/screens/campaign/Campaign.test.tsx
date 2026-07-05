@@ -15,6 +15,9 @@ import {
   ListVoicesResponseSchema,
   VoiceSchema,
   PreviewVoiceResponseSchema,
+  ToolGrantSchema,
+  ListToolGrantsResponseSchema,
+  UpdateToolGrantResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -64,6 +67,25 @@ function mockTransport() {
   ];
   const previewCalls: string[] = [];
 
+  // Per-agent Tool grant state (#117). The catalog is dice-only (matching the
+  // server's built-in Registry): the Butler comes granted, Bart ungranted. An
+  // unknown agent (a freshly added NPC) defaults to dice-ungranted so the section
+  // always renders the catalog. dice supports no scope, so no scope editor shows.
+  const grants: Record<string, { granted: boolean; config: string }> = {
+    "butler-1": { granted: true, config: "" },
+    "npc-1": { granted: false, config: "" },
+  };
+  const grantEntry = (agentId: string) => {
+    const state = grants[agentId] ?? { granted: false, config: "" };
+    return create(ToolGrantSchema, {
+      toolName: "dice",
+      description: "Roll dice.",
+      granted: state.granted,
+      config: state.config,
+      supportsScope: false,
+    });
+  };
+
   const transport = createRouterTransport(({ service }) => {
     service(VoiceService, {
       listVoices: () => create(ListVoicesResponseSchema, { voices: liveVoices }),
@@ -111,19 +133,25 @@ function mockTransport() {
         if (i >= 0) npcs.splice(i, 1);
         return create(DeleteAgentResponseSchema, {});
       },
+      listToolGrants: (req) =>
+        create(ListToolGrantsResponseSchema, { grants: [grantEntry(req.agentId)] }),
+      updateToolGrant: (req) => {
+        grants[req.agentId] = { granted: req.granted, config: req.granted ? req.config : "" };
+        return create(UpdateToolGrantResponseSchema, { grant: grantEntry(req.agentId) });
+      },
     });
   });
-  return { transport, npcs, previewCalls };
+  return { transport, npcs, previewCalls, grants };
 }
 
 function renderScreen() {
-  const { transport, npcs, previewCalls } = mockTransport();
+  const { transport, npcs, previewCalls, grants } = mockTransport();
   render(
     <Providers transport={transport} queryClient={makeQueryClient()}>
       <Campaign />
     </Providers>,
   );
-  return { npcs, previewCalls };
+  return { npcs, previewCalls, grants };
 }
 
 describe("Campaign", () => {
@@ -291,5 +319,126 @@ describe("Campaign", () => {
     // The preview RPC fired for the selected voice (audio playback is a no-op in
     // jsdom; the RPC call is the observable behaviour).
     await waitFor(() => expect(previewCalls).toEqual(["rachel"]));
+  });
+
+  it("shows the per-agent Tools section with each grant's current state (#117)", async () => {
+    renderScreen();
+    // Bart (npc-1) is dice-ungranted; the toggle renders unchecked.
+    fireEvent.click(await screen.findByText("Bart"));
+    const dice = await screen.findByLabelText("dice");
+    expect(dice).not.toBeChecked();
+
+    // The Butler (butler-1) is dice-granted; its toggle renders checked.
+    fireEvent.click(screen.getByText("Glyphoxa"));
+    expect(await screen.findByLabelText("dice")).toBeChecked();
+  });
+
+  it("toggles a grant on and it persists across a reload (#117 AC2)", async () => {
+    const { grants } = renderScreen();
+    fireEvent.click(await screen.findByText("Bart"));
+    const dice = await screen.findByLabelText("dice");
+    expect(dice).not.toBeChecked();
+
+    fireEvent.click(dice);
+
+    // The mutation persisted to the store and the invalidated query re-read it as
+    // granted — the toggle sticks after the reload the invalidation triggers.
+    await waitFor(() => expect(screen.getByLabelText("dice")).toBeChecked());
+    expect(grants["npc-1"].granted).toBe(true);
+  });
+
+  it("disables the grant toggle while its mutation is in flight (#117)", async () => {
+    // A deferred UpdateToolGrant holds the toggle pending until we resolve it.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    let resolveUpdate: () => void = () => {};
+    let updateCalls = 0;
+    let granted = false;
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        listToolGrants: () =>
+          create(ListToolGrantsResponseSchema, {
+            grants: [create(ToolGrantSchema, { toolName: "dice", description: "Roll dice.", granted })],
+          }),
+        updateToolGrant: async (req) => {
+          updateCalls += 1;
+          await new Promise<void>((r) => (resolveUpdate = r));
+          granted = req.granted;
+          return create(UpdateToolGrantResponseSchema, {
+            grant: create(ToolGrantSchema, { toolName: "dice", granted }),
+          });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+    const dice = await screen.findByLabelText("dice");
+    fireEvent.click(dice);
+
+    // In flight: the toggle is disabled, so a second click can't double-submit.
+    await waitFor(() => expect(screen.getByLabelText("dice")).toBeDisabled());
+    fireEvent.click(screen.getByLabelText("dice"));
+    expect(updateCalls).toBe(1);
+
+    resolveUpdate();
+    await waitFor(() => expect(screen.getByLabelText("dice")).toBeChecked());
+  });
+
+  it("renders a scope editor only for a Tool that supports one, and round-trips its config (#117 AC3)", async () => {
+    // A scope-supporting Tool exercises the editor half of AC3; dice (no scope)
+    // proves the editor is absent for a Tool without one.
+    const campaign = create(CampaignSchema, { id: "c1", name: "X", system: "5e", language: "en" });
+    const butler = create(AgentSchema, { id: "b1", campaignId: "c1", role: "butler", name: "Glyphoxa", addressOnly: true });
+    const npc = create(AgentSchema, { id: "n1", campaignId: "c1", role: "character", name: "Bart", voice: "rachel" });
+    const configs: string[] = [];
+    const transport = createRouterTransport(({ service }) => {
+      service(VoiceService, { listVoices: () => create(ListVoicesResponseSchema, { voices: [] }) });
+      service(CampaignService, {
+        getCampaignRoster: () => create(GetCampaignRosterResponseSchema, { campaign, roster: [butler, npc] }),
+        listToolGrants: () =>
+          create(ListToolGrantsResponseSchema, {
+            grants: [
+              create(ToolGrantSchema, { toolName: "dice", description: "Roll dice.", granted: true, supportsScope: false }),
+              create(ToolGrantSchema, {
+                toolName: "remember_knowledge",
+                description: "Remember a fact.",
+                granted: true,
+                supportsScope: true,
+                config: '{"scope":"self"}',
+              }),
+            ],
+          }),
+        updateToolGrant: (req) => {
+          configs.push(req.config);
+          return create(UpdateToolGrantResponseSchema, {
+            grant: create(ToolGrantSchema, { toolName: req.toolName, granted: req.granted, config: req.config, supportsScope: true }),
+          });
+        },
+      });
+    });
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Campaign />
+      </Providers>,
+    );
+    fireEvent.click(await screen.findByText("Bart"));
+
+    // dice supports no scope → no scope field; remember_knowledge does → one shows.
+    await screen.findByLabelText("dice");
+    expect(screen.queryByLabelText("dice scope")).not.toBeInTheDocument();
+    const scope = (await screen.findByLabelText("remember_knowledge scope")) as HTMLInputElement;
+    expect(scope.value).toBe('{"scope":"self"}');
+
+    // Edit the scope and save it: the new config round-trips through UpdateToolGrant.
+    fireEvent.change(scope, { target: { value: '{"scope":"campaign"}' } });
+    fireEvent.click(screen.getByRole("button", { name: /save scope/i }));
+    await waitFor(() => expect(configs).toContain('{"scope":"campaign"}'));
   });
 });

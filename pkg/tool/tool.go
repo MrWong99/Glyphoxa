@@ -47,6 +47,15 @@ type Tool interface {
 	// from a possibly-discarded draft.
 	ReadOnly() bool
 
+	// SupportsScope reports whether a per-grant Config can NARROW this Tool's
+	// authority for one Agent (ADR-0029) — the bit the grant editor keys its
+	// scope UI off. A Tool that supports a scope (a future remember_knowledge
+	// granted "only about yourself" vs campaign-wide) exposes a scope editor; one
+	// that does not (dice carries no config) is a plain on/off grant. It is a
+	// declaration ABOUT the grant config, independent of ReadOnly: the LLM never
+	// sees the scope, and the handler still enforces whatever Config it receives.
+	SupportsScope() bool
+
 	// Execute runs the Tool with the LLM-supplied args and the caller's
 	// per-grant config (ADR-0029). grantConfig narrows the Tool's authority for
 	// this Agent and is enforced here, in the handler, never by the LLM — the

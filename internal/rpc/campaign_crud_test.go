@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -70,6 +71,14 @@ type fakeCampaignStore struct {
 	searchLimit   int
 	searchCalls   int
 	nodeSearchErr error
+
+	// Tool Grant state (#117): grants maps agent_id → tool_name → config blob (nil
+	// = no scope), backing the upsert/delete/list round-trip; the *Err hooks force
+	// each failure path.
+	grants         map[uuid.UUID]map[string]json.RawMessage
+	grantListErr   error
+	grantUpsertErr error
+	grantDeleteErr error
 }
 
 // setAgentCall records one SetNodeAgent invocation for assertions.
@@ -243,6 +252,42 @@ func (f *fakeCampaignStore) SearchNodes(_ context.Context, _ uuid.UUID, query st
 		return nil, f.nodeSearchErr
 	}
 	return f.searchResults, nil
+}
+
+func (f *fakeCampaignStore) ListToolGrants(_ context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error) {
+	if f.grantListErr != nil {
+		return nil, f.grantListErr
+	}
+	var out []storage.ToolGrant
+	for tool, cfg := range f.grants[agentID] {
+		out = append(out, storage.ToolGrant{AgentID: agentID, ToolName: tool, Config: cfg})
+	}
+	return out, nil
+}
+
+func (f *fakeCampaignStore) UpsertToolGrant(_ context.Context, g storage.NewToolGrant) error {
+	if f.grantUpsertErr != nil {
+		return f.grantUpsertErr
+	}
+	if f.grants == nil {
+		f.grants = map[uuid.UUID]map[string]json.RawMessage{}
+	}
+	if f.grants[g.AgentID] == nil {
+		f.grants[g.AgentID] = map[string]json.RawMessage{}
+	}
+	f.grants[g.AgentID][g.ToolName] = g.Config
+	return nil
+}
+
+func (f *fakeCampaignStore) DeleteToolGrant(_ context.Context, agentID uuid.UUID, toolName string) error {
+	if f.grantDeleteErr != nil {
+		return f.grantDeleteErr
+	}
+	if _, ok := f.grants[agentID][toolName]; !ok {
+		return storage.ErrNotFound
+	}
+	delete(f.grants[agentID], toolName)
+	return nil
 }
 
 // crudClient stands up the full CampaignService handler over an httptest server

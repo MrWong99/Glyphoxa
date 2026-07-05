@@ -75,6 +75,15 @@ func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.NullUUID) (stora
 func (fakeReader) SearchNodes(context.Context, uuid.UUID, string, int) ([]storage.KGNode, error) {
 	return nil, nil
 }
+func (fakeReader) ListToolGrants(context.Context, uuid.UUID) ([]storage.ToolGrant, error) {
+	return nil, nil
+}
+func (fakeReader) UpsertToolGrant(context.Context, storage.NewToolGrant) error {
+	return nil
+}
+func (fakeReader) DeleteToolGrant(context.Context, uuid.UUID, string) error {
+	return nil
+}
 
 // newClient stands up the CampaignServer handler behind an httptest server and
 // returns a Connect-JSON client for it. WithProtoJSON forces the JSON codec on
