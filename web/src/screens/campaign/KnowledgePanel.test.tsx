@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -11,6 +11,7 @@ import {
   ListNodesResponseSchema,
   UpdateNodeResponseSchema,
   DeleteNodeResponseSchema,
+  SearchNodesResponseSchema,
   type CreateNodeRequest,
   type UpdateNodeRequest,
   type DeleteNodeRequest,
@@ -40,10 +41,22 @@ function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
   const createCalls: CreateNodeRequest[] = [];
   const updateCalls: UpdateNodeRequest[] = [];
   const deleteCalls: DeleteNodeRequest[] = [];
+  const searchCalls: string[] = [];
 
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
       listNodes: () => create(ListNodesResponseSchema, { nodes }),
+      // Stand-in for the tsvector search: a case-insensitive substring over
+      // name + body. The panel only cares that matches filter the visible list;
+      // relevance ranking is asserted server-side. gm_private is not filtered.
+      searchNodes: (req) => {
+        searchCalls.push(req.query);
+        const q = req.query.trim().toLowerCase();
+        const hits = nodes.filter(
+          (n) => n.name.toLowerCase().includes(q) || n.body.toLowerCase().includes(q),
+        );
+        return create(SearchNodesResponseSchema, { nodes: hits });
+      },
       createNode: (req) => {
         createCalls.push(req);
         const node = create(NodeSchema, {
@@ -73,7 +86,7 @@ function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
       },
     });
   });
-  return { transport, nodes, createCalls, updateCalls, deleteCalls };
+  return { transport, nodes, createCalls, updateCalls, deleteCalls, searchCalls };
 }
 
 function renderPanel(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
@@ -171,6 +184,30 @@ describe("KnowledgePanel", () => {
     expect(within(locGroup).getByText("Harbor")).toBeInTheDocument();
     const facGroup = screen.getByRole("region", { name: "Faction" });
     expect(within(facGroup).getByText("Dockers Guild")).toBeInTheDocument();
+  });
+
+  it("filters the visible list to search matches, and clearing restores it with no search RPC", async () => {
+    const { searchCalls } = renderPanel([
+      create(NodeSchema, { id: "n1", campaignId: "c1", nodeType: NodeType.NOTE, name: "The sealed vault", body: "" }),
+      create(NodeSchema, { id: "n2", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Quiet Harbor", body: "" }),
+    ]);
+    // Both entries show before any search, and no search RPC has fired.
+    await screen.findByText("The sealed vault");
+    expect(screen.getByText("Quiet Harbor")).toBeInTheDocument();
+    expect(searchCalls).toHaveLength(0);
+
+    // Typing filters the visible list to matches (debounced), dropping the harbor.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
+    await waitFor(() => expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument());
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+    expect(searchCalls.at(-1)).toBe("vault");
+    const callsAfterSearch = searchCalls.length;
+
+    // Clearing the box restores the full list from ListNodes — no search RPC on empty.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
+    await screen.findByText("Quiet Harbor");
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+    expect(searchCalls).toHaveLength(callsAfterSearch);
   });
 
   it("marks a gm-private entry with a private badge", async () => {

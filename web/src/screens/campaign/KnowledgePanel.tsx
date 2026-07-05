@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   EyeOff,
   Plus,
   Pencil,
+  Search,
   Trash2,
   User,
   VenetianMask,
@@ -73,9 +74,37 @@ function alphaBg(color: string): string {
 
 export function KnowledgePanel() {
   const queryClient = useQueryClient();
-  const { data, status, error } = useQuery(CampaignService.method.listNodes, {});
-  const nodes = useMemo(() => data?.nodes ?? [], [data]);
+  const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
+
+  // Live wiki search (#131, ADR-0008 tsvector): the raw box value drives a
+  // 200ms-debounced SearchNodes query. The RPC runs only while the debounced
+  // query is non-empty (keepPreviousData holds the last matches steady across
+  // keystrokes); an empty box falls straight back to the full ListNodes list
+  // with no search RPC.
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
+  const searching = debounced.trim() !== "";
+  const searchQuery = useQuery(
+    CampaignService.method.searchNodes,
+    { query: debounced },
+    { enabled: searching, placeholderData: keepPreviousData },
+  );
+
+  // Destructured together so the status-discriminated union still narrows `error`
+  // to non-null in the error branch below.
+  const { status, error } = listQuery;
+  // While searching, show the matches; before the FIRST search result lands (no
+  // previous data to keep) fall back to the full list so the view never flashes
+  // empty. An empty match array is a real "no matches" and is shown as such.
+  const nodes = useMemo(() => {
+    if (!searching) return listQuery.data?.nodes ?? [];
+    return searchQuery.data?.nodes ?? listQuery.data?.nodes ?? [];
+  }, [searching, searchQuery.data, listQuery.data]);
 
   const invalidateNodes = () =>
     queryClient.invalidateQueries({
@@ -125,6 +154,15 @@ export function KnowledgePanel() {
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
+        <Input
+          type="search"
+          aria-label="Search entries"
+          icon={<Search size={15} />}
+          placeholder="Search the wiki — names and content"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="gx-kg-search"
+        />
         {groups.map((g) => (
           <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
             <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
@@ -139,11 +177,14 @@ export function KnowledgePanel() {
             ))}
           </section>
         ))}
-        {nodes.length === 0 && (
-          <p className="gx-kg-empty">
-            No entries yet. Add what the world knows and your NPCs will speak to it.
-          </p>
-        )}
+        {nodes.length === 0 &&
+          (searching ? (
+            <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
+          ) : (
+            <p className="gx-kg-empty">
+              No entries yet. Add what the world knows and your NPCs will speak to it.
+            </p>
+          ))}
       </div>
 
       <EntryEditor
