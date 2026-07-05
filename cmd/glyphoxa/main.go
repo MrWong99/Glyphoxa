@@ -306,10 +306,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		reg.Register(presence.RollCommand(tool.NewDice()))
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
-		// session; set BEFORE the Manager copies cfg into its base config.
+		// session; set BEFORE the Manager copies cfg into its base config. Note:
+		// pres.Ensure is deliberately NOT called here — it opens the gateway, whose
+		// interaction goroutines read `mgr` via the /glyphoxa search resolver, so it
+		// must run AFTER mgr is assigned (below) to establish the happens-before edge.
 		cfg.Client = pres.ClientProvider()
-		// The GM session commands (#108) register below, once the Manager exists,
-		// and Ensure runs after them so all commands are in one registration.
+		// The GM session commands (#108) + /glyphoxa search (#120) register below,
+		// once the Manager exists, and Ensure runs after them so all commands are in
+		// one registration.
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {
@@ -331,11 +335,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// web Session screen uses, so the two surfaces share one session record and
 		// never diverge (AC4). Registered here (not in the presence block above)
 		// because they need the Manager, and BEFORE Ensure so they land in the one
-		// per-Guild registration alongside /roll.
+		// per-Guild registration alongside /roll. /glyphoxa search (#120) joins them:
+		// it resolves the Active Campaign through the SAME shared slash resolver
+		// (resolveActiveCampaign over the store + Manager), so it can never diverge
+		// from /glyphoxa start.
 		reg.Register(
 			presence.UseCommand(store),
 			presence.StartCommand(store, mgr),
 			presence.EndCommand(mgr),
+			presence.SearchCommand(store, mgr),
 		)
 		// Bring the presence up at boot (AC: the commands appear with no Voice
 		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier

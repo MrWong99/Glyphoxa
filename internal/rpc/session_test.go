@@ -73,7 +73,9 @@ func (f *fakeSessionManager) Snapshot() (storage.VoiceSession, bool) {
 }
 
 // fakeSessionStore serves the durable per-operator selection, the implicit active
-// campaign, and the latest ended session.
+// campaign, the latest ended session, and the campaign-scoped transcript search
+// (#120), recording the campaign + query the handler resolved so the scope
+// precedence can be asserted.
 type fakeSessionStore struct {
 	forUser     storage.Campaign // the operator's /glyphoxa use selection (#108)
 	forUserErr  error            // set to storage.ErrNotFound to force the fallback
@@ -81,6 +83,12 @@ type fakeSessionStore struct {
 	campaignErr error
 	latest      storage.VoiceSession
 	latestErr   error
+
+	searchLines    []storage.TranscriptLine
+	searchErr      error
+	searchCampaign uuid.UUID // the campaign id the handler passed to search
+	searchQuery    string
+	searchCalls    int
 }
 
 func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
@@ -105,6 +113,16 @@ func (f *fakeSessionStore) GetLatestVoiceSession(context.Context, uuid.UUID) (st
 		return storage.VoiceSession{}, f.latestErr
 	}
 	return f.latest, nil
+}
+
+func (f *fakeSessionStore) SearchTranscriptLines(_ context.Context, campaignID uuid.UUID, query string, _ int) ([]storage.TranscriptLine, error) {
+	f.searchCalls++
+	f.searchCampaign = campaignID
+	f.searchQuery = query
+	if f.searchErr != nil {
+		return nil, f.searchErr
+	}
+	return f.searchLines, nil
 }
 
 func newSessionClient(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore) managementv1connect.SessionServiceClient {
@@ -341,5 +359,186 @@ func TestSessionStartFallsBackWithoutSelection(t *testing.T) {
 	}
 	if start.Msg.GetSession().GetCampaignId() != newer.ID.String() {
 		t.Errorf("bound campaign = %s, want the fallback %s", start.Msg.GetSession().GetCampaignId(), newer.ID)
+	}
+}
+
+// TestSearchTranscriptIdleScopesToActiveCampaign is #120 AC1 + AC5 (server, idle):
+// with no live session, the search resolves the operator's Active Campaign via
+// GetActiveCampaign, passes THAT campaign id to the one storage search method, and
+// maps the ranked rows to the wire hits (speaker/tag/kind/ts/text + session/line
+// id for deep-linking).
+func TestSearchTranscriptIdleScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	sessionID := uuid.New()
+	store := &fakeSessionStore{
+		campaign: storage.Campaign{ID: campaignID, Name: "Sunless Citadel"},
+		searchLines: []storage.TranscriptLine{
+			{VoiceSessionID: sessionID, CampaignID: campaignID, LineID: "a:t1", Seq: 2, Who: "Bart", Tag: "NPC", Kind: "npc", TS: time.Date(2026, 6, 27, 18, 0, 2, 0, time.UTC), Text: "Well met, traveller."},
+		},
+	}
+	client := newSessionClient(t, &fakeSessionManager{}, store)
+
+	resp, err := client.SearchTranscriptLines(context.Background(),
+		connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"}))
+	if err != nil {
+		t.Fatalf("SearchTranscriptLines: %v", err)
+	}
+	if store.searchCampaign != campaignID {
+		t.Errorf("searched campaign = %s, want the Active Campaign %s (AC5 scope)", store.searchCampaign, campaignID)
+	}
+	if store.searchQuery != "dragon" {
+		t.Errorf("searched query = %q, want %q (raw query passed through to the shared path)", store.searchQuery, "dragon")
+	}
+	lines := resp.Msg.GetLines()
+	if len(lines) != 1 {
+		t.Fatalf("got %d hits, want 1", len(lines))
+	}
+	m := lines[0]
+	if m.GetSessionId() != sessionID.String() || m.GetLineId() != "a:t1" || m.GetWho() != "Bart" ||
+		m.GetTag() != "NPC" || m.GetKind() != "npc" || m.GetText() != "Well met, traveller." {
+		t.Errorf("hit = %+v, want the mapped Bart NPC line with its session + line id", m)
+	}
+}
+
+// TestSearchTranscriptPrefersLiveSessionCampaign is #120's live-session precedence
+// (restored after the #108 alignment dropped it): while a Voice Session is live the
+// web search scopes to the LIVE session's campaign — exactly like GetSession, which
+// renders that session's transcript — so it never diverges from what is on screen,
+// even if the durable /glyphoxa use selection was changed mid-session (AC5). Repro:
+// /use B → start (live B) → /use A must still search B, not A.
+func TestSearchTranscriptPrefersLiveSessionCampaign(t *testing.T) {
+	t.Parallel()
+	liveCampaign := uuid.New()
+	durable := storage.Campaign{ID: uuid.New(), Name: "Durable A"} // a since-changed /glyphoxa use selection
+	legacy := storage.Campaign{ID: uuid.New(), Name: "Most recent"}
+	mgr := &fakeSessionManager{
+		active:  true,
+		current: storage.VoiceSession{ID: uuid.New(), CampaignID: liveCampaign, Status: storage.VoiceSessionRunning},
+	}
+	// Both the durable selection and the legacy default differ from the live
+	// session; the live session must win over both (Snapshot before startCampaign).
+	store := &fakeSessionStore{forUser: durable, campaign: legacy, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, mgr, store, storage.User{DiscordUserID: "999"})
+
+	if _, err := client.SearchTranscriptLines(context.Background(),
+		connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"})); err != nil {
+		t.Fatalf("SearchTranscriptLines: %v", err)
+	}
+	if store.searchCampaign != liveCampaign {
+		t.Errorf("searched campaign = %s, want the LIVE session's %s (not the durable %s or legacy %s)",
+			store.searchCampaign, liveCampaign, durable.ID, legacy.ID)
+	}
+}
+
+// TestSearchTranscriptHonorsDurableSelection is #120 aligned to #108: with NO live
+// session the web search resolves the campaign with the SAME profile-first
+// startCampaign path as StartSession — the logged-in operator's durable /glyphoxa
+// use selection outranks the most-recently-created default, so the web search box
+// and the Start button always agree on which campaign is searched (AC5).
+func TestSearchTranscriptHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	selected := storage.Campaign{ID: uuid.New(), Name: "Selected"}
+	newer := storage.Campaign{ID: uuid.New(), Name: "Newer"}
+	store := &fakeSessionStore{forUser: selected, campaign: newer, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, &fakeSessionManager{}, store, storage.User{DiscordUserID: "999"})
+
+	if _, err := client.SearchTranscriptLines(context.Background(),
+		connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"})); err != nil {
+		t.Fatalf("SearchTranscriptLines: %v", err)
+	}
+	if store.searchCampaign != selected.ID {
+		t.Errorf("searched campaign = %s, want the durable selection %s (profile-first, not the fallback %s)",
+			store.searchCampaign, selected.ID, newer.ID)
+	}
+}
+
+// TestSearchTranscriptEmptyQueryIsInvalidArgument mirrors SearchNodes: an
+// empty/whitespace query is CodeInvalidArgument and never reaches storage.
+func TestSearchTranscriptEmptyQueryIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	store := &fakeSessionStore{campaign: storage.Campaign{ID: uuid.New()}}
+	client := newSessionClient(t, &fakeSessionManager{}, store)
+
+	for _, q := range []string{"", "   "} {
+		_, err := client.SearchTranscriptLines(context.Background(),
+			connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: q}))
+		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+			t.Errorf("SearchTranscriptLines(%q) code = %v, want InvalidArgument", q, got)
+		}
+	}
+	if store.searchCalls != 0 {
+		t.Errorf("store.SearchTranscriptLines called %d times for empty queries, want 0", store.searchCalls)
+	}
+}
+
+// TestSearchTranscriptNoCampaignReturnsEmpty: with no live session and no Active
+// Campaign (never-run state), the search returns an empty result gracefully — not
+// an error — and never reaches storage.
+func TestSearchTranscriptNoCampaignReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	store := &fakeSessionStore{campaignErr: storage.ErrNotFound}
+	client := newSessionClient(t, &fakeSessionManager{}, store)
+
+	resp, err := client.SearchTranscriptLines(context.Background(),
+		connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"}))
+	if err != nil {
+		t.Fatalf("SearchTranscriptLines with no campaign = %v, want nil (graceful empty)", err)
+	}
+	if len(resp.Msg.GetLines()) != 0 {
+		t.Errorf("got %d hits, want 0 when there is no Active Campaign", len(resp.Msg.GetLines()))
+	}
+	if store.searchCalls != 0 {
+		t.Errorf("store.SearchTranscriptLines called %d times with no campaign, want 0", store.searchCalls)
+	}
+}
+
+// TestSearchTranscriptAuthGatesLikeSiblings (auth half): the whole SessionService
+// is auth-gated (ADR-0016) — with no valid session BOTH the SearchTranscriptLines
+// read and the StartSession mutation are Unauthenticated. The read being
+// side-effect-free exempts it from CSRF, never from auth.
+func TestSearchTranscriptAuthGatesLikeSiblings(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+		connect.WithInterceptors(auth.NewAuthInterceptor(denyAuth{})),
+	))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+	ctx := context.Background()
+
+	_, searchErr := client.SearchTranscriptLines(ctx, connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"}))
+	_, startErr := client.StartSession(ctx, connect.NewRequest(&managementv1.StartSessionRequest{}))
+	for name, err := range map[string]error{"SearchTranscriptLines": searchErr, "StartSession(sibling)": startErr} {
+		if got := connect.CodeOf(err); got != connect.CodeUnauthenticated {
+			t.Errorf("%s code = %v, want Unauthenticated (whole API is auth-gated)", name, got)
+		}
+	}
+}
+
+// TestSearchTranscriptCSRFExemptAsRead (CSRF half): with the CSRF interceptor
+// mounted and no double-submit token, the state-changing StartSession is
+// PermissionDenied while the side-effect-free SearchTranscriptLines (NO_SIDE_EFFECTS)
+// is exempt and reaches the handler.
+func TestSearchTranscriptCSRFExemptAsRead(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+		connect.WithInterceptors(auth.NewCSRFInterceptor()),
+	))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+	ctx := context.Background()
+
+	// The mutation is CSRF-guarded — no token → PermissionDenied.
+	_, startErr := client.StartSession(ctx, connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if got := connect.CodeOf(startErr); got != connect.CodePermissionDenied {
+		t.Errorf("StartSession code = %v, want PermissionDenied (CSRF-guarded mutation)", got)
+	}
+	// The read is exempt — no token still reaches the handler.
+	if _, err := client.SearchTranscriptLines(ctx, connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"})); connect.CodeOf(err) == connect.CodePermissionDenied {
+		t.Error("SearchTranscriptLines must be CSRF-exempt (NO_SIDE_EFFECTS read)")
 	}
 }
