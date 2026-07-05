@@ -3,10 +3,11 @@
 // consults each turn to fill the reserved Hot Context KG-facts slot.
 //
 // It mirrors internal/recall's shape but is deliberately simpler — INLINE only,
-// no speculation, no goroutine, no bus, no Close. The read is an indexed OLTP
-// query (ListPublicNodes), sub-millisecond, so speculation buys nothing
-// (ADR-0042): the fact is that a per-turn read means a gm_private flip mid-session
-// takes effect on the very next turn, with no cache to invalidate.
+// no speculation, no goroutine, no bus, no Close. The read is one indexed OLTP
+// query (AgentNodeFacts — the Agent's own Node plus its single-hop neighbours),
+// sub-millisecond, so speculation buys nothing (ADR-0042): a per-turn read means a
+// gm_private flip or a new Edge mid-session takes effect on the very next turn,
+// with no cache to invalidate.
 //
 // One contract, shared with [agent.MemoryRecaller]: Facts NEVER errors and NEVER
 // stalls the turn. A slow/unavailable DB path, or the hard budget elapsing,
@@ -61,16 +62,19 @@ const factsHeader = "## What you know about the world"
 // in the agent's rendered block. Reserved in the block-budget accounting.
 const blockJoin = "\n\n"
 
-// Nodes is the narrow storage read kgfacts needs: the Campaign's gm-public Nodes,
-// newest-first, bounded (the prompt-injection read). *storage.Store satisfies it.
+// Nodes is the narrow storage read kgfacts needs: the Agent's edge-aware Node
+// neighbourhood — its own linked Node plus its single-hop neighbours (both edge
+// directions), gm-public only, bounded (the prompt-injection read, #133).
+// *storage.Store satisfies it.
 type Nodes interface {
-	ListPublicNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
+	AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]storage.KGNode, error)
 }
 
-// Sessions is the narrow read kgfacts needs from the SessionManager: which Voice
-// Session (hence Campaign) is active, so the fact read is campaign-scoped.
-// *session.Manager satisfies it via Snapshot (the same shape recall depends on);
-// defined locally so kgfacts does not import session.
+// Sessions is the narrow read kgfacts needs from the SessionManager: whether a
+// Voice Session is active this turn — the guard that keeps Facts a no-op when idle
+// (the read itself is Agent-scoped, not campaign-scoped). *session.Manager
+// satisfies it via Snapshot (the same shape recall depends on); defined locally so
+// kgfacts does not import session.
 type Sessions interface {
 	Snapshot() (storage.VoiceSession, bool)
 }
@@ -125,16 +129,24 @@ func New(nodes Nodes, sessions Sessions, metrics Metrics, log *slog.Logger, cfg 
 	}
 }
 
-// Facts implements [agent.FactsRecaller]. It returns the gm-public Node facts for
-// the active Campaign this turn, bounded and rendered, honoring the hard budget and
-// degrading to nil rather than stalling. agentID is unused in #126 (facts are
-// campaign-wide gm-public Nodes); the NPC-scoped filter arrives with edges (#133).
-// It never returns an error and never panics.
+// Facts implements [agent.FactsRecaller]. It returns the NPC's edge-aware Node
+// facts this turn — the Agent's own linked Node plus its single-hop neighbours
+// (#133, ADR-0008 amendment) — bounded and rendered, honoring the hard budget and
+// degrading to nil rather than stalling. The read is keyed by the Agent, so an
+// UNLINKED Character NPC gets an empty slot (no campaign-wide fallback); an
+// unparseable/empty agentID yields nil, counted empty. It never errors or panics.
 func (r *Recaller) Facts(ctx context.Context, agentID string) []string {
-	campaignID, ok := r.campaign()
-	if !ok {
-		// No active session to scope the read: nothing to inject (defensive — Facts
-		// runs during a live turn). Count it as an empty read, not a degradation.
+	if _, ok := r.sessions.Snapshot(); !ok {
+		// No active session (defensive — Facts runs during a live turn): nothing to
+		// inject. Count it as an empty read, not a degradation.
+		r.metrics.KGFacts(observe.FactsEmpty)
+		return nil
+	}
+
+	aid, err := uuid.Parse(agentID)
+	if err != nil || aid == uuid.Nil {
+		// A Persona with no persisted uuid: there is nothing to scope the
+		// neighbourhood read to, so inject nothing. Empty, not degraded.
 		r.metrics.KGFacts(observe.FactsEmpty)
 		return nil
 	}
@@ -147,9 +159,9 @@ func (r *Recaller) Facts(ctx context.Context, agentID string) []string {
 		return r.degrade(ctx, err)
 	}
 
-	nodes, err := r.nodes.ListPublicNodes(ctx, campaignID)
+	nodes, err := r.nodes.AgentNodeFacts(ctx, aid)
 	if err != nil {
-		return r.degrade(ctx, fmt.Errorf("list public nodes: %w", err))
+		return r.degrade(ctx, fmt.Errorf("agent node facts: %w", err))
 	}
 
 	facts := renderFacts(nodes)
@@ -171,15 +183,6 @@ func (r *Recaller) degrade(ctx context.Context, cause error) []string {
 	r.log.Warn("kg facts degraded to no-facts", "err", cause)
 	r.metrics.KGFacts(observe.FactsDegraded)
 	return nil
-}
-
-// campaign reads the active session's Campaign id, or false when idle.
-func (r *Recaller) campaign() (uuid.UUID, bool) {
-	vs, ok := r.sessions.Snapshot()
-	if !ok {
-		return uuid.Nil, false
-	}
-	return vs.CampaignID, true
 }
 
 // renderFacts projects the public Nodes (in storage order) into rendered fact
