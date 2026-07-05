@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Lock, Plus, Sparkles, Trash2, Volume2 } from "lucide-react";
 
 import { CampaignService, VoiceService } from "@gen/glyphoxa/management/v1/management_pb";
-import type { Agent, Voice } from "@gen/glyphoxa/management/v1/management_pb";
+import type { Agent, Voice, ToolGrant } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
@@ -354,6 +354,8 @@ function AgentEditor({
         </span>
       </div>
 
+      <ToolGrants agentId={agent.id} />
+
       <div className="gx-editor__actions">
         <Button variant="primary" onClick={save} disabled={update.isPending}>
           {update.isPending ? "Saving…" : "Save changes"}
@@ -383,5 +385,97 @@ function AgentEditor({
         </span>
       </div>
     </Card>
+  );
+}
+
+// ToolGrants renders the per-Agent Tool grant toggles (#117): one row per
+// available built-in Tool with its current grant state, backed by
+// CampaignService.ListToolGrants. Toggling invalidates the grants query so the
+// list re-reads the persisted state (AC2). The available Tools are whatever the
+// server's built-in Registry exposes (dice today, ADR-0028); the LLM is only ever
+// shown granted Tools (ADR-0029), and a change hydrates into the NEXT session.
+function ToolGrants({ agentId }: { agentId: string }) {
+  const queryClient = useQueryClient();
+  const { data, status } = useQuery(CampaignService.method.listToolGrants, { agentId });
+  const grants = data?.grants ?? [];
+
+  const invalidateGrants = () =>
+    queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.listToolGrants,
+        cardinality: "finite",
+      }),
+    });
+
+  return (
+    <div className="gx-editor__tools">
+      <span className="gx-field__label">Tools</span>
+      <span className="gx-field__hint">
+        Grant the Tools this agent may use. Changes take effect in the next session.
+      </span>
+      {status === "pending" ? (
+        <div className="gx-skeleton" data-testid="tools-loading" />
+      ) : grants.length === 0 ? (
+        <span className="gx-field__hint">No tools available.</span>
+      ) : (
+        grants.map((g) => <ToolRow key={g.toolName} agentId={agentId} grant={g} onChanged={invalidateGrants} />)
+      )}
+    </div>
+  );
+}
+
+// ToolRow is one Tool's grant toggle plus, for a Tool that supports a per-grant
+// scope (ADR-0029), an inline scope editor. dice supports no scope, so only the
+// on/off Switch renders for it; a scope-supporting Tool also exposes a raw-JSON
+// scope field that round-trips through UpdateToolGrant's config. The Switch is
+// disabled while its mutation is in flight so a grant can't be double-submitted.
+function ToolRow({
+  agentId,
+  grant,
+  onChanged,
+}: {
+  agentId: string;
+  grant: ToolGrant;
+  onChanged: () => void;
+}) {
+  const [scope, setScope] = useState(grant.config);
+
+  const update = useMutation(CampaignService.method.updateToolGrant, {
+    onSuccess: () => onChanged(),
+    onError: (err) => toast.error(`Couldn't update ${grant.toolName}: ${err.message}`),
+  });
+
+  const toggle = (granted: boolean) =>
+    update.mutate({ agentId, toolName: grant.toolName, granted, config: scope });
+  const saveScope = () =>
+    update.mutate({ agentId, toolName: grant.toolName, granted: true, config: scope });
+
+  return (
+    <div className="gx-editor__tool">
+      <div className="gx-editor__tool-head">
+        <Switch
+          label={grant.toolName}
+          checked={grant.granted}
+          disabled={update.isPending}
+          onCheckedChange={toggle}
+        />
+        {grant.description && <span className="gx-field__hint">{grant.description}</span>}
+      </div>
+      {/* Scope editor only for Tools that support one AND are granted; dice does
+          not, so it renders no scope editor (#117). */}
+      {grant.supportsScope && grant.granted && (
+        <div className="gx-editor__tool-scope">
+          <Input
+            label={`${grant.toolName} scope`}
+            value={scope}
+            onChange={(e) => setScope(e.target.value)}
+            placeholder='{"scope":"self"}'
+          />
+          <Button variant="secondary" size="sm" onClick={saveScope} disabled={update.isPending}>
+            Save scope
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }

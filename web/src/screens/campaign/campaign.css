@@ -401,6 +401,35 @@
   gap: var(--spacing-xs);
 }
 
+/* Per-Agent Tool grant toggles (#117): a labelled section of on/off Switches,
+ * one per available built-in Tool, each with the Tool's description as hint text
+ * and — for a scope-supporting Tool — an inline scope editor. */
+.gx-editor__tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-editor__tool {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-editor__tool-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-editor__tool-scope {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  padding-left: var(--spacing-md);
+}
+
 .gx-editor__actions {
   display: flex;
   align-items: center;
