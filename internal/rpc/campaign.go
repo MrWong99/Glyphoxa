@@ -37,6 +37,7 @@ type campaignStore interface {
 	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 	UpdateNode(ctx context.Context, u storage.KGNodeUpdate) (storage.KGNode, error)
 	DeleteNode(ctx context.Context, id uuid.UUID) error
+	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a
