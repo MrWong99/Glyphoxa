@@ -17,6 +17,14 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
+// registerAgent seeds a bare Agent row so the grant handlers' existence pre-check
+// (issue #215) passes; these tests only need the Agent to exist, not its fields.
+func registerAgent(store *fakeCampaignStore) uuid.UUID {
+	id := uuid.New()
+	store.agents[id] = storage.Agent{ID: id}
+	return id
+}
+
 // TestListToolGrants_CatalogWithState is the AC1 bar over the handler: the list
 // shows EVERY built-in Tool (dice today) with the Agent's current grant state.
 // An ungranted Agent sees dice present-but-off; granting flips it on. Because the
@@ -24,7 +32,7 @@ import (
 func TestListToolGrants_CatalogWithState(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
-	agentID := uuid.New()
+	agentID := registerAgent(store)
 	client := crudClient(t, store)
 
 	// No grant rows: dice is listed but not granted, and advertises no scope.
@@ -64,6 +72,30 @@ func TestListToolGrants_CatalogWithState(t *testing.T) {
 	}
 }
 
+// TestToolGrant_GhostAgentNotFound: operating on an agent_id that doesn't exist
+// (a stale second tab after the Agent was deleted) is CodeNotFound on BOTH the
+// list read and the grant write. The handler pre-checks Agent existence
+// (GetAgent) rather than letting the write surface the tool_agent_grant FK
+// violation as a 500 (issue #215), mirroring the sibling UpdateAgent/DeleteAgent
+// missing-Agent mapping.
+func TestToolGrant_GhostAgentNotFound(t *testing.T) {
+	t.Parallel()
+	client := crudClient(t, newFakeStore()) // empty store → no Agent exists
+	ghost := uuid.New().String()
+
+	_, listErr := client.ListToolGrants(context.Background(),
+		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: ghost}))
+	if got := connect.CodeOf(listErr); got != connect.CodeNotFound {
+		t.Errorf("ListToolGrants(ghost) code = %v, want NotFound", got)
+	}
+
+	_, updErr := client.UpdateToolGrant(context.Background(),
+		connect.NewRequest(&managementv1.UpdateToolGrantRequest{AgentId: ghost, ToolName: "dice", Granted: true}))
+	if got := connect.CodeOf(updErr); got != connect.CodeNotFound {
+		t.Errorf("UpdateToolGrant(ghost) code = %v, want NotFound", got)
+	}
+}
+
 func TestListToolGrants_InvalidAgentID(t *testing.T) {
 	t.Parallel()
 	client := crudClient(t, newFakeStore())
@@ -80,7 +112,7 @@ func TestListToolGrants_InvalidAgentID(t *testing.T) {
 func TestUpdateToolGrant_ToggleRoundTrips(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
-	agentID := uuid.New()
+	agentID := registerAgent(store)
 	client := crudClient(t, store)
 
 	on, err := client.UpdateToolGrant(context.Background(),
@@ -118,7 +150,7 @@ func TestUpdateToolGrant_ToggleRoundTrips(t *testing.T) {
 func TestUpdateToolGrant_ConfigRoundTrips(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
-	agentID := uuid.New()
+	agentID := registerAgent(store)
 	client := crudClient(t, store)
 
 	scope := `{"scope":"self"}`
@@ -169,10 +201,12 @@ func TestUpdateToolGrant_UnknownToolRejected(t *testing.T) {
 
 func TestUpdateToolGrant_InvalidConfigRejected(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	store := newFakeStore()
+	agentID := registerAgent(store)
+	client := crudClient(t, store)
 	_, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
-			AgentId: uuid.New().String(), ToolName: "dice", Granted: true, Config: "{not json",
+			AgentId: agentID.String(), ToolName: "dice", Granted: true, Config: "{not json",
 		}))
 	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
 		t.Errorf("code = %v, want InvalidArgument for malformed config", got)
@@ -194,10 +228,12 @@ func TestUpdateToolGrant_InvalidAgentID(t *testing.T) {
 // errors.
 func TestUpdateToolGrant_RevokeIsIdempotent(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	store := newFakeStore()
+	agentID := registerAgent(store)
+	client := crudClient(t, store)
 	if _, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
-			AgentId: uuid.New().String(), ToolName: "dice", Granted: false,
+			AgentId: agentID.String(), ToolName: "dice", Granted: false,
 		})); err != nil {
 		t.Errorf("revoking an ungranted Tool should succeed, got %v", err)
 	}
