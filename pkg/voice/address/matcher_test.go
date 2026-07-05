@@ -198,6 +198,31 @@ func TestMatcher_SingleTargetByDefault(t *testing.T) {
 	assertIDs(t, m.TargetMatch("Bart and the Goblin start arguing"), "npc-bart")
 }
 
+// TestMatcher_ExactNameOutranksPhoneticCollision pins the live misroute of
+// issue #198: "gerade" collides with "Greta" under Double Metaphone (both KRT),
+// so Greta clears the name threshold phonetically while Marek is named exactly.
+// Both earn NameMatch's flat weight, and the roster-order tie-break handed the
+// turn to Greta, who precedes Marek on the roster. Equal totals must rank by
+// name similarity, so the exactly-heard name wins the single-target pick. The
+// two prior Greta turns reproduce the live session's continuation state and
+// prove it plays no part (LastAddressed is suppressed by AnyNameMatched).
+func TestMatcher_ExactNameOutranksPhoneticCollision(t *testing.T) {
+	greta := address.Agent{
+		Target: voiceevent.AddressTarget{AgentID: "npc-greta", AgentRole: "character", Name: "Greta"},
+	}
+	marek := address.Agent{
+		Target: voiceevent.AddressTarget{AgentID: "npc-marek", AgentRole: "character", Name: "Marek"},
+	}
+	m := address.NewMatcher(address.Config{Language: "en"}, bart, greta, marek)
+
+	assertIDs(t, m.TargetMatch("Greta, erzähl mir von deinen Kräutern."), "npc-greta")
+	assertIDs(t, m.TargetMatch("und was hilft gegen Kopfschmerzen?"), "npc-greta")
+
+	// Session 545abb84: the exact "Marek" must outrank Greta's incidental
+	// phonetic hit on "gerade".
+	assertIDs(t, m.TargetMatch("Marek, was liegt gerade auf deinem Amboss?"), "npc-marek")
+}
+
 // TestMatcher_MaxTargetsCap proves the cap is configurable: MaxTargets: 2 keeps
 // the top two of a larger named set, while MaxTargets: -1 keeps them all.
 func TestMatcher_MaxTargetsCap(t *testing.T) {
