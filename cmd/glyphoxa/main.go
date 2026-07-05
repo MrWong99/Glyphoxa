@@ -19,6 +19,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/session"
@@ -315,6 +316,22 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("seed embedding-backlog gauge", "err", err)
 	} else {
 		metrics.SetEmbeddingBacklog(n)
+	}
+
+	// Async embedding backfill worker (#116, ADR-0011): a background loop that
+	// claims chunks written with embedding NULL, embeds their text, and UPDATEs
+	// each row — draining the backlog gauge toward zero and making the chunks
+	// returnable by embedding-filtered retrieval. It needs only the DB + the
+	// embeddings provider (not the voice loop), so it runs in web AND all mode.
+	// A resolve failure (an unsupported provider OR a config-read error) is
+	// loud-but-non-fatal: log ERROR and skip the worker — the backlog gauge then
+	// exposes the permanent stall rather than the process crashing. The worker
+	// rides the process signal ctx, so SIGTERM stops it and any in-flight provider
+	// call aborts with the same context.
+	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
+		log.Error("embeddings provider unavailable, backfill disabled", "err", err)
+	} else {
+		go embedworker.New(store, provider, model, metrics, log, embedworker.Config{}).Run(ctx)
 	}
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
