@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -27,12 +28,18 @@ type SessionManager interface {
 }
 
 // SessionStore is the narrow storage surface SessionServer needs: the active
-// campaign to scope a session, and the latest ended session for the idle
-// last-session summary (#72).
+// campaign to scope a session, the latest ended session for the idle
+// last-session summary (#72), and the campaign-scoped transcript search (#120).
 type SessionStore interface {
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
+	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
 }
+
+// searchTranscriptLimit caps a transcript search result set (#120). It is a fixed
+// server policy for the single-operator web tier (ADR-0039), mirroring
+// searchNodesLimit; the client sends no limit.
+const searchTranscriptLimit = 50
 
 // SessionServer implements the Connect SessionService over a SessionManager +
 // SessionStore: Start/Stop drive the in-process loop, GetSession reports the live
@@ -180,6 +187,80 @@ func (s *SessionServer) StopSession(
 	return connect.NewResponse(&managementv1.StopSessionResponse{
 		Session: toProtoVoiceSession(vs),
 	}), nil
+}
+
+// SearchTranscriptLines returns the operator's Active Campaign transcript Lines
+// matching the query, ranked by relevance (#120). The Campaign is resolved
+// server-side — the active Voice Session's campaign when live, else the Active
+// Campaign (GetActiveCampaign) — NEVER a client-supplied id, so a search can
+// never cross into another campaign's transcript (AC5). It shares ONE query path
+// (storage.SearchTranscriptLines) with the `/glyphoxa search` slash command
+// (AC4). An empty/whitespace query is CodeInvalidArgument; no Active Campaign
+// yields an empty result (nothing to search, not an error); a storage failure is
+// CodeInternal. A read (NO_SIDE_EFFECTS).
+func (s *SessionServer) SearchTranscriptLines(
+	ctx context.Context,
+	req *connect.Request[managementv1.SearchTranscriptLinesRequest],
+) (*connect.Response[managementv1.SearchTranscriptLinesResponse], error) {
+	if strings.TrimSpace(req.Msg.GetQuery()) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query must not be empty"))
+	}
+
+	campaignID, ok, err := s.activeCampaignID(ctx)
+	if err != nil {
+		s.log.Error("SearchTranscriptLines: resolve active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if !ok {
+		// No Active Campaign: nothing to search yet (never-run state), not an error.
+		return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{}), nil
+	}
+
+	lines, err := s.store.SearchTranscriptLines(ctx, campaignID, req.Msg.GetQuery(), searchTranscriptLimit)
+	if err != nil {
+		s.log.Error("SearchTranscriptLines: store search failed", "campaign_id", campaignID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	out := make([]*managementv1.TranscriptLineMatch, 0, len(lines))
+	for _, l := range lines {
+		out = append(out, toProtoTranscriptLineMatch(l))
+	}
+	return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{Lines: out}), nil
+}
+
+// activeCampaignID resolves the operator's Active Campaign for a read: the live
+// Voice Session's campaign when one is running (the same in-process truth
+// GetSession uses), otherwise the stored Active Campaign. ok is false only when
+// there is neither — a never-run state the caller treats gracefully. A storage
+// error other than ErrNotFound is returned.
+func (s *SessionServer) activeCampaignID(ctx context.Context) (uuid.UUID, bool, error) {
+	if vs, active := s.mgr.Snapshot(); active {
+		return vs.CampaignID, true, nil
+	}
+	campaign, err := s.store.GetActiveCampaign(ctx)
+	if errors.Is(err, storage.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return campaign.ID, true, nil
+}
+
+// toProtoTranscriptLineMatch maps a storage.TranscriptLine onto the wire search
+// hit: the rendered fields plus the owning session + stable line id the web
+// deep-links with (#120).
+func toProtoTranscriptLineMatch(l storage.TranscriptLine) *managementv1.TranscriptLineMatch {
+	return &managementv1.TranscriptLineMatch{
+		SessionId: l.VoiceSessionID.String(),
+		LineId:    l.LineID,
+		Who:       l.Who,
+		Tag:       l.Tag,
+		Kind:      l.Kind,
+		Ts:        timestamppb.New(l.TS),
+		Text:      l.Text,
+	}
 }
 
 // toProtoVoiceSession maps a storage.VoiceSession onto its wire view. A zero
