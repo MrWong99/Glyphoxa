@@ -690,6 +690,52 @@ service SessionService {
   // resulting muted-Agent id set. It fails with CodeFailedPrecondition when no
   // Voice Session is active. State-changing.
   rpc SetAllMute(SetAllMuteRequest) returns (SetAllMuteResponse);
+  // SearchTranscriptLines returns the operator's Active Campaign transcript Lines
+  // whose text matches the query, ranked by relevance (#120, ADR-0011 amendment).
+  // It backs the Session screen's transcript search box and shares ONE query path
+  // (storage.SearchTranscriptLines) with `/glyphoxa search` (AC4). The Campaign is
+  // resolved server-side — the active Voice Session's campaign when live, else the
+  // Active Campaign — never a client-supplied id, so it never crosses into another
+  // campaign's transcript (AC5). An empty/whitespace query is CodeInvalidArgument.
+  // It is a read (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc SearchTranscriptLines(SearchTranscriptLinesRequest) returns (SearchTranscriptLinesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// TranscriptLineMatch is one transcript-search hit (#120): the rendered Line's
+// speaker/tag/kind, its instant and text, plus the owning session + stable line
+// id the web uses to deep-link and highlight the exact line in the Session screen.
+message TranscriptLineMatch {
+  // session_id is the Voice Session the matched Line belongs to.
+  string session_id = 1;
+  // line_id is the relay's stable Line.ID ("u:<n>" / "a:<turn>") — the key the
+  // web scrolls-to / highlights in the rendered transcript.
+  string line_id = 2;
+  // who is the speaker label (e.g. "Bart", "Player / DM").
+  string who = 3;
+  // tag is the optional pill (e.g. "NPC"); empty when none.
+  string tag = 4;
+  // kind is the line kind ∈ {gm,player,npc,butler} (ADR-0039), for styling.
+  string kind = 5;
+  // ts is when the Line was spoken.
+  google.protobuf.Timestamp ts = 6;
+  // text is the rendered Line text (the matched content).
+  string text = 7;
+}
+
+// SearchTranscriptLinesRequest carries the operator's raw search query; the
+// Active Campaign is resolved server-side (single operator, ADR-0039). An
+// empty/whitespace query is rejected with CodeInvalidArgument.
+message SearchTranscriptLinesRequest {
+  // query is the operator's raw keyword search over the transcript.
+  string query = 1;
+}
+
+// SearchTranscriptLinesResponse carries the matching Lines in relevance rank order.
+message SearchTranscriptLinesResponse {
+  // lines are the matching transcript Lines, ranked by relevance.
+  repeated TranscriptLineMatch lines = 1;
 }
 
 // VoiceSession is the wire view of a voice_sessions row (#72): the Bot's

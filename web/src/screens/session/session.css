@@ -224,6 +224,70 @@
   color: var(--text-muted);
 }
 
+/* Transcript search (#120): the search box sits above the transcript Card; its
+ * ranked results drop in beneath, each a clickable row that deep-links the line. */
+.gx-tsearch {
+  margin-bottom: var(--spacing-md);
+}
+
+.gx-tsearch__results {
+  list-style: none;
+  margin: var(--spacing-sm) 0 0;
+  padding: var(--spacing-xs, 4px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border-subtle, var(--surface-inset));
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+}
+
+/* Each result: a full-width, left-aligned button styled like a transcript line. */
+.gx-tsearch__result {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  width: 100%;
+  text-align: left;
+  padding: var(--spacing-xs, 4px) var(--spacing-sm);
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.gx-tsearch__result:hover,
+.gx-tsearch__result:focus-visible {
+  background: var(--surface-raised, rgba(255, 255, 255, 0.04));
+}
+
+.gx-tsearch__text {
+  color: var(--text-default);
+}
+
+.gx-tsearch__empty {
+  margin: var(--spacing-sm) 0 0;
+  color: var(--text-muted);
+}
+
+/* Inline hint on a hit whose line isn't in the rendered transcript (an older
+ * session): explains why the click didn't scroll anywhere. */
+.gx-tsearch__hint {
+  display: block;
+  padding: 0 var(--spacing-sm) var(--spacing-xs, 4px);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Deep-link highlight: the line a search hit points at, briefly emphasized. */
+.gx-line--highlighted {
+  background: var(--rune-soft, rgba(120, 160, 255, 0.14));
+  border-radius: var(--radius-sm, 4px);
+  box-shadow: 0 0 0 2px var(--rune, rgba(120, 160, 255, 0.5)) inset;
+}
+
 /* Live transcript list: one row per line — speaker name, optional tag pill,
  * timestamp, then the utterance text. */
 .gx-transcript {

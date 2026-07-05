@@ -78,6 +78,47 @@ func (s *Store) GetUserByDiscordID(ctx context.Context, discordUserID string) (U
 	return u, nil
 }
 
+// SetActiveCampaign records the operator's durable Active Campaign choice (#108,
+// ADR-0009) on the users row keyed by Discord snowflake. It UPSERTS the row so a
+// GM who drives the slash-command surface before ever logging into the web tier
+// still gets a persisted selection; a later OAuth login refreshes the display
+// fields (UpsertUser) and preserves this selection. Idempotent.
+func (s *Store) SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`INSERT INTO users (discord_user_id, active_campaign_id)
+		 VALUES ($1, $2)
+		 ON CONFLICT (discord_user_id) DO UPDATE
+		   SET active_campaign_id = EXCLUDED.active_campaign_id, updated_at = now()`,
+		discordUserID, campaignID)
+	if err != nil {
+		return fmt.Errorf("storage: set active campaign for %q: %w", discordUserID, err)
+	}
+	return nil
+}
+
+// GetActiveCampaignForUser returns the Campaign the operator selected via
+// /glyphoxa use (#108, ADR-0009 step 2), joining the users row's
+// active_campaign_id to campaign. ErrNotFound when the operator has no row, has
+// made no selection, or the chosen campaign has since been deleted (the FK's ON
+// DELETE SET NULL nulled the pointer) — the caller then falls through to the
+// GetActiveCampaign fallback (step 3). The columns are qualified to `c` because
+// users and campaign share id/name/created_at/updated_at.
+func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID string) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
+		        c.created_at, c.updated_at
+		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
+		  WHERE u.discord_user_id = $1`, discordUserID)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: active campaign for %q: %w", discordUserID, err)
+	}
+	return c, nil
+}
+
 // NewSession is the input to CreateSession. Token is the opaque random secret
 // the auth tier minted; ExpiresAt is the absolute expiry the validator enforces.
 type NewSession struct {
