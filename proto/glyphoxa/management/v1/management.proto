@@ -61,6 +61,124 @@ service CampaignService {
   // DeleteNode removes a Knowledge Graph Node by id (#129). An unknown id is
   // CodeNotFound.
   rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse);
+
+  // CreateEdge adds a typed directional Edge between two same-campaign Nodes
+  // (#132, ADR-0008 v1.0 + amendment). An invalid (type, from-type, to-type)
+  // combination or a self-edge is CodeInvalidArgument; a duplicate (from, to,
+  // type) is CodeAlreadyExists; a missing OR cross-campaign endpoint is
+  // CodeNotFound (a cross-campaign Edge is impossible).
+  rpc CreateEdge(CreateEdgeRequest) returns (CreateEdgeResponse);
+
+  // DeleteEdge removes a typed Edge by id (#132). An unknown id is CodeNotFound.
+  rpc DeleteEdge(DeleteEdgeRequest) returns (DeleteEdgeResponse);
+
+  // ListNodeEdges returns a Node's incident Edges split into outgoing and
+  // incoming lists (strictly directional; no auto-inverse, ADR-0008 amendment),
+  // each carrying its endpoints' joined name/type. It is a read (NO_SIDE_EFFECTS).
+  rpc ListNodeEdges(ListNodeEdgesRequest) returns (ListNodeEdgesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetNodeAgent links or unlinks an NPC Node's "voiced by" Character NPC Agent
+  // (#132, ADR-0008 amendment). An empty agent_id unlinks. Linking a non-NPC Node
+  // is CodeInvalidArgument; an Agent already voicing another Node is
+  // CodeAlreadyExists; a missing OR cross-campaign Node/Agent is CodeNotFound.
+  rpc SetNodeAgent(SetNodeAgentRequest) returns (SetNodeAgentResponse);
+}
+
+// EdgeType is a Knowledge Graph Edge's type (CONTEXT.md "Edge", ADR-0008 v1.0).
+// Every Edge is a one-way assertion; a mutual relationship is two Edges.
+enum EdgeType {
+  // EDGE_TYPE_UNSPECIFIED is the zero value; the server rejects it on create.
+  EDGE_TYPE_UNSPECIFIED = 0;
+  EDGE_TYPE_RESIDES_IN = 1;
+  EDGE_TYPE_MEMBER_OF = 2;
+  EDGE_TYPE_OWNS = 3;
+  EDGE_TYPE_KNOWS = 4;
+  EDGE_TYPE_ENEMY_OF = 5;
+  EDGE_TYPE_ALLY_OF = 6;
+  EDGE_TYPE_PARENT_OF = 7;
+  EDGE_TYPE_PARTICIPATED_IN = 8;
+  EDGE_TYPE_MENTIONED_IN = 9;
+}
+
+// Edge is the wire representation of a typed directional Edge between two Nodes in
+// one campaign (ADR-0008 v1.0). The endpoint names/types are joined server-side so
+// the UI renders an incident-edge list without an N+1 per endpoint.
+message Edge {
+  // id is the edge's UUID.
+  string id = 1;
+  // from_node_id is the subject Node's UUID.
+  string from_node_id = 2;
+  // to_node_id is the object Node's UUID.
+  string to_node_id = 3;
+  // edge_type is the relationship type.
+  EdgeType edge_type = 4;
+  // from_node_name is the subject Node's display name (joined).
+  string from_node_name = 5;
+  // from_node_type is the subject Node's type (joined).
+  NodeType from_node_type = 6;
+  // to_node_name is the object Node's display name (joined).
+  string to_node_name = 7;
+  // to_node_type is the object Node's type (joined).
+  NodeType to_node_type = 8;
+  // created_at is when the edge was created.
+  google.protobuf.Timestamp created_at = 9;
+}
+
+// CreateEdgeRequest is the "Add relation" payload. The campaign is resolved
+// server-side; the endpoints must be same-campaign Nodes.
+message CreateEdgeRequest {
+  // from_node_id is the subject Node's UUID.
+  string from_node_id = 1;
+  // to_node_id is the object Node's UUID.
+  string to_node_id = 2;
+  // edge_type is the relationship type; UNSPECIFIED is rejected.
+  EdgeType edge_type = 3;
+}
+
+// CreateEdgeResponse carries the created Edge (with joined endpoint fields).
+message CreateEdgeResponse {
+  // edge is the newly created Edge.
+  Edge edge = 1;
+}
+
+// DeleteEdgeRequest names the Edge to delete; an unknown id is CodeNotFound.
+message DeleteEdgeRequest {
+  // id is the edge to delete.
+  string id = 1;
+}
+
+// DeleteEdgeResponse is the (empty) response for DeleteEdge.
+message DeleteEdgeResponse {}
+
+// ListNodeEdgesRequest names the Node whose incident Edges to list.
+message ListNodeEdgesRequest {
+  // node_id is the Node whose edges to list.
+  string node_id = 1;
+}
+
+// ListNodeEdgesResponse carries the Node's incident Edges split by direction —
+// outgoing and incoming are separate lists because Edges are strictly one-way.
+message ListNodeEdgesResponse {
+  // outgoing are Edges whose subject (from) is this Node.
+  repeated Edge outgoing = 1;
+  // incoming are Edges whose object (to) is this Node.
+  repeated Edge incoming = 2;
+}
+
+// SetNodeAgentRequest links (or unlinks) a Node's "voiced by" Agent.
+message SetNodeAgentRequest {
+  // node_id is the NPC Node to link.
+  string node_id = 1;
+  // agent_id is the Character NPC Agent to link; empty unlinks.
+  string agent_id = 2;
+}
+
+// SetNodeAgentResponse carries the updated Node (with agent_id set or cleared).
+message SetNodeAgentResponse {
+  // node is the updated Node.
+  Node node = 1;
 }
 
 // NodeType is a Knowledge Graph Node's type (CONTEXT.md "Node", ADR-0008 v1.0).
@@ -98,7 +216,9 @@ message Node {
   google.protobuf.Timestamp created_at = 7;
   // updated_at is when the node was last modified.
   google.protobuf.Timestamp updated_at = 8;
-  // field 9 = agent_id, reserved for the NPC-Node ↔ Agent link (#132).
+  // agent_id is the optional NPC-Node ↔ Character NPC Agent link (#132): the
+  // "voiced by" cast Agent's UUID, empty when unlinked or the Node is not an NPC.
+  string agent_id = 9;
 }
 
 // CreateNodeRequest is the Knowledge panel's "Add entry" payload. The campaign is

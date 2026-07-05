@@ -47,6 +47,26 @@ type fakeCampaignStore struct {
 	nodeListErr   error
 	nodeUpdateErr error
 	nodeDeleteErr error
+
+	// KG Edge state (#132): edgesCreated records CreateEdge inputs; edgesOut/edgesIn
+	// back NodeEdges; setAgentCalls records SetNodeAgent inputs; setAgentNode is the
+	// happy-path node it returns (with AgentID overridden per call); the *Err hooks
+	// force each failure path.
+	edgesCreated  []storage.NewKGEdge
+	edgeCreateErr error
+	edgeDeleteErr error
+	edgesOut      []storage.KGEdgeWithNodes
+	edgesIn       []storage.KGEdgeWithNodes
+	nodeEdgesErr  error
+	setAgentCalls []setAgentCall
+	setAgentNode  storage.KGNode
+	setAgentErr   error
+}
+
+// setAgentCall records one SetNodeAgent invocation for assertions.
+type setAgentCall struct {
+	nodeID  uuid.UUID
+	agentID uuid.NullUUID
 }
 
 func newFakeStore() *fakeCampaignStore {
@@ -171,6 +191,39 @@ func (f *fakeCampaignStore) DeleteNode(_ context.Context, id uuid.UUID) error {
 		}
 	}
 	return storage.ErrNotFound
+}
+
+func (f *fakeCampaignStore) CreateEdge(_ context.Context, e storage.NewKGEdge) (storage.KGEdge, error) {
+	if f.edgeCreateErr != nil {
+		return storage.KGEdge{}, f.edgeCreateErr
+	}
+	f.edgesCreated = append(f.edgesCreated, e)
+	return storage.KGEdge{
+		ID:         uuid.New(),
+		CampaignID: e.CampaignID,
+		FromNodeID: e.FromNodeID,
+		ToNodeID:   e.ToNodeID,
+		Type:       e.Type,
+	}, nil
+}
+
+func (f *fakeCampaignStore) DeleteEdge(_ context.Context, _ uuid.UUID) error {
+	return f.edgeDeleteErr
+}
+
+func (f *fakeCampaignStore) NodeEdges(_ context.Context, _ uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
+	return f.edgesOut, f.edgesIn, f.nodeEdgesErr
+}
+
+func (f *fakeCampaignStore) SetNodeAgent(_ context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error) {
+	if f.setAgentErr != nil {
+		return storage.KGNode{}, f.setAgentErr
+	}
+	f.setAgentCalls = append(f.setAgentCalls, setAgentCall{nodeID: nodeID, agentID: agentID})
+	n := f.setAgentNode
+	n.ID = nodeID
+	n.AgentID = agentID
+	return n, nil
 }
 
 // crudClient stands up the full CampaignService handler over an httptest server
