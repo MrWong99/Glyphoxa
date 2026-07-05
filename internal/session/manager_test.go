@@ -30,7 +30,7 @@ type fakeStore struct {
 	depReads   int
 	reconciles int
 	tick       int
-	endErr     error // injected EndVoiceSession failure (#143 Defect A)
+	endErr     error           // injected EndVoiceSession failure (#143 Defect A)
 	agents     []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
 }
 
