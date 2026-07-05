@@ -175,25 +175,19 @@ func grantedNames(grants []*managementv1.ToolGrant) []string {
 }
 
 // hydratedDeclarations replays the #113 hydration path against the persisted rows
-// using the PUBLIC tool package the live loop shares: read the Agent's Tool Grant
-// rows, build a real GrantSet over the built-in Registry, and return the Tool
-// names it would declare to the LLM. This is exactly what loadSeededNPCs does at
-// Voice Session start, so it proves a grant mutation takes effect on the next
-// session without new plumbing (AC4).
+// through the SAME canonical mapper the live loop uses ([storage.GrantsFromRows],
+// via wirenpc.grantsFromRows): read the Agent's Tool Grant rows, build a real
+// GrantSet over the built-in Registry, and return the Tool names it would declare
+// to the LLM. Calling the shared mapper — rather than reimplementing it here —
+// means this AC4 assertion can never drift from what loadSeededNPCs actually
+// hydrates at Voice Session start (issue #215).
 func hydratedDeclarations(t *testing.T, store *storage.Store, agentID uuid.UUID) []string {
 	t.Helper()
 	rows, err := store.ListToolGrants(context.Background(), agentID)
 	if err != nil {
 		t.Fatalf("hydrate: ListToolGrants(%s): %v", agentID, err)
 	}
-	grants := make([]tool.Grant, 0, len(rows))
-	for _, r := range rows {
-		g := tool.Grant{ToolName: r.ToolName}
-		if len(r.Config) > 0 {
-			g.Config = r.Config
-		}
-		grants = append(grants, g)
-	}
+	grants := storage.GrantsFromRows(rows)
 	decls := tool.NewGrantSet(tool.BuiltinRegistry(), grants...).Declarations()
 	names := make([]string, len(decls))
 	for i, d := range decls {

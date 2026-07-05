@@ -252,26 +252,13 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 	return specs, primary, campaign, nil
 }
 
-// grantsFromRows maps an Agent's persisted Tool Grant rows to the in-memory
-// [tool.Grant]s the live loop hydrates into a [tool.GrantSet] (#113, ADR-0029) —
-// the identical shape the orchestrator already consumes, so the loop never knows
-// the grants came from the DB. A row's jsonb config becomes Grant.Config as a
-// [json.RawMessage] (nil when the column is NULL — dice's shape), which the Tool
-// handler receives as grantConfig at execution time and enforces there, never
-// the LLM. No rows yields no grants: the Agent is shown no Tool at all.
+// grantsFromRows hydrates an Agent's persisted Tool Grant rows into the in-memory
+// [tool.Grant]s the voice loop builds its GrantSet from (#113). It delegates to
+// the canonical [storage.GrantsFromRows] so the live loop and the grant RPC's
+// AC4 hydration test share ONE mapping and can't drift (issue #215) — the
+// behaviour is unchanged, this is just the single source of truth.
 func grantsFromRows(rows []storage.ToolGrant) []tool.Grant {
-	if len(rows) == 0 {
-		return nil
-	}
-	grants := make([]tool.Grant, 0, len(rows))
-	for _, r := range rows {
-		g := tool.Grant{ToolName: r.ToolName}
-		if len(r.Config) > 0 {
-			g.Config = r.Config // json.RawMessage; the handler decodes its scope
-		}
-		grants = append(grants, g)
-	}
-	return grants
+	return storage.GrantsFromRows(rows)
 }
 
 // npcSpecFromAgent maps a storage.Agent (vendor-neutral) to the voice-domain
