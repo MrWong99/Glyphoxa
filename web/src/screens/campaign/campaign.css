@@ -433,3 +433,122 @@
 .gx-editor__voice .gx-select-field {
   flex: 1;
 }
+
+/* --- KG Relations (#132) -------------------------------------------------- */
+/* The editor card's "Relations · N" section: the NPC "Voiced by" agent link, an
+   add-relation control, and the incident-edge lists. Outgoing are editable;
+   incoming are dimmed context (one-way edges, ADR-0008 amendment). */
+.gx-kg-relations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.gx-kg-voicedby {
+  margin-bottom: var(--spacing-xs);
+}
+
+.gx-kg-relations__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+/* Dashed-border inset add-relation box. */
+.gx-kg-relations__add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm, 8px);
+}
+
+.gx-kg-relations__addgrid {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: var(--spacing-sm);
+}
+
+.gx-kg-relations__addactions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.gx-kg-relations__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2xs, 4px);
+}
+
+.gx-kg-relations__list--incoming {
+  margin-top: var(--spacing-xs);
+}
+
+/* One edge row: direction arrow, mono edge-type, target name, type badge, X. */
+.gx-kg-edge {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-2xs, 4px) var(--spacing-xs);
+  border-radius: var(--radius-sm, 8px);
+}
+
+.gx-kg-edge:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+
+.gx-kg-edge--incoming {
+  opacity: 0.75;
+}
+
+.gx-kg-edge__dir {
+  color: var(--text-subtle);
+  flex: 0 0 auto;
+}
+
+.gx-kg-edge__type {
+  font-family: var(--font-mono);
+  font-size: var(--body-xs);
+  color: var(--arcane);
+  flex: 0 0 auto;
+}
+
+.gx-kg-edge__target {
+  color: var(--text-strong);
+  font-size: var(--body-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-kg-edge__incoming {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+}
+
+.gx-kg-edge .gx-kg-iconbtn {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+}
+
+.gx-kg-edge--incoming .gx-kg-edge__incoming {
+  margin-left: auto;
+}
+
+.gx-kg-relations__empty,
+.gx-kg-relations__hint {
+  font-size: var(--body-xs);
+  color: var(--text-subtle);
+  margin: 0;
+}

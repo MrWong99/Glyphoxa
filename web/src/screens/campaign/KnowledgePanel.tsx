@@ -13,6 +13,7 @@ import {
   Gem,
   GitBranch,
   StickyNote,
+  Link as LinkIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -24,6 +25,7 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
+import { NodeRelations } from "./NodeRelations";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
 // on the live CampaignService node RPCs (ADR-0008 v1.0). An "entry" is the
@@ -220,6 +222,11 @@ function KnowledgeCard({
               <EyeOff size={11} /> GM private
             </Badge>
           )}
+          {node.agentId !== "" && (
+            <Badge size="sm" className="gx-kg-card__linked" style={{ color: "#ffcf5a", background: "#ffcf5a24" }}>
+              <LinkIcon size={11} /> Linked agent
+            </Badge>
+          )}
         </div>
         {node.body && <span className="gx-kg-card__snippet">{node.body}</span>}
       </div>
@@ -340,6 +347,8 @@ function EntryEditor({
           Private entries stay searchable for you and never reach the table.
         </span>
       </div>
+
+      {isEdit && node && <NodeRelations node={node} />}
 
       <div className="gx-kg-editor__actions">
         <Button
