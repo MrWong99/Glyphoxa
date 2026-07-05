@@ -24,6 +24,12 @@ type SessionManager interface {
 	Start(ctx context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error)
 	Stop(ctx context.Context) (storage.VoiceSession, error)
 	Snapshot() (storage.VoiceSession, bool)
+	// SetAgentMute / SetAllMute toggle the live per-Agent mute set (#211), returning
+	// the resulting sorted muted-id set; both fail ErrNoActiveSession when idle.
+	SetAgentMute(agentID string, muted bool) ([]string, error)
+	SetAllMute(ctx context.Context, muted bool) ([]string, error)
+	// MutedAgentIDs is the reload truth (AC5): the muted set while active, nil idle.
+	MutedAgentIDs() []string
 }
 
 // SessionStore is the narrow storage surface SessionServer needs: the active
@@ -32,6 +38,9 @@ type SessionManager interface {
 type SessionStore interface {
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
+	// ListAgents is the Active Campaign roster (#211): SetAgentMute validates the
+	// target agent_id is an Agent of the active session's campaign.
+	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 }
 
 // SessionServer implements the Connect SessionService over a SessionManager +
@@ -77,8 +86,9 @@ func (s *SessionServer) GetSession(
 ) (*connect.Response[managementv1.GetSessionResponse], error) {
 	if vs, active := s.mgr.Snapshot(); active {
 		return connect.NewResponse(&managementv1.GetSessionResponse{
-			Session: toProtoVoiceSession(vs),
-			Active:  true,
+			Session:       toProtoVoiceSession(vs),
+			Active:        true,
+			MutedAgentIds: s.mgr.MutedAgentIDs(), // reload truth while live (AC5)
 		}), nil
 	}
 
@@ -180,6 +190,69 @@ func (s *SessionServer) StopSession(
 	return connect.NewResponse(&managementv1.StopSessionResponse{
 		Session: toProtoVoiceSession(vs),
 	}), nil
+}
+
+// SetAgentMute mutes or unmutes one Agent of the Active Campaign in the live
+// Voice Session (#211). It refuses when no session is active
+// (CodeFailedPrecondition) and rejects an agent_id that is not an Agent of the
+// active session's campaign — or an unparsable id — with CodeNotFound.
+func (s *SessionServer) SetAgentMute(
+	ctx context.Context,
+	req *connect.Request[managementv1.SetAgentMuteRequest],
+) (*connect.Response[managementv1.SetAgentMuteResponse], error) {
+	vs, active := s.mgr.Snapshot()
+	if !active {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
+	}
+
+	notFound := connect.NewError(connect.CodeNotFound, errors.New("no such Agent in the Active Campaign"))
+	agentID, err := uuid.Parse(req.Msg.GetAgentId())
+	if err != nil {
+		return nil, notFound
+	}
+	agents, err := s.store.ListAgents(ctx, vs.CampaignID)
+	if err != nil {
+		s.log.Error("SetAgentMute: list agents failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	found := false
+	for _, a := range agents {
+		if a.ID == agentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, notFound
+	}
+
+	ids, err := s.mgr.SetAgentMute(req.Msg.GetAgentId(), req.Msg.GetMuted())
+	if errors.Is(err, session.ErrNoActiveSession) {
+		// The session ended between the snapshot and the mute write.
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
+	}
+	if err != nil {
+		s.log.Error("SetAgentMute: manager mute failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return connect.NewResponse(&managementv1.SetAgentMuteResponse{MutedAgentIds: ids}), nil
+}
+
+// SetAllMute mutes or unmutes every Agent of the Active Campaign in the live Voice
+// Session (#211). It refuses when no session is active (CodeFailedPrecondition).
+func (s *SessionServer) SetAllMute(
+	ctx context.Context,
+	req *connect.Request[managementv1.SetAllMuteRequest],
+) (*connect.Response[managementv1.SetAllMuteResponse], error) {
+	ids, err := s.mgr.SetAllMute(ctx, req.Msg.GetMuted())
+	if errors.Is(err, session.ErrNoActiveSession) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active voice session"))
+	}
+	if err != nil {
+		s.log.Error("SetAllMute: manager mute failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return connect.NewResponse(&managementv1.SetAllMuteResponse{MutedAgentIds: ids}), nil
 }
 
 // toProtoVoiceSession maps a storage.VoiceSession onto its wire view. A zero

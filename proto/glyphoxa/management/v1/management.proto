@@ -679,6 +679,17 @@ service SessionService {
   // StopSession cancels the active voice loop and returns the ended session. It
   // fails with CodeFailedPrecondition when no session is active. State-changing.
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  // SetAgentMute mutes or unmutes one Agent of the Active Campaign in the live
+  // Voice Session (#211), returning the resulting muted-Agent id set. It fails
+  // with CodeFailedPrecondition when no Voice Session is active, and CodeNotFound
+  // when agent_id is not an Agent of the Active Campaign. State-changing: the auth
+  // + CSRF interceptors guard it exactly like the other session mutations.
+  rpc SetAgentMute(SetAgentMuteRequest) returns (SetAgentMuteResponse);
+  // SetAllMute mutes or unmutes EVERY Agent of the Active Campaign in the live
+  // Voice Session (#211) — the Mute all / Unmute all button — returning the
+  // resulting muted-Agent id set. It fails with CodeFailedPrecondition when no
+  // Voice Session is active. State-changing.
+  rpc SetAllMute(SetAllMuteRequest) returns (SetAllMuteResponse);
 }
 
 // VoiceSession is the wire view of a voice_sessions row (#72): the Bot's
@@ -710,6 +721,37 @@ message GetSessionResponse {
   VoiceSession session = 1;
   // active is true exactly when a voice loop is running in this process.
   bool active = 2;
+  // muted_agent_ids are the currently-muted Agents' ids (#211), set ONLY while a
+  // Voice Session is active — the reload truth for a mid-session page reload
+  // (AC5). Empty when idle (a new session starts all-unmuted).
+  repeated string muted_agent_ids = 3;
+}
+
+// SetAgentMuteRequest toggles one Agent's mute in the live Voice Session (#211).
+message SetAgentMuteRequest {
+  // agent_id is the Agent (Butler or Character NPC) of the Active Campaign to
+  // mute or unmute.
+  string agent_id = 1;
+  // muted turns the mute on (true) or off (false).
+  bool muted = 2;
+}
+
+// SetAgentMuteResponse carries the muted-Agent id set after the change.
+message SetAgentMuteResponse {
+  // muted_agent_ids are the currently-muted Agents' ids after the toggle.
+  repeated string muted_agent_ids = 1;
+}
+
+// SetAllMuteRequest mutes or unmutes every Agent of the Active Campaign (#211).
+message SetAllMuteRequest {
+  // muted turns every Agent's mute on (true) or off (false).
+  bool muted = 1;
+}
+
+// SetAllMuteResponse carries the muted-Agent id set after the change.
+message SetAllMuteResponse {
+  // muted_agent_ids are the currently-muted Agents' ids after the toggle.
+  repeated string muted_agent_ids = 1;
 }
 
 // StartSessionRequest is the (empty) request; the active campaign is resolved
