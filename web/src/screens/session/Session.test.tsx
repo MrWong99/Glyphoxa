@@ -463,10 +463,12 @@ function searchTransport(searchCalls: string[]) {
       sessionId: "vs1", lineId: "u:1", who: "Player / DM", kind: "player",
       ts: timestampFromDate(new Date()), text: "Where is the dragon?",
     }),
-    // A hit from an EARLIER session — its line id is not in the rendered transcript.
+    // A hit from an EARLIER session that SHARES the rendered session's line id
+    // ("u:1") — relay ids restart per session, so this collision must NOT be treated
+    // as in-view (would highlight the wrong line).
     create(TranscriptLineMatchSchema, {
-      sessionId: "vsOld", lineId: "old:9", who: "Grumnir", kind: "npc",
-      ts: timestampFromDate(new Date()), text: "ancient dragon lore",
+      sessionId: "vsOld", lineId: "u:1", who: "Grumnir", kind: "npc",
+      ts: timestampFromDate(new Date()), text: "old dragon mention",
     }),
   ];
   return createRouterTransport(({ service }) => {
@@ -561,7 +563,7 @@ describe("Session transcript search (#120)", () => {
     });
   });
 
-  it("hints when a clicked hit is from an earlier session not in the view", async () => {
+  it("hints for an earlier-session hit that shares a line id, without highlighting the rendered line", async () => {
     renderSearch();
     expect(await screen.findByText("Where is the dragon?")).toBeInTheDocument();
 
@@ -570,15 +572,18 @@ describe("Session transcript search (#120)", () => {
     });
     const results = await screen.findByTestId("transcript-search-results");
 
-    // The out-of-view hit (older session) shows the hint on click.
-    fireEvent.click(await within(results).findByText("ancient dragon lore"));
+    // Click the older-session hit whose line id ("u:1") COLLIDES with the rendered
+    // line: it must show the hint AND must not highlight the rendered u:1.
+    fireEvent.click(await within(results).findByText("old dragon mention"));
     expect(await within(results).findByText(/not in the view/i)).toBeInTheDocument();
+    expect(document.querySelector('[data-line-id="u:1"]')).not.toHaveAttribute("data-highlighted");
 
-    // Clicking an in-view hit clears it — that line IS in the rendered transcript.
+    // Clicking the in-view hit (same session) highlights that line and clears the hint.
     fireEvent.click(within(results).getByText("Where is the dragon?"));
     await waitFor(() =>
-      expect(within(results).queryByText(/not in the view/i)).not.toBeInTheDocument(),
+      expect(document.querySelector('[data-line-id="u:1"]')).toHaveAttribute("data-highlighted", "true"),
     );
+    expect(within(results).queryByText(/not in the view/i)).not.toBeInTheDocument();
   });
 
   it("fires no RPC for a whitespace box and drops results when cleared", async () => {

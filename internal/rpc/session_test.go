@@ -401,11 +401,41 @@ func TestSearchTranscriptIdleScopesToActiveCampaign(t *testing.T) {
 	}
 }
 
-// TestSearchTranscriptHonorsDurableSelection is #120 aligned to #108: the web
-// search resolves the campaign with the SAME profile-first startCampaign path as
-// StartSession — the logged-in operator's durable /glyphoxa use selection outranks
-// the most-recently-created default, so the web search box and the Start button
-// always agree on which campaign is searched (AC5, no divergent resolution).
+// TestSearchTranscriptPrefersLiveSessionCampaign is #120's live-session precedence
+// (restored after the #108 alignment dropped it): while a Voice Session is live the
+// web search scopes to the LIVE session's campaign — exactly like GetSession, which
+// renders that session's transcript — so it never diverges from what is on screen,
+// even if the durable /glyphoxa use selection was changed mid-session (AC5). Repro:
+// /use B → start (live B) → /use A must still search B, not A.
+func TestSearchTranscriptPrefersLiveSessionCampaign(t *testing.T) {
+	t.Parallel()
+	liveCampaign := uuid.New()
+	durable := storage.Campaign{ID: uuid.New(), Name: "Durable A"} // a since-changed /glyphoxa use selection
+	legacy := storage.Campaign{ID: uuid.New(), Name: "Most recent"}
+	mgr := &fakeSessionManager{
+		active:  true,
+		current: storage.VoiceSession{ID: uuid.New(), CampaignID: liveCampaign, Status: storage.VoiceSessionRunning},
+	}
+	// Both the durable selection and the legacy default differ from the live
+	// session; the live session must win over both (Snapshot before startCampaign).
+	store := &fakeSessionStore{forUser: durable, campaign: legacy, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, mgr, store, storage.User{DiscordUserID: "999"})
+
+	if _, err := client.SearchTranscriptLines(context.Background(),
+		connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"})); err != nil {
+		t.Fatalf("SearchTranscriptLines: %v", err)
+	}
+	if store.searchCampaign != liveCampaign {
+		t.Errorf("searched campaign = %s, want the LIVE session's %s (not the durable %s or legacy %s)",
+			store.searchCampaign, liveCampaign, durable.ID, legacy.ID)
+	}
+}
+
+// TestSearchTranscriptHonorsDurableSelection is #120 aligned to #108: with NO live
+// session the web search resolves the campaign with the SAME profile-first
+// startCampaign path as StartSession — the logged-in operator's durable /glyphoxa
+// use selection outranks the most-recently-created default, so the web search box
+// and the Start button always agree on which campaign is searched (AC5).
 func TestSearchTranscriptHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
 	selected := storage.Campaign{ID: uuid.New(), Name: "Selected"}

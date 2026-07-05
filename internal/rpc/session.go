@@ -214,15 +214,17 @@ func (s *SessionServer) StopSession(
 
 // SearchTranscriptLines returns the operator's Active Campaign transcript Lines
 // matching the query, ranked by relevance (#120). The Campaign is resolved
-// server-side by the SAME profile-first resolver StartSession uses (startCampaign:
-// the logged-in operator's durable /glyphoxa use selection, else the
-// most-recently-created campaign) — NEVER a client-supplied id, so a search can
-// never cross into another campaign's transcript (AC5) and the web search + Start
-// button always agree on which campaign. It shares ONE query path
-// (storage.SearchTranscriptLines) with the `/glyphoxa search` slash command (AC4).
-// An empty/whitespace query is CodeInvalidArgument; no Active Campaign yields an
-// empty result (nothing to search, not an error); a storage failure is
-// CodeInternal. A read (NO_SIDE_EFFECTS).
+// server-side — the LIVE Voice Session's campaign first (exactly like GetSession:
+// the Session screen renders that session's transcript, so search must scope to
+// it, not a durable selection changed mid-session), else the same profile-first
+// startCampaign StartSession uses (durable /glyphoxa use selection → most-recent
+// fallback). NEVER a client-supplied id, so a search can never cross into another
+// campaign's transcript (AC5). It shares ONE query path
+// (storage.SearchTranscriptLines) with the `/glyphoxa search` slash command, whose
+// resolveActiveCampaign is live-session-first for the same reason (AC4). An
+// empty/whitespace query is CodeInvalidArgument; no Active Campaign yields an empty
+// result (nothing to search, not an error); a storage failure is CodeInternal. A
+// read (NO_SIDE_EFFECTS).
 func (s *SessionServer) SearchTranscriptLines(
 	ctx context.Context,
 	req *connect.Request[managementv1.SearchTranscriptLinesRequest],
@@ -231,19 +233,19 @@ func (s *SessionServer) SearchTranscriptLines(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query must not be empty"))
 	}
 
-	campaign, err := s.startCampaign(ctx)
-	if errors.Is(err, storage.ErrNotFound) {
-		// No Active Campaign: nothing to search yet (never-run state), not an error.
-		return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{}), nil
-	}
+	campaignID, ok, err := s.searchCampaign(ctx)
 	if err != nil {
 		s.log.Error("SearchTranscriptLines: resolve active campaign failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
+	if !ok {
+		// No Active Campaign: nothing to search yet (never-run state), not an error.
+		return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{}), nil
+	}
 
-	lines, err := s.store.SearchTranscriptLines(ctx, campaign.ID, req.Msg.GetQuery(), searchTranscriptLimit)
+	lines, err := s.store.SearchTranscriptLines(ctx, campaignID, req.Msg.GetQuery(), searchTranscriptLimit)
 	if err != nil {
-		s.log.Error("SearchTranscriptLines: store search failed", "campaign_id", campaign.ID, "err", err)
+		s.log.Error("SearchTranscriptLines: store search failed", "campaign_id", campaignID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -252,6 +254,27 @@ func (s *SessionServer) SearchTranscriptLines(
 		out = append(out, toProtoTranscriptLineMatch(l))
 	}
 	return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{Lines: out}), nil
+}
+
+// searchCampaign resolves the campaign the web transcript search scopes to: the
+// live Voice Session's campaign first (the same in-process truth GetSession uses,
+// so search scopes to exactly the transcript on screen), otherwise the
+// profile-first startCampaign (the operator's durable /glyphoxa use selection, else
+// the most-recently-created fallback). ok is false only when neither resolves — a
+// never-run state the caller answers with an empty result. A storage error other
+// than ErrNotFound is returned.
+func (s *SessionServer) searchCampaign(ctx context.Context) (uuid.UUID, bool, error) {
+	if vs, active := s.mgr.Snapshot(); active {
+		return vs.CampaignID, true, nil
+	}
+	campaign, err := s.startCampaign(ctx)
+	if errors.Is(err, storage.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return campaign.ID, true, nil
 }
 
 // toProtoTranscriptLineMatch maps a storage.TranscriptLine onto the wire search

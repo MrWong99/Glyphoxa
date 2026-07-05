@@ -135,9 +135,12 @@ export function Session() {
   // where the browser supports it, scrolls to) that line in the rendered
   // transcript. A hit for a line NOT in the current view — e.g. an older session —
   // can't scroll anywhere, so the search box shows an inline "not in the view" hint
-  // instead of a dead click (ADR-0011 amendment). renderedLineIds is the set of
-  // line ids currently on screen, so the search box can tell the two apart.
+  // instead of a dead click (ADR-0011 amendment). Relay line ids RESTART per
+  // session ("u:<n>"/"a:<turn>"), so "in view" must match the hit's SESSION too —
+  // renderedSessionId + renderedLineIds — otherwise an older session's "u:3" would
+  // collide with the rendered session's own "u:3" and highlight the wrong line.
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
+  const renderedSessionId = session?.id ?? null;
   const renderedLineIds = useMemo(
     () => new Set(transcript.lines.map((l) => l.id)),
     [transcript.lines],
@@ -204,7 +207,11 @@ export function Session() {
 
       <section className="gx-session__transcript">
         <h2 className="gx-section-title">{active ? "Live transcript" : "Session transcript"}</h2>
-        <TranscriptSearch onJump={jumpToLine} renderedLineIds={renderedLineIds} />
+        <TranscriptSearch
+          onJump={jumpToLine}
+          renderedSessionId={renderedSessionId}
+          renderedLineIds={renderedLineIds}
+        />
         <Card>
           {!hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
@@ -258,14 +265,19 @@ export function Session() {
 // The server scopes the search to the operator's Active Campaign and shares the
 // one storage search path with /glyphoxa search (AC4/AC5). Each hit renders its
 // speaker, tag, timestamp, and matched text; clicking it asks the parent to
-// deep-link the line in the rendered transcript (onJump). A hit whose line is not
-// in the rendered transcript (renderedLineIds) — an older session's line — shows an
-// inline "not in the view" hint on that result rather than clicking to nothing.
+// deep-link the line in the rendered transcript (onJump). "In view" means the hit
+// belongs to the RENDERED session (renderedSessionId) AND its line is on screen
+// (renderedLineIds) — line ids restart per session, so the session must match too.
+// A hit that isn't in view (an older session's line) shows an inline "not in the
+// view" hint on that result and does NOT highlight, rather than jumping to an
+// unrelated line that happens to share the id.
 function TranscriptSearch({
   onJump,
+  renderedSessionId,
   renderedLineIds,
 }: {
   onJump: (lineId: string) => void;
+  renderedSessionId: string | null;
   renderedLineIds: Set<string>;
 }) {
   const [search, setSearch] = useState("");
@@ -286,13 +298,19 @@ function TranscriptSearch({
   );
   const lines = searchQuery.data?.lines ?? [];
 
-  // The clicked hit whose line isn't in the rendered transcript — flagged for the
-  // inline hint. Cleared on a new query so a stale hint never lingers.
-  const [notInViewLineId, setNotInViewLineId] = useState<string | null>(null);
-  useEffect(() => setNotInViewLineId(null), [debounced]);
-  const openHit = (lineId: string) => {
-    onJump(lineId);
-    setNotInViewLineId(renderedLineIds.has(lineId) ? null : lineId);
+  // The clicked hit that isn't in the rendered view — flagged for the inline hint,
+  // keyed by sessionId:lineId (line ids collide across sessions). Cleared on a new
+  // query so a stale hint never lingers.
+  const [notInViewKey, setNotInViewKey] = useState<string | null>(null);
+  useEffect(() => setNotInViewKey(null), [debounced]);
+  const hitKey = (sessionId: string, lineId: string) => `${sessionId}:${lineId}`;
+  const openHit = (sessionId: string, lineId: string) => {
+    if (sessionId === renderedSessionId && renderedLineIds.has(lineId)) {
+      onJump(lineId); // in view: highlight + scroll the rendered line
+      setNotInViewKey(null);
+    } else {
+      setNotInViewKey(hitKey(sessionId, lineId)); // older session: hint, no false highlight
+    }
   };
 
   return (
@@ -314,8 +332,8 @@ function TranscriptSearch({
         ) : lines.length > 0 ? (
           <ul className="gx-tsearch__results" data-testid="transcript-search-results">
             {lines.map((m) => (
-              <li key={`${m.sessionId}:${m.lineId}`}>
-                <button type="button" className="gx-tsearch__result" onClick={() => openHit(m.lineId)}>
+              <li key={hitKey(m.sessionId, m.lineId)}>
+                <button type="button" className="gx-tsearch__result" onClick={() => openHit(m.sessionId, m.lineId)}>
                   <span className="gx-line__who" data-kind={m.kind}>
                     {m.who}
                   </span>
@@ -327,7 +345,7 @@ function TranscriptSearch({
                   <time className="gx-line__ts">{matchClock(m.ts)}</time>
                   <span className="gx-tsearch__text">{m.text}</span>
                 </button>
-                {notInViewLineId === m.lineId && (
+                {notInViewKey === hitKey(m.sessionId, m.lineId) && (
                   <span className="gx-tsearch__hint" role="note">
                     From an earlier session — not in the view.
                   </span>
