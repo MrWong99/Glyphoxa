@@ -19,6 +19,7 @@ require (
 
 require (
 	connectrpc.com/connect v1.20.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
 	github.com/openai/openai-go/v3 v3.41.0
 	github.com/prometheus/client_golang v1.23.2
@@ -52,7 +53,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
