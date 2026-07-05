@@ -125,14 +125,15 @@ func (r *Roster) RemoveNPC(agentID string) {
 }
 
 // rosterDepsForLive builds the production rosterDeps: every NPC's Replier is
-// constructed from the shared tool-engine, so N Character NPCs reuse one Groq
-// client and one synthesizer rather than each opening their own. memory is the
-// shared NPC memory recaller (#122) and facts the shared KG-facts recaller (#126);
-// every NPC's loop consults the SAME recallers, which scope by the addressed
-// AgentID / active Campaign per turn. A nil memory/facts disables that slot (the
-// prompt stays byte-identical). language is the Campaign Language selecting the
-// Matcher's phonetic encoder (#199).
-func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller, facts agent.FactsRecaller, language string) rosterDeps {
+// constructed from a per-NPC engine (engineFor), so each NPC carries its own
+// hydrated GrantSet (#113) while still sharing one Groq client and Registry under
+// the hood — N Character NPCs reuse one client rather than each opening their
+// own. memory is the shared NPC memory recaller (#122) and facts the shared
+// KG-facts recaller (#126); every NPC's loop consults the SAME recallers, which
+// scope by the addressed AgentID / active Campaign per turn. A nil memory/facts
+// disables that slot (the prompt stays byte-identical). language is the Campaign
+// Language selecting the Matcher's phonetic encoder (#199).
+func rosterDepsForLive(engineFor func(npcSpec) agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller, facts agent.FactsRecaller, language string) rosterDeps {
 	return rosterDeps{
 		language: language,
 		replierFor: func(spec npcSpec) *agent.Replier {
@@ -142,7 +143,7 @@ func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns 
 					Markdown: spec.persona,
 					Voice:    spec.voice,
 				},
-				Engine:       engine,
+				Engine:       engineFor(spec),
 				Synthesizer:  synth,
 				HistoryTurns: historyTurns,
 				Memory:       memory,

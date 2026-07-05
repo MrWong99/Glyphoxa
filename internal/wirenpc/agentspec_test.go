@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -321,6 +323,64 @@ func TestCampaignLanguageDrivesMatcherPhonetics(t *testing.T) {
 	}
 	if got := routed[0].Target.AgentID; got != jaegerID.String() {
 		t.Errorf(`"Yeager" routed to AgentID %q, want Jäger %q`, got, jaegerID.String())
+	}
+}
+
+// TestLoadSeededNPCs_HydratesToolGrants is the #113 end-to-end bar over the real
+// DB path: the seeded NPC's Tool Grants come from its tool_agent_grant rows, and
+// removing the dice grant row makes the hydrated GrantSet declare no Tool at all
+// (AC2/AC3) — the LLM is never shown dice, so the NPC cannot roll. dice is the
+// only Tool the demo registry holds, so an empty Declarations() is exactly "the
+// NPC can no longer roll".
+func TestLoadSeededNPCs_HydratesToolGrants(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+
+	// Registry the live loop hydrates grants against (dice is the one v1.0 Tool).
+	reg := tool.NewRegistry()
+	reg.MustRegister(tool.NewDice())
+
+	specs, _, _, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("loaded %d NPCs, want 1", len(specs))
+	}
+	bart := specs[0]
+
+	// Seeded Bart hydrates a dice grant → its GrantSet declares dice to the LLM.
+	if got := tool.NewGrantSet(reg, bart.grants...).Declarations(); len(got) != 1 || got[0].Name != "dice" {
+		t.Fatalf("seeded NPC declared %+v, want exactly [dice]", got)
+	}
+
+	// Resolve Bart's Agent id (the spec.agentID is the UUID string) and remove
+	// his dice grant row — the GM revoking the Tool (#117 owns the RPC; here we
+	// hit storage directly).
+	bartID, err := uuid.Parse(bart.agentID)
+	if err != nil {
+		t.Fatalf("parse agentID %q: %v", bart.agentID, err)
+	}
+	if err := st.DeleteToolGrant(ctx, bartID, "dice"); err != nil {
+		t.Fatalf("DeleteToolGrant(dice): %v", err)
+	}
+
+	// Re-hydrate: with the row gone, the NPC is granted nothing → the LLM is
+	// never shown a Tool, so it cannot roll.
+	respec, _, _, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs after revoke: %v", err)
+	}
+	if len(respec[0].grants) != 0 {
+		t.Fatalf("after removing the dice grant row, NPC still has grants %+v, want none", respec[0].grants)
+	}
+	if got := tool.NewGrantSet(reg, respec[0].grants...).Declarations(); len(got) != 0 {
+		t.Fatalf("after revoke the NPC declared %+v, want none (Tool never declared → cannot roll)", got)
 	}
 }
 
