@@ -121,6 +121,10 @@ const (
 	// ReasonProviderError: the reply producer (LLM round / tool loop) failed before
 	// the turn could produce audio.
 	ReasonProviderError TurnReason = "provider_error"
+	// ReasonMute: a GM muted the Agent, cutting its turn (#211) — distinct from
+	// ReasonBarge (human interruption), so a mute does not collapse into
+	// no_first_audio.
+	ReasonMute TurnReason = "mute"
 )
 
 // StageRecorder records the orchestrator's per-stage / per-turn latency

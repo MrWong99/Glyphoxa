@@ -359,6 +359,7 @@ func TestStageSubscriberTurnEndedReasons(t *testing.T) {
 		{"barge", voiceevent.TurnEndBarge, TurnAbandoned, ReasonBarge},
 		{"tts_error", voiceevent.TurnEndTTSError, TurnAbandoned, ReasonTTSError},
 		{"provider_error", voiceevent.TurnEndProviderError, TurnAbandoned, ReasonProviderError},
+		{"mute", voiceevent.TurnEndMute, TurnAbandoned, ReasonMute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
