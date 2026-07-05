@@ -134,3 +134,137 @@ func TestListNodes_NoCampaignIsNotFound(t *testing.T) {
 		t.Errorf("code = %v, want NotFound", got)
 	}
 }
+
+func TestUpdateNode_MapsAndPersists(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	store := newFakeStore()
+	store.nodes = []storage.KGNode{
+		{ID: id, CampaignID: uuid.New(), Type: storage.KGNodeLocation, Name: "Harbor", Body: "old"},
+	}
+	client := crudClient(t, store)
+
+	resp, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{
+			Id: id.String(), Name: "Old Harbor", Body: "new prose", GmPrivate: true,
+		}))
+	if err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+	node := resp.Msg.GetNode()
+	if node.GetName() != "Old Harbor" || node.GetBody() != "new prose" || !node.GetGmPrivate() {
+		t.Errorf("fields not mapped: %+v", node)
+	}
+	// node_type is immutable: the request carries none, and the stored Location type
+	// survives the update.
+	if node.GetNodeType() != managementv1.NodeType_NODE_TYPE_LOCATION {
+		t.Errorf("node_type = %v, want the immutable LOCATION", node.GetNodeType())
+	}
+	if store.nodes[0].Name != "Old Harbor" || !store.nodes[0].GMPrivate {
+		t.Errorf("storage not updated: %+v", store.nodes[0])
+	}
+}
+
+func TestUpdateNode_EmptyNameIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	store := newFakeStore()
+	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "x"}}
+	client := crudClient(t, store)
+
+	_, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: id.String(), Name: "   "}))
+	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+}
+
+func TestUpdateNode_InvalidIdIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	client := crudClient(t, store)
+
+	_, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: "not-a-uuid", Name: "x"}))
+	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+}
+
+func TestUpdateNode_NotFoundIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore() // no nodes seeded
+	client := crudClient(t, store)
+
+	_, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: uuid.NewString(), Name: "x"}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
+func TestUpdateNode_StorageErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.nodeUpdateErr = errAny
+	client := crudClient(t, store)
+
+	_, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: uuid.NewString(), Name: "x"}))
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("code = %v, want Internal", got)
+	}
+}
+
+func TestDeleteNode_Deletes(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	store := newFakeStore()
+	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "gone soon"}}
+	client := crudClient(t, store)
+
+	if _, err := client.DeleteNode(context.Background(),
+		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	if len(store.nodes) != 0 {
+		t.Errorf("node not removed from store: %+v", store.nodes)
+	}
+}
+
+func TestDeleteNode_InvalidIdIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	client := crudClient(t, store)
+
+	_, err := client.DeleteNode(context.Background(),
+		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: "nope"}))
+	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", got)
+	}
+}
+
+func TestDeleteNode_NotFoundIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	client := crudClient(t, store)
+
+	_, err := client.DeleteNode(context.Background(),
+		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
+func TestDeleteNode_StorageErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.nodeDeleteErr = errAny
+	client := crudClient(t, store)
+
+	_, err := client.DeleteNode(context.Background(),
+		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("code = %v, want Internal", got)
+	}
+}
