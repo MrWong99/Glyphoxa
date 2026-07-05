@@ -111,6 +111,14 @@ type status struct {
 	Typing Typing `json:"typing"`
 }
 
+// muteFrame is the payload of a "mute" SSE frame (#211): one Agent's mute state
+// flipped, so the web Voice panel patches that row without a reload. Deliberately
+// minimal — the authoritative current set is GetSession.muted_agent_ids.
+type muteFrame struct {
+	AgentID string `json:"agent_id"`
+	Muted   bool   `json:"muted"`
+}
+
 // View is the snapshot the JSON endpoint returns and the unit tests assert on:
 // the current coalesced lines plus the derived status/typing.
 type View struct {
@@ -305,6 +313,12 @@ func (r *Relay) project(e voiceevent.Event) {
 		// Agent off mid-reply.
 		r.turn(ev.TurnID).ended = true
 		r.setTyping(r.liveTyping())
+	case voiceevent.MuteChanged:
+		// One Agent's mute flipped (#211): forward a "mute" frame so the web Voice
+		// panel tracks a Discord (or web) mute without a reload (AC5). It rides the
+		// ring for Last-Event-ID replay; there is NO transcript-line change and NO
+		// snapshot change — a mid-session reload reads the true state from GetSession.
+		r.emit(Frame{Event: "mute", Data: mustJSON(muteFrame{AgentID: ev.AgentID, Muted: ev.Muted})})
 	}
 }
 

@@ -84,6 +84,56 @@ func TestProjection_LinesAndOrder(t *testing.T) {
 	}
 }
 
+// TestProjection_MuteFrame pins the mute relay (#211): a MuteChanged projects a
+// "mute" frame carrying agent_id + muted, and the frame rides the ring so a
+// Last-Event-ID reconnect replays it (no snapshot change — the reload truth is
+// GetSession).
+func TestProjection_MuteFrame(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+
+	bus.Publish(voiceevent.MuteChanged{At: at(1), AgentID: "bart", Muted: true})
+
+	frames := r.Frames(id, 0)
+	var mute *Frame
+	for i := range frames {
+		if frames[i].Event == "mute" {
+			mute = &frames[i]
+			break
+		}
+	}
+	if mute == nil {
+		t.Fatalf("no mute frame emitted; frames: %+v", frames)
+	}
+	var payload struct {
+		AgentID string `json:"agent_id"`
+		Muted   bool   `json:"muted"`
+	}
+	if err := json.Unmarshal(mute.Data, &payload); err != nil {
+		t.Fatalf("mute frame payload: %v", err)
+	}
+	if payload.AgentID != "bart" || !payload.Muted {
+		t.Fatalf("mute frame payload = %+v, want {bart true}", payload)
+	}
+
+	// An unmute rides the ring too.
+	bus.Publish(voiceevent.MuteChanged{At: at(2), AgentID: "bart", Muted: false})
+	frames = r.Frames(id, 0)
+	unmutes := 0
+	for _, f := range frames {
+		if f.Event == "mute" {
+			unmutes++
+		}
+	}
+	if unmutes != 2 {
+		t.Fatalf("mute frames on the ring = %d, want 2 (mute + unmute)", unmutes)
+	}
+
+	// The mute frame does NOT change the transcript snapshot lines.
+	if v := r.View(id); len(v.Lines) != 0 {
+		t.Fatalf("mute frame added %d transcript lines, want 0 (reload truth is GetSession)", len(v.Lines))
+	}
+}
+
 // TestProjection_ButlerKind checks the butler role maps to the butler kind + tag.
 func TestProjection_ButlerKind(t *testing.T) {
 	bus, r, _, id := liveRelay(t)
