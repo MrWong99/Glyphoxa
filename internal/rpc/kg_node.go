@@ -140,6 +140,45 @@ func (s *CampaignServer) DeleteNode(
 	}
 }
 
+// searchNodesLimit caps a wiki search result set (#131). It is a fixed server
+// policy for the single-operator web tier (ADR-0039); the client sends no limit.
+const searchNodesLimit = 50
+
+// SearchNodes returns the active campaign's Knowledge Graph Nodes whose name or
+// body match the query, ranked by relevance (#131, ADR-0008 v1.0). gm_private
+// Nodes are INCLUDED (GM-facing search). An empty/whitespace query is
+// CodeInvalidArgument; no campaign is CodeNotFound; a storage failure is
+// CodeInternal.
+func (s *CampaignServer) SearchNodes(
+	ctx context.Context,
+	req *connect.Request[managementv1.SearchNodesRequest],
+) (*connect.Response[managementv1.SearchNodesResponse], error) {
+	if strings.TrimSpace(req.Msg.GetQuery()) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query must not be empty"))
+	}
+
+	c, err := s.store.GetActiveCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("SearchNodes: get active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	nodes, err := s.store.SearchNodes(ctx, c.ID, req.Msg.GetQuery(), searchNodesLimit)
+	if err != nil {
+		slog.Default().Error("SearchNodes: store search failed", "campaign_id", c.ID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	out := make([]*managementv1.Node, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, toProtoNode(n))
+	}
+	return connect.NewResponse(&managementv1.SearchNodesResponse{Nodes: out}), nil
+}
+
 // toProtoNode maps a storage.KGNode onto its wire representation.
 func toProtoNode(n storage.KGNode) *managementv1.Node {
 	return &managementv1.Node{

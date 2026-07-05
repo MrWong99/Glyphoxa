@@ -268,3 +268,87 @@ func TestDeleteNode_StorageErrorIsInternal(t *testing.T) {
 		t.Errorf("code = %v, want Internal", got)
 	}
 }
+
+func TestSearchNodes_EmptyQueryIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
+	client := crudClient(t, store)
+
+	for _, q := range []string{"", "   "} {
+		_, err := client.SearchNodes(context.Background(),
+			connect.NewRequest(&managementv1.SearchNodesRequest{Query: q}))
+		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+			t.Errorf("SearchNodes(%q) code = %v, want InvalidArgument", q, got)
+		}
+	}
+	// An empty query must never reach storage.
+	if store.searchCalls != 0 {
+		t.Errorf("store.SearchNodes called %d times for empty queries, want 0", store.searchCalls)
+	}
+}
+
+func TestSearchNodes_PreservesRankOrderAndIncludesPrivate(t *testing.T) {
+	t.Parallel()
+	campID := uuid.New()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: campID, Name: "Lost Mine"}
+	// Storage owns the relevance ranking; the handler must preserve it 1:1 and must
+	// NOT drop the gm_private match (GM-facing search).
+	store.searchResults = []storage.KGNode{
+		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodeCharacter, Name: "Dragon of the North"},
+		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodePlotThread, Name: "The dragon's true name", GMPrivate: true},
+		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodeNote, Name: "Rumor", Body: "a dragon"},
+	}
+	client := crudClient(t, store)
+
+	resp, err := client.SearchNodes(context.Background(),
+		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "dragon"}))
+	if err != nil {
+		t.Fatalf("SearchNodes: %v", err)
+	}
+	nodes := resp.Msg.GetNodes()
+	if len(nodes) != 3 {
+		t.Fatalf("len = %d, want 3 (rank order preserved, private included)", len(nodes))
+	}
+	if nodes[0].GetName() != "Dragon of the North" || nodes[2].GetName() != "Rumor" {
+		t.Errorf("rank order not preserved: %q … %q", nodes[0].GetName(), nodes[2].GetName())
+	}
+	if !nodes[1].GetGmPrivate() {
+		t.Errorf("gm_private match dropped from GM-facing search: %+v", nodes[1])
+	}
+	// The handler forwards the raw query and the LIMIT-50 cap to storage.
+	if store.searchQuery != "dragon" {
+		t.Errorf("store saw query %q, want %q", store.searchQuery, "dragon")
+	}
+	if store.searchLimit != 50 {
+		t.Errorf("store saw limit %d, want 50", store.searchLimit)
+	}
+}
+
+func TestSearchNodes_NoCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.SearchNodes(context.Background(),
+		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "x"}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
+func TestSearchNodes_StorageErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
+	store.nodeSearchErr = errAny
+	client := crudClient(t, store)
+
+	_, err := client.SearchNodes(context.Background(),
+		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "x"}))
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("code = %v, want Internal", got)
+	}
+}
