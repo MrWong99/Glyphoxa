@@ -83,6 +83,18 @@ func idSet(ids []uuid.UUID) map[uuid.UUID]bool {
 	return m
 }
 
+func sameOrder(got, want []uuid.UUID) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestSearchChunksByCampaign_OrdersByCosineAndCapsAtK is AC1 + AC5(cap): seeded
 // chunks with known embeddings come back ordered by cosine distance to the query
 // (nearest first, distance monotone nondecreasing), and k caps the result at the
@@ -99,18 +111,25 @@ func TestSearchChunksByCampaign_OrdersByCosineAndCapsAtK(t *testing.T) {
 	}
 
 	query := vec768(1, 0)
-	nearest := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(1, 0))     // distance 0
-	near := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.9, 0.1))    // ~0.006
-	mid := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.5, 0.5))     // ~0.293
-	far := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0, 1))         // 1.0
+	// Small vectors at known angles PLUS one large-magnitude near-parallel vector:
+	// `big` = [90,9] shares a near-zero angle with the query (cosine ranks it 2nd,
+	// ~0.005) but its ~90 magnitude makes it the FARTHEST by L2 (~89.5). So the
+	// exact cosine order below differs from the L2 order — it fails if <=> (cosine)
+	// is ever swapped for <-> (L2), a mutant that every small-norm vector alone
+	// (similar magnitudes → L2 order == cosine order) could not catch.
+	nearest := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(1, 0))    // cos 0
+	big := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(90, 9))       // cos ~0.005, L2 ~89.5
+	near := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.9, 0.1))   // cos ~0.006
+	mid := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.5, 0.5))    // cos ~0.293
+	far := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0, 1))        // cos 1.0
 
-	got, err := st.SearchChunksByCampaign(ctx, campaignID, query, 4)
+	got, err := st.SearchChunksByCampaign(ctx, campaignID, query, 5)
 	if err != nil {
 		t.Fatalf("SearchChunksByCampaign: %v", err)
 	}
-	wantOrder := []uuid.UUID{nearest, near, mid, far}
-	if ids := matchIDs(got); len(ids) != 4 || ids[0] != wantOrder[0] || ids[1] != wantOrder[1] || ids[2] != wantOrder[2] || ids[3] != wantOrder[3] {
-		t.Fatalf("order = %v, want nearest-first %v", ids, wantOrder)
+	wantOrder := []uuid.UUID{nearest, big, near, mid, far}
+	if !sameOrder(matchIDs(got), wantOrder) {
+		t.Fatalf("order = %v, want cosine nearest-first %v (L2 would rank the big vector last)", matchIDs(got), wantOrder)
 	}
 	for i := 1; i < len(got); i++ {
 		if got[i].Distance < got[i-1].Distance {
@@ -120,21 +139,21 @@ func TestSearchChunksByCampaign_OrdersByCosineAndCapsAtK(t *testing.T) {
 	if got[0].Distance > 1e-4 {
 		t.Errorf("nearest distance = %g, want ~0 (identical direction)", got[0].Distance)
 	}
-	if got[3].Distance < 0.99 {
-		t.Errorf("farthest distance = %g, want ~1 (orthogonal)", got[3].Distance)
+	if last := got[len(got)-1]; last.Distance < 0.99 {
+		t.Errorf("farthest distance = %g, want ~1 (orthogonal)", last.Distance)
 	}
 	// The returned chunk carries its scanned fields, not a zero value.
 	if got[0].Chunk.CampaignID != campaignID || got[0].Chunk.EmbeddingModel != "test-model" {
 		t.Errorf("nearest chunk fields not populated: %+v", got[0].Chunk)
 	}
 
-	// k caps at the k nearest: k=2 -> {nearest, near} only.
+	// k caps at the k nearest by cosine: k=2 -> {nearest, big} (big by angle, not L2).
 	capped, err := st.SearchChunksByCampaign(ctx, campaignID, query, 2)
 	if err != nil {
 		t.Fatalf("SearchChunksByCampaign (k=2): %v", err)
 	}
-	if ids := matchIDs(capped); len(ids) != 2 || ids[0] != nearest || ids[1] != near {
-		t.Fatalf("k=2 result = %v, want [%s %s] (the 2 nearest)", ids, nearest, near)
+	if ids := matchIDs(capped); len(ids) != 2 || ids[0] != nearest || ids[1] != big {
+		t.Fatalf("k=2 result = %v, want [%s %s] (the 2 nearest by cosine)", ids, nearest, big)
 	}
 }
 
