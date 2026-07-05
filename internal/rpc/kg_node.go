@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
@@ -45,7 +46,7 @@ func (s *CampaignServer) CreateNode(
 	created, err := s.store.CreateNode(ctx, storage.NewKGNode{
 		CampaignID: c.ID,
 		Type:       nodeType,
-		Name:       m.GetName(),
+		Name:       strings.TrimSpace(m.GetName()),
 		Body:       m.GetBody(),
 		GMPrivate:  m.GetGmPrivate(),
 	})
@@ -83,6 +84,60 @@ func (s *CampaignServer) ListNodes(
 		out = append(out, toProtoNode(n))
 	}
 	return connect.NewResponse(&managementv1.ListNodesResponse{Nodes: out}), nil
+}
+
+// UpdateNode saves a Node's editor fields (name/body/gm_private) and returns the
+// updated Node. node_type is immutable, so it is never sent nor changed. An empty
+// name or an unparsable id is CodeInvalidArgument; a missing id is CodeNotFound.
+func (s *CampaignServer) UpdateNode(
+	ctx context.Context,
+	req *connect.Request[managementv1.UpdateNodeRequest],
+) (*connect.Response[managementv1.UpdateNodeResponse], error) {
+	m := req.Msg
+	id, err := uuid.Parse(m.GetId())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid node id"))
+	}
+	if strings.TrimSpace(m.GetName()) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
+	}
+
+	updated, err := s.store.UpdateNode(ctx, storage.KGNodeUpdate{
+		ID:        id,
+		Name:      strings.TrimSpace(m.GetName()),
+		Body:      m.GetBody(),
+		GMPrivate: m.GetGmPrivate(),
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
+		}
+		slog.Default().Error("UpdateNode: store update failed", "node_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return connect.NewResponse(&managementv1.UpdateNodeResponse{Node: toProtoNode(updated)}), nil
+}
+
+// DeleteNode removes a Node by id. An unparsable id is CodeInvalidArgument; a
+// missing id is CodeNotFound; a storage failure is CodeInternal.
+func (s *CampaignServer) DeleteNode(
+	ctx context.Context,
+	req *connect.Request[managementv1.DeleteNodeRequest],
+) (*connect.Response[managementv1.DeleteNodeResponse], error) {
+	id, err := uuid.Parse(req.Msg.GetId())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid node id"))
+	}
+
+	switch err := s.store.DeleteNode(ctx, id); {
+	case err == nil:
+		return connect.NewResponse(&managementv1.DeleteNodeResponse{}), nil
+	case errors.Is(err, storage.ErrNotFound):
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
+	default:
+		slog.Default().Error("DeleteNode: store delete failed", "node_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
 }
 
 // toProtoNode maps a storage.KGNode onto its wire representation.

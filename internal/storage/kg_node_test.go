@@ -4,7 +4,10 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -122,5 +125,154 @@ func TestKGNodeListPublicNodes(t *testing.T) {
 		if n.GMPrivate {
 			t.Errorf("ListPublicNodes leaked a gm_private node: %+v", n)
 		}
+	}
+}
+
+// TestKGNodeUpdate is #129 AC2/AC3: UpdateNode persists name/body/gm_private,
+// bumps updated_at (never touching node_type — immutable, ADR-0008), and yields
+// ErrNotFound for an id that does not exist.
+func TestKGNodeUpdate(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	created, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeLocation, Name: "Barrow", Body: "A haunted mound.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+
+	updated, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
+		ID: created.ID, Name: "Old Barrow", Body: "A very haunted mound.", GMPrivate: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+	if updated.ID != created.ID || updated.CampaignID != campaignID {
+		t.Errorf("update changed identity: %+v", updated)
+	}
+	if updated.Name != "Old Barrow" || updated.Body != "A very haunted mound." || !updated.GMPrivate {
+		t.Errorf("fields not persisted: %+v", updated)
+	}
+	if updated.Type != storage.KGNodeLocation {
+		t.Errorf("node_type must be immutable, got %q", updated.Type)
+	}
+	if !updated.UpdatedAt.After(created.UpdatedAt) {
+		t.Errorf("updated_at not bumped: created %v updated %v", created.UpdatedAt, updated.UpdatedAt)
+	}
+
+	// The change is durable — a fresh read reflects the new fields.
+	nodes, err := st.ListNodes(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "Old Barrow" || !nodes[0].GMPrivate {
+		t.Errorf("update did not persist across reload: %+v", nodes)
+	}
+
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: uuid.New(), Name: "ghost"}); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("UpdateNode missing id err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestKGNodeDelete is #129 AC2: DeleteNode removes the row and yields ErrNotFound
+// for a missing id.
+func TestKGNodeDelete(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	created, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeFaction, Name: "The Cult",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+
+	if err := st.DeleteNode(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	nodes, err := st.ListNodes(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Errorf("node not deleted: %+v", nodes)
+	}
+
+	if err := st.DeleteNode(ctx, created.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("second DeleteNode err = %v, want ErrNotFound", err)
+	}
+	if err := st.DeleteNode(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("DeleteNode unknown id err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestKGNodeCreateEditDeleteAcrossTypes is #129 AC5's storage grain: the full
+// create → edit → delete lifecycle across two distinct Node types (Location and
+// Faction), with the gm_private toggle round-tripping, and AC4's boundary — a
+// gm-public Node of either type surfaces into the Hot Context read while a
+// gm_private one of any type is excluded.
+func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	loc, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeLocation, Name: "Harbor", Body: "Ships dock here.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode location: %v", err)
+	}
+	fac, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeFaction, Name: "Dockers Guild", Body: "They run the docks.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode faction: %v", err)
+	}
+
+	// Edit both: flip the Faction to gm_private, leave the Location public.
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
+		ID: loc.ID, Name: "Old Harbor", Body: "Ships used to dock here.",
+	}); err != nil {
+		t.Fatalf("UpdateNode location: %v", err)
+	}
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
+		ID: fac.ID, Name: "Dockers Guild", Body: "A secret cabal.", GMPrivate: true,
+	}); err != nil {
+		t.Fatalf("UpdateNode faction: %v", err)
+	}
+
+	// AC4: the public Location surfaces into the Hot Context read; the now-private
+	// Faction is excluded — proving the visibility filter is type-agnostic.
+	pub, err := st.ListPublicNodes(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListPublicNodes: %v", err)
+	}
+	if len(pub) != 1 || pub[0].Type != storage.KGNodeLocation || pub[0].Name != "Old Harbor" {
+		t.Fatalf("public read = %+v, want only the public Location", pub)
+	}
+
+	// Delete the Location; the (private) Faction remains but stays out of the public read.
+	if err := st.DeleteNode(ctx, loc.ID); err != nil {
+		t.Fatalf("DeleteNode location: %v", err)
+	}
+	all, err := st.ListNodes(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != fac.ID || !all[0].GMPrivate {
+		t.Errorf("after delete want only the private Faction, got %+v", all)
+	}
+	pub, err = st.ListPublicNodes(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListPublicNodes after delete: %v", err)
+	}
+	if len(pub) != 0 {
+		t.Errorf("gm_private Faction leaked into the Hot Context read: %+v", pub)
 	}
 }

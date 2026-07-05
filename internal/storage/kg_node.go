@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -78,6 +79,52 @@ func (s *Store) CreateNode(ctx context.Context, n NewKGNode) (KGNode, error) {
 		return KGNode{}, fmt.Errorf("storage: create kg node: %w", err)
 	}
 	return created, nil
+}
+
+// KGNodeUpdate is the input to UpdateNode — the Knowledge panel's editor fields
+// (#129). It carries no Type (node_type is immutable, ADR-0008) and no CampaignID
+// (a Node never moves between campaigns); the row is addressed by ID alone.
+type KGNodeUpdate struct {
+	ID        uuid.UUID
+	Name      string
+	Body      string
+	GMPrivate bool
+}
+
+// UpdateNode saves a Knowledge Graph Node's editor fields (name/body/gm_private)
+// and returns the updated row, stamping updated_at = now(). node_type is never
+// touched (immutable, ADR-0008). A missing id yields ErrNotFound.
+func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE kg_node SET
+		    name = $2,
+		    body = $3,
+		    gm_private = $4,
+		    updated_at = now()
+		  WHERE id = $1
+		 RETURNING `+kgNodeColumns,
+		u.ID, u.Name, u.Body, u.GMPrivate)
+	updated, err := scanKGNode(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KGNode{}, ErrNotFound
+	}
+	if err != nil {
+		return KGNode{}, fmt.Errorf("storage: update kg node %s: %w", u.ID, err)
+	}
+	return updated, nil
+}
+
+// DeleteNode removes a Knowledge Graph Node by id. A missing id yields
+// ErrNotFound so the RPC can distinguish "gone" from "never existed".
+func (s *Store) DeleteNode(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM kg_node WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("storage: delete kg node %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListNodes returns every Knowledge Graph Node in a Campaign in a stable display
