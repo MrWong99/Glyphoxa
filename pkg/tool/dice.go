@@ -77,6 +77,10 @@ func (*Dice) InputSchema() json.RawMessage { return diceInputSchema }
 // ReadOnly implements [Tool]: rolling dice mutates no state.
 func (*Dice) ReadOnly() bool { return true }
 
+// SupportsScope implements [Tool]: dice carries no per-grant Config (its authority
+// cannot be narrowed per Agent), so it is a plain on/off grant with no scope editor.
+func (*Dice) SupportsScope() bool { return false }
+
 // diceArgs is the decoded shape of [Dice]'s LLM-supplied arguments.
 type diceArgs struct {
 	Count int `json:"count"`

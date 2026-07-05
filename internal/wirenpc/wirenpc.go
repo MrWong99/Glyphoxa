@@ -761,8 +761,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// — only the GrantSet differs per NPC — so N NPCs reuse one client rather than
 	// each opening their own.
 	provider := newLLM(keys.llm)
-	reg := tool.NewRegistry()
-	reg.MustRegister(tool.NewDice())
+	reg := tool.BuiltinRegistry()
 	engineFor := func(spec npcSpec) agent.Engine {
 		grants := tool.NewGrantSet(reg, spec.grants...)
 		return agenttool.NewEngine(provider, grants, groq.DefaultModel, 0, 0,

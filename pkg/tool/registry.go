@@ -1,6 +1,9 @@
 package tool
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // Registry maps a Tool name to its [Tool]. It is deliberately dumb (ADR-0028):
 // a map with registration and lookup, no lifecycle ceremony. The API makes no
@@ -50,4 +53,18 @@ func (r *Registry) MustRegister(t Tool) {
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]
 	return t, ok
+}
+
+// Tools returns every registered Tool sorted by [Tool.Name]. This is the full
+// available-Tools catalog — NOT grant-stripped, unlike [GrantSet.Declarations] —
+// so the grant editor can list every Tool an Agent could be granted with its
+// current grant state (#117). The stable sort keeps the rendered list order
+// deterministic across process restarts.
+func (r *Registry) Tools() []Tool {
+	out := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out
 }
