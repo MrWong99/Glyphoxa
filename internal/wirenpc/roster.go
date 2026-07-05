@@ -32,6 +32,10 @@ type Roster struct {
 	matcher *address.Matcher
 	cast    *agent.Cast
 
+	// language is the Campaign Language the Matcher's phonetic tier encodes
+	// names under (#199); set from rosterDeps at construction.
+	language string
+
 	// replierFor builds the [agent.Replier] for one NPC. Production binds it to a
 	// shared tool-engine (so N NPCs share one Groq client); tests inject scripted
 	// engines through it. Always non-nil after [newRoster].
@@ -45,6 +49,10 @@ type Roster struct {
 type rosterDeps struct {
 	// replierFor builds the Replier for one NPC; see [Roster.replierFor].
 	replierFor func(npcSpec) *agent.Replier
+	// language is the Campaign Language (CONTEXT.md) selecting the Matcher's
+	// phonetic encoder (#199): the loaded campaign's language column on the DB
+	// path, "" on the env-only path.
+	language string
 }
 
 // newRoster builds an empty Roster wired to deps. It holds no NPCs yet — the
@@ -57,7 +65,19 @@ func newRoster(deps rosterDeps) *Roster {
 	return &Roster{
 		cast:       agent.NewCast(),
 		replierFor: deps.replierFor,
+		language:   matcherLanguage(deps.language),
 	}
+}
+
+// matcherLanguage returns lang if the address package ships a phonetic encoder
+// for it, else "en" (#199): a Campaign Language the platform has no phonetics
+// for degrades to the EN encoder — the pre-#199 behavior — rather than to the
+// bare edit-distance net.
+func matcherLanguage(lang string) string {
+	if _, ok := address.DefaultEncoders().For(lang); ok {
+		return lang
+	}
+	return "en"
 }
 
 // matcherAgent builds the address.Agent for one NPC: its routing target plus
@@ -85,7 +105,7 @@ func (r *Roster) AddNPC(spec npcSpec) {
 		// First NPC: build the Matcher around it. Single-target by default
 		// (Config.MaxTargets unset ⇒ 1): naming two NPCs fires one turn on the
 		// top-scored, the safe one-floor default (ADR-0025 deferred).
-		r.matcher = address.NewMatcher(address.Config{Language: "en"}, matcherAgent(spec))
+		r.matcher = address.NewMatcher(address.Config{Language: r.language}, matcherAgent(spec))
 	} else {
 		r.matcher.Add(matcherAgent(spec))
 	}
@@ -109,9 +129,11 @@ func (r *Roster) RemoveNPC(agentID string) {
 // client and one synthesizer rather than each opening their own. memory is the
 // shared NPC memory recaller (#122); every NPC's loop consults the SAME recaller,
 // which scopes retrieval by the addressed AgentID per turn. A nil memory disables
-// recall (AC6).
-func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller) rosterDeps {
+// recall (AC6). language is the Campaign Language selecting the Matcher's
+// phonetic encoder (#199).
+func rosterDepsForLive(engine agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller, language string) rosterDeps {
 	return rosterDeps{
+		language: language,
 		replierFor: func(spec npcSpec) *agent.Replier {
 			return agent.NewReplier(agent.Config{
 				Persona: agent.Persona{

@@ -154,6 +154,58 @@ func newRosterFor(specs []npcSpec, repliers []*agent.Replier, synth tts.Synthesi
 	return r
 }
 
+// TestRoster_MatcherUsesCampaignLanguage (#199): a Roster assembled for a "de"
+// Campaign matches German names through Kölner Phonetik. "Yeager" is an
+// EN-biased STT's rendering of "Jäger" — Kölner Phonetik codes both 047, while
+// Double Metaphone separates them (JKR vs AKR) and the edit net is out of
+// reach (Damerau-Levenshtein 3) — so only the German encoder routes it. Two
+// NPCs keep the lone-NPC fallback inert, so a route proves the name tier.
+func TestRoster_MatcherUsesCampaignLanguage(t *testing.T) {
+	synth := &recordingSynth{}
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+		language:   "de",
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-jaeger", "Jäger", ""))
+	r.AddNPC(specFor("npc-lena", "Lena", ""))
+
+	routed := r.matcher.TargetMatch("Yeager, wie läuft die Jagd?")
+	if len(routed) != 1 || routed[0].Target.AgentID != "npc-jaeger" {
+		got := make([]string, len(routed))
+		for i, rt := range routed {
+			got[i] = rt.Target.AgentID
+		}
+		t.Fatalf(`"Yeager" under language "de" addressed %v, want [npc-jaeger]`, got)
+	}
+}
+
+// TestRoster_UnknownLanguageFallsBackToEnglishPhonetics (#199): a Campaign
+// Language with no registered phonetic encoder degrades to the "en" encoder —
+// pre-#199 behavior — rather than to the bare edit-distance net. "nite" is a
+// phonetic rendering of "Knight" (Double Metaphone NT for both) that the edit
+// net cannot reach (Damerau-Levenshtein 4), so a route proves the EN encoder
+// is live under the unknown code.
+func TestRoster_UnknownLanguageFallsBackToEnglishPhonetics(t *testing.T) {
+	synth := &recordingSynth{}
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+		language:   "tlh",
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-knight", "Knight", ""))
+	r.AddNPC(specFor("npc-lena", "Lena", ""))
+
+	routed := r.matcher.TargetMatch("nite, guard the gate at dawn")
+	if len(routed) != 1 || routed[0].Target.AgentID != "npc-knight" {
+		got := make([]string, len(routed))
+		for i, rt := range routed {
+			got[i] = rt.Target.AgentID
+		}
+		t.Fatalf(`"nite" under unregistered language "tlh" addressed %v, want [npc-knight]`, got)
+	}
+}
+
 // TestRoster_RoutesNamedUtterancesToEachNPC pins multi-NPC routing through the
 // assembled conversation: naming Aldra speaks Aldra; naming Bram speaks Bram.
 // Real Matcher + real Cast over the bus, single-target default.

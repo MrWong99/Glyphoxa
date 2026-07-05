@@ -172,30 +172,32 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 // Detection routes on (the in-code path used "bart"; the value only has to be
 // consistent between the matcher and the Persona, which it is).
 //
-// It also surfaces the owning tenant ID and the PRIMARY (first) Character's
-// LoadedAgent — the bits the credential bridge (issue #69) resolves the session
-// BYOK keys from. The primary's LoadedAgent already carries its LLM/TTS provider
-// configs (LoadAgent joins them), so this returns them rather than re-querying.
-// A single set of keys backs the whole session (one shared Groq client + one
-// ElevenLabs synth across the Roster — see buildConversation), so the primary
-// agent is the representative; per-NPC adapter selection is a later concern.
-func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.LoadedAgent, uuid.UUID, error) {
+// It also surfaces the loaded Campaign row — carrying the owning tenant ID
+// (the credential bridge, issue #69) and the Campaign Language (the matcher's
+// phonetic scheme, #199) — and the PRIMARY (first) Character's LoadedAgent, the
+// bit the credential bridge resolves the session BYOK keys from. The primary's
+// LoadedAgent already carries its LLM/TTS provider configs (LoadAgent joins
+// them), so this returns them rather than re-querying. A single set of keys
+// backs the whole session (one shared Groq client + one ElevenLabs synth across
+// the Roster — see buildConversation), so the primary agent is the
+// representative; per-NPC adapter selection is a later concern.
+func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
 	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
 	if err != nil {
-		return nil, storage.LoadedAgent{}, uuid.Nil, fmt.Errorf("wirenpc: load NPCs: find tenant: %w", err)
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: find tenant: %w", err)
 	}
 
-	campaignID, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
 	if err != nil {
-		return nil, storage.LoadedAgent{}, uuid.Nil, fmt.Errorf("wirenpc: load NPCs: find campaign: %w", err)
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: find campaign: %w", err)
 	}
 
-	chars, err := st.CharacterAgents(ctx, campaignID)
+	chars, err := st.CharacterAgents(ctx, campaign.ID)
 	if err != nil {
-		return nil, storage.LoadedAgent{}, uuid.Nil, err
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 	}
 	if len(chars) == 0 {
-		return nil, storage.LoadedAgent{}, uuid.Nil, fmt.Errorf("wirenpc: load NPCs: no Character NPC in %q", SeedCampaignName)
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: no Character NPC in %q", SeedCampaignName)
 	}
 
 	specs := make([]npcSpec, 0, len(chars))
@@ -203,18 +205,18 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 	for i, c := range chars {
 		loaded, err := st.LoadAgent(ctx, c.ID)
 		if err != nil {
-			return nil, storage.LoadedAgent{}, uuid.Nil, err
+			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 		}
 		if i == 0 {
 			primary = loaded
 		}
 		spec, err := npcSpecFromAgent(loaded.Agent)
 		if err != nil {
-			return nil, storage.LoadedAgent{}, uuid.Nil, err
+			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 		}
 		specs = append(specs, spec)
 	}
-	return specs, primary, tenant.ID, nil
+	return specs, primary, campaign, nil
 }
 
 // npcSpecFromAgent maps a storage.Agent (vendor-neutral) to the voice-domain

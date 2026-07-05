@@ -308,17 +308,20 @@ func (s *Store) FindTenantByName(ctx context.Context, name string) (Tenant, erro
 	return t, nil
 }
 
-// FindCampaignByName returns the ID of the Tenant's Campaign with the given
-// name, or ErrNotFound.
-func (s *Store) FindCampaignByName(ctx context.Context, tenantID uuid.UUID, name string) (uuid.UUID, error) {
-	var id uuid.UUID
-	err := s.db.QueryRow(ctx,
-		`SELECT id FROM campaign WHERE tenant_id = $1 AND name = $2`, tenantID, name).Scan(&id)
+// FindCampaignByName returns the Tenant's Campaign with the given name, or
+// ErrNotFound. It returns the full row rather than just the ID so a caller
+// wiring a Voice Session gets the Campaign Language (the matcher's phonetic
+// scheme, #199) from the same lookup.
+func (s *Store) FindCampaignByName(ctx context.Context, tenantID uuid.UUID, name string) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+campaignColumns+`
+		   FROM campaign WHERE tenant_id = $1 AND name = $2`, tenantID, name)
+	c, err := scanCampaign(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrNotFound
+		return Campaign{}, ErrNotFound
 	}
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("storage: find campaign %q: %w", name, err)
+		return Campaign{}, fmt.Errorf("storage: find campaign %q: %w", name, err)
 	}
-	return id, nil
+	return c, nil
 }

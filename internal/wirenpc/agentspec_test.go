@@ -164,7 +164,7 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// assert it succeeds, and that the matcher routes a named utterance to the
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
-	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil, providerKeys{}, false, nil)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, "", ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
 	}
@@ -206,14 +206,14 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindTenantByName: %v", err)
 	}
-	campaignID, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
 	if err != nil {
 		t.Fatalf("FindCampaignByName: %v", err)
 	}
 
 	// A second Character NPC in the same campaign — a Voice Session can host ≥2.
 	if _, err := st.CreateAgent(ctx, storage.NewAgent{
-		CampaignID:  campaignID,
+		CampaignID:  campaign.ID,
 		Role:        storage.AgentRoleCharacter,
 		Name:        "Mira",
 		Persona:     "You are Mira, the wandering bard.",
@@ -233,7 +233,7 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 
 	// The two NPCs must assemble into a Roster that routes each by name to its own
 	// identity — the end-to-end multi-NPC acceptance bar.
-	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, ttseleven.New(""), nil, providerKeys{}, false, nil)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, "", ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("buildConversation from 2 DB NPCs: %v", err)
 	}
@@ -257,6 +257,73 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 	}
 }
 
+// TestCampaignLanguageDrivesMatcherPhonetics (#199): the loaded campaign's
+// language column reaches the assembled Roster's matcher, selecting the
+// phonetic encoder. A 'de' campaign hosting "Jäger" must route "Yeager" — an
+// EN-biased STT rendering that only Kölner Phonetik matches (both code 047;
+// Double Metaphone separates them and the edit net is out of reach at
+// Damerau-Levenshtein 3). Before #199 the matcher was hardcoded to "en" and
+// this utterance routed to nobody. The seed's Bart keeps the lone-NPC
+// fallback inert, so the route proves the name tier.
+func TestCampaignLanguageDrivesMatcherPhonetics(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+	// The demo seed is an "en" campaign; the live German table runs 'de'.
+	if _, err := pool.Exec(ctx, `UPDATE campaign SET language = 'de'`); err != nil {
+		t.Fatalf("set campaign language: %v", err)
+	}
+
+	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
+	if err != nil {
+		t.Fatalf("FindTenantByName: %v", err)
+	}
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	if err != nil {
+		t.Fatalf("FindCampaignByName: %v", err)
+	}
+	jaegerID, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaign.ID,
+		Role:       storage.AgentRoleCharacter,
+		Name:       "Jäger",
+		Persona:    "You are Jäger, the huntsman.",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent (Jäger): %v", err)
+	}
+
+	specs, _, loadedCampaign, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	if loadedCampaign.Language != "de" {
+		t.Fatalf("loadSeededNPCs surfaced campaign language %q, want %q", loadedCampaign.Language, "de")
+	}
+
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), specs, loadedCampaign.Language,
+		ttseleven.New(""), nil, providerKeys{}, false, nil)
+	if err != nil {
+		t.Fatalf("buildConversation: %v", err)
+	}
+	defer cleanup()
+	if conv == nil {
+		t.Fatal("buildConversation returned a nil Conversation")
+	}
+
+	routed := roster.matcher.TargetMatch("Yeager, wie läuft die Jagd?")
+	if len(routed) == 0 {
+		t.Fatal(`"Yeager" routed to nobody — campaign language did not reach the matcher`)
+	}
+	if got := routed[0].Target.AgentID; got != jaegerID.String() {
+		t.Errorf(`"Yeager" routed to AgentID %q, want Jäger %q`, got, jaegerID.String())
+	}
+}
+
 // TestBuildConversation_CleanupDoesNotDestroyEngine guards issue #44's reconnect
 // loop against a regression that destroys the process-global Silero/ONNX
 // environment. cleanup() must release only the per-cycle VAD session, NEVER the
@@ -269,7 +336,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	npcs := []npcSpec{hardcodedNPC()}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil, providerKeys{}, false, nil)
+	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, "", ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("first buildConversation: %v", err)
 	}
@@ -278,7 +345,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	}
 	cleanup1() // end of reconnect cycle 1
 
-	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, ttseleven.New(""), nil, providerKeys{}, false, nil)
+	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, "", ttseleven.New(""), nil, providerKeys{}, false, nil)
 	if err != nil {
 		t.Fatalf("second buildConversation after cleanup: %v — cleanup destroyed the shared ONNX env?", err)
 	}
@@ -308,11 +375,11 @@ func TestSeedIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindTenantByName: %v", err)
 	}
-	campaignID, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
 	if err != nil {
 		t.Fatalf("FindCampaignByName: %v", err)
 	}
-	chars, err := st.CharacterAgents(ctx, campaignID)
+	chars, err := st.CharacterAgents(ctx, campaign.ID)
 	if err != nil {
 		t.Fatalf("CharacterAgents: %v", err)
 	}
