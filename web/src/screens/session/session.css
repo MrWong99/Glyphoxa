@@ -3,11 +3,159 @@
  */
 
 /* Page gutter (#88 slice 1): the screen root had no padding, so the content sat
- * flush against the topbar and the content edges. */
+ * flush against the topbar and the content edges. The Voice control panel (#211)
+ * makes this a two-column layout — the session content, then a fixed-width right
+ * rail — that stacks on a narrow viewport. */
 .gx-session {
   padding: var(--spacing-xl);
   max-width: var(--content-lg);
   margin: 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-xl);
+}
+
+.gx-session__main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Voice control panel (#211): the right rail listing every Agent with a mute
+ * toggle, a mute-all button, and the voicing count. */
+.gx-voice-panel {
+  flex: 0 0 308px;
+  align-self: stretch;
+  padding: var(--spacing-lg);
+  border-left: 1px solid var(--border);
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-voice-panel__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-voice-panel__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.gx-voice-panel__count {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Full-width Mute all / Unmute all button. */
+.gx-voice-panel__all {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  color: var(--text-default);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gx-voice-panel__all:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gx-voice-panel__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs, 4px);
+}
+
+.gx-voice-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs, 4px) 0;
+}
+.gx-voice-row[data-muted] {
+  opacity: 0.5;
+}
+
+.gx-voice-row__dot {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.gx-voice-row__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.gx-voice-row__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-default);
+}
+
+.gx-voice-row__state {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 34px square icon toggle; the muted state is red-tinted. */
+.gx-voice-row__toggle {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-default);
+  cursor: pointer;
+}
+.gx-voice-row__toggle[data-muted] {
+  border-color: rgba(255, 79, 94, 0.42);
+  background: rgba(255, 79, 94, 0.09);
+  color: rgb(255, 79, 94);
+}
+.gx-voice-row__toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gx-voice-panel__hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+@media (max-width: 900px) {
+  .gx-session {
+    flex-direction: column;
+  }
+  .gx-voice-panel {
+    flex-basis: auto;
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
 }
 
 .gx-session__header {

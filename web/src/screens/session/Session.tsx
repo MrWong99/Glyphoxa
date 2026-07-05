@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { useSessionEvents, formatClock } from "./useSessionEvents";
+import { VoicePanel } from "./VoicePanel";
 
 import "./session.css";
 
@@ -125,6 +126,7 @@ export function Session() {
 
   return (
     <div className="gx-session">
+      <div className="gx-session__main">
       <header className="gx-session__header">
         {campaignName && <span className="gx-overline">{campaignName}</span>}
         <h1>Voice session</h1>
@@ -212,6 +214,9 @@ export function Session() {
           )}
         </Card>
       </section>
+      </div>
+
+      <VoicePanel active={active} mutedIds={data?.mutedAgentIds ?? []} />
     </div>
   );
 }
