@@ -104,6 +104,15 @@ func WithBargeInCoalesce(confirmWindow, coalesceWindow time.Duration) Option {
 	}
 }
 
+// WithStreamingSTT wires a streaming-STT transport (ADR-0042) into the segmenter:
+// each utterance is mirrored onto the persistent websocket (pre-roll + voiced
+// frames) and finalized by a manual commit at the local VAD speech-end, with the
+// batch recognizer as the automatic fallback. A nil sm is ZERO behaviour change —
+// the byte-for-byte no-streaming default — so callers can wire it unconditionally.
+func WithStreamingSTT(sm *StreamManager) Option {
+	return func(c *Conversation) { c.seg.stream = sm }
+}
+
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
 // the reactors fire inside bus callbacks (currently the replier's TTS dispatch).
 // Without it such failures are dropped silently.
