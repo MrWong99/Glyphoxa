@@ -401,29 +401,25 @@ func TestSearchTranscriptIdleScopesToActiveCampaign(t *testing.T) {
 	}
 }
 
-// TestSearchTranscriptPrefersLiveSessionCampaign is #120's scope precedence: while
-// a Voice Session is live, the search scopes to the LIVE session's campaign (the
-// same in-process truth GetSession uses), NOT GetActiveCampaign — so it never
-// returns a different campaign's transcript (AC5).
-func TestSearchTranscriptPrefersLiveSessionCampaign(t *testing.T) {
+// TestSearchTranscriptHonorsDurableSelection is #120 aligned to #108: the web
+// search resolves the campaign with the SAME profile-first startCampaign path as
+// StartSession — the logged-in operator's durable /glyphoxa use selection outranks
+// the most-recently-created default, so the web search box and the Start button
+// always agree on which campaign is searched (AC5, no divergent resolution).
+func TestSearchTranscriptHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
-	liveCampaign := uuid.New()
-	otherCampaign := uuid.New()
-	mgr := &fakeSessionManager{
-		active:  true,
-		current: storage.VoiceSession{ID: uuid.New(), CampaignID: liveCampaign, Status: storage.VoiceSessionRunning},
-	}
-	// GetActiveCampaign returns a DIFFERENT campaign; the live session must win.
-	store := &fakeSessionStore{campaign: storage.Campaign{ID: otherCampaign}}
-	client := newSessionClient(t, mgr, store)
+	selected := storage.Campaign{ID: uuid.New(), Name: "Selected"}
+	newer := storage.Campaign{ID: uuid.New(), Name: "Newer"}
+	store := &fakeSessionStore{forUser: selected, campaign: newer, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, &fakeSessionManager{}, store, storage.User{DiscordUserID: "999"})
 
 	if _, err := client.SearchTranscriptLines(context.Background(),
 		connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"})); err != nil {
 		t.Fatalf("SearchTranscriptLines: %v", err)
 	}
-	if store.searchCampaign != liveCampaign {
-		t.Errorf("searched campaign = %s, want the LIVE session's campaign %s (not GetActiveCampaign %s)",
-			store.searchCampaign, liveCampaign, otherCampaign)
+	if store.searchCampaign != selected.ID {
+		t.Errorf("searched campaign = %s, want the durable selection %s (profile-first, not the fallback %s)",
+			store.searchCampaign, selected.ID, newer.ID)
 	}
 }
 

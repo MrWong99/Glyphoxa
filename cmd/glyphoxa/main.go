@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
@@ -336,22 +335,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// web Session screen uses, so the two surfaces share one session record and
 		// never diverge (AC4). Registered here (not in the presence block above)
 		// because they need the Manager, and BEFORE Ensure so they land in the one
-		// per-Guild registration alongside /roll.
-		// /glyphoxa search (#120) scopes to the operator's Active Campaign: the live
-		// session's campaign when one is running, else the stored Active Campaign
-		// (resolved inside the command). Registered here too because it reads the
-		// Manager snapshot.
-		activeCampaign := func() (uuid.UUID, bool) {
-			if vs, active := mgr.Snapshot(); active {
-				return vs.CampaignID, true
-			}
-			return uuid.Nil, false
-		}
+		// per-Guild registration alongside /roll. /glyphoxa search (#120) joins them:
+		// it resolves the Active Campaign through the SAME shared slash resolver
+		// (resolveActiveCampaign over the store + Manager), so it can never diverge
+		// from /glyphoxa start.
 		reg.Register(
 			presence.UseCommand(store),
 			presence.StartCommand(store, mgr),
 			presence.EndCommand(mgr),
-			presence.SearchCommand(store, activeCampaign),
+			presence.SearchCommand(store, mgr),
 		)
 		// Bring the presence up at boot (AC: the commands appear with no Voice
 		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier

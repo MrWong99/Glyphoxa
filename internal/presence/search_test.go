@@ -12,23 +12,20 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// fakeTranscriptSearch records the campaign + query the handler resolved and
-// returns canned lines/errors, so the scope precedence and formatting can be
-// asserted without a DB.
-type fakeTranscriptSearch struct {
+// fakeSearchStore reuses #216's fakeSessionStore (the shared slash Active-Campaign
+// resolver) and adds the transcript search path, recording the campaign + query
+// the handler resolved so the scope precedence can be asserted without a DB.
+type fakeSearchStore struct {
+	*fakeSessionStore
 	lines       []storage.TranscriptLine
 	searchErr   error
-	campaign    storage.Campaign
-	campaignErr error
-
-	gotCampaign    uuid.UUID
-	gotQuery       string
-	gotLimit       int
-	searchCalls    int
-	getActiveCalls int
+	gotCampaign uuid.UUID
+	gotQuery    string
+	gotLimit    int
+	searchCalls int
 }
 
-func (f *fakeTranscriptSearch) SearchTranscriptLines(_ context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error) {
+func (f *fakeSearchStore) SearchTranscriptLines(_ context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error) {
 	f.searchCalls++
 	f.gotCampaign = campaignID
 	f.gotQuery = query
@@ -36,31 +33,23 @@ func (f *fakeTranscriptSearch) SearchTranscriptLines(_ context.Context, campaign
 	return f.lines, f.searchErr
 }
 
-func (f *fakeTranscriptSearch) GetActiveCampaign(context.Context) (storage.Campaign, error) {
-	f.getActiveCalls++
-	if f.campaignErr != nil {
-		return storage.Campaign{}, f.campaignErr
+// selectionStore is a fakeSearchStore whose Active Campaign resolves via the
+// operator's durable /glyphoxa use selection (the common case for these tests).
+func selectionStore(selected storage.Campaign, lines ...storage.TranscriptLine) *fakeSearchStore {
+	return &fakeSearchStore{
+		fakeSessionStore: &fakeSessionStore{forUser: &selected},
+		lines:            lines,
 	}
-	return f.campaign, nil
 }
 
-// dispatchSearch registers the SearchCommand on a GM-configured registry and
-// dispatches it as the allowlisted operator with the given query, returning the
-// recorded responder + the fake. The GM path is exercised end-to-end (auth gate,
-// Defer watchdog, reply routing).
-func dispatchSearch(t *testing.T, fake *fakeTranscriptSearch, activeCampaign func() (uuid.UUID, bool), query string) *fakeResponder {
+// dispatchSearch registers /glyphoxa search on a GM-configured registry and
+// dispatches it as the allowlisted operator with the given query, exercising the
+// full GM path (auth gate, Defer watchdog, reply routing).
+func dispatchSearch(t *testing.T, store SearchStore, voice VoiceControl, query string) *fakeResponder {
 	t.Helper()
 	reg := testRegistry(testGuild, operatorID)
-	reg.Register(SearchCommand(fake, activeCampaign))
-	resp := &fakeResponder{}
-	ic := &Interaction{
-		guildID: testGuild,
-		userID:  operatorID,
-		opts:    fakeOpts{s: map[string]string{"query": query}},
-		resp:    resp,
-	}
-	reg.dispatch(context.Background(), "glyphoxa search", ic)
-	return resp
+	reg.Register(SearchCommand(store, voice))
+	return dispatchAs(reg, "glyphoxa search", operatorID, map[string]string{"query": query})
 }
 
 func bartLine(campaignID uuid.UUID) storage.TranscriptLine {
@@ -75,15 +64,12 @@ func bartLine(campaignID uuid.UUID) storage.TranscriptLine {
 // shared storage path with the resolved campaign + raw query + small limit, and
 // quotes the top matches with speaker + timestamp in ONE ephemeral Followup.
 func TestSearchCommandQuotesTopMatches(t *testing.T) {
-	campaignID := uuid.New()
-	fake := &fakeTranscriptSearch{
-		campaign: storage.Campaign{ID: campaignID},
-		lines: []storage.TranscriptLine{
-			bartLine(campaignID),
-			{VoiceSessionID: uuid.New(), CampaignID: campaignID, LineID: "u:1", Seq: 1, Who: "Player / DM", Kind: "player", TS: time.Date(2026, 6, 27, 18, 0, 1, 0, time.UTC), Text: "Where is the dragon?"},
-		},
-	}
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "dragon")
+	c := campaign("Lost Mine")
+	store := selectionStore(c,
+		bartLine(c.ID),
+		storage.TranscriptLine{VoiceSessionID: uuid.New(), CampaignID: c.ID, LineID: "u:1", Seq: 1, Who: "Player / DM", Kind: "player", TS: time.Date(2026, 6, 27, 18, 0, 1, 0, time.UTC), Text: "Where is the dragon?"},
+	)
+	resp := dispatchSearch(t, store, &fakeVoice{}, "dragon")
 
 	if resp.deferred == nil || !*resp.deferred {
 		t.Fatalf("search must Defer ephemerally before the DB round trip; deferred = %v", resp.deferred)
@@ -94,11 +80,11 @@ func TestSearchCommandQuotesTopMatches(t *testing.T) {
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
 	}
-	if fake.searchCalls != 1 || fake.gotQuery != "dragon" || fake.gotCampaign != campaignID {
-		t.Errorf("search call = (calls %d, query %q, campaign %s), want (1, dragon, %s)", fake.searchCalls, fake.gotQuery, fake.gotCampaign, campaignID)
+	if store.searchCalls != 1 || store.gotQuery != "dragon" || store.gotCampaign != c.ID {
+		t.Errorf("search call = (calls %d, query %q, campaign %s), want (1, dragon, %s)", store.searchCalls, store.gotQuery, store.gotCampaign, c.ID)
 	}
-	if fake.gotLimit != transcriptSearchLimit {
-		t.Errorf("search limit = %d, want %d", fake.gotLimit, transcriptSearchLimit)
+	if store.gotLimit != transcriptSearchLimit {
+		t.Errorf("search limit = %d, want %d", store.gotLimit, transcriptSearchLimit)
 	}
 	body := resp.followups[0].content
 	for _, want := range []string{"Bart (NPC)", "18:00:02", "Well met, traveller.", "Player / DM", "Where is the dragon?"} {
@@ -111,8 +97,7 @@ func TestSearchCommandQuotesTopMatches(t *testing.T) {
 // TestSearchCommandNoMatches is #120 AC3's no-match case: a clear ephemeral reply
 // quoting the query.
 func TestSearchCommandNoMatches(t *testing.T) {
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: uuid.New()}}
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "unicorn")
+	resp := dispatchSearch(t, selectionStore(campaign("Lost Mine")), &fakeVoice{}, "unicorn")
 
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
@@ -125,8 +110,8 @@ func TestSearchCommandNoMatches(t *testing.T) {
 // TestSearchCommandEmptyQuery: a blank/whitespace query short-circuits with a
 // hint, WITHOUT Deferring or touching the DB.
 func TestSearchCommandEmptyQuery(t *testing.T) {
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: uuid.New()}}
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "   ")
+	store := selectionStore(campaign("Lost Mine"))
+	resp := dispatchSearch(t, store, &fakeVoice{}, "   ")
 
 	if resp.deferred != nil {
 		t.Errorf("empty query must not Defer; deferred = %v", resp.deferred)
@@ -137,16 +122,17 @@ func TestSearchCommandEmptyQuery(t *testing.T) {
 	if !strings.Contains(strings.ToLower(resp.replies[0].content), "search for") {
 		t.Errorf("empty-query hint = %q, want a search-for hint", resp.replies[0].content)
 	}
-	if fake.searchCalls != 0 || fake.getActiveCalls != 0 {
-		t.Errorf("empty query touched storage: search=%d getActive=%d, want 0/0", fake.searchCalls, fake.getActiveCalls)
+	if store.searchCalls != 0 {
+		t.Errorf("empty query touched storage: search=%d, want 0", store.searchCalls)
 	}
 }
 
-// TestSearchCommandNoActiveCampaign: with no live session and no stored Active
-// Campaign, the reply points the operator at /glyphoxa use — and no search runs.
+// TestSearchCommandNoActiveCampaign: with no live session and no durable /glyphoxa
+// use selection, the reply points the operator at /glyphoxa use (the SHARED slash
+// resolver's ErrNoActiveCampaign, no most-recent fallback) — and no search runs.
 func TestSearchCommandNoActiveCampaign(t *testing.T) {
-	fake := &fakeTranscriptSearch{campaignErr: storage.ErrNotFound}
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "dragon")
+	store := &fakeSearchStore{fakeSessionStore: &fakeSessionStore{}} // forUser nil -> ErrNotFound
+	resp := dispatchSearch(t, store, &fakeVoice{}, "dragon")
 
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
@@ -154,40 +140,41 @@ func TestSearchCommandNoActiveCampaign(t *testing.T) {
 	if !strings.Contains(resp.followups[0].content, "/glyphoxa use") {
 		t.Errorf("no-campaign reply = %q, want the /glyphoxa use hint", resp.followups[0].content)
 	}
-	if fake.searchCalls != 0 {
-		t.Errorf("search ran %d times with no Active Campaign, want 0", fake.searchCalls)
+	if store.searchCalls != 0 {
+		t.Errorf("search ran %d times with no Active Campaign, want 0", store.searchCalls)
 	}
 }
 
-// TestSearchCommandPrefersLiveSessionCampaign: while a session is live the search
-// scopes to the live campaign and never falls back to GetActiveCampaign (AC5
-// scope precedence, matching the web RPC).
-func TestSearchCommandPrefersLiveSessionCampaign(t *testing.T) {
-	live := uuid.New()
-	other := uuid.New()
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: other}, lines: []storage.TranscriptLine{bartLine(live)}}
-	dispatchSearch(t, fake, func() (uuid.UUID, bool) { return live, true }, "dragon")
-
-	if fake.gotCampaign != live {
-		t.Errorf("searched campaign = %s, want the live session's %s (not GetActiveCampaign %s)", fake.gotCampaign, live, other)
+// TestSearchCommandResolvesLiveSessionCampaign: while a session is live the search
+// scopes to the LIVE session's campaign (the shared resolver's first choice), NOT
+// the durable selection — matching /glyphoxa start (AC5 scope precedence).
+func TestSearchCommandResolvesLiveSessionCampaign(t *testing.T) {
+	live := campaign("Live")
+	other := campaign("Other")
+	store := &fakeSearchStore{
+		fakeSessionStore: &fakeSessionStore{
+			byID:    map[uuid.UUID]storage.Campaign{live.ID: live},
+			forUser: &other, // a different durable selection; the live session must win
+		},
+		lines: []storage.TranscriptLine{bartLine(live.ID)},
 	}
-	if fake.getActiveCalls != 0 {
-		t.Errorf("GetActiveCampaign called %d times while a session was live, want 0", fake.getActiveCalls)
+	voice := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: live.ID}}
+	dispatchSearch(t, store, voice, "dragon")
+
+	if store.gotCampaign != live.ID {
+		t.Errorf("searched campaign = %s, want the live session's %s (not the durable selection %s)", store.gotCampaign, live.ID, other.ID)
 	}
 }
 
-// TestSearchCommandFallsBackToActiveCampaign: with no live session it resolves the
-// stored Active Campaign.
-func TestSearchCommandFallsBackToActiveCampaign(t *testing.T) {
-	stored := uuid.New()
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: stored}, lines: []storage.TranscriptLine{bartLine(stored)}}
-	dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "dragon")
+// TestSearchCommandFallsBackToDurableSelection: with no live session it resolves
+// the operator's durable /glyphoxa use selection.
+func TestSearchCommandFallsBackToDurableSelection(t *testing.T) {
+	selected := campaign("Selected")
+	store := selectionStore(selected, bartLine(selected.ID))
+	dispatchSearch(t, store, &fakeVoice{}, "dragon")
 
-	if fake.gotCampaign != stored {
-		t.Errorf("searched campaign = %s, want the stored Active Campaign %s", fake.gotCampaign, stored)
-	}
-	if fake.getActiveCalls != 1 {
-		t.Errorf("GetActiveCampaign called %d times, want 1 (the fallback)", fake.getActiveCalls)
+	if store.gotCampaign != selected.ID {
+		t.Errorf("searched campaign = %s, want the durable selection %s", store.gotCampaign, selected.ID)
 	}
 }
 
@@ -195,8 +182,9 @@ func TestSearchCommandFallsBackToActiveCampaign(t *testing.T) {
 // from the handler, which the Registry answers with the generic ephemeral reply
 // via Followup (post-Defer), never leaving the interaction on "thinking…".
 func TestSearchCommandStorageErrorRepliesGeneric(t *testing.T) {
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: uuid.New()}, searchErr: context.DeadlineExceeded}
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "dragon")
+	store := selectionStore(campaign("Lost Mine"))
+	store.searchErr = context.DeadlineExceeded
+	resp := dispatchSearch(t, store, &fakeVoice{}, "dragon")
 
 	if len(resp.replies) != 0 {
 		t.Errorf("post-Defer error must not CreateMessage; replies = %+v", resp.replies)
@@ -212,7 +200,7 @@ func TestSearchCommandStorageErrorRepliesGeneric(t *testing.T) {
 // TestSearchCommandIsGMOnly pins the command's surface: it is the grouped
 // /glyphoxa search, GM-only (ADR-0010), with a required query option.
 func TestSearchCommandIsGMOnly(t *testing.T) {
-	cmd := SearchCommand(&fakeTranscriptSearch{}, nil)
+	cmd := SearchCommand(&fakeSearchStore{fakeSessionStore: &fakeSessionStore{}}, &fakeVoice{})
 	if cmd.Path != "glyphoxa search" {
 		t.Errorf("Path = %q, want \"glyphoxa search\"", cmd.Path)
 	}
@@ -231,16 +219,12 @@ func TestSearchCommandIsGMOnly(t *testing.T) {
 // TestSearchCommandNonOperatorDenied: a non-allowlisted user's /glyphoxa search is
 // denied by the Gate before the handler runs (GM-only, ADR-0041) — no search.
 func TestSearchCommandNonOperatorDenied(t *testing.T) {
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: uuid.New()}}
+	store := selectionStore(campaign("Lost Mine"))
 	reg := testRegistry(testGuild, operatorID)
-	reg.Register(SearchCommand(fake, func() (uuid.UUID, bool) { return uuid.Nil, false }))
-	resp := &fakeResponder{}
-	reg.dispatch(context.Background(), "glyphoxa search", &Interaction{
-		guildID: testGuild, userID: strangerID,
-		opts: fakeOpts{s: map[string]string{"query": "dragon"}}, resp: resp,
-	})
+	reg.Register(SearchCommand(store, &fakeVoice{}))
+	resp := dispatchAs(reg, "glyphoxa search", strangerID, map[string]string{"query": "dragon"})
 
-	if fake.searchCalls != 0 {
+	if store.searchCalls != 0 {
 		t.Errorf("search ran for a non-operator, want 0 (GM-only gate)")
 	}
 	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
@@ -252,15 +236,13 @@ func TestSearchCommandNonOperatorDenied(t *testing.T) {
 // long; the quoted line is truncated (…) so it never blows Discord's 2000-char
 // content cap and 400s the Followup (which would hide ALL matches from the GM).
 func TestSearchCommandTruncatesLongLine(t *testing.T) {
-	campaignID := uuid.New()
+	c := campaign("Lost Mine")
 	long := strings.Repeat("dragon fire ", 60) // ~720 chars, well over the per-line cap
-	fake := &fakeTranscriptSearch{
-		campaign: storage.Campaign{ID: campaignID},
-		lines: []storage.TranscriptLine{
-			{VoiceSessionID: uuid.New(), CampaignID: campaignID, LineID: "a:t1", Seq: 1, Who: "Bart", Tag: "NPC", Kind: "npc", TS: time.Date(2026, 6, 27, 18, 0, 1, 0, time.UTC), Text: long},
-		},
-	}
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, "dragon")
+	store := selectionStore(c, storage.TranscriptLine{
+		VoiceSessionID: uuid.New(), CampaignID: c.ID, LineID: "a:t1", Seq: 1, Who: "Bart", Tag: "NPC", Kind: "npc",
+		TS: time.Date(2026, 6, 27, 18, 0, 1, 0, time.UTC), Text: long,
+	})
+	resp := dispatchSearch(t, store, &fakeVoice{}, "dragon")
 
 	if len(resp.followups) != 1 {
 		t.Fatalf("want one Followup, got %+v", resp.followups)
@@ -300,9 +282,9 @@ func TestFormatTranscriptMatchesCapsTotalLength(t *testing.T) {
 // 6000 chars; the no-match reply echoes only a truncated query, so it stays well
 // under the Discord cap and never 400s.
 func TestSearchCommandGiantQueryNoMatch(t *testing.T) {
-	fake := &fakeTranscriptSearch{campaign: storage.Campaign{ID: uuid.New()}} // no lines -> no match
+	store := selectionStore(campaign("Lost Mine")) // no lines -> no match
 	giant := strings.Repeat("a", 6000)
-	resp := dispatchSearch(t, fake, func() (uuid.UUID, bool) { return uuid.Nil, false }, giant)
+	resp := dispatchSearch(t, store, &fakeVoice{}, giant)
 
 	if len(resp.followups) != 1 {
 		t.Fatalf("want one Followup, got %+v", resp.followups)

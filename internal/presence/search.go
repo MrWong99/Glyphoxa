@@ -35,27 +35,31 @@ const (
 	maxQueryEcho        = 100
 )
 
-// TranscriptSearch is the storage surface /glyphoxa search needs: the ONE shared
-// search path (AC4 — the same storage.SearchTranscriptLines the web RPC calls)
-// plus the stored Active Campaign fallback. The live Voice Session's campaign is
-// resolved separately (activeCampaign), matching the web RPC's scope precedence.
-type TranscriptSearch interface {
+// SearchStore is the storage surface /glyphoxa search needs: the shared slash
+// Active-Campaign resolution (SessionStore, reused by resolveActiveCampaign so the
+// slash surface has ONE resolver, not a divergent copy — #216/#108) plus the ONE
+// shared transcript search path (AC4 — the same storage.SearchTranscriptLines the
+// web RPC calls). *storage.Store satisfies it; tests use a fake.
+type SearchStore interface {
+	SessionStore
 	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
-	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 }
 
 // SearchCommand builds the /glyphoxa search slash command (ADR-0010: GM-only,
 // operator-allowlisted). It searches the operator's Active Campaign transcript via
 // the SAME storage path the web uses (AC4) and quotes the top matches with speaker
-// + timestamp (ADR-0011 amendment). The Campaign is resolved server-side — the
-// live Voice Session's campaign (activeCampaign), else the stored Active Campaign —
-// never client-supplied (AC5), so a search never crosses into another campaign.
+// + timestamp (ADR-0011 amendment). The Campaign is resolved server-side by the
+// SHARED slash resolver resolveActiveCampaign (ADR-0009 order: live Voice Session's
+// campaign → the operator's durable /glyphoxa use selection → fail) — never
+// client-supplied (AC5), and identical to /glyphoxa start so the two never diverge.
+// There is deliberately no most-recently-created fallback on the slash surface (the
+// GM has the /glyphoxa use affordance right there).
 //
 // The DB search can exceed Discord's ~2.5s interaction deadline, so the handler
 // Defers first (which stops the dispatch first-response watchdog) and then bounds
 // its own DB work with transcriptSearchTimeout, because the post-Defer ctx no
 // longer carries that deadline.
-func SearchCommand(search TranscriptSearch, activeCampaign func() (uuid.UUID, bool)) Command {
+func SearchCommand(store SearchStore, voice VoiceControl) Command {
 	return Command{
 		Path:        "glyphoxa search",
 		Description: "Search the Active Campaign's transcript.",
@@ -85,17 +89,19 @@ func SearchCommand(search TranscriptSearch, activeCampaign func() (uuid.UUID, bo
 			dbCtx, cancel := context.WithTimeout(ctx, transcriptSearchTimeout)
 			defer cancel()
 
-			campaignID, ok, err := resolveSearchCampaign(dbCtx, search, activeCampaign)
+			// The SAME resolver /glyphoxa start uses (no divergent copy): live session
+			// → durable /glyphoxa use selection → ErrNoActiveCampaign.
+			c, err := resolveActiveCampaign(dbCtx, store, voice, ic.UserID())
+			if errors.Is(err, ErrNoActiveCampaign) {
+				return ic.ReplyEphemeral("No Active Campaign yet — run /glyphoxa use campaign:<name> first.")
+			}
 			if err != nil {
 				return fmt.Errorf("presence: resolve active campaign for search: %w", err)
 			}
-			if !ok {
-				return ic.ReplyEphemeral("No Active Campaign yet — run `/glyphoxa use` to set one.")
-			}
 
-			lines, err := search.SearchTranscriptLines(dbCtx, campaignID, query, transcriptSearchLimit)
+			lines, err := store.SearchTranscriptLines(dbCtx, c.ID, query, transcriptSearchLimit)
 			if err != nil {
-				return fmt.Errorf("presence: search transcript for campaign %s: %w", campaignID, err)
+				return fmt.Errorf("presence: search transcript for campaign %s: %w", c.ID, err)
 			}
 			if len(lines) == 0 {
 				return ic.ReplyEphemeral(fmt.Sprintf("No lines match %q.", truncateRunes(query, maxQueryEcho)))
@@ -103,27 +109,6 @@ func SearchCommand(search TranscriptSearch, activeCampaign func() (uuid.UUID, bo
 			return ic.ReplyEphemeral(formatTranscriptMatches(query, lines))
 		},
 	}
-}
-
-// resolveSearchCampaign returns the Campaign to search, matching the web RPC's
-// precedence: the live Voice Session's campaign first, else the stored Active
-// Campaign. ok is false only when there is neither (never-run state), which the
-// caller answers with the "/glyphoxa use" hint. A storage error other than
-// ErrNotFound is propagated.
-func resolveSearchCampaign(ctx context.Context, search TranscriptSearch, activeCampaign func() (uuid.UUID, bool)) (uuid.UUID, bool, error) {
-	if activeCampaign != nil {
-		if id, ok := activeCampaign(); ok {
-			return id, true, nil
-		}
-	}
-	c, err := search.GetActiveCampaign(ctx)
-	if errors.Is(err, storage.ErrNotFound) {
-		return uuid.Nil, false, nil
-	}
-	if err != nil {
-		return uuid.Nil, false, err
-	}
-	return c.ID, true, nil
 }
 
 // formatTranscriptMatches renders the top matches as an ephemeral reply: a header
