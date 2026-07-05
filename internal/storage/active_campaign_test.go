@@ -1,0 +1,182 @@
+//go:build integration
+
+package storage_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
+)
+
+const gmSnowflake = "555000111222"
+
+// insertCampaign adds a second campaign in the same tenant, returning its id.
+func insertCampaign(t *testing.T, st *storage.Store, tenantID uuid.UUID, name string) uuid.UUID {
+	t.Helper()
+	// Use a direct write through the pool the Store already holds; CreateCampaign
+	// needs a NewCampaign — but the campaign-creation seam differs across tests, so
+	// keep this local to the active-campaign concern.
+	id, err := st.CreateCampaign(context.Background(), storage.NewCampaign{
+		TenantID: tenantID, Name: name, System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("create campaign %q: %v", name, err)
+	}
+	return id
+}
+
+// TestActiveCampaignRoundTrip proves the #108 durable selection against a real
+// Postgres: SetActiveCampaign upserts the operator's users row (even before any
+// web login) and GetActiveCampaignForUser reads the chosen campaign back;
+// re-selecting a different campaign updates in place.
+func TestActiveCampaignRoundTrip(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, first := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// No selection yet (and no user row at all) → ErrNotFound.
+	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetActiveCampaignForUser before any selection = %v, want ErrNotFound", err)
+	}
+
+	// SetActiveCampaign upserts the user row and records the choice.
+	if err := st.SetActiveCampaign(ctx, gmSnowflake, first); err != nil {
+		t.Fatalf("SetActiveCampaign: %v", err)
+	}
+	if _, err := st.GetUserByDiscordID(ctx, gmSnowflake); err != nil {
+		t.Fatalf("SetActiveCampaign did not create the user row: %v", err)
+	}
+	got, err := st.GetActiveCampaignForUser(ctx, gmSnowflake)
+	if err != nil {
+		t.Fatalf("GetActiveCampaignForUser: %v", err)
+	}
+	if got.ID != first {
+		t.Errorf("active campaign = %s, want %s", got.ID, first)
+	}
+
+	// Re-selecting a different campaign updates the same row in place.
+	second := insertCampaign(t, st, tenantID, "Second Campaign")
+	if err := st.SetActiveCampaign(ctx, gmSnowflake, second); err != nil {
+		t.Fatalf("SetActiveCampaign (re-select): %v", err)
+	}
+	got, err = st.GetActiveCampaignForUser(ctx, gmSnowflake)
+	if err != nil || got.ID != second {
+		t.Fatalf("after re-select = %s, %v; want %s", got.ID, err, second)
+	}
+}
+
+// TestActiveCampaignPersistsAcrossReopen proves AC1 "persists across a process
+// restart": a fresh Store over the same DSN reads the same selection.
+func TestActiveCampaignPersistsAcrossReopen(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+
+	if err := storage.New(pool).SetActiveCampaign(ctx, gmSnowflake, campaignID); err != nil {
+		t.Fatalf("SetActiveCampaign: %v", err)
+	}
+
+	// A brand-new pool + Store (a "restarted process") sees the persisted choice.
+	reopened := storage.New(openPool(t, dsn))
+	got, err := reopened.GetActiveCampaignForUser(ctx, gmSnowflake)
+	if err != nil || got.ID != campaignID {
+		t.Fatalf("after reopen = %s, %v; want %s", got.ID, err, campaignID)
+	}
+}
+
+// TestActiveCampaignOverridesImplicitDefault is the ADR-0009 resolution
+// precedence at the storage grain: the operator's explicit selection (step 2)
+// diverges from — and is honored over — the most-recently-created implicit
+// default (step 3, GetActiveCampaign). #108's resolveActiveCampaign layers the
+// live-session step on top of this.
+func TestActiveCampaignOverridesImplicitDefault(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, older := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A newer campaign becomes the implicit default (most-recently-created).
+	newer := insertCampaign(t, st, tenantID, "Newer Campaign")
+	def, err := st.GetActiveCampaign(ctx)
+	if err != nil || def.ID != newer {
+		t.Fatalf("implicit default = %s, %v; want the newer campaign %s", def.ID, err, newer)
+	}
+
+	// The operator explicitly selects the OLDER campaign; the per-operator read
+	// must return that, not the implicit default.
+	if err := st.SetActiveCampaign(ctx, gmSnowflake, older); err != nil {
+		t.Fatalf("SetActiveCampaign: %v", err)
+	}
+	got, err := st.GetActiveCampaignForUser(ctx, gmSnowflake)
+	if err != nil || got.ID != older {
+		t.Fatalf("per-operator selection = %s, %v; want the older campaign %s", got.ID, err, older)
+	}
+}
+
+// TestGetActiveCampaignForUserFallsThroughOnDeletedCampaign proves the FK's ON
+// DELETE SET NULL clears a stale selection: deleting the chosen campaign makes
+// GetActiveCampaignForUser return ErrNotFound (so resolution falls to step 3),
+// and a user with a NULL selection is likewise ErrNotFound.
+func TestGetActiveCampaignForUserFallsThroughOnDeletedCampaign(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, _ := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A user with a row but no selection → ErrNotFound.
+	if _, err := st.UpsertUser(ctx, storage.UpsertUserParams{DiscordUserID: gmSnowflake}); err != nil {
+		t.Fatalf("UpsertUser: %v", err)
+	}
+	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("NULL selection = %v, want ErrNotFound", err)
+	}
+
+	// Select a throwaway campaign, then delete it: the FK nulls the pointer.
+	victim := insertCampaign(t, st, tenantID, "Doomed Campaign")
+	if err := st.SetActiveCampaign(ctx, gmSnowflake, victim); err != nil {
+		t.Fatalf("SetActiveCampaign: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM campaign WHERE id = $1`, victim); err != nil {
+		t.Fatalf("delete campaign: %v", err)
+	}
+	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("selection after campaign delete = %v, want ErrNotFound (FK SET NULL)", err)
+	}
+}
+
+// TestListAndGetCampaign covers the /glyphoxa use autocomplete + resolution
+// reads: ListCampaigns returns every campaign name-ordered, GetCampaign fetches
+// one by id, and an unknown id is ErrNotFound.
+func TestListAndGetCampaign(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, first := seedCampaign(t, dsn) // seeded name: "Lost Mine"
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	second := insertCampaign(t, st, tenantID, "Alpha Quest")
+
+	list, err := st.ListCampaigns(ctx)
+	if err != nil {
+		t.Fatalf("ListCampaigns: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("ListCampaigns len = %d, want 2", len(list))
+	}
+	// Ordered by name: "Alpha Quest" before "Lost Mine".
+	if list[0].ID != second || list[1].ID != first {
+		t.Errorf("ListCampaigns order = [%s %s], want name-ordered [%s %s]", list[0].ID, list[1].ID, second, first)
+	}
+
+	got, err := st.GetCampaign(ctx, first)
+	if err != nil || got.ID != first {
+		t.Fatalf("GetCampaign(%s) = %s, %v", first, got.ID, err)
+	}
+	if _, err := st.GetCampaign(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetCampaign(random) = %v, want ErrNotFound", err)
+	}
+}

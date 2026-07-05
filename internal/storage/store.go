@@ -97,6 +97,45 @@ func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
 	return c, nil
 }
 
+// GetCampaign loads one Campaign by id, or ErrNotFound. It backs the /glyphoxa
+// use resolution step that turns a live Voice Session's campaign_id back into the
+// full Campaign (#108).
+func (s *Store) GetCampaign(ctx context.Context, id uuid.UUID) (Campaign, error) {
+	row := s.db.QueryRow(ctx, `SELECT `+campaignColumns+` FROM campaign WHERE id = $1`, id)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: get campaign %s: %w", id, err)
+	}
+	return c, nil
+}
+
+// ListCampaigns returns every Campaign ordered by name (then id for a stable
+// tie-break) — the /glyphoxa use autocomplete source (#108). Single-operator
+// today, so it is unscoped, mirroring GetActiveCampaign; tenant scoping fills in
+// behind the X-Tenant-Id pass-through later (ADR-0039).
+func (s *Store) ListCampaigns(ctx context.Context) ([]Campaign, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+campaignColumns+` FROM campaign ORDER BY name, id`)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list campaigns: %w", err)
+	}
+	defer rows.Close()
+	var out []Campaign
+	for rows.Next() {
+		c, err := scanCampaign(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan campaign: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list campaigns: %w", err)
+	}
+	return out, nil
+}
+
 const agentColumns = `
 	id, campaign_id, agent_role, name, title, persona, voice,
 	voice_provider_config_id, llm_provider_config_id,
