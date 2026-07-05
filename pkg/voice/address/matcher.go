@@ -362,8 +362,18 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 		}
 	}
 
-	// Highest score wins; ties break by Agent order so the result is stable.
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].total > hits[j].total })
+	// Highest score wins. Equal totals rank by fuzzy name similarity, because
+	// NameMatch contributes a flat weight above its threshold: an exactly heard
+	// name (1.0) and an incidental phonetic collision (0.9, e.g. "gerade" ≈
+	// "Greta" under Double Metaphone, #198) total the same, and only the raw
+	// similarity still tells them apart. Remaining ties break by Agent order so
+	// the result is stable.
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].total != hits[j].total {
+			return hits[i].total > hits[j].total
+		}
+		return nameScores[hits[i].agent.index] > nameScores[hits[j].agent.index]
+	})
 
 	// Cap the published set before building it, so lastAddressed records only
 	// the Agents actually addressed: naming two NPCs under the single-target
