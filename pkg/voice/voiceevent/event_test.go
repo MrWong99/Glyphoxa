@@ -105,6 +105,15 @@ func TestTurnEnded_EventName(t *testing.T) {
 	}
 }
 
+func TestMuteChanged_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := MuteChanged{}.EventName()
+	if got != "mute.changed" {
+		t.Errorf("EventName = %q, want %q", got, "mute.changed")
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 

@@ -226,6 +226,12 @@ const (
 	// TurnEndProviderError: the reply producer (LLM round/tool loop) failed before
 	// the turn could produce audio.
 	TurnEndProviderError TurnEndReason = "provider_error"
+	// TurnEndMute: a GM muted the Agent, cutting its turn (#211). It is a
+	// deliberate control action, DISTINCT from a human [BargeDetected] — CONTEXT.md
+	// reserves Barge-in for the human-interrupts-Agent case. Transcript and history
+	// commit exactly as a barge would (delivered-sentences-only, ADR-0012), but the
+	// cause is a mute, never a barge.
+	TurnEndMute TurnEndReason = "mute"
 )
 
 // TurnEnded marks a turn that ended for a known reason — distinct from a turn
@@ -264,6 +270,26 @@ type BargeDetected struct {
 
 // EventName implements [Event].
 func (BargeDetected) EventName() string { return "barge.detected" }
+
+// MuteChanged marks a change to one Agent's mute state in the live Voice Session
+// (#211). It is the mute-control event on the shared bus: the session Manager
+// publishes it AFTER writing its authoritative mute set, and both surfaces react —
+// the orchestrator's mute reactor cuts the floor / gates routes, the wirenpc
+// wiring prunes the address matcher, and the SSE relay forwards it to the web
+// panel. The ordering is load-bearing: the set is written before the event, so a
+// reactor reading the set on this event always sees the change.
+//
+// Muted=true means the Agent is now muted (produces no audio, no transcript);
+// Muted=false restores it. AgentID is the Agent's stable id (a Character NPC's
+// primary key, or the Butler's).
+type MuteChanged struct {
+	At      time.Time
+	AgentID string
+	Muted   bool
+}
+
+// EventName implements [Event].
+func (MuteChanged) EventName() string { return "mute.changed" }
 
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
