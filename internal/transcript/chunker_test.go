@@ -102,6 +102,26 @@ func newChunker(t *testing.T, store ChunkStore, gauge BacklogGauge, cfg ChunkerC
 	return bus, fs, c
 }
 
+// liveChunker wires a chunker to a bus with one active session that carries a
+// campaign id (fakeSessions reports uuid.Nil for the campaign; the funcSessions
+// script here lets a test assert campaign_id / voice_session_id on the row).
+func liveChunker(t *testing.T, store ChunkStore, gauge BacklogGauge, cfg ChunkerConfig, vs storage.VoiceSession) (*voiceevent.Bus, *Chunker) {
+	t.Helper()
+	bus := voiceevent.NewBus()
+	fs := &funcSessions{}
+	fs.set(func() (storage.VoiceSession, bool) { return vs, true })
+	c := NewChunker(bus, fs, store, gauge, slog.New(slog.DiscardHandler), cfg)
+	return bus, c
+}
+
+// agentReply is the event sequence for one DELIVERED Agent sentence: dispatch
+// (TTSInvoked) immediately followed by delivery (FirstAudio). The chunk grain
+// commits only on delivery (ADR-0012).
+func agentReply(bus *voiceevent.Bus, turnID, sentence string, at time.Time) {
+	bus.Publish(voiceevent.TTSInvoked{At: at, Sentence: sentence, TurnID: turnID})
+	bus.Publish(voiceevent.FirstAudio{At: at, TurnID: turnID})
+}
+
 // eventually polls fn until it returns true or the deadline passes.
 func eventually(t *testing.T, within time.Duration, fn func() bool) bool {
 	t.Helper()
@@ -116,26 +136,25 @@ func eventually(t *testing.T, within time.Duration, fn func() bool) bool {
 }
 
 // TestChunker_FiveUtterancesOneInsert is #104 rule CLOSE: a chunk closes at the
-// fifth utterance into ONE insert whose content is the five lines in order — not
-// one insert per utterance — and the embedding is never set on the write path.
+// fifth utterance into ONE insert whose content is the five lines in order — and
+// the write happens on the auto-close path WITHOUT any FlushSession draining it.
+// It also pins started_at = the first utterance's event time and the row's
+// campaign/session FKs.
 func TestChunker_FiveUtterancesOneInsert(t *testing.T) {
 	store := &fakeChunkStore{}
-	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	bus, _ := liveChunker(t, store, nil, ChunkerConfig{}, vs)
 
 	for i := 1; i <= 5; i++ {
 		bus.Publish(voiceevent.STTFinal{At: at(i), Text: "line" + string(rune('0'+i)), TurnID: "t"})
 	}
 
-	// Drain the async writer via the flush barrier (the auto-close at 5 already
-	// enqueued the insert; FlushSession only adds the barrier here).
-	if err := c.FlushSession(context.Background(), fs.id); err != nil {
-		t.Fatalf("FlushSession: %v", err)
+	// The fifth utterance auto-closes the chunk and the async writer inserts it —
+	// no FlushSession barrier involved.
+	if !eventually(t, 2*time.Second, func() bool { return store.count() == 1 }) {
+		t.Fatalf("five utterances did not auto-close into one insert: inserts = %d", store.count())
 	}
-
 	got := store.all()
-	if len(got) != 1 {
-		t.Fatalf("inserts = %d, want 1 (five utterances = one chunk)", len(got))
-	}
 	want := "Player / DM: line1\nPlayer / DM: line2\nPlayer / DM: line3\nPlayer / DM: line4\nPlayer / DM: line5"
 	if got[0].Content != want {
 		t.Errorf("content = %q,\nwant %q", got[0].Content, want)
@@ -145,6 +164,13 @@ func TestChunker_FiveUtterancesOneInsert(t *testing.T) {
 	}
 	if len(got[0].SpeakerDiscordUserIDs) != 0 {
 		t.Errorf("speakers = %v, want empty (anonymous STT lane)", got[0].SpeakerDiscordUserIDs)
+	}
+	if !got[0].StartedAt.Equal(at(1)) {
+		t.Errorf("started_at = %s, want the first utterance's event time %s", got[0].StartedAt, at(1))
+	}
+	if got[0].CampaignID != vs.CampaignID || got[0].VoiceSessionID != vs.ID {
+		t.Errorf("row FKs = campaign %s / session %s, want %s / %s",
+			got[0].CampaignID, got[0].VoiceSessionID, vs.CampaignID, vs.ID)
 	}
 }
 
@@ -212,8 +238,9 @@ func TestChunker_SecondUtteranceAfterWindowClosesImmediately(t *testing.T) {
 }
 
 // TestChunker_AgentReplyCoalesces is #104 rule UTTERANCES: an Agent turn is ONE
-// utterance no matter how many TTS sentences it spans (they append to one line),
-// and participated_agent_ids carries exactly that Agent's DB UUID.
+// utterance no matter how many DELIVERED sentences it spans (each delivered on its
+// FirstAudio, appended to one line), and participated_agent_ids carries exactly
+// that Agent's DB UUID.
 func TestChunker_AgentReplyCoalesces(t *testing.T) {
 	store := &fakeChunkStore{}
 	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
@@ -224,9 +251,10 @@ func TestChunker_AgentReplyCoalesces(t *testing.T) {
 		At: at(2), TurnID: "t1",
 		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
 	})
-	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Well met.", Index: 0, TurnID: "t1"})
-	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Sit down.", Index: 1, TurnID: "t1"})
-	bus.Publish(voiceevent.TTSInvoked{At: at(5), Sentence: "What'll it be?", Index: 2, TurnID: "t1"})
+	// Each sentence dispatched then delivered (TTSInvoked + FirstAudio interleaved).
+	agentReply(bus, "t1", "Well met.", at(3))
+	agentReply(bus, "t1", "Sit down.", at(4))
+	agentReply(bus, "t1", "What'll it be?", at(5))
 	bus.Publish(voiceevent.STTFinal{At: at(6), Text: "An ale", TurnID: "t2"})
 
 	if err := c.FlushSession(context.Background(), fs.id); err != nil {
@@ -243,6 +271,216 @@ func TestChunker_AgentReplyCoalesces(t *testing.T) {
 	}
 	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
 		t.Errorf("participated = %v, want exactly [%s]", got[0].ParticipatedAgentIDs, agentID)
+	}
+}
+
+// TestChunker_DispatchedButNotDeliveredIsIgnored is #104 + ADR-0012: TTSInvoked is
+// a dispatch attempt, not delivery. A sentence dispatched but never delivered (no
+// FirstAudio — e.g. a Synthesize start-error) leaves the chunk unchanged and the
+// Agent out of participated_agent_ids.
+func TestChunker_DispatchedButNotDeliveredIsIgnored(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hi", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	// Dispatched, but no FirstAudio ever follows: the room never heard it.
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "unheard", TurnID: "t1"})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 || got[0].Content != "Player / DM: hi" {
+		t.Fatalf("content = %+v, want only the human line (undelivered agent sentence excluded)", got)
+	}
+	if len(got[0].ParticipatedAgentIDs) != 0 {
+		t.Errorf("participated = %v, want empty (agent produced no audio)", got[0].ParticipatedAgentIDs)
+	}
+}
+
+// TestChunker_UndeliveredTailDroppedOnBarge is #104 + ADR-0012: on a barge the
+// turn ends carrying only its delivered sentences; the dispatched-but-undelivered
+// tail is dropped, a late TTSInvoked after TurnEnded is dropped + logged, and a
+// late FirstAudio after the buffer cleared is a no-op.
+func TestChunker_UndeliveredTailDroppedOnBarge(t *testing.T) {
+	store := &fakeChunkStore{}
+	cap := &capHandler{}
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	c := NewChunker(bus, fs, store, nil, slog.New(cap), ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "Well met.", at(2))                                        // delivered
+	agentReply(bus, "t1", "Sit.", at(3))                                             // delivered
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "Have a—", TurnID: "t1"}) // dispatched, not delivered
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
+	bus.Publish(voiceevent.TTSInvoked{At: at(6), Sentence: "late", TurnID: "t1"}) // after end: dropped + logged
+	bus.Publish(voiceevent.FirstAudio{At: at(7), TurnID: "t1"})                   // straggler: no pending -> no-op
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 || got[0].Content != "Bart: Well met. Sit." {
+		t.Fatalf("content = %+v, want only the two delivered sentences", got)
+	}
+	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
+		t.Errorf("participated = %v, want [%s]", got[0].ParticipatedAgentIDs, agentID)
+	}
+	if !cap.has("after turn ended") {
+		t.Errorf("late dispatch after TurnEnded was not logged")
+	}
+}
+
+// TestChunker_ZeroDeliveredTurnLogsNothing is #104 + ADR-0012: a turn interrupted
+// before its first sentence is delivered (no FirstAudio at all) contributes no
+// utterance — a chunk never even opens for it.
+func TestChunker_ZeroDeliveredTurnLogsNothing(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "cut off", TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(3), TurnID: "t1", Reason: voiceevent.TurnEndBarge})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	if n := store.count(); n != 0 {
+		t.Fatalf("inserts = %d, want 0 (zero-delivered turn logs nothing)", n)
+	}
+}
+
+// TestChunker_ContinuationAcrossChunkClose is #104 rule 4: when a turn's first
+// delivered sentence is the fifth utterance, the chunk closes with that sentence;
+// the turn's next delivered sentence opens a CONTINUATION utterance in the next
+// chunk, with the Agent in that new chunk's participated set and started_at at the
+// continuation's delivery time.
+func TestChunker_ContinuationAcrossChunkClose(t *testing.T) {
+	store := &fakeChunkStore{}
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	bus, c := liveChunker(t, store, nil, ChunkerConfig{}, vs) // default MaxUtterances = 5
+	agentID := uuid.New()
+
+	// Four human utterances fill slots 1–4.
+	for i := 1; i <= 4; i++ {
+		bus.Publish(voiceevent.STTFinal{At: at(i), Text: "h" + string(rune('0'+i)), TurnID: "h"})
+	}
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(5), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "one", at(5)) // 5th utterance -> closes chunk 1
+	agentReply(bus, "t1", "two", at(6)) // continuation -> opens chunk 2
+
+	// chunk 1 auto-closed; FlushSession closes the continuation chunk 2 and drains.
+	if err := c.FlushSession(context.Background(), vs.ID); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 2 {
+		t.Fatalf("inserts = %d, want 2 (chunk + continuation)", len(got))
+	}
+	want1 := "Player / DM: h1\nPlayer / DM: h2\nPlayer / DM: h3\nPlayer / DM: h4\nBart: one"
+	if got[0].Content != want1 {
+		t.Errorf("chunk 1 content = %q,\nwant %q", got[0].Content, want1)
+	}
+	if len(got[0].ParticipatedAgentIDs) != 1 || got[0].ParticipatedAgentIDs[0] != agentID {
+		t.Errorf("chunk 1 participated = %v, want [%s]", got[0].ParticipatedAgentIDs, agentID)
+	}
+	if got[1].Content != "Bart: two" {
+		t.Errorf("continuation content = %q, want %q", got[1].Content, "Bart: two")
+	}
+	if len(got[1].ParticipatedAgentIDs) != 1 || got[1].ParticipatedAgentIDs[0] != agentID {
+		t.Errorf("continuation participated = %v, want [%s] (agent in the new chunk too)", got[1].ParticipatedAgentIDs, agentID)
+	}
+	if !got[1].StartedAt.Equal(at(6)) {
+		t.Errorf("continuation started_at = %s, want the continuation delivery time %s", got[1].StartedAt, at(6))
+	}
+}
+
+// TestChunker_RolloverFlushKeepsOldSessionIDs is #104 WRITE PATH: when the active
+// session changes without a FlushSession, the rollover safety-net flushes the
+// stale open chunk under the PREVIOUS session's ids (not the new session's).
+func TestChunker_RolloverFlushKeepsOldSessionIDs(t *testing.T) {
+	store := &fakeChunkStore{}
+	sessA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	sessB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	bus := voiceevent.NewBus()
+	fs := &funcSessions{}
+	fs.set(func() (storage.VoiceSession, bool) { return sessA, true })
+	c := NewChunker(bus, fs, store, nil, slog.New(slog.DiscardHandler), ChunkerConfig{})
+
+	// Two utterances under A open a chunk (default 60s window — not closed).
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "a1", TurnID: "t"})
+	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "a2", TurnID: "t"})
+
+	// Session rolls to B; the next event triggers the rollover that flushes A's chunk.
+	fs.set(func() (storage.VoiceSession, bool) { return sessB, true })
+	bus.Publish(voiceevent.STTFinal{At: at(3), Text: "b1", TurnID: "t"})
+
+	if err := c.FlushSession(context.Background(), sessB.ID); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 2 {
+		t.Fatalf("inserts = %d, want 2 (A's stale chunk + B's chunk)", len(got))
+	}
+	// FIFO: the rollover flushed A's chunk first, then FlushSession closed B's.
+	if got[0].VoiceSessionID != sessA.ID || got[0].CampaignID != sessA.CampaignID {
+		t.Errorf("stale chunk FKs = session %s / campaign %s, want A's %s / %s",
+			got[0].VoiceSessionID, got[0].CampaignID, sessA.ID, sessA.CampaignID)
+	}
+	if got[0].Content != "Player / DM: a1\nPlayer / DM: a2" {
+		t.Errorf("stale chunk content = %q", got[0].Content)
+	}
+	if got[1].VoiceSessionID != sessB.ID || got[1].Content != "Player / DM: b1" {
+		t.Errorf("B's chunk = %+v, want session %s with b1", got[1], sessB.ID)
+	}
+}
+
+// TestChunker_NonUUIDAgentIDSkippedAndLogged is #104 rule UTTERANCES: an
+// AddressTarget.AgentID that is not a DB UUID (the well-known "butler" route, or
+// any non-uuid) is skipped from participated_agent_ids and logged — the utterance
+// still lands, but the chunk carries no participant for it.
+func TestChunker_NonUUIDAgentIDSkippedAndLogged(t *testing.T) {
+	store := &fakeChunkStore{}
+	cap := &capHandler{}
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	c := NewChunker(bus, fs, store, nil, slog.New(cap), ChunkerConfig{})
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Butler"},
+	})
+	agentReply(bus, "t1", "At your service.", at(2))
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 || got[0].Content != "Butler: At your service." {
+		t.Fatalf("content = %+v, want the butler utterance", got)
+	}
+	if len(got[0].ParticipatedAgentIDs) != 0 {
+		t.Errorf("participated = %v, want empty (non-uuid agent id skipped)", got[0].ParticipatedAgentIDs)
+	}
+	if !cap.has("unparsable agent id") {
+		t.Errorf("non-uuid agent id skip was not logged")
 	}
 }
 

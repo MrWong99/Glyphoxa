@@ -16,7 +16,11 @@ import (
 // Transcript chunk writer (#104, ADR-0011). The chunker subscribes to the process
 // voiceevent.Bus, folds the pipeline's events into a per-session open chunk of
 // 3–6 utterances, and closes the chunk on whichever-first of five utterances,
-// the window elapsing (with ≥2 utterances), or session end. A closed chunk is
+// the window elapsing (with ≥2 utterances), or session end. An Agent utterance
+// counts only DELIVERED speech (ADR-0012): a sentence enters the chunk on its
+// FirstAudio (audio handed to the room), not on TTSInvoked (a dispatch attempt),
+// so the undelivered tail of a barged / errored turn never reaches the transcript
+// and a zero-delivered turn logs nothing. A closed chunk is
 // written with embedding NULL — the async embedding pipeline fills it later — and
 // the NULL-embedding backlog gauge is refreshed from the store's COUNT after each
 // write. This CHUNK grain (retrieval/Hot Context) is distinct from the per-line
@@ -68,14 +72,17 @@ type ChunkerConfig struct {
 }
 
 // chunkTurn is the per-turn coalescing state: the routed target (name + agent id
-// from AddressRouted) and, once the turn's first TTSInvoked opens its utterance,
-// the open-chunk line whose text later sentences append to. closed marks a turn
-// whose line was flushed into a now-closed chunk, so a late sentence is dropped
-// (mirrors the relay's post-TurnEnded drop).
+// from AddressRouted); pending, the sentences DISPATCHED (TTSInvoked) but not yet
+// delivered, held FIFO and paired with FirstAudio by arrival order within the
+// TurnID (event.go); line, the open-chunk utterance once the turn's first
+// delivered sentence has opened it, which later delivered sentences append to; and
+// ended (TurnEnded seen), after which a late TTSInvoked is dropped and the
+// undelivered pending tail never commits (ADR-0012).
 type chunkTurn struct {
-	target voiceevent.AddressTarget
-	line   *chunkLine
-	closed bool
+	target  voiceevent.AddressTarget
+	line    *chunkLine
+	pending []string
+	ended   bool
 }
 
 // chunkLine is one rendered utterance line ("Who: text") in an open chunk. It is a
@@ -91,7 +98,7 @@ type openChunk struct {
 	openedWall time.Time    // wall clock at open — the window-elapsed reference
 	count      int          // utterance count (human STTFinal, or one per Agent turn)
 	entries    []*chunkLine // rendered lines, in order
-	turnIDs    []string     // Agent turns whose line lives in this chunk (for close-drop)
+	turnIDs    []string     // Agent turns whose line lives in this chunk (detached on close)
 	agents     []uuid.UUID  // participated Agent ids, first-seen order
 	agentSeen  map[uuid.UUID]struct{}
 	timer      *time.Timer
@@ -189,7 +196,15 @@ func (c *Chunker) project(e voiceevent.Event) {
 	case voiceevent.AddressRouted:
 		c.turn(ev.TurnID).target = ev.Target
 	case voiceevent.TTSInvoked:
-		c.appendAgentSentence(ev)
+		c.bufferAgentSentence(ev)
+	case voiceevent.FirstAudio:
+		c.commitDelivered(ev)
+	case voiceevent.TurnEnded:
+		// The turn is finalized: drop its undelivered tail (ADR-0012 — the room
+		// never heard those sentences) and refuse late dispatches.
+		t := c.turn(ev.TurnID)
+		t.ended = true
+		t.pending = nil
 	}
 }
 
@@ -217,19 +232,42 @@ func (c *Chunker) appendHuman(ev voiceevent.STTFinal) {
 	c.afterAppend(oc)
 }
 
-// appendAgentSentence folds one TTS sentence into its turn's utterance: the first
-// sentence of a turn opens a new utterance line (and records the Agent), later
-// sentences append to that same line without bumping the utterance count. A
-// sentence for a turn already flushed into a closed chunk is dropped + logged.
-func (c *Chunker) appendAgentSentence(ev voiceevent.TTSInvoked) {
+// bufferAgentSentence records one DISPATCHED sentence. TTSInvoked is a dispatch
+// attempt, not delivery (ADR-0012 / event.go), so nothing enters the chunk here:
+// the sentence is buffered FIFO and committed only when its FirstAudio confirms it
+// reached the room. Every dispatch is buffered (empty sentences included) so
+// pending stays 1:1 with dispatch attempts and the FirstAudio pairing holds. A
+// sentence for a turn already ended (barge / tts_error) is dropped + logged.
+func (c *Chunker) bufferAgentSentence(ev voiceevent.TTSInvoked) {
 	t := c.turn(ev.TurnID)
-	if t.closed {
-		c.log.Warn("transcript: chunk sentence for a closed chunk, dropping", "turn", ev.TurnID)
+	if t.ended {
+		c.log.Warn("transcript: chunk sentence after turn ended, dropping", "turn", ev.TurnID)
 		return
 	}
+	t.pending = append(t.pending, ev.Sentence)
+}
+
+// commitDelivered commits the next dispatched sentence now that its FirstAudio
+// confirms it was delivered (ADR-0012: transcripts reflect what listeners actually
+// heard). FirstAudio pairs FIFO with TTSInvoked by arrival order within the TurnID
+// (event.go), so it pops pending's head. The first delivered sentence OPENS the
+// turn's utterance (one utterance per Agent turn, records the Agent, bumps the
+// count); later delivered sentences append to that same line. A FirstAudio with
+// nothing pending — a straggler after TurnEnded cleared the buffer — is a no-op.
+func (c *Chunker) commitDelivered(ev voiceevent.FirstAudio) {
+	t := c.turn(ev.TurnID)
+	if len(t.pending) == 0 {
+		c.log.Debug("transcript: first audio with no pending sentence, ignoring", "turn", ev.TurnID)
+		return
+	}
+	s := t.pending[0]
+	t.pending = t.pending[1:]
 	if t.line == nil {
+		// First delivered sentence of this turn's current utterance: open it. After
+		// a chunk close detached the line, this re-opens a CONTINUATION in the next
+		// chunk (started_at = this delivery's time, Agent in the new chunk's set).
 		oc := c.ensureOpen(ev.At)
-		t.line = &chunkLine{text: nameOr(t.target.Name, "NPC") + ": " + ev.Sentence}
+		t.line = &chunkLine{text: nameOr(t.target.Name, "NPC") + ": " + s}
 		oc.entries = append(oc.entries, t.line)
 		oc.turnIDs = append(oc.turnIDs, ev.TurnID)
 		c.recordAgent(oc, t.target)
@@ -237,13 +275,13 @@ func (c *Chunker) appendAgentSentence(ev voiceevent.TTSInvoked) {
 		c.afterAppend(oc)
 		return
 	}
-	if ev.Sentence == "" {
+	if s == "" {
 		return
 	}
 	if t.line.text != "" {
 		t.line.text += " "
 	}
-	t.line.text += ev.Sentence
+	t.line.text += s
 }
 
 // recordAgent adds the turn's Agent to the chunk's participated set (deduped,
@@ -308,11 +346,12 @@ func (c *Chunker) onTimer(oc *openChunk) {
 	}
 }
 
-// closeChunk finalizes oc: it stops the timer, clears it as the open chunk, marks
-// its Agent turns closed (so a late sentence drops), and tees the built chunk onto
-// the writer queue. Idempotent-safe: a count-0 chunk (never happens in practice,
-// as a chunk only opens on an utterance) is dropped without a write. Caller holds
-// c.mu.
+// closeChunk finalizes oc: it stops the timer, clears it as the open chunk,
+// DETACHES its Agent turns (line = nil) so a not-ended turn's next delivered
+// sentence opens a continuation utterance in the next chunk, and tees the built
+// chunk onto the writer queue. A count-0 chunk (a chunk only opens on a delivered
+// or human utterance, so this is defensive) is dropped without a write. Caller
+// holds c.mu.
 func (c *Chunker) closeChunk(oc *openChunk) {
 	if oc.timer != nil {
 		oc.timer.Stop()
@@ -322,7 +361,6 @@ func (c *Chunker) closeChunk(oc *openChunk) {
 	}
 	for _, id := range oc.turnIDs {
 		if t := c.turns[id]; t != nil {
-			t.closed = true
 			t.line = nil
 		}
 	}
