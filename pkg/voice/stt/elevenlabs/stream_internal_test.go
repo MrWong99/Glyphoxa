@@ -58,6 +58,43 @@ func TestWritePump_SendsKeepalivePing(t *testing.T) {
 	}
 }
 
+// TestOpenStream_Unauthorized_MapsToAuthError pins that an HTTP 401/403 on the
+// websocket handshake surfaces as a *StreamError with the auth_error code (not the
+// generic transport code), so the stream manager backs a revoked/forbidden key off
+// straight to the cap instead of ~6 fast redials.
+func TestOpenStream_Unauthorized_MapsToAuthError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"unauthorized", http.StatusUnauthorized},
+		{"forbidden", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status) // reject the upgrade
+			}))
+			defer srv.Close()
+
+			c := New("k", WithBaseURL(srv.URL))
+			_, err := c.OpenStream(context.Background(), stt.StreamConfig{SampleRate: 16000})
+			if err == nil {
+				t.Fatal("OpenStream returned nil on a rejected handshake; want an error")
+			}
+			var se *stt.StreamError
+			if !errors.As(err, &se) {
+				t.Fatalf("error %v is not a *stt.StreamError", err)
+			}
+			if se.Code != "auth_error" {
+				t.Errorf("dial error code = %q, want auth_error for HTTP %d", se.Code, tc.status)
+			}
+			if !se.Fatal {
+				t.Error("a rejected handshake must be Fatal (the session never opened)")
+			}
+		})
+	}
+}
+
 // TestSend_WriteQueueFull_RestoresAggregatedAudio pins Finding 4: when a flush
 // cannot be enqueued (write queue full), Send reports a recoverable queue-full
 // *StreamError AND keeps the flushed bytes in the aggregation buffer so no
@@ -103,5 +140,44 @@ func TestSend_WriteQueueFull_RestoresAggregatedAudio(t *testing.T) {
 	wantBytes := 4 * 512 * 2
 	if len(s.agg) != wantBytes {
 		t.Errorf("aggregation buffer = %d bytes, want %d (flushed audio must not be lost)", len(s.agg), wantBytes)
+	}
+}
+
+// TestCommit_WriteQueueFull_RestoresRemainder pins the R1 fix: when Commit cannot
+// enqueue the swapped-out aggregation remainder (write queue full), it restores
+// that remainder into the aggregation buffer — mirroring the Send-path restore —
+// so a retried Commit does not lose the utterance's tail. Without it the tail
+// bytes vanished with the failed enqueue and the retried commit was short.
+func TestCommit_WriteQueueFull_RestoresRemainder(t *testing.T) {
+	s := &stream{
+		cfg:       stt.StreamConfig{SampleRate: 16000},
+		writeCh:   make(chan wsWrite, 1),
+		stopCh:    make(chan struct{}),
+		threshold: 16000 * minChunkMs / 1000 * 2,
+	}
+	s.writeCh <- wsWrite{} // occupy the only slot; the remainder enqueue must fail
+
+	// A sub-threshold remainder sits in the aggregation buffer (never flushed by
+	// Send because it is under the 100 ms threshold).
+	remainder := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	s.agg = append([]byte(nil), remainder...)
+
+	ch, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit returned a call-time error %v; want a resolving channel", err)
+	}
+
+	select {
+	case res := <-ch:
+		var se *stt.StreamError
+		if !errors.As(res.Err, &se) || se.Code != stt.CodeQueueFull {
+			t.Fatalf("commit resolved with %v; want a *StreamError code %q", res.Err, stt.CodeQueueFull)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("commit channel never resolved on a queue-full remainder enqueue")
+	}
+
+	if string(s.agg) != string(remainder) {
+		t.Errorf("aggregation buffer = %v, want the restored remainder %v (utterance tail must not be lost)", s.agg, remainder)
 	}
 }

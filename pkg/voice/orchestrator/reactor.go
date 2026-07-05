@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -87,6 +88,17 @@ type Segmenter struct {
 	inflight sync.WaitGroup
 	worker   sync.WaitGroup
 
+	// stream is the optional streaming-STT transport (ADR-0042, [WithStreamingSTT]).
+	// When non-nil the segmenter mirrors each utterance onto it — pre-roll while
+	// idle, voiced frames while listening, a manual commit at speech-end — and the
+	// worker prefers the committed text, falling back to the batch recognizer on any
+	// failure. Nil is the byte-for-byte no-streaming default: none of the stream
+	// hooks fire and the batch path is untouched.
+	stream *StreamManager
+	// streamCancel stops the stream manager's maintainer; set at Bind (when stream
+	// is non-nil), called from the returned teardown.
+	streamCancel func()
+
 	mu sync.Mutex
 	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of the most recent
 	// speech-end transition, captured so the flushed utterance's STTFinal can
@@ -94,6 +106,13 @@ type Segmenter struct {
 	// turn's true speech-end without the metrics subscriber guessing. Zero until
 	// the first speech-end, and for a Flush with no preceding transition.
 	speechEndAt time.Time
+	// curUtteranceID and pendCommit/pendCommitSentAt carry the current utterance's
+	// streaming state from the VAD callbacks to the flush that enqueues its job. The
+	// id is minted at speech_start (beginUtterance); the commit handle is captured at
+	// speech_end (endUtterance) and consumed by the flush. All guarded by mu.
+	curUtteranceID   string
+	pendCommit       <-chan stt.CommitResult
+	pendCommitSentAt time.Time
 	// ctx is the context handed to STT.Transcribe when a segment flushes. It is
 	// the conversation's lifetime context, captured at Bind and cleared by the
 	// returned cancel; storing it lets Process stay frame-only (ctx-free) so the
@@ -107,10 +126,19 @@ type Segmenter struct {
 // segment frames plus the per-segment state STT needs (the lifetime ctx and the
 // turn's speech-end time), snapshotted at enqueue so the worker never reads
 // mutable Segmenter state.
+//
+// On the streaming path (ADR-0042) it additionally carries the utterance's manual
+// commit handle (nil = pure batch), the moment that commit was sent (for the
+// stt_request span), and the utterance id (stamped on the STTFinal so it joins its
+// partials). The worker prefers the committed text and falls back to the batch
+// recognizer — with these SAME locally-buffered seg frames — on any commit failure.
 type transcribeJob struct {
-	ctx         context.Context
-	seg         []audio.Frame
-	speechEndAt time.Time
+	ctx          context.Context
+	seg          []audio.Frame
+	speechEndAt  time.Time
+	commit       <-chan stt.CommitResult
+	commitSentAt time.Time
+	utteranceID  string
 }
 
 // transcribeQueueDepth is the buffer on the worker's job channel. A flush enqueues
@@ -148,20 +176,34 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 	s.jobs = jobs
 	s.mu.Unlock()
 
+	// Start the streaming transport's maintainer (eager dial) so utterance 1 can
+	// stream; nil stream = no-op (byte-for-byte batch path).
+	if s.stream != nil {
+		s.streamCancel = s.stream.bind(ctx, bus)
+	}
+
 	// One serial worker drains the queue, so transcriptions stay in speech order.
 	s.worker.Go(func() {
 		for job := range jobs {
-			if err := s.transcribe(job.ctx, job.seg, job.speechEndAt); err != nil && s.onError != nil {
+			if err := s.transcribe(job); err != nil && s.onError != nil {
 				s.onError(err)
 			}
 			s.inflight.Done()
 		}
 	})
 
-	unsubStart := voiceevent.On(bus, func(voiceevent.VADSpeechStart) {
+	unsubStart := voiceevent.On(bus, func(start voiceevent.VADSpeechStart) {
 		s.mu.Lock()
 		s.listening = true
 		s.mu.Unlock()
+		// Mint this utterance's id and, if the stream is up, flush the pre-roll ring —
+		// voiced frames then follow from Process (see [Segmenter.Process]).
+		if s.stream != nil {
+			id := s.stream.beginUtterance(start.At)
+			s.mu.Lock()
+			s.curUtteranceID = id
+			s.mu.Unlock()
+		}
 	})
 	unsubEnd := voiceevent.On(bus, func(end voiceevent.VADSpeechEnd) {
 		s.mu.Lock()
@@ -170,10 +212,28 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		// can carry it (A3); the next Process call after speech ends flushes.
 		s.speechEndAt = end.At
 		s.mu.Unlock()
+		// Local VAD is the sole endpointing authority (ADR-0042): the manual commit
+		// fires HERE, at the VAD speech-end, never provider-side. The handle is stashed
+		// for the imminent flush to attach to the job.
+		if s.stream != nil {
+			commit, sentAt, ok := s.stream.endUtterance()
+			s.mu.Lock()
+			if ok {
+				s.pendCommit = commit
+				s.pendCommitSentAt = sentAt
+			} else {
+				s.pendCommit = nil
+			}
+			s.mu.Unlock()
+		}
 	})
 	return func() {
 		unsubStart()
 		unsubEnd()
+		if s.streamCancel != nil {
+			s.streamCancel()
+			s.streamCancel = nil
+		}
 		s.mu.Lock()
 		s.ctx = nil
 		s.jobs = nil
@@ -208,15 +268,29 @@ func (s *Segmenter) Process(frame audio.Frame) error {
 	if s.listening {
 		s.buf = append(s.buf, frame)
 		s.mu.Unlock()
+		// Mirror the voiced frame onto the stream (additive; the local buffer above
+		// stays authoritative for the batch fallback). No-op when no stream is wired.
+		if s.stream != nil {
+			s.stream.send(frame)
+		}
 		return nil
 	}
 	seg := s.buf
 	s.buf = nil
 	ctx := s.ctx
 	speechEndAt := s.speechEndAt
+	commit := s.pendCommit
+	commitSentAt := s.pendCommitSentAt
+	utteranceID := s.curUtteranceID
+	s.pendCommit = nil
 	s.mu.Unlock()
 
-	s.dispatchTranscription(ctx, seg, speechEndAt)
+	// A non-listening frame is pre-speech silence: fill the pre-roll ring (never
+	// streamed until the next utterance begins, so silence is not billed).
+	if s.stream != nil {
+		s.stream.idleFrame(frame)
+	}
+	s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID)
 	return nil
 }
 
@@ -229,9 +303,17 @@ func (s *Segmenter) Process(frame audio.Frame) error {
 // only if the queue is full (see [transcribeQueueDepth]). A recognizer error is
 // reported by the worker through onError — the side channel that replaces the
 // inline call's return value.
-func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time) {
+func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit <-chan stt.CommitResult, commitSentAt time.Time, utteranceID string) {
 	if len(seg) == 0 {
 		return
+	}
+	job := transcribeJob{
+		ctx:          ctx,
+		seg:          seg,
+		speechEndAt:  speechEndAt,
+		commit:       commit,
+		commitSentAt: commitSentAt,
+		utteranceID:  utteranceID,
 	}
 	s.mu.Lock()
 	jobs := s.jobs
@@ -239,13 +321,13 @@ func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame
 	if jobs == nil {
 		// Not bound (or already torn down): transcribe inline so a late flush still
 		// completes rather than dropping the utterance.
-		if err := s.transcribe(ctx, seg, speechEndAt); err != nil && s.onError != nil {
+		if err := s.transcribe(job); err != nil && s.onError != nil {
 			s.onError(err)
 		}
 		return
 	}
 	s.inflight.Add(1)
-	jobs <- transcribeJob{ctx: ctx, seg: seg, speechEndAt: speechEndAt}
+	jobs <- job
 }
 
 // Flush transcribes any buffered utterance audio immediately, regardless of
@@ -268,31 +350,66 @@ func (s *Segmenter) Flush() error {
 	s.mu.Lock()
 	seg := s.buf
 	s.buf = nil
+	wasListening := s.listening
 	s.listening = false
 	ctx := s.ctx
-	// A Flush has no speech-end transition (end-of-stream), so it carries the
-	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
+	commit := s.pendCommit
+	commitSentAt := s.pendCommitSentAt
+	utteranceID := s.curUtteranceID
+	s.pendCommit = nil
 	s.mu.Unlock()
 
-	s.dispatchTranscription(ctx, seg, time.Time{})
+	// If the stream ended while speech was still active there was no VAD speech-end,
+	// so the open utterance never got its manual commit — request it now (ADR-0042),
+	// or fall to batch if the stream is down. A speech-end already emitted a handle
+	// captured above, so this only fires for a truly mid-utterance end-of-stream.
+	if wasListening && s.stream != nil {
+		if c, sentAt, ok := s.stream.endUtterance(); ok {
+			commit = c
+			commitSentAt = sentAt
+		}
+	}
+
+	// A Flush has no speech-end transition (end-of-stream), so it carries the
+	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
+	s.dispatchTranscription(ctx, seg, time.Time{}, commit, commitSentAt, utteranceID)
 	s.inflight.Wait()
 	return nil
 }
 
-// transcribe hands a flushed segment to STT under ctx, carrying the turn's
-// speech-end time so STT can stamp it on the published STTFinal (A3). An empty
-// segment is a no-op (a speech-end with nothing buffered, or a redundant Flush).
-// A nil ctx — the segmenter was never bound, or was already torn down — falls
-// back to a background context so a late flush still completes rather than
-// panicking.
-func (s *Segmenter) transcribe(ctx context.Context, seg []audio.Frame, speechEndAt time.Time) error {
-	if len(seg) == 0 {
+// transcribe produces one utterance's authoritative STTFinal, carrying the turn's
+// speech-end time and (on the streaming path) utterance id via ctx so STT stamps
+// them on the published event (A3, ADR-0042). An empty segment is a no-op (a
+// speech-end with nothing buffered, or a redundant Flush). A nil ctx — the
+// segmenter was never bound, or was already torn down — falls back to a background
+// context so a late flush still completes rather than panicking.
+//
+// When the utterance streamed (job.commit != nil), it waits for the manual commit
+// and publishes the committed text directly, skipping the batch POST. On ANY commit
+// error or timeout it falls back to the batch recognizer with these SAME
+// locally-buffered frames — streaming is additive, never authoritative — so no
+// utterance is lost when the stream degrades.
+func (s *Segmenter) transcribe(job transcribeJob) error {
+	if len(job.seg) == 0 {
 		return nil
 	}
+	ctx := job.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return s.stt.Transcribe(withSpeechEndAt(ctx, speechEndAt), seg)
+	ctx = withSpeechEndAt(ctx, job.speechEndAt)
+	ctx = withUtteranceID(ctx, job.utteranceID)
+
+	if job.commit != nil && s.stream != nil {
+		if t, ok := s.stream.awaitCommit(job.commit, job.commitSentAt); ok {
+			// Committed text is authoritative: publish it as this utterance's STTFinal
+			// with the SAME TurnID minting the batch path uses.
+			s.stt.PublishFinal(ctx, t)
+			return nil
+		}
+		// Commit errored or timed out: degrade to the batch adapter below.
+	}
+	return s.stt.Transcribe(ctx, job.seg)
 }
 
 // Reply is one thing an addressed Agent should say: a single sentence and the

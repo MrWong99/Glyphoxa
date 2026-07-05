@@ -74,6 +74,9 @@ func main() {
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
+	// Streaming STT (ADR-0042, issue #180) is an env opt-in shared by voice and
+	// all mode; default OFF keeps the batch STT path byte-for-byte.
+	cfg.STTStreaming = sttStreaming(os.Getenv)
 	hardcoded := flag.Bool("hardcoded", false, "use the in-code NPC instead of loading from the database — no Postgres needed, for smoke-testing audio without a seeded DB")
 	metricsAddr := flag.String("metrics-addr", ":9090", "address for the /metrics + /healthz + /readyz listener (all Modes; kept off the public web API port, ADR-0032); empty disables it")
 	webAddr := flag.String("web-addr", ":8080", "address for the web/all-mode Connect RPC API listener (ADR-0039); observability is on -metrics-addr")

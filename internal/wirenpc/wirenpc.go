@@ -34,6 +34,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -261,6 +262,12 @@ type Config struct {
 	// nothing. The live binary injects the Prometheus adapter; the benchmark
 	// injects its own; the keyless default is the no-op recorder.
 	StageMetrics observe.StageRecorder
+	// STTStreaming opts the voice loop into the streaming-STT transport (ADR-0042,
+	// issue #180): when the wired STT recognizer supports it, utterances stream over
+	// a persistent websocket and finalize on a local-VAD manual commit, with the
+	// batch adapter as automatic fallback. Default OFF reproduces today's batch path
+	// byte-for-byte. Parsed from GLYPHOXA_STT_STREAMING in cmd/glyphoxa.
+	STTStreaming bool
 	// Bus, when non-nil, is the process-wide voiceevent.Bus the orchestrator
 	// publishes onto INSTEAD of a fresh per-cycle bus (issue #73, ADR-0014).
 	// The web tier injects ONE bus so the SSE transcript relay can subscribe
@@ -530,7 +537,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics, cfg.keys)
+	conv, _, cleanup, err := buildConversation(bus, log, cfg.npcs, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -652,7 +659,7 @@ var (
 // synthesized audio is tee'd to the playback path while the orchestrator keeps
 // draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
 // (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -686,9 +693,14 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 	}
 	vadStage := orchestrator.NewVAD(bus, vadSession)
 
-	sttStage := orchestrator.NewSTT(bus, newSTT(keys.stt),
+	// One recognizer instance backs both the batch stage and — when streaming is
+	// enabled and the adapter supports it — the stream manager (the ElevenLabs
+	// Client is both a batch stt.Recognizer and a stt.StreamingRecognizer, ADR-0042).
+	var recognizer stt.Recognizer = newSTT(keys.stt)
+	sttStage := orchestrator.NewSTT(bus, recognizer,
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
 	ttsStage := orchestrator.NewTTS(bus, synth)
+	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
 
 	// The `dice` grant stays in code: Tool Grants are a #6 table, not yet
 	// seeded. With no grants the tool engine degrades to a single completion
@@ -737,6 +749,10 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 		// self-cancel the latency investigation found. With B1 a confirmed barge
 		// cancels mid-generation, not just pending dispatch.
 		orchestrator.WithBargeInCoalesce(bargeConfirmWindow, floorCoalesceWindow),
+		// Streaming STT (ADR-0042, issue #180): a nil manager is byte-for-byte the
+		// batch path, so this option is unconditional — buildStreamManager returns nil
+		// unless GLYPHOXA_STT_STREAMING is set AND the adapter is a StreamingRecognizer.
+		orchestrator.WithStreamingSTT(streamMgr),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).
@@ -745,4 +761,27 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, sy
 		}),
 	)
 	return conv, roster, cleanup, nil
+}
+
+// buildStreamManager returns the streaming-STT manager when streaming is enabled
+// AND the wired recognizer implements [stt.StreamingRecognizer], else nil (the
+// byte-for-byte batch default). It is the selection seam (ADR-0042, issue #180):
+// keeping it a small pure function lets the gating be unit-tested without standing
+// up the whole Silero/ONNX pipeline. The provider label is elevenlabs (the only
+// streaming STT adapter in the MVP matrix, ADR-0039).
+func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) *orchestrator.StreamManager {
+	if !streaming {
+		return nil
+	}
+	sr, ok := recognizer.(stt.StreamingRecognizer)
+	if !ok {
+		// Opting in but the wired provider can't stream is a misconfiguration worth
+		// surfacing — otherwise the operator sees the batch path with no hint why.
+		if log != nil {
+			log.Warn("STT streaming requested but provider does not support it; using batch")
+		}
+		return nil
+	}
+	return orchestrator.NewStreamManager(sr,
+		orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs))
 }

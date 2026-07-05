@@ -19,3 +19,21 @@ func (r *Replier) SetFloor(floor *Floor) { r.floor = floor }
 // tests (external test package). Production wiring sets it inside
 // Conversation.Register from [WithErrorHandler].
 func (s *Segmenter) SetErrorHandler(fn ErrorFunc) { s.onError = fn }
+
+// WaitStreamUp blocks until the manager has a live session or timeout elapses,
+// reporting whether one came up. Test-only: pipeline tests feed the first
+// utterance only after the eager dial completes, so utterance 1 streams
+// deterministically instead of racing the maintainer.
+func (m *StreamManager) WaitStreamUp(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		up := m.stream != nil
+		m.mu.Unlock()
+		if up {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
