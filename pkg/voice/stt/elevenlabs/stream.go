@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -76,19 +77,41 @@ const (
 	msgInsufficientAudio = "insufficient_audio_activity"
 )
 
-// codeSampleRate is the [stt.StreamError.Code] for a frame whose sample rate
-// does not match the session's declared rate — a caller (not transport) error.
-const codeSampleRate = "sample_rate_mismatch"
-
-// recoverableErrorCodes are provider error-frame types after which the session
-// stays usable: the failing operation is reported but Send/Commit continue to
-// work. Every other error frame is treated as fatal (session dead).
-var recoverableErrorCodes = map[string]bool{
-	"commit_throttled":    true,
-	"rate_limited":        true,
-	"chunk_size_exceeded": true,
-	"input_error":         true,
-}
+// Provider error-frame classification. A frame's message_type decides how it is
+// routed (see routeErrorFrame):
+//
+//   - commitScopedErrorCodes pertain to a specific commit and resolve the oldest
+//     in-flight commit with the error; the session stays usable.
+//   - droppableErrorCodes are recoverable but NOT tied to a commit (a rejected
+//     chunk or a transient throttle), so they are logged and dropped rather than
+//     misattributed to whichever commit happens to be pending.
+//   - fatalErrorCodes kill the session.
+//
+// An unrecognized message_type carrying an error payload is treated as fatal
+// (safe default); one with no error payload is an unknown benign frame (e.g. a
+// future language_detection frame) and is ignored like a malformed frame.
+var (
+	commitScopedErrorCodes = map[string]bool{
+		"commit_throttled": true,
+	}
+	droppableErrorCodes = map[string]bool{
+		// rate_limited is treated as not-commit-scoped: the provider docs do not
+		// tie it to a specific commit, so dropping it avoids misattribution.
+		"rate_limited":        true,
+		"chunk_size_exceeded": true,
+		"input_error":         true,
+	}
+	fatalErrorCodes = map[string]bool{
+		"error":                       true,
+		"auth_error":                  true,
+		"quota_exceeded":              true,
+		"unaccepted_terms":            true,
+		"queue_overflow":              true,
+		"resource_exhausted":          true,
+		"session_time_limit_exceeded": true,
+		"transcriber_error":           true,
+	}
+)
 
 // OpenStream implements [stt.StreamingRecognizer]. It dials a fresh Scribe v2
 // Realtime session honoring ADR-0042: manual commit strategy, sample rate
@@ -222,7 +245,7 @@ func (s *stream) Send(frame audio.Frame) error {
 	}
 	if frame.SampleRate() != s.cfg.SampleRate {
 		return &stt.StreamError{
-			Code:  codeSampleRate,
+			Code:  stt.CodeSampleRateMismatch,
 			Fatal: false,
 			Err:   fmt.Errorf("frame sample rate %d != stream sample rate %d", frame.SampleRate(), s.cfg.SampleRate),
 		}
@@ -240,7 +263,17 @@ func (s *stream) Send(frame audio.Frame) error {
 	if chunk == nil {
 		return nil
 	}
-	return s.enqueue(wsWrite{audioB64: base64.StdEncoding.EncodeToString(chunk)})
+	if err := s.enqueue(wsWrite{audioB64: base64.StdEncoding.EncodeToString(chunk)}); err != nil {
+		// The flush could not be queued (queue full or session dead). Put the
+		// bytes back at the front of the aggregation buffer so no audio is
+		// dropped — a later flush retries them. Send is single-goroutine, so no
+		// concurrent Send appended behind us.
+		s.aggMu.Lock()
+		s.agg = append(chunk, s.agg...)
+		s.aggMu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // Commit implements [stt.Stream].
@@ -296,7 +329,7 @@ func (s *stream) enqueue(w wsWrite) error {
 		if de := s.deadErr.Load(); de != nil {
 			return de
 		}
-		return &stt.StreamError{Code: stt.CodeTransport, Fatal: false, Err: fmt.Errorf("write queue full")}
+		return &stt.StreamError{Code: stt.CodeQueueFull, Fatal: false, Err: fmt.Errorf("write queue full")}
 	}
 }
 
@@ -391,13 +424,48 @@ func (s *stream) readPump() {
 			// Empty utterance: resolve like the batch adapter's empty text.
 			s.resolveEmpty()
 		default:
-			se := classifyError(msg.MessageType, msg.Error)
-			if se.Fatal {
-				s.shutdown(se)
-				return
+			if s.routeErrorFrame(msg.MessageType, msg.Error) {
+				return // fatal: session dead, stop reading
 			}
-			s.resolveFront(stt.CommitResult{Err: se})
 		}
+	}
+}
+
+// routeErrorFrame classifies a non-normal server frame and acts on it. It
+// returns true when the frame killed the session, so the read pump stops.
+//
+// Only commit-scoped errors consume a pending commit; chunk-scoped and other
+// recoverable errors are logged and dropped so they cannot be misattributed to
+// whichever commit happens to be in flight. Fatal errors tear the session down.
+func (s *stream) routeErrorFrame(code, detail string) (fatal bool) {
+	switch {
+	case commitScopedErrorCodes[code]:
+		s.resolveFront(stt.CommitResult{Err: &stt.StreamError{
+			Code:  code,
+			Fatal: false,
+			Err:   fmt.Errorf("provider error %q: %s", code, detail),
+		}})
+		return false
+	case droppableErrorCodes[code]:
+		slog.Default().Debug("stt stream: dropping recoverable provider error frame",
+			"code", code, "detail", detail)
+		return false
+	case fatalErrorCodes[code], detail != "":
+		// Known fatal code, or an unrecognized frame that still carries an error
+		// payload (safe default: treat unknown errors as fatal).
+		s.shutdown(&stt.StreamError{
+			Code:  code,
+			Fatal: true,
+			Err:   fmt.Errorf("provider error %q: %s", code, detail),
+		})
+		return true
+	default:
+		// Unknown message_type with no error payload — a benign frame the adapter
+		// does not model (e.g. a future language_detection frame). Ignore it, the
+		// same posture as a malformed frame.
+		slog.Default().Debug("stt stream: ignoring unrecognized non-error frame",
+			"message_type", code)
+		return false
 	}
 }
 
@@ -481,14 +549,6 @@ func (s *stream) failCommit(ch chan stt.CommitResult, err error) {
 	s.mu.Unlock()
 	if removed {
 		ch <- stt.CommitResult{Err: err}
-	}
-}
-
-func classifyError(code, detail string) *stt.StreamError {
-	return &stt.StreamError{
-		Code:  code,
-		Fatal: !recoverableErrorCodes[code],
-		Err:   fmt.Errorf("provider error %q: %s", code, detail),
 	}
 }
 

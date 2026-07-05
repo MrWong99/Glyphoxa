@@ -325,6 +325,9 @@ func TestSend_AggregatesTo100msChunk_PreservesOrder(t *testing.T) {
 	if c.sampleRate != 16000 {
 		t.Errorf("sample_rate = %d, want 16000", c.sampleRate)
 	}
+	if c.previousText != "" {
+		t.Errorf("previous_text = %q, want empty (the adapter never sets it)", c.previousText)
+	}
 	want := pcmOf(frames...)
 	if len(c.pcm) != len(want) {
 		t.Fatalf("chunk pcm len = %d, want %d (should be 4 frames concatenated)", len(c.pcm), len(want))
@@ -768,5 +771,228 @@ func TestReconnect_FreshSessionAfterAbruptClose(t *testing.T) {
 	}
 	if n := ss.upgrades.Load(); n != 2 {
 		t.Errorf("server upgrade count = %d, want 2 (one per session)", n)
+	}
+}
+
+// --- Finding 1: chunk-scoped error must not consume a pending commit ---
+
+func TestErrorFrame_ChunkSizeExceeded_DoesNotConsumeOrDuplicate(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		// A chunk-scoped error arrives while a commit is pending: it must be
+		// dropped, not attributed to the pending commit. The real result then
+		// resolves that same commit.
+		_ = conn.WriteJSON(errorMsg("chunk_size_exceeded", "chunk too large"))
+		_ = conn.WriteJSON(committedMsg("real one"))
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(committedMsg("real two"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	if err := s.Send(rampFrame(t, 0)); err != nil {
+		t.Fatalf("Send 1: %v", err)
+	}
+	c1, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit 1: %v", err)
+	}
+	if res := recvCommit(t, c1); res.Err != nil || res.Transcript.Text != "real one" {
+		t.Fatalf("commit 1 = %+v, want text %q with nil error (chunk error must not be attributed here)", res, "real one")
+	}
+
+	if err := s.Send(rampFrame(t, 100)); err != nil {
+		t.Fatalf("Send 2: %v", err)
+	}
+	c2, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit 2: %v", err)
+	}
+	// No duplication: had the chunk error consumed c1, "real one" would have
+	// become autoText and leaked into this commit as "real one real two".
+	if got := recvCommit(t, c2).Transcript.Text; got != "real two" {
+		t.Errorf("commit 2 = %q, want %q (no carried-over duplication)", got, "real two")
+	}
+}
+
+// --- Finding 2: unknown frames ---
+
+func TestUnknownFrame_NoErrorPayload_SessionSurvives(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		// A frame the adapter does not model, carrying no error field.
+		_ = conn.WriteJSON(map[string]any{"message_type": "language_detection", "language_code": "de"})
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(committedMsg("still alive"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	c1, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	res := recvCommit(t, c1)
+	if res.Err != nil {
+		t.Fatalf("unknown benign frame killed the session: %v", res.Err)
+	}
+	if res.Transcript.Text != "still alive" {
+		t.Errorf("committed text = %q, want %q", res.Transcript.Text, "still alive")
+	}
+}
+
+func TestUnknownFrame_WithErrorPayload_IsFatal(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(errorMsg("some_future_error_code", "boom"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	c1, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	se := asStreamError(t, recvCommit(t, c1).Err)
+	if !se.Fatal {
+		t.Error("an unrecognized error-bearing frame should be fatal (safe default)")
+	}
+	if se.Code != "some_future_error_code" {
+		t.Errorf("code = %q, want the verbatim wire code", se.Code)
+	}
+}
+
+// --- Finding 3: lifecycle ---
+
+func TestCtxCancel_TearsDownSessionAndResolvesPending(t *testing.T) {
+	ss := newScriptedServer(t, echoUntilClose)
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	defer ss.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := elevenlabs.New("test-key", elevenlabs.WithBaseURL(ss.URL))
+	s, err := c.OpenStream(ctx, stt.StreamConfig{SampleRate: 16000})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer s.Close()
+
+	commitCh, err := s.Commit() // server never answers
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	cancel() // cancel == Close
+
+	if se := asStreamError(t, recvCommit(t, commitCh).Err); !se.Fatal {
+		t.Error("ctx-cancel should resolve the pending commit with a fatal error")
+	}
+	if err := s.Send(rampFrame(t, 0)); err == nil {
+		t.Error("Send after ctx-cancel returned nil error")
+	}
+}
+
+func TestClose_ResolvesPendingCommitFatally(t *testing.T) {
+	ss := newScriptedServer(t, echoUntilClose)
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	commitCh, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Close drained the pumps before returning, so the resolution is ready.
+	if se := asStreamError(t, recvCommit(t, commitCh).Err); !se.Fatal {
+		t.Error("Close should resolve pending commits with a fatal *StreamError")
+	}
+}
+
+func TestClose_Idempotent(t *testing.T) {
+	ss := newScriptedServer(t, echoUntilClose)
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close (must be idempotent): %v", err)
+	}
+}
+
+func TestCommit_AfterClose_Errors(t *testing.T) {
+	ss := newScriptedServer(t, echoUntilClose)
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ch, err := s.Commit()
+	if err == nil {
+		t.Error("Commit after Close returned nil error")
+	}
+	if ch != nil {
+		t.Error("Commit after Close returned a non-nil channel")
+	}
+}
+
+func TestTwoPending_InterleavedCommitScopedError_FIFO(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(committedMsg("one"))
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(errorMsg("commit_throttled", "slow down"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	if err := s.Send(rampFrame(t, 0)); err != nil {
+		t.Fatalf("Send 1: %v", err)
+	}
+	c1, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit 1: %v", err)
+	}
+	if err := s.Send(rampFrame(t, 100)); err != nil {
+		t.Fatalf("Send 2: %v", err)
+	}
+	c2, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit 2: %v", err)
+	}
+
+	if got := recvCommit(t, c1).Transcript.Text; got != "one" {
+		t.Errorf("commit 1 = %q, want one", got)
+	}
+	// The interleaved commit-scoped error consumes the SECOND pending, FIFO.
+	if se := asStreamError(t, recvCommit(t, c2).Err); se.Code != "commit_throttled" {
+		t.Errorf("commit 2 error code = %q, want commit_throttled", se.Code)
 	}
 }

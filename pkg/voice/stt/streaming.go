@@ -77,10 +77,26 @@ type StreamingRecognizer interface {
 	OpenStream(ctx context.Context, cfg StreamConfig) (Stream, error)
 }
 
-// CodeTransport is the [StreamError.Code] for websocket-level failures the
-// adapter synthesizes itself (dial failure, read/write error, abrupt close).
-// Provider error frames carry their own wire code verbatim.
-const CodeTransport = "transport"
+// These are the [StreamError.Code] values an adapter synthesizes itself, as
+// opposed to provider error frames (see ADR-0042), which carry their own wire
+// code verbatim. A caller switching on Code to decide fallback-vs-retry can
+// rely on exactly these three originating in the adapter.
+const (
+	// CodeTransport marks a websocket-level failure: dial failure, a read or
+	// write error, an abrupt close, or context cancellation. Always Fatal — the
+	// session is dead and the caller should reopen or fall back to batch.
+	CodeTransport = "transport"
+
+	// CodeSampleRateMismatch marks a [Stream.Send] frame whose SampleRate does
+	// not equal the session's declared rate. Recoverable: only that frame is
+	// rejected, the session continues.
+	CodeSampleRateMismatch = "sample_rate_mismatch"
+
+	// CodeQueueFull marks a non-blocking Send or Commit that could not enqueue
+	// because the internal write queue is full (backpressure). Recoverable: the
+	// caller may retry once the write pump drains.
+	CodeQueueFull = "queue_full"
+)
 
 // StreamError is the typed error surfaced by every streaming operation. Code
 // is the provider's error-frame type (see ADR-0042) or [CodeTransport] for
