@@ -148,12 +148,13 @@ func (f *fakeSessionManager) mutedIDsLocked() []string {
 // (#120), recording the campaign + query the handler resolved so the scope
 // precedence can be asserted.
 type fakeSessionStore struct {
-	forUser     storage.Campaign // the operator's /glyphoxa use selection (#108)
-	forUserErr  error            // set to storage.ErrNotFound to force the fallback
-	campaign    storage.Campaign
-	campaignErr error
-	latest      storage.VoiceSession
-	latestErr   error
+	forUser        storage.Campaign // the operator's /glyphoxa use selection (#108)
+	forUserErr     error            // set to storage.ErrNotFound to force the fallback
+	campaign       storage.Campaign
+	campaignErr    error
+	latest         storage.VoiceSession
+	latestErr      error
+	latestCampaign uuid.UUID // the campaign id the idle GetSession resolved (#220)
 
 	searchLines    []storage.TranscriptLine
 	searchErr      error
@@ -179,7 +180,8 @@ func (f *fakeSessionStore) GetActiveCampaign(context.Context) (storage.Campaign,
 	return f.campaign, nil
 }
 
-func (f *fakeSessionStore) GetLatestVoiceSession(context.Context, uuid.UUID) (storage.VoiceSession, error) {
+func (f *fakeSessionStore) GetLatestVoiceSession(_ context.Context, campaignID uuid.UUID) (storage.VoiceSession, error) {
+	f.latestCampaign = campaignID
 	if f.latestErr != nil {
 		return storage.VoiceSession{}, f.latestErr
 	}
@@ -607,6 +609,46 @@ func TestSessionStartFallsBackWithoutSelection(t *testing.T) {
 	}
 	if start.Msg.GetSession().GetCampaignId() != newer.ID.String() {
 		t.Errorf("bound campaign = %s, want the fallback %s", start.Msg.GetSession().GetCampaignId(), newer.ID)
+	}
+}
+
+// TestSessionGetIdleHonorsDurableSelection is #220: with the operator's /glyphoxa
+// use selection set (campaign A) AND a newer implicit default (campaign B) and no
+// live session, the idle GetSession last-session summary resolves campaign A — the
+// SAME profile-first startCampaign StartSession binds — so the Session screen never
+// describes campaign B while Start would run A. Repro: /use A, newer B exists, no
+// session running → idle summary must scope to A (GetLatestVoiceSession(A)).
+func TestSessionGetIdleHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	selected := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Selected A"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer B"}
+	store := &fakeSessionStore{forUser: selected, campaign: newer, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, &fakeSessionManager{}, store, storage.User{DiscordUserID: "999"})
+
+	if _, err := client.GetSession(context.Background(), connect.NewRequest(&managementv1.GetSessionRequest{})); err != nil {
+		t.Fatalf("GetSession idle: %v", err)
+	}
+	if store.latestCampaign != selected.ID {
+		t.Errorf("idle summary scoped to %s, want the durable selection %s (not the newer default %s)",
+			store.latestCampaign, selected.ID, newer.ID)
+	}
+}
+
+// TestSessionGetIdleFallsBackWithoutSelection pins the fallback half of #220: an
+// operator with no /glyphoxa use selection falls back to the most-recently-created
+// campaign (GetActiveCampaign) for the idle summary — mirroring StartSession, so the
+// deleted-campaign SET NULL path (selection → ErrNotFound) still surfaces a summary.
+func TestSessionGetIdleFallsBackWithoutSelection(t *testing.T) {
+	t.Parallel()
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer B"}
+	store := &fakeSessionStore{forUserErr: storage.ErrNotFound, campaign: newer, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, &fakeSessionManager{}, store, storage.User{DiscordUserID: "999"})
+
+	if _, err := client.GetSession(context.Background(), connect.NewRequest(&managementv1.GetSessionRequest{})); err != nil {
+		t.Fatalf("GetSession idle: %v", err)
+	}
+	if store.latestCampaign != newer.ID {
+		t.Errorf("idle summary scoped to %s, want the fallback %s", store.latestCampaign, newer.ID)
 	}
 }
 
