@@ -92,7 +92,9 @@ export function KnowledgePanel() {
   const searchQuery = useQuery(
     CampaignService.method.searchNodes,
     { query: debounced },
-    { enabled: searching, placeholderData: keepPreviousData },
+    // retry:false surfaces a failure promptly rather than backing off silently for
+    // seconds — a typeahead re-fires on the next keystroke anyway.
+    { enabled: searching, placeholderData: keepPreviousData, retry: false },
   );
 
   // Destructured together so the status-discriminated union still narrows `error`
@@ -106,13 +108,30 @@ export function KnowledgePanel() {
     return searchQuery.data?.nodes ?? listQuery.data?.nodes ?? [];
   }, [searching, searchQuery.data, listQuery.data]);
 
-  const invalidateNodes = () =>
-    queryClient.invalidateQueries({
+  // A failed search must NOT silently fall back to the full list — the box still
+  // holds a query, so an unfiltered list would look filtered and the GM could act
+  // on the wrong entry. Surface the failure instead.
+  const searchFailed = searching && searchQuery.isError;
+
+  // A mutation must refresh BOTH reads: the full ListNodes list AND any active
+  // SearchNodes result. Invalidating only listNodes left a stale search view — a
+  // deleted/renamed entry lingered in the filtered list (second delete then
+  // 404s). The searchNodes key is built without an input so it prefix-matches
+  // every cached query string.
+  const invalidateNodes = () => {
+    void queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
         schema: CampaignService.method.listNodes,
         cardinality: "finite",
       }),
     });
+    void queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.searchNodes,
+        cardinality: "finite",
+      }),
+    });
+  };
 
   const createNode = useMutation(CampaignService.method.createNode, {
     onSuccess: () => void invalidateNodes(),
@@ -179,28 +198,36 @@ export function KnowledgePanel() {
           onChange={(e) => setSearch(e.target.value)}
           className="gx-kg-search"
         />
-        {groups.map((g) => (
-          <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
-            <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
-            {g.items.map((n) => (
-              <KnowledgeCard
-                key={n.id}
-                node={n}
-                onEdit={() => setEditing(n)}
-                onDelete={() => removeNode(n)}
-                deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
-              />
+        {searchFailed ? (
+          <p className="gx-campaign__error" role="alert">
+            Couldn't search: {searchQuery.error?.message}
+          </p>
+        ) : (
+          <>
+            {groups.map((g) => (
+              <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
+                <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
+                {g.items.map((n) => (
+                  <KnowledgeCard
+                    key={n.id}
+                    node={n}
+                    onEdit={() => setEditing(n)}
+                    onDelete={() => removeNode(n)}
+                    deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
+                  />
+                ))}
+              </section>
             ))}
-          </section>
-        ))}
-        {nodes.length === 0 &&
-          (searching ? (
-            <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
-          ) : (
-            <p className="gx-kg-empty">
-              No entries yet. Add what the world knows and your NPCs will speak to it.
-            </p>
-          ))}
+            {nodes.length === 0 &&
+              (searching ? (
+                <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
+              ) : (
+                <p className="gx-kg-empty">
+                  No entries yet. Add what the world knows and your NPCs will speak to it.
+                </p>
+              ))}
+          </>
+        )}
       </div>
 
       <EntryEditor

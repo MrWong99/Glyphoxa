@@ -26,7 +26,7 @@ import { KnowledgePanel } from "./KnowledgePanel";
 // NodeType, the update fields, and the delete id reach the wire.
 function mockTransport(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts: { failDelete?: boolean } = {},
+  opts: { failDelete?: boolean; failSearch?: boolean } = {},
 ) {
   const nodes =
     seed ??
@@ -54,6 +54,9 @@ function mockTransport(
       // relevance ranking is asserted server-side. gm_private is not filtered.
       searchNodes: (req) => {
         searchCalls.push(req.query);
+        if (opts.failSearch) {
+          throw new ConnectError("search boom", Code.Internal);
+        }
         const q = req.query.trim().toLowerCase();
         const hits = nodes.filter(
           (n) => n.name.toLowerCase().includes(q) || n.body.toLowerCase().includes(q),
@@ -97,7 +100,7 @@ function mockTransport(
 
 function renderPanel(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts?: { failDelete?: boolean },
+  opts?: { failDelete?: boolean; failSearch?: boolean },
 ) {
   const ctx = mockTransport(seed, opts);
   render(
@@ -181,6 +184,46 @@ describe("KnowledgePanel", () => {
     await screen.findByText(/no entries yet/i);
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0].id).toBe("n1");
+  });
+
+  it("refreshes the filtered search results when an entry is deleted while searching", async () => {
+    const { deleteCalls } = renderPanel([
+      create(NodeSchema, { id: "n1", campaignId: "c1", nodeType: NodeType.NOTE, name: "The sealed vault", body: "" }),
+      create(NodeSchema, { id: "n2", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Quiet Harbor", body: "" }),
+    ]);
+    await screen.findByText("The sealed vault");
+
+    // Filter to just the vault, then delete it from the filtered list.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
+    await waitFor(() => expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+
+    // The mutation must invalidate the SEARCH cache too, so the deleted entry
+    // leaves the filtered view instead of lingering (stale search results).
+    await waitFor(() => expect(screen.queryByText("The sealed vault")).not.toBeInTheDocument());
+    expect(screen.getByText(/no entries match/i)).toBeInTheDocument();
+    expect(deleteCalls).toHaveLength(1);
+  });
+
+  it("surfaces a failed search RPC as an alert instead of silently showing the full list", async () => {
+    renderPanel(
+      [
+        create(NodeSchema, { id: "n1", campaignId: "c1", nodeType: NodeType.NOTE, name: "The sealed vault", body: "" }),
+        create(NodeSchema, { id: "n2", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Quiet Harbor", body: "" }),
+      ],
+      { failSearch: true },
+    );
+    await screen.findByText("The sealed vault");
+
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
+
+    // The failure is announced...
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't search/i);
+    expect(alert).toHaveTextContent(/search boom/i);
+    // ...and the full unfiltered list is NOT shown as if it were the results (a
+    // non-matching entry must not reappear while the box still holds a query).
+    expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument();
   });
 
   it("surfaces a failed delete as an alert instead of a silently dead button", async () => {
