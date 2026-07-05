@@ -7,6 +7,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -155,6 +157,57 @@ func TestDeploymentConfigTokenAndChannels(t *testing.T) {
 	}
 	if idRow.GuildID != "999" || idRow.VoiceChannelID != "888" {
 		t.Errorf("channels not updated: %+v", idRow)
+	}
+}
+
+// TestGetLatestDeploymentConfig asserts the standing presence's boot read (#102,
+// ADR-0010): no row yields ErrNotFound, a saved config is returned, and with more
+// than one deployment_config row the most-recently-updated one wins (the
+// single-operator "latest", tenant-unscoped like GetActiveCampaign).
+func TestGetLatestDeploymentConfig(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, _ := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// Empty → ErrNotFound.
+	if _, err := st.GetLatestDeploymentConfig(ctx); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("get latest on empty: got %v, want ErrNotFound", err)
+	}
+
+	// One tenant's config.
+	if _, err := st.SaveDiscordChannels(ctx, tenantID, "472093001100", "472093774421"); err != nil {
+		t.Fatalf("save channels: %v", err)
+	}
+	if _, err := st.SaveDiscordBotToken(ctx, tenantID, []byte{0x01, 0x99}, "tok1"); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+	got, err := st.GetLatestDeploymentConfig(ctx)
+	if err != nil {
+		t.Fatalf("get latest: %v", err)
+	}
+	if got.TenantID != tenantID || got.GuildID != "472093001100" || got.DiscordBotTokenLast4 != "tok1" {
+		t.Fatalf("latest = %+v, want the saved single-tenant config", got)
+	}
+
+	// A second tenant with a strictly-newer deployment_config must win "latest".
+	var tenant2 uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO tenant (name) VALUES ('Beta TTRPG') RETURNING id`).Scan(&tenant2); err != nil {
+		t.Fatalf("insert tenant2: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO deployment_config (tenant_id, guild_id, voice_channel_id, updated_at)
+		 VALUES ($1, '888888888888', '777777777777', now() + interval '1 second')`,
+		tenant2); err != nil {
+		t.Fatalf("insert tenant2 deployment_config: %v", err)
+	}
+	got, err = st.GetLatestDeploymentConfig(ctx)
+	if err != nil {
+		t.Fatalf("get latest after second tenant: %v", err)
+	}
+	if got.TenantID != tenant2 || got.GuildID != "888888888888" {
+		t.Errorf("latest = %+v, want the newer tenant2 config", got)
 	}
 }
 

@@ -250,6 +250,12 @@ func hardcodedNPC() npcSpec {
 	}
 }
 
+// ClientProvider yields the standing shared Discord client a Voice Session cycle
+// borrows (ADR-0010 amendment, #102). It returns an error while the presence is
+// in its wait-state (no Bot token) or rebuilding; the reconnect loop treats that
+// as a transient failure and retries. See [Config.Client].
+type ClientProvider func(ctx context.Context) (*bot.Client, error)
+
 // Config configures a [Run] of the live NPC voice loop.
 type Config struct {
 	// Token is the Discord bot token (from DISCORD_BOT_TOKEN). Required.
@@ -258,6 +264,14 @@ type Config struct {
 	// channel to join. Required.
 	Guild   string
 	Channel string
+	// Client, when non-nil, is the standing shared Discord client the boot-owned
+	// presence owns (ADR-0010 amendment, #102): connectAndServe borrows it per
+	// cycle instead of constructing its own with disgo.New / OpenGateway, and does
+	// NOT close it at cycle end (the presence owns its lifecycle). A provider error
+	// (the presence is in its wait-state, or rebuilding) fails the cycle, so
+	// runWithReconnect backs off and retries — self-healing across presence
+	// rebuilds. nil keeps today's per-cycle client (env-only voice mode, unchanged).
+	Client ClientProvider
 	// Logger receives structured logs; nil discards them.
 	Logger *slog.Logger
 	// Metrics receives the hot-path voice counters/gauges (A2): inbound frame
@@ -460,23 +474,30 @@ func Run(ctx context.Context, cfg Config) error {
 // join-then-immediate-fail cycle keeps backing off. Any error — or a clean return (a dropped
 // gateway often reports none) — flows back to runWithReconnect, which decides
 // whether to retry; only a cancelled ctx ends the loop.
-func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func()) error {
-	// Per-cycle context: everything this cycle spawns — the stage subscriber's
-	// TTL-sweep goroutine (stageSub.Start), the Discord gateway, and the audio
-	// loop — is bound to cycleCtx, so the deferred cancel reaps it at cycle end.
-	// Without this a flapping Discord (issue #44) would leak one sweeper goroutine
-	// per reconnect: the outer ctx only ends at process shutdown. cycleCtx is a
-	// child of ctx, so a cancelled process still unwinds promptly (pipe.Run et al.
-	// observe the cancellation), and runWithReconnect checks the OUTER ctx to
-	// decide shutdown vs reconnect.
-	cycleCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+// newDiscordClient is the disgo constructor seam (mirrors newLLM/newSTT/newTTS):
+// a test swaps it to assert the owned path calls it and the shared-client path
+// does NOT. Production always uses disgo.New.
+var newDiscordClient = disgo.New
 
-	// Discord client: DAVE/MLS is wired at construction (it cannot be enabled
-	// after disgo builds its VoiceManager). DaveOption() is a no-op stub unless
-	// the binary was built with -tags dave; NewManager(WithDave(true)) then warns
-	// if encryption was expected but unavailable.
-	client, err := disgo.New(cfg.Token,
+// acquireClient yields the Discord client for one connect-and-serve cycle. When
+// cfg.Client is set it BORROWS the standing shared client (already gateway-open,
+// owned by the presence) and reports owned=false so the caller never closes it;
+// a provider error fails the cycle so runWithReconnect retries. Otherwise it
+// builds and opens a per-cycle client (today's behavior) and reports owned=true.
+func acquireClient(ctx context.Context, cfg Config, log *slog.Logger) (client *bot.Client, owned bool, err error) {
+	if cfg.Client != nil {
+		c, err := cfg.Client(ctx)
+		if err != nil {
+			return nil, false, fmt.Errorf("wirenpc: standing Discord client unavailable: %w", err)
+		}
+		return c, false, nil
+	}
+
+	// Per-cycle client: DAVE/MLS is wired at construction (it cannot be enabled
+	// after disgo builds its VoiceManager). DaveOption() is a no-op stub unless the
+	// binary was built with -tags dave; NewManager(WithDave(true)) then warns if
+	// encryption was expected but unavailable.
+	c, err := newDiscordClient(cfg.Token,
 		// Own disgo's logger explicitly (A1): route it through the same filtered
 		// app logger so the benign DAVE-decrypt noise is tamed even if disgo ever
 		// stops reading slog.Default().
@@ -492,12 +513,36 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		gxvoice.DaveOption(),
 	)
 	if err != nil {
-		return fmt.Errorf("wirenpc: build Discord client: %w", err)
+		return nil, false, fmt.Errorf("wirenpc: build Discord client: %w", err)
 	}
-	defer client.Close(context.Background())
+	if err := c.OpenGateway(ctx); err != nil {
+		c.Close(context.Background())
+		return nil, false, fmt.Errorf("wirenpc: open gateway: %w", err)
+	}
+	return c, true, nil
+}
 
-	if err := client.OpenGateway(cycleCtx); err != nil {
-		return fmt.Errorf("wirenpc: open gateway: %w", err)
+func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.ID, log *slog.Logger, connected func()) error {
+	// Per-cycle context: everything this cycle spawns — the stage subscriber's
+	// TTL-sweep goroutine (stageSub.Start), the Discord gateway, and the audio
+	// loop — is bound to cycleCtx, so the deferred cancel reaps it at cycle end.
+	// Without this a flapping Discord (issue #44) would leak one sweeper goroutine
+	// per reconnect: the outer ctx only ends at process shutdown. cycleCtx is a
+	// child of ctx, so a cancelled process still unwinds promptly (pipe.Run et al.
+	// observe the cancellation), and runWithReconnect checks the OUTER ctx to
+	// decide shutdown vs reconnect.
+	cycleCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Discord client: either the standing shared client the presence owns
+	// (cfg.Client, #102) or a per-cycle client this loop builds and closes. The
+	// shared client is already gateway-open and must NOT be closed here.
+	client, owned, err := acquireClient(cycleCtx, cfg, log)
+	if err != nil {
+		return err
+	}
+	if owned {
+		defer client.Close(context.Background())
 	}
 
 	mgr := gxvoice.NewManager(client,
