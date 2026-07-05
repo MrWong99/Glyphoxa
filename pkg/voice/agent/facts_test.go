@@ -106,7 +106,8 @@ func TestSystemPrompt_Facts_BlockInSlotOrder(t *testing.T) {
 	iFacts := strings.Index(sys, "## What you know about the world")
 	iMemory := strings.Index(sys, "I served him ale.")
 	iMarkup := strings.Index(sys, sentinelMarkup)
-	if !(iPersona < iFacts && iFacts < iMemory && iMemory < iMarkup) {
+	ordered := iPersona < iFacts && iFacts < iMemory && iMemory < iMarkup
+	if !ordered {
 		t.Errorf("slot order wrong (want persona<facts<memory<markup): persona=%d facts=%d memory=%d markup=%d\n%q",
 			iPersona, iFacts, iMemory, iMarkup, sys)
 	}
