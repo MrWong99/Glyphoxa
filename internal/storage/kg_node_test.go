@@ -74,60 +74,6 @@ func TestKGNodeCreateListRoundTrip(t *testing.T) {
 	}
 }
 
-// TestKGNodeListPublicNodes is #126 AC3: the prompt-injection read excludes
-// gm_private Nodes and orders by updated_at DESC — the newest public Node first.
-func TestKGNodeListPublicNodes(t *testing.T) {
-	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
-	ctx := context.Background()
-	st := storage.New(pool)
-
-	// Two public and one private. Force distinct updated_at ordering by inserting
-	// in a known sequence and stamping updated_at explicitly for determinism.
-	pubOld, err := st.CreateNode(ctx, storage.NewKGNode{
-		CampaignID: campaignID, Type: storage.KGNodeNote, Name: "Old public", Body: "old",
-	})
-	if err != nil {
-		t.Fatalf("CreateNode pubOld: %v", err)
-	}
-	if _, err := st.CreateNode(ctx, storage.NewKGNode{
-		CampaignID: campaignID, Type: storage.KGNodeNote, Name: "Secret", Body: "hidden", GMPrivate: true,
-	}); err != nil {
-		t.Fatalf("CreateNode secret: %v", err)
-	}
-	pubNew, err := st.CreateNode(ctx, storage.NewKGNode{
-		CampaignID: campaignID, Type: storage.KGNodeNote, Name: "New public", Body: "new",
-	})
-	if err != nil {
-		t.Fatalf("CreateNode pubNew: %v", err)
-	}
-	// Make pubNew strictly newer than pubOld regardless of insert-time granularity.
-	if _, err := pool.Exec(ctx,
-		`UPDATE kg_node SET updated_at = now() + interval '1 hour' WHERE id = $1`, pubNew.ID); err != nil {
-		t.Fatalf("bump pubNew updated_at: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`UPDATE kg_node SET updated_at = now() - interval '1 hour' WHERE id = $1`, pubOld.ID); err != nil {
-		t.Fatalf("bump pubOld updated_at: %v", err)
-	}
-
-	pub, err := st.ListPublicNodes(ctx, campaignID)
-	if err != nil {
-		t.Fatalf("ListPublicNodes: %v", err)
-	}
-	if len(pub) != 2 {
-		t.Fatalf("ListPublicNodes returned %d, want 2 (gm_private excluded)", len(pub))
-	}
-	if pub[0].Name != "New public" || pub[1].Name != "Old public" {
-		t.Errorf("order = [%q %q], want [New public, Old public] (updated_at DESC)", pub[0].Name, pub[1].Name)
-	}
-	for _, n := range pub {
-		if n.GMPrivate {
-			t.Errorf("ListPublicNodes leaked a gm_private node: %+v", n)
-		}
-	}
-}
-
 // TestKGNodeUpdate is #129 AC2/AC3: UpdateNode persists name/body/gm_private,
 // bumps updated_at (never touching node_type — immutable, ADR-0008), and yields
 // ErrNotFound for an id that does not exist.
@@ -213,9 +159,7 @@ func TestKGNodeDelete(t *testing.T) {
 
 // TestKGNodeCreateEditDeleteAcrossTypes is #129 AC5's storage grain: the full
 // create → edit → delete lifecycle across two distinct Node types (Location and
-// Faction), with the gm_private toggle round-tripping, and AC4's boundary — a
-// gm-public Node of either type surfaces into the Hot Context read while a
-// gm_private one of any type is excluded.
+// Faction), with the gm_private toggle round-tripping through ListNodes.
 func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, campaignID := seedCampaign(t, dsn)
@@ -247,17 +191,26 @@ func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 		t.Fatalf("UpdateNode faction: %v", err)
 	}
 
-	// AC4: the public Location surfaces into the Hot Context read; the now-private
-	// Faction is excluded — proving the visibility filter is type-agnostic.
-	pub, err := st.ListPublicNodes(ctx, campaignID)
+	// The edits round-trip across both types: the Location stays public with its
+	// new name/body, the Faction flips to gm_private with its new body. ListNodes
+	// orders by node_type enum (location < faction), so the Location is first.
+	afterEdit, err := st.ListNodes(ctx, campaignID)
 	if err != nil {
-		t.Fatalf("ListPublicNodes: %v", err)
+		t.Fatalf("ListNodes after edit: %v", err)
 	}
-	if len(pub) != 1 || pub[0].Type != storage.KGNodeLocation || pub[0].Name != "Old Harbor" {
-		t.Fatalf("public read = %+v, want only the public Location", pub)
+	if len(afterEdit) != 2 {
+		t.Fatalf("after edit want 2 nodes, got %+v", afterEdit)
+	}
+	if afterEdit[0].ID != loc.ID || afterEdit[0].Type != storage.KGNodeLocation ||
+		afterEdit[0].Name != "Old Harbor" || afterEdit[0].GMPrivate {
+		t.Errorf("location edit not persisted: %+v", afterEdit[0])
+	}
+	if afterEdit[1].ID != fac.ID || afterEdit[1].Type != storage.KGNodeFaction ||
+		afterEdit[1].Body != "A secret cabal." || !afterEdit[1].GMPrivate {
+		t.Errorf("faction edit not persisted: %+v", afterEdit[1])
 	}
 
-	// Delete the Location; the (private) Faction remains but stays out of the public read.
+	// Delete the Location; only the (private) Faction remains.
 	if err := st.DeleteNode(ctx, loc.ID); err != nil {
 		t.Fatalf("DeleteNode location: %v", err)
 	}
@@ -267,12 +220,5 @@ func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 	}
 	if len(all) != 1 || all[0].ID != fac.ID || !all[0].GMPrivate {
 		t.Errorf("after delete want only the private Faction, got %+v", all)
-	}
-	pub, err = st.ListPublicNodes(ctx, campaignID)
-	if err != nil {
-		t.Fatalf("ListPublicNodes after delete: %v", err)
-	}
-	if len(pub) != 0 {
-		t.Errorf("gm_private Faction leaked into the Hot Context read: %+v", pub)
 	}
 }

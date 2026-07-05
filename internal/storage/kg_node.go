@@ -219,32 +219,3 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 	}
 	return out, nil
 }
-
-// ListPublicNodes returns the Campaign's gm-public Nodes ordered newest-first
-// (updated_at DESC, id), capped — the Hot Context prompt-injection read (#126).
-// gm_private Nodes are excluded so a GM-only fact never reaches an NPC's prompt.
-func (s *Store) ListPublicNodes(ctx context.Context, campaignID uuid.UUID) ([]KGNode, error) {
-	rows, err := s.db.Query(ctx,
-		`SELECT `+kgNodeColumns+`
-		   FROM kg_node
-		  WHERE campaign_id = $1 AND NOT gm_private
-		  ORDER BY updated_at DESC, id
-		  LIMIT $2`, campaignID, kgFactsCap)
-	if err != nil {
-		return nil, fmt.Errorf("storage: list public kg nodes for campaign %s: %w", campaignID, err)
-	}
-	defer rows.Close()
-
-	var out []KGNode
-	for rows.Next() {
-		n, err := scanKGNode(rows)
-		if err != nil {
-			return nil, fmt.Errorf("storage: scan public kg node: %w", err)
-		}
-		out = append(out, n)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: list public kg nodes for campaign %s: %w", campaignID, err)
-	}
-	return out, nil
-}
