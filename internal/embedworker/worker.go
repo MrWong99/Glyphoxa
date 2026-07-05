@@ -8,13 +8,16 @@
 // backlog toward zero and making the chunks returnable by the embedding-filtered
 // retrieval query (embedding IS NOT NULL).
 //
-// Retry is implicit and stateless: any pass error (provider outage, timeout, a
-// DB write) abandons the pass WITHOUT writing partial results, so the affected
-// chunks stay NULL and are re-claimed on the next pass. There is no backoff
-// bookkeeping and no dead-letter state — a chunk that cannot be embedded now is
-// simply retried later, forever, while the worker keeps running. The loop stops
-// cleanly when its context is cancelled (process shutdown): in-flight provider
-// calls carry that context, so they abort rather than pinning the shutdown.
+// Retry is implicit and stateless: a pass that hits an error stops early and
+// re-claims the leftover work next pass. A failure BEFORE the writes (list, the
+// provider call, a wrong vector count or dimension) writes nothing; a failure
+// DURING the per-chunk writes keeps the rows already written — each embedding is
+// an independent, valid row — and leaves the rest NULL. Either way the still-NULL
+// chunks are re-claimed on the next pass. There is no backoff bookkeeping and no
+// dead-letter state — a chunk that cannot be embedded now is simply retried
+// later, forever, while the worker keeps running. The loop stops cleanly when its
+// context is cancelled (process shutdown): in-flight provider calls carry that
+// context, so they abort rather than pinning the shutdown.
 package embedworker
 
 import (
@@ -130,10 +133,12 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// pass claims one batch, embeds it, and writes the vectors. Any error abandons
-// the pass without a partial write — the affected chunks stay NULL and are
-// re-claimed next pass (the retry). A pass that embeds nothing (empty backlog or
-// any error) leaves the gauge untouched; only a successful write re-reads it.
+// pass claims one batch, embeds it, and writes each vector. An error stops the
+// pass early: a pre-write error (list, provider, wrong count/dimension) writes
+// nothing, while a mid-batch write error keeps the rows already written and
+// leaves the rest NULL. The still-NULL chunks are re-claimed next pass (the
+// retry). The gauge is re-read only after the whole batch of writes succeeds; a
+// short or aborted pass leaves it as the last pass set it.
 func (w *Worker) pass(ctx context.Context) {
 	chunks, err := w.store.ListUnembeddedChunks(ctx, w.cfg.BatchSize)
 	if err != nil {
@@ -173,9 +178,12 @@ func (w *Worker) pass(ctx context.Context) {
 		}
 	}
 
+	// Write each row; a failure stops the loop but keeps the rows already written
+	// (each is an independent, committed embedding). This chunk and the untried
+	// remainder stay NULL and are re-claimed next pass.
 	for i, c := range chunks {
 		if err := w.store.SetChunkEmbedding(ctx, c.ID, vecs[i], w.model); err != nil {
-			w.log.Warn("embed backfill: set chunk embedding failed; remaining chunks retry next pass",
+			w.log.Warn("embed backfill: set chunk embedding failed; this and later chunks retry next pass",
 				"chunk_id", c.ID, "err", err)
 			return
 		}

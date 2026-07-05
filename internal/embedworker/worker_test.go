@@ -25,14 +25,16 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 
 // fakeStore is an in-memory embed backlog: pending holds the still-NULL chunks
 // (the ListUnembeddedChunks queue), embedded records what SetChunkEmbedding
-// stored, and Count reports len(pending). The *Err fields inject failures.
+// stored, and Count reports len(pending). listErr/countErr fail those reads;
+// setFailID fails SetChunkEmbedding for exactly one chunk id, so a test can land
+// a write error mid-batch (rows before it commit, rows from it on stay NULL).
 type fakeStore struct {
-	mu       sync.Mutex
-	pending  []storage.TranscriptChunk
-	embedded map[uuid.UUID]embedRecord
-	listErr  error
-	setErr   error
-	countErr error
+	mu        sync.Mutex
+	pending   []storage.TranscriptChunk
+	embedded  map[uuid.UUID]embedRecord
+	listErr   error
+	setFailID uuid.UUID
+	countErr  error
 }
 
 type embedRecord struct {
@@ -58,8 +60,8 @@ func (f *fakeStore) ListUnembeddedChunks(_ context.Context, limit int) ([]storag
 func (f *fakeStore) SetChunkEmbedding(_ context.Context, id uuid.UUID, vec []float32, model string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.setErr != nil {
-		return f.setErr
+	if f.setFailID != uuid.Nil && id == f.setFailID {
+		return errors.New("set chunk embedding: injected write failure")
 	}
 	for i, c := range f.pending {
 		if c.ID == id {
@@ -93,6 +95,13 @@ func (f *fakeStore) pendingCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.pending)
+}
+
+func (f *fakeStore) isEmbedded(id uuid.UUID) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.embedded[id]
+	return ok
 }
 
 // fakeGauge records every Set so a test can assert the backlog curve.
@@ -292,6 +301,118 @@ func TestPassRejectsWrongDimension(t *testing.T) {
 	w.pass(context.Background())
 	if store.embeddedCount() != 0 {
 		t.Errorf("embedded = %d after retry, want 0 (still wrong dimension)", store.embeddedCount())
+	}
+}
+
+// Test: a List read error abandons the pass without embedding anything or
+// touching the gauge, and the worker keeps running — a later pass recovers.
+func TestPassAbandonedOnListError(t *testing.T) {
+	store := &fakeStore{
+		pending: []storage.TranscriptChunk{chunk("alpha")},
+		listErr: errors.New("db unavailable"),
+	}
+	gauge := &fakeGauge{}
+	w := New(store, embeddingstest.Deterministic{}, "m", gauge, discardLog(), Config{})
+
+	w.pass(context.Background())
+	if store.embeddedCount() != 0 {
+		t.Errorf("embedded = %d, want 0 (list failed, nothing embedded)", store.embeddedCount())
+	}
+	if got := gauge.snapshot(); len(got) != 0 {
+		t.Errorf("gauge Set %d times, want 0 (no successful pass)", len(got))
+	}
+
+	store.mu.Lock()
+	store.listErr = nil
+	store.mu.Unlock()
+	w.pass(context.Background())
+	if store.embeddedCount() != 1 {
+		t.Errorf("embedded = %d after recovery pass, want 1 (worker kept running)", store.embeddedCount())
+	}
+}
+
+// Test: a write error mid-batch commits the rows written before it (each
+// embedding is an independent, valid row) and leaves the failing chunk plus the
+// untried remainder NULL; a later pass drains them (the retry).
+func TestPassKeepsWrittenRowsOnMidBatchSetError(t *testing.T) {
+	c0, c1, c2 := chunk("alpha"), chunk("beta"), chunk("gamma")
+	store := &fakeStore{
+		pending:   []storage.TranscriptChunk{c0, c1, c2},
+		setFailID: c1.ID, // the second write fails
+	}
+	w := New(store, embeddingstest.Deterministic{}, "m", nil, discardLog(), Config{})
+
+	w.pass(context.Background())
+	if !store.isEmbedded(c0.ID) {
+		t.Error("c0 not embedded; the pre-error write must commit")
+	}
+	if store.isEmbedded(c1.ID) || store.isEmbedded(c2.ID) {
+		t.Error("c1/c2 embedded; the failing chunk and the untried remainder must stay NULL")
+	}
+	if store.pendingCount() != 2 {
+		t.Fatalf("pending = %d, want 2 (c1 failed + c2 untried)", store.pendingCount())
+	}
+
+	// Clear the injected failure: the next pass drains the leftover backlog.
+	store.mu.Lock()
+	store.setFailID = uuid.Nil
+	store.mu.Unlock()
+	w.pass(context.Background())
+	if store.pendingCount() != 0 || store.embeddedCount() != 3 {
+		t.Fatalf("after retry pass: pending=%d embedded=%d, want 0/3", store.pendingCount(), store.embeddedCount())
+	}
+}
+
+// Test: a recount error after the writes leaves the gauge unset (stale, not
+// zeroed) while the embeddings still commit, and the worker keeps running.
+func TestPassLeavesGaugeStaleOnCountError(t *testing.T) {
+	store := &fakeStore{
+		pending:  []storage.TranscriptChunk{chunk("alpha"), chunk("beta")},
+		countErr: errors.New("count failed"),
+	}
+	gauge := &fakeGauge{}
+	w := New(store, embeddingstest.Deterministic{}, "m", gauge, discardLog(), Config{})
+
+	w.pass(context.Background())
+	if store.embeddedCount() != 2 {
+		t.Fatalf("embedded = %d, want 2 (writes precede the recount)", store.embeddedCount())
+	}
+	if got := gauge.snapshot(); len(got) != 0 {
+		t.Errorf("gauge Set %d times, want 0 (recount failed → gauge stays stale)", len(got))
+	}
+
+	// Worker keeps running: with the backlog drained, the next pass is a no-op.
+	store.mu.Lock()
+	store.countErr = nil
+	store.mu.Unlock()
+	w.pass(context.Background())
+	if store.embeddedCount() != 2 {
+		t.Errorf("embedded = %d, want 2 (no work left)", store.embeddedCount())
+	}
+}
+
+// shortProvider returns one fewer vector than requested — a broken provider that
+// violates the order-preserving, total contract.
+type shortProvider struct{}
+
+func (shortProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	return embeddingstest.Deterministic{}.Embed(ctx, texts[:len(texts)-1])
+}
+
+// Test: a vector-count mismatch (len(vecs) != len(chunks)) abandons the pass
+// without writing any row — a provider that can't return one vector per input is
+// mis-behaving, and a positional write would embed rows with the wrong vector.
+func TestPassRejectsVectorCountMismatch(t *testing.T) {
+	store := &fakeStore{pending: []storage.TranscriptChunk{chunk("alpha"), chunk("beta")}}
+	w := New(store, shortProvider{}, "m", nil, discardLog(), Config{})
+
+	w.pass(context.Background())
+	if store.embeddedCount() != 0 || store.pendingCount() != 2 {
+		t.Fatalf("embedded=%d pending=%d, want 0/2 (count mismatch abandons the pass)",
+			store.embeddedCount(), store.pendingCount())
 	}
 }
 

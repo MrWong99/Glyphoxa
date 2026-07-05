@@ -323,12 +323,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// each row — draining the backlog gauge toward zero and making the chunks
 	// returnable by embedding-filtered retrieval. It needs only the DB + the
 	// embeddings provider (not the voice loop), so it runs in web AND all mode.
-	// An unsupported provider is loud-but-non-fatal: log ERROR and skip the worker
-	// — the backlog gauge then exposes the permanent stall rather than the process
-	// crashing. The worker rides the process signal ctx, so SIGTERM stops it and
-	// any in-flight provider call aborts with the same context.
+	// A resolve failure (an unsupported provider OR a config-read error) is
+	// loud-but-non-fatal: log ERROR and skip the worker — the backlog gauge then
+	// exposes the permanent stall rather than the process crashing. The worker
+	// rides the process signal ctx, so SIGTERM stops it and any in-flight provider
+	// call aborts with the same context.
 	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
-		log.Error("unsupported embeddings provider, backfill disabled", "err", err)
+		log.Error("embeddings provider unavailable, backfill disabled", "err", err)
 	} else {
 		go embedworker.New(store, provider, model, metrics, log, embedworker.Config{}).Run(ctx)
 	}
