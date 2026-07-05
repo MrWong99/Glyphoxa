@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import { createRouterTransport, ConnectError, Code } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
@@ -11,6 +11,7 @@ import {
   ListNodesResponseSchema,
   UpdateNodeResponseSchema,
   DeleteNodeResponseSchema,
+  SearchNodesResponseSchema,
   type CreateNodeRequest,
   type UpdateNodeRequest,
   type DeleteNodeRequest,
@@ -23,7 +24,10 @@ import { KnowledgePanel } from "./KnowledgePanel";
 // CampaignService node RPCs mutate a closure so create/edit/delete each round-trip
 // through invalidate → refetch, and the recorded requests prove the chosen
 // NodeType, the update fields, and the delete id reach the wire.
-function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
+function mockTransport(
+  seed?: ReturnType<typeof create<typeof NodeSchema>>[],
+  opts: { failDelete?: boolean; failSearch?: boolean } = {},
+) {
   const nodes =
     seed ??
     [
@@ -40,10 +44,25 @@ function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
   const createCalls: CreateNodeRequest[] = [];
   const updateCalls: UpdateNodeRequest[] = [];
   const deleteCalls: DeleteNodeRequest[] = [];
+  const searchCalls: string[] = [];
 
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
       listNodes: () => create(ListNodesResponseSchema, { nodes }),
+      // Stand-in for the tsvector search: a case-insensitive substring over
+      // name + body. The panel only cares that matches filter the visible list;
+      // relevance ranking is asserted server-side. gm_private is not filtered.
+      searchNodes: (req) => {
+        searchCalls.push(req.query);
+        if (opts.failSearch) {
+          throw new ConnectError("search boom", Code.Internal);
+        }
+        const q = req.query.trim().toLowerCase();
+        const hits = nodes.filter(
+          (n) => n.name.toLowerCase().includes(q) || n.body.toLowerCase().includes(q),
+        );
+        return create(SearchNodesResponseSchema, { nodes: hits });
+      },
       createNode: (req) => {
         createCalls.push(req);
         const node = create(NodeSchema, {
@@ -67,17 +86,23 @@ function mockTransport(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
       },
       deleteNode: (req) => {
         deleteCalls.push(req);
+        if (opts.failDelete) {
+          throw new ConnectError("delete boom", Code.Internal);
+        }
         const i = nodes.findIndex((n) => n.id === req.id);
         if (i >= 0) nodes.splice(i, 1);
         return create(DeleteNodeResponseSchema, {});
       },
     });
   });
-  return { transport, nodes, createCalls, updateCalls, deleteCalls };
+  return { transport, nodes, createCalls, updateCalls, deleteCalls, searchCalls };
 }
 
-function renderPanel(seed?: ReturnType<typeof create<typeof NodeSchema>>[]) {
-  const ctx = mockTransport(seed);
+function renderPanel(
+  seed?: ReturnType<typeof create<typeof NodeSchema>>[],
+  opts?: { failDelete?: boolean; failSearch?: boolean },
+) {
+  const ctx = mockTransport(seed, opts);
   render(
     <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
       <KnowledgePanel />
@@ -161,6 +186,59 @@ describe("KnowledgePanel", () => {
     expect(deleteCalls[0].id).toBe("n1");
   });
 
+  it("refreshes the filtered search results when an entry is deleted while searching", async () => {
+    const { deleteCalls } = renderPanel([
+      create(NodeSchema, { id: "n1", campaignId: "c1", nodeType: NodeType.NOTE, name: "The sealed vault", body: "" }),
+      create(NodeSchema, { id: "n2", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Quiet Harbor", body: "" }),
+    ]);
+    await screen.findByText("The sealed vault");
+
+    // Filter to just the vault, then delete it from the filtered list.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
+    await waitFor(() => expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+
+    // The mutation must invalidate the SEARCH cache too, so the deleted entry
+    // leaves the filtered view instead of lingering (stale search results).
+    await waitFor(() => expect(screen.queryByText("The sealed vault")).not.toBeInTheDocument());
+    expect(screen.getByText(/no entries match/i)).toBeInTheDocument();
+    expect(deleteCalls).toHaveLength(1);
+  });
+
+  it("surfaces a failed search RPC as an alert instead of silently showing the full list", async () => {
+    renderPanel(
+      [
+        create(NodeSchema, { id: "n1", campaignId: "c1", nodeType: NodeType.NOTE, name: "The sealed vault", body: "" }),
+        create(NodeSchema, { id: "n2", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Quiet Harbor", body: "" }),
+      ],
+      { failSearch: true },
+    );
+    await screen.findByText("The sealed vault");
+
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
+
+    // The failure is announced...
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't search/i);
+    expect(alert).toHaveTextContent(/search boom/i);
+    // ...and the full unfiltered list is NOT shown as if it were the results (a
+    // non-matching entry must not reappear while the box still holds a query).
+    expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a failed delete as an alert instead of a silently dead button", async () => {
+    renderPanel(undefined, { failDelete: true });
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+
+    // The failure is announced, not swallowed — and the entry is still present.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't delete/i);
+    expect(alert).toHaveTextContent(/delete boom/i);
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+  });
+
   it("groups the list by node type", async () => {
     renderPanel([
       create(NodeSchema, { id: "a", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Harbor" }),
@@ -171,6 +249,30 @@ describe("KnowledgePanel", () => {
     expect(within(locGroup).getByText("Harbor")).toBeInTheDocument();
     const facGroup = screen.getByRole("region", { name: "Faction" });
     expect(within(facGroup).getByText("Dockers Guild")).toBeInTheDocument();
+  });
+
+  it("filters the visible list to search matches, and clearing restores it with no search RPC", async () => {
+    const { searchCalls } = renderPanel([
+      create(NodeSchema, { id: "n1", campaignId: "c1", nodeType: NodeType.NOTE, name: "The sealed vault", body: "" }),
+      create(NodeSchema, { id: "n2", campaignId: "c1", nodeType: NodeType.LOCATION, name: "Quiet Harbor", body: "" }),
+    ]);
+    // Both entries show before any search, and no search RPC has fired.
+    await screen.findByText("The sealed vault");
+    expect(screen.getByText("Quiet Harbor")).toBeInTheDocument();
+    expect(searchCalls).toHaveLength(0);
+
+    // Typing filters the visible list to matches (debounced), dropping the harbor.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
+    await waitFor(() => expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument());
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+    expect(searchCalls.at(-1)).toBe("vault");
+    const callsAfterSearch = searchCalls.length;
+
+    // Clearing the box restores the full list from ListNodes — no search RPC on empty.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
+    await screen.findByText("Quiet Harbor");
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+    expect(searchCalls).toHaveLength(callsAfterSearch);
   });
 
   it("marks a gm-private entry with a private badge", async () => {

@@ -72,6 +72,9 @@ func (fakeReader) NodeEdges(context.Context, uuid.UUID) ([]storage.KGEdgeWithNod
 func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.NullUUID) (storage.KGNode, error) {
 	return storage.KGNode{}, nil
 }
+func (fakeReader) SearchNodes(context.Context, uuid.UUID, string, int) ([]storage.KGNode, error) {
+	return nil, nil
+}
 
 // newClient stands up the CampaignServer handler behind an httptest server and
 // returns a Connect-JSON client for it. WithProtoJSON forces the JSON codec on

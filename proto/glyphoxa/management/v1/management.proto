@@ -84,6 +84,16 @@ service CampaignService {
   // is CodeInvalidArgument; an Agent already voicing another Node is
   // CodeAlreadyExists; a missing OR cross-campaign Node/Agent is CodeNotFound.
   rpc SetNodeAgent(SetNodeAgentRequest) returns (SetNodeAgentResponse);
+
+  // SearchNodes returns the active campaign's Knowledge Graph Nodes whose name or
+  // body match the query, ranked by relevance (tsvector fts, ADR-0008 v1.0). It
+  // backs the Campaign screen's live wiki search; gm_private Nodes ARE included
+  // (GM-facing — the NPC-prompt exclusion is unchanged). An empty/whitespace query
+  // is CodeInvalidArgument. It is a read (NO_SIDE_EFFECTS), so the CSRF check is
+  // exempt.
+  rpc SearchNodes(SearchNodesRequest) returns (SearchNodesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
 // EdgeType is a Knowledge Graph Edge's type (CONTEXT.md "Edge", ADR-0008 v1.0).
@@ -277,6 +287,21 @@ message DeleteNodeRequest {
 
 // DeleteNodeResponse is the (empty) response for DeleteNode.
 message DeleteNodeResponse {}
+
+// SearchNodesRequest carries the GM's raw search query; the active campaign is
+// resolved server-side (single operator, ADR-0039). An empty/whitespace query is
+// rejected with CodeInvalidArgument.
+message SearchNodesRequest {
+  // query is the GM's raw keyword search over Node name + body.
+  string query = 1;
+}
+
+// SearchNodesResponse carries the matching Nodes in relevance rank order.
+message SearchNodesResponse {
+  // nodes are the matching Knowledge Graph Nodes, ranked by relevance; gm_private
+  // Nodes are included (GM-facing search).
+  repeated Node nodes = 1;
+}
 
 // Campaign is the wire representation of a campaign record.
 message Campaign {

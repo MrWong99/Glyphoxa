@@ -61,6 +61,15 @@ type fakeCampaignStore struct {
 	setAgentCalls []setAgentCall
 	setAgentNode  storage.KGNode
 	setAgentErr   error
+
+	// KG Node search state (#131): searchResults is returned verbatim so the
+	// handler's 1:1 rank-order mapping is asserted; searchQuery/searchLimit/searchCalls
+	// record what reached storage; nodeSearchErr forces the Internal path.
+	searchResults []storage.KGNode
+	searchQuery   string
+	searchLimit   int
+	searchCalls   int
+	nodeSearchErr error
 }
 
 // setAgentCall records one SetNodeAgent invocation for assertions.
@@ -224,6 +233,16 @@ func (f *fakeCampaignStore) SetNodeAgent(_ context.Context, nodeID uuid.UUID, ag
 	n.ID = nodeID
 	n.AgentID = agentID
 	return n, nil
+}
+
+func (f *fakeCampaignStore) SearchNodes(_ context.Context, _ uuid.UUID, query string, limit int) ([]storage.KGNode, error) {
+	f.searchCalls++
+	f.searchQuery = query
+	f.searchLimit = limit
+	if f.nodeSearchErr != nil {
+		return nil, f.nodeSearchErr
+	}
+	return f.searchResults, nil
 }
 
 // crudClient stands up the full CampaignService handler over an httptest server

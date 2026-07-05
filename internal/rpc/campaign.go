@@ -41,6 +41,7 @@ type campaignStore interface {
 	DeleteEdge(ctx context.Context, id uuid.UUID) error
 	NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
 	SetNodeAgent(ctx context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
+	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a

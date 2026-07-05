@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   EyeOff,
   Plus,
   Pencil,
+  Search,
   Trash2,
   User,
   VenetianMask,
@@ -75,17 +76,64 @@ function alphaBg(color: string): string {
 
 export function KnowledgePanel() {
   const queryClient = useQueryClient();
-  const { data, status, error } = useQuery(CampaignService.method.listNodes, {});
-  const nodes = useMemo(() => data?.nodes ?? [], [data]);
+  const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
 
-  const invalidateNodes = () =>
-    queryClient.invalidateQueries({
+  // Live wiki search (#131, ADR-0008 tsvector): the raw box value drives a
+  // 200ms-debounced SearchNodes query. The RPC runs only while the debounced
+  // query is non-empty (keepPreviousData holds the last matches steady across
+  // keystrokes); an empty box falls straight back to the full ListNodes list
+  // with no search RPC.
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
+  const searching = debounced.trim() !== "";
+  const searchQuery = useQuery(
+    CampaignService.method.searchNodes,
+    { query: debounced },
+    // retry:false surfaces a failure promptly rather than backing off silently for
+    // seconds — a typeahead re-fires on the next keystroke anyway.
+    { enabled: searching, placeholderData: keepPreviousData, retry: false },
+  );
+
+  // Destructured together so the status-discriminated union still narrows `error`
+  // to non-null in the error branch below.
+  const { status, error } = listQuery;
+  // While searching, show the matches; before the FIRST search result lands (no
+  // previous data to keep) fall back to the full list so the view never flashes
+  // empty. An empty match array is a real "no matches" and is shown as such.
+  const nodes = useMemo(() => {
+    if (!searching) return listQuery.data?.nodes ?? [];
+    return searchQuery.data?.nodes ?? listQuery.data?.nodes ?? [];
+  }, [searching, searchQuery.data, listQuery.data]);
+
+  // A failed search must NOT silently fall back to the full list — the box still
+  // holds a query, so an unfiltered list would look filtered and the GM could act
+  // on the wrong entry. Surface the failure instead.
+  const searchFailed = searching && searchQuery.isError;
+
+  // A mutation must refresh BOTH reads: the full ListNodes list AND any active
+  // SearchNodes result. Invalidating only listNodes left a stale search view — a
+  // deleted/renamed entry lingered in the filtered list (second delete then
+  // 404s). The searchNodes key is built without an input so it prefix-matches
+  // every cached query string.
+  const invalidateNodes = () => {
+    void queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
         schema: CampaignService.method.listNodes,
         cardinality: "finite",
       }),
     });
+    void queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.searchNodes,
+        cardinality: "finite",
+      }),
+    });
+  };
 
   const createNode = useMutation(CampaignService.method.createNode, {
     onSuccess: () => void invalidateNodes(),
@@ -124,27 +172,63 @@ export function KnowledgePanel() {
       { onSuccess: () => setEditing((e) => (e?.id === n.id ? null : e)) },
     );
 
+  // The editor's alert line. The active save (create or edit) takes precedence;
+  // a failed delete — which otherwise leaves the button looking dead (#204) —
+  // falls back into the same role=alert line so it is never swallowed.
+  const saveError = editing
+    ? updateNode.isError
+      ? updateNode.error.message
+      : null
+    : createNode.isError
+      ? createNode.error.message
+      : null;
+  const editorError = saveError
+    ? `Couldn't save: ${saveError}`
+    : deleteNode.isError
+      ? `Couldn't delete: ${deleteNode.error.message}`
+      : null;
+
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
-        {groups.map((g) => (
-          <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
-            <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
-            {g.items.map((n) => (
-              <KnowledgeCard
-                key={n.id}
-                node={n}
-                onEdit={() => setEditing(n)}
-                onDelete={() => removeNode(n)}
-                deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
-              />
-            ))}
-          </section>
-        ))}
-        {nodes.length === 0 && (
-          <p className="gx-kg-empty">
-            No entries yet. Add what the world knows and your NPCs will speak to it.
+        <Input
+          type="search"
+          aria-label="Search entries"
+          icon={<Search size={15} />}
+          placeholder="Search the wiki — names and content"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="gx-kg-search"
+        />
+        {searchFailed ? (
+          <p className="gx-campaign__error" role="alert">
+            Couldn't search: {searchQuery.error?.message}
           </p>
+        ) : (
+          <>
+            {groups.map((g) => (
+              <section key={g.type} className="gx-kg-group" aria-label={metaOf(g.type).label}>
+                <h3 className="gx-kg-group__title">{metaOf(g.type).label}</h3>
+                {g.items.map((n) => (
+                  <KnowledgeCard
+                    key={n.id}
+                    node={n}
+                    onEdit={() => setEditing(n)}
+                    onDelete={() => removeNode(n)}
+                    deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
+                  />
+                ))}
+              </section>
+            ))}
+            {nodes.length === 0 &&
+              (searching ? (
+                <p className="gx-kg-empty">No entries match “{debounced.trim()}”.</p>
+              ) : (
+                <p className="gx-kg-empty">
+                  No entries yet. Add what the world knows and your NPCs will speak to it.
+                </p>
+              ))}
+          </>
         )}
       </div>
 
@@ -152,15 +236,7 @@ export function KnowledgePanel() {
         key={editing?.id ?? "new"}
         node={editing}
         pending={editing ? updateNode.isPending : createNode.isPending}
-        error={
-          editing
-            ? updateNode.isError
-              ? updateNode.error.message
-              : null
-            : createNode.isError
-              ? createNode.error.message
-              : null
-        }
+        error={editorError}
         onCancel={() => setEditing(null)}
         onDelete={editing ? () => removeNode(editing) : undefined}
         onSubmit={(fields, reset) => {
@@ -366,7 +442,7 @@ function EntryEditor({
         )}
         {error && (
           <span className="gx-editor__status gx-editor__status--error" role="alert">
-            Couldn't save: {error}
+            {error}
           </span>
         )}
       </div>
