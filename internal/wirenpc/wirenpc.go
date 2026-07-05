@@ -785,11 +785,11 @@ func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView)
 		roster.SetMuted(e.AgentID, muted)
 	})
 	if mutes != nil {
-		for id := range roster.specs {
-			if mutes.Muted(id) {
-				roster.SetMuted(id, true)
-			}
-		}
+		// Seed via the locked reconcile, NOT a raw range over roster.specs: this runs
+		// on connectAndServe's goroutine while the subscription above may fire
+		// SetMuted on the publisher's goroutine (a concurrent GM mute), so the whole
+		// seed must be under the Roster lock.
+		roster.ApplyMutes(mutes.Muted)
 	}
 	return unsub
 }

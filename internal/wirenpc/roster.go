@@ -2,6 +2,7 @@ package wirenpc
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
@@ -53,6 +54,14 @@ type Roster struct {
 	// wireMutes fires SetMuted per event, sometimes for an already-correct state)
 	// must be a no-op, not a re-Add.
 	muted map[string]struct{}
+
+	// mu guards the specs/muted maps (and the Matcher mutations they drive). Mute
+	// control breaks the "one goroutine owns the Roster" contract (#211): wireMutes
+	// calls [Roster.SetMuted] from the bus-event callback (the MuteChanged
+	// publisher's goroutine) AND seeds from connectAndServe's goroutine — a
+	// mid-session reconnect racing a GM mute would otherwise be a concurrent map
+	// write (a fatal). All specs/muted access goes under mu.
+	mu sync.Mutex
 }
 
 // rosterDeps carries what a [Roster] needs to assemble an NPC beyond the NPC's
@@ -116,6 +125,8 @@ func matcherAgent(spec npcSpec) address.Agent {
 // ones extend the live roster via [address.Matcher.Add]. Both halves move
 // together so an NPC is never routable-but-silent or speaking-but-unroutable.
 func (r *Roster) AddNPC(spec npcSpec) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.matcher == nil {
 		// First NPC: build the Matcher around it. Single-target by default
 		// (Config.MaxTargets unset ⇒ 1): naming two NPCs fires one turn on the
@@ -134,12 +145,14 @@ func (r *Roster) AddNPC(spec npcSpec) {
 // route says nothing). Removing an unknown agentID is a no-op. Removing every
 // NPC leaves the Matcher routing to nobody — the voice loop simply stays quiet.
 func (r *Roster) RemoveNPC(agentID string) {
+	r.mu.Lock()
 	if r.matcher != nil {
 		r.matcher.Remove(agentID)
 	}
-	r.cast.Remove(agentID)
 	delete(r.specs, agentID)
 	delete(r.muted, agentID)
+	r.mu.Unlock()
+	r.cast.Remove(agentID) // Cast is independently concurrency-safe; outside r.mu
 }
 
 // SetMuted toggles one NPC's mute in the live scene (#211). It is deliberately
@@ -156,7 +169,30 @@ func (r *Roster) RemoveNPC(agentID string) {
 // Replier and its history, the exact failure to avoid. Muting an id the Roster
 // never held is a no-op, and re-applying the current state (mute an already-muted
 // NPC, unmute an already-unmuted one) is idempotent — no Matcher churn.
+//
+// Concurrency-safe: SetMuted is called from the bus-event goroutine AND the seed
+// path (see [Roster.mu]).
 func (r *Roster) SetMuted(agentID string, muted bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setMutedLocked(agentID, muted)
+}
+
+// ApplyMutes reconciles the whole roster to the authoritative view under the
+// Roster lock (#211): for each held NPC it sets its mute to muted(agentID). It is
+// the seed/reconnect path — a mid-session Discord reconnect re-applies the mutes
+// that were in effect — run under [Roster.mu] so it never races the bus-event
+// SetMuted. muted must be non-nil.
+func (r *Roster) ApplyMutes(muted func(agentID string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id := range r.specs {
+		r.setMutedLocked(id, muted(id))
+	}
+}
+
+// setMutedLocked is the mute transition; the caller holds r.mu.
+func (r *Roster) setMutedLocked(agentID string, muted bool) {
 	spec, ok := r.specs[agentID]
 	if !ok || r.matcher == nil {
 		return // unknown NPC (or no matcher yet): nothing to route or de-route

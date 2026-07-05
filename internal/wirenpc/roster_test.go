@@ -449,6 +449,46 @@ func TestWireMutes_AppliesBusEvents(t *testing.T) {
 	}
 }
 
+// TestWireMutes_ConcurrentSeedAndBusEvents_RaceClean pins the Roster-lock fix
+// (#211): SetMuted is called from the bus-event goroutine (a GM mute) AND the seed
+// goroutine (connectAndServe re-applying mutes on a mid-session reconnect). Both
+// mutate the Roster's muted/specs maps, so without the lock this is a concurrent
+// map write (a runtime FATAL). Run with -race.
+func TestWireMutes_ConcurrentSeedAndBusEvents_RaceClean(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	specs := []npcSpec{specFor("aldra", "Aldra", ""), specFor("bram", "Bram", ""), specFor("cyra", "Cyra", "")}
+	roster := newRosterFor(specs, []*agent.Replier{
+		replierFor(specs[0], "a", synth),
+		replierFor(specs[1], "b", synth),
+		replierFor(specs[2], "c", synth),
+	}, synth)
+	ids := []string{"aldra", "bram", "cyra"}
+	view := fixedMutes{"bram": true}
+
+	t.Cleanup(wireMutes(bus, roster, view)) // subscribes (bus-event → SetMuted) + seeds once
+
+	var wg sync.WaitGroup
+	// Bus-event side: each MuteChanged fires the subscription's SetMuted on THIS
+	// goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			bus.Publish(voiceevent.MuteChanged{AgentID: ids[i%len(ids)], Muted: i%2 == 0})
+		}
+	}()
+	// Seed side: connectAndServe's reconnect reconcile, hammered concurrently.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			roster.ApplyMutes(view.Muted)
+		}
+	}()
+	wg.Wait()
+}
+
 // TestWireMutes_ReReadsAuthoritativeViewNotPayload pins the cross-op ordering fix
 // (#211): wireMutes applies the AUTHORITATIVE view (mutes.Muted), never the
 // event's payload — so a stale/reordered MuteChanged (e.g. a mute-all event that
