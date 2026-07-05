@@ -293,6 +293,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// voice (`all` mode); a web-only replica runs no Bot. Declared at function
 	// scope so the shutdown path below can Close it after the Manager drains.
 	var pres *presence.Presence
+	var reg *presence.Registry
 	if withVoice {
 		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
 		gate := presence.NewGate(allow, func() string {
@@ -301,19 +302,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			}
 			return pres.GuildID()
 		})
-		reg := presence.NewRegistry(gate, log)
+		reg = presence.NewRegistry(gate, log)
 		reg.Register(presence.RollCommand(tool.NewDice()))
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
 		// session; set BEFORE the Manager copies cfg into its base config.
 		cfg.Client = pres.ClientProvider()
-		// Bring the presence up at boot (AC: /roll appears with no Voice Session).
-		// Non-fatal: a bad or absent Bot token must not kill the web tier — it
-		// stays in the wait-state and the RPC refresher retries on the next save.
-		if err := pres.Ensure(ctx); err != nil {
-			log.Warn("presence: initial ensure failed; the slash-command surface "+
-				"will retry when Discord settings are next saved", "err", err)
-		}
+		// The GM session commands (#108) register below, once the Manager exists,
+		// and Ensure runs after them so all commands are in one registration.
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {
@@ -327,6 +323,27 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// rows). A failure here is a broken DB — fail the boot loudly.
 	if err := mgr.ReconcileOrphans(ctx); err != nil {
 		return fmt.Errorf("web: %w", err)
+	}
+
+	if withVoice {
+		// The GM admin/session commands (#108, ADR-0010): /glyphoxa use sets the
+		// durable Active Campaign; start/end drive the SAME in-process Manager the
+		// web Session screen uses, so the two surfaces share one session record and
+		// never diverge (AC4). Registered here (not in the presence block above)
+		// because they need the Manager, and BEFORE Ensure so they land in the one
+		// per-Guild registration alongside /roll.
+		reg.Register(
+			presence.UseCommand(store),
+			presence.StartCommand(store, mgr),
+			presence.EndCommand(mgr),
+		)
+		// Bring the presence up at boot (AC: the commands appear with no Voice
+		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
+		// — it stays in the wait-state and the RPC refresher retries on the next save.
+		if err := pres.Ensure(ctx); err != nil {
+			log.Warn("presence: initial ensure failed; the slash-command surface "+
+				"will retry when Discord settings are next saved", "err", err)
+		}
 	}
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the

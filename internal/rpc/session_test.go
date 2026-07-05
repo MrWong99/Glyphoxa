@@ -72,12 +72,25 @@ func (f *fakeSessionManager) Snapshot() (storage.VoiceSession, bool) {
 	return f.current, f.active
 }
 
-// fakeSessionStore serves the active campaign and the latest ended session.
+// fakeSessionStore serves the durable per-operator selection, the implicit active
+// campaign, and the latest ended session.
 type fakeSessionStore struct {
+	forUser     storage.Campaign // the operator's /glyphoxa use selection (#108)
+	forUserErr  error            // set to storage.ErrNotFound to force the fallback
 	campaign    storage.Campaign
 	campaignErr error
 	latest      storage.VoiceSession
 	latestErr   error
+}
+
+func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+	if f.forUserErr != nil {
+		return storage.Campaign{}, f.forUserErr
+	}
+	if f.forUser.ID == uuid.Nil {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	return f.forUser, nil
 }
 
 func (f *fakeSessionStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
@@ -95,11 +108,22 @@ func (f *fakeSessionStore) GetLatestVoiceSession(context.Context, uuid.UUID) (st
 }
 
 func newSessionClient(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore) managementv1connect.SessionServiceClient {
+	return newSessionClientAs(t, mgr, store, storage.User{})
+}
+
+// newSessionClientAs is newSessionClient plus an injected authenticated operator,
+// so StartSession's durable-selection lookup (#108) sees a Discord identity. A
+// zero user injects only the tenant (the legacy no-user path).
+func newSessionClientAs(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore, user storage.User) managementv1connect.SessionServiceClient {
 	t.Helper()
 	tenantID := uuid.New()
 	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			return next(auth.WithTenant(ctx, tenantID), req)
+			ctx = auth.WithTenant(ctx, tenantID)
+			if user.DiscordUserID != "" {
+				ctx = auth.WithUser(ctx, user)
+			}
+			return next(ctx, req)
 		}
 	})
 	mux := http.NewServeMux()
@@ -279,5 +303,43 @@ func TestSessionGetIdleReturnsLastSession(t *testing.T) {
 	got := resp.Msg.GetSession()
 	if got == nil || got.GetStatus() != "ended" || got.GetLineCount() != 12 {
 		t.Errorf("idle session = %+v, want ended with 12 lines", got)
+	}
+}
+
+// TestSessionStartHonorsDurableSelection is #108 web parity: with the operator's
+// /glyphoxa use selection set (campaign A) AND a newer implicit default (campaign
+// B), the web StartSession binds A — so the Session screen and the slash command
+// agree on the campaign.
+func TestSessionStartHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	selected := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Selected"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer"}
+	store := &fakeSessionStore{forUser: selected, campaign: newer, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, &fakeSessionManager{}, store, storage.User{DiscordUserID: "999"})
+
+	start, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if start.Msg.GetSession().GetCampaignId() != selected.ID.String() {
+		t.Errorf("bound campaign = %s, want the durable selection %s", start.Msg.GetSession().GetCampaignId(), selected.ID)
+	}
+}
+
+// TestSessionStartFallsBackWithoutSelection pins the existing web behavior: an
+// operator with no /glyphoxa use selection falls back to the most-recently-created
+// campaign (GetActiveCampaign).
+func TestSessionStartFallsBackWithoutSelection(t *testing.T) {
+	t.Parallel()
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer"}
+	store := &fakeSessionStore{forUserErr: storage.ErrNotFound, campaign: newer, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, &fakeSessionManager{}, store, storage.User{DiscordUserID: "999"})
+
+	start, err := client.StartSession(context.Background(), connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if start.Msg.GetSession().GetCampaignId() != newer.ID.String() {
+		t.Errorf("bound campaign = %s, want the fallback %s", start.Msg.GetSession().GetCampaignId(), newer.ID)
 	}
 }
