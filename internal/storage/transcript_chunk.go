@@ -2,10 +2,14 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Transcript-chunk persistence (#104, ADR-0011): the chunk writer inserts one row
@@ -16,8 +20,9 @@ import (
 // independent records of the same speech and do not share rows.
 
 // TranscriptChunk is one persisted Transcript Chunk. embedding is always NULL at
-// insert (the async embedding pipeline, ADR-0011); EmbeddingModel is deferred to
-// #116 (no column yet), so it is neither written nor read here and scans "".
+// insert (the async embedding pipeline, ADR-0011); EmbeddingModel is empty until
+// the backfill worker (#116) embeds the row and stamps which model produced the
+// vector — the provenance a model-switch re-embed pass keys off (ADR-0011).
 type TranscriptChunk struct {
 	ID                    uuid.UUID
 	CampaignID            uuid.UUID
@@ -25,15 +30,15 @@ type TranscriptChunk struct {
 	Content               string      // the chunk's utterances joined "\n"
 	SpeakerDiscordUserIDs []string    // empty in v1.0: anonymous STT lane (ADR-0039)
 	ParticipatedAgentIDs  []uuid.UUID // Agents that spoke in the chunk (NPC-knowledge filter)
-	EmbeddingModel        string      // deferred to #116; not persisted here
+	EmbeddingModel        string      // '' until the backfill worker embeds the row (#116)
 	StartedAt             time.Time
 	CreatedAt             time.Time
 }
 
 // InsertTranscriptChunk writes one closed chunk and returns its generated id. The
 // embedding is left NULL — the async pipeline fills it later (ADR-0011) — and the
-// arrays default to empty (never NULL). embedding_model is deferred (#116), so it
-// is not written here.
+// arrays default to empty (never NULL). embedding_model is left at its empty
+// column default; the backfill worker (#116) stamps it when it embeds the row.
 func (s *Store) InsertTranscriptChunk(ctx context.Context, c TranscriptChunk) (uuid.UUID, error) {
 	speakers := c.SpeakerDiscordUserIDs
 	if speakers == nil {
@@ -68,4 +73,110 @@ func (s *Store) CountUnembeddedChunks(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("storage: count unembedded transcript chunks: %w", err)
 	}
 	return n, nil
+}
+
+const transcriptChunkColumns = `
+	id, campaign_id, voice_session_id, content,
+	speaker_discord_user_ids, participated_agent_ids,
+	embedding_model, started_at, created_at`
+
+func scanTranscriptChunk(row pgx.Row) (TranscriptChunk, error) {
+	var (
+		c    TranscriptChunk
+		vsID uuid.NullUUID // column is nullable (ADR-0011 SEAM); may be NULL
+	)
+	err := row.Scan(
+		&c.ID, &c.CampaignID, &vsID, &c.Content,
+		&c.SpeakerDiscordUserIDs, &c.ParticipatedAgentIDs,
+		&c.EmbeddingModel, &c.StartedAt, &c.CreatedAt,
+	)
+	c.VoiceSessionID = vsID.UUID // uuid.Nil when NULL
+	return c, err
+}
+
+// ListUnembeddedChunks returns up to limit Transcript Chunks still awaiting an
+// embedding (embedding IS NULL), oldest first — the backfill worker's work queue
+// (#116, ADR-0011). Ordering by (created_at, id) makes each pass drain the oldest
+// backlog first and be a stable, deterministic batch. An empty result is not an
+// error: it means the backlog is drained and the worker sleeps.
+func (s *Store) ListUnembeddedChunks(ctx context.Context, limit int) ([]TranscriptChunk, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+transcriptChunkColumns+`
+		   FROM transcript_chunk
+		  WHERE embedding IS NULL
+		  ORDER BY created_at, id
+		  LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list unembedded transcript chunks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TranscriptChunk
+	for rows.Next() {
+		c, err := scanTranscriptChunk(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan transcript chunk: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list unembedded transcript chunks: %w", err)
+	}
+	return out, nil
+}
+
+// SetChunkEmbedding fills one chunk's embedding vector and stamps the model that
+// produced it (#116, ADR-0011). The vector is passed as pgvector's text form and
+// cast server-side (::vector) so storage carries no pgvector-go dependency; the
+// column is vector(768), so a wrong-length vector is rejected by Postgres. Once
+// set, the row leaves the NULL-embedding backlog and becomes returnable by the
+// embedding-filtered retrieval query (embedding IS NOT NULL).
+func (s *Store) SetChunkEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE transcript_chunk
+		    SET embedding = $2::vector, embedding_model = $3
+		  WHERE id = $1`, id, encodeVector(vec), model); err != nil {
+		return fmt.Errorf("storage: set chunk embedding %s: %w", id, err)
+	}
+	return nil
+}
+
+// encodeVector renders a float32 vector as pgvector's text input form,
+// "[0.1,0.2,...]", for a server-side ::vector cast. Each element uses the
+// shortest round-trippable float32 decimal ('g', 32-bit) so the stored value is
+// exactly what was embedded. Keeping this a plain string keeps the storage layer
+// free of a pgvector-go binding.
+func encodeVector(v []float32) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, f := range v {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// GetEmbeddingsProviderConfig returns the most-recently-updated 'embeddings'
+// Provider Config, or ErrNotFound when none is bound. Process-wide (no tenant
+// filter), mirroring GetActiveCampaign's single-operator posture (ADR-0039): the
+// backfill worker resolves ONE embeddings provider for the process. Not-found is
+// not fatal — the worker falls back to the local Ollama default (ADR-0004/0011).
+func (s *Store) GetEmbeddingsProviderConfig(ctx context.Context) (ProviderConfig, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+providerConfigColumns+`
+		   FROM provider_config
+		  WHERE component = 'embeddings'
+		  ORDER BY updated_at DESC, id DESC
+		  LIMIT 1`)
+	p, err := scanProviderConfig(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProviderConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return ProviderConfig{}, fmt.Errorf("storage: get embeddings provider_config: %w", err)
+	}
+	return p, nil
 }
