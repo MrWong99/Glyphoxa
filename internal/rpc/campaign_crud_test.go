@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,9 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
+
+// errAny is an opaque storage failure the fake returns to force the Internal path.
+var errAny = errors.New("kg fake failure")
 
 // fakeCampaignStore is a small in-memory campaignStore for the CRUD handlers'
 // keyless unit tests. Error hooks (campErr/butlerErr/…) force the failure paths;
@@ -34,6 +38,13 @@ type fakeCampaignStore struct {
 	nextColor int
 
 	created []storage.NewAgent
+
+	// KG Node state (#126): nodes backs ListNodes; nodesCreated records the
+	// storage inputs; nodeCreateErr forces the create failure path.
+	nodes         []storage.KGNode
+	nodesCreated  []storage.NewKGNode
+	nodeCreateErr error
+	nodeListErr   error
 }
 
 func newFakeStore() *fakeCampaignStore {
@@ -109,6 +120,27 @@ func (f *fakeCampaignStore) DeleteAgent(_ context.Context, id uuid.UUID) error {
 	}
 	delete(f.agents, id)
 	return nil
+}
+
+func (f *fakeCampaignStore) CreateNode(_ context.Context, n storage.NewKGNode) (storage.KGNode, error) {
+	if f.nodeCreateErr != nil {
+		return storage.KGNode{}, f.nodeCreateErr
+	}
+	f.nodesCreated = append(f.nodesCreated, n)
+	created := storage.KGNode{
+		ID:         uuid.New(),
+		CampaignID: n.CampaignID,
+		Type:       n.Type,
+		Name:       n.Name,
+		Body:       n.Body,
+		GMPrivate:  n.GMPrivate,
+	}
+	f.nodes = append(f.nodes, created)
+	return created, nil
+}
+
+func (f *fakeCampaignStore) ListNodes(_ context.Context, _ uuid.UUID) ([]storage.KGNode, error) {
+	return f.nodes, f.nodeListErr
 }
 
 // crudClient stands up the full CampaignService handler over an httptest server

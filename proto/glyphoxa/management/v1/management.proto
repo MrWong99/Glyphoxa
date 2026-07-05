@@ -40,6 +40,85 @@ service CampaignService {
   // CodeFailedPrecondition (it is undeletable, ADR-0009); a missing id fails with
   // CodeNotFound.
   rpc DeleteAgent(DeleteAgentRequest) returns (DeleteAgentResponse);
+
+  // CreateNode adds a Knowledge Graph Node ("entry") to the active campaign and
+  // returns the created Node (ADR-0008 v1.0). An UNSPECIFIED node_type or an empty
+  // name fails with CodeInvalidArgument; the campaign is resolved server-side.
+  rpc CreateNode(CreateNodeRequest) returns (CreateNodeResponse);
+
+  // ListNodes returns the active campaign's Knowledge Graph Nodes in stable
+  // display order (type, then case-insensitive name). It is a read
+  // (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// NodeType is a Knowledge Graph Node's type (CONTEXT.md "Node", ADR-0008 v1.0).
+// The full 7-value set ships now; #126 only creates NOTE from the UI, but the
+// wire type is complete so later slices (#129) need no proto change.
+enum NodeType {
+  // NODE_TYPE_UNSPECIFIED is the zero value; the server rejects it on create.
+  NODE_TYPE_UNSPECIFIED = 0;
+  NODE_TYPE_CHARACTER = 1;
+  NODE_TYPE_NPC = 2;
+  NODE_TYPE_LOCATION = 3;
+  NODE_TYPE_FACTION = 4;
+  NODE_TYPE_ITEM = 5;
+  NODE_TYPE_PLOT_THREAD = 6;
+  NODE_TYPE_NOTE = 7;
+}
+
+// Node is the wire representation of a Knowledge Graph Node — a typed wiki entry
+// in one campaign (ADR-0008 v1.0). gm_private hides it from every NPC's Hot
+// Context (#126).
+message Node {
+  // id is the node's UUID.
+  string id = 1;
+  // campaign_id is the owning campaign's UUID.
+  string campaign_id = 2;
+  // node_type is the node's type; immutable after create.
+  NodeType node_type = 3;
+  // name is the node's display name.
+  string name = 4;
+  // body is the node's prose (may be empty).
+  string body = 5;
+  // gm_private hides the node from every NPC's assembled prompt (#126).
+  bool gm_private = 6;
+  // created_at is when the node was created.
+  google.protobuf.Timestamp created_at = 7;
+  // updated_at is when the node was last modified.
+  google.protobuf.Timestamp updated_at = 8;
+  // field 9 = agent_id, reserved for the NPC-Node ↔ Agent link (#132).
+}
+
+// CreateNodeRequest is the Knowledge panel's "Add entry" payload. The campaign is
+// resolved server-side (single operator, ADR-0039).
+message CreateNodeRequest {
+  // node_type is the entry's type; UNSPECIFIED is rejected.
+  NodeType node_type = 1;
+  // name is the entry's display name; empty is rejected.
+  string name = 2;
+  // body is the entry's prose (optional).
+  string body = 3;
+  // gm_private keeps the entry out of every NPC's prompt (#126).
+  bool gm_private = 4;
+}
+
+// CreateNodeResponse carries the created Node.
+message CreateNodeResponse {
+  // node is the newly created Knowledge Graph Node.
+  Node node = 1;
+}
+
+// ListNodesRequest is the (empty) request; the active campaign is resolved
+// server-side for the single operator.
+message ListNodesRequest {}
+
+// ListNodesResponse carries the campaign's Knowledge Graph Nodes in display order.
+message ListNodesResponse {
+  // nodes is the campaign's Knowledge Graph Nodes.
+  repeated Node nodes = 1;
 }
 
 // Campaign is the wire representation of a campaign record.

@@ -33,6 +33,8 @@ type campaignStore interface {
 	CreateAgent(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
 	UpdateAgent(ctx context.Context, a storage.AgentUpdate) (storage.Agent, error)
 	DeleteAgent(ctx context.Context, id uuid.UUID) error
+	CreateNode(ctx context.Context, n storage.NewKGNode) (storage.KGNode, error)
+	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a
