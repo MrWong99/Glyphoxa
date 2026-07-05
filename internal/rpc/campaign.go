@@ -19,6 +19,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
 // campaignStore is the narrow storage surface CampaignServer needs — the active
@@ -42,18 +43,26 @@ type campaignStore interface {
 	NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
 	SetNodeAgent(ctx context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
+	UpsertToolGrant(ctx context.Context, g storage.NewToolGrant) error
+	DeleteToolGrant(ctx context.Context, agentID uuid.UUID, toolName string) error
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a
-// campaignStore.
+// campaignStore. tools is the built-in Tool catalog the grant editor lists
+// (ADR-0028) — the available-Tools source for ListToolGrants and the registry
+// UpdateToolGrant validates tool_name against (#117).
 type CampaignServer struct {
 	store campaignStore
+	tools *tool.Registry
 }
 
 // NewCampaignServer wraps a campaignStore (e.g. *storage.Store) in a
-// CampaignServer.
+// CampaignServer. The available-Tools catalog is the shared built-in Registry
+// (ADR-0028), so the grants a GM can toggle are exactly the Tools a Voice Session
+// runs; nothing external configures it.
 func NewCampaignServer(s campaignStore) *CampaignServer {
-	return &CampaignServer{store: s}
+	return &CampaignServer{store: s, tools: tool.BuiltinRegistry()}
 }
 
 // compile-time assertion that CampaignServer satisfies the generated handler.
