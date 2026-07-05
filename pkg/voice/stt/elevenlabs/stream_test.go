@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/goleak"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
@@ -513,5 +514,259 @@ func TestTwoUtterances_OneSession_FIFO(t *testing.T) {
 	}
 	if got := recvCommit(t, c2).Transcript.Text; got != "second" {
 		t.Errorf("commit 2 = %q, want second", got)
+	}
+}
+
+// --- Test 7: error frames ---
+
+func TestErrorFrame_AuthError_ResolvesFatalAndKillsSession(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(errorMsg("auth_error", "invalid xi-api-key"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	if err := s.Send(rampFrame(t, 0)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	commitCh, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	res := recvCommit(t, commitCh)
+	se := asStreamError(t, res.Err)
+	if se.Code != "auth_error" {
+		t.Errorf("code = %q, want auth_error", se.Code)
+	}
+	if !se.Fatal {
+		t.Error("auth_error should be Fatal")
+	}
+
+	// The session is dead: a later Send surfaces a typed fatal error.
+	sendErr := s.Send(rampFrame(t, 0))
+	if sendErr == nil {
+		t.Fatal("Send after auth_error returned nil error")
+	}
+	if se2 := asStreamError(t, sendErr); !se2.Fatal {
+		t.Error("Send after fatal error should return a Fatal *StreamError")
+	}
+}
+
+func TestErrorFrame_CommitThrottled_RecoverableSessionSurvives(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(errorMsg("commit_throttled", "slow down"))
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(committedMsg("recovered"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	c1, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit 1: %v", err)
+	}
+	se := asStreamError(t, recvCommit(t, c1).Err)
+	if se.Code != "commit_throttled" {
+		t.Errorf("code = %q, want commit_throttled", se.Code)
+	}
+	if se.Fatal {
+		t.Error("commit_throttled should be recoverable (Fatal=false)")
+	}
+
+	// Session still usable: a fresh commit resolves normally.
+	if err := s.Send(rampFrame(t, 0)); err != nil {
+		t.Fatalf("Send after throttle: %v", err)
+	}
+	c2, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit 2: %v", err)
+	}
+	if got := recvCommit(t, c2).Transcript.Text; got != "recovered" {
+		t.Errorf("recovered commit = %q, want recovered", got)
+	}
+}
+
+func TestErrorFrame_InsufficientAudio_ResolvesEmptyNoError(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(errorMsg("insufficient_audio_activity", "too quiet"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	c1, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	res := recvCommit(t, c1)
+	if res.Err != nil {
+		t.Errorf("insufficient_audio_activity resolved with error %v, want nil (empty utterance)", res.Err)
+	}
+	if res.Transcript.Text != "" {
+		t.Errorf("transcript = %q, want empty", res.Transcript.Text)
+	}
+}
+
+// --- Test 8: 90s auto-commit carries onto the next manual commit ---
+
+func TestAutoCommit_PrependedToNextCommit(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		// Unsolicited committed_transcript (the provider's 90s auto-commit),
+		// then a partial as a synchronization barrier so the client is proven
+		// to have processed the auto-commit before it registers a pending commit.
+		_ = conn.WriteJSON(committedMsg("auto part"))
+		_ = conn.WriteJSON(partialMsg("barrier"))
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(committedMsg("manual part"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	partials := make(chan string, 4)
+	c := elevenlabs.New("test-key", elevenlabs.WithBaseURL(ss.URL))
+	s, err := c.OpenStream(context.Background(), stt.StreamConfig{
+		SampleRate: 16000,
+		OnPartial:  func(text string) { partials <- text },
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer s.Close()
+
+	// Barrier: the auto-commit was processed before this partial (serial read pump).
+	if got := recvString(t, partials); got != "barrier" {
+		t.Fatalf("barrier partial = %q, want barrier", got)
+	}
+
+	commitCh, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	res := recvCommit(t, commitCh)
+	if res.Err != nil {
+		t.Fatalf("commit resolved with error: %v", res.Err)
+	}
+	if res.Transcript.Text != "auto part manual part" {
+		t.Errorf("committed text = %q, want %q", res.Transcript.Text, "auto part manual part")
+	}
+}
+
+// --- Test 9: abrupt TCP close surfaces transport-fatal, no goroutine leak ---
+
+func TestAbruptClose_SurfacesTransportFatal_NoLeak(t *testing.T) {
+	ss := newScriptedServer(t, func(conn *websocket.Conn) {
+		// Read one chunk mid-utterance, then kill the TCP connection with no
+		// websocket close handshake.
+		_ = readChunk(conn)
+		_ = conn.UnderlyingConn().Close()
+	})
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	defer ss.Close()
+
+	s := openTestStream(t, ss, stt.StreamConfig{SampleRate: 16000})
+	defer s.Close()
+
+	// 128 ms auto-flushes one chunk, then commit registers a pending resolution.
+	for _, start := range []int{0, 1000, 2000, 3000} {
+		if err := s.Send(rampFrame(t, start)); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	commitCh, err := s.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	se := asStreamError(t, recvCommit(t, commitCh).Err)
+	if se.Code != stt.CodeTransport {
+		t.Errorf("commit error code = %q, want %q", se.Code, stt.CodeTransport)
+	}
+	if !se.Fatal {
+		t.Error("transport error should be Fatal")
+	}
+
+	// A later Send also surfaces the typed transport-fatal error.
+	if sendErr := s.Send(rampFrame(t, 0)); sendErr == nil {
+		t.Error("Send after abrupt close returned nil error")
+	} else if se2 := asStreamError(t, sendErr); !se2.Fatal {
+		t.Error("Send after abrupt close should be Fatal")
+	}
+}
+
+// --- Test 10: reconnect opens a fresh session on the same server ---
+
+func TestReconnect_FreshSessionAfterAbruptClose(t *testing.T) {
+	var ss *scriptedServer
+	ss = newScriptedServer(t, func(conn *websocket.Conn) {
+		if ss.upgrades.Load() == 1 {
+			_ = readChunk(conn)
+			_ = conn.UnderlyingConn().Close()
+			return
+		}
+		if !readUntilCommit(conn, nil) {
+			return
+		}
+		_ = conn.WriteJSON(committedMsg("reconnected"))
+		echoUntilClose(conn)
+	})
+	defer ss.Close()
+
+	c := elevenlabs.New("test-key", elevenlabs.WithBaseURL(ss.URL))
+
+	s1, err := c.OpenStream(context.Background(), stt.StreamConfig{SampleRate: 16000})
+	if err != nil {
+		t.Fatalf("OpenStream 1: %v", err)
+	}
+	for _, start := range []int{0, 1000, 2000, 3000} {
+		_ = s1.Send(rampFrame(t, start))
+	}
+	commit1, err := s1.Commit()
+	if err != nil {
+		t.Fatalf("Commit 1: %v", err)
+	}
+	if se := asStreamError(t, recvCommit(t, commit1).Err); !se.Fatal {
+		t.Error("first session should have died fatally on abrupt close")
+	}
+	_ = s1.Close()
+
+	// A fresh OpenStream against the same server works as a new session.
+	s2, err := c.OpenStream(context.Background(), stt.StreamConfig{SampleRate: 16000})
+	if err != nil {
+		t.Fatalf("OpenStream 2 (reconnect): %v", err)
+	}
+	defer s2.Close()
+	if err := s2.Send(rampFrame(t, 0)); err != nil {
+		t.Fatalf("Send on reconnect: %v", err)
+	}
+	commit2, err := s2.Commit()
+	if err != nil {
+		t.Fatalf("Commit 2: %v", err)
+	}
+	if got := recvCommit(t, commit2).Transcript.Text; got != "reconnected" {
+		t.Errorf("reconnect commit = %q, want reconnected", got)
+	}
+	if n := ss.upgrades.Load(); n != 2 {
+		t.Errorf("server upgrade count = %d, want 2 (one per session)", n)
 	}
 }
