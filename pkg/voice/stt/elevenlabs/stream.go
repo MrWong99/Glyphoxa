@@ -299,6 +299,13 @@ func (s *stream) Commit() (<-chan stt.CommitResult, error) {
 
 	if len(rem) > 0 {
 		if err := s.enqueue(wsWrite{audioB64: base64.StdEncoding.EncodeToString(rem)}); err != nil {
+			// The remainder could not be queued (queue full or session dead). Restore
+			// it to the front of the aggregation buffer — mirroring the Send-path
+			// restore — so a retried Commit does not lose the utterance's tail. Commit
+			// swapped agg to nil; prepend rem ahead of anything a racing Send appended.
+			s.aggMu.Lock()
+			s.agg = append(rem, s.agg...)
+			s.aggMu.Unlock()
 			s.failCommit(ch, err)
 			return ch, nil
 		}

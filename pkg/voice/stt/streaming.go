@@ -98,10 +98,12 @@ const (
 	CodeQueueFull = "queue_full"
 )
 
-// StreamError is the typed error surfaced by every streaming operation. Code
-// is the provider's error-frame type (see ADR-0042) or [CodeTransport] for
-// transport-level failures. Fatal reports whether the whole session is dead
-// (reopen or fall back) versus only the single operation having failed.
+// StreamError is the typed error surfaced by every streaming operation. Code is
+// either the provider's error-frame type (see ADR-0042) or one of the three
+// adapter-synthesized codes above — [CodeTransport] for transport-level
+// failures, [CodeSampleRateMismatch] for a rejected frame, and [CodeQueueFull]
+// for backpressure. Fatal reports whether the whole session is dead (reopen or
+// fall back) versus only the single operation having failed.
 type StreamError struct {
 	Code  string
 	Fatal bool
