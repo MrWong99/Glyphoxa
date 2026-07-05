@@ -171,6 +171,26 @@ func newManager(t *testing.T, store session.Store, run session.LoopRunner, enabl
 		slog.New(slog.DiscardHandler), enabled)
 }
 
+// fakeFactsRecaller is a no-op agent.FactsRecaller for the SetFacts wiring test.
+type fakeFactsRecaller struct{}
+
+func (fakeFactsRecaller) Facts(context.Context, string) []string { return nil }
+
+// TestSetFacts_ThreadsOntoBaseConfig mirrors the SetMemory/SetChunkFlusher wiring
+// (#126): SetFacts sets the recaller on the base voice config every session copies,
+// so it flows through Start → RunFromDB → buildConversation into each NPC's loop.
+func TestSetFacts_ThreadsOntoBaseConfig(t *testing.T) {
+	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)
+	if mgr.BaseFactsForTest() != nil {
+		t.Fatal("base Facts should start nil")
+	}
+	rec := fakeFactsRecaller{}
+	mgr.SetFacts(rec)
+	if mgr.BaseFactsForTest() != rec {
+		t.Errorf("SetFacts did not thread the recaller onto the base config: got %v", mgr.BaseFactsForTest())
+	}
+}
+
 // newCipher builds a Cipher on a fresh random AES-256 key for the #87 saved-token
 // path — keyless and Docker-free, so the resolution logic is proven in the
 // default suite.

@@ -173,6 +173,17 @@ func (m *Manager) SetMemory(r agent.MemoryRecaller) {
 	m.base.Memory = r
 }
 
+// SetFacts wires the NPC KG-facts recaller onto the base voice config every
+// manager-started session copies (#126): it flows through Start → RunFromDB →
+// connectAndServe → buildConversation into each NPC's Agent loop, filling the
+// reserved Hot Context KG-facts slot. Like SetMemory it is set once at boot — the
+// recaller needs the Manager as its Sessions source (the active Campaign), so the
+// Manager is built first and the recaller back-wired — before any session can
+// start, so no lock is needed. nil leaves facts off (the prompt stays byte-identical).
+func (m *Manager) SetFacts(f agent.FactsRecaller) {
+	m.base.Facts = f
+}
+
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no
 // live loop owns (#143). Called once at boot, before any session can start: at
 // that point NO loop is live, so every 'running' row is an orphan — stranded by
