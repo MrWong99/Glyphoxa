@@ -679,9 +679,13 @@ func TestAutoCommit_PrependedToNextCommit(t *testing.T) {
 
 func TestAbruptClose_SurfacesTransportFatal_NoLeak(t *testing.T) {
 	ss := newScriptedServer(t, func(conn *websocket.Conn) {
-		// Read one chunk mid-utterance, then kill the TCP connection with no
-		// websocket close handshake.
-		_ = readChunk(conn)
+		// Read through the commit sentinel (so the client has registered its
+		// pending commit) but NEVER answer it — then kill the TCP connection with
+		// no websocket close handshake. Waiting for the sentinel makes the death
+		// deterministic: Commit has already returned before the transport dies,
+		// so the pending resolves via the read pump rather than Commit itself
+		// racing the close.
+		_ = readUntilCommit(conn, nil)
 		_ = conn.UnderlyingConn().Close()
 	})
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
@@ -720,10 +724,18 @@ func TestAbruptClose_SurfacesTransportFatal_NoLeak(t *testing.T) {
 // --- Test 10: reconnect opens a fresh session on the same server ---
 
 func TestReconnect_FreshSessionAfterAbruptClose(t *testing.T) {
+	// proceed gates the server's abrupt close on the test having RECEIVED
+	// session 1's commit resolution, so the close cannot race the resolution on
+	// a slow runner.
+	proceed := make(chan struct{})
 	var ss *scriptedServer
 	ss = newScriptedServer(t, func(conn *websocket.Conn) {
 		if ss.upgrades.Load() == 1 {
-			_ = readChunk(conn)
+			if !readUntilCommit(conn, nil) {
+				return
+			}
+			_ = conn.WriteJSON(committedMsg("first"))
+			<-proceed // wait until the test received the resolution
 			_ = conn.UnderlyingConn().Close()
 			return
 		}
@@ -741,17 +753,20 @@ func TestReconnect_FreshSessionAfterAbruptClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStream 1: %v", err)
 	}
-	for _, start := range []int{0, 1000, 2000, 3000} {
-		_ = s1.Send(rampFrame(t, start))
+	if err := s1.Send(rampFrame(t, 0)); err != nil {
+		t.Fatalf("Send 1: %v", err)
 	}
 	commit1, err := s1.Commit()
 	if err != nil {
 		t.Fatalf("Commit 1: %v", err)
 	}
-	if se := asStreamError(t, recvCommit(t, commit1).Err); !se.Fatal {
-		t.Error("first session should have died fatally on abrupt close")
+	if got := recvCommit(t, commit1).Transcript.Text; got != "first" {
+		t.Errorf("commit 1 = %q, want first", got)
 	}
-	_ = s1.Close()
+	close(proceed) // release the server to abruptly kill session 1
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close 1: %v", err)
+	}
 
 	// A fresh OpenStream against the same server works as a new session.
 	s2, err := c.OpenStream(context.Background(), stt.StreamConfig{SampleRate: 16000})
