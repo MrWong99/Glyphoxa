@@ -293,6 +293,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// voice (`all` mode); a web-only replica runs no Bot. Declared at function
 	// scope so the shutdown path below can Close it after the Manager drains.
 	var pres *presence.Presence
+	var reg *presence.Registry
 	if withVoice {
 		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
 		gate := presence.NewGate(allow, func() string {
@@ -301,25 +302,33 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			}
 			return pres.GuildID()
 		})
-		reg := presence.NewRegistry(gate, log)
+		reg = presence.NewRegistry(gate, log)
 		reg.Register(presence.RollCommand(tool.NewDice()))
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
 		// session; set BEFORE the Manager copies cfg into its base config.
 		cfg.Client = pres.ClientProvider()
-		// Bring the presence up at boot (AC: /roll appears with no Voice Session).
-		// Non-fatal: a bad or absent Bot token must not kill the web tier — it
-		// stays in the wait-state and the RPC refresher retries on the next save.
-		if err := pres.Ensure(ctx); err != nil {
-			log.Warn("presence: initial ensure failed; the slash-command surface "+
-				"will retry when Discord settings are next saved", "err", err)
-		}
+		// Ensure is deferred until after the Manager is built: /glyphoxa mute /
+		// muteall (#211) need the Manager (their SessionMuter), so they register just
+		// below and the first Ensure registers the FULL command surface.
 	}
 
 	runner := func(rctx context.Context, c wirenpc.Config) error {
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
 	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice)
+	if withVoice {
+		// The Manager is the mute commands' SessionMuter and the mute view the live
+		// loop reads (NewManager wired cfg.Mutes = mgr, #211). Register the mute
+		// surface now, then bring the presence up at boot (AC: the commands appear
+		// with no Voice Session active). Ensure is non-fatal: a bad/absent Bot token
+		// keeps the presence in its wait-state and the RPC refresher retries.
+		reg.Register(presence.MuteCommand(mgr, store), presence.MuteAllCommand(mgr))
+		if err := pres.Ensure(ctx); err != nil {
+			log.Warn("presence: initial ensure failed; the slash-command surface "+
+				"will retry when Discord settings are next saved", "err", err)
+		}
+	}
 	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
 	// left 'running' (crash / failed end-write). No loop is live yet, so every
 	// such row is an orphan; done before the web tier serves so GetSession never
