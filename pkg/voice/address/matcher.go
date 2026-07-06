@@ -19,6 +19,12 @@ type Agent struct {
 	// Target.Name ("Bartholomew", "the innkeeper" for "Bart"). The primary
 	// Target.Name is always matchable; aliases extend it.
 	Aliases []string
+	// TruncationAliases are auto-derived STT-truncation forms of this Agent's
+	// name/aliases ("art" for "Bart", #197). Unlike [Agent.Aliases] they are
+	// matched EXACT-ONLY and only when the matched window opens the utterance, so
+	// a mid-sentence noun ("was für eine Art …") never routes here. Callers derive
+	// them with [DeriveTruncationAliases]; empty for Agents with none.
+	TruncationAliases []string
 	// Expertise lists words this Agent is considered the expert on, consumed by
 	// the [ExpertOnRecentWord] heuristic.
 	Expertise []string
@@ -212,10 +218,12 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 // constructor is the sole exception, running before the Matcher is shared.
 func (m *Matcher) buildIndex() *fuzzyIndex {
 	names := make([][]string, len(m.agents))
+	truncations := make([][]string, len(m.agents))
 	for i := range m.agents {
 		names[i] = m.agents[i].matchableNames()
+		truncations[i] = m.agents[i].TruncationAliases
 	}
-	return newFuzzyIndex(m.nameMatch, m.enc, names)
+	return newFuzzyIndex(m.nameMatch, m.enc, names, truncations)
 }
 
 // NoteInterruption records that the Agent with agentID was just interrupted

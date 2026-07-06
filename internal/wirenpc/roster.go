@@ -104,9 +104,13 @@ func matcherLanguage(lang string) string {
 	return "en"
 }
 
-// matcherAgent builds the address.Agent for one NPC: its routing target plus
-// aliases. A lone Character NPC is not AddressOnly, so it catches unaddressed
-// speech via the single-NPC fallback (CONTEXT.md "Address-Only").
+// matcherAgent builds the address.Agent for one NPC: its routing target, aliases,
+// and the STT-truncation aliases derived from its name + aliases (#197). This is
+// the ONE derivation site, so every path that builds an address.Agent — the
+// hardcoded NPC, the DB load (via npcSpecFromAgent), and the SetMuted unmute
+// re-add — gets the derived aliases identically. A lone Character NPC is not
+// AddressOnly, so it catches unaddressed speech via the single-NPC fallback
+// (CONTEXT.md "Address-Only").
 func matcherAgent(spec npcSpec) address.Agent {
 	return address.Agent{
 		Target: voiceevent.AddressTarget{
@@ -114,7 +118,8 @@ func matcherAgent(spec npcSpec) address.Agent {
 			AgentRole: "character",
 			Name:      spec.name,
 		},
-		Aliases: spec.aliases,
+		Aliases:           spec.aliases,
+		TruncationAliases: address.DeriveTruncationAliases(append([]string{spec.name}, spec.aliases...)...),
 	}
 }
 

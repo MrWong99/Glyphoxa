@@ -326,6 +326,82 @@ func TestCampaignLanguageDrivesMatcherPhonetics(t *testing.T) {
 	}
 }
 
+// TestLoadedNPC_DerivesTruncationAliases is the #197 bar on the DB-loaded path
+// (AC: "derivation exercised on both hardcoded-NPC and DB-loaded paths"): a
+// Character NPC loaded from Postgres derives its STT-truncation aliases through
+// the same matcherAgent seam the hardcoded path uses, so an utterance opening
+// with the STT truncation "Art" routes to the seeded "Bart". Two more NPCs keep
+// the lone-NPC fallback inert, so the route proves the derived alias — not the
+// fallback. It mirrors TestCampaignLanguageDrivesMatcherPhonetics' seed→load→
+// buildConversation shape.
+func TestLoadedNPC_DerivesTruncationAliases(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+	// The demo seed is an "en" campaign; the live German table runs 'de'.
+	if _, err := pool.Exec(ctx, `UPDATE campaign SET language = 'de'`); err != nil {
+		t.Fatalf("set campaign language: %v", err)
+	}
+
+	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
+	if err != nil {
+		t.Fatalf("FindTenantByName: %v", err)
+	}
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	if err != nil {
+		t.Fatalf("FindCampaignByName: %v", err)
+	}
+	// Two more Character NPCs so a lone-NPC fallback cannot manufacture the route.
+	for _, name := range []string{"Greta", "Marek"} {
+		if _, err := st.CreateAgent(ctx, storage.NewAgent{
+			CampaignID: campaign.ID,
+			Role:       storage.AgentRoleCharacter,
+			Name:       name,
+			Persona:    "You are " + name + ".",
+		}); err != nil {
+			t.Fatalf("CreateAgent (%s): %v", name, err)
+		}
+	}
+
+	specs, _, loadedCampaign, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), specs, loadedCampaign.Language,
+		ttseleven.New(""), nil, providerKeys{}, false, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildConversation: %v", err)
+	}
+	defer cleanup()
+	if conv == nil {
+		t.Fatal("buildConversation returned a nil Conversation")
+	}
+
+	var bartID string
+	for _, s := range specs {
+		if s.name == "Bart" {
+			bartID = s.agentID
+		}
+	}
+	if bartID == "" {
+		t.Fatal("seeded Bart not found among loaded specs")
+	}
+
+	routed := roster.matcher.TargetMatch("Art, wie läuft das Geschäft heute Abend?")
+	if len(routed) == 0 {
+		t.Fatal(`"Art, …" routed to nobody — the DB-loaded NPC did not derive its truncation alias`)
+	}
+	if got := routed[0].Target.AgentID; got != bartID {
+		t.Errorf(`"Art, …" routed to %q, want seeded Bart %q`, got, bartID)
+	}
+}
+
 // TestLoadSeededNPCs_HydratesToolGrants is the #113 end-to-end bar over the real
 // DB path: the seeded NPC's Tool Grants come from its tool_agent_grant rows, and
 // removing the dice grant row makes the hydrated GrantSet declare no Tool at all
