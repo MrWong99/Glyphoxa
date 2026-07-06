@@ -46,6 +46,15 @@ func (f *fakeProviderStore) ListProviderConfigs(_ context.Context, _ uuid.UUID) 
 	return out, nil
 }
 
+func (f *fakeProviderStore) GetProviderConfigByComponent(_ context.Context, _ uuid.UUID, component storage.Component) (storage.ProviderConfig, error) {
+	for _, c := range f.configs {
+		if c.Component == component {
+			return c, nil
+		}
+	}
+	return storage.ProviderConfig{}, storage.ErrNotFound
+}
+
 func (f *fakeProviderStore) UpsertProviderConfigs(_ context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error) {
 	out := make([]storage.ProviderConfig, 0, len(configs))
 	for _, n := range configs {
@@ -419,5 +428,90 @@ func TestProviderList_EnvPlaceholderIsKeyNeeded(t *testing.T) {
 	groq := credByProvider(resp.Msg.GetCredentials(), "groq")
 	if groq.GetEverSaved() {
 		t.Errorf("env-placeholder groq should be key-needed, got ever_saved=true: %+v", groq)
+	}
+}
+
+// TestProviderSave_ModelOnlyKeepsSecret pins the #227 model-only branch: an
+// empty secret with a model updates the stored model and leaves the sealed
+// credential byte-identical. The second client runs WITHOUT a cipher to prove
+// the model-only path never needs one (nothing is sealed).
+func TestProviderSave_ModelOnlyKeepsSecret(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	seedClient, _ := newProviderClient(t, store, testCipher(t))
+	if _, err := seedClient.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "sk-groq-secret-abcd", Model: "old-model",
+	})); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+	before, err := store.GetProviderConfigByComponent(context.Background(), uuid.Nil, storage.ComponentLLM)
+	if err != nil {
+		t.Fatalf("read seeded row: %v", err)
+	}
+
+	client, _ := newProviderClient(t, store, nil) // nil cipher: model-only must not need it
+	resp, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "", Model: "custom-model-x",
+	}))
+	if err != nil {
+		t.Fatalf("model-only save: %v", err)
+	}
+	cred := resp.Msg.GetCredential()
+	if cred.GetModel() != "custom-model-x" || !cred.GetEverSaved() || cred.GetLast4() != "abcd" {
+		t.Errorf("credential after model-only save = model %q, everSaved %v, last4 %q; want custom-model-x, true, abcd",
+			cred.GetModel(), cred.GetEverSaved(), cred.GetLast4())
+	}
+	after, err := store.GetProviderConfigByComponent(context.Background(), uuid.Nil, storage.ComponentLLM)
+	if err != nil {
+		t.Fatalf("read updated row: %v", err)
+	}
+	if after.Model != "custom-model-x" {
+		t.Errorf("stored model = %q, want custom-model-x", after.Model)
+	}
+	if string(after.CredentialsCiphertext) != string(before.CredentialsCiphertext) || after.CredentialsLast4 != before.CredentialsLast4 {
+		t.Error("model-only save must leave the sealed credential byte-identical")
+	}
+}
+
+// TestProviderSave_ModelOnlyWithoutKeyRejected: a model alone cannot create a
+// credential slot — with no stored row the empty-secret save is rejected
+// exactly like before #227.
+func TestProviderSave_ModelOnlyWithoutKeyRejected(t *testing.T) {
+	t.Parallel()
+	client, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	_, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "", Model: "some-model",
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("model-only save without stored key = %v, want CodeInvalidArgument", err)
+	}
+}
+
+// TestProviderSave_ModelOnlyEmptyModelIsNoOp: empty secret + empty model reads
+// the slot back without writing (such a request only reaches the wire by
+// accident — mirrors #142's posture on empty Discord IDs).
+func TestProviderSave_ModelOnlyEmptyModelIsNoOp(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	client, _ := newProviderClient(t, store, testCipher(t))
+	if _, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "sk-groq-secret-abcd", Model: "old-model",
+	})); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+	before, _ := store.GetProviderConfigByComponent(context.Background(), uuid.Nil, storage.ComponentLLM)
+
+	resp, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "groq", Secret: "", Model: "",
+	}))
+	if err != nil {
+		t.Fatalf("empty model-only save: %v", err)
+	}
+	if got := resp.Msg.GetCredential().GetModel(); got != "old-model" {
+		t.Errorf("no-op save returned model %q, want old-model", got)
+	}
+	after, _ := store.GetProviderConfigByComponent(context.Background(), uuid.Nil, storage.ComponentLLM)
+	if !after.UpdatedAt.Equal(before.UpdatedAt) || after.Model != before.Model {
+		t.Error("empty model-only save must not write")
 	}
 }

@@ -491,6 +491,133 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	cleanup2()
 }
 
+// TestLoadSeededNPCs_ModelFromBoundLLMConfig is the #227 AC1 bar: a non-default
+// model saved on the Agent's bound LLM provider_config threads through
+// loadSeededNPCs onto the npcSpec, so the live engine runs it instead of the
+// hardcoded default. Update the bound row's model and assert the loaded spec
+// carries it.
+func TestLoadSeededNPCs_ModelFromBoundLLMConfig(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+	const want = "meta-llama/llama-4-scout-17b-16e-instruct"
+	if _, err := pool.Exec(ctx, `UPDATE provider_config SET model = $1 WHERE component = 'llm'`, want); err != nil {
+		t.Fatalf("set llm model: %v", err)
+	}
+
+	specs, _, _, err := loadSeededNPCs(ctx, storage.New(pool))
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("loaded %d NPCs, want 1", len(specs))
+	}
+	if specs[0].model != want {
+		t.Errorf("spec.model = %q, want %q (configured model must thread through)", specs[0].model, want)
+	}
+}
+
+// TestLoadSeededNPCs_ModelFallsBackToTenantConfig pins the LOAD-BEARING fallback
+// (#227): a web-created Character NPC has NO LLMProviderConfigID, so its model
+// must come from the tenant-level LLM provider_config the Configuration screen
+// writes. Without this fallback the fix would miss the operator's own NPCs.
+func TestLoadSeededNPCs_ModelFallsBackToTenantConfig(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+	const want = "tenant-fallback-model"
+	if _, err := pool.Exec(ctx, `UPDATE provider_config SET model = $1 WHERE component = 'llm'`, want); err != nil {
+		t.Fatalf("set tenant llm model: %v", err)
+	}
+
+	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
+	if err != nil {
+		t.Fatalf("FindTenantByName: %v", err)
+	}
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	if err != nil {
+		t.Fatalf("FindCampaignByName: %v", err)
+	}
+	// A web-created NPC: bound to no LLM provider_config (LLMProviderConfigID
+	// omitted → NULL), exactly what the Campaign editor writes.
+	if _, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaign.ID,
+		Role:       storage.AgentRoleCharacter,
+		Name:       "WebNPC",
+		Persona:    "You are a web-created NPC.",
+	}); err != nil {
+		t.Fatalf("CreateAgent (WebNPC): %v", err)
+	}
+
+	specs, _, _, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	var web *npcSpec
+	for i := range specs {
+		if specs[i].name == "WebNPC" {
+			web = &specs[i]
+		}
+	}
+	if web == nil {
+		t.Fatal("WebNPC not among loaded specs")
+	}
+	if web.model != want {
+		t.Errorf("web NPC model = %q, want tenant fallback %q", web.model, want)
+	}
+}
+
+// TestLoadSeededNPCs_NoLLMConfigYieldsEmptyModel pins the empty-model edge: a
+// campaign with no LLM provider_config at all leaves spec.model == "" so the
+// adapter default applies (#227 AC2, no defaulting duplicated in wirenpc).
+func TestLoadSeededNPCs_NoLLMConfigYieldsEmptyModel(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// Build the demo tenant/campaign by hand WITHOUT any provider_config rows, so
+	// both the bound-config and tenant-fallback lookups miss.
+	tenantID, err := st.CreateTenant(ctx, SeedTenantName)
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campaignID, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID,
+		Name:     SeedCampaignName,
+		System:   "dnd5e",
+		Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	if _, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaignID,
+		Role:       storage.AgentRoleCharacter,
+		Name:       "Bart",
+		Persona:    BartPersona,
+	}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	specs, _, _, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("loaded %d NPCs, want 1", len(specs))
+	}
+	if specs[0].model != "" {
+		t.Errorf("spec.model = %q, want empty (no config → adapter default)", specs[0].model)
+	}
+}
+
 // TestSeedIdempotent asserts a second SeedNPC is a no-op (the slice re-seeds on
 // every boot in some deploys; it must not duplicate or error).
 func TestSeedIdempotent(t *testing.T) {

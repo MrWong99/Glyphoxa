@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -81,6 +82,10 @@ type VoiceServer struct {
 	// pingLLM is the Groq liveness test-call (a real key -> nil). Defaults to a
 	// GET against the Groq models endpoint.
 	pingLLM func(ctx context.Context, apiKey string) error
+	// listModels fetches a provider's live model catalog for the model select
+	// (#227). Defaults to the Groq OpenAI-compatible GET /models via the shared
+	// adapter; unit tests fake it so the default `go test` makes no vendor call.
+	listModels func(ctx context.Context, apiKey string) ([]string, error)
 	// botTag proves the Discord token via REST (GET /users/@me — no gateway
 	// IDENTIFY, #150) and returns the bot tag. Defaults to discordtag.Resolve.
 	botTag func(ctx context.Context, token string) (string, error)
@@ -142,6 +147,7 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		newLister:    func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
 		newSynth:     func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
 		pingLLM:      livePingGroq,
+		listModels:   func(ctx context.Context, apiKey string) ([]string, error) { return groq.New(apiKey).ListModels(ctx) },
 		botTag:       func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
 		now:          time.Now,
 		probeTimeout: healthProbeTimeout,
@@ -179,20 +185,60 @@ func (s *VoiceServer) tenant(ctx context.Context) (uuid.UUID, error) {
 	return id, nil
 }
 
-// ListModels returns the static model allowlist for a provider. Groq exposes no
-// list-models call we surface, so its select is a curated allowlist (ADR-0039);
-// an unknown provider is a client error.
+// ListModels returns the live Groq model catalog for the model select (#227):
+// the OpenAI-compatible GET /models fetched with the tenant's decrypted BYOK key
+// (the ListVoices / health-check posture, ADR-0039). The default model is pinned
+// first, the rest are sorted and deduped, and the previously-hardcoded allowlist
+// (with its deprecated ids) is gone. A failed fetch degrades gracefully — the
+// screen stays usable — by returning just the default and NO rpc error, since the
+// combobox accepts free-text entry regardless. An unknown provider is a client
+// error (unchanged).
 func (s *VoiceServer) ListModels(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[managementv1.ListModelsRequest],
 ) (*connect.Response[managementv1.ListModelsResponse], error) {
-	switch req.Msg.GetProvider() {
-	case "groq":
-		return connect.NewResponse(&managementv1.ListModelsResponse{Models: groq.Models}), nil
-	default:
+	if req.Msg.GetProvider() != "groq" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("no model allowlist for provider %q", req.Msg.GetProvider()))
+			fmt.Errorf("no model catalog for provider %q", req.Msg.GetProvider()))
 	}
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentLLM)
+	if err != nil {
+		return nil, err
+	}
+
+	models, err := s.listModels(ctx, key)
+	if err != nil {
+		// Never fail the RPC: a broken catalog must not break the Configuration
+		// screen (free-text entry still saves and runs, ADR-0039). Fall back to the
+		// pinned default so the select still renders.
+		s.log.Warn("ListModels: live Groq catalog failed", "err", err)
+		return connect.NewResponse(&managementv1.ListModelsResponse{Models: []string{groq.DefaultModel}}), nil
+	}
+	return connect.NewResponse(&managementv1.ListModelsResponse{Models: groqCatalog(models)}), nil
+}
+
+// groqCatalog shapes a raw Groq /models catalog for the select: the default model
+// is pinned first (even if the live list omits or re-orders it), and the rest are
+// deduped and sorted ascending. Curation of non-chat ids is deliberately NOT done
+// — the pinned default plus free-text entry make the extra ids harmless, and the
+// staleness the static allowlist caused is exactly what this removes (#227).
+func groqCatalog(models []string) []string {
+	out := []string{groq.DefaultModel}
+	seen := map[string]bool{groq.DefaultModel: true}
+	rest := make([]string, 0, len(models))
+	for _, m := range models {
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		rest = append(rest, m)
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 // ListVoices maps the ElevenLabs voice catalog onto the wire type for the voice

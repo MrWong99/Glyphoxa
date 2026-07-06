@@ -103,19 +103,89 @@ func tenantCtx() context.Context {
 	return auth.WithTenant(context.Background(), uuid.New())
 }
 
-func TestListModels_GroqAllowlist(t *testing.T) {
+func TestListModels_GroqLiveCatalog(t *testing.T) {
 	t.Parallel()
 	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	// A live Groq /models catalog: unsorted, containing the default in the middle
+	// plus a duplicate. The handler pins the default first, sorts the rest
+	// ascending, and dedupes — and the deprecated hardcoded entries are gone.
+	srv.listModels = func(_ context.Context, _ string) ([]string, error) {
+		return []string{
+			"meta-llama/llama-4-scout-17b-16e-instruct",
+			"llama-3.1-8b-instant",
+			groq.DefaultModel,
+			"llama-3.1-8b-instant", // duplicate
+		}, nil
+	}
 	resp, err := srv.ListModels(tenantCtx(), connect.NewRequest(&managementv1.ListModelsRequest{Provider: "groq"}))
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
 	got := resp.Msg.GetModels()
-	if len(got) != len(groq.Models) {
-		t.Fatalf("models = %v, want %v", got, groq.Models)
+	want := []string{
+		groq.DefaultModel, // pinned first
+		"llama-3.1-8b-instant",
+		"meta-llama/llama-4-scout-17b-16e-instruct",
 	}
-	if got[0] != groq.DefaultModel {
-		t.Errorf("first model = %q, want default %q", got[0], groq.DefaultModel)
+	if len(got) != len(want) {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("models[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// The stale hardcoded catalog is retired: a live catalog that never mentions
+	// the deprecated ids must not resurrect them.
+	for _, dead := range []string{"llama3-70b-8192", "llama3-8b-8192"} {
+		for _, m := range got {
+			if m == dead {
+				t.Errorf("deprecated model %q leaked into the catalog", dead)
+			}
+		}
+	}
+}
+
+// TestListModels_GroqCatalogFailureStaysUsable pins the ADR-0039 degradation
+// posture: a failed live catalog fetch does NOT error the RPC (which would break
+// the Configuration screen); it warns and returns just the default so the select
+// still renders and free-text entry keeps working.
+func TestListModels_GroqCatalogFailureStaysUsable(t *testing.T) {
+	t.Parallel()
+	srv := NewVoiceServer(&fakeVoiceStore{}, nil, nil)
+	srv.listModels = func(_ context.Context, _ string) ([]string, error) {
+		return nil, errors.New("groq unreachable")
+	}
+	resp, err := srv.ListModels(tenantCtx(), connect.NewRequest(&managementv1.ListModelsRequest{Provider: "groq"}))
+	if err != nil {
+		t.Fatalf("ListModels must not error on catalog failure: %v", err)
+	}
+	got := resp.Msg.GetModels()
+	if len(got) != 1 || got[0] != groq.DefaultModel {
+		t.Fatalf("catalog-failure models = %v, want [%q]", got, groq.DefaultModel)
+	}
+}
+
+// TestListModels_FeedsDecryptedTenantKey pins the credential bridge: the catalog
+// seam is called with the tenant's decrypted BYOK LLM key (health-check posture,
+// like livePingGroq / ListVoices), never a raw ciphertext or a blank key.
+func TestListModels_FeedsDecryptedTenantKey(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	store := &fakeVoiceStore{configs: map[storage.Component]storage.ProviderConfig{
+		storage.ComponentLLM: savedConfig(t, cipher, storage.ComponentLLM, "groq", "sk-groq-secret"),
+	}}
+	srv := NewVoiceServer(store, cipher, nil)
+	var seen atomic.Value
+	srv.listModels = func(_ context.Context, apiKey string) ([]string, error) {
+		seen.Store(apiKey)
+		return []string{groq.DefaultModel}, nil
+	}
+	if _, err := srv.ListModels(tenantCtx(), connect.NewRequest(&managementv1.ListModelsRequest{Provider: "groq"})); err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if got, _ := seen.Load().(string); got != "sk-groq-secret" {
+		t.Errorf("seam key = %q, want the decrypted tenant key", got)
 	}
 }
 
@@ -680,6 +750,10 @@ type stubProviderStore struct{}
 
 func (stubProviderStore) ListProviderConfigs(context.Context, uuid.UUID) ([]storage.ProviderConfig, error) {
 	return nil, nil
+}
+
+func (stubProviderStore) GetProviderConfigByComponent(context.Context, uuid.UUID, storage.Component) (storage.ProviderConfig, error) {
+	return storage.ProviderConfig{}, storage.ErrNotFound
 }
 
 func (stubProviderStore) UpsertProviderConfigs(_ context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error) {
