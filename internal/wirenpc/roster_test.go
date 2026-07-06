@@ -316,11 +316,16 @@ func TestRoster_RemoveNPC_GoesSilentAndStopsContinuations(t *testing.T) {
 	}
 }
 
-// TestRoster_SetMuted_DropsAndRestoresMatching pins the matcher-only mute (#211):
-// a muted NPC is never matched by name/alias nor caught as an unnamed
-// continuation (its lastAddressed is pruned), so a 2-NPC scene's unnamed speech
-// re-routes to the remaining NPC; unmuting makes it addressable again.
-func TestRoster_SetMuted_DropsAndRestoresMatching(t *testing.T) {
+// TestRoster_SetMuted_KeepsNamedRoutingForDownstreamGate pins the #225 fix at the
+// Roster seam: muting keeps the NPC ROUTABLE by name — it stays in the Matcher —
+// and the reactor's MuteView gate (ADR-0012, reactor.go) silences it downstream,
+// rather than the mute dropping the name from the Matcher (the #211 bug that let
+// a named-muted utterance re-route to another NPC). The test harness wires no
+// floor/MuteView, so the named-muted route is asserted at the Matcher level; the
+// ambient half (a muted NPC excluded from unnamed continuation/fallback so a
+// 2-NPC scene re-routes unnamed speech to the survivor) and the unmute-restore
+// half stay at the end-to-end speak level.
+func TestRoster_SetMuted_KeepsNamedRoutingForDownstreamGate(t *testing.T) {
 	bus := voiceevent.NewBus()
 	synth := &recordingSynth{}
 	specs := []npcSpec{
@@ -337,13 +342,15 @@ func TestRoster_SetMuted_DropsAndRestoresMatching(t *testing.T) {
 
 	roster.SetMuted("bram", true)
 
-	// Named: muted Bram says nothing (its name no longer matches — it left the Matcher).
-	publish("Bram, are you there?")
-	if got := synth.spokenBy("bram"); len(got) != 1 {
-		t.Fatalf("muted Bram spoke when named (%d total), want 1 (silent)", len(got))
+	// Named: the muted Bram STAYS matched by name (#225). His name must still
+	// route to him at the Matcher so the downstream reactor MuteView gate can end
+	// the turn with the mute reason — instead of the utterance re-routing to Aldra.
+	if got := routedTo(roster, "Bram, are you there?"); got != "bram" {
+		t.Fatalf("muted Bram routed to %q when named, want bram (name-gated, silenced downstream — not de-routed)", got)
 	}
+
 	// Unnamed: the continuation must NOT resurrect Bram (his lastAddressed was
-	// pruned) — it re-routes to the remaining NPC (Aldra), who stays reachable.
+	// pruned by the mute transition) — it re-routes to the remaining NPC (Aldra).
 	publish("Anyone still around?")
 	if got := synth.spokenBy("bram"); len(got) != 1 {
 		t.Fatalf("muted Bram caught an unnamed continuation (%d total), want 1 — lastAddressed not pruned", len(got))
@@ -354,10 +361,32 @@ func TestRoster_SetMuted_DropsAndRestoresMatching(t *testing.T) {
 
 	roster.SetMuted("bram", false)
 
-	// Unmuted: Bram is addressable again.
+	// Unmuted: Bram is addressable again end-to-end.
 	publish("Bram, welcome back.")
 	if got := synth.spokenBy("bram"); len(got) != 2 {
 		t.Fatalf("unmuted Bram spoke %d times total, want 2 (addressable again)", len(got))
+	}
+}
+
+// TestRoster_MutedDegradedNameStaysWithMutedNPC composes #225 with #197: an
+// STT-degraded address to a MUTED NPC ("Art" for "Bart") must still resolve to
+// that muted NPC via its derived truncation alias and NEVER leak to another NPC.
+// The muted Bart is silenced by the downstream MuteView gate, but the re-route
+// bug is closed at the Matcher: "Art, …" routes to Bart, never Greta.
+func TestRoster_MutedDegradedNameStaysWithMutedNPC(t *testing.T) {
+	synth := &recordingSynth{}
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+		language:   "de",
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(specFor("npc-greta", "Greta", ""))
+
+	r.SetMuted("npc-bart", true)
+
+	if got := routedTo(r, "Art, hörst du mich?"); got != "npc-bart" {
+		t.Fatalf(`STT-degraded "Art" to muted Bart routed to %q, want npc-bart (never leaked to Greta)`, got)
 	}
 }
 
@@ -425,9 +454,12 @@ type fixedMutes map[string]bool
 
 func (m fixedMutes) Muted(agentID string) bool { return m[agentID] }
 
-// TestWireMutes_AppliesBusEvents pins the live control path (#211): a MuteChanged
-// on the bus de-routes the NPC via the roster, and an unmute restores it —
-// without touching the Cast.
+// TestWireMutes_AppliesBusEvents pins the live control path (#211, #225): a
+// MuteChanged on the bus reaches the Matcher's mute state via the roster, and an
+// unmute restores it — without touching the Cast. Since #225 a muted NPC stays
+// routable by name (silenced downstream by the reactor gate), so the mute is
+// observed at the Matcher through the AMBIENT path: the muted NPC is excluded
+// from the sole-NPC fallback, leaving the surviving NPC the sole active one.
 func TestWireMutes_AppliesBusEvents(t *testing.T) {
 	bus := voiceevent.NewBus()
 	synth := &recordingSynth{}
@@ -440,8 +472,11 @@ func TestWireMutes_AppliesBusEvents(t *testing.T) {
 	t.Cleanup(wireMutes(bus, roster, nil))
 
 	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: true})
-	if routedTo(roster, "Bram, are you there?") == "bram" {
-		t.Fatal("after a mute bus event, naming Bram still routed to Bram — he must have left the Matcher")
+	// Muted Bram is excluded from ambient, so Aldra is the sole active NPC and
+	// unnamed speech routes to her (with Bram unmuted, two active NPCs make the
+	// sole-NPC fallback inert and unnamed speech routes to nobody).
+	if got := routedTo(roster, "is anyone about?"); got != "aldra" {
+		t.Fatalf("after a mute bus event, unnamed speech routed to %q, want aldra (muted Bram excluded from ambient)", got)
 	}
 	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: false})
 	routed := roster.matcher.TargetMatch("Bram, are you there?")
@@ -507,18 +542,22 @@ func TestWireMutes_ReReadsAuthoritativeViewNotPayload(t *testing.T) {
 	view := fixedMutes{} // authoritative: bram currently UNMUTED
 	t.Cleanup(wireMutes(bus, roster, view))
 
-	// A stale event claims bram is muted, but the view says unmuted → ignored.
+	// A stale event claims bram is muted, but the view says unmuted → ignored, so
+	// bram stays UNMUTED: two active NPCs make the sole-NPC fallback inert and
+	// unnamed speech routes to nobody. (Since #225 the mute is observed via the
+	// ambient path — a muted NPC stays name-routable, silenced downstream.)
 	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: true})
-	if got := routedTo(roster, "Bram, are you there?"); got != "bram" {
-		t.Fatalf("a stale {bram,true} event de-routed Bram against the view (routed to %q) — payload was trusted over the view", got)
+	if got := routedTo(roster, "is anyone about?"); got != "" {
+		t.Fatalf("a stale {bram,true} event muted Bram against the view (unnamed routed to %q, want nobody) — payload was trusted over the view", got)
 	}
 
 	// Flip the authoritative view to muted; a stale {bram,false} event must not
-	// re-route him.
+	// unmute him — muted Bram is excluded from ambient, so unnamed speech routes
+	// to the sole active Aldra.
 	view["bram"] = true
 	bus.Publish(voiceevent.MuteChanged{AgentID: "bram", Muted: false})
-	if routedTo(roster, "Bram, are you there?") == "bram" {
-		t.Fatal("a stale {bram,false} event routed to Bram against the muted view — payload trusted over the view")
+	if got := routedTo(roster, "is anyone about?"); got != "aldra" {
+		t.Fatalf("a stale {bram,false} event unmuted Bram against the muted view (unnamed routed to %q, want aldra) — payload trusted over the view", got)
 	}
 }
 
@@ -536,8 +575,11 @@ func TestWireMutes_SeedsFromView(t *testing.T) {
 
 	t.Cleanup(wireMutes(bus, roster, fixedMutes{"bram": true}))
 
-	if routedTo(roster, "Bram, are you there?") == "bram" {
-		t.Fatal("a roster seeded with Bram muted still routed his name to Bram, want de-routed")
+	// Seeded muted: Bram is excluded from ambient, so unnamed speech routes to the
+	// sole active Aldra. (Since #225 a muted NPC stays name-routable — silenced
+	// downstream — so the seed is observed through the ambient path.)
+	if got := routedTo(roster, "is anyone about?"); got != "aldra" {
+		t.Fatalf("a roster seeded with Bram muted did not exclude him from ambient (unnamed routed to %q, want aldra)", got)
 	}
 	// The un-muted NPC is unaffected by the seed.
 	if got := routedTo(roster, "Aldra, hello"); got != "aldra" {
