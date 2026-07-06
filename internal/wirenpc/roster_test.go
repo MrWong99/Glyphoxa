@@ -2,6 +2,7 @@ package wirenpc
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -541,6 +542,49 @@ func TestWireMutes_SeedsFromView(t *testing.T) {
 	// The un-muted NPC is unaffected by the seed.
 	if got := routedTo(roster, "Aldra, hello"); got != "aldra" {
 		t.Fatalf("seed muted the wrong NPC: Aldra routed to %q, want aldra", got)
+	}
+}
+
+// TestMatcherAgent_DerivesTruncationAliases pins that the ONE derivation call
+// site (#197) feeds every wiring path — hardcoded, DB (npcSpecFromAgent), and the
+// SetMuted unmute re-add all build their address.Agent through matcherAgent. The
+// hardcoded Bart (name "Bart", aliases "innkeeper"/"barkeep") derives "art" from
+// the name and "arkeep" from "barkeep"; the vowel-initial "innkeeper" derives
+// nothing.
+func TestMatcherAgent_DerivesTruncationAliases(t *testing.T) {
+	got := matcherAgent(hardcodedNPC()).TruncationAliases
+	want := []string{"art", "arkeep"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("matcherAgent truncation aliases = %v, want %v", got, want)
+	}
+}
+
+// TestRoster_TruncatedNameRoutesViaDerivedAlias is the end-to-end #197 bar over
+// the Roster: a "de" scene of Bart/Greta/Marek routes an utterance opening with
+// the STT truncation "Art" to Bart and "Arek" to Marek via their derived
+// aliases, while the same "Art" mid-sentence (checked first, before any turn
+// leaves continuation state) reaches nobody — three NPCs keep the lone-NPC
+// fallback inert.
+func TestRoster_TruncatedNameRoutesViaDerivedAlias(t *testing.T) {
+	synth := &recordingSynth{}
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+		language:   "de",
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(specFor("npc-greta", "Greta", ""))
+	r.AddNPC(specFor("npc-marek", "Marek", ""))
+
+	// Mid-sentence "Art" first, while there is no continuation state to lean on.
+	if got := routedTo(r, "was für eine Art von Bier hast du?"); got != "" {
+		t.Fatalf(`mid-sentence "Art" routed to %q, want nobody (derived alias is utterance-initial only)`, got)
+	}
+	if got := routedTo(r, "Art, wie läuft das Geschäft heute Abend?"); got != "npc-bart" {
+		t.Fatalf(`"Art, …" routed to %q, want npc-bart`, got)
+	}
+	if got := routedTo(r, "Arek, was liegt auf deinem Amboss?"); got != "npc-marek" {
+		t.Fatalf(`"Arek, …" routed to %q, want npc-marek`, got)
 	}
 }
 
