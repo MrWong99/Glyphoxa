@@ -32,6 +32,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
@@ -226,6 +227,13 @@ type npcSpec struct {
 	// per-NPC GrantSet against the shared Registry, so the LLM only ever sees the
 	// Tools this NPC is granted (#113). nil ⇒ granted nothing.
 	grants []tool.Grant
+	// model is the Groq model id this NPC's engine runs (#227): loadSeededNPCs
+	// resolves it from the Agent's LLM provider_config, falling back to the
+	// tenant-level LLM row. Empty means "adapter default" — it flows verbatim into
+	// [llm.Request.Model], where the openaicompat adapter fills [groq.DefaultModel]
+	// — so there is no defaulting duplicated here. Read once per session start
+	// (like keys and grants); a change applies on the NEXT Voice Session.
+	model string
 }
 
 // hardcodedNPC is the original in-code "Bart" definition. It is the seed source
@@ -866,18 +874,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// each opening their own.
 	provider := newLLM(keys.llm)
 	reg := tool.BuiltinRegistry()
-	engineFor := func(spec npcSpec) agent.Engine {
-		grants := tool.NewGrantSet(reg, spec.grants...)
-		return agenttool.NewEngine(provider, grants, groq.DefaultModel, 0, 0,
-			// Groq is the wired provider (see the function doc), so the per-round
-			// LLM spans (A3) are labelled groq. The no-op recorder keeps the keyless
-			// path silent; the live binary / benchmark inject a real one.
-			agenttool.WithMetrics(stageMetrics, observe.ProviderGroq),
-			// The dice gate selects its keyword set by Campaign Language (#226), so a
-			// German campaign arms the dice Tool for German roll requests instead of
-			// gating it out and forcing the model to improvise the roll.
-			agenttool.WithLanguage(language))
-	}
+	engineFor := engineFactory(provider, reg, language, stageMetrics)
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over a per-NPC engine carrying that NPC's
@@ -921,6 +918,32 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		}),
 	)
 	return conv, roster, cleanup, nil
+}
+
+// engineFactory builds the per-NPC engine constructor buildConversation hands the
+// Roster: one shared Groq provider + Registry, one engine per NPC differing only
+// by GrantSet and model. It is a named function (not an inline closure) so the
+// model-threading contract (#227) is unit-testable with a fake provider that
+// captures the [llm.Request].
+//
+// spec.model — resolved from the Agent's LLM provider_config (loadSeededNPCs),
+// tenant-level row as fallback — flows verbatim into the request. Empty passes
+// through as "" so the openaicompat adapter fills [groq.DefaultModel]; there is
+// NO defaulting duplicated here (the AC "empty → provider default" is proven at
+// the adapter). language selects the dice gate's keyword set (#226); stageMetrics
+// labels the per-round LLM spans groq (A3).
+func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder) func(npcSpec) agent.Engine {
+	return func(spec npcSpec) agent.Engine {
+		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.model, 0, 0,
+			// Groq is the wired provider (see buildConversation's doc), so the
+			// per-round LLM spans (A3) are labelled groq. The no-op recorder keeps the
+			// keyless path silent; the live binary / benchmark inject a real one.
+			agenttool.WithMetrics(stageMetrics, observe.ProviderGroq),
+			// The dice gate selects its keyword set by Campaign Language (#226), so a
+			// German campaign arms the dice Tool for German roll requests instead of
+			// gating it out and forcing the model to improvise the roll.
+			agenttool.WithLanguage(language))
+	}
 }
 
 // buildStreamManager returns the streaming-STT manager when streaming is enabled

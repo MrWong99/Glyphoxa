@@ -49,18 +49,6 @@ const (
 	DefaultMaxTokens = 1024
 )
 
-// Models is the curated allowlist of Groq production models the Configuration
-// model select offers. Groq exposes no programmatic list-models call we surface
-// to the operator (ADR-0039), so the choice is a static, reviewed allowlist
-// rather than live data. [DefaultModel] is first so it is the default selection.
-// Extend this slice (not the UI) to offer another model.
-var Models = []string{
-	DefaultModel, // llama-3.3-70b-versatile
-	"llama-3.1-8b-instant",
-	"llama3-70b-8192",
-	"llama3-8b-8192",
-}
-
 // Client is the Groq LLM adapter: the shared [openaicompat.Client] preconfigured
 // by [New]. Construct with [New]; the zero value is not usable. Safe for
 // concurrent use across goroutines.
