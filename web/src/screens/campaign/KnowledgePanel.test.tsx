@@ -30,7 +30,13 @@ import { KnowledgePanel } from "./KnowledgePanel";
 // NodeType, the update fields, and the delete id reach the wire.
 function mockTransport(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts: { failDelete?: boolean; failSearch?: boolean; failEdges?: boolean; edges?: PbEdge[] } = {},
+  opts: {
+    failDelete?: boolean;
+    failSearch?: boolean;
+    failEdges?: boolean;
+    hangEdges?: boolean;
+    edges?: PbEdge[];
+  } = {},
 ) {
   const nodes =
     seed ??
@@ -60,6 +66,11 @@ function mockTransport(
       listNodeEdges: (req) => {
         if (opts.failEdges) {
           throw new ConnectError("edges boom", Code.Internal);
+        }
+        // A never-settling response models a slow/stuck count: the dialog must
+        // stay in its "counting…" + confirm-disabled state, never implying 0.
+        if (opts.hangEdges) {
+          return new Promise<never>(() => {});
         }
         return create(ListNodeEdgesResponseSchema, {
           outgoing: edges.filter((e) => e.fromNodeId === req.nodeId),
@@ -117,7 +128,13 @@ function mockTransport(
 
 function renderPanel(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts?: { failDelete?: boolean; failSearch?: boolean; failEdges?: boolean; edges?: PbEdge[] },
+  opts?: {
+    failDelete?: boolean;
+    failSearch?: boolean;
+    failEdges?: boolean;
+    hangEdges?: boolean;
+    edges?: PbEdge[];
+  },
 ) {
   const ctx = mockTransport(seed, opts);
   render(
@@ -289,6 +306,27 @@ describe("KnowledgePanel", () => {
     await confirmInDialog();
     await screen.findByText(/no entries yet/i);
     expect(deleteCalls).toHaveLength(1);
+  });
+
+  it("holds the confirm disabled while the cascade count is still loading; Cancel still exits", async () => {
+    const { deleteCalls } = renderPanel(undefined, { hangEdges: true });
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    // Counting…, and the destructive button is held disabled so nobody confirms
+    // against an as-yet-unknown (would-read-0) count.
+    expect(dialog).toHaveTextContent(/counting its relationships/i);
+    const confirm = within(dialog).getByRole("button", { name: /delete entry/i });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(deleteCalls).toHaveLength(0);
+
+    // Cancel is always available — the operator is never trapped in a stuck dialog.
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(deleteCalls).toHaveLength(0);
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
   });
 
   it("refreshes the filtered search results when an entry is deleted while searching", async () => {

@@ -85,6 +85,25 @@ describe("ConfirmDialog", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("confirmDisabled disables the confirm button and blocks onConfirm on click", () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="Delete the vault?"
+        confirmLabel="Delete entry"
+        confirmDisabled
+        onConfirm={onConfirm}
+      />,
+    );
+    const confirm = screen.getByRole("button", { name: "Delete entry" });
+    expect(confirm).toBeDisabled();
+    // A disabled destructive button must not fire the side effect.
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   // Adversarial focus probe: the Cancel/Action buttons are rendered via Radix
   // `asChild` onto our Button, so Button MUST forward its ref or Radix's Slot
   // drops it — the AlertDialog then can't move focus into the dialog and logs
