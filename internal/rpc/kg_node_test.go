@@ -480,3 +480,78 @@ func TestSearchNodesHonorsDurableSelection(t *testing.T) {
 			store.searchNodesCampaign, durable.ID, newer.ID)
 	}
 }
+
+// TestCreateNodeHonorsLiveSession is #222 live-first for the KG wiki write: a new
+// Node lands in the LIVE session's campaign (L), the SAME campaign the wiki list
+// shows mid-session.
+func TestCreateNodeHonorsLiveSession(t *testing.T) {
+	t.Parallel()
+	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+
+	if _, err := client.CreateNode(context.Background(),
+		connect.NewRequest(&managementv1.CreateNodeRequest{
+			NodeType: managementv1.NodeType_NODE_TYPE_NOTE, Name: "A note",
+		})); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	if len(store.nodesCreated) != 1 {
+		t.Fatalf("created %d nodes, want 1", len(store.nodesCreated))
+	}
+	if got := store.nodesCreated[0].CampaignID; got != live.ID {
+		t.Errorf("node landed in campaign %s, want the LIVE session campaign %s (not durable %s / newer %s)",
+			got, live.ID, durable.ID, newer.ID)
+	}
+}
+
+// TestListNodesHonorsLiveSession is #222 live-first for the KG wiki read: ListNodes
+// scopes to the LIVE session's campaign (L).
+func TestListNodesHonorsLiveSession(t *testing.T) {
+	t.Parallel()
+	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+
+	if _, err := client.ListNodes(context.Background(),
+		connect.NewRequest(&managementv1.ListNodesRequest{})); err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if store.listNodesCampaign != live.ID {
+		t.Errorf("ListNodes scoped to %s, want the LIVE session campaign %s (not durable %s / newer %s)",
+			store.listNodesCampaign, live.ID, durable.ID, newer.ID)
+	}
+}
+
+// TestSearchNodesHonorsLiveSession is #222 live-first for the KG wiki search:
+// SearchNodes scopes to the LIVE session's campaign (L).
+func TestSearchNodesHonorsLiveSession(t *testing.T) {
+	t.Parallel()
+	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+
+	if _, err := client.SearchNodes(context.Background(),
+		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "vault"})); err != nil {
+		t.Fatalf("SearchNodes: %v", err)
+	}
+	if store.searchNodesCampaign != live.ID {
+		t.Errorf("SearchNodes scoped to %s, want the LIVE session campaign %s (not durable %s / newer %s)",
+			store.searchNodesCampaign, live.ID, durable.ID, newer.ID)
+	}
+}

@@ -30,7 +30,7 @@ func (s *CampaignServer) GetCampaignRoster(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetCampaignRosterRequest],
 ) (*connect.Response[managementv1.GetCampaignRosterResponse], error) {
-	c, err := s.rosterCampaign(ctx)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -67,14 +67,15 @@ func (s *CampaignServer) GetCampaignRoster(
 
 // CreateAgent adds a Character NPC to the active campaign and returns it with its
 // server-assigned speaker-colour slot. The role is always 'character'. The active
-// campaign is resolved profile-first (durable /glyphoxa use selection →
-// most-recent fallback) so the new NPC lands in the campaign the Campaign screen
-// is scoped to, not the newest one (#222).
+// campaign is resolved live-first (the live Voice Session's campaign → durable
+// /glyphoxa use selection → most-recent fallback), the SAME resolution the roster
+// read uses, so mid-session a new NPC lands in the campaign the screen shows —
+// never a silent cross-campaign write (#222).
 func (s *CampaignServer) CreateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateAgentRequest],
 ) (*connect.Response[managementv1.CreateAgentResponse], error) {
-	c, err := resolveActiveCampaign(ctx, s.store)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

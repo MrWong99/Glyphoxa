@@ -81,12 +81,12 @@ func NewCampaignServer(s campaignStore) *CampaignServer {
 // compile-time assertion that CampaignServer satisfies the generated handler.
 var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
 
-// SetSessions wires the live Voice Session source the roster/mute panel consults
-// (#222): while a session is live, GetCampaignRoster scopes to that session's
-// campaign so the GM mutes the NPCs actually in the channel, even if the durable
-// selection was changed mid-session. Called once at boot, after the session
-// manager exists and before the server serves, so no lock is needed — mirrors
-// VoiceServer.SetSessions.
+// SetSessions wires the live Voice Session source the Active Campaign resolution
+// consults (#222): while a session is live, EVERY CampaignService surface (header,
+// roster/mute panel, campaign CRUD, KG wiki) scopes to that session's campaign, so
+// the screen's reads and writes agree even if the durable selection was changed
+// mid-session. Called once at boot, after the session manager exists and before
+// the server serves, so no lock is needed — mirrors VoiceServer.SetSessions.
 func (s *CampaignServer) SetSessions(src activeSessionSource) {
 	s.liveCampaign = func() (uuid.UUID, bool) {
 		vs, active := src.Snapshot()
@@ -94,32 +94,25 @@ func (s *CampaignServer) SetSessions(src activeSessionSource) {
 	}
 }
 
-// rosterCampaign resolves the campaign the roster/mute panel scopes to: the live
-// Voice Session's campaign first (the campaign actually voicing), otherwise the
-// profile-first resolveActiveCampaign (durable /glyphoxa use selection →
-// most-recent fallback). This is the live → durable → most-recent precedence the
-// Session screen's transcript search already uses (searchCampaign, #120), so the
-// roster and the transcript on the same screen name the same campaign (#222).
-func (s *CampaignServer) rosterCampaign(ctx context.Context) (storage.Campaign, error) {
-	if s.liveCampaign != nil {
-		if id, active := s.liveCampaign(); active {
-			return s.store.GetCampaign(ctx, id)
-		}
-	}
-	return resolveActiveCampaign(ctx, s.store)
+// activeCampaign resolves the campaign every CampaignService handler scopes to,
+// via the one shared resolveActiveCampaign policy (live Voice Session → durable
+// /glyphoxa use selection → most-recent fallback, #222). Reads and writes on the
+// same screen therefore always name the same campaign.
+func (s *CampaignServer) activeCampaign(ctx context.Context) (storage.Campaign, error) {
+	return resolveActiveCampaign(ctx, s.liveCampaign, s.store)
 }
 
-// GetActiveCampaign resolves the operator's active campaign and maps it onto
-// the wire type. The Campaign is resolved profile-first (the durable /glyphoxa
-// use selection → most-recent fallback), so the Session-screen header names the
-// same campaign Start would run, not the newest one (#222). A storage.ErrNotFound
-// (no campaign exists) becomes CodeNotFound; any other failure becomes
-// CodeInternal.
+// GetActiveCampaign resolves the operator's active campaign and maps it onto the
+// wire type. The Campaign is resolved live-first (the live Voice Session's
+// campaign → durable /glyphoxa use selection → most-recent fallback), so the
+// Session-screen header names the same campaign the roster, transcript, and Start
+// do (#222). A storage.ErrNotFound (no campaign exists) becomes CodeNotFound; any
+// other failure becomes CodeInternal.
 func (s *CampaignServer) GetActiveCampaign(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetActiveCampaignRequest],
 ) (*connect.Response[managementv1.GetActiveCampaignResponse], error) {
-	c, err := resolveActiveCampaign(ctx, s.store)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
