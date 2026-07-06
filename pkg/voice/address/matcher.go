@@ -143,6 +143,18 @@ type Matcher struct {
 	lastAddressed map[string]bool
 	interruptions map[string]time.Time
 	recentWords   []timedWord
+	// muted holds the AgentIDs currently muted (#225). Mute is MATCHER-INTERNAL
+	// state guarded by m.mu — the SAME critical section as index and agents — so
+	// a scoring pass reads a mutually consistent index/roster/mute triple and
+	// SetMuted never rebuilds the index (ADR-0024 one-snapshot invariant, #145).
+	// A muted Agent stays in the index and is still matched by name, but is
+	// name-gated like an AddressOnly Agent (excluded from every ambient
+	// heuristic), is dropped from the published set whenever any unmuted Agent is
+	// also addressed, and is never recorded as lastAddressed. It is published
+	// only when it is the SOLE addressee, so its decision flows to the reactor's
+	// mute gate (which ends the turn pre-audio) instead of re-routing to another
+	// NPC — the exact #225 failure this closes.
+	muted map[string]struct{}
 }
 
 type timedWord struct {
@@ -208,6 +220,7 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 		agents:        agents,
 		lastAddressed: map[string]bool{},
 		interruptions: map[string]time.Time{},
+		muted:         map[string]struct{}{},
 	}
 	m.index = m.buildIndex()
 	return m
@@ -295,8 +308,56 @@ func (m *Matcher) Remove(agentIDs ...string) {
 	for id := range drop {
 		delete(m.lastAddressed, id)
 		delete(m.interruptions, id)
+		delete(m.muted, id) // a re-Added Agent starts unmuted
 	}
 	m.reindexLocked()
+}
+
+// SetMuted toggles whether the Agent with agentID is muted (#225). Mute is
+// matcher-internal routing state, NOT a roster change: a muted Agent stays in
+// the fuzzy index and is still matched by name, but is name-gated like an
+// AddressOnly Agent — excluded from every ambient heuristic, dropped from the
+// published set whenever an unmuted Agent is also addressed, and never recorded
+// as lastAddressed. It is published only when it is the SOLE addressee, so an
+// explicit address to a muted NPC flows to the reactor's mute gate (which ends
+// the turn before any audio) instead of re-routing to another NPC.
+//
+// The flag lives under m.mu — the same critical section as the index and roster
+// — so SetMuted never rebuilds the index (unlike Add/Remove) and a concurrent
+// TargetMatch reads a consistent index/roster/mute triple (ADR-0024, #145).
+// SetMuted is idempotent and a no-op for an unknown agentID. Muting is a state
+// TRANSITION check first (wireMutes re-fires SetMuted per event): only an actual
+// unmuted→muted flip prunes the Agent's lastAddressed and interruption state,
+// mirroring Remove's prune so a later unnamed continuation cannot resurrect the
+// muted Agent (#211 parity). Remove clears the flag, so a re-Added Agent is
+// unmuted.
+func (m *Matcher) SetMuted(agentID string, muted bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	known := false
+	for i := range m.agents {
+		if m.agents[i].Target.AgentID == agentID {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return // unknown Agent: nothing to mute
+	}
+
+	if _, already := m.muted[agentID]; muted == already {
+		return // already in the requested state: idempotent, no prune
+	}
+	if !muted {
+		delete(m.muted, agentID)
+		return
+	}
+	// Unmuted → muted transition: mute and prune continuation/interruption state
+	// so an unnamed follow-up never continues into the muted Agent (#211 parity).
+	m.muted[agentID] = struct{}{}
+	delete(m.lastAddressed, agentID)
+	delete(m.interruptions, agentID)
 }
 
 // reindexLocked reassigns each Agent's index to its new slice position and swaps
@@ -357,8 +418,11 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 	var hits []scored
 	for _, a := range m.agents {
 		// AddressOnly agents are reachable only by an explicit name match; no
-		// ambient heuristic may route to them (CONTEXT.md "Address-Only").
-		if a.AddressOnly && nameScores[a.index] < nameThreshold {
+		// ambient heuristic may route to them (CONTEXT.md "Address-Only"). A muted
+		// Agent is name-gated the same way (#225): it stays matchable by name but
+		// is excluded from every ambient heuristic, so a muted addressee never
+		// re-routes to another NPC via continuation or the sole-NPC fallback.
+		if _, isMuted := m.muted[a.Target.AgentID]; (a.AddressOnly || isMuted) && nameScores[a.index] < nameThreshold {
 			continue
 		}
 		var total float64
@@ -368,6 +432,31 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 		if total >= m.threshold {
 			hits = append(hits, scored{agent: a, total: total})
 		}
+	}
+
+	// A muted Agent that was named alongside an unmuted one must not shadow the
+	// unmuted answer (#225 "Greta und Bart"): if any unmuted Agent was addressed
+	// this turn, drop every muted hit BEFORE the score-sort and MaxTargets cap, so
+	// a muted score never wins a tie-break and never consumes a cap slot. A muted
+	// hit survives only when it is the ONLY thing addressed (a solo address to a
+	// muted NPC), so its decision flows to the reactor's mute gate and ends the
+	// turn with TurnEndMute rather than re-routing.
+	anyUnmuted := false
+	for i := range hits {
+		if _, isMuted := m.muted[hits[i].agent.Target.AgentID]; !isMuted {
+			anyUnmuted = true
+			break
+		}
+	}
+	if anyUnmuted {
+		kept := hits[:0]
+		for _, h := range hits {
+			if _, isMuted := m.muted[h.agent.Target.AgentID]; isMuted {
+				continue
+			}
+			kept = append(kept, h)
+		}
+		hits = kept
 	}
 
 	// Highest score wins. Equal totals rank by fuzzy name similarity, because
@@ -393,15 +482,22 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 	addressed := make(map[string]bool, len(hits))
 	out := make([]voiceevent.AddressRouted, 0, len(hits))
 	for _, h := range hits {
-		addressed[h.agent.Target.AgentID] = true
 		out = append(out, voiceevent.AddressRouted{
 			At:     now,
 			Text:   text,
 			Target: h.agent.Target,
 		})
+		// A muted addressee is published (it flows to the reactor's mute gate) but
+		// is NEVER recorded as lastAddressed (#225): recording it would black-hole
+		// the next unnamed follow-up onto a muted Agent that produces no answer.
+		if _, isMuted := m.muted[h.agent.Target.AgentID]; isMuted {
+			continue
+		}
+		addressed[h.agent.Target.AgentID] = true
 	}
-	// Record this turn's addressees for next turn's continuation heuristic.
-	// Stay put on a no-target turn rather than forgetting who held the floor.
+	// Record this turn's UNMUTED addressees for next turn's continuation heuristic.
+	// Stay put on a no-target (or all-muted) turn rather than forgetting who held
+	// the floor.
 	if len(addressed) > 0 {
 		m.lastAddressed = addressed
 	}
@@ -422,15 +518,21 @@ func (m *Matcher) nameThreshold() float64 {
 	return 0.000001
 }
 
-// nonAddressableCount returns how many Agents are not AddressOnly. Every Agent
-// the matcher was built with is considered active for the lifetime of the
-// Voice Session.
+// nonAddressableCount returns how many Agents are eligible for the ambient
+// heuristics: not AddressOnly and not muted (#225). Every non-muted Agent the
+// matcher was built with is active for the lifetime of the Voice Session, so the
+// sole-NPC fallback sees the surviving addressable NPCs only — muting one of two
+// NPCs makes the other the sole active NPC. Caller holds m.mu.
 func (m *Matcher) nonAddressableCount() int {
 	n := 0
 	for _, a := range m.agents {
-		if !a.AddressOnly {
-			n++
+		if a.AddressOnly {
+			continue
 		}
+		if _, isMuted := m.muted[a.Target.AgentID]; isMuted {
+			continue
+		}
+		n++
 	}
 	return n
 }
