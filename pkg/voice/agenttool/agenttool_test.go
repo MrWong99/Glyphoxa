@@ -438,6 +438,70 @@ func TestEngine_DiceGate_HistoryDiceDoesNotArmCurrentTurn(t *testing.T) {
 	}
 }
 
+// TestEngine_DiceGate_GermanUtteranceOffersDiceWithLanguage is the #226 pin: a
+// German campaign (WithLanguage("de")) arms the dice Tool for the exact live
+// failure utterance — „Würfelwerkzeug … würfle zwei sechsseitige Würfel" — so
+// the model gets a real tool round-trip instead of improvising the roll.
+func TestEngine_DiceGate_GermanUtteranceOffersDiceWithLanguage(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":2,"sides":6}`)}}, stop: "tool_use"},
+		{text: "Eine Vier und eine Zwei.", stop: "end_turn"},
+	}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithLanguage("de-DE"))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Bart, benutze dein Würfelwerkzeug und würfle zwei sechsseitige Würfel."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("provider called %d times, want 2 (German dice intent → tool round-trip)", len(reqs))
+	}
+	if len(reqs[0].Tools) != 1 || reqs[0].Tools[0].Name != "dice" {
+		t.Errorf("German dice turn tools = %+v, want the dice decl offered", reqs[0].Tools)
+	}
+}
+
+// TestEngine_DiceGate_GermanPlainTurnGatedWithLanguage proves the other #226
+// direction: with WithLanguage("de") the German article „die" no longer trips
+// the gate, so a plain German turn stays a single dice-less round.
+func TestEngine_DiceGate_GermanPlainTurnGatedWithLanguage(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{{text: "Es war einmal…", stop: "end_turn"}}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithLanguage("de"))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Erzähl mir die Geschichte von diesem Ort."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 1 || len(reqs[0].Tools) != 0 {
+		t.Errorf("plain German turn: reqs=%d tools=%+v, want 1 req / 0 tools (article „die\" gated)", len(reqs), reqs[0].Tools)
+	}
+}
+
+// TestEngine_DiceGate_GermanUtteranceWithoutLanguageStaysEnglish pins that the
+// language must be threaded to fix #226: without WithLanguage the gate stays
+// English (the pre-#226 behavior, byte-for-byte), so the same German dice
+// utterance is gated out — reproducing the live false negative.
+func TestEngine_DiceGate_GermanUtteranceWithoutLanguageStaysEnglish(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{{text: "role-played roll", stop: "end_turn"}}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Bart, benutze dein Würfelwerkzeug und würfle zwei sechsseitige Würfel."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 1 || len(reqs[0].Tools) != 0 {
+		t.Errorf("German utterance under the EN default: reqs=%d tools=%+v, want 1 req / 0 tools (dice gated — the #226 failure)", len(reqs), reqs[0].Tools)
+	}
+}
+
 // TestEngine_AsAgentEngine_DrivesReplier pins that the bridge slots into the
 // agent loop via agent.Config.Engine — the production wiring path — so an
 // addressed utterance flows utterance → Hot Context → tool loop → spoken reply.

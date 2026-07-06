@@ -186,27 +186,36 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 type Engine struct {
 	full  *tool.Loop // every granted Tool declared
 	gated *tool.Loop // grants minus the dice Tool
+
+	// language is the gate language the dice keyword set is selected by (#226):
+	// the Campaign Language normalized via [gateLanguage] at construction, so the
+	// hot path never resolves language per turn. The zero value "" gates in
+	// English ([needsDice] normalizes it), matching the pre-#226 behavior.
+	language string
 }
 
 // loopFor selects the loop for this turn: the full grants when the utterance
 // plausibly needs dice, the dice-less grants otherwise.
 func (e *Engine) loopFor(messages []llm.Message) *tool.Loop {
-	if needsDice(messages) {
+	if needsDice(e.language, messages) {
 		return e.full
 	}
 	return e.gated
 }
 
-// EngineOption configures a [NewEngine]. The only option today is
-// [WithMetrics], which opts the per-round LLM instrumentation in; without it
-// the Engine records nothing (the keyless default).
+// EngineOption configures a [NewEngine]: [WithMetrics] opts the per-round LLM
+// instrumentation in, and [WithLanguage] selects the dice gate's keyword set.
+// Without either, the Engine records nothing and gates dice in English (the
+// keyless, pre-#226 default).
 type EngineOption func(*engineConfig)
 
 // engineConfig collects the optional [NewEngine] settings before the adapter is
-// built. The zero value is the no-op recorder + empty provider label.
+// built. The zero value is the no-op recorder + empty provider label + the
+// English dice gate ("" normalizes to "en" in [needsDice]).
 type engineConfig struct {
 	rec      observe.StageRecorder
 	provName observe.Provider
+	language string
 }
 
 // WithMetrics injects the A3 per-round instrumentation: rec receives one
@@ -222,6 +231,16 @@ func WithMetrics(rec observe.StageRecorder, provName observe.Provider) EngineOpt
 			c.rec = rec
 		}
 		c.provName = provName
+	}
+}
+
+// WithLanguage selects the dice gate's keyword set by Campaign Language (#226):
+// lang is normalized once here via [gateLanguage] ("de-DE" → "de"; an unknown
+// language degrades to "en", ADR-0024), so the hot path never resolves language
+// per turn. Without this option the gate stays English (the pre-#226 behavior).
+func WithLanguage(lang string) EngineOption {
+	return func(c *engineConfig) {
+		c.language = gateLanguage(lang)
 	}
 }
 
@@ -252,8 +271,9 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 	// Per turn (Generate/GenerateStream) the dice gate picks between them so a
 	// non-dice utterance never declares the dice Tool — one round, not two.
 	return &Engine{
-		full:  newLoop(grants),
-		gated: newLoop(grants.Without(diceToolName)),
+		full:     newLoop(grants),
+		gated:    newLoop(grants.Without(diceToolName)),
+		language: cfg.language,
 	}
 }
 

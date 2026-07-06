@@ -9,38 +9,66 @@ import (
 func TestNeedsDice(t *testing.T) {
 	cases := []struct {
 		name string
+		lang string
 		text string
 		want bool
 	}{
-		// Explicit die notation.
-		{"d20", "Roll a d20 for me.", true},
-		{"NdM", "I attack with 2d6 damage.", true},
-		{"d100", "Give me a d100.", true},
-		{"d-percent", "Roll d% for the table.", true},
-		{"bare die word", "Throw the dice.", true},
+		// --- English: explicit die notation. ---
+		{"en d20", "en", "Roll a d20 for me.", true},
+		{"en NdM", "en", "I attack with 2d6 damage.", true},
+		{"en d100", "en", "Give me a d100.", true},
+		{"en d-percent", "en", "Roll d% for the table.", true},
+		{"en bare die word", "en", "Throw the dice.", true},
 
-		// ttrpg roll intent without explicit notation.
-		{"saving throw", "Make a saving throw against the poison.", true},
-		{"initiative", "Everyone roll initiative.", true},
-		{"check", "Give me an ability check.", true},
-		{"to hit", "What's my to hit?", true},
+		// --- English: ttrpg roll intent without explicit notation. ---
+		{"en saving throw", "en", "Make a saving throw against the poison.", true},
+		{"en initiative", "en", "Everyone roll initiative.", true},
+		{"en check", "en", "Give me an ability check.", true},
+		{"en to hit", "en", "What's my to hit?", true},
+		// \b-anchored prefix keeps inflections (rolls/rolling) armed.
+		{"en rolling", "en", "He keeps rolling his eyes.", true},
 
-		// Plain conversation — must NOT arm dice.
-		{"room price", "How much for a room and a pint?", false},
-		{"greeting", "Hello Bart, how are you?", false},
-		{"rumors", "Heard any good rumors lately?", false},
+		// --- English: plain conversation — must NOT arm dice. ---
+		{"en room price", "en", "How much for a room and a pint?", false},
+		{"en greeting", "en", "Hello Bart, how are you?", false},
+		{"en rumors", "en", "Heard any good rumors lately?", false},
 
-		// False-positive guards: dice-shaped substrings inside unrelated words.
-		{"model not d-something", "Tell me about your business model.", false},
-		{"add not a die", "Can you add another log to the fire?", false},
-		{"addled", "The traveler looks addled.", false},
-		{"empty", "", false},
+		// --- English: false-positive guards. ---
+		{"en model not d-something", "en", "Tell me about your business model.", false},
+		{"en add not a die", "en", "Can you add another log to the fire?", false},
+		{"en addled", "en", "The traveler looks addled.", false},
+		// \b-anchoring: "die" substring inside "studied" no longer trips (#226).
+		{"en studied not die", "en", "She studied the map.", false},
+		{"en empty", "en", "", false},
+
+		// --- German: the live failure — must arm dice (#226). ---
+		{"de Würfelwerkzeug", "de", "Bart, benutze dein Würfelwerkzeug und würfle zwei sechsseitige Würfel.", true},
+		// German article „die" must NOT trip the gate (#226).
+		{"de article die", "de", "Erzähl mir die Geschichte von diesem Ort.", false},
+		{"de w20 notation", "de", "würfle zwei w20", true},
+		{"de bare notation", "de", "nimm zwei w20", true},
+		{"de Probe", "de", "mach eine Probe", true},
+		{"de Rettungswurf", "de", "mach einen Rettungswurf gegen das Gift", true},
+		{"de Initiative", "de", "alle würfeln Initiative", true},
+		// German plain conversation — must NOT arm dice.
+		{"de greeting", "de", "Hallo Bart, wie geht es dir?", false},
+		{"de room", "de", "Was kostet ein Zimmer für die Nacht?", false},
+
+		// --- Cross-language notation trips in any language (AC). ---
+		{"de NdM notation", "de", "2d6 Schaden", true},
+		{"en wN notation", "en", "roll 2w6", true},
+
+		// --- Unknown/empty language behaves as en. ---
+		{"unknown lang en keyword", "fr", "Roll a d20.", true},
+		{"unknown lang de keyword ignored", "fr", "würfle zwei Würfel", false},
+		{"empty lang en keyword", "", "Roll a d20.", true},
+		{"empty lang notation", "", "2d6", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := needsDice([]llm.Message{{Role: llm.RoleUser, Text: tc.text}})
+			got := needsDice(tc.lang, []llm.Message{{Role: llm.RoleUser, Text: tc.text}})
 			if got != tc.want {
-				t.Errorf("needsDice(%q) = %v, want %v", tc.text, got, tc.want)
+				t.Errorf("needsDice(%q, %q) = %v, want %v", tc.lang, tc.text, got, tc.want)
 			}
 		})
 	}
@@ -56,7 +84,29 @@ func TestNeedsDice_LatestUserOnly(t *testing.T) {
 		{Role: llm.RoleAssistant, Text: "You rolled a 14."},
 		{Role: llm.RoleUser, Text: "Thanks, where's the bar?"}, // current: plain
 	}
-	if needsDice(msgs) {
+	if needsDice("en", msgs) {
 		t.Error("needsDice must key on the latest user message (plain), not history or the system prompt")
+	}
+}
+
+// TestGateLanguage covers the language-subtag normalization the gate applies
+// before selecting a keyword table: a known primary subtag is kept, a region
+// tag is stripped, and anything without a registered table degrades to "en"
+// (mirroring the address matcher's fallback, ADR-0024).
+func TestGateLanguage(t *testing.T) {
+	cases := map[string]string{
+		"de":    "de",
+		"de-DE": "de",
+		"DE":    "de",
+		"en":    "en",
+		"en-US": "en",
+		"":      "en",
+		"fr":    "en",
+		"xx":    "en",
+	}
+	for in, want := range cases {
+		if got := gateLanguage(in); got != want {
+			t.Errorf("gateLanguage(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
