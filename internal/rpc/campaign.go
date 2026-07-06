@@ -28,6 +28,7 @@ import (
 // and the real store in integration tests.
 type campaignStore interface {
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)

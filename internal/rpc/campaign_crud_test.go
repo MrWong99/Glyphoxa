@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // errAny is an opaque storage failure the fake returns to force the Internal path.
@@ -25,12 +27,13 @@ var errAny = errors.New("kg fake failure")
 // the agents map backs GetAgent/Create/Update/Delete so happy paths round-trip
 // without a database.
 type fakeCampaignStore struct {
-	campaign  storage.Campaign
-	campErr   error
-	butler    storage.Agent
-	butlerErr error
-	chars     []storage.Agent
-	charsErr  error
+	campaign   storage.Campaign
+	campErr    error
+	getCampErr error // forces GetCampaign's failure path (distinct from GetActiveCampaign)
+	butler     storage.Agent
+	butlerErr  error
+	chars      []storage.Agent
+	charsErr   error
 
 	agents    map[uuid.UUID]storage.Agent
 	createErr error
@@ -93,6 +96,10 @@ func newFakeStore() *fakeCampaignStore {
 
 func (f *fakeCampaignStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
 	return f.campaign, f.campErr
+}
+
+func (f *fakeCampaignStore) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	return f.campaign, f.getCampErr
 }
 
 func (f *fakeCampaignStore) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {
@@ -463,6 +470,50 @@ func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 	}
 	if a.GetSpeakerColor() != 3 {
 		t.Errorf("speaker_color must be immutable across update: %d", a.GetSpeakerColor())
+	}
+}
+
+// TestUpdateAgent_PreservesExistingVoiceTuning proves the #224 wiring end-to-end
+// through the handler: re-saving the editor with the SAME voice id must leave the
+// persisted ProviderID/Language/Settings untouched (the editor only sends a bare
+// id, ADR-0039), and switching to a NEW id keeps that tuning while swapping the
+// id. Without the GetAgent+GetCampaign read the handler now does, the old writer
+// clobbered the whole blob to {"voice_id":…} and the NPC went silent.
+func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New(), Language: "de"}
+	id := uuid.New()
+
+	tuned := ttseleven.DefaultVoice("v1", "en")
+	tuned.Name = "Custom"
+	blob, err := storage.VoiceToJSON(tuned)
+	if err != nil {
+		t.Fatalf("VoiceToJSON: %v", err)
+	}
+	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old", Voice: blob}
+	client := crudClient(t, store)
+
+	// Same id: the persisted bytes must be byte-identical afterward.
+	if _, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "Renamed", Voice: "v1"})); err != nil {
+		t.Fatalf("UpdateAgent(same voice): %v", err)
+	}
+	if got := store.agents[id].Voice; !bytes.Equal(got, blob) {
+		t.Errorf("same-id re-save changed persisted voice:\n got %s\nwant %s", got, blob)
+	}
+
+	// New id: keep Settings/ProviderID, swap VoiceID.
+	if _, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "Renamed", Voice: "v2"})); err != nil {
+		t.Fatalf("UpdateAgent(new voice): %v", err)
+	}
+	after, err := storage.VoiceFromJSON(store.agents[id].Voice)
+	if err != nil {
+		t.Fatalf("VoiceFromJSON: %v", err)
+	}
+	if after.VoiceID != "v2" || after.ProviderID != ttseleven.ProviderID || len(after.Settings) == 0 {
+		t.Errorf("voice change dropped tuning: %+v", after)
 	}
 }
 

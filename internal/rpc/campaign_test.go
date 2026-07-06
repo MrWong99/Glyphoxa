@@ -30,6 +30,9 @@ func (f fakeReader) GetActiveCampaign(context.Context) (storage.Campaign, error)
 // The roster + CRUD half of campaignStore is unused by the GetActiveCampaign
 // tests; stub it so fakeReader still satisfies the widened interface. The CRUD
 // handlers have their own fake (campaign_crud_test.go).
+func (fakeReader) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{}, storage.ErrNotFound
+}
 func (fakeReader) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {
 	return storage.Agent{}, storage.ErrNotFound
 }
