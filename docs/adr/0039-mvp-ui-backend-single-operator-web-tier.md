@@ -14,7 +14,32 @@ The MVP UI ships as a Claude Design handoff — three screens (Configuration, Ca
 
 - **Health and connection badges render instantly, upgrade async.** The Configuration "Healthy / Key needed" badge and the bot-connected tag render immediately from presence of a `provider_config` row / a saved token, then an async test-call (ElevenLabs `/v1/voices` is already wired; a Groq ping) and a real Discord gateway login upgrade or downgrade the badge and resolve the live bot tag (`Glyphoxa#4823` in the mock). No live call blocks page load.
 
-- **MVP provider matrix = Groq (LLM) + ElevenLabs (STT + TTS) only.** Matches the design's "more providers soon" and the only adapters built. The Configuration voice dropdown is live data from ElevenLabs `ListVoices` (already implemented); Groq exposes no list-models call, so its model select is a static allowlist. Preview-voice wraps the existing `Synthesize`. OpenAI TTS (ADR-0023) and Gemini (ADR-0035) stay out of this increment.
+- **MVP provider matrix = Groq (LLM) + ElevenLabs (STT + TTS) only.** Matches the design's "more providers soon" and the only adapters built. The Configuration voice dropdown is live data from ElevenLabs `ListVoices` (already implemented); ~~Groq exposes no list-models call, so its model select is a static allowlist~~ (superseded — see the 2026-07-06 amendment: the claim was factually wrong). Preview-voice wraps the existing `Synthesize`. OpenAI TTS (ADR-0023) and Gemini (ADR-0035) stay out of this increment.
+
+## Amendment: live Groq model catalog + free-text model entry (2026-07-06, #227)
+
+The premise "Groq exposes no list-models call" was factually wrong: Groq's
+OpenAI-compatible surface serves `GET /models` (the health check's
+`livePingGroq` was already calling it). The static allowlist it justified went
+stale — deprecated ids lingered, new models never appeared — and the hardcoded
+`groq.Models` var is deleted.
+
+Decided instead:
+
+- **Live catalog.** `ListModels` fetches the catalog through the tenant's
+  decrypted key (the same hybrid credential policy as the health check),
+  unfiltered, with `groq.DefaultModel` pinned first. A fetch failure degrades
+  to just the default and never errors: the Configuration screen must stay
+  usable without a catalog.
+- **Free-text model entry.** The Configuration model control is a combobox
+  that accepts any typed model id, catalog-listed or not — curation is exactly
+  the staleness this amendment removes. A typed model saves via a model-only
+  `SaveProviderConfig` (empty secret + existing rows), which re-upserts the
+  sealed key verbatim; the secret stays write-only (ADR-0004).
+- **End-to-end threading.** `provider_config.model` now reaches the engine:
+  Agent-bound LLM config first, tenant-level row as fallback, empty meaning
+  "adapter default" (resolved in the openaicompat adapter, never duplicated
+  upstream).
 
 ## Why
 
