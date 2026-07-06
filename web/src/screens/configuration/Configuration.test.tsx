@@ -345,4 +345,68 @@ describe("Configuration", () => {
     );
     expect(await screen.findByText(/Connected as Glyphoxa#4823/)).toBeInTheDocument();
   });
+
+  it("autofills both ID fields from a pasted channel link with no network request (#101)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
+
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, {
+      target: { value: "https://discord.com/channels/472093001100472093/987654321098765432" },
+    });
+
+    // Both snowflakes land in the (still editable) ID fields, purely client-side.
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
+    // Parsing issues NO save RPC — the autofill is local until the operator Saves.
+    expect(discordSaves).toHaveLength(0);
+  });
+
+  it("persists autofilled IDs through the existing Save flow (#101)", async () => {
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
+      target: { value: "discord.com/channels/472093001100472093/987654321098765432" },
+    });
+    // The autofill marks the fields dirty, so Save picks up the pasted values.
+    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
+
+    expect(await screen.findByDisplayValue("472093001100472093")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("987654321098765432")).toBeInTheDocument();
+  });
+
+  it("rejects a non-link paste with an inline hint and leaves fields unchanged (#101)", async () => {
+    renderScreen();
+
+    // Operator already has a Guild ID typed in.
+    const guild = await screen.findByLabelText("Guild ID");
+    fireEvent.change(guild, { target: { value: "existing-guild" } });
+
+    // A paste that is not a channel deep-link surfaces a hint…
+    const paste = screen.getByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, { target: { value: "not a discord link" } });
+    expect(screen.getByText(/couldn't read that link/i)).toBeInTheDocument();
+
+    // …and does not clobber what the operator already had.
+    expect((guild as HTMLInputElement).value).toBe("existing-guild");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+  });
+
+  it("tolerates scheme/subdomain/trailing-slash/query variants when autofilling (#101)", async () => {
+    renderScreen();
+
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, {
+      target: { value: "ptb.discord.com/channels/472093001100472093/987654321098765432/?jump=1" },
+    });
+
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
+    // A rejected paste's hint must not linger after a successful one.
+    expect(screen.queryByText(/couldn't read that link/i)).not.toBeInTheDocument();
+  });
 });

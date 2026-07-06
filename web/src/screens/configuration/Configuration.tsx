@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { MessagesSquare, BrainCircuit, AudioLines, RefreshCw } from "lucide-react";
+import { MessagesSquare, BrainCircuit, AudioLines, RefreshCw, Link as LinkIcon } from "lucide-react";
 
 import {
   CampaignService,
@@ -17,6 +17,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
+import { parseChannelLink } from "@/lib/discordLink";
 
 import "./configuration.css";
 
@@ -94,6 +95,30 @@ export function Configuration() {
     setVoiceChannelId(v);
   };
 
+  // "Paste a Discord link" autofill (#101): a voice channel's Copy-Link carries
+  // both snowflakes, so a well-formed paste fills the two ID fields purely
+  // client-side (parseChannelLink issues no network call) and marks them dirty so
+  // Save picks the values up. A paste that isn't a channel deep-link leaves the
+  // fields untouched and surfaces an inline hint.
+  const [channelLink, setChannelLink] = useState("");
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const pasteChannelLink = (v: string) => {
+    setChannelLink(v);
+    if (!v.trim()) {
+      setLinkError(null);
+      return;
+    }
+    const parsed = parseChannelLink(v);
+    if (!parsed) {
+      setLinkError("Couldn't read that link — paste a Discord channel link.");
+      return;
+    }
+    idsDirty.current = true;
+    setGuildId(parsed.guildId);
+    setVoiceChannelId(parsed.channelId);
+    setLinkError(null);
+  };
+
   return (
     <div className="gx-providers">
       <h1>Providers</h1>
@@ -168,6 +193,15 @@ export function Configuration() {
             // presence), so replacing the token can never clobber the stored IDs —
             // even while the config load is still resolving (#142).
             onSave={(secret) => saveDiscord.mutateAsync({ botToken: secret })}
+          />
+          <Input
+            label="Paste a Discord link"
+            placeholder="https://discord.com/channels/…"
+            icon={<LinkIcon size={15} />}
+            hint="Right-click a voice channel → Copy Link to fill both IDs at once."
+            error={linkError}
+            value={channelLink}
+            onChange={(e) => pasteChannelLink(e.target.value)}
           />
           <div className="gx-discord__ids">
             <Input
