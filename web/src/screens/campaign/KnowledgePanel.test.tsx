@@ -7,11 +7,15 @@ import {
   CampaignService,
   NodeSchema,
   NodeType,
+  EdgeSchema,
+  EdgeType,
   CreateNodeResponseSchema,
   ListNodesResponseSchema,
+  ListNodeEdgesResponseSchema,
   UpdateNodeResponseSchema,
   DeleteNodeResponseSchema,
   SearchNodesResponseSchema,
+  type Edge as PbEdge,
   type CreateNodeRequest,
   type UpdateNodeRequest,
   type DeleteNodeRequest,
@@ -26,7 +30,7 @@ import { KnowledgePanel } from "./KnowledgePanel";
 // NodeType, the update fields, and the delete id reach the wire.
 function mockTransport(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts: { failDelete?: boolean; failSearch?: boolean } = {},
+  opts: { failDelete?: boolean; failSearch?: boolean; edges?: PbEdge[] } = {},
 ) {
   const nodes =
     seed ??
@@ -46,9 +50,18 @@ function mockTransport(
   const deleteCalls: DeleteNodeRequest[] = [];
   const searchCalls: string[] = [];
 
+  const edges = opts.edges ?? [];
+
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
       listNodes: () => create(ListNodesResponseSchema, { nodes }),
+      // The delete-confirm dialog fetches a node's edges to show the cascade
+      // count; split the seeded edges by which side touches the asked node.
+      listNodeEdges: (req) =>
+        create(ListNodeEdgesResponseSchema, {
+          outgoing: edges.filter((e) => e.fromNodeId === req.nodeId),
+          incoming: edges.filter((e) => e.toNodeId === req.nodeId),
+        }),
       // Stand-in for the tsvector search: a case-insensitive substring over
       // name + body. The panel only cares that matches filter the visible list;
       // relevance ranking is asserted server-side. gm_private is not filtered.
@@ -100,7 +113,7 @@ function mockTransport(
 
 function renderPanel(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts?: { failDelete?: boolean; failSearch?: boolean },
+  opts?: { failDelete?: boolean; failSearch?: boolean; edges?: PbEdge[] },
 ) {
   const ctx = mockTransport(seed, opts);
   render(
@@ -109,6 +122,13 @@ function renderPanel(
     </Providers>,
   );
   return ctx;
+}
+
+// Delete is now guarded by a confirm dialog: open it via the card/editor trash
+// button, then click the destructive button inside the dialog itself.
+async function confirmInDialog() {
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: /^delete/i }));
 }
 
 // pickType opens the Radix Type select and chooses the named option.
@@ -175,11 +195,70 @@ describe("KnowledgePanel", () => {
     expect(updateCalls[0].gmPrivate).toBe(true);
   });
 
-  it("deletes an entry from its card via DeleteNode", async () => {
+  it("deletes an entry from its card via DeleteNode, after confirming", async () => {
+    const { deleteCalls } = renderPanel();
+    await screen.findByText("The sealed vault");
+
+    // The card trash button opens a confirm dialog; no RPC yet.
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(/sealed vault/i);
+    expect(deleteCalls).toHaveLength(0);
+
+    // Confirming issues exactly one DeleteNode for the right id.
+    await confirmInDialog();
+    await screen.findByText(/no entries yet/i);
+    expect(deleteCalls).toHaveLength(1);
+    expect(deleteCalls[0].id).toBe("n1");
+  });
+
+  it("cancelling the confirm dialog issues no delete RPC and leaves the entry", async () => {
     const { deleteCalls } = renderPanel();
     await screen.findByText("The sealed vault");
 
     fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(deleteCalls).toHaveLength(0);
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+  });
+
+  it("Escape dismisses the confirm dialog without deleting", async () => {
+    const { deleteCalls } = renderPanel();
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(deleteCalls).toHaveLength(0);
+    expect(screen.getByText("The sealed vault")).toBeInTheDocument();
+  });
+
+  it("shows the count of edges that will cascade-delete in the confirm dialog", async () => {
+    const edges = [
+      create(EdgeSchema, { id: "e1", fromNodeId: "n1", toNodeId: "n2", edgeType: EdgeType.KNOWS }),
+      create(EdgeSchema, { id: "e2", fromNodeId: "n1", toNodeId: "n3", edgeType: EdgeType.OWNS }),
+      create(EdgeSchema, { id: "e3", fromNodeId: "n4", toNodeId: "n1", edgeType: EdgeType.ALLY_OF }),
+    ];
+    renderPanel(undefined, { edges });
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    // Two outgoing + one incoming = three cascade edges.
+    await waitFor(() => expect(dialog).toHaveTextContent(/3 relationship/i));
+  });
+
+  it("deletes from the editor's delete button, after confirming", async () => {
+    const { deleteCalls } = renderPanel();
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /edit the sealed vault/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete entry$/i }));
+    await confirmInDialog();
 
     await screen.findByText(/no entries yet/i);
     expect(deleteCalls).toHaveLength(1);
@@ -197,6 +276,7 @@ describe("KnowledgePanel", () => {
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "vault" } });
     await waitFor(() => expect(screen.queryByText("Quiet Harbor")).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    await confirmInDialog();
 
     // The mutation must invalidate the SEARCH cache too, so the deleted entry
     // leaves the filtered view instead of lingering (stale search results).
@@ -231,6 +311,7 @@ describe("KnowledgePanel", () => {
     await screen.findByText("The sealed vault");
 
     fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    await confirmInDialog();
 
     // The failure is announced, not swallowed — and the entry is still present.
     const alert = await screen.findByRole("alert");

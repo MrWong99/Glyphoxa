@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
@@ -78,6 +79,10 @@ export function KnowledgePanel() {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
+  // The entry a delete has been requested for; drives the confirm dialog. Delete
+  // is a hard, cascading DELETE (ADR-0008), so no DeleteNode fires until the
+  // operator confirms here (#209).
+  const [confirmNode, setConfirmNode] = useState<Node | null>(null);
 
   // Live wiki search (#131, ADR-0008 tsvector): the raw box value drives a
   // 200ms-debounced SearchNodes query. The RPC runs only while the debounced
@@ -214,7 +219,7 @@ export function KnowledgePanel() {
                     key={n.id}
                     node={n}
                     onEdit={() => setEditing(n)}
-                    onDelete={() => removeNode(n)}
+                    onDelete={() => setConfirmNode(n)}
                     deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
                   />
                 ))}
@@ -238,7 +243,7 @@ export function KnowledgePanel() {
         pending={editing ? updateNode.isPending : createNode.isPending}
         error={editorError}
         onCancel={() => setEditing(null)}
-        onDelete={editing ? () => removeNode(editing) : undefined}
+        onDelete={editing ? () => setConfirmNode(editing) : undefined}
         onSubmit={(fields, reset) => {
           if (editing) {
             updateNode.mutate({
@@ -255,7 +260,61 @@ export function KnowledgePanel() {
           }
         }}
       />
+
+      {confirmNode && (
+        <NodeDeleteConfirm
+          node={confirmNode}
+          onCancel={() => setConfirmNode(null)}
+          onConfirm={() => {
+            removeNode(confirmNode);
+            setConfirmNode(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// NodeDeleteConfirm is the delete gate for one entry. Mounted only while a delete
+// is pending confirmation, it fetches the node's edges so the dialog can name how
+// many relationships the cascade (ADR-0008 ON DELETE CASCADE) will take with it.
+function NodeDeleteConfirm({
+  node,
+  onConfirm,
+  onCancel,
+}: {
+  node: Node;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const edgesQuery = useQuery(CampaignService.method.listNodeEdges, { nodeId: node.id });
+  const edgeCount =
+    (edgesQuery.data?.outgoing.length ?? 0) + (edgesQuery.data?.incoming.length ?? 0);
+
+  return (
+    <ConfirmDialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+      title={`Delete “${node.name}”?`}
+      description={
+        <>
+          This permanently deletes this entry
+          {edgeCount > 0 && (
+            <>
+              {" and its "}
+              <strong>
+                {edgeCount} relationship{edgeCount === 1 ? "" : "s"}
+              </strong>
+            </>
+          )}
+          . Hard delete — this can't be undone.
+        </>
+      }
+      confirmLabel="Delete entry"
+      onConfirm={onConfirm}
+    />
   );
 }
 

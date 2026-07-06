@@ -1014,3 +1014,52 @@ textarea.gx-input {
     padding: var(--spacing-md);
   }
 }
+
+/* ===================== Confirm dialog (#209) ===========================
+ * A modal AlertDialog gate for destructive actions (hard-delete a KG entry or a
+ * relation). The overlay dims the app; the card is centred and sits above every
+ * other layer. Styled on the same surface/border/shadow vocabulary as the cards.
+ */
+.gx-confirm__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.6);
+}
+.gx-confirm {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 91;
+  width: min(440px, calc(100vw - 2 * var(--spacing-lg)));
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-lg);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+.gx-confirm__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.gx-confirm__desc {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.gx-confirm__desc strong {
+  color: var(--text-default);
+}
+.gx-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+}
