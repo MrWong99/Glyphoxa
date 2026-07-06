@@ -12,23 +12,54 @@ import (
 // it drops without widening this package's coupling.
 const diceToolName = "dice"
 
-// dicePattern matches an explicit NdM / dM die notation anywhere in the text:
-// an optional count, a 'd', then sides (a number or '%' for d100). Word
-// boundaries keep it from firing inside unrelated words (e.g. "add", "model").
-var dicePattern = regexp.MustCompile(`(?i)\b\d*d(\d+|%)\b`)
+// diceNotation matches explicit die notation anywhere in the text, in any
+// language: an optional count, a 'd' (NdM: 2d6, d20, d%) or a 'w' (the German
+// wN form: 2w6, w20), then sides — a number or '%' (d100). The leading \b and
+// the \b inside the digit branch keep the numeric form from firing inside
+// unrelated words ("add", "model", "würfle"); the '%' branch carries no
+// trailing \b because '%' is not a word char, so "d%"/"w%" match on their own
+// (a \b after '%' would require a following word char and could never fire).
+var diceNotation = regexp.MustCompile(`(?i)\b\d*[dw](\d+\b|%)`)
 
-// diceKeywords are the lowercase substrings whose presence in an utterance marks
-// plausible dice intent. The set is biased for HIGH RECALL: a false positive
-// only costs the (rare) extra tool-call round the system already paid
-// unconditionally before this gate, whereas a false negative would withhold the
-// dice Tool when it is genuinely needed — breaking the tool path. So the keep-IN
-// side is generous (anything ttrpg-roll-shaped) and the keep-OUT side is
-// conservative. Tune here.
-var diceKeywords = []string{
-	"roll", "dice", "die", "d20", "d6", "d100",
-	// ttrpg cues that imply a roll even without the word "roll":
-	"saving throw", "initiative", "advantage", "disadvantage",
-	"to hit", "attack roll", "ability check", "skill check",
+// diceKeywords maps a gate language (the normalized primary subtag) to the
+// keyword pattern whose match in an utterance marks plausible dice intent. The
+// set is biased for HIGH RECALL: a false positive only costs the (rare) extra
+// tool-call round the system already paid unconditionally before this gate,
+// whereas a false negative would withhold the dice Tool when it is genuinely
+// needed — breaking the tool path. So the keep-IN side is generous (anything
+// ttrpg-roll-shaped) and the keep-OUT side is conservative. Tune here; adding a
+// language is a data change (one entry), not a logic change.
+//
+//   - en: \b-anchored PREFIX so inflections stay armed ("rolls", "rolling") while
+//     the "die" substring no longer trips inside unrelated words ("studied") —
+//     the substring false-positive class #226 also flags in the other direction.
+//   - de: bare substrings, because the roll cue lives inside compounds
+//     ("Würfelwerkzeug", "Rettungswurf", "Fertigkeitsprobe") that word anchors
+//     would miss. würf/wurf/wirf/werf cover würfeln + the werfen ("throw a die")
+//     verb family (imperative „wirf", „werft", „werfen wir"). This deliberately
+//     accepts rare compound false positives (Entwurf, Vorwurf, verwerfen) — the
+//     recall bias above makes that the cheap side.
+var diceKeywords = map[string]*regexp.Regexp{
+	"en": regexp.MustCompile(`(?i)\b(roll|dice|die|d20|d6|d100|saving throw|initiative|advantage|disadvantage|to hit|attack roll|ability check|skill check)`),
+	"de": regexp.MustCompile(`(?i)(würf|wurf|wirf|werf|probe|initiative)`),
+}
+
+// gateLanguage normalizes a Campaign Language to a key in [diceKeywords]: it
+// lowercases the primary subtag ("de-DE" → "de") and degrades any language with
+// no registered keyword table to "en". This mirrors the address matcher's EN
+// fallback (matcherLanguage, ADR-0024): an unknown Campaign Language degrades to
+// English, never to nothing — a language with no table still gets the EN gate,
+// not a gate that never arms dice.
+func gateLanguage(lang string) string {
+	primary := lang
+	if i := strings.IndexAny(primary, "-_"); i >= 0 {
+		primary = primary[:i]
+	}
+	primary = strings.ToLower(primary)
+	if _, ok := diceKeywords[primary]; ok {
+		return primary
+	}
+	return "en"
 }
 
 // needsDice reports whether the latest user utterance in the assembled Hot
@@ -38,24 +69,19 @@ var diceKeywords = []string{
 //
 // It inspects ONLY the most recent user message (the turn's actual request);
 // older history must not keep dice armed for every subsequent turn. Matching is
-// case-insensitive over explicit die notation (2d6, d20, d%) and a small,
-// recall-biased keyword set. An empty/absent user message yields false (nothing
-// to roll for).
-func needsDice(messages []llm.Message) bool {
+// case-insensitive over explicit die notation (2d6, d20, d%, w20) and the
+// recall-biased keyword set selected by lang ([gateLanguage] normalizes it; an
+// unknown language falls back to the EN set). An empty/absent user message
+// yields false (nothing to roll for).
+func needsDice(lang string, messages []llm.Message) bool {
 	text := latestUserText(messages)
 	if text == "" {
 		return false
 	}
-	if dicePattern.MatchString(text) {
+	if diceNotation.MatchString(text) {
 		return true
 	}
-	lower := strings.ToLower(text)
-	for _, kw := range diceKeywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
+	return diceKeywords[gateLanguage(lang)].MatchString(text)
 }
 
 // latestUserText returns the Text of the last user-role message, or "" if there
