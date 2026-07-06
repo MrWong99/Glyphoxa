@@ -21,13 +21,17 @@ import (
 // scoping fills in behind the X-Tenant-Id interceptor later.
 
 // GetCampaignRoster returns the active campaign with its ordered roster: the
-// Butler first, then the Character NPCs. No campaign yields CodeNotFound; a
-// missing Butler is an ADR-0009 invariant violation (logged, CodeInternal).
+// Butler first, then the Character NPCs. The campaign is resolved live-first
+// (the live Voice Session's campaign → durable /glyphoxa use selection →
+// most-recent fallback) so the Session screen's roster/mute panel lists the NPCs
+// actually voicing, not a durable selection changed mid-session (#222). No
+// campaign yields CodeNotFound; a missing Butler is an ADR-0009 invariant
+// violation (logged, CodeInternal).
 func (s *CampaignServer) GetCampaignRoster(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetCampaignRosterRequest],
 ) (*connect.Response[managementv1.GetCampaignRosterResponse], error) {
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -63,12 +67,16 @@ func (s *CampaignServer) GetCampaignRoster(
 }
 
 // CreateAgent adds a Character NPC to the active campaign and returns it with its
-// server-assigned speaker-colour slot. The role is always 'character'.
+// server-assigned speaker-colour slot. The role is always 'character'. The active
+// campaign is resolved live-first (the live Voice Session's campaign → durable
+// /glyphoxa use selection → most-recent fallback), the SAME resolution the roster
+// read uses, so mid-session a new NPC lands in the campaign the screen shows —
+// never a silent cross-campaign write (#222).
 func (s *CampaignServer) CreateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateAgentRequest],
 ) (*connect.Response[managementv1.CreateAgentResponse], error) {
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -117,10 +125,9 @@ func (s *CampaignServer) UpdateAgent(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
 
-	// Read the current row + its campaign so applyVoiceSelection can preserve the
-	// persisted voice tuning the editor never sees (ProviderID/Language/Settings)
-	// and seed a first-save default in the campaign's language (#224). GetAgent
-	// also gives the authoritative NotFound before the write.
+	// Read the current row so applyVoiceSelection can preserve the persisted voice
+	// tuning the editor never sees (ProviderID/Language/Settings); GetAgent also
+	// gives the authoritative NotFound before the write (#224).
 	existing, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -129,9 +136,15 @@ func (s *CampaignServer) UpdateAgent(
 		slog.Default().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	campaign, err := s.store.GetCampaign(ctx, existing.CampaignID)
+	// Resolve the active campaign the SAME live-first way the roster/create paths do
+	// (#222/#229) — its language seeds a first-save voice default (#224). Reusing the
+	// unified resolver avoids a second, divergent campaign-resolution path.
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
-		slog.Default().Error("UpdateAgent: read campaign failed", "agent_id", id, "campaign_id", existing.CampaignID, "err", err)
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("UpdateAgent: get active campaign failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
@@ -141,7 +154,7 @@ func (s *CampaignServer) UpdateAgent(
 		Name:        m.GetName(),
 		Title:       m.GetTitle(),
 		Persona:     m.GetPersona(),
-		Voice:       applyVoiceSelection(existing.Voice, m.GetVoice(), campaign.Language),
+		Voice:       applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),
 		AddressOnly: m.GetAddressOnly(),
 		Aliases:     m.GetAliases(),
 	})

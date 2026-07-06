@@ -27,7 +27,15 @@ import (
 // *storage.Store satisfies it, so handlers can be driven by a fake in unit tests
 // and the real store in integration tests.
 type campaignStore interface {
+	// GetActiveCampaignForUser + GetActiveCampaign are the profile-first resolution
+	// (durable /glyphoxa use selection → most-recent fallback) the header + CRUD +
+	// KG reads scope through instead of the plain most-recent read (#222).
+	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
+	// GetCampaign loads a campaign by id: the roster/mute panel resolves the LIVE
+	// Voice Session's campaign first (#222), so it fetches that specific row rather
+	// than the profile default. UpdateAgent also uses it to read the owning
+	// campaign's language for a first-save voice default (#224).
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
@@ -56,6 +64,11 @@ type campaignStore interface {
 type CampaignServer struct {
 	store campaignStore
 	tools *tool.Registry
+	// liveCampaign reports the live Voice Session's campaign id, if any. Nil until
+	// SetSessions wires it; the roster/mute panel resolves through it so it scopes
+	// to the campaign actually voicing, not a durable selection changed mid-session
+	// (#222). Set once at boot before serving, so no lock is needed.
+	liveCampaign func() (uuid.UUID, bool)
 }
 
 // NewCampaignServer wraps a campaignStore (e.g. *storage.Store) in a
@@ -69,14 +82,38 @@ func NewCampaignServer(s campaignStore) *CampaignServer {
 // compile-time assertion that CampaignServer satisfies the generated handler.
 var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
 
-// GetActiveCampaign resolves the operator's active campaign and maps it onto
-// the wire type. A storage.ErrNotFound (no campaign exists) becomes
-// CodeNotFound; any other failure becomes CodeInternal.
+// SetSessions wires the live Voice Session source the Active Campaign resolution
+// consults (#222): while a session is live, EVERY CampaignService surface (header,
+// roster/mute panel, campaign CRUD, KG wiki) scopes to that session's campaign, so
+// the screen's reads and writes agree even if the durable selection was changed
+// mid-session. Called once at boot, after the session manager exists and before
+// the server serves, so no lock is needed — mirrors VoiceServer.SetSessions.
+func (s *CampaignServer) SetSessions(src activeSessionSource) {
+	s.liveCampaign = func() (uuid.UUID, bool) {
+		vs, active := src.Snapshot()
+		return vs.CampaignID, active
+	}
+}
+
+// activeCampaign resolves the campaign every CampaignService handler scopes to,
+// via the one shared resolveActiveCampaign policy (live Voice Session → durable
+// /glyphoxa use selection → most-recent fallback, #222). Reads and writes on the
+// same screen therefore always name the same campaign.
+func (s *CampaignServer) activeCampaign(ctx context.Context) (storage.Campaign, error) {
+	return resolveActiveCampaign(ctx, s.liveCampaign, s.store)
+}
+
+// GetActiveCampaign resolves the operator's active campaign and maps it onto the
+// wire type. The Campaign is resolved live-first (the live Voice Session's
+// campaign → durable /glyphoxa use selection → most-recent fallback), so the
+// Session-screen header names the same campaign the roster, transcript, and Start
+// do (#222). A storage.ErrNotFound (no campaign exists) becomes CodeNotFound; any
+// other failure becomes CodeInternal.
 func (s *CampaignServer) GetActiveCampaign(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetActiveCampaignRequest],
 ) (*connect.Response[managementv1.GetActiveCampaignResponse], error) {
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

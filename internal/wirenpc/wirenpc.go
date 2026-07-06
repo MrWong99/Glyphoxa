@@ -872,7 +872,11 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 			// Groq is the wired provider (see the function doc), so the per-round
 			// LLM spans (A3) are labelled groq. The no-op recorder keeps the keyless
 			// path silent; the live binary / benchmark inject a real one.
-			agenttool.WithMetrics(stageMetrics, observe.ProviderGroq))
+			agenttool.WithMetrics(stageMetrics, observe.ProviderGroq),
+			// The dice gate selects its keyword set by Campaign Language (#226), so a
+			// German campaign arms the dice Tool for German roll requests instead of
+			// gating it out and forcing the model to improvise the roll.
+			agenttool.WithLanguage(language))
 	}
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent

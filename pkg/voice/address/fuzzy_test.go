@@ -24,7 +24,7 @@ func TestTokenize(t *testing.T) {
 // idxFor builds an English fuzzy index over the given per-agent names with the
 // default config, the common setup for the scoring tests below.
 func idxFor(names ...[]string) *fuzzyIndex {
-	return newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, names)
+	return newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, names, nil)
 }
 
 // TestFuzzyIndex_ExactMatch is the baseline: a clean name scores a perfect 1.0.
@@ -77,7 +77,7 @@ func TestFuzzyIndex_MultiTokenName(t *testing.T) {
 // TestFuzzyIndex_RuneFloor pins the short-token guard: a 3-rune name is
 // exact-only, so a near-miss filler word does not collide with it.
 func TestFuzzyIndex_RuneFloor(t *testing.T) {
-	idx := newFuzzyIndex(NameMatchConfig{MinRunes: 4}, DoubleMetaphone, [][]string{{"Ann"}})
+	idx := newFuzzyIndex(NameMatchConfig{MinRunes: 4}, DoubleMetaphone, [][]string{{"Ann"}}, nil)
 	// "an" is one edit from "ann" but both are under the 4-rune floor → no match.
 	if got := idx.scoreAll(tokenize("give me an apple")); got[0] != 0 {
 		t.Errorf("short-name fuzzy score = %v, want 0 (exact-only under floor)", got[0])
@@ -93,14 +93,14 @@ func TestFuzzyIndex_RuneFloor(t *testing.T) {
 // the Damerau-Levenshtein net, scoring strictly below the phonetic tier.
 func TestFuzzyIndex_EditDistanceNet(t *testing.T) {
 	// No encoder → the edit net is the entire fuzzy layer (ADR-0024).
-	idx := newFuzzyIndex(NameMatchConfig{MaxEditDistance: 2}, nil, [][]string{{"Glyphoxa"}})
+	idx := newFuzzyIndex(NameMatchConfig{MaxEditDistance: 2}, nil, [][]string{{"Glyphoxa"}}, nil)
 	got := idx.scoreAll(tokenize("glyphoxer rolls a check")) // 1 insertion
 	if got[0] <= 0 || got[0] >= 1.0 {
 		t.Fatalf("edit-net score = %v, want in (0,1)", got[0])
 	}
 
 	// Beyond the bound, nothing matches.
-	far := newFuzzyIndex(NameMatchConfig{MaxEditDistance: 1}, nil, [][]string{{"Glyphoxa"}})
+	far := newFuzzyIndex(NameMatchConfig{MaxEditDistance: 1}, nil, [][]string{{"Glyphoxa"}}, nil)
 	if s := far.scoreAll(tokenize("grindstone")); s[0] != 0 {
 		t.Errorf("out-of-bound score = %v, want 0", s[0])
 	}
@@ -127,5 +127,83 @@ func TestFuzzyIndex_NoMatch(t *testing.T) {
 	idx := idxFor([]string{"Bart"})
 	if got := idx.scoreAll(tokenize("let us roll initiative please")); len(got) != 0 {
 		t.Errorf("unrelated utterance scored %v, want empty", got)
+	}
+}
+
+// TestDeriveTruncationAliases pins the derivation rules (#197): a leading
+// consonant is dropped ("Bart"→"art"), a vowel-initial name derives nothing
+// ("Anna"), a non-letter remainder is guarded ("D20"→"20" rejected), a two-rune
+// name is too short once truncated ("Bo"→"o" rejected), multi-token names keep
+// their remaining tokens, and collisions dedupe.
+func TestDeriveTruncationAliases(t *testing.T) {
+	cases := []struct {
+		desc string
+		in   []string
+		want []string
+	}{
+		{"consonant drop", []string{"Bart"}, []string{"art"}},
+		{"marek", []string{"Marek"}, []string{"arek"}},
+		{"multi-token keeps remaining tokens", []string{"Grim Jaw"}, []string{"rim Jaw"}},
+		{"vowel-initial derives none", []string{"Anna"}, nil},
+		{"configured-alias vowel-initial none", []string{"innkeeper"}, nil},
+		{"non-letter remainder none", []string{"D20"}, nil},
+		{"two-rune name none", []string{"Bo"}, nil},
+		{"barkeep", []string{"barkeep"}, []string{"arkeep"}},
+		{"dedupe collision", []string{"Bart", "Cart"}, []string{"art"}},
+		{"name plus aliases", []string{"Bart", "innkeeper", "barkeep"}, []string{"art", "arkeep"}},
+	}
+	for _, tc := range cases {
+		if got := DeriveTruncationAliases(tc.in...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: DeriveTruncationAliases(%q) = %v, want %v", tc.desc, tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestFuzzyIndex_TruncationAlias_InitialExactHit pins the derived-alias tier
+// (#197): with Bart carrying the derived alias "art", an utterance that opens
+// with "Art" (the STT truncation, live turn 47aecba4be320d54) scores the
+// truncation-alias score — below an exact name, above phonetics.
+func TestFuzzyIndex_TruncationAlias_InitialExactHit(t *testing.T) {
+	idx := newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, [][]string{{"Bart"}}, [][]string{{"art"}})
+	got := idx.scoreAll(tokenize("Art, wie läuft das Geschäft heute Abend?"))
+	if got[0] != truncationAliasScore {
+		t.Fatalf("initial truncation hit = %v, want %v", got[0], truncationAliasScore)
+	}
+}
+
+// TestFuzzyIndex_TruncationAlias_NonInitialNoHit is the position gate: the same
+// derived alias "art" appearing mid-utterance (the noun "Art") must NOT route to
+// Bart. It is a differential test — the derived alias must add nothing over a
+// name-only index for this utterance — so it isolates the alias's contribution
+// from any incidental fuzzy hit the name "Bart" earns elsewhere in the sentence.
+func TestFuzzyIndex_TruncationAlias_NonInitialNoHit(t *testing.T) {
+	const utter = "was für eine Art von Bier hast du?" // AC: "Art" mid-sentence
+	withTrunc := newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, [][]string{{"Bart"}}, [][]string{{"art"}})
+	nameOnly := newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, [][]string{{"Bart"}}, nil)
+	if a, b := withTrunc.scoreAll(tokenize(utter))[0], nameOnly.scoreAll(tokenize(utter))[0]; a != b {
+		t.Fatalf("mid-utterance derived alias changed the score (%v with, %v without); it must only match at the start", a, b)
+	}
+}
+
+// TestFuzzyIndex_TruncationAlias_ExactOnlyNoFuzzyTiers pins that a derived alias
+// is exact-only: a near-miss to the derived form contributes nothing (no
+// phonetic/edit tier for a derived entry), while the exact derived form scores
+// the truncation-alias score — below a genuine exact name (1.0). The near-miss
+// arm is differential so it is not confused by the name "Marek" incidentally
+// reaching "areck" through its own edit net.
+func TestFuzzyIndex_TruncationAlias_ExactOnlyNoFuzzyTiers(t *testing.T) {
+	withTrunc := newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, [][]string{{"Marek"}}, [][]string{{"arek"}})
+	nameOnly := newFuzzyIndex(NameMatchConfig{}, DoubleMetaphone, [][]string{{"Marek"}}, nil)
+
+	const near = "areck, was liegt auf deinem Amboss?" // "areck" ≠ derived "arek"
+	if a, b := withTrunc.scoreAll(tokenize(near))[0], nameOnly.scoreAll(tokenize(near))[0]; a != b {
+		t.Fatalf("near-miss earned %v from the derived alias over name-only %v; a derived alias never fuzzes", a, b)
+	}
+
+	if got := withTrunc.scoreAll(tokenize("arek, was liegt auf deinem Amboss?"))[0]; got != truncationAliasScore {
+		t.Fatalf("exact derived hit = %v, want %v", got, truncationAliasScore)
+	}
+	if truncationAliasScore >= 1.0 {
+		t.Fatal("a derived alias must score below a genuine exact name (1.0)")
 	}
 }

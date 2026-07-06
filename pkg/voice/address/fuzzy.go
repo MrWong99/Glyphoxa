@@ -50,6 +50,13 @@ func (c NameMatchConfig) withDefaults() NameMatchConfig {
 	return c
 }
 
+// truncationAliasScore is the similarity a derived STT-truncation alias earns on
+// an exact, utterance-initial hit (#197). It sits just below an exact name (1.0)
+// so a genuinely named Agent always outranks a truncation collision, and above
+// the phonetic tier (0.9) so a truncated name still clears the address
+// threshold. See [fuzzyIndex.scoreAll] and ADR-0024.
+const truncationAliasScore = 0.99
+
 // nameEntry is one matchable name (an Agent's display Name or an alias),
 // pre-tokenized and pre-joined at build time so matching does no per-call
 // string work beyond tokenizing the utterance.
@@ -57,6 +64,11 @@ type nameEntry struct {
 	agentIdx int    // index into the matcher's agents slice
 	joined   string // tokens concatenated, lowercased: "Grim Jaw" → "grimjaw"
 	tokens   int    // token count, used to size the window search
+	// initialOnly marks a derived STT-truncation alias (#197): it is matched
+	// EXACT-ONLY and only when the candidate window starts the utterance (token
+	// 0), and it never reaches the phonetic/edit fuzzy tiers. Configured names
+	// and aliases stay position-free with the full fuzzy chain.
+	initialOnly bool
 }
 
 // fuzzyIndex is the pure, immutable name index the [Matcher] builds once from
@@ -72,32 +84,46 @@ type fuzzyIndex struct {
 }
 
 // newFuzzyIndex builds the index for names, where names[i] is the list of
-// matchable strings (primary Name + aliases) for agent i. enc may be nil, in
-// which case matching relies on the edit-distance net alone (ADR-0024: a
-// language with no registered phonetic encoder).
-func newFuzzyIndex(cfg NameMatchConfig, enc Encoder, names [][]string) *fuzzyIndex {
+// matchable strings (primary Name + aliases) for agent i, and truncations[i] is
+// the derived STT-truncation aliases for the same agent (#197), matched
+// exact-only at the utterance start. truncations is parallel to names and may be
+// nil (no derived aliases). enc may be nil, in which case matching relies on the
+// edit-distance net alone (ADR-0024: a language with no registered phonetic
+// encoder).
+func newFuzzyIndex(cfg NameMatchConfig, enc Encoder, names [][]string, truncations [][]string) *fuzzyIndex {
 	cfg = cfg.withDefaults()
 	idx := &fuzzyIndex{cfg: cfg, enc: enc, window: cfg.MaxWindow}
+	add := func(agentIdx int, name string, initialOnly bool) {
+		toks := tokenize(name)
+		if len(toks) == 0 {
+			return
+		}
+		joined := strings.Join(toks, "")
+		idx.entries = append(idx.entries, nameEntry{
+			agentIdx:    agentIdx,
+			joined:      joined,
+			tokens:      len(toks),
+			initialOnly: initialOnly,
+		})
+		// Derived aliases never reach the phonetic tier, so they carry no code;
+		// codes stays parallel to entries either way.
+		if enc != nil && !initialOnly {
+			idx.codes = append(idx.codes, enc.Encode(joined))
+		} else {
+			idx.codes = append(idx.codes, "")
+		}
+		if len(toks) > idx.window {
+			idx.window = len(toks)
+		}
+	}
 	for agentIdx, agentNames := range names {
 		for _, name := range agentNames {
-			toks := tokenize(name)
-			if len(toks) == 0 {
-				continue
-			}
-			joined := strings.Join(toks, "")
-			idx.entries = append(idx.entries, nameEntry{
-				agentIdx: agentIdx,
-				joined:   joined,
-				tokens:   len(toks),
-			})
-			if enc != nil {
-				idx.codes = append(idx.codes, enc.Encode(joined))
-			} else {
-				idx.codes = append(idx.codes, "")
-			}
-			if len(toks) > idx.window {
-				idx.window = len(toks)
-			}
+			add(agentIdx, name, false)
+		}
+	}
+	for agentIdx, aliases := range truncations {
+		for _, alias := range aliases {
+			add(agentIdx, alias, true)
 		}
 	}
 	return idx
@@ -116,6 +142,7 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 	// name entry. Windows of 1..window adjacent tokens are joined so a name
 	// heard as several tokens still lines up with a single-token name.
 	type candidate struct {
+		start  int // index of the first token in this window, 0 == utterance start
 		joined string
 		code   string
 	}
@@ -125,7 +152,7 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 		for n := 1; n <= idx.window && start+n <= len(words); n++ {
 			sb.WriteString(words[start+n-1])
 			joined := sb.String()
-			c := candidate{joined: joined}
+			c := candidate{start: start, joined: joined}
 			if idx.enc != nil {
 				c.code = idx.enc.Encode(joined)
 			}
@@ -136,7 +163,17 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 	for ei, entry := range idx.entries {
 		code := idx.codes[ei]
 		for _, c := range cands {
-			s := idx.similarity(c.joined, c.code, entry.joined, code)
+			var s float64
+			if entry.initialOnly {
+				// Derived STT-truncation alias (#197): exact byte-match only, and
+				// only when the window opens the utterance. It never reaches the
+				// phonetic/edit tiers, so a near-miss earns nothing.
+				if c.start == 0 && c.joined == entry.joined {
+					s = truncationAliasScore
+				}
+			} else {
+				s = idx.similarity(c.joined, c.code, entry.joined, code)
+			}
 			if s > best[entry.agentIdx] {
 				best[entry.agentIdx] = s
 			}
@@ -187,6 +224,55 @@ func runeLen(s string) int {
 		n++
 	}
 	return n
+}
+
+// isVowel reports whether r is a vocalic onset for truncation-alias derivation.
+// German umlauts count because the Campaign Language may be de (#199); y is a
+// consonant. A name beginning with a vowel derives no alias, since dropping a
+// leading vowel is not the STT-truncation failure mode this guards.
+func isVowel(r rune) bool {
+	switch unicode.ToLower(r) {
+	case 'a', 'e', 'i', 'o', 'u', 'ä', 'ö', 'ü':
+		return true
+	}
+	return false
+}
+
+// DeriveTruncationAliases returns, per name, the STT-truncation form STT tends to
+// produce by dropping the leading consonant — "Bart" heard as "art" (#197, live
+// turn 47aecba4be320d54). A form is derived only when the name begins with a
+// consonant letter and the remainder is itself usable: its first rune is a
+// letter (so "D20"→"20" is rejected) and it is at least two runes once tokenized
+// (so "Bo"→"o" is rejected). Vowel-initial names ("Anna", the configured alias
+// "innkeeper") derive nothing. Results are deduped. The caller feeds these to
+// [Agent.TruncationAliases], where they are matched EXACT-ONLY at the utterance
+// start and never reach the phonetic/edit tiers (see [fuzzyIndex.scoreAll]).
+func DeriveTruncationAliases(names ...string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, name := range names {
+		runes := []rune(strings.TrimSpace(name))
+		if len(runes) == 0 {
+			continue
+		}
+		if first := runes[0]; !unicode.IsLetter(first) || isVowel(first) {
+			continue
+		}
+		candidate := string(runes[1:])
+		rem := []rune(strings.TrimSpace(candidate))
+		if len(rem) == 0 || !unicode.IsLetter(rem[0]) {
+			continue // remainder does not start with a letter (guards "D20"→"20")
+		}
+		if runeLen(strings.Join(tokenize(candidate), "")) < 2 {
+			continue // remainder too short to be a name (guards "Bo"→"o")
+		}
+		if _, dup := seen[candidate]; dup {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
 }
 
 // tokenize lowercases s and splits it into maximal runs of letters and digits,

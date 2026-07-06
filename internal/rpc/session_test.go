@@ -180,6 +180,17 @@ func (f *fakeSessionStore) GetActiveCampaign(context.Context) (storage.Campaign,
 	return f.campaign, nil
 }
 
+// GetCampaign is the live-first resolution's per-id load (#222). The SessionServer
+// idle/Start paths never reach it with a live session (GetSession returns the live
+// Snapshot directly; Start is guarded single-active), so a simple pass-through of
+// the implicit campaign satisfies the interface.
+func (f *fakeSessionStore) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	if f.campaignErr != nil {
+		return storage.Campaign{}, f.campaignErr
+	}
+	return f.campaign, nil
+}
+
 func (f *fakeSessionStore) GetLatestVoiceSession(_ context.Context, campaignID uuid.UUID) (storage.VoiceSession, error) {
 	f.latestCampaign = campaignID
 	if f.latestErr != nil {
