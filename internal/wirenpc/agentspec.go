@@ -218,6 +218,19 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: no Character NPC in %q", SeedCampaignName)
 	}
 
+	// The tenant-level LLM model is the fallback for any NPC not bound to its own
+	// LLM provider_config (#227): web-created Agents carry no LLMProviderConfigID,
+	// but the Configuration screen writes the tenant row — without this fallback
+	// the model fix would miss the operator's own NPCs. Fetched ONCE per session
+	// start (consistent with the credential/grant hydration); no row → "" so the
+	// adapter default applies.
+	tenantLLMModel := ""
+	if cfg, err := st.GetProviderConfigByComponent(ctx, campaign.TenantID, storage.ComponentLLM); err == nil {
+		tenantLLMModel = cfg.Model
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: tenant LLM config: %w", err)
+	}
+
 	specs := make([]npcSpec, 0, len(chars))
 	var primary storage.LoadedAgent
 	for i, c := range chars {
@@ -232,6 +245,10 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 		if err != nil {
 			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 		}
+		// Resolve the model this NPC's engine runs (#227): the Agent's bound LLM
+		// provider_config model when it has one, else the tenant-level fallback.
+		// Empty stays empty so the openaicompat adapter fills groq.DefaultModel.
+		spec.model = resolveNPCModel(loaded.LLMConfig, tenantLLMModel)
 		// Hydrate this NPC's Tool Grants from its DB rows (#113): tool
 		// availability is data-driven, not compiled in. An NPC with no rows gets
 		// no grants, so its GrantSet declares no Tool to the LLM (least-privilege).
@@ -249,6 +266,18 @@ func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.
 		specs = append(specs, spec)
 	}
 	return specs, primary, campaign, nil
+}
+
+// resolveNPCModel picks the model id for one NPC's engine (#227): the Agent's own
+// bound LLM provider_config model wins when present and non-empty, otherwise the
+// tenant-level LLM model fallback. Both empty yields "", which the openaicompat
+// adapter reads as "use the provider default" — the defaulting lives at the
+// adapter, never duplicated here.
+func resolveNPCModel(bound *storage.ProviderConfig, tenantModel string) string {
+	if bound != nil && bound.Model != "" {
+		return bound.Model
+	}
+	return tenantModel
 }
 
 // grantsFromRows hydrates an Agent's persisted Tool Grant rows into the in-memory
