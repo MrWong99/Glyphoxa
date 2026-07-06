@@ -33,13 +33,14 @@ const CAMPAIGN = {
 };
 
 // cred builds a ProviderCredential the List RPC returns. saved => masked + last4.
-function cred(component: string, provider: string, last4?: string) {
+function cred(component: string, provider: string, last4?: string, model = "") {
   return create(ProviderCredentialSchema, {
     component,
     provider,
     everSaved: Boolean(last4),
     showMasked: Boolean(last4),
     last4: last4 ?? "",
+    model,
   });
 }
 
@@ -64,9 +65,16 @@ function mockBackend(
     // discordSaveError makes SaveDiscordSettings fail (simulates a server-side
     // failure) so tests can pin that the screen surfaces the rejection.
     discordSaveError?: string;
+    // providerSaves captures every SaveProviderConfig request so tests can pin
+    // the model-only wire shape (#227: secret "" + model).
+    providerSaves?: Array<{ provider: string; secret: string; model: string }>;
+    // listModelsError makes the catalog fetch fail at the transport, pinning
+    // that free-text model entry survives a dead catalog (#227).
+    listModelsError?: string;
   } = {},
 ) {
   const state = {
+    groqModel: "",
     groq: opts.saved?.groq,
     elevenlabs: opts.saved?.elevenlabs,
     discord: opts.saved?.discord,
@@ -77,7 +85,10 @@ function mockBackend(
     service(VoiceService, {
       getProviderHealth: () =>
         create(GetProviderHealthResponseSchema, { providers: opts.health ?? [] }),
-      listModels: () => create(ListModelsResponseSchema, { models: GROQ_MODELS }),
+      listModels: () => {
+        if (opts.listModelsError) throw new ConnectError(opts.listModelsError, Code.Unavailable);
+        return create(ListModelsResponseSchema, { models: GROQ_MODELS });
+      },
     });
     service(CampaignService, {
       getActiveCampaign: () =>
@@ -88,18 +99,33 @@ function mockBackend(
         create(ListProviderConfigsResponseSchema, {
           credentials: [
             cred("discord", "discord", state.discord),
-            cred("llm", "groq", state.groq),
+            cred("llm", "groq", state.groq, state.groqModel),
             cred("tts", "elevenlabs", state.elevenlabs),
           ],
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
         }),
       saveProviderConfig: (req) => {
+        opts.providerSaves?.push({ provider: req.provider, secret: req.secret, model: req.model });
+        if (req.secret === "") {
+          // Model-only save (#227): mirrors internal/rpc/provider.go — a stored
+          // key is required, the sealed key is untouched, only model changes.
+          if (req.provider !== "groq" || !state.groq) {
+            throw new ConnectError("secret is required", Code.InvalidArgument);
+          }
+          state.groqModel = req.model;
+          return create(SaveProviderConfigResponseSchema, {
+            credential: cred("llm", "groq", state.groq, state.groqModel),
+          });
+        }
         const last4 = req.secret.slice(-4);
-        if (req.provider === "groq") state.groq = last4;
+        if (req.provider === "groq") {
+          state.groq = last4;
+          state.groqModel = req.model;
+        }
         if (req.provider === "elevenlabs") state.elevenlabs = last4;
         return create(SaveProviderConfigResponseSchema, {
-          credential: cred(req.provider === "groq" ? "llm" : "tts", req.provider, last4),
+          credential: cred(req.provider === "groq" ? "llm" : "tts", req.provider, last4, req.model),
         });
       },
       saveDiscordSettings: (req) => {
@@ -315,11 +341,12 @@ describe("Configuration", () => {
     expect(alert).toHaveTextContent(/database is down/);
   });
 
-  it("renders the Groq model allowlist select (ListModels)", async () => {
+  it("renders the Groq model combobox defaulting to the catalog's first model (ListModels)", async () => {
     renderScreen();
-    // The Groq row's model select defaults to the first allowlisted model.
+    // The combobox mounts before the catalog resolves (#227 renders it even for
+    // an empty list), so await the default value, not just the control.
     const groqModelSelect = await screen.findByLabelText("Groq model");
-    expect(within(groqModelSelect).getByText("llama-3.3-70b-versatile")).toBeInTheDocument();
+    expect(await within(groqModelSelect).findByText("llama-3.3-70b-versatile")).toBeInTheDocument();
   });
 
   it("upgrades a saved provider's badge to Degraded from the health RPC", async () => {
@@ -344,5 +371,51 @@ describe("Configuration", () => {
       }),
     );
     expect(await screen.findByText(/Connected as Glyphoxa#4823/)).toBeInTheDocument();
+  });
+});
+
+describe("Configuration model entry (#227)", () => {
+  it("saves a free-text model without re-pasting the key (model-only save)", async () => {
+    const providerSaves: Array<{ provider: string; secret: string; model: string }> = [];
+    renderScreen(mockBackend({ saved: { groq: "eeee" }, providerSaves }));
+
+    // Open the Groq model combobox and type a model the catalog doesn't list.
+    fireEvent.click(await screen.findByRole("button", { name: "Groq model" }));
+    fireEvent.change(screen.getByPlaceholderText(/search or type/i), {
+      target: { value: "my-custom-model" },
+    });
+    fireEvent.click(screen.getByRole("option", { name: /use "my-custom-model"/i }));
+
+    // The dirty pick grows a Save model button; clicking it fires the
+    // model-only mutation: empty secret, the typed model.
+    fireEvent.click(await screen.findByRole("button", { name: "Save model" }));
+    await screen.findByRole("button", { name: "Groq model" }); // settle
+    expect(providerSaves).toContainEqual({ provider: "groq", secret: "", model: "my-custom-model" });
+    // The key was never touched: the row still shows the masked saved state.
+    expect(screen.getByText("••••••••")).toBeInTheDocument();
+  });
+
+  it("keeps free-text model entry usable when the catalog fetch fails", async () => {
+    const providerSaves: Array<{ provider: string; secret: string; model: string }> = [];
+    renderScreen(
+      mockBackend({ saved: { groq: "eeee" }, providerSaves, listModelsError: "catalog down" }),
+    );
+
+    // The combobox renders despite the dead catalog (empty list)…
+    fireEvent.click(await screen.findByRole("button", { name: "Groq model" }));
+    fireEvent.change(screen.getByPlaceholderText(/search or type/i), {
+      target: { value: "llama-fallback" },
+    });
+    // …and the typed id is still offered and saveable.
+    fireEvent.click(screen.getByRole("option", { name: /use "llama-fallback"/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save model" }));
+    await screen.findByRole("button", { name: "Groq model" });
+    expect(providerSaves).toContainEqual({ provider: "groq", secret: "", model: "llama-fallback" });
+  });
+
+  it("shows no Save model button for the passive catalog-default display", async () => {
+    renderScreen(mockBackend({ saved: { groq: "eeee" } }));
+    await screen.findByRole("button", { name: "Groq model" });
+    expect(screen.queryByRole("button", { name: "Save model" })).not.toBeInTheDocument();
   });
 });

@@ -15,7 +15,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
-import { Select } from "@/components/ui/Select";
+import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
 
 import "./configuration.css";
@@ -62,7 +62,9 @@ export function Configuration() {
   const healthQuery = useQuery(VoiceService.method.getProviderHealth, {});
   const health = healthQuery.data?.providers ?? [];
 
-  // Groq model allowlist (static; Groq has no list-models API, ADR-0039).
+  // Live Groq model catalog (#227): fetched with the tenant key; the server
+  // degrades to just the default on a failed fetch, and the combobox accepts
+  // free text either way, so this query can never wedge the screen.
   const groqModels = useQuery(VoiceService.method.listModels, { provider: "groq" });
   const models = groqModels.data?.models ?? [];
 
@@ -145,8 +147,9 @@ export function Configuration() {
             placeholder={slot.placeholder}
             credential={credentialFor(creds, slot.provider)}
             health={healthFor(health, slot.provider)}
-            // Groq's model select is the static allowlist (#70); the chosen model
-            // rides along when the key is saved (SaveProviderConfig carries it).
+            // Groq's model combobox lists the live catalog with free-text entry
+            // (#227); the chosen model rides along when the key is saved, or
+            // alone via the model-only save once a key exists.
             models={slot.provider === "groq" ? models : undefined}
             onSave={(secret, model) => saveProvider.mutateAsync({ provider: slot.provider, secret, model })}
           />
@@ -278,9 +281,30 @@ function SecretRow({
 
   const saved = Boolean(credential?.showMasked);
   const masked = saved && !editing;
-  // The select shows the saved model, the operator's pick, or the allowlist
+  // The combobox shows the operator's pick, the saved model, or the catalog
   // default (first), in that order.
   const selectedModel = model ?? (credential?.model || undefined) ?? models?.[0];
+  // "Save model" appears only when a saved key exists AND the operator actively
+  // picked something different from the stored model (#227) — never for the
+  // passive catalog-default display, which stores nothing.
+  const modelDirty =
+    saved && model !== undefined && model !== (credential?.model || undefined);
+
+  // Model-only save (#227): empty secret tells the server to keep the sealed
+  // key verbatim and update just the model.
+  async function handleSaveModel() {
+    if (!selectedModel || busy) return;
+    setBusy(true);
+    setSaveError(null);
+    try {
+      await onSave("", selectedModel);
+      setModel(undefined); // the refreshed credential now carries it
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleSave() {
     if (!value || busy) return;
@@ -311,14 +335,26 @@ function SecretRow({
           )}
         </div>
 
-        {models && models.length > 0 && (
-          <Select
-            aria-label={`${name} model`}
-            options={models}
-            value={selectedModel}
-            onValueChange={setModel}
-            placeholder="Model…"
-          />
+        {/* Rendered whenever this slot HAS a model concept (groq), even with an
+            empty catalog — a hard transport failure must not take free-text
+            entry down with it (#227): allowCustom still accepts any id. */}
+        {models && (
+          <div className="gx-provider-row__model">
+            <Combobox
+              aria-label={`${name} model`}
+              options={models.map((m) => ({ value: m, label: m }))}
+              value={selectedModel}
+              onValueChange={setModel}
+              placeholder="Model…"
+              searchPlaceholder="Search or type a model id…"
+              allowCustom
+            />
+            {modelDirty && (
+              <Button variant="secondary" size="sm" disabled={busy} onClick={handleSaveModel}>
+                Save model
+              </Button>
+            )}
+          </div>
         )}
 
         <div className="gx-secret">

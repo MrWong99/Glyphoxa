@@ -102,3 +102,34 @@ describe("Combobox", () => {
     expect(within(trigger).getByText("Marcus")).toBeInTheDocument();
   });
 });
+
+describe("Combobox allowCustom (#227)", () => {
+  it("offers the typed text as a Use item and picks it verbatim", () => {
+    const onChange = vi.fn();
+    render(<Combobox label="Model" options={OPTS} value="" onValueChange={onChange} allowCustom />);
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "my-custom-model " } });
+    const useItem = screen.getByRole("option", { name: /use "my-custom-model"/i });
+    fireEvent.click(useItem);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("my-custom-model");
+  });
+
+  it("suppresses the Use item on an exact match (case-insensitive) and on empty search", () => {
+    render(<Combobox label="Model" options={OPTS} value="" onValueChange={() => {}} allowCustom />);
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    // Empty search: no phantom item.
+    expect(screen.queryByRole("option", { name: /use "/i })).not.toBeInTheDocument();
+    // Exact label match, different case: the real item is selectable, no Use item.
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "RACHEL" } });
+    expect(screen.getByRole("option", { name: /rachel/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /use "/i })).not.toBeInTheDocument();
+  });
+
+  it("renders a custom (non-catalog) value verbatim on the trigger", () => {
+    render(
+      <Combobox label="Model" options={OPTS} value="my-custom-model" onValueChange={() => {}} allowCustom />,
+    );
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("my-custom-model");
+  });
+});

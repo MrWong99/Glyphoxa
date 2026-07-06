@@ -80,7 +80,14 @@
   margin-top: 2px;
 }
 
-/* Groq model allowlist select sits between the row meta and the secret control. */
+/* Groq model combobox (live catalog + free text, #227) sits between the row
+   meta and the secret control; a dirty pick grows a Save model button beside it. */
 .gx-provider-row .gx-select-field {
   min-width: 12rem;
+}
+
+.gx-provider-row__model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }

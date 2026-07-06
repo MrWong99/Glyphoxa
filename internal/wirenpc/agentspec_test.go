@@ -650,3 +650,25 @@ func TestSeedIdempotent(t *testing.T) {
 		t.Fatalf("expected 1 Character NPC after two seeds, got %d", len(chars))
 	}
 }
+
+
+// TestResolveNPCModel_BoundConfigOutranksTenantFallback pins the precedence
+// pure-functionally (#227 review finding): a resolver that ignored the bound
+// config and always returned the tenant fallback would pass the DB-backed
+// tests, whose single provider_config row is simultaneously both sources.
+func TestResolveNPCModel_BoundConfigOutranksTenantFallback(t *testing.T) {
+	t.Parallel()
+	bound := &storage.ProviderConfig{Model: "bound-model"}
+	if got := resolveNPCModel(bound, "tenant-model"); got != "bound-model" {
+		t.Errorf("bound + tenant = %q, want bound-model", got)
+	}
+	if got := resolveNPCModel(&storage.ProviderConfig{}, "tenant-model"); got != "tenant-model" {
+		t.Errorf("empty bound model + tenant = %q, want tenant-model", got)
+	}
+	if got := resolveNPCModel(nil, "tenant-model"); got != "tenant-model" {
+		t.Errorf("nil bound + tenant = %q, want tenant-model", got)
+	}
+	if got := resolveNPCModel(nil, ""); got != "" {
+		t.Errorf("nil bound + no tenant = %q, want empty (adapter default)", got)
+	}
+}

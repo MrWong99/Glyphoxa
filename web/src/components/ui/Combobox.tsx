@@ -32,6 +32,7 @@ export function Combobox({
   placeholder = "Select…",
   searchPlaceholder = "Search…",
   emptyText = "No matches",
+  allowCustom = false,
   id,
   "aria-label": ariaLabel,
 }: {
@@ -43,6 +44,10 @@ export function Combobox({
   placeholder?: string;
   searchPlaceholder?: string;
   emptyText?: string;
+  // allowCustom offers the raw typed text as a pickable `Use "…"` item when it
+  // matches no option exactly (#227 free-text model entry). The value passed to
+  // onValueChange is the trimmed text verbatim.
+  allowCustom?: boolean;
   id?: string;
   "aria-label"?: string;
 }) {
@@ -53,6 +58,23 @@ export function Combobox({
   const wrapRef = useRef<HTMLDivElement>(null);
 
   const selected = options.find((o) => o.value === value);
+  // With allowCustom a saved value may not appear in the catalog (free-text
+  // model, or the catalog fetch degraded) — render it verbatim, not as the
+  // unselected placeholder.
+  const triggerLabel = selected ? selected.label : allowCustom && value ? value : null;
+
+  // The `Use "…"` item exists only while typed text matches no option exactly
+  // (case-insensitive, on value or label) — an exact hit means the real item is
+  // already selectable. Empty search offers nothing.
+  const customText = search.trim();
+  const customItem =
+    allowCustom &&
+    customText !== "" &&
+    !options.some(
+      (o) =>
+        o.value.toLowerCase() === customText.toLowerCase() ||
+        o.label.toLowerCase() === customText.toLowerCase(),
+    );
 
   // Close on outside click / Escape so the popover behaves like a native select.
   // Whenever the popover is closed — pick, Escape or outside click — the search
@@ -100,8 +122,8 @@ export function Combobox({
           data-state={open ? "open" : "closed"}
           onClick={() => setOpen((o) => !o)}
         >
-          <span className={selected ? "gx-combobox__value" : "gx-combobox__placeholder"}>
-            {selected ? selected.label : placeholder}
+          <span className={triggerLabel ? "gx-combobox__value" : "gx-combobox__placeholder"}>
+            {triggerLabel ?? placeholder}
           </span>
           <ChevronDown size={14} className="gx-select-chevron" />
         </button>
@@ -124,7 +146,25 @@ export function Combobox({
                 />
               </div>
               <Command.List className="gx-combobox__list">
-                <Command.Empty className="gx-combobox__empty">{emptyText}</Command.Empty>
+                {!customItem && (
+                  <Command.Empty className="gx-combobox__empty">{emptyText}</Command.Empty>
+                )}
+                {customItem && (
+                  <Command.Item
+                    // forceMount: the item's visibility is governed by the
+                    // customItem condition above, not by cmdk's filter — the
+                    // trimmed value would lose against an untrimmed search.
+                    forceMount
+                    key={`custom:${customText}`}
+                    value={customText}
+                    className="gx-select__item gx-combobox__item"
+                    onSelect={() => pick(customText)}
+                  >
+                    <span>
+                      Use &quot;{customText}&quot;
+                    </span>
+                  </Command.Item>
+                )}
                 {options.map((o) => (
                   <Command.Item
                     key={o.value}
