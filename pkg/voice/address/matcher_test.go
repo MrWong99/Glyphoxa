@@ -223,6 +223,50 @@ func TestMatcher_ExactNameOutranksPhoneticCollision(t *testing.T) {
 	assertIDs(t, m.TargetMatch("Marek, was liegt gerade auf deinem Amboss?"), "npc-marek")
 }
 
+// TestMatcher_TruncatedNameRoutesToAgent pins the #197 live misroute
+// (turn 47aecba4be320d54): STT drops the leading consonant of "Bart" to "Art",
+// which falls under the rune floor and never matched. With Bart carrying the
+// derived truncation alias "art", an utterance opening with "Art" now routes to
+// Bart — while the same "Art" mid-sentence, on a fresh matcher, reaches nobody
+// (three NPCs keep the lone-NPC fallback inert and there is no continuation).
+func TestMatcher_TruncatedNameRoutesToAgent(t *testing.T) {
+	bartDE := address.Agent{
+		Target:            voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bart"},
+		TruncationAliases: address.DeriveTruncationAliases("Bart"),
+	}
+	greta := address.Agent{
+		Target:            voiceevent.AddressTarget{AgentID: "npc-greta", AgentRole: "character", Name: "Greta"},
+		TruncationAliases: address.DeriveTruncationAliases("Greta"),
+	}
+	marek := address.Agent{
+		Target:            voiceevent.AddressTarget{AgentID: "npc-marek", AgentRole: "character", Name: "Marek"},
+		TruncationAliases: address.DeriveTruncationAliases("Marek"),
+	}
+
+	m := address.NewMatcher(address.Config{Language: "de"}, bartDE, greta, marek)
+	assertIDs(t, m.TargetMatch("Art, wie läuft das Geschäft heute Abend?"), "npc-bart")
+
+	fresh := address.NewMatcher(address.Config{Language: "de"}, bartDE, greta, marek)
+	assertIDs(t, fresh.TargetMatch("was für eine Art von Bier hast du?"))
+}
+
+// TestMatcher_GenuineNameOutranksDerivedAlias pins the tie-break: an Agent
+// genuinely named "Art" (exact 1.0) must win over an Agent whose derived alias
+// "art" collides (0.99), even when the genuine "Art" is rostered AFTER — the
+// name-similarity tie-break, not roster order, decides it.
+func TestMatcher_GenuineNameOutranksDerivedAlias(t *testing.T) {
+	bartDE := address.Agent{
+		Target:            voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bart"},
+		TruncationAliases: address.DeriveTruncationAliases("Bart"),
+	}
+	// "Art" is vowel-initial, so it derives no alias of its own.
+	art := address.Agent{
+		Target: voiceevent.AddressTarget{AgentID: "npc-art", AgentRole: "character", Name: "Art"},
+	}
+	m := address.NewMatcher(address.Config{Language: "de"}, bartDE, art)
+	assertIDs(t, m.TargetMatch("Art, wie läuft das Geschäft heute Abend?"), "npc-art")
+}
+
 // TestMatcher_MaxTargetsCap proves the cap is configurable: MaxTargets: 2 keeps
 // the top two of a larger named set, while MaxTargets: -1 keeps them all.
 func TestMatcher_MaxTargetsCap(t *testing.T) {
