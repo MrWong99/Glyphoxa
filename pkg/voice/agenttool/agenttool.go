@@ -188,9 +188,11 @@ type Engine struct {
 	gated *tool.Loop // grants minus the dice Tool
 
 	// language is the gate language the dice keyword set is selected by (#226):
-	// the Campaign Language normalized via [gateLanguage] at construction, so the
-	// hot path never resolves language per turn. The zero value "" gates in
-	// English ([needsDice] normalizes it), matching the pre-#226 behavior.
+	// the Campaign Language, subtag-normalized via [gateLanguage] once at
+	// construction ([WithLanguage]), so an arbitrary campaign string is parsed
+	// once and the per-turn gate only does a cheap table lookup on the result.
+	// The zero value "" selects the English keyword set ([needsDice] maps it to
+	// "en") — the default when no Campaign Language is wired.
 	language string
 }
 
@@ -235,9 +237,10 @@ func WithMetrics(rec observe.StageRecorder, provName observe.Provider) EngineOpt
 }
 
 // WithLanguage selects the dice gate's keyword set by Campaign Language (#226):
-// lang is normalized once here via [gateLanguage] ("de-DE" → "de"; an unknown
-// language degrades to "en", ADR-0024), so the hot path never resolves language
-// per turn. Without this option the gate stays English (the pre-#226 behavior).
+// lang is subtag-normalized here via [gateLanguage] ("de-DE" → "de"; an unknown
+// language degrades to "en", ADR-0024), so the arbitrary campaign string is
+// parsed once and the per-turn gate only does a cheap table lookup. Without this
+// option the gate defaults to the English keyword set.
 func WithLanguage(lang string) EngineOption {
 	return func(c *engineConfig) {
 		c.language = gateLanguage(lang)

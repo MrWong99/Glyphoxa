@@ -18,6 +18,10 @@ func TestNeedsDice(t *testing.T) {
 		{"en NdM", "en", "I attack with 2d6 damage.", true},
 		{"en d100", "en", "Give me a d100.", true},
 		{"en d-percent", "en", "Roll d% for the table.", true},
+		// Notation-only rows with NO keyword: prove the '%' branch bites on its own,
+		// not via "roll" — the trailing-\b bug that made "d%"/"w%" dead notation.
+		{"en d-percent notation only", "en", "Give me a d% please.", true},
+		{"en w-percent notation only", "en", "hand me a w%", true},
 		{"en bare die word", "en", "Throw the dice.", true},
 
 		// --- English: ttrpg roll intent without explicit notation. ---
@@ -50,6 +54,11 @@ func TestNeedsDice(t *testing.T) {
 		{"de Probe", "de", "mach eine Probe", true},
 		{"de Rettungswurf", "de", "mach einen Rettungswurf gegen das Gift", true},
 		{"de Initiative", "de", "alle würfeln Initiative", true},
+		// werfen ("throw a die") verb family — imperative „wirf", „werfen" (#226).
+		{"de wirf imperative", "de", "Wirf noch einmal!", true},
+		{"de werfen", "de", "Kannst du nochmal werfen?", true},
+		// d-percent + notation-only in German (no keyword): '%' branch bites.
+		{"de d-percent notation only", "de", "gib mir ein d%", true},
 		// German plain conversation — must NOT arm dice.
 		{"de greeting", "de", "Hallo Bart, wie geht es dir?", false},
 		{"de room", "de", "Was kostet ein Zimmer für die Nacht?", false},

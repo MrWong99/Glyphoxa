@@ -14,9 +14,12 @@ const diceToolName = "dice"
 
 // diceNotation matches explicit die notation anywhere in the text, in any
 // language: an optional count, a 'd' (NdM: 2d6, d20, d%) or a 'w' (the German
-// wN form: 2w6, w20), then sides (a number or '%' for d100). Word boundaries
-// keep it from firing inside unrelated words (e.g. "add", "model", "würfle").
-var diceNotation = regexp.MustCompile(`(?i)\b\d*[dw](\d+|%)\b`)
+// wN form: 2w6, w20), then sides — a number or '%' (d100). The leading \b and
+// the \b inside the digit branch keep the numeric form from firing inside
+// unrelated words ("add", "model", "würfle"); the '%' branch carries no
+// trailing \b because '%' is not a word char, so "d%"/"w%" match on their own
+// (a \b after '%' would require a following word char and could never fire).
+var diceNotation = regexp.MustCompile(`(?i)\b\d*[dw](\d+\b|%)`)
 
 // diceKeywords maps a gate language (the normalized primary subtag) to the
 // keyword pattern whose match in an utterance marks plausible dice intent. The
@@ -32,11 +35,13 @@ var diceNotation = regexp.MustCompile(`(?i)\b\d*[dw](\d+|%)\b`)
 //     the substring false-positive class #226 also flags in the other direction.
 //   - de: bare substrings, because the roll cue lives inside compounds
 //     ("Würfelwerkzeug", "Rettungswurf", "Fertigkeitsprobe") that word anchors
-//     would miss. This deliberately accepts rare compound false positives
-//     (Entwurf, Vorwurf) — the recall bias above makes that the cheap side.
+//     would miss. würf/wurf/wirf/werf cover würfeln + the werfen ("throw a die")
+//     verb family (imperative „wirf", „werft", „werfen wir"). This deliberately
+//     accepts rare compound false positives (Entwurf, Vorwurf, verwerfen) — the
+//     recall bias above makes that the cheap side.
 var diceKeywords = map[string]*regexp.Regexp{
 	"en": regexp.MustCompile(`(?i)\b(roll|dice|die|d20|d6|d100|saving throw|initiative|advantage|disadvantage|to hit|attack roll|ability check|skill check)`),
-	"de": regexp.MustCompile(`(?i)(würf|wurf|probe|initiative)`),
+	"de": regexp.MustCompile(`(?i)(würf|wurf|wirf|werf|probe|initiative)`),
 }
 
 // gateLanguage normalizes a Campaign Language to a key in [diceKeywords]: it
