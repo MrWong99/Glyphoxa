@@ -42,25 +42,20 @@ type Roster struct {
 	// engines through it. Always non-nil after [newRoster].
 	replierFor func(npcSpec) *agent.Replier
 
-	// specs retains each held NPC's spec by agentID so [Roster.SetMuted] can
-	// rebuild its matcher Agent on unmute (#211) — a mute drops the NPC from the
-	// Matcher but keeps its spec here, since the Cast entry is deliberately left
-	// untouched. Populated by [Roster.AddNPC], pruned by [Roster.RemoveNPC].
+	// specs retains each held NPC's spec by agentID so [Roster.ApplyMutes] can
+	// iterate the current membership when reconciling the authoritative mute view
+	// on a reconnect (#211). Populated by [Roster.AddNPC], pruned by
+	// [Roster.RemoveNPC]. Mute state itself lives in the Matcher (#225), not here.
 	specs map[string]npcSpec
-	// muted tracks which NPCs are currently dropped from the Matcher (#211), so
-	// [Roster.SetMuted] is IDEMPOTENT: it touches the Matcher only on an actual
-	// mute↔unmute transition. Load-bearing — [address.Matcher.Add] panics on a
-	// duplicate agent, so a re-applied unmute (the authoritative-view re-read in
-	// wireMutes fires SetMuted per event, sometimes for an already-correct state)
-	// must be a no-op, not a re-Add.
-	muted map[string]struct{}
 
-	// mu guards the specs/muted maps (and the Matcher mutations they drive). Mute
-	// control breaks the "one goroutine owns the Roster" contract (#211): wireMutes
-	// calls [Roster.SetMuted] from the bus-event callback (the MuteChanged
-	// publisher's goroutine) AND seeds from connectAndServe's goroutine — a
-	// mid-session reconnect racing a GM mute would otherwise be a concurrent map
-	// write (a fatal). All specs/muted access goes under mu.
+	// mu guards the specs map (and the AddNPC/RemoveNPC Matcher mutations it moves
+	// in lockstep with). Mute control breaks the "one goroutine owns the Roster"
+	// contract (#211): wireMutes calls [Roster.SetMuted] from the bus-event
+	// callback (the MuteChanged publisher's goroutine) AND seeds via
+	// [Roster.ApplyMutes] from connectAndServe's goroutine — a mid-session
+	// reconnect racing a GM mute would otherwise be a concurrent map read/write.
+	// All specs access (and the ApplyMutes range) goes under mu; the Matcher's own
+	// mute state is separately guarded by its mutex.
 	mu sync.Mutex
 }
 
@@ -89,7 +84,6 @@ func newRoster(deps rosterDeps) *Roster {
 		replierFor: deps.replierFor,
 		language:   matcherLanguage(deps.language),
 		specs:      map[string]npcSpec{},
-		muted:      map[string]struct{}{},
 	}
 }
 
@@ -107,10 +101,9 @@ func matcherLanguage(lang string) string {
 // matcherAgent builds the address.Agent for one NPC: its routing target, aliases,
 // and the STT-truncation aliases derived from its name + aliases (#197). This is
 // the ONE derivation site, so every path that builds an address.Agent — the
-// hardcoded NPC, the DB load (via npcSpecFromAgent), and the SetMuted unmute
-// re-add — gets the derived aliases identically. A lone Character NPC is not
-// AddressOnly, so it catches unaddressed speech via the single-NPC fallback
-// (CONTEXT.md "Address-Only").
+// hardcoded NPC and the DB load (via npcSpecFromAgent) — gets the derived aliases
+// identically. A lone Character NPC is not AddressOnly, so it catches unaddressed
+// speech via the single-NPC fallback (CONTEXT.md "Address-Only").
 func matcherAgent(spec npcSpec) address.Agent {
 	return address.Agent{
 		Target: voiceevent.AddressTarget{
@@ -152,28 +145,33 @@ func (r *Roster) AddNPC(spec npcSpec) {
 func (r *Roster) RemoveNPC(agentID string) {
 	r.mu.Lock()
 	if r.matcher != nil {
-		r.matcher.Remove(agentID)
+		r.matcher.Remove(agentID) // also clears the Matcher's mute flag for this NPC (#225)
 	}
 	delete(r.specs, agentID)
-	delete(r.muted, agentID)
 	r.mu.Unlock()
 	r.cast.Remove(agentID) // Cast is independently concurrency-safe; outside r.mu
 }
 
-// SetMuted toggles one NPC's mute in the live scene (#211). It is deliberately
-// MATCHER-ONLY: muting drops the NPC from the address Matcher (so nothing routes
-// to it — its name/aliases stop matching AND its lastAddressed is pruned so an
-// unnamed continuation re-routes / the remaining-NPC fallback emerges), while
-// unmuting re-adds its matcher Agent from the retained spec. The Cast is NEVER
-// touched, so the NPC's SAME [agent.Replier] — and its ADR-0012 delivered-only
-// history — survives a mute and is intact the instant it is unmuted (AC3 "context
-// intact"). A muted NPC therefore stays in the scene (the conversation keeps
-// accruing around it) but produces no audio and no transcript line.
+// SetMuted toggles one NPC's mute in the live scene (#211, #225). It is
+// deliberately MATCHER-ONLY and NEVER touches the Cast, so the NPC keeps its SAME
+// [agent.Replier] — and its ADR-0012 delivered-only history — across a mute,
+// intact the instant it is unmuted (AC3 "context intact").
+//
+// Muting does NOT drop the NPC from the Matcher. That was the #225 failure: a
+// dropped name stops matching, so "Bart, hörst du mich?" to a muted Bart
+// re-routed to another NPC instead of staying unanswered. Instead the Matcher
+// keeps the muted NPC ROUTABLE by name but name-gates it (excluded from the
+// ambient heuristics, dropped from a shared decision, never recorded as
+// lastAddressed) — see [address.Matcher.SetMuted]. A named-muted utterance thus
+// still resolves to the muted NPC, whose turn the reactor's MuteView gate then
+// ends before any audio (so it produces no audio and no transcript line), rather
+// than leaking to a bystander. A muted NPC stays in the scene (the conversation
+// keeps accruing around it).
 //
 // This is NOT [Roster.RemoveNPC]: removing the Cast entry would destroy the
 // Replier and its history, the exact failure to avoid. Muting an id the Roster
-// never held is a no-op, and re-applying the current state (mute an already-muted
-// NPC, unmute an already-unmuted one) is idempotent — no Matcher churn.
+// never held is a no-op, and re-applying the current state is idempotent (both
+// contracts enforced by [address.Matcher.SetMuted]).
 //
 // Concurrency-safe: SetMuted is called from the bus-event goroutine AND the seed
 // path (see [Roster.mu]).
@@ -196,22 +194,18 @@ func (r *Roster) ApplyMutes(muted func(agentID string) bool) {
 	}
 }
 
-// setMutedLocked is the mute transition; the caller holds r.mu.
+// setMutedLocked forwards the mute to the Matcher, which owns the mute state
+// (#225): muting keeps the NPC in the Matcher — still routable by name — but
+// name-gates it (excluded from the ambient heuristics, dropped from a shared
+// decision, never recorded as lastAddressed), so a named-muted utterance no
+// longer re-routes to another NPC. The reactor's MuteView gate silences the
+// muted NPC downstream (ADR-0012). Idempotence and the unknown-id no-op live in
+// [address.Matcher.SetMuted]. The caller holds r.mu.
 func (r *Roster) setMutedLocked(agentID string, muted bool) {
-	spec, ok := r.specs[agentID]
-	if !ok || r.matcher == nil {
-		return // unknown NPC (or no matcher yet): nothing to route or de-route
+	if r.matcher == nil {
+		return // no matcher yet: nothing to route or de-route
 	}
-	if _, alreadyMuted := r.muted[agentID]; muted == alreadyMuted {
-		return // already in the requested state: idempotent no-op (Matcher.Add panics on a dup)
-	}
-	if muted {
-		r.matcher.Remove(agentID)
-		r.muted[agentID] = struct{}{}
-		return
-	}
-	r.matcher.Add(matcherAgent(spec))
-	delete(r.muted, agentID)
+	r.matcher.SetMuted(agentID, muted)
 }
 
 // rosterDepsForLive builds the production rosterDeps: every NPC's Replier is

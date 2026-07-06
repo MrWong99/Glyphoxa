@@ -530,9 +530,13 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// metrics subscriber records the precise reason, not the coarse no-first-audio
 		// TTL reap (#20) — mirroring the floor branch below. The sync path has no
 		// barge/supersede, so a non-cancelled ctx is the only guard needed. NOTE: the
-		// mute gate (#211) below lives in the floor branch only; the no-floor path
-		// never wires a MuteView in prod (mute needs the barge-in floor to cut a
-		// speaker), so a muted addressee here is unreachable, not silently voiced.
+		// mute gate (#211, #225) below lives in the floor branch only. Since #225 the
+		// matcher keeps a muted addressee routable by name (silencing is the reactor
+		// gate's job, not the matcher's), so a route CAN name a muted Agent. Prod
+		// always wires the barge-in floor together with the MuteView — mute needs the
+		// floor to cut a speaker — so that gate always runs; this no-floor path is
+		// reached only by configs wiring neither, and relies on that pairing rather
+		// than on the matcher de-routing muted Agents.
 		if r.floor == nil {
 			if reason := r.dispatchAll(ctx, e); reason != "" && ctx.Err() == nil {
 				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})

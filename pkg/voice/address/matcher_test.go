@@ -33,6 +33,11 @@ var (
 	dwarf = address.Agent{
 		Target: voiceevent.AddressTarget{AgentID: "npc-dwarf", AgentRole: "character", Name: "Durin"},
 	}
+	// greta is a second Character NPC used by the mute tests (#225): a scene of
+	// Bart + Greta reproduces the live "muted addressee re-routes" failure.
+	greta = address.Agent{
+		Target: voiceevent.AddressTarget{AgentID: "npc-greta", AgentRole: "character", Name: "Greta"},
+	}
 )
 
 // fakeClock is a manually advanced clock so the recency windows are driven
@@ -436,6 +441,107 @@ func TestMatcher_ConcurrentHeadRemoveNeverTransfersNameScore(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestMatcher_MutedAgentStillRoutedWhenNamed pins the core of #225: a muted
+// Agent stays in the index and is still matched by name, so "Bart, hörst du
+// mich?" addresses the muted Bart (the decision then flows to the reactor's mute
+// gate downstream). Muting must NOT drop Bart from the matcher — that was the
+// bug: his name stopped matching and the utterance re-routed to another NPC.
+func TestMatcher_MutedAgentStillRoutedWhenNamed(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m.SetMuted("npc-bart", true)
+	assertIDs(t, m.TargetMatch("Bart, hörst du mich?"), "npc-bart")
+}
+
+// TestMatcher_MutedNameSuppressesAmbientReRoute pins the anti-shadow rule (#225):
+// naming a muted Agent addresses ONLY that Agent and never re-routes to an
+// unmuted one, and — because a muted addressee is never recorded as
+// lastAddressed — a later unnamed follow-up continues to whoever legitimately
+// held the floor, not into a muted black hole.
+func TestMatcher_MutedNameSuppressesAmbientReRoute(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	assertIDs(t, m.TargetMatch("Greta, was denkst du?"), "npc-greta") // lastAddressed = greta
+	m.SetMuted("npc-bart", true)
+
+	// Naming the muted Bart addresses only Bart (→ reactor mute gate), never Greta.
+	assertIDs(t, m.TargetMatch("Bart, hörst du mich?"), "npc-bart")
+	// The muted address left lastAddressed on Greta, so an unnamed follow-up
+	// continues to Greta rather than the muted Bart.
+	assertIDs(t, m.TargetMatch("und was hilft gegen Kopfschmerzen?"), "npc-greta")
+}
+
+// TestMatcher_NamedUnmutedWinsOverNamedMuted pins the own-merit re-route (#225):
+// "Greta und Bart" with Bart muted addresses only Greta on her own merit — the
+// muted Bart's name hit is dropped before the score-sort/cap regardless of
+// roster order, so it never consumes the single-target slot Greta needs.
+func TestMatcher_NamedUnmutedWinsOverNamedMuted(t *testing.T) {
+	for _, agents := range [][]address.Agent{{bart, greta}, {greta, bart}} {
+		m := address.NewMatcher(address.Config{Language: "de"}, agents...)
+		m.SetMuted("npc-bart", true)
+		assertIDs(t, m.TargetMatch("Greta und Bart, was denkt ihr?"), "npc-greta")
+	}
+}
+
+// TestMatcher_MutedExcludedFromAmbient pins that a muted Agent is excluded from
+// the ambient heuristics (#225): with Bart muted the sole-NPC fallback sees only
+// Greta, and — the variant — a Bart addressed BEFORE the mute is pruned from
+// lastAddressed by the mute transition, so an unnamed follow-up routes to Greta,
+// not the now-muted Bart.
+func TestMatcher_MutedExcludedFromAmbient(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m.SetMuted("npc-bart", true)
+	assertIDs(t, m.TargetMatch("was passiert als nächstes?"), "npc-greta")
+
+	m2 := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	assertIDs(t, m2.TargetMatch("Bart, was denkst du?"), "npc-bart") // lastAddressed = bart
+	m2.SetMuted("npc-bart", true)                                    // transition prunes bart's lastAddressed
+	assertIDs(t, m2.TargetMatch("was passiert als nächstes?"), "npc-greta")
+}
+
+// TestMatcher_UnmuteRestoresImmediately pins the unmute restore (#225 / #211
+// AC): unmuting re-admits Bart to both name matching and the ambient pool at
+// once — naming him routes to him, and (as one of two unmuted NPCs) an unnamed
+// follow-up continues to him.
+func TestMatcher_UnmuteRestoresImmediately(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m.SetMuted("npc-bart", true)
+	m.SetMuted("npc-bart", false)
+	assertIDs(t, m.TargetMatch("Bart, hörst du mich?"), "npc-bart")
+	assertIDs(t, m.TargetMatch("und weiter?"), "npc-bart") // continuation: Bart is ambient again
+}
+
+// TestMatcher_SetMuted_UnknownAndRemoved pins SetMuted's edge contract (#225):
+// muting an unknown AgentID is a clean no-op, and Remove clears the mute flag so
+// a removed-then-readded Agent starts UNMUTED — proven by the re-added Bart
+// catching the sole-NPC fallback (a still-muted Agent would be excluded).
+func TestMatcher_SetMuted_UnknownAndRemoved(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, bart, greta)
+	m.SetMuted("ghost", true) // unknown: no-op, no panic, no routing change
+	assertIDs(t, m.TargetMatch("Bart, hörst du mich?"), "npc-bart")
+
+	m.SetMuted("npc-bart", true)
+	m.Remove("npc-bart")
+	m.Add(bart)           // starts unmuted (Remove cleared the flag)
+	m.Remove("npc-greta") // Bart is now the sole NPC
+	assertIDs(t, m.TargetMatch("was passiert als nächstes?"), "npc-bart")
+}
+
+// TestMatcher_ConcurrentMuteAndTargetMatch mirrors TestMatcher_ConcurrentUse for
+// the mute path (#225): many goroutines flip SetMuted while others route. Run
+// under `go test -race` it pins that the mute set lives under the same mutex as
+// the index and roster — no data race, no torn read of the muted map.
+func TestMatcher_ConcurrentMuteAndTargetMatch(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de", MaxTargets: -1}, bart, greta)
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(4)
+		go func() { defer wg.Done(); m.TargetMatch("Bart und Greta reden") }()
+		go func() { defer wg.Done(); m.SetMuted("npc-bart", true) }()
+		go func() { defer wg.Done(); m.SetMuted("npc-bart", false) }()
+		go func() { defer wg.Done(); m.SetMuted("npc-greta", true) }()
+	}
+	wg.Wait()
 }
 
 // TestMatcher_ConcurrentUse exercises the matcher's locking: many goroutines
