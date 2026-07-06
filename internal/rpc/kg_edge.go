@@ -41,7 +41,7 @@ func (s *CampaignServer) CreateEdge(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("edge type must be specified"))
 	}
 
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

@@ -530,7 +530,12 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 	// TenantResolver (TenantForUser); GetCurrentUser is the only public procedure.
 	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
 
-	campaignPath, campaignHandler := rpc.NewCampaignServer(store).Handler(stack.HandlerOptions()...)
+	campaignSrv := rpc.NewCampaignServer(store)
+	// While a session is live, the roster/mute panel scopes to that session's
+	// campaign so the GM mutes the NPCs actually in the channel, not a durable
+	// selection changed mid-session (#222).
+	campaignSrv.SetSessions(mgr)
+	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
 	// Campaign screens render — the ElevenLabs voice catalog + preview, the Groq

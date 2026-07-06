@@ -37,9 +37,11 @@ type SessionManager interface {
 
 // SessionStore is the narrow storage surface SessionServer needs: the operator's
 // durable Active Campaign selection (#108), the most-recently-created campaign as
-// the fallback that scopes a session, the latest ended session for the idle
+// the fallback that scopes a session, the live Voice Session's campaign by id (the
+// live-first resolution step, #222), the latest ended session for the idle
 // last-session summary (#72), and the campaign-scoped transcript search (#120).
 type SessionStore interface {
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
@@ -156,25 +158,22 @@ func (s *SessionServer) StartSession(
 	}), nil
 }
 
+// liveCampaign reports the live Voice Session's campaign id, if any, off the
+// manager Snapshot — the live-first input to resolveActiveCampaign (#222).
+func (s *SessionServer) liveCampaign() (uuid.UUID, bool) {
+	vs, active := s.mgr.Snapshot()
+	return vs.CampaignID, active
+}
+
 // startCampaign resolves the campaign a web Start binds to, honoring the durable
 // /glyphoxa use selection so the web Start button and the slash command agree
-// (ADR-0009, #108): the logged-in operator's active_campaign_id when set, else the
-// most-recently-created campaign — kept as the fallback so a fresh install that
-// has never run /glyphoxa use still starts. The slash surface is strict (no
-// fallback) because it has the /use affordance; the web has no such hint, so it
-// keeps the legacy default.
+// (ADR-0009, #108). It is the shared resolveActiveCampaign policy (live Voice
+// Session → durable /glyphoxa use selection → most-recent fallback, #222) — the
+// SAME resolution the header, campaign CRUD, and KG wiki scope through. In the
+// idle Start/GetSession paths the live step is a no-op (no session runs yet), so
+// this resolves the durable selection then the most-recent fallback.
 func (s *SessionServer) startCampaign(ctx context.Context) (storage.Campaign, error) {
-	if u, ok := auth.CurrentUser(ctx); ok && u.DiscordUserID != "" {
-		c, err := s.store.GetActiveCampaignForUser(ctx, u.DiscordUserID)
-		if err == nil {
-			return c, nil
-		}
-		if !errors.Is(err, storage.ErrNotFound) {
-			return storage.Campaign{}, err
-		}
-		// No durable selection yet — fall back to the implicit default.
-	}
-	return s.store.GetActiveCampaign(ctx)
+	return resolveActiveCampaign(ctx, s.liveCampaign, s.store)
 }
 
 // startError maps a manager Start failure onto a Connect status code: the

@@ -13,6 +13,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -31,6 +32,19 @@ type fakeCampaignStore struct {
 	butlerErr error
 	chars     []storage.Agent
 	charsErr  error
+
+	// forUser/forUserErr back the durable /glyphoxa use selection the profile-first
+	// resolution reads first (#222); campaign is the most-recent fallback.
+	forUser    storage.Campaign
+	forUserErr error
+	// campaignsByID backs GetCampaign, the live-first roster path's per-id load
+	// (#222); getCampaignErr forces its failure path.
+	campaignsByID  map[uuid.UUID]storage.Campaign
+	getCampaignErr error
+	// listNodesCampaign/searchNodesCampaign record the campaign id ListNodes /
+	// SearchNodes resolved so the scope precedence can be asserted (#222).
+	listNodesCampaign   uuid.UUID
+	searchNodesCampaign uuid.UUID
 
 	agents    map[uuid.UUID]storage.Agent
 	createErr error
@@ -93,6 +107,27 @@ func newFakeStore() *fakeCampaignStore {
 
 func (f *fakeCampaignStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
 	return f.campaign, f.campErr
+}
+
+func (f *fakeCampaignStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+	if f.forUserErr != nil {
+		return storage.Campaign{}, f.forUserErr
+	}
+	if f.forUser.ID == uuid.Nil {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	return f.forUser, nil
+}
+
+func (f *fakeCampaignStore) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	if f.getCampaignErr != nil {
+		return storage.Campaign{}, f.getCampaignErr
+	}
+	c, ok := f.campaignsByID[id]
+	if !ok {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	return c, nil
 }
 
 func (f *fakeCampaignStore) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {
@@ -179,7 +214,8 @@ func (f *fakeCampaignStore) CreateNode(_ context.Context, n storage.NewKGNode) (
 	return created, nil
 }
 
-func (f *fakeCampaignStore) ListNodes(_ context.Context, _ uuid.UUID) ([]storage.KGNode, error) {
+func (f *fakeCampaignStore) ListNodes(_ context.Context, campaignID uuid.UUID) ([]storage.KGNode, error) {
+	f.listNodesCampaign = campaignID
 	return f.nodes, f.nodeListErr
 }
 
@@ -244,8 +280,9 @@ func (f *fakeCampaignStore) SetNodeAgent(_ context.Context, nodeID uuid.UUID, ag
 	return n, nil
 }
 
-func (f *fakeCampaignStore) SearchNodes(_ context.Context, _ uuid.UUID, query string, limit int) ([]storage.KGNode, error) {
+func (f *fakeCampaignStore) SearchNodes(_ context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error) {
 	f.searchCalls++
+	f.searchNodesCampaign = campaignID
 	f.searchQuery = query
 	f.searchLimit = limit
 	if f.nodeSearchErr != nil {
@@ -300,6 +337,34 @@ func crudClient(t *testing.T, store *fakeCampaignStore) managementv1connect.Camp
 	t.Cleanup(srv.Close)
 	return managementv1connect.NewCampaignServiceClient(
 		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
+	)
+}
+
+// crudClientAs is crudClient plus an injected authenticated operator (so the
+// profile-first resolution's durable-selection lookup sees a Discord identity,
+// #222) and an optional live Voice Session source (so the roster/mute panel's
+// live-first scope can be exercised). A zero user injects nothing; a nil
+// sessions leaves the server with no live source.
+func crudClientAs(t *testing.T, store *fakeCampaignStore, user storage.User, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	srv := rpc.NewCampaignServer(store)
+	if sessions != nil {
+		srv.SetSessions(sessions)
+	}
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			if user.DiscordUserID != "" {
+				ctx = auth.WithUser(ctx, user)
+			}
+			return next(ctx, req)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler(connect.WithInterceptors(inject)))
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return managementv1connect.NewCampaignServiceClient(
+		http.DefaultClient, s.URL, connect.WithProtoJSON(),
 	)
 }
 
@@ -368,6 +433,206 @@ func TestGetCampaignRoster_ButlerMissingIsInternal(t *testing.T) {
 		connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
 	if got := connect.CodeOf(err); got != connect.CodeInternal {
 		t.Errorf("code = %v, want Internal", got)
+	}
+}
+
+// rosterStore builds a fake whose Butler + one Character resolve for ANY campaign
+// id (the fake ignores the id on those reads), so the roster tests can assert
+// purely on which campaign GetCampaignRoster resolved.
+func rosterStore() *fakeCampaignStore {
+	store := newFakeStore()
+	store.butler = storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa", AddressOnly: true}
+	store.chars = []storage.Agent{{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Ana"}}
+	return store
+}
+
+// TestGetCampaignRosterHonorsLiveSession is #222's roster/mute-panel core: while a
+// Voice Session is live (bound to campaign L), the roster resolves L even when the
+// durable selection (D) and the most-recent default (N) are different campaigns —
+// so the GM mutes the NPCs actually in the channel.
+func TestGetCampaignRosterHonorsLiveSession(t *testing.T) {
+	t.Parallel()
+	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := rosterStore()
+	store.forUser = durable
+	store.campaign = newer
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
+
+	mgr := &fakeSessionManager{active: true, current: storage.VoiceSession{ID: uuid.New(), CampaignID: live.ID}}
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, mgr)
+
+	resp, err := client.GetCampaignRoster(context.Background(),
+		connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
+	if err != nil {
+		t.Fatalf("GetCampaignRoster: %v", err)
+	}
+	if got := resp.Msg.GetCampaign().GetId(); got != live.ID.String() {
+		t.Errorf("roster campaign = %s, want the LIVE session campaign %s (not durable %s / newer %s)",
+			got, live.ID, durable.ID, newer.ID)
+	}
+}
+
+// TestGetCampaignRosterHonorsDurableSelectionIdle is the middle precedence: with no
+// live session, the roster resolves the durable /glyphoxa use selection (D), not
+// the most-recent default (N).
+func TestGetCampaignRosterHonorsDurableSelectionIdle(t *testing.T) {
+	t.Parallel()
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := rosterStore()
+	store.forUser = durable
+	store.campaign = newer
+
+	// An inactive manager still exercises the SetSessions wiring (live branch skipped).
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, &fakeSessionManager{})
+
+	resp, err := client.GetCampaignRoster(context.Background(),
+		connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
+	if err != nil {
+		t.Fatalf("GetCampaignRoster: %v", err)
+	}
+	if got := resp.Msg.GetCampaign().GetId(); got != durable.ID.String() {
+		t.Errorf("roster campaign = %s, want the durable selection %s (not the newer %s)", got, durable.ID, newer.ID)
+	}
+}
+
+// TestGetCampaignRosterFallsBackWithoutSelection pins the fallback tail: no live
+// session and no durable selection resolves the most-recently-created campaign.
+func TestGetCampaignRosterFallsBackWithoutSelection(t *testing.T) {
+	t.Parallel()
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := rosterStore()
+	store.forUserErr = storage.ErrNotFound
+	store.campaign = newer
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+
+	resp, err := client.GetCampaignRoster(context.Background(),
+		connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
+	if err != nil {
+		t.Fatalf("GetCampaignRoster: %v", err)
+	}
+	if got := resp.Msg.GetCampaign().GetId(); got != newer.ID.String() {
+		t.Errorf("roster campaign = %s, want the fallback %s", got, newer.ID)
+	}
+}
+
+// TestCreateAgentHonorsDurableSelection is #222 for the campaign CRUD write: a new
+// NPC lands in the durable /glyphoxa use selection (D), not the most-recent
+// default (N).
+func TestCreateAgentHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+
+	if _, err := client.CreateAgent(context.Background(),
+		connect.NewRequest(&managementv1.CreateAgentRequest{Name: "New NPC"})); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if len(store.created) != 1 {
+		t.Fatalf("created %d agents, want 1", len(store.created))
+	}
+	if got := store.created[0].CampaignID; got != durable.ID {
+		t.Errorf("new NPC landed in campaign %s, want the durable selection %s (not the newer %s)", got, durable.ID, newer.ID)
+	}
+}
+
+// liveMgr returns a fakeSessionManager reporting an active Voice Session bound to
+// campaignID — the live-first input every CampaignService surface resolves through
+// (#222). The Manager enforces single-active, so one live campaign is enough.
+func liveMgr(campaignID uuid.UUID) *fakeSessionManager {
+	return &fakeSessionManager{active: true, current: storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID}}
+}
+
+// TestGetActiveCampaignHonorsLiveSession is #222 finding 2: the header resolves the
+// LIVE Voice Session's campaign (L), not the durable selection (D) or the newest
+// (N), so it never names a different campaign than the roster/transcript on the
+// same Session screen.
+func TestGetActiveCampaignHonorsLiveSession(t *testing.T) {
+	t.Parallel()
+	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+
+	resp, err := client.GetActiveCampaign(context.Background(),
+		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}))
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	if got := resp.Msg.GetCampaign().GetId(); got != live.ID.String() {
+		t.Errorf("header campaign = %s, want the LIVE session campaign %s (not durable %s / newer %s)",
+			got, live.ID, durable.ID, newer.ID)
+	}
+}
+
+// TestCreateAgentHonorsLiveSession is #222 finding 1: mid-session the new NPC lands
+// in the LIVE session's campaign (L) — the SAME campaign the roster read shows — so
+// the NPC appears where the GM is looking, never a silent cross-campaign write.
+func TestCreateAgentHonorsLiveSession(t *testing.T) {
+	t.Parallel()
+	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+
+	if _, err := client.CreateAgent(context.Background(),
+		connect.NewRequest(&managementv1.CreateAgentRequest{Name: "New NPC"})); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if len(store.created) != 1 {
+		t.Fatalf("created %d agents, want 1", len(store.created))
+	}
+	if got := store.created[0].CampaignID; got != live.ID {
+		t.Errorf("new NPC landed in campaign %s, want the LIVE session campaign %s (not durable %s / newer %s)",
+			got, live.ID, durable.ID, newer.ID)
+	}
+}
+
+// TestGetCampaignRosterLiveLoadErrorIsInternal is #222 finding 3: a non-ErrNotFound
+// failure loading the live session's campaign row maps to CodeInternal (the raw
+// cause is logged, not returned).
+func TestGetCampaignRosterLiveLoadErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	live := uuid.New()
+	store := rosterStore()
+	store.getCampaignErr = errAny
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live))
+
+	_, err := client.GetCampaignRoster(context.Background(),
+		connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("code = %v, want Internal", got)
+	}
+}
+
+// TestGetCampaignRosterLiveCampaignMissingIsNotFound is #222 finding 3: if the live
+// session's campaign row is gone (ErrNotFound from GetCampaign), the roster surfaces
+// CodeNotFound like any no-campaign state.
+func TestGetCampaignRosterLiveCampaignMissingIsNotFound(t *testing.T) {
+	t.Parallel()
+	live := uuid.New()
+	store := rosterStore()
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{} // live id absent → GetCampaign ErrNotFound
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live))
+
+	_, err := client.GetCampaignRoster(context.Background(),
+		connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
 	}
 }
 
