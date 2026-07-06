@@ -126,6 +126,13 @@ async function pick(combobox: string, option: string) {
   fireEvent.click(await screen.findByRole("option", { name: option }));
 }
 
+// Edge delete is confirm-gated too (#209): the row's X opens a dialog; click the
+// destructive button inside it to actually issue DeleteEdge.
+async function confirmInDialog() {
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: /^delete/i }));
+}
+
 describe("NodeRelations", () => {
   it("renders outgoing and incoming edges in separate sections", async () => {
     renderRelations(npcNode, {
@@ -181,7 +188,33 @@ describe("NodeRelations", () => {
     expect(createCalls[0].toNodeId).toBe("loc");
   });
 
-  it("deletes an outgoing relation", async () => {
+  it("deletes an outgoing relation after confirming", async () => {
+    const { deleteCalls } = renderRelations(npcNode, {
+      node: npcNode,
+      outgoing: [
+        create(EdgeSchema, {
+          id: "e1",
+          fromNodeId: "n1",
+          toNodeId: "loc",
+          edgeType: EdgeType.RESIDES_IN,
+          toNodeName: "Barrow",
+          toNodeType: NodeType.LOCATION,
+        }),
+      ],
+    });
+    await screen.findByText("Barrow");
+
+    // The row's X opens a confirm dialog naming the relation; no RPC yet.
+    fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(/resides_in/i);
+    expect(deleteCalls).toHaveLength(0);
+
+    await confirmInDialog();
+    await waitFor(() => expect(deleteCalls).toHaveLength(1));
+    expect(deleteCalls[0].id).toBe("e1");
+  });
+
+  it("cancelling the relation-delete dialog issues no RPC and keeps the edge", async () => {
     const { deleteCalls } = renderRelations(npcNode, {
       node: npcNode,
       outgoing: [
@@ -198,9 +231,12 @@ describe("NodeRelations", () => {
     await screen.findByText("Barrow");
 
     fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
 
-    await waitFor(() => expect(deleteCalls).toHaveLength(1));
-    expect(deleteCalls[0].id).toBe("e1");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(deleteCalls).toHaveLength(0);
+    expect(screen.getByText("Barrow")).toBeInTheDocument();
   });
 
   it("links a Character NPC agent from the Voiced by select (NPC node only)", async () => {
@@ -265,6 +301,7 @@ describe("NodeRelations", () => {
     await screen.findByText("Barrow");
 
     fireEvent.click(screen.getByRole("button", { name: /delete relation/i }));
+    await confirmInDialog();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't delete/i);
   });

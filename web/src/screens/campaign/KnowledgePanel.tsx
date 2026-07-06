@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
@@ -26,6 +27,7 @@ import { Input } from "@/components/ui/Input";
 import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { NodeRelations } from "./NodeRelations";
 
 // The Knowledge panel (#126, #129) backs the Campaign screen's "Knowledge" view
@@ -78,6 +80,10 @@ export function KnowledgePanel() {
   const queryClient = useQueryClient();
   const listQuery = useQuery(CampaignService.method.listNodes, {});
   const [editing, setEditing] = useState<Node | null>(null);
+  // The entry a delete has been requested for; drives the confirm dialog. Delete
+  // is a hard, cascading DELETE (ADR-0008), so no DeleteNode fires until the
+  // operator confirms here (#209).
+  const [confirmNode, setConfirmNode] = useState<Node | null>(null);
 
   // Live wiki search (#131, ADR-0008 tsvector): the raw box value drives a
   // 200ms-debounced SearchNodes query. The RPC runs only while the debounced
@@ -135,6 +141,20 @@ export function KnowledgePanel() {
     });
   };
 
+  // A node hard-delete cascades to every edge that touches it (ADR-0008 ON
+  // DELETE CASCADE), so it can silently kill edges belonging to OTHER nodes.
+  // Drop every cached ListNodeEdges result so the next relations view / delete
+  // dialog doesn't count a dead edge (the query's staleTime would otherwise
+  // serve it). No input key = prefix match across all node ids.
+  const invalidateEdges = () => {
+    void queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.listNodeEdges,
+        cardinality: "finite",
+      }),
+    });
+  };
+
   const createNode = useMutation(CampaignService.method.createNode, {
     onSuccess: () => void invalidateNodes(),
   });
@@ -145,7 +165,10 @@ export function KnowledgePanel() {
     },
   });
   const deleteNode = useMutation(CampaignService.method.deleteNode, {
-    onSuccess: () => void invalidateNodes(),
+    onSuccess: () => {
+      invalidateNodes();
+      invalidateEdges();
+    },
   });
 
   if (status === "pending") {
@@ -214,7 +237,7 @@ export function KnowledgePanel() {
                     key={n.id}
                     node={n}
                     onEdit={() => setEditing(n)}
-                    onDelete={() => removeNode(n)}
+                    onDelete={() => setConfirmNode(n)}
                     deleting={deleteNode.isPending && deleteNode.variables?.id === n.id}
                   />
                 ))}
@@ -238,7 +261,7 @@ export function KnowledgePanel() {
         pending={editing ? updateNode.isPending : createNode.isPending}
         error={editorError}
         onCancel={() => setEditing(null)}
-        onDelete={editing ? () => removeNode(editing) : undefined}
+        onDelete={editing ? () => setConfirmNode(editing) : undefined}
         onSubmit={(fields, reset) => {
           if (editing) {
             updateNode.mutate({
@@ -255,7 +278,86 @@ export function KnowledgePanel() {
           }
         }}
       />
+
+      {confirmNode && (
+        <NodeDeleteConfirm
+          node={confirmNode}
+          onCancel={() => setConfirmNode(null)}
+          onConfirm={() => {
+            removeNode(confirmNode);
+            setConfirmNode(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// NodeDeleteConfirm is the delete gate for one entry. Mounted only while a delete
+// is pending confirmation, it fetches the node's edges so the dialog can name how
+// many relationships the cascade (ADR-0008 ON DELETE CASCADE) will take with it.
+// The count must never be IMPLIED — while the fetch is in flight a raw 0 would
+// falsely promise "no cascade", so the dialog says "counting…" and holds the
+// confirm disabled until the real count lands; a failed fetch says so plainly
+// rather than showing 0 (deletion still cascades server-side either way).
+function NodeDeleteConfirm({
+  node,
+  onConfirm,
+  onCancel,
+}: {
+  node: Node;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  // retry:false so a failed count settles into isError at once — this query
+  // blocks a modal, so backing off silently for seconds would leave "counting…"
+  // stuck and the confirm disabled. Fail fast and say so.
+  const edgesQuery = useQuery(
+    CampaignService.method.listNodeEdges,
+    { nodeId: node.id },
+    { retry: false },
+  );
+  const edgeCount =
+    (edgesQuery.data?.outgoing.length ?? 0) + (edgesQuery.data?.incoming.length ?? 0);
+
+  let cascade: ReactNode;
+  if (edgesQuery.isPending) {
+    cascade = <> Counting its relationships…</>;
+  } else if (edgesQuery.isError) {
+    cascade = <> Its relationships couldn't be counted, but any it has will be deleted too.</>;
+  } else if (edgeCount > 0) {
+    cascade = (
+      <>
+        {" This also deletes its "}
+        <strong>
+          {edgeCount} relationship{edgeCount === 1 ? "" : "s"}
+        </strong>
+        .
+      </>
+    );
+  } else {
+    cascade = null;
+  }
+
+  return (
+    <ConfirmDialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+      title={`Delete “${node.name}”?`}
+      description={
+        <>
+          This permanently deletes this entry. Hard delete — this can't be undone.
+          {cascade}
+        </>
+      }
+      confirmLabel="Delete entry"
+      // Don't let the operator confirm against an unknown count; a fetch failure
+      // is not a reason to block the delete itself.
+      confirmDisabled={edgesQuery.isPending}
+      onConfirm={onConfirm}
+    />
   );
 }
 

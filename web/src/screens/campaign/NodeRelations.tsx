@@ -8,6 +8,7 @@ import type { Node as PbNode, Edge as PbEdge } from "@gen/glyphoxa/management/v1
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 // NodeRelations (#132) is the editor card's "Relations · N" section on the live
 // CampaignService edge RPCs (ADR-0008 v1.0 + 2026-07-04 amendment). Edges are
@@ -99,6 +100,9 @@ export function NodeRelations({ node }: { node: PbNode }) {
   const [adding, setAdding] = useState(false);
   const [relType, setRelType] = useState<string>("");
   const [target, setTarget] = useState<string>("");
+  // The outgoing edge a delete has been requested for; drives the confirm dialog
+  // so no DeleteEdge fires on a single click (#209).
+  const [confirmEdge, setConfirmEdge] = useState<PbEdge | null>(null);
 
   // The linked agent is held locally so the select reflects a fresh choice: the
   // `node` prop is a snapshot of the editor's `editing` state that setNodeAgent
@@ -207,7 +211,7 @@ export function NodeRelations({ node }: { node: PbNode }) {
 
       <section className="gx-kg-relations__list" aria-label="Outgoing relations">
         {outgoing.map((e) => (
-          <OutgoingRow key={e.id} edge={e} onDelete={() => deleteEdge.mutate({ id: e.id })} />
+          <OutgoingRow key={e.id} edge={e} onDelete={() => setConfirmEdge(e)} />
         ))}
         {outgoing.length === 0 && <p className="gx-kg-relations__empty">No outgoing relations yet.</p>}
         {deleteEdge.isError && (
@@ -226,6 +230,30 @@ export function NodeRelations({ node }: { node: PbNode }) {
             Relations are one-way. Incoming ones are shown for context and edited from the other entry.
           </p>
         </section>
+      )}
+
+      {confirmEdge && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setConfirmEdge(null);
+          }}
+          title="Delete this relation?"
+          description={
+            <>
+              Removes the{" "}
+              <strong>
+                {EDGE_LABEL.get(confirmEdge.edgeType) ?? ""} → {confirmEdge.toNodeName}
+              </strong>{" "}
+              relationship. This can't be undone.
+            </>
+          }
+          confirmLabel="Delete relation"
+          onConfirm={() => {
+            deleteEdge.mutate({ id: confirmEdge.id });
+            setConfirmEdge(null);
+          }}
+        />
       )}
     </div>
   );
