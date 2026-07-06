@@ -313,3 +313,31 @@ func TestSetNodeAgent_StorageErrorsMapToCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateEdgeHonorsDurableSelection is #222 for the KG wiki edge write: a new
+// Edge is created in the durable /glyphoxa use selection (D), not the most-recent
+// default (N).
+func TestCreateEdgeHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+
+	if _, err := client.CreateEdge(context.Background(),
+		connect.NewRequest(&managementv1.CreateEdgeRequest{
+			FromNodeId: uuid.New().String(),
+			ToNodeId:   uuid.New().String(),
+			EdgeType:   managementv1.EdgeType_EDGE_TYPE_KNOWS,
+		})); err != nil {
+		t.Fatalf("CreateEdge: %v", err)
+	}
+	if len(store.edgesCreated) != 1 {
+		t.Fatalf("created %d edges, want 1", len(store.edgesCreated))
+	}
+	if got := store.edgesCreated[0].CampaignID; got != durable.ID {
+		t.Errorf("edge created in campaign %s, want the durable selection %s (not the newer %s)", got, durable.ID, newer.ID)
+	}
+}

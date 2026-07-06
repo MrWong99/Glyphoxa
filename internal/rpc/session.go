@@ -158,23 +158,11 @@ func (s *SessionServer) StartSession(
 
 // startCampaign resolves the campaign a web Start binds to, honoring the durable
 // /glyphoxa use selection so the web Start button and the slash command agree
-// (ADR-0009, #108): the logged-in operator's active_campaign_id when set, else the
-// most-recently-created campaign — kept as the fallback so a fresh install that
-// has never run /glyphoxa use still starts. The slash surface is strict (no
-// fallback) because it has the /use affordance; the web has no such hint, so it
-// keeps the legacy default.
+// (ADR-0009, #108). It is the shared profile-first resolveActiveCampaign (durable
+// /glyphoxa use selection → most-recent fallback, #222) — the SAME resolution the
+// header, campaign CRUD, and KG wiki scope through.
 func (s *SessionServer) startCampaign(ctx context.Context) (storage.Campaign, error) {
-	if u, ok := auth.CurrentUser(ctx); ok && u.DiscordUserID != "" {
-		c, err := s.store.GetActiveCampaignForUser(ctx, u.DiscordUserID)
-		if err == nil {
-			return c, nil
-		}
-		if !errors.Is(err, storage.ErrNotFound) {
-			return storage.Campaign{}, err
-		}
-		// No durable selection yet — fall back to the implicit default.
-	}
-	return s.store.GetActiveCampaign(ctx)
+	return resolveActiveCampaign(ctx, s.store)
 }
 
 // startError maps a manager Start failure onto a Connect status code: the

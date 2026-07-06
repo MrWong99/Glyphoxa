@@ -20,13 +20,17 @@ import (
 // scoping fills in behind the X-Tenant-Id interceptor later.
 
 // GetCampaignRoster returns the active campaign with its ordered roster: the
-// Butler first, then the Character NPCs. No campaign yields CodeNotFound; a
-// missing Butler is an ADR-0009 invariant violation (logged, CodeInternal).
+// Butler first, then the Character NPCs. The campaign is resolved live-first
+// (the live Voice Session's campaign → durable /glyphoxa use selection →
+// most-recent fallback) so the Session screen's roster/mute panel lists the NPCs
+// actually voicing, not a durable selection changed mid-session (#222). No
+// campaign yields CodeNotFound; a missing Butler is an ADR-0009 invariant
+// violation (logged, CodeInternal).
 func (s *CampaignServer) GetCampaignRoster(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetCampaignRosterRequest],
 ) (*connect.Response[managementv1.GetCampaignRosterResponse], error) {
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := s.rosterCampaign(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -62,12 +66,15 @@ func (s *CampaignServer) GetCampaignRoster(
 }
 
 // CreateAgent adds a Character NPC to the active campaign and returns it with its
-// server-assigned speaker-colour slot. The role is always 'character'.
+// server-assigned speaker-colour slot. The role is always 'character'. The active
+// campaign is resolved profile-first (durable /glyphoxa use selection →
+// most-recent fallback) so the new NPC lands in the campaign the Campaign screen
+// is scoped to, not the newest one (#222).
 func (s *CampaignServer) CreateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateAgentRequest],
 ) (*connect.Response[managementv1.CreateAgentResponse], error) {
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := resolveActiveCampaign(ctx, s.store)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

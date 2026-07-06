@@ -13,17 +13,36 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // fakeReader is a keyless, deterministic campaignReader for the default gate.
+// forUser/forUserErr back the durable /glyphoxa use selection the profile-first
+// resolution reads first (#222); campaign is the most-recent fallback.
 type fakeReader struct {
-	campaign storage.Campaign
-	err      error
+	campaign   storage.Campaign
+	err        error
+	forUser    storage.Campaign
+	forUserErr error
 }
 
 func (f fakeReader) GetActiveCampaign(context.Context) (storage.Campaign, error) {
+	return f.campaign, f.err
+}
+
+func (f fakeReader) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+	if f.forUserErr != nil {
+		return storage.Campaign{}, f.forUserErr
+	}
+	if f.forUser.ID == uuid.Nil {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	return f.forUser, nil
+}
+
+func (f fakeReader) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
 	return f.campaign, f.err
 }
 
@@ -98,6 +117,66 @@ func newClient(t *testing.T, reader fakeReader) managementv1connect.CampaignServ
 	return managementv1connect.NewCampaignServiceClient(
 		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
 	)
+}
+
+// newClientAs is newClient plus an injected authenticated operator, so the
+// profile-first resolution's durable-selection lookup sees a Discord identity
+// (#222). A zero user injects nothing (the legacy no-user path).
+func newClientAs(t *testing.T, reader fakeReader, user storage.User) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			if user.DiscordUserID != "" {
+				ctx = auth.WithUser(ctx, user)
+			}
+			return next(ctx, req)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewCampaignServer(reader).Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return managementv1connect.NewCampaignServiceClient(
+		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
+	)
+}
+
+// TestGetActiveCampaignHonorsDurableSelection is #222: the Session-screen header
+// resolves the operator's durable /glyphoxa use selection (campaign A), not the
+// most-recently-created default (campaign B), so the header names the campaign
+// Start would run.
+func TestGetActiveCampaignHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	selected := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Selected A"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer B"}
+	client := newClientAs(t, fakeReader{forUser: selected, campaign: newer}, storage.User{DiscordUserID: "999"})
+
+	resp, err := client.GetActiveCampaign(context.Background(),
+		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}))
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	if got := resp.Msg.GetCampaign().GetId(); got != selected.ID.String() {
+		t.Errorf("header campaign = %s, want the durable selection %s (not the newer %s)", got, selected.ID, newer.ID)
+	}
+}
+
+// TestGetActiveCampaignFallsBackWithoutSelection pins the fallback half of #222:
+// an operator with no /glyphoxa use selection sees the most-recently-created
+// campaign in the header (GetActiveCampaign).
+func TestGetActiveCampaignFallsBackWithoutSelection(t *testing.T) {
+	t.Parallel()
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer B"}
+	client := newClientAs(t, fakeReader{forUserErr: storage.ErrNotFound, campaign: newer}, storage.User{DiscordUserID: "999"})
+
+	resp, err := client.GetActiveCampaign(context.Background(),
+		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}))
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	if got := resp.Msg.GetCampaign().GetId(); got != newer.ID.String() {
+		t.Errorf("header campaign = %s, want the fallback %s", got, newer.ID)
+	}
 }
 
 func TestGetActiveCampaign_HappyPath(t *testing.T) {

@@ -409,3 +409,74 @@ func TestSearchNodes_StorageErrorIsInternal(t *testing.T) {
 		t.Errorf("code = %v, want Internal", got)
 	}
 }
+
+// TestCreateNodeHonorsDurableSelection is #222 for the KG wiki write: a new Node
+// lands in the durable /glyphoxa use selection (D), not the most-recent default
+// (N) — so the wiki edited on the Campaign screen and the durable selection stay
+// coherent.
+func TestCreateNodeHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+
+	if _, err := client.CreateNode(context.Background(),
+		connect.NewRequest(&managementv1.CreateNodeRequest{
+			NodeType: managementv1.NodeType_NODE_TYPE_NOTE, Name: "A note",
+		})); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	if len(store.nodesCreated) != 1 {
+		t.Fatalf("created %d nodes, want 1", len(store.nodesCreated))
+	}
+	if got := store.nodesCreated[0].CampaignID; got != durable.ID {
+		t.Errorf("node landed in campaign %s, want the durable selection %s (not the newer %s)", got, durable.ID, newer.ID)
+	}
+}
+
+// TestListNodesHonorsDurableSelection is #222 for the KG wiki read: ListNodes
+// scopes to the durable /glyphoxa use selection (D), not the most-recent default
+// (N).
+func TestListNodesHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+
+	if _, err := client.ListNodes(context.Background(),
+		connect.NewRequest(&managementv1.ListNodesRequest{})); err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if store.listNodesCampaign != durable.ID {
+		t.Errorf("ListNodes scoped to %s, want the durable selection %s (not the newer %s)",
+			store.listNodesCampaign, durable.ID, newer.ID)
+	}
+}
+
+// TestSearchNodesHonorsDurableSelection is #222 for the KG wiki search: SearchNodes
+// scopes to the durable /glyphoxa use selection (D), not the most-recent default
+// (N).
+func TestSearchNodesHonorsDurableSelection(t *testing.T) {
+	t.Parallel()
+	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
+	store := newFakeStore()
+	store.forUser = durable
+	store.campaign = newer
+	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+
+	if _, err := client.SearchNodes(context.Background(),
+		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "vault"})); err != nil {
+		t.Fatalf("SearchNodes: %v", err)
+	}
+	if store.searchNodesCampaign != durable.ID {
+		t.Errorf("SearchNodes scoped to %s, want the durable selection %s (not the newer %s)",
+			store.searchNodesCampaign, durable.ID, newer.ID)
+	}
+}

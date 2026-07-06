@@ -34,7 +34,7 @@ func (s *CampaignServer) CreateNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := resolveActiveCampaign(ctx, s.store)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -64,7 +64,7 @@ func (s *CampaignServer) ListNodes(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListNodesRequest],
 ) (*connect.Response[managementv1.ListNodesResponse], error) {
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := resolveActiveCampaign(ctx, s.store)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -157,7 +157,7 @@ func (s *CampaignServer) SearchNodes(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query must not be empty"))
 	}
 
-	c, err := s.store.GetActiveCampaign(ctx)
+	c, err := resolveActiveCampaign(ctx, s.store)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
