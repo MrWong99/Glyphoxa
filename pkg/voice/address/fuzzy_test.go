@@ -129,3 +129,32 @@ func TestFuzzyIndex_NoMatch(t *testing.T) {
 		t.Errorf("unrelated utterance scored %v, want empty", got)
 	}
 }
+
+// TestDeriveTruncationAliases pins the derivation rules (#197): a leading
+// consonant is dropped ("Bart"→"art"), a vowel-initial name derives nothing
+// ("Anna"), a non-letter remainder is guarded ("D20"→"20" rejected), a two-rune
+// name is too short once truncated ("Bo"→"o" rejected), multi-token names keep
+// their remaining tokens, and collisions dedupe.
+func TestDeriveTruncationAliases(t *testing.T) {
+	cases := []struct {
+		desc string
+		in   []string
+		want []string
+	}{
+		{"consonant drop", []string{"Bart"}, []string{"art"}},
+		{"marek", []string{"Marek"}, []string{"arek"}},
+		{"multi-token keeps remaining tokens", []string{"Grim Jaw"}, []string{"rim Jaw"}},
+		{"vowel-initial derives none", []string{"Anna"}, nil},
+		{"configured-alias vowel-initial none", []string{"innkeeper"}, nil},
+		{"non-letter remainder none", []string{"D20"}, nil},
+		{"two-rune name none", []string{"Bo"}, nil},
+		{"barkeep", []string{"barkeep"}, []string{"arkeep"}},
+		{"dedupe collision", []string{"Bart", "Cart"}, []string{"art"}},
+		{"name plus aliases", []string{"Bart", "innkeeper", "barkeep"}, []string{"art", "arkeep"}},
+	}
+	for _, tc := range cases {
+		if got := DeriveTruncationAliases(tc.in...); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: DeriveTruncationAliases(%q) = %v, want %v", tc.desc, tc.in, got, tc.want)
+		}
+	}
+}

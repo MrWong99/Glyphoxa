@@ -189,6 +189,55 @@ func runeLen(s string) int {
 	return n
 }
 
+// isVowel reports whether r is a vocalic onset for truncation-alias derivation.
+// German umlauts count because the Campaign Language may be de (#199); y is a
+// consonant. A name beginning with a vowel derives no alias, since dropping a
+// leading vowel is not the STT-truncation failure mode this guards.
+func isVowel(r rune) bool {
+	switch unicode.ToLower(r) {
+	case 'a', 'e', 'i', 'o', 'u', 'ä', 'ö', 'ü':
+		return true
+	}
+	return false
+}
+
+// DeriveTruncationAliases returns, per name, the STT-truncation form STT tends to
+// produce by dropping the leading consonant — "Bart" heard as "art" (#197, live
+// turn 47aecba4be320d54). A form is derived only when the name begins with a
+// consonant letter and the remainder is itself usable: its first rune is a
+// letter (so "D20"→"20" is rejected) and it is at least two runes once tokenized
+// (so "Bo"→"o" is rejected). Vowel-initial names ("Anna", the configured alias
+// "innkeeper") derive nothing. Results are deduped. The caller feeds these to
+// [Agent.TruncationAliases], where they are matched EXACT-ONLY at the utterance
+// start and never reach the phonetic/edit tiers (see [fuzzyIndex.scoreAll]).
+func DeriveTruncationAliases(names ...string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, name := range names {
+		runes := []rune(strings.TrimSpace(name))
+		if len(runes) == 0 {
+			continue
+		}
+		if first := runes[0]; !unicode.IsLetter(first) || isVowel(first) {
+			continue
+		}
+		candidate := string(runes[1:])
+		rem := []rune(strings.TrimSpace(candidate))
+		if len(rem) == 0 || !unicode.IsLetter(rem[0]) {
+			continue // remainder does not start with a letter (guards "D20"→"20")
+		}
+		if runeLen(strings.Join(tokenize(candidate), "")) < 2 {
+			continue // remainder too short to be a name (guards "Bo"→"o")
+		}
+		if _, dup := seen[candidate]; dup {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
+}
+
 // tokenize lowercases s and splits it into maximal runs of letters and digits,
 // dropping all other runes. It is the shared normalizer for both names (at
 // build time) and utterances (at match time), so "Bart, what's up?" and the
