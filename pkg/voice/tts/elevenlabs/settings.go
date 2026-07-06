@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
 
 // ModelV3 is the canonical ElevenLabs v3 model identifier. v3 is the model
@@ -73,6 +75,39 @@ func DefaultV3Settings() Settings {
 			SimilarityBoost: &similarity,
 			UseSpeakerBoost: &boost,
 		},
+	}
+}
+
+// DefaultVoiceOutputFormat is the PCM output format [DefaultVoice] requests:
+// 48 kHz mono int16 PCM, matching Discord's Opus encoder rate so the outbound
+// codec path stays encode-only (no resampler) on the live demo. It overrides the
+// streaming-friendly [DefaultOutputFormat] (24 kHz) for the persisted per-NPC
+// default the web editor and the seed both write.
+const DefaultVoiceOutputFormat = "pcm_48000"
+
+// DefaultVoice builds the canonical [tts.Voice] for a freshly-selected ElevenLabs
+// voice id: the ProviderID + VoiceID + Language identity plus the documented
+// eleven_v3 defaults (conversational stability/similarity/speaker-boost) at
+// [DefaultVoiceOutputFormat]. It is the ONE place the first-save default is
+// defined — the Campaign RPC's first UI save and [wirenpc.npcVoice] (the seed
+// source) both delegate here, so the persisted shape can't drift between them
+// (#224). Name is left empty; callers that display a name (the seed's "Bart")
+// set it after. Settings stays opaque to the core tts package (ADR-0022); this
+// is the elevenlabs-package home for its typed default.
+func DefaultVoice(voiceID, language string) tts.Voice {
+	settings := DefaultV3Settings()
+	settings.OutputFormat = DefaultVoiceOutputFormat
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		// DefaultV3Settings is a fixed, marshalable struct; a failure here is a
+		// programming error, not a runtime condition.
+		panic(fmt.Sprintf("elevenlabs.DefaultVoice: marshal settings: %v", err))
+	}
+	return tts.Voice{
+		ProviderID: ProviderID,
+		VoiceID:    voiceID,
+		Language:   language,
+		Settings:   raw,
 	}
 }
 

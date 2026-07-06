@@ -14,7 +14,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
@@ -264,17 +263,13 @@ func grantsFromRows(rows []storage.ToolGrant) []tool.Grant {
 // npcSpecFromAgent maps a storage.Agent (vendor-neutral) to the voice-domain
 // npcSpec, deserializing the opaque Voice JSONB into a tts.Voice.
 func npcSpecFromAgent(a storage.Agent) (npcSpec, error) {
-	var voice tts.Voice
-	if len(a.Voice) > 0 {
-		if err := json.Unmarshal(a.Voice, &voice); err != nil {
-			return npcSpec{}, fmt.Errorf("wirenpc: unmarshal voice for agent %s: %w", a.ID, err)
-		}
-	}
-	// A nil Settings serializes to the JSON literal `null`, which unmarshals
-	// back into a non-nil json.RawMessage("null"). Normalize it to nil so a
-	// settings-less Voice round-trips identically.
-	if string(voice.Settings) == "null" {
-		voice.Settings = nil
+	// Delegate to the canonical storage.VoiceFromJSON mapper so the live loop and
+	// the Campaign RPC editor read the voice column through ONE decoder and can't
+	// drift (#224) — the same single-source pattern as grantsFromRows (#215). The
+	// null-Settings normalization lives in the mapper now.
+	voice, err := storage.VoiceFromJSON(a.Voice)
+	if err != nil {
+		return npcSpec{}, fmt.Errorf("wirenpc: unmarshal voice for agent %s: %w", a.ID, err)
 	}
 	return npcSpec{
 		agentID: a.ID.String(),
