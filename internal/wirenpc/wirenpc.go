@@ -13,7 +13,6 @@ package wirenpc
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -388,6 +387,11 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	for _, npc := range npcs {
 		log.Info("loaded NPC from DB", "npc", npc.name, "agentID", npc.agentID)
 	}
+	// Surface the #224 failure mode at session start, loudly: an NPC that hydrated
+	// with an empty VoiceID will be silent at synthesis time (elevenlabs.Synthesize
+	// rejects an empty Voice.VoiceID). Logging it here — once, at load — beats the
+	// per-turn WARN storm that hid the cause during live validation.
+	logVoiceGaps(log, npcs)
 
 	// Resolve the session's BYOK keys from the saved provider_config (issue #69).
 	// A decryption failure (e.g. a real saved key with the wrong/absent cipher)
@@ -402,6 +406,21 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	cfg.keys = keys
 	cfg.language = campaign.Language
 	return Run(ctx, cfg)
+}
+
+// logVoiceGaps emits an ERROR for every loaded NPC whose Voice has an empty
+// VoiceID (#224, AC6): such an NPC is unsynthesizable and will be silent, so the
+// gap is surfaced ONCE at session start instead of failing per-turn at synthesis
+// time. It is unconditional on the DB path — the check is the empty VoiceID
+// itself, not the NPC's addressability or TTS binding, because an empty VoiceID
+// is always the silent-NPC condition.
+func logVoiceGaps(log *slog.Logger, npcs []npcSpec) {
+	for _, npc := range npcs {
+		if npc.voice.VoiceID == "" {
+			log.Error("NPC has no synthesizable voice (empty VoiceID); it will be silent",
+				"npc", npc.name, "agentID", npc.agentID)
+		}
+	}
 }
 
 // ensureSchemaCurrent verifies the DB at dsn is migrated to the latest embedded
@@ -694,21 +713,12 @@ func npcNames(npcs []npcSpec) []string {
 // The codec still resamples arbitrary AudioChunk.SampleRate for tests and other
 // voices; this voice simply does not exercise it.
 func npcVoice() tts.Voice {
-	settings := ttseleven.DefaultV3Settings()
-	settings.OutputFormat = "pcm_48000"
-	raw, err := json.Marshal(settings)
-	if err != nil {
-		// DefaultV3Settings is a fixed, marshalable struct; a failure here is a
-		// programming error, not a runtime condition.
-		panic(fmt.Sprintf("wirenpc.npcVoice: marshal voice settings: %v", err))
-	}
-	return tts.Voice{
-		ProviderID: ttseleven.ProviderID,
-		VoiceID:    elevenGeorgeVoiceID,
-		Name:       "Bart",
-		Language:   "en",
-		Settings:   raw,
-	}
+	// Delegate to the canonical ElevenLabs default (the same one the web editor's
+	// first save writes) and add the seed's display Name, so this seed source and
+	// the RPC first-save default stay byte-identical (#224).
+	v := ttseleven.DefaultVoice(elevenGeorgeVoiceID, "en")
+	v.Name = "Bart"
+	return v
 }
 
 // Provider-adapter constructors, injected as package vars so a test can spy on

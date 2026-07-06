@@ -11,6 +11,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // Campaign-screen CRUD handlers (#71) on CampaignServer: the roster read plus
@@ -86,12 +87,14 @@ func (s *CampaignServer) CreateAgent(
 
 	m := req.Msg
 	id, err := s.store.CreateAgent(ctx, storage.NewAgent{
-		CampaignID:  c.ID,
-		Role:        storage.AgentRoleCharacter,
-		Name:        m.GetName(),
-		Title:       m.GetTitle(),
-		Persona:     m.GetPersona(),
-		Voice:       marshalVoice(m.GetVoice()),
+		CampaignID: c.ID,
+		Role:       storage.AgentRoleCharacter,
+		Name:       m.GetName(),
+		Title:      m.GetTitle(),
+		Persona:    m.GetPersona(),
+		// A new agent has no persisted voice yet; the active campaign's language
+		// seeds the first-save default when a voice is picked (#224).
+		Voice:       applyVoiceSelection(nil, m.GetVoice(), c.Language),
 		AddressOnly: m.GetAddressOnly(),
 		Aliases:     m.GetAliases(),
 	})
@@ -122,13 +125,36 @@ func (s *CampaignServer) UpdateAgent(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
 
+	// Read the current row so applyVoiceSelection can preserve the persisted voice
+	// tuning the editor never sees (ProviderID/Language/Settings); GetAgent also
+	// gives the authoritative NotFound before the write (#224).
+	existing, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
+		}
+		slog.Default().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	// Resolve the active campaign the SAME live-first way the roster/create paths do
+	// (#222/#229) — its language seeds a first-save voice default (#224). Reusing the
+	// unified resolver avoids a second, divergent campaign-resolution path.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("UpdateAgent: get active campaign failed", "agent_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
 	m := req.Msg
 	updated, err := s.store.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:          id,
 		Name:        m.GetName(),
 		Title:       m.GetTitle(),
 		Persona:     m.GetPersona(),
-		Voice:       marshalVoice(m.GetVoice()),
+		Voice:       applyVoiceSelection(existing.Voice, m.GetVoice(), c.Language),
 		AddressOnly: m.GetAddressOnly(),
 		Aliases:     m.GetAliases(),
 	})
@@ -184,34 +210,62 @@ func toProtoAgent(a storage.Agent) *managementv1.Agent {
 	}
 }
 
-// voiceBlob is the minimal shape of an Agent's voice JSONB this slice reads and
-// writes: a single voice id. The column is JSONB so the shape can grow without a
-// migration (ADR-0022/0023); the editor only selects a voice id today.
-type voiceBlob struct {
-	VoiceID string `json:"voice_id"`
-}
-
-// marshalVoice wraps a selected voice id into the voice JSONB. An empty id yields
-// the empty object the schema defaults to, so "no voice" round-trips cleanly.
-func marshalVoice(voiceID string) []byte {
+// applyVoiceSelection folds the editor's bare voice-id selection (ADR-0039 keeps
+// the wire contract a plain string) into the canonical voice JSONB the voice
+// pipeline reads (#224). It preserves the persisted tuning the editor never sees:
+//
+//   - empty id → {} : clearing the voice, the schema default (today's semantics).
+//   - first save / an old {"voice_id":…} drift row / an unparsable blob → the
+//     documented ElevenLabs default for this id + the campaign language, so a
+//     first UI save fills provider/Settings and a silent drift row self-heals on
+//     the next edit — no re-pick needed.
+//   - same id as already persisted → the existing bytes verbatim (a tuned
+//     Settings blob is never clobbered).
+//   - changed id → keep the existing ProviderID/Language/Settings, swap the
+//     VoiceID, reset the display Name (it named the old voice).
+//
+// existing is the row's current voice column (nil on create); campaignLanguage is
+// the active/owning campaign's language, used only to seed a first-save default.
+func applyVoiceSelection(existing json.RawMessage, voiceID, campaignLanguage string) []byte {
 	if voiceID == "" {
 		return []byte(`{}`)
 	}
-	b, err := json.Marshal(voiceBlob{VoiceID: voiceID})
-	if err != nil { // a string field cannot fail to marshal; guard defensively
+	current, err := storage.VoiceFromJSON(existing)
+	if err != nil || current.VoiceID == "" {
+		// First save, a cleared/empty blob, or an old {"voice_id":…} drift row (all
+		// read back with an empty VoiceID): fill the documented defaults.
+		return defaultVoiceJSON(voiceID, campaignLanguage)
+	}
+	if current.VoiceID == voiceID {
+		return existing // unchanged selection — preserve the persisted bytes exactly
+	}
+	// Changed selection: keep the provider tuning, swap the id, drop the stale Name.
+	current.VoiceID = voiceID
+	current.Name = ""
+	b, err := storage.VoiceToJSON(current)
+	if err != nil { // a well-formed Voice cannot fail to marshal; guard defensively
+		return defaultVoiceJSON(voiceID, campaignLanguage)
+	}
+	return b
+}
+
+// defaultVoiceJSON is the canonical first-save default voice blob for a selected
+// id: elevenlabs.DefaultVoice serialized through the canonical mapper. Falls back
+// to {} only if marshaling somehow fails (it cannot for a fixed struct).
+func defaultVoiceJSON(voiceID, language string) []byte {
+	b, err := storage.VoiceToJSON(elevenlabs.DefaultVoice(voiceID, language))
+	if err != nil {
 		return []byte(`{}`)
 	}
 	return b
 }
 
-// unmarshalVoice extracts the voice id from an Agent's voice JSONB, returning ""
-// for an empty/unparsable blob.
+// unmarshalVoice extracts the voice id from an Agent's voice JSONB via the
+// canonical reader (#224) — so a seed/pipeline-shaped row shows its voice in the
+// editor instead of "Pick a voice…". An empty/unparsable blob yields "".
 func unmarshalVoice(raw []byte) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var v voiceBlob
-	if err := json.Unmarshal(raw, &v); err != nil {
+	v, err := storage.VoiceFromJSON(raw)
+	if err != nil {
 		return ""
 	}
 	return v.VoiceID

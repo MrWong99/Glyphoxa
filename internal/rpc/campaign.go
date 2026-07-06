@@ -34,7 +34,8 @@ type campaignStore interface {
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	// GetCampaign loads a campaign by id: the roster/mute panel resolves the LIVE
 	// Voice Session's campaign first (#222), so it fetches that specific row rather
-	// than the profile default.
+	// than the profile default. UpdateAgent also uses it to read the owning
+	// campaign's language for a first-save voice default (#224).
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
