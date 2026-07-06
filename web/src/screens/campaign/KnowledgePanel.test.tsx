@@ -30,7 +30,7 @@ import { KnowledgePanel } from "./KnowledgePanel";
 // NodeType, the update fields, and the delete id reach the wire.
 function mockTransport(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts: { failDelete?: boolean; failSearch?: boolean; edges?: PbEdge[] } = {},
+  opts: { failDelete?: boolean; failSearch?: boolean; failEdges?: boolean; edges?: PbEdge[] } = {},
 ) {
   const nodes =
     seed ??
@@ -57,11 +57,15 @@ function mockTransport(
       listNodes: () => create(ListNodesResponseSchema, { nodes }),
       // The delete-confirm dialog fetches a node's edges to show the cascade
       // count; split the seeded edges by which side touches the asked node.
-      listNodeEdges: (req) =>
-        create(ListNodeEdgesResponseSchema, {
+      listNodeEdges: (req) => {
+        if (opts.failEdges) {
+          throw new ConnectError("edges boom", Code.Internal);
+        }
+        return create(ListNodeEdgesResponseSchema, {
           outgoing: edges.filter((e) => e.fromNodeId === req.nodeId),
           incoming: edges.filter((e) => e.toNodeId === req.nodeId),
-        }),
+        });
+      },
       // Stand-in for the tsvector search: a case-insensitive substring over
       // name + body. The panel only cares that matches filter the visible list;
       // relevance ranking is asserted server-side. gm_private is not filtered.
@@ -113,7 +117,7 @@ function mockTransport(
 
 function renderPanel(
   seed?: ReturnType<typeof create<typeof NodeSchema>>[],
-  opts?: { failDelete?: boolean; failSearch?: boolean; edges?: PbEdge[] },
+  opts?: { failDelete?: boolean; failSearch?: boolean; failEdges?: boolean; edges?: PbEdge[] },
 ) {
   const ctx = mockTransport(seed, opts);
   render(
@@ -125,10 +129,14 @@ function renderPanel(
 }
 
 // Delete is now guarded by a confirm dialog: open it via the card/editor trash
-// button, then click the destructive button inside the dialog itself.
+// button, then click the destructive button inside the dialog itself. The
+// confirm stays disabled until the cascade-edge count has loaded, so wait for it
+// to enable before clicking.
 async function confirmInDialog() {
   const dialog = await screen.findByRole("alertdialog");
-  fireEvent.click(within(dialog).getByRole("button", { name: /^delete/i }));
+  const btn = within(dialog).getByRole("button", { name: /^delete/i });
+  await waitFor(() => expect(btn).toBeEnabled());
+  fireEvent.click(btn);
 }
 
 // pickType opens the Radix Type select and chooses the named option.
@@ -258,11 +266,29 @@ describe("KnowledgePanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /edit the sealed vault/i }));
     fireEvent.click(screen.getByRole("button", { name: /^delete entry$/i }));
-    await confirmInDialog();
+    // The editor trash opens the confirm dialog; no RPC until confirmed.
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    expect(deleteCalls).toHaveLength(0);
 
+    await confirmInDialog();
     await screen.findByText(/no entries yet/i);
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0].id).toBe("n1");
+  });
+
+  it("when the cascade count can't be fetched, admits it instead of implying zero — and still deletes", async () => {
+    const { deleteCalls } = renderPanel(undefined, { failEdges: true });
+    await screen.findByText("The sealed vault");
+
+    fireEvent.click(screen.getByRole("button", { name: /delete the sealed vault/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    // Never a bare "0 relationships"; the dialog says the count is unknown.
+    await waitFor(() => expect(dialog).toHaveTextContent(/couldn't be counted/i));
+
+    // The delete itself is not blocked by a failed count (cascade runs server-side).
+    await confirmInDialog();
+    await screen.findByText(/no entries yet/i);
+    expect(deleteCalls).toHaveLength(1);
   });
 
   it("refreshes the filtered search results when an entry is deleted while searching", async () => {

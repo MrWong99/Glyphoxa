@@ -19,6 +19,7 @@ export function ConfirmDialog({
   confirmLabel = "Delete",
   cancelLabel = "Cancel",
   onConfirm,
+  confirmDisabled = false,
   destructive = true,
 }: {
   open: boolean;
@@ -28,6 +29,7 @@ export function ConfirmDialog({
   confirmLabel?: string;
   cancelLabel?: string;
   onConfirm: () => void;
+  confirmDisabled?: boolean;
   destructive?: boolean;
 }) {
   return (
@@ -45,7 +47,11 @@ export function ConfirmDialog({
               <Button variant="ghost">{cancelLabel}</Button>
             </RAlert.Cancel>
             <RAlert.Action asChild>
-              <Button variant={destructive ? "danger" : "primary"} onClick={onConfirm}>
+              <Button
+                variant={destructive ? "danger" : "primary"}
+                onClick={onConfirm}
+                disabled={confirmDisabled}
+              >
                 {confirmLabel}
               </Button>
             </RAlert.Action>

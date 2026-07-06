@@ -1,7 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 
 import { ConfirmDialog } from "./ConfirmDialog";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("ConfirmDialog", () => {
   it("renders the title, description, and both buttons when open", () => {
@@ -81,5 +83,48 @@ describe("ConfirmDialog", () => {
     fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
     expect(onConfirm).not.toHaveBeenCalled();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  // Adversarial focus probe: the Cancel/Action buttons are rendered via Radix
+  // `asChild` onto our Button, so Button MUST forward its ref or Radix's Slot
+  // drops it — the AlertDialog then can't move focus into the dialog and logs
+  // "Function components cannot be given refs" on every render.
+  it("does not warn about refs on function components", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="Delete?"
+        description="gone forever"
+        onConfirm={() => {}}
+      />,
+    );
+    const refWarnings = err.mock.calls.filter((c) =>
+      String(c[0]).includes("Function components cannot be given refs"),
+    );
+    expect(refWarnings).toHaveLength(0);
+  });
+
+  it("moves initial focus onto the Cancel button (AlertDialog contract)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const trigger = document.createElement("button");
+    trigger.textContent = "outside trigger";
+    document.body.appendChild(trigger);
+    trigger.focus();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="Delete?"
+        description="gone forever"
+        onConfirm={() => {}}
+      />,
+    );
+    await screen.findByRole("alertdialog");
+    // If the ref never attached, focus stays on the outside trigger behind the
+    // now-aria-hidden app — keyboard/SR users are stranded.
+    const cancel = screen.getByRole("button", { name: /cancel/i });
+    expect(document.activeElement).toBe(cancel);
   });
 });
