@@ -29,6 +29,7 @@ const envPlaceholderLast4 = "env"
 // concrete store) so they unit-test keyless with a fake.
 type providerStore interface {
 	ListProviderConfigs(ctx context.Context, tenantID uuid.UUID) ([]storage.ProviderConfig, error)
+	GetProviderConfigByComponent(ctx context.Context, tenantID uuid.UUID, component storage.Component) (storage.ProviderConfig, error)
 	UpsertProviderConfigs(ctx context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error)
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	SaveDiscordBotToken(ctx context.Context, tenantID uuid.UUID, ciphertext []byte, last4 string) (storage.DeploymentConfig, error)
@@ -182,10 +183,6 @@ func (s *ProviderServer) SaveProviderConfig(
 	if err != nil {
 		return nil, err
 	}
-	if s.cipher == nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
-	}
 
 	slot, ok := slotFor(req.Msg.GetProvider())
 	if !ok {
@@ -194,7 +191,14 @@ func (s *ProviderServer) SaveProviderConfig(
 	}
 	secret := req.Msg.GetSecret()
 	if secret == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
+		// No secret on the wire = a model-only update for an already-saved key
+		// (#227): free-text model entry must not force the operator to re-paste
+		// the secret. Needs no cipher — nothing is sealed.
+		return s.saveModelOnly(ctx, tenantID, slot, req.Msg.GetModel())
+	}
+	if s.cipher == nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
 	}
 
 	sealed, last4, err := s.seal(secret)
@@ -225,6 +229,63 @@ func (s *ProviderServer) SaveProviderConfig(
 	// old key) is stale — bust it so the next health call probes fresh (#150).
 	if s.invalidateHealth != nil {
 		s.invalidateHealth(tenantID)
+	}
+
+	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
+		Credential: providerCredential(string(slot.components[0]), slot.provider, saved[0]),
+	}), nil
+}
+
+// saveModelOnly handles a SaveProviderConfig carrying no secret (#227): a
+// model-only update for a provider whose key is already stored. Each of the
+// slot's component rows is re-upserted with its stored ciphertext/last4
+// verbatim and the new model — the secret stays write-only and untouched
+// (ADR-0004). With no stored row the request is rejected exactly like the
+// pre-#227 empty-secret save: a model alone cannot create a credential slot.
+// An empty model together with the empty secret is a read-back no-op — such a
+// request only reaches the wire by accident (mirrors #142's posture on empty
+// Discord IDs). The health cache is deliberately NOT busted: the key did not
+// change, so the cached verdict is still valid.
+func (s *ProviderServer) saveModelOnly(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	slot byokSlot,
+	model string,
+) (*connect.Response[managementv1.SaveProviderConfigResponse], error) {
+	existing := make([]storage.ProviderConfig, 0, len(slot.components))
+	for _, comp := range slot.components {
+		cfg, err := s.store.GetProviderConfigByComponent(ctx, tenantID, comp)
+		if errors.Is(err, storage.ErrNotFound) || (err == nil && cfg.Provider != slot.provider) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("secret is required"))
+		}
+		if err != nil {
+			s.log.Error("SaveProviderConfig: read provider_config for model-only save failed", "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		existing = append(existing, cfg)
+	}
+
+	if model == "" {
+		return connect.NewResponse(&managementv1.SaveProviderConfigResponse{
+			Credential: providerCredential(string(slot.components[0]), slot.provider, existing[0]),
+		}), nil
+	}
+
+	batch := make([]storage.NewProviderConfig, 0, len(existing))
+	for _, cfg := range existing {
+		batch = append(batch, storage.NewProviderConfig{
+			TenantID:              tenantID,
+			Component:             cfg.Component,
+			Provider:              slot.provider,
+			Model:                 model,
+			CredentialsCiphertext: cfg.CredentialsCiphertext,
+			CredentialsLast4:      cfg.CredentialsLast4,
+		})
+	}
+	saved, err := s.store.UpsertProviderConfigs(ctx, batch)
+	if err != nil {
+		s.log.Error("SaveProviderConfig: model-only upsert failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
 
 	return connect.NewResponse(&managementv1.SaveProviderConfigResponse{

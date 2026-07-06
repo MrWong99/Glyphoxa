@@ -752,6 +752,10 @@ func (stubProviderStore) ListProviderConfigs(context.Context, uuid.UUID) ([]stor
 	return nil, nil
 }
 
+func (stubProviderStore) GetProviderConfigByComponent(context.Context, uuid.UUID, storage.Component) (storage.ProviderConfig, error) {
+	return storage.ProviderConfig{}, storage.ErrNotFound
+}
+
 func (stubProviderStore) UpsertProviderConfigs(_ context.Context, configs []storage.NewProviderConfig) ([]storage.ProviderConfig, error) {
 	out := make([]storage.ProviderConfig, len(configs))
 	for i, n := range configs {
