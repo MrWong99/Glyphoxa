@@ -17,6 +17,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
 import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
+import { AddBotLink } from "./AddBotLink";
 
 import "./configuration.css";
 
@@ -209,6 +210,9 @@ export function Configuration() {
               </span>
             )}
           </div>
+          {/* Authorizing the Bot into the Guild is a separate, prerequisite step
+              from saving the IDs — neither pasted-link format joins the Bot (#110). */}
+          <AddBotLink applicationId={config.data?.discordApplicationId ?? ""} />
         </div>
       </Card>
 
