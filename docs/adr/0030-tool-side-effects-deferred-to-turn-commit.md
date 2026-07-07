@@ -22,3 +22,7 @@ Tool execution shares the turn's `context.Context`, so barge-in cancellation tea
 - **Open a DB transaction per draft across the whole generation** — rejected; long-running transactions across multi-second LLM latency hold locks and exhaust connections. Recording intent and flushing in a short commit-time transaction achieves the same isolation without the open-tx cost.
 
 **Why this works:** a write's result is almost never load-bearing for the spoken text (`remember_knowledge` returns "saved", which the LLM does not need to keep talking), while reads — which the LLM *does* need mid-generation — are read-only and safe to speculate. Deferring writes to commit therefore costs nothing the spoken turn depends on, and yields isolation + atomicity for free with zero per-tool compensation code. The lost capability is intra-turn read-your-own-writes, which is rare and can be revisited.
+
+## Amendment: `remember_knowledge` is proposal-mediated, turn-commit narrowed (2026-07-07, #298)
+
+**ADR-0052** routes Agent KG writes through a GM-reviewed proposal queue: the Tool's only effect is inserting a `pending` proposal row at execution time, so it needs neither intent recording nor commit-time flushing (a barged reply still yields its proposal — the Agent heard the fact; the GM review is the safety net). Turn-commit remains the specified mechanism for future Tools whose effects must be atomic with the spoken utterance, and the `pkg/tool/loop.go` hard-refusal stays for any side-effecting Tool that is not proposal-mediated.
