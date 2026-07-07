@@ -188,6 +188,15 @@ func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, 
 		if ctx.Err() != nil {
 			return nil // shutdown requested — stop retrying, exit clean (fixes SIGTERM->exit1)
 		}
+		// A fatal, non-retryable gateway rejection (bad Bot token, disallowed
+		// intents, gateway reject) can never succeed on retry, so stop at once and
+		// surface the classification instead of backing off forever (#123). The
+		// session Manager reads this to record the persisted status as failed. A
+		// transient failure (or a clean nil return) falls through to the backoff.
+		if fe := classifyFatal(err); fe != nil {
+			log.Error("voice connection failed fatally; not retrying", "err", fe, "reason", fe.Reason)
+			return fe
+		}
 		if !connectedAt.IsZero() && now().Sub(connectedAt) >= p.healthyAfter {
 			delay = p.initial // served healthily — forgive past failures (issue #44)
 		}

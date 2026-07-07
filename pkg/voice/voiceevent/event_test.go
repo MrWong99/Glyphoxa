@@ -114,6 +114,27 @@ func TestMuteChanged_EventName(t *testing.T) {
 	}
 }
 
+func TestConnectionStateChanged_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := ConnectionStateChanged{}.EventName()
+	if got != "connection.state" {
+		t.Errorf("EventName = %q, want %q", got, "connection.state")
+	}
+}
+
+// TestConnectionState_WireValues pins the connecting/connected/failed wire values.
+// They are the shared voice-event taxonomy the deferred split-Mode relay path
+// stays contract-compatible with (#123 AC5), so a rename here is a wire break.
+func TestConnectionState_WireValues(t *testing.T) {
+	t.Parallel()
+
+	if ConnectionConnecting != "connecting" || ConnectionConnected != "connected" || ConnectionFailed != "failed" {
+		t.Errorf("connection states = %q/%q/%q, want connecting/connected/failed",
+			ConnectionConnecting, ConnectionConnected, ConnectionFailed)
+	}
+}
+
 func TestBus_PublishDeliversToSubscriber(t *testing.T) {
 	t.Parallel()
 
