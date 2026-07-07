@@ -86,7 +86,9 @@ export function parseInviteCode(input: string): string | null {
 
   let code: string | undefined;
   if (isInviteHost(host)) {
-    code = segments[0];
+    // discord.gg/{code}, but a share sheet may emit discord.gg/invite/{code} —
+    // skip a leading "invite" segment so the code, not the literal "invite", wins.
+    code = segments[0] === "invite" ? segments[1] : segments[0];
   } else if (isDiscordHost(host) && segments[0] === "invite") {
     code = segments[1];
   }

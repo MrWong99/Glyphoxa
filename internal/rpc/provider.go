@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -453,7 +454,10 @@ func (s *ProviderServer) ResolveGuildInvite(
 			return nil, connect.NewError(connect.CodeFailedPrecondition,
 				errors.New("the Bot is not a member of that server"))
 		default:
-			s.log.Error("ResolveGuildInvite: resolve failed", "err", err)
+			// A transport failure wraps *url.Error, whose text embeds the request
+			// URL — and thus the invite code, a join capability (ADR-0047). Scrub
+			// the code before logging; the op + status text still diagnose.
+			s.log.Error("ResolveGuildInvite: resolve failed", "err", redactInviteCode(err, code))
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 	}
@@ -467,6 +471,18 @@ func (s *ProviderServer) ResolveGuildInvite(
 		GuildName:     resolved.Guild.Name,
 		VoiceChannels: channels,
 	}), nil
+}
+
+// redactInviteCode strips the invite code from an internal-error string bound for
+// the log. Transport failures wrap *url.Error whose text carries the request URL
+// (code included); the code is a join capability that must not land in logs
+// (ADR-0047). The op and status text survive so a failure is still diagnosable.
+// The code is guaranteed ^[A-Za-z0-9-]{2,64}$, so a literal replace is safe.
+func redactInviteCode(err error, code string) string {
+	if code == "" {
+		return err.Error()
+	}
+	return strings.ReplaceAll(err.Error(), code, "[invite-code]")
 }
 
 // GetSpendCaps returns the operator's two per-Tenant spend caps (#130, ADR-0046),

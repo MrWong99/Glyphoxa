@@ -86,6 +86,22 @@ describe("parseDiscordLink", () => {
     }
   });
 
+  it("skips a leading 'invite' path segment on the discord.gg host", () => {
+    // A share sheet sometimes yields discord.gg/invite/{code}; segment[0] is the
+    // literal 'invite', not the code. The parser must reach past it (or the whole
+    // valid invite gets resolved as the code 'invite' → a false invalid/expired).
+    expect(parseDiscordLink(`https://discord.gg/invite/${INVITE_CODE}`)).toEqual({
+      kind: "invite",
+      code: INVITE_CODE,
+    });
+    expect(parseDiscordLink(`discord.gg/invite/${INVITE_CODE}`)).toEqual({
+      kind: "invite",
+      code: INVITE_CODE,
+    });
+    // A bare discord.gg/invite with no trailing code is not a link.
+    expect(parseDiscordLink("https://discord.gg/invite/")).toBeNull();
+  });
+
   it("returns null for a bare invite host with no code", () => {
     expect(parseDiscordLink("discord.gg/")).toBeNull();
     expect(parseDiscordLink("https://discord.gg/")).toBeNull();

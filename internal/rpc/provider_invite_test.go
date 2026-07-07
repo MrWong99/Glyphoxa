@@ -1,8 +1,11 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -198,6 +201,41 @@ func TestResolveGuildInvite_SeamErrorMapping(t *testing.T) {
 				t.Errorf("code = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolveGuildInvite_InternalError_LogRedactsCode: an opaque resolver error
+// maps to Internal AND its log line must not carry the invite code. Transport
+// failures wrap *url.Error whose text embeds the request URL — and thus the code,
+// a join capability (ADR-0047). The op still logs; only the code is scrubbed.
+func TestResolveGuildInvite_InternalError_LogRedactsCode(t *testing.T) {
+	t.Parallel()
+	store, cipher := savedInviteStore(t)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := NewProviderServer(store, cipher, logger)
+
+	const code = "s3cretJoinCode"
+	// Mimic the *url.Error a live transport failure produces: its text carries the
+	// full request URL, code included.
+	srv.resolveInvite = func(context.Context, string, string) (discordinvite.Resolved, error) {
+		return discordinvite.Resolved{}, fmt.Errorf(
+			"discordinvite: GET /invites: Get %q: dial tcp: i/o timeout",
+			"https://discord.com/api/v10/invites/"+code)
+	}
+
+	_, err := srv.ResolveGuildInvite(tenantCtx(),
+		connect.NewRequest(&managementv1.ResolveGuildInviteRequest{InviteCode: code}))
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Fatalf("code = %v, want Internal", got)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, code) {
+		t.Errorf("log leaked the invite code %q:\n%s", code, logged)
+	}
+	// Enough survives to diagnose: the operation and the failing REST call.
+	if !strings.Contains(logged, "GET /invites") {
+		t.Errorf("log dropped the diagnostic op, got:\n%s", logged)
 	}
 }
 
