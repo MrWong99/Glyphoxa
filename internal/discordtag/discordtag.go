@@ -68,7 +68,7 @@ func resolve(ctx context.Context, token, baseURL string, log *slog.Logger) (stri
 	}
 	req.Header.Set("Authorization", "Bot "+token)
 	// Discord requires bots to identify with the DiscordBot User-Agent form.
-	req.Header.Set("User-Agent", "DiscordBot (https://github.com/MrWong99/Glyphoxa_v2, v2)")
+	req.Header.Set("User-Agent", "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)")
 
 	resp, err := selfUserClient.Do(req)
 	if err != nil {

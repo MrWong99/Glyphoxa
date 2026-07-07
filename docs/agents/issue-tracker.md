@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repo live as GitHub issues on `MrWong99/Glyphoxa_v2`. Use the `gh` CLI for all operations.
+Issues and PRDs for this repo live as GitHub issues on `MrWong99/Glyphoxa`. Use the `gh` CLI for all operations.
 
 ## Conventions
 

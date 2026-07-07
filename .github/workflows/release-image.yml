@@ -24,7 +24,7 @@ jobs:
     name: build + push image to ghcr
     runs-on: ubuntu-latest
     # Don't attempt to publish from forks (no package write, no intent).
-    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    if: github.repository == 'MrWong99/Glyphoxa'
     steps:
       - uses: actions/checkout@v7
 

@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-GitHub Issues on `MrWong99/Glyphoxa_v2` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+GitHub Issues on `MrWong99/Glyphoxa` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
