@@ -22,9 +22,10 @@ export function botAuthorizeUrl(applicationId: string): string {
 }
 
 // The always-visible copy distinguishing this step from saving the IDs and
-// marking it a prerequisite for voice-join.
+// marking it a prerequisite for voice-join. "above" because the action renders
+// at the foot of the card, below the ID inputs.
 const COPY =
-  "Adding the Bot to a server is a separate step from saving the IDs below — the Bot must be a member before a Voice Session can join voice.";
+  "Adding the Bot to a server is a separate step from saving the IDs above — the Bot must be a member before a Voice Session can join voice.";
 
 // The anchor wears the Button classes because the Button primitive is
 // button-only; a real <a> is needed to open Discord in a new tab.

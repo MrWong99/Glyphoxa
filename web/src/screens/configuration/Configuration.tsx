@@ -211,8 +211,11 @@ export function Configuration() {
             )}
           </div>
           {/* Authorizing the Bot into the Guild is a separate, prerequisite step
-              from saving the IDs — neither pasted-link format joins the Bot (#110). */}
-          <AddBotLink applicationId={config.data?.discordApplicationId ?? ""} />
+              from saving the IDs — neither pasted-link format joins the Bot (#110).
+              Gated on a resolved read so the "no application id" note can't flash
+              while the config loads, nor stick on a query error — only a genuine
+              empty id (query succeeded) is the disabled fallback. */}
+          {config.isSuccess && <AddBotLink applicationId={config.data.discordApplicationId} />}
         </div>
       </Card>
 

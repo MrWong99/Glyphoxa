@@ -389,6 +389,16 @@ describe("Configuration", () => {
     expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /add glyphoxa to your server/i })).not.toBeInTheDocument();
   });
+
+  it("does not flash the missing-app-id note while the config query is loading (#110)", async () => {
+    renderScreen(); // default mock resolves success with an empty id
+    // Synchronously after render the list query is still pending — the note must
+    // not flash (nor would it stick on a query error): only a resolved empty id
+    // is the disabled fallback.
+    expect(screen.queryByText(/no discord application id is configured/i)).not.toBeInTheDocument();
+    // Once the read resolves with an empty id, the disabled action + note appear.
+    expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
+  });
 });
 
 describe("Configuration model entry (#227)", () => {
