@@ -82,6 +82,12 @@ type ProviderServer struct {
 	// slash-command surface without a restart. Fired in a goroutine (presence
 	// Ensure does network I/O). nil (web-only, or not wired) skips.
 	refreshPresence func()
+
+	// discordAppID is the Discord application (client) id backing operator login
+	// (ADR-0016), surfaced on ListProviderConfigs so the SPA composes the
+	// bot-authorization URL (#110). Non-secret; empty when DISCORD_OAUTH_CLIENT_ID
+	// is unset, which the screen renders as a disabled action.
+	discordAppID string
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -110,6 +116,15 @@ func (s *ProviderServer) SetHealthInvalidator(fn func(tenantID uuid.UUID)) {
 // not block the RPC response.
 func (s *ProviderServer) SetPresenceRefresher(fn func()) {
 	s.refreshPresence = fn
+}
+
+// SetDiscordApplicationID wires the Discord application (client) id ListProviderConfigs
+// echoes so the SPA composes the bot-authorization URL (#110), mirroring
+// SetHealthInvalidator/SetPresenceRefresher. Called once at boot, before the
+// server serves, so no lock is needed. The empty string (DISCORD_OAUTH_CLIENT_ID
+// unset) is the missing-app-id fallback the screen renders as disabled.
+func (s *ProviderServer) SetDiscordApplicationID(id string) {
+	s.discordAppID = id
 }
 
 // Handler builds the Connect HTTP handler for ProviderService and returns its
@@ -167,9 +182,10 @@ func (s *ProviderServer) ListProviderConfigs(
 	}
 
 	return connect.NewResponse(&managementv1.ListProviderConfigsResponse{
-		Credentials:    creds,
-		GuildId:        dep.GuildID,
-		VoiceChannelId: dep.VoiceChannelID,
+		Credentials:          creds,
+		GuildId:              dep.GuildID,
+		VoiceChannelId:       dep.VoiceChannelID,
+		DiscordApplicationId: s.discordAppID,
 	}), nil
 }
 

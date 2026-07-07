@@ -71,6 +71,9 @@ function mockBackend(
     // listModelsError makes the catalog fetch fail at the transport, pinning
     // that free-text model entry survives a dead catalog (#227).
     listModelsError?: string;
+    // discordApplicationId seeds the server-provided Discord application id the
+    // read echoes so the screen composes the bot-authorization URL (#110).
+    discordApplicationId?: string;
   } = {},
 ) {
   const state = {
@@ -104,6 +107,7 @@ function mockBackend(
           ],
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
+          discordApplicationId: opts.discordApplicationId ?? "",
         }),
       saveProviderConfig: (req) => {
         opts.providerSaves?.push({ provider: req.provider, secret: req.secret, model: req.model });
@@ -371,6 +375,29 @@ describe("Configuration", () => {
       }),
     );
     expect(await screen.findByText(/Connected as Glyphoxa#4823/)).toBeInTheDocument();
+  });
+
+  it("shows the Add-Glyphoxa-to-your-server link built from the server app id (#110)", async () => {
+    renderScreen(mockBackend({ discordApplicationId: "987654321098765432" }));
+    const link = await screen.findByRole("link", { name: /add glyphoxa to your server/i });
+    expect(link).toHaveAttribute("href", expect.stringContaining("client_id=987654321098765432"));
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  it("disables the Add-Glyphoxa action when no application id is configured (#110)", async () => {
+    renderScreen(); // default mock: empty discordApplicationId
+    expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /add glyphoxa to your server/i })).not.toBeInTheDocument();
+  });
+
+  it("does not flash the missing-app-id note while the config query is loading (#110)", async () => {
+    renderScreen(); // default mock resolves success with an empty id
+    // Synchronously after render the list query is still pending — the note must
+    // not flash (nor would it stick on a query error): only a resolved empty id
+    // is the disabled fallback.
+    expect(screen.queryByText(/no discord application id is configured/i)).not.toBeInTheDocument();
+    // Once the read resolves with an empty id, the disabled action + note appear.
+    expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
   });
 
   it("autofills both ID fields from a pasted channel link with no network request (#101)", async () => {
