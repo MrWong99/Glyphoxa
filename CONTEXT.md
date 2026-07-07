@@ -25,6 +25,8 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **NPC** | A non-player character in the Campaign world, modeled as a Knowledge Graph Node and optionally as a Character NPC Agent. | Character (overloaded — Character is reserved for PCs) |
 | **System** | The TTRPG ruleset of a Campaign (D&D 5e, Pathfinder 2e, Call of Cthulhu, etc.); consumed by Tools that need rules context. | Ruleset, Game system |
 | **Campaign Language** | The natural language a Campaign is played in; selects the phonetic scheme used by Address Detection's name matching and the language hint for STT/TTS. | Locale, Lang |
+| **Campaign Bundle** | The versioned gzipped-JSON export of a Campaign's setup (Agents, Tool Grants, KG, Characters; Transcript history flag-gated) with secrets always excluded; import mints fresh IDs (ADR-0053). | Export (unqualified), Backup, Archive (reserved for archived Campaigns) |
+| **Recap** | A Butler-Persona-flavored summary of a Voice Session's Transcript Lines, generated on demand and never persisted; delivered voiced, as public text, or GM-only per request (#271). | Summary, Digest |
 
 ## Knowledge Graph
 
@@ -33,6 +35,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Knowledge Graph (KG)** | The Campaign's structured world model — typed Nodes connected by typed Edges. | Wiki, Graph, World model |
 | **Node** | A typed KG entity within one Campaign: `Character`, `NPC`, `Location`, `Faction`, `Item`, `PlotThread`, `Note`. | Entity, Page, Record |
 | **Edge** | A typed directional relationship between two Nodes in the same Campaign (e.g. `resides_in`, `member_of`, `knows`). | Link, Relationship, Connection |
+| **Knowledge Proposal** | An Agent-authored KG write (fact, Node, or Edge) awaiting GM review; nothing enters the KG without approval (ADR-0052). Character NPCs may propose only on their own linked Node; the Butler campaign-wide. | Suggestion, Pending fact, Draft |
 
 ## Agents
 
@@ -68,6 +71,10 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Barge-in** | A human participant reclaiming the floor while an Agent is speaking: per-participant voiced speech crossing the Barge-in Confirm Window cancels the Agent's whole turn (the entire Ensemble Turn, if one is running). Distinct from Cross-talk. | Interruption, Cut-in |
 | **Barge-in Confirm Window** | The duration of continuous voiced speech from one participant required before a Barge-in cancels the Agent (default ~250ms). A per-Agent tunable: longer = harder to interrupt. Voiced bursts shorter than the window are Soft-overlap. | Barge threshold, Interrupt delay |
 | **Soft-overlap** | A participant's voiced burst shorter than the Barge-in Confirm Window (a backchannel: "mhm", "yeah", a cough). Does not cancel the Agent, but is still transcribed and committed normally. | Backchannel (use in prose only), Filler |
+| **Speaker Lane** | The per-participant VAD/segmentation path (one per active speaker, keyed by Discord snowflake) that attributes each utterance's events via `SpeakerID` (ADR-0050). | Lane (ok once qualified), Channel, Track |
+| **Rollover Tape** | The consent-gated, in-memory 120s rolling buffer of consented Speaker Lanes plus Agent speech during a Voice Session; discarded wholesale at session end (ADR-0051). Default OFF. | Recording (implies persistence), Ring buffer (implementation term) |
+| **Highlight Candidate** | A detector-flagged moment clipped from the Rollover Tape; ephemeral — held only until the GM's session-end review (7-day safety purge), then promoted or deleted (#305). | Moment, Clip (unqualified) |
+| **Highlight** | A GM-promoted Highlight Candidate stored durably with its excerpt and optional generated media; leaves the instance only by explicit GM action (ADR-0051, #310). | Clip (unqualified), Best-of |
 
 ## Providers & Pipeline
 

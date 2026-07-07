@@ -69,3 +69,7 @@ The whole increment is built **test-first, slice by slice** (ADR-0019): each ver
 - **ADR-0014 / 0020 (SSE + event taxonomy)** — the SSE relay is the unbuilt Hop-B; `voiceevent` already produces the dot-namespaced names it forwards.
 - **ADR-0019 (orchestrator-first TDD; deferred per-participant VAD)** — the increment is built test-first, and the anonymous human lane is the visible consequence of that deferral.
 - **ADR-0024 (Address Detection)** — supplies `AddressTarget.Name`, the only reliable speaker attribution the transcript has in this increment.
+
+## Amendment: the anonymous human lane ends (2026-07-07, #275)
+
+The `SpeakerID` seam this ADR anticipated is now specified: **ADR-0050** decides N-lane per-speaker segmentation and adds `SpeakerID` to `STTPartial`/`STTFinal`/`VADSpeechStart`/`BargeDetected`. Speaker-to-Character rendering policy is decided on #281 (persist-time snapshots; guild-display-name fallback).

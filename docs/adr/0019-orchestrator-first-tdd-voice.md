@@ -10,3 +10,7 @@ Build sequence:
 4. **Slice 4 — Web UI live wiring.** SPA developed in parallel against Slice 1's recorded event logs as fixtures; switched to real SSE from Slice 3.
 
 **Why:** v1 wired Discord first and accumulated brittle integration tests around vendor behaviour. The failure mode was "tests are green but nothing reasons correctly" — the orchestrator's logic was never validated in isolation. Building the orchestrator headlessly forces address/turn/barge-in logic to be testable on its own.
+
+## Amendment: per-participant segmentation lands (2026-07-07, #275)
+
+The deferred per-participant VAD/attribution is now decided: **ADR-0050** replaces the single anonymous human lane with one Speaker Lane per active speaker and threads `SpeakerID` through the event taxonomy. The orchestrator-first testing posture is unchanged — lanes are exercised by the same headless harness.
