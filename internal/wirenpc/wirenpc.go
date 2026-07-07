@@ -362,6 +362,15 @@ type Config struct {
 	// mutes) → buildConversation (orchestrator.WithMute). nil is the feature-off
 	// default: voice standalone / the benchmark are byte-for-byte unchanged.
 	Mutes orchestrator.MuteView
+
+	// Gate is the live turn gate (#130, ADR-0046): the session Manager's spend meter
+	// satisfies it (AllowTurn() false once the soft cap is crossed), and Start sets
+	// it on the per-session config copy so buildConversation wires it via
+	// orchestrator.WithTurnGate. It flows straight into the replier's pre-Take gate,
+	// beside the mute check. nil is the feature-off default: no caps configured, so
+	// voice standalone / the benchmark / an uncapped session are byte-for-byte
+	// unchanged.
+	Gate orchestrator.TurnGate
 }
 
 // RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
@@ -694,7 +703,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -852,7 +861,7 @@ func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView)
 	return unsub
 }
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -966,6 +975,10 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// speaking Agent is muted. A nil view is the feature-off default (voice
 		// standalone / bench), so this option is unconditional.
 		orchestrator.WithMute(mutes),
+		// Per-session spend soft cap (#130, ADR-0046): the replier refuses a NEW turn
+		// once the session's estimated spend crosses the soft cap. A nil gate is the
+		// feature-off default (no caps configured), so this option is unconditional.
+		orchestrator.WithTurnGate(gate),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).

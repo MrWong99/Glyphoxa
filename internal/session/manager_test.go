@@ -34,6 +34,8 @@ type fakeStore struct {
 	tick       int
 	endErr     error           // injected EndVoiceSession failure (#143 Defect A)
 	agents     []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
+	caps       storage.SpendCaps
+	capsErr    error // injected GetTenantSpendCaps failure (#130)
 }
 
 func newFakeStore() *fakeStore {
@@ -132,10 +134,29 @@ func (f *fakeStore) ListAgents(_ context.Context, _ uuid.UUID) ([]storage.Agent,
 	return append([]storage.Agent(nil), f.agents...), nil
 }
 
+// GetTenantSpendCaps serves the canned per-Tenant spend caps snapshot at Start
+// (#130). Default: both nil (no caps → today's behavior).
+func (f *fakeStore) GetTenantSpendCaps(_ context.Context, _ uuid.UUID) (storage.SpendCaps, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.capsErr != nil {
+		return storage.SpendCaps{}, f.capsErr
+	}
+	return f.caps, nil
+}
+
 func (f *fakeStore) counts() (created, ended int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.created, f.ended
+}
+
+// session returns the recorded voice_sessions row by id (the terminal state after
+// a close), for the spend-cap end-reason assertions (#130).
+func (f *fakeStore) session(id uuid.UUID) storage.VoiceSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessions[id]
 }
 
 // blockingRunner is a fake loop runner that records the cfg it ran with and the

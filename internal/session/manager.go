@@ -18,6 +18,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
@@ -79,6 +81,10 @@ type Store interface {
 	// ListAgents returns the Active Campaign's roster (Butler + Character NPCs) so
 	// mute-all (#211) can target EVERY Agent, not just the voiced wirenpc Roster.
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
+	// GetTenantSpendCaps returns the Tenant's soft/hard spend caps (#130, ADR-0046),
+	// snapshot at Start to build the session's spend meter. ErrNotFound (no tenant
+	// row) is treated as no caps configured — today's behavior.
+	GetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID) (storage.SpendCaps, error)
 }
 
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
@@ -126,7 +132,23 @@ type activeSession struct {
 	// Agents unmuted (AC5) — there is NO DB column and NO migration; the set dies
 	// with the session. Guarded by Manager.mu.
 	muted map[string]struct{}
+
+	// meter is the session's spend meter (#130, ADR-0046), non-nil only when the
+	// Tenant configured at least one cap at Start. It is the cfg.Gate and rides the
+	// teed StageMetrics, and backs Manager.Spend(). Dies with the session.
+	meter *spend.Meter
+	// endReasonOverride records a deliberate policy end_reason for a session that
+	// ended cleanly (status 'ended') rather than by a fault — set by the hard-cap
+	// trip before it cancels the run ctx (#130). runLoop reads it under Manager.mu
+	// and stamps it onto the clean-close write. Empty for an ordinary stop.
+	endReasonOverride string
 }
+
+// spendHardReason is the end_reason a hard-cap-ended session records: an 'ended'
+// row (a deliberate policy stop, ADR-0046 — NOT 'failed', which is reserved for
+// faults) carrying WHY it stopped. Prefix 'spend_cap_hard' mirrors the classified
+// prefixes #123 uses so the Session screen renders a readable cause.
+const spendHardReason = "spend_cap_hard: estimated spend crossed the hard cap"
 
 // Manager owns at most one live voice session at a time (the single-active
 // guard). It is safe for concurrent use.
@@ -287,6 +309,15 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
 	}
 
+	// Snapshot the Tenant's spend caps for this session (#130, ADR-0046): a
+	// mid-session edit applies to the NEXT session, never this one. A missing tenant
+	// row (ErrNotFound) is no caps; any other error fails Start before a row is left
+	// stuck, mirroring the deployment-config precondition above.
+	storeCaps, err := m.store.GetTenantSpendCaps(ctx, tenantID)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return storage.VoiceSession{}, fmt.Errorf("session: load spend caps: %w", err)
+	}
+
 	cfg := m.base
 	cfg.Token = token
 	cfg.Guild = dep.GuildID
@@ -302,9 +333,83 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		done:       make(chan struct{}),
 		muted:      map[string]struct{}{}, // fresh: every new session starts all-unmuted (AC5)
 	}
+
+	// Spend meter (#130, ADR-0046): only when the Tenant configured at least one
+	// cap. It rides the EXISTING recorder config copy — the tee wraps cfg's
+	// StageMetrics, so the meter reads the same usage calls #127 records with ZERO
+	// new pipeline plumbing — and is the turn gate. No caps ⇒ nil meter, no tee, no
+	// gate: byte-for-byte today's behavior.
+	if caps := (spend.Caps{SoftUSD: storeCaps.SoftUSD, HardUSD: storeCaps.HardUSD}); caps.SoftUSD != nil || caps.HardUSD != nil {
+		meter := spend.NewMeter(caps, m.log, m.softCapTrip(as), m.hardCapTrip(as))
+		base := cfg.StageMetrics
+		if base == nil {
+			base = observe.Discard{}
+		}
+		cfg.StageMetrics = observe.TeeUsage(base, meter)
+		cfg.Gate = meter
+		as.meter = meter
+	}
+
 	m.active = as
 	go m.runLoop(runCtx, as, cfg)
 	return vs, nil
+}
+
+// softCapTrip returns the meter's onSoft callback for session as: publish
+// SpendCapReached{soft} on the shared bus (#130). The soft cap refuses NEW turns at
+// the replier gate (the meter's AllowTurn already reports false by the time this
+// fires); this callback only surfaces the state to the Session screen. It runs on
+// the pipeline goroutine that recorded the crossing usage, never under Manager.mu,
+// so publishing (the relay takes its own lock) can't deadlock.
+func (m *Manager) softCapTrip(as *activeSession) func() {
+	return func() {
+		if m.base.Bus != nil {
+			m.base.Bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapSoft})
+		}
+	}
+}
+
+// hardCapTrip returns the meter's onHard callback for session as: end the session
+// itself cleanly (#130, ADR-0046). It runs on a FRESH goroutine (the #211
+// lock-order pattern): the meter fires it outside its own mutex, but it must take
+// Manager.mu to record the deliberate end_reason override, then publish + cancel
+// OUTSIDE Manager.mu — the relay's SpendCapReached handler calls Snapshot (Manager.mu),
+// so publishing under the lock would deadlock. Guarded by m.active == as so a trip
+// arriving after the session already rolled over is a no-op.
+func (m *Manager) hardCapTrip(as *activeSession) func() {
+	return func() {
+		go func() {
+			m.mu.Lock()
+			if m.active != as {
+				m.mu.Unlock()
+				return // this session already ended / rolled over
+			}
+			as.endReasonOverride = spendHardReason
+			cancel := as.cancel
+			bus := m.base.Bus
+			m.mu.Unlock()
+
+			if bus != nil {
+				bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapHard})
+			}
+			// Cancel the run ctx: runLoop then closes the row via the CLEAN path
+			// (ctx.Err() != nil ⇒ not 'failed') and stamps the endReasonOverride —
+			// 'ended' + spend_cap_hard reason, a deliberate policy stop.
+			cancel()
+		}()
+	}
+}
+
+// Spend returns a snapshot of the active session's spend meter (#130): estimated
+// USD, cap state, and configured caps. Idle, or a session with no caps configured,
+// reports the zero Status (no state, zero spend) — the feature-off surface.
+func (m *Manager) Spend() spend.Status {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil || m.active.meter == nil {
+		return spend.Status{}
+	}
+	return m.active.meter.Status()
 }
 
 // runLoop runs the voice loop to completion (cancel or self-exit), then writes
@@ -360,15 +465,28 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		chunkCancel()
 	}
 
+	// A hard-cap trip records a deliberate end_reason override before it cancels the
+	// run ctx (#130): the cancel makes ctx.Err() non-nil, so the clean path below
+	// runs (status 'ended', NOT 'failed' — a policy stop is not a fault, ADR-0046),
+	// but the row still records WHY it stopped. Read under Manager.mu (the trip
+	// writes it there) so the race detector sees the synchronization.
+	m.mu.Lock()
+	override := as.endReasonOverride
+	m.mu.Unlock()
+
 	// A FRESH deadline for the terminal write, regardless of what Finalize consumed
 	// (#143): the row landing terminal is the invariant that matters. One
-	// CloseVoiceSession stamps 'failed' + the readable reason, or 'ended' + NULL for
-	// a clean stop — the single write preserves #143's end-write atomicity.
+	// CloseVoiceSession stamps 'failed' + the readable reason, 'ended' + the policy
+	// override reason (hard cap), or 'ended' + NULL for a clean stop — the single
+	// write preserves #143's end-write atomicity.
 	status := storage.VoiceSessionEnded
 	var endReason *string
 	if failed {
 		status = storage.VoiceSessionFailed
 		reason := failureReason(loopErr)
+		endReason = &reason
+	} else if override != "" {
+		reason := override
 		endReason = &reason
 	}
 	endCtx, cancel := context.WithTimeout(base, m.endTimeout)
