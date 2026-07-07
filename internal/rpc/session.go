@@ -350,7 +350,9 @@ func toProtoTranscriptLineMatch(l storage.TranscriptLine) *managementv1.Transcri
 
 // toProtoVoiceSession maps a storage.VoiceSession onto its wire view. A zero
 // value (no session) maps to nil so the screen renders the never-run state;
-// ended_at is set only once the session has ended.
+// ended_at is set only once the session has ended, and end_reason carries the
+// readable cause of an abnormal end (a fatal "failed" session, #123, or a
+// boot-orphaned row, #143) — empty for a clean stop.
 func toProtoVoiceSession(v storage.VoiceSession) *managementv1.VoiceSession {
 	if v.ID == uuid.Nil {
 		return nil
@@ -364,6 +366,9 @@ func toProtoVoiceSession(v storage.VoiceSession) *managementv1.VoiceSession {
 	}
 	if v.EndedAt != nil {
 		pb.EndedAt = timestamppb.New(*v.EndedAt)
+	}
+	if v.EndReason != nil {
+		pb.EndReason = *v.EndReason
 	}
 	return pb
 }

@@ -119,12 +119,27 @@ type muteFrame struct {
 	Muted   bool   `json:"muted"`
 }
 
+// connectionFrame is the payload of a "connection" SSE frame (#123): the Voice
+// Session's gateway connection state (connecting/connected/failed) and, on a fatal
+// failure, the readable reason. The Session screen flips its badge from this live;
+// the terminal reload truth for a failed session is GetSession (status + end_reason).
+type connectionFrame struct {
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // View is the snapshot the JSON endpoint returns and the unit tests assert on:
-// the current coalesced lines plus the derived status/typing.
+// the current coalesced lines plus the derived status/typing and the live
+// connection state (#123).
 type View struct {
 	Lines  []Line `json:"lines"`
 	Status string `json:"status"`
 	Typing Typing `json:"typing"`
+	// Connection is the latest gateway connection state (connecting/connected/
+	// failed) for the live session, "" before the first transition. It is the
+	// live reload truth for a mid-session reconnect; a terminal failed session
+	// reads its truth from GetSession instead.
+	Connection string `json:"connection,omitempty"`
 }
 
 // Frame is one buffered SSE frame. Seq is the monotonic `id:` field a browser
@@ -181,6 +196,7 @@ type Relay struct {
 	buf              []Frame
 	lines            []Line
 	typing           Typing
+	connection       string // latest gateway connection state for the live session (#123); "" until the first transition
 	turns            map[string]*turn
 	nextSeq          uint64
 	humanSeq         uint64
@@ -319,6 +335,14 @@ func (r *Relay) project(e voiceevent.Event) {
 		// ring for Last-Event-ID replay; there is NO transcript-line change and NO
 		// snapshot change — a mid-session reload reads the true state from GetSession.
 		r.emit(Frame{Event: "mute", Data: mustJSON(muteFrame{AgentID: ev.AgentID, Muted: ev.Muted})})
+	case voiceevent.ConnectionStateChanged:
+		// The gateway connection state moved (#123): forward a "connection" frame so
+		// the Session screen flips connecting→connected, or to failed with its reason,
+		// live and without a reload (AC3). It rides the ring for Last-Event-ID replay;
+		// the live snapshot carries the state via View.Connection, while a terminal
+		// failed session's reload truth is GetSession (status + end_reason).
+		r.connection = string(ev.State)
+		r.emit(Frame{Event: "connection", Data: mustJSON(connectionFrame{State: string(ev.State), Detail: ev.Detail})})
 	}
 }
 
@@ -356,6 +380,7 @@ func (r *Relay) rollover(vs storage.VoiceSession) {
 	r.nextSeq = 0
 	r.humanSeq = 0
 	r.typing = r.liveTyping()
+	r.connection = "" // a fresh session has no connection state until its first transition (#123)
 	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: r.typing})})
 }
 
@@ -456,9 +481,10 @@ func (r *Relay) View(id string) View {
 		return View{Lines: []Line{}, Status: "idle", Typing: Typing{}}
 	}
 	return View{
-		Lines:  append([]Line(nil), r.lines...),
-		Status: "live",
-		Typing: r.typing,
+		Lines:      append([]Line(nil), r.lines...),
+		Status:     "live",
+		Typing:     r.typing,
+		Connection: r.connection,
 	}
 }
 
@@ -470,7 +496,7 @@ func (r *Relay) snapshot(ctx context.Context, id string) View {
 	r.mu.Lock()
 	live := r.currentSessionID() == id && id == r.activeID
 	if live {
-		v := View{Lines: append([]Line(nil), r.lines...), Status: "live", Typing: r.typing}
+		v := View{Lines: append([]Line(nil), r.lines...), Status: "live", Typing: r.typing, Connection: r.connection}
 		r.mu.Unlock()
 		return v
 	}
