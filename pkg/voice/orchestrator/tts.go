@@ -122,19 +122,26 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 		Voice:    voice,
 	})
 	if err != nil {
-		// A start error is a provider error at the TTS stage (#125): count the call
-		// with its outcome (a cancelled ctx is timeout-shaped) and bump the
-		// error-only sibling. No tts_total — there was no synthesis to time.
-		s.rec.ProviderCall(observe.StageTTS, s.provider, observe.CallOutcome(ctx, err))
-		s.rec.ProviderError(observe.StageTTS, s.provider)
+		// A start error at the TTS stage (#125): count the call with its outcome and
+		// bump the error-only sibling ONLY on a fault (error/timeout). A barge-in that
+		// cuts the ctx before Synthesize returns is OutcomeCanceled — a caller cancel,
+		// not a vendor error — so it does not inflate the error ratio (#239 review).
+		// No tts_total — there was no synthesis to time.
+		outcome := observe.CallOutcome(ctx, err)
+		s.rec.ProviderCall(observe.StageTTS, s.provider, outcome)
+		if outcome.IsFault() {
+			s.rec.ProviderError(observe.StageTTS, s.provider)
+		}
 		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
 	}
 	for range ch {
 	}
-	// The synthesis completed (the channel closed): record the full-synthesis span
-	// and count the call OK. A mid-stream barge (ctx cancel closing the channel
-	// early) is NOT a provider error — the vendor call itself succeeded — so it
-	// still counts OK, mirroring the agenttool adapter.
+	// The channel closed: record the DELIVER span and count the call OK. tts_total is
+	// NOT synthesis time — under the lockstep TeeSynthesizer the drain is paced by the
+	// playback pump, so it measures synthesis plus paced delivery of the sentence
+	// (ADR-0044 amendment, #239 review); the provider-latency signal is tts_ttfb. A
+	// mid-stream barge (ctx cancel closing the channel early) is NOT a provider error
+	// — the vendor call itself succeeded — so it still counts OK, mirroring agenttool.
 	s.rec.TTSTotal(s.provider, time.Since(start))
 	s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeOK)
 	return nil

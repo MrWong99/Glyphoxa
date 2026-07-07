@@ -123,6 +123,83 @@ func TestTTS_Dispatch_KeylessRecordsNothing(t *testing.T) {
 	}
 }
 
+// TestTTS_Dispatch_BargeCancelIsNotFault pins the #239 refinement on the TTS stage:
+// a barge-in that cancels the ctx before Synthesize returns records
+// provider_calls with outcome=canceled and does NOT bump provider_errors — a
+// caller cancel is not a vendor fault. There is no tts_total (no synthesis).
+func TestTTS_Dispatch_BargeCancelIsNotFault(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	// startErrSynth returns an error; a pre-cancelled ctx makes the outcome canceled
+	// (the ctx state is authoritative, matching a real barge cutting the call).
+	stage := orchestrator.NewTTS(h.Bus, startErrSynth{},
+		orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := stage.Dispatch(ctx, "boom", voicetest.LiveElevenLabsVoice()); err == nil {
+		t.Fatal("Dispatch: expected an error on the cancelled path")
+	}
+
+	_, ttsTotals, _, calls, errs := spy.snapshot()
+	if len(ttsTotals) != 0 {
+		t.Errorf("tts_total recorded %v on a cancelled start, want none", ttsTotals)
+	}
+	want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeCanceled}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v on a barge cancel, want none (a cancel is not a fault)", errs)
+	}
+}
+
+// earlyCloseSynth emits a couple of audio chunks then closes the channel WITHOUT
+// an error and with a live ctx — a mid-synthesis provider outage the Synthesizer
+// contract renders indistinguishable from a clean completion.
+type earlyCloseSynth struct{}
+
+func (earlyCloseSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	ch := make(chan tts.AudioChunk, 2)
+	ch <- tts.AudioChunk{PCM: []byte{0, 0}}
+	ch <- tts.AudioChunk{PCM: []byte{0, 0}}
+	close(ch)
+	return ch, nil
+}
+
+func (earlyCloseSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestTTS_Dispatch_MidStreamCloseIsAcceptedBlindSpot documents the accepted
+// Synthesizer-contract blind spot (#239 review): a channel that delivers some
+// chunks then closes with no error — a streaming outage mid-synthesis — is
+// INVISIBLE at this seam. Dispatch sees a clean close, so it records outcome=ok and
+// NO provider_error. This is by design: the tts.Synthesizer channel-close carries
+// no error signal, so a truncated stream cannot be distinguished from a complete
+// one here. If that blind spot must be closed, it belongs in the adapter, not this
+// stage.
+func TestTTS_Dispatch_MidStreamCloseIsAcceptedBlindSpot(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	stage := orchestrator.NewTTS(h.Bus, earlyCloseSynth{},
+		orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+	if err := stage.Dispatch(context.Background(), "cut short", voicetest.LiveElevenLabsVoice()); err != nil {
+		t.Fatalf("Dispatch: %v (a clean mid-stream close is not an error at this seam)", err)
+	}
+
+	_, ttsTotals, _, calls, errs := spy.snapshot()
+	if len(ttsTotals) != 1 {
+		t.Errorf("tts_total recorded %d, want 1 (the drain completed)", len(ttsTotals))
+	}
+	want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeOK}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v (mid-stream close reads as ok)", calls, want)
+	}
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v, want none (the blind spot: a truncated stream is invisible here)", errs)
+	}
+}
+
 // TestTTS_HelloTest_DispatchesSentence is TB6: the first TTS tracer bullet,
 // per ADR-0021's TTS cassette policy.
 //

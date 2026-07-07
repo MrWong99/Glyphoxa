@@ -556,6 +556,11 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 	if presenceRefresh != nil {
 		providerSrv.SetPresenceRefresher(presenceRefresh)
 	}
+	// The OAuth client id is the Discord application id; ListProviderConfigs
+	// echoes it so the Configuration screen builds the bot-authorization URL
+	// (#110). Empty when DISCORD_OAUTH_CLIENT_ID is unset — the screen's disabled
+	// fallback.
+	providerSrv.SetDiscordApplicationID(clientID)
 	providerPath, providerHandler := providerSrv.Handler(stack.HandlerOptions()...)
 	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, log).Handler(stack.HandlerOptions()...)

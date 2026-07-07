@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -71,6 +71,9 @@ function mockBackend(
     // listModelsError makes the catalog fetch fail at the transport, pinning
     // that free-text model entry survives a dead catalog (#227).
     listModelsError?: string;
+    // discordApplicationId seeds the server-provided Discord application id the
+    // read echoes so the screen composes the bot-authorization URL (#110).
+    discordApplicationId?: string;
   } = {},
 ) {
   const state = {
@@ -104,6 +107,7 @@ function mockBackend(
           ],
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
+          discordApplicationId: opts.discordApplicationId ?? "",
         }),
       saveProviderConfig: (req) => {
         opts.providerSaves?.push({ provider: req.provider, secret: req.secret, model: req.model });
@@ -371,6 +375,112 @@ describe("Configuration", () => {
       }),
     );
     expect(await screen.findByText(/Connected as Glyphoxa#4823/)).toBeInTheDocument();
+  });
+
+  it("shows the Add-Glyphoxa-to-your-server link built from the server app id (#110)", async () => {
+    renderScreen(mockBackend({ discordApplicationId: "987654321098765432" }));
+    const link = await screen.findByRole("link", { name: /add glyphoxa to your server/i });
+    expect(link).toHaveAttribute("href", expect.stringContaining("client_id=987654321098765432"));
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  it("disables the Add-Glyphoxa action when no application id is configured (#110)", async () => {
+    renderScreen(); // default mock: empty discordApplicationId
+    expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /add glyphoxa to your server/i })).not.toBeInTheDocument();
+  });
+
+  it("does not flash the missing-app-id note while the config query is loading (#110)", async () => {
+    renderScreen(); // default mock resolves success with an empty id
+    // Synchronously after render the list query is still pending — the note must
+    // not flash (nor would it stick on a query error): only a resolved empty id
+    // is the disabled fallback.
+    expect(screen.queryByText(/no discord application id is configured/i)).not.toBeInTheDocument();
+    // Once the read resolves with an empty id, the disabled action + note appear.
+    expect(await screen.findByText(/no discord application id is configured/i)).toBeInTheDocument();
+  });
+
+  it("autofills both ID fields from a pasted channel link with no network request (#101)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(mockBackend({ discordSaves }));
+
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, {
+      target: { value: "https://discord.com/channels/472093001100472093/987654321098765432" },
+    });
+
+    // Both snowflakes land in the (still editable) ID fields, purely client-side.
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
+    // Parsing issues NO save RPC — the autofill is local until the operator Saves.
+    expect(discordSaves).toHaveLength(0);
+  });
+
+  it("persists autofilled IDs through Save into the right wire fields and re-seeds them on reload (#101)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    const transport = mockBackend({ discordSaves });
+    const { unmount } = renderScreen(transport);
+
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
+      target: { value: "discord.com/channels/472093001100472093/987654321098765432" },
+    });
+    // The autofill marks the fields dirty, so Save picks up the pasted values.
+    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
+
+    // Pin the exact snowflake in the exact wire field: a guild/voice SWAP would
+    // still round-trip through the display, so a value-only check can't catch it.
+    await waitFor(() => expect(discordSaves).toHaveLength(1));
+    expect(discordSaves[0].guildId).toBe("472093001100472093");
+    expect(discordSaves[0].voiceChannelId).toBe("987654321098765432");
+
+    // Reload (AC2): a fresh mount against the SAME stateful backend re-seeds both
+    // fields from what was persisted — the values survive the round-trip, and
+    // each lands back in its OWN field (guild in Guild ID, channel in Voice).
+    unmount();
+    renderScreen(transport);
+    await waitFor(() =>
+      expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(
+        "472093001100472093",
+      ),
+    );
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
+  });
+
+  it("rejects a non-link paste with an inline hint and leaves fields unchanged (#101)", async () => {
+    renderScreen();
+
+    // Operator already has a Guild ID typed in.
+    const guild = await screen.findByLabelText("Guild ID");
+    fireEvent.change(guild, { target: { value: "existing-guild" } });
+
+    // A paste that is not a channel deep-link surfaces a hint…
+    const paste = screen.getByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, { target: { value: "not a discord link" } });
+    expect(screen.getByText(/couldn't read that link/i)).toBeInTheDocument();
+
+    // …and does not clobber what the operator already had.
+    expect((guild as HTMLInputElement).value).toBe("existing-guild");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+  });
+
+  it("tolerates scheme/subdomain/trailing-slash/query variants when autofilling (#101)", async () => {
+    renderScreen();
+
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, {
+      target: { value: "ptb.discord.com/channels/472093001100472093/987654321098765432/?jump=1" },
+    });
+
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
+    // A rejected paste's hint must not linger after a successful one.
+    expect(screen.queryByText(/couldn't read that link/i)).not.toBeInTheDocument();
   });
 });
 

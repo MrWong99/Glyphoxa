@@ -73,6 +73,30 @@
   color: var(--status-danger);
 }
 
+/* "Add Glyphoxa to your server" bot-authorization action (#110): a separate,
+ * prerequisite step from saving the IDs, sits at the foot of the Discord card
+ * above a top divider so the distinction reads. */
+.gx-add-bot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.gx-add-bot__copy {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+  margin: 0;
+}
+
+.gx-add-bot__note {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+  margin: 0;
+}
+
 /* Resolved Discord bot tag from the live gateway login (#70), under the name. */
 .gx-provider-row__tag {
   font-size: var(--text-xs, 0.75rem);

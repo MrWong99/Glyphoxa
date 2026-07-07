@@ -156,6 +156,29 @@ func TestWiredHistogramsAndProviderCounters(t *testing.T) {
 	}
 }
 
+// TestTTSTotalDeliverSpanBucketsAndHelp pins the #239 re-scope: tts_total is a
+// deliver span carrying its own wide buckets (0.5–60s), NOT the shared sub-5s SLO
+// buckets, and its help text names it a deliver span and points provider latency at
+// tts_ttfb.
+func TestTTSTotalDeliverSpanBucketsAndHelp(t *testing.T) {
+	rec := NewPrometheusRecorder()
+	rec.TTSTotal(ProviderElevenLabs, 12*time.Second)
+	out := scrape(t, rec)
+
+	wantHelp := `# HELP glyphoxa_voice_tts_total_seconds TTS deliver span: synthesis plus paced playback delivery of one sentence. Provider latency lives in tts_ttfb.`
+	if !strings.Contains(out, wantHelp) {
+		t.Errorf("tts_total help missing/wrong; want:\n%s\ngot:\n%s", wantHelp, filterGlyphoxa(out))
+	}
+	// A wide bin must exist (deliver buckets), and the sub-second SLO bin must NOT.
+	// (Prometheus orders the histogram's le label after the user labels.)
+	if !strings.Contains(out, `glyphoxa_voice_tts_total_seconds_bucket{provider="elevenlabs",le="60"}`) {
+		t.Errorf("tts_total missing the wide le=60 bucket:\n%s", filterGlyphoxa(out))
+	}
+	if strings.Contains(out, `glyphoxa_voice_tts_total_seconds_bucket{provider="elevenlabs",le="0.05"`) {
+		t.Errorf("tts_total still carries the shared SLO buckets (le=0.05); want its own wide buckets:\n%s", filterGlyphoxa(out))
+	}
+}
+
 func TestSessionGaugeTracksOpenClose(t *testing.T) {
 	rec := NewPrometheusRecorder()
 	rec.SessionOpened("a")

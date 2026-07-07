@@ -617,6 +617,10 @@ message ListProviderConfigsResponse {
   string guild_id = 2;
   // voice_channel_id is the channel sessions join (non-secret; may be empty).
   string voice_channel_id = 3;
+  // discord_application_id is the Discord application (client) id backing
+  // operator login (ADR-0016), reused for the bot-authorization URL; non-secret;
+  // empty when DISCORD_OAUTH_CLIENT_ID unset.
+  string discord_application_id = 4;
 }
 
 // SaveProviderConfigRequest seals one BYOK provider key.

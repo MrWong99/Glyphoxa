@@ -115,15 +115,17 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 		Tools:     toLLMToolDefs(tools),
 	})
 	if err != nil {
-		// A start failure is a provider error with no round span (no completion
-		// happened); attribute it to the LLM stage. A cancelled ctx is a timeout-
-		// shaped outcome rather than a vendor error.
-		outcome := observe.OutcomeError
-		if ctx.Err() != nil {
-			outcome = observe.OutcomeTimeout
-		}
+		// A start failure has no round span (no completion happened); attribute it to
+		// the LLM stage via the shared [observe.CallOutcome] rule so LLM agrees with
+		// STT/TTS: a barge-in cancel is OutcomeCanceled (NOT a vendor fault), a fired
+		// deadline is OutcomeTimeout, anything else is OutcomeError. ProviderError is
+		// bumped only on a fault, so a barge before first token does not inflate the
+		// error ratio (#239 review).
+		outcome := observe.CallOutcome(ctx, err)
 		a.rec.ProviderCall(observe.StageLLM, a.provName, outcome)
-		a.rec.ProviderError(observe.StageLLM, a.provName)
+		if outcome.IsFault() {
+			a.rec.ProviderError(observe.StageLLM, a.provName)
+		}
 		return tool.AssistantMessage{}, err
 	}
 

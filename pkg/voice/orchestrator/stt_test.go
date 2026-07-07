@@ -122,6 +122,46 @@ func TestSTT_Transcribe_RecordsProviderCallOutcomes(t *testing.T) {
 	}
 }
 
+// TestSTT_Transcribe_BargeCancelIsNotFault pins the #239 refinement: a barge-in
+// that cancels the recognizer ctx mid-call records provider_calls with
+// outcome=canceled and does NOT bump provider_errors — a caller cancel is not a
+// vendor fault and must not inflate the error ratio. The per-request timeout is
+// disabled so ONLY the caller cancel drives the outcome. stt_request still records.
+func TestSTT_Transcribe_BargeCancelIsNotFault(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	stage := orchestrator.NewSTT(h.Bus, hangingRecognizer{},
+		orchestrator.WithSTTMetrics(spy, observe.ProviderElevenLabs),
+		orchestrator.WithSTTTimeout(0)) // disable the per-request bound: only the caller cancel drives it
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- stage.Transcribe(ctx, []audio.Frame{}) }()
+	time.Sleep(20 * time.Millisecond) // let it reach the blocked recognizer
+	cancel()                          // barge-in
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Transcribe returned nil on a cancelled ctx; want the cancel error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Transcribe did not return after the ctx was cancelled")
+	}
+
+	sttReqs, _, _, calls, errs := spy.snapshot()
+	if len(sttReqs) != 1 {
+		t.Errorf("stt_request recorded %d spans on a barge, want 1", len(sttReqs))
+	}
+	want := providerCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeCanceled}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v on a barge cancel, want none (a cancel is not a fault)", errs)
+	}
+}
+
 // TestSTT_Transcribe_BoundsHungRecognizer pins the wedge fix: a recognizer call
 // that would otherwise block forever is bounded by the stage's per-request
 // timeout ([orchestrator.WithSTTTimeout]). Without the bound, the single serial

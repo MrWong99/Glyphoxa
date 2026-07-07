@@ -29,20 +29,33 @@ import (
 )
 
 // CallOutcome classifies a provider call's terminal state from its error and the
-// call ctx, so the STT and TTS stages record [StageRecorder.ProviderCall] with
-// the same rule the agenttool adapter already applies: a nil err is [OutcomeOK];
-// a non-nil ctx error (a fired deadline or a barge/supersede cancel) is the
-// timeout-shaped [OutcomeTimeout] regardless of the returned err; any other error
-// is a vendor [OutcomeError]. Keeping the classification in one place means the
-// three provider stages agree on the outcome label.
+// call ctx, so the STT, TTS and LLM stages record [StageRecorder.ProviderCall]
+// with one shared rule: a nil err is [OutcomeOK]; a [context.Canceled] call ctx is
+// [OutcomeCanceled] (a caller-driven barge-in / supersede, NOT a vendor fault); a
+// [context.DeadlineExceeded] call ctx is [OutcomeTimeout] (a fault); any other
+// error is a vendor [OutcomeError] (a fault). The ctx state is checked before the
+// err's own type because a cancelled/expired ctx is the authoritative reason the
+// call ended even when the adapter surfaces its own wrapped error.
 func CallOutcome(ctx context.Context, err error) Outcome {
 	if err == nil {
 		return OutcomeOK
 	}
-	if ctx.Err() != nil {
+	switch ctx.Err() {
+	case context.Canceled:
+		return OutcomeCanceled
+	case context.DeadlineExceeded:
 		return OutcomeTimeout
+	default:
+		return OutcomeError
 	}
-	return OutcomeError
+}
+
+// IsFault reports whether an outcome should increment provider_errors: a vendor
+// [OutcomeError] or a [OutcomeTimeout], but never [OutcomeOK] or the caller-driven
+// [OutcomeCanceled] (a barge-in / supersede is not a provider fault, so it must not
+// inflate the error-ratio). The three provider stages gate ProviderError on this.
+func (o Outcome) IsFault() bool {
+	return o == OutcomeError || o == OutcomeTimeout
 }
 
 // AgentRole is the bounded role label substituted for the unbounded agent_id /
@@ -87,6 +100,11 @@ const (
 	OutcomeOK      Outcome = "ok"
 	OutcomeError   Outcome = "error"
 	OutcomeTimeout Outcome = "timeout"
+	// OutcomeCanceled is a caller-driven cancel (a barge-in / supersede cutting the
+	// call's ctx), distinct from a vendor error or a timeout: it counts the call but
+	// is NOT a provider fault (see [Outcome.IsFault]). A bounded enum value per
+	// ADR-0032.
+	OutcomeCanceled Outcome = "canceled"
 )
 
 // TurnOutcome is the bounded result label on the turn-lifecycle counter
@@ -186,9 +204,14 @@ type StageRecorder interface {
 	// TTSTimeToFirstByte is the Synthesize call → first AudioChunk span
 	// (glyphoxa_voice_tts_ttfb_seconds{provider}) — WIRED by the bus subscriber.
 	TTSTimeToFirstByte(provider Provider, d time.Duration)
-	// TTSTotal is the full synthesis. (glyphoxa_voice_tts_total_seconds{provider})
-	// WIRED (#125) by the TTS stage: one span per successful Dispatch (Synthesize
-	// call through the full audio-chunk drain).
+	// TTSTotal is the per-sentence TTS DELIVER span, NOT synthesis time.
+	// (glyphoxa_voice_tts_total_seconds{provider}) WIRED (#125) by the TTS stage:
+	// one span per successful Dispatch (Synthesize call through the full audio-chunk
+	// drain). Under the lockstep TeeSynthesizer the drain is paced by the playback
+	// pump (disgo's 20 ms sender), so this span tracks synthesis PLUS paced playback
+	// delivery of the sentence — true synthesis time is unobservable at this seam.
+	// The provider-latency signal lives in [StageRecorder.TTSTimeToFirstByte]; this
+	// series carries its own wide buckets (ADR-0044 amendment, #239 review).
 	TTSTotal(provider Provider, d time.Duration)
 
 	// LLMRound is one Provider.Complete round inside the agenttool loop. roundIndex
