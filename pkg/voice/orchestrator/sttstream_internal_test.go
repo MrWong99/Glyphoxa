@@ -107,6 +107,7 @@ type spyStage struct {
 	lastProvider observe.Provider
 	calls        []spyProviderCall
 	errs         int
+	audio        []time.Duration // #127 STTAudioSeconds durations
 }
 
 // spyProviderCall is one captured ProviderCall's bounded labels.
@@ -133,6 +134,18 @@ func (s *spyStage) ProviderError(observe.Stage, observe.Provider) {
 	s.mu.Lock()
 	s.errs++
 	s.mu.Unlock()
+}
+
+func (s *spyStage) STTAudioSeconds(_ observe.Provider, d time.Duration) {
+	s.mu.Lock()
+	s.audio = append(s.audio, d)
+	s.mu.Unlock()
+}
+
+func (s *spyStage) audioSeconds() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.audio...)
 }
 
 func (s *spyStage) requests() int {
@@ -200,6 +213,87 @@ func TestStreamManager_BeginSendsPreRollThenLiveFrames(t *testing.T) {
 	}
 	if fs.commitCount() != 1 {
 		t.Errorf("Commit called %d times; want exactly 1", fs.commitCount())
+	}
+}
+
+// TestStreamManager_MetersStreamedAudioSecondsAtEndUtterance is the #127 streaming
+// AC (ADR-0045/0042): endUtterance meters the voiced+pre-roll duration accumulated
+// for the utterance — (P pre-roll + M voiced) × 32ms — recorded once per utterance,
+// regardless of the commit outcome (audio sent is audio billed).
+func TestStreamManager_MetersStreamedAudioSecondsAtEndUtterance(t *testing.T) {
+	spy := &spyStage{}
+	fs := &fakeStream{result: &stt.CommitResult{Transcript: stt.Transcript{Text: "ok"}}}
+	m := NewStreamManager(&fakeStreamingRecognizer{},
+		WithPreRoll(2), WithStreamMetrics(spy, observe.ProviderElevenLabs))
+	m.stream = fs
+	m.bus = voiceevent.NewBus()
+
+	m.idleFrame(streamFrame(t, 1))
+	m.idleFrame(streamFrame(t, 2)) // 2 pre-roll frames
+	m.beginUtterance(time.Now())
+	m.send(streamFrame(t, 3))
+	m.send(streamFrame(t, 4))
+	m.send(streamFrame(t, 5)) // 3 voiced frames
+	if _, _, ok := m.endUtterance(); !ok {
+		t.Fatal("endUtterance ok=false on a healthy utterance")
+	}
+
+	got := spy.audioSeconds()
+	if len(got) != 1 || got[0] != 5*32*time.Millisecond {
+		t.Errorf("stt_audio_seconds = %v, want one 160ms span ((2 pre-roll + 3 voiced)×32ms)", got)
+	}
+}
+
+// TestStreamManager_MetersOnlyStreamedAudioWhenUtteranceDies pins the truthful
+// billing on a mid-utterance death (ADR-0045): only the frames the provider actually
+// accepted before the death are billed by the streaming path (the batch fallback then
+// bills its own clip — both calls billed). Here 2 pre-roll frames stream, then a fatal
+// voiced send kills the utterance, so endUtterance meters exactly 2×32ms and returns
+// the batch-fallback signal.
+func TestStreamManager_MetersOnlyStreamedAudioWhenUtteranceDies(t *testing.T) {
+	spy := &spyStage{}
+	fs := &fakeStream{}
+	m := NewStreamManager(&fakeStreamingRecognizer{},
+		WithPreRoll(2), WithStreamMetrics(spy, observe.ProviderElevenLabs))
+	m.stream = fs
+	m.bus = voiceevent.NewBus()
+
+	m.idleFrame(streamFrame(t, 1))
+	m.idleFrame(streamFrame(t, 2))
+	m.beginUtterance(time.Now()) // 2 pre-roll frames stream OK (sendErr still nil)
+
+	// The websocket dies before the first voiced frame.
+	fs.mu.Lock()
+	fs.sendErr = &stt.StreamError{Code: stt.CodeTransport, Fatal: true, Err: errors.New("ws dead")}
+	fs.mu.Unlock()
+	m.send(streamFrame(t, 3)) // fails → utterance dead
+
+	if _, _, ok := m.endUtterance(); ok {
+		t.Fatal("endUtterance ok=true after a fatal send; want batch fallback (ok=false)")
+	}
+	got := spy.audioSeconds()
+	if len(got) != 1 || got[0] != 2*32*time.Millisecond {
+		t.Errorf("stt_audio_seconds = %v, want one 64ms span (only the 2 pre-roll frames the provider accepted)", got)
+	}
+}
+
+// TestStreamManager_PureBatchUtteranceMetersNoStreamedAudio pins that an utterance
+// that never streamed (session down at begin) bills nothing on the streaming path —
+// the batch path bills the whole clip instead (no double count when nothing streamed).
+func TestStreamManager_PureBatchUtteranceMetersNoStreamedAudio(t *testing.T) {
+	spy := &spyStage{}
+	m := NewStreamManager(&fakeStreamingRecognizer{},
+		WithPreRoll(2), WithStreamMetrics(spy, observe.ProviderElevenLabs))
+	m.bus = voiceevent.NewBus() // m.stream stays nil: session down at begin
+
+	m.idleFrame(streamFrame(t, 1))
+	m.beginUtterance(time.Now()) // pure batch: nothing streamed
+	m.send(streamFrame(t, 2))    // no-op
+	if _, _, ok := m.endUtterance(); ok {
+		t.Fatal("endUtterance ok=true with no session; want batch (ok=false)")
+	}
+	if got := spy.audioSeconds(); len(got) != 0 {
+		t.Errorf("stt_audio_seconds on a pure-batch utterance = %v, want none (batch path bills it)", got)
 	}
 }
 

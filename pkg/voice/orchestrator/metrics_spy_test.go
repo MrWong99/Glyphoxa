@@ -35,6 +35,16 @@ type metricsSpy struct {
 	vadHangs    []time.Duration
 	calls       []providerCall
 	errs        []providerErr
+
+	// #127 usage meters.
+	sttAudio []time.Duration // STTAudioSeconds durations
+	ttsChars []ttsCharsRec   // TTSCharacters (provider, chars)
+}
+
+// ttsCharsRec is one captured TTSCharacters call.
+type ttsCharsRec struct {
+	provider observe.Provider
+	chars    int
 }
 
 func (s *metricsSpy) STTRequest(p observe.Provider, _ time.Duration) {
@@ -67,6 +77,18 @@ func (s *metricsSpy) ProviderError(stage observe.Stage, p observe.Provider) {
 	s.errs = append(s.errs, providerErr{stage: stage, provider: p})
 }
 
+func (s *metricsSpy) STTAudioSeconds(_ observe.Provider, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sttAudio = append(s.sttAudio, d)
+}
+
+func (s *metricsSpy) TTSCharacters(p observe.Provider, chars int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ttsChars = append(s.ttsChars, ttsCharsRec{provider: p, chars: chars})
+}
+
 func (s *metricsSpy) snapshot() ([]observe.Provider, []observe.Provider, []time.Duration, []providerCall, []providerErr) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,4 +97,18 @@ func (s *metricsSpy) snapshot() ([]observe.Provider, []observe.Provider, []time.
 		append([]time.Duration(nil), s.vadHangs...),
 		append([]providerCall(nil), s.calls...),
 		append([]providerErr(nil), s.errs...)
+}
+
+// audioSeconds returns the captured STTAudioSeconds durations.
+func (s *metricsSpy) audioSeconds() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.sttAudio...)
+}
+
+// characters returns the captured TTSCharacters records.
+func (s *metricsSpy) characters() []ttsCharsRec {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ttsCharsRec(nil), s.ttsChars...)
 }

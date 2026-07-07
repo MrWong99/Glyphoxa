@@ -162,8 +162,28 @@ func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
 		}
 		return fmt.Errorf("orchestrator.STT.Transcribe: %w", err)
 	}
+	// Usage metering (#127, ADR-0045/0042): on success only, bill the submitted audio
+	// length — a failed/hung call above billed nothing. An atomic counter add; it
+	// never blocks or fails the turn.
+	s.rec.STTAudioSeconds(s.provider, framesDuration(frames))
 	s.PublishFinal(ctx, t)
 	return nil
+}
+
+// framesDuration sums the wall-clock span of frames from each Frame's FrameMs — the
+// audio length submitted to the recognizer, which the STT usage meter bills (#127,
+// ADR-0045/0042).
+func framesDuration(frames []audio.Frame) time.Duration {
+	var d time.Duration
+	for _, f := range frames {
+		d += frameDuration(f)
+	}
+	return d
+}
+
+// frameDuration is one Frame's wall-clock span (FrameMs milliseconds).
+func frameDuration(f audio.Frame) time.Duration {
+	return time.Duration(f.FrameMs()) * time.Millisecond
 }
 
 // PublishFinal fans an authoritative [stt.Transcript] out as a
