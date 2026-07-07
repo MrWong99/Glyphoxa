@@ -73,6 +73,39 @@
   color: var(--status-danger);
 }
 
+/* Per-session spend caps editor (#130, ADR-0046): a short lede, two USD inputs
+ * side by side, and a right-aligned Save row mirroring the Discord IDs form. */
+.gx-spendcaps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-spendcaps__lede {
+  margin: 0;
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+}
+
+.gx-spendcaps__inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-md);
+}
+
+.gx-spendcaps__save {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.gx-spendcaps__error {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--status-danger);
+}
+
 /* "Add Glyphoxa to your server" bot-authorization action (#110): a separate,
  * prerequisite step from saving the IDs, sits at the foot of the Discord card
  * above a top divider so the distinction reads. */

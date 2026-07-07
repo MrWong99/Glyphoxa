@@ -226,6 +226,18 @@
   font-size: 0.875rem;
 }
 
+/* Spend-cap-reached banner (#130, ADR-0046): a warning tone, distinct from the
+ * danger failure banner — a soft cap is a deliberate limit, not a fault. */
+.gx-session__spendcap {
+  margin-top: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--warning, #a86800);
+  background: color-mix(in srgb, var(--warning, #a86800) 12%, transparent);
+  color: var(--warning, #a86800);
+  font-size: 0.875rem;
+}
+
 .gx-session__transcript {
   margin-top: var(--spacing-xl);
 }

@@ -68,7 +68,7 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
   // The SSE "mute" frame patches the SHARED getSession cache (not the transcript
   // cache), so the Voice panel reflects a mute from EITHER surface without a
   // reload (#211, AC5). patchOne is referentially stable, so it is a safe effect dep.
-  const { patchOne } = useMuteCache();
+  const { patchOne, patchSpendCap } = useMuteCache();
   // Fetch the snapshot for ANY session that exists — live OR ended. A reload of
   // an ended session replays its persisted history from the DB-backed snapshot
   // (#74); the live stream below only opens while the session is active.
@@ -123,6 +123,14 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
       const m = JSON.parse((e as MessageEvent).data) as { agent_id: string; muted: boolean };
       patchOne(m.agent_id, m.muted);
     });
+    es.addEventListener("spendcap", (e) => {
+      // The session's estimated spend crossed a cap (#130): flip the spend-cap
+      // state on the shared getSession cache so the Session screen shows the
+      // spend-cap-reached badge immediately; the interval refetch fills in the
+      // estimated spend the frame does not carry.
+      const s = JSON.parse((e as MessageEvent).data) as { level: string };
+      patchSpendCap(s.level);
+    });
     es.addEventListener("connection", (e) => {
       // The gateway connection state moved (#123): reflect connecting → connected
       // live, or failed with its readable reason — no page reload.
@@ -135,7 +143,7 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     });
 
     return () => es.close();
-  }, [active, sessionId, isSuccess, queryClient, patchOne]);
+  }, [active, sessionId, isSuccess, queryClient, patchOne, patchSpendCap]);
 
   return data ?? EMPTY;
 }

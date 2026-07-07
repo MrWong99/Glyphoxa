@@ -18,8 +18,12 @@ import {
   ProviderHealthSchema,
   ListModelsResponseSchema,
   ResolveGuildInviteResponseSchema,
+  GetSpendCapsResponseSchema,
+  SetSpendCapsResponseSchema,
+  SpendCapsSchema,
   type ProviderHealth,
   type SaveDiscordSettingsRequest,
+  type SetSpendCapsRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -82,6 +86,11 @@ function mockBackend(
     // inviteCodes captures every ResolveGuildInvite request's code so a test can
     // pin that the SPA sent the BARE code (not the full URL).
     inviteCodes?: string[];
+    // spendCaps seeds the stored per-Tenant spend caps GetSpendCaps returns (#130);
+    // spendSaves captures every SetSpendCaps request so a test can pin the wire
+    // shape (a blank field must be omitted, i.e. undefined = cleared).
+    spendCaps?: { softUsd?: number; hardUsd?: number };
+    spendSaves?: SetSpendCapsRequest[];
   } = {},
 ) {
   const state = {
@@ -91,6 +100,8 @@ function mockBackend(
     discord: opts.saved?.discord,
     guildId: "",
     voiceChannelId: "",
+    spendSoft: opts.spendCaps?.softUsd,
+    spendHard: opts.spendCaps?.hardUsd,
   };
   return createRouterTransport(({ service }) => {
     service(VoiceService, {
@@ -168,6 +179,26 @@ function mockBackend(
         if (opts.inviteError) throw new ConnectError(opts.inviteError.message, opts.inviteError.code);
         const r = opts.inviteResolve ?? { guildId: "111", guildName: "The Keep", voiceChannels: [] };
         return create(ResolveGuildInviteResponseSchema, r);
+      },
+      getSpendCaps: () =>
+        create(GetSpendCapsResponseSchema, {
+          caps: create(SpendCapsSchema, { softUsd: state.spendSoft, hardUsd: state.spendHard }),
+        }),
+      setSpendCaps: (req) => {
+        opts.spendSaves?.push(req);
+        // Mirror the server (#130): negative or hard < soft is rejected; an omitted
+        // field clears that cap.
+        if ((req.softUsd ?? 0) < 0 || (req.hardUsd ?? 0) < 0) {
+          throw new ConnectError("cap must not be negative", Code.InvalidArgument);
+        }
+        if (req.softUsd !== undefined && req.hardUsd !== undefined && req.hardUsd < req.softUsd) {
+          throw new ConnectError("hard cap must be >= soft cap", Code.InvalidArgument);
+        }
+        state.spendSoft = req.softUsd;
+        state.spendHard = req.hardUsd;
+        return create(SetSpendCapsResponseSchema, {
+          caps: create(SpendCapsSchema, { softUsd: state.spendSoft, hardUsd: state.spendHard }),
+        });
       },
     });
   });
@@ -663,5 +694,37 @@ describe("Configuration model entry (#227)", () => {
     renderScreen(mockBackend({ saved: { groq: "eeee" } }));
     await screen.findByRole("button", { name: "Groq model" });
     expect(screen.queryByRole("button", { name: "Save model" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Configuration spend caps (#130)", () => {
+  it("seeds the inputs from stored caps and saves edits (blank field clears)", async () => {
+    const spendSaves: SetSpendCapsRequest[] = [];
+    renderScreen(mockBackend({ spendCaps: { softUsd: 5, hardUsd: 10 }, spendSaves }));
+
+    const soft = (await screen.findByLabelText("Soft cap (USD)")) as HTMLInputElement;
+    const hard = screen.getByLabelText("Hard cap (USD)") as HTMLInputElement;
+    await waitFor(() => expect(soft.value).toBe("5"));
+    expect(hard.value).toBe("10");
+
+    // Raise the soft cap and clear the hard cap.
+    fireEvent.change(soft, { target: { value: "7" } });
+    fireEvent.change(hard, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /save spend caps/i }));
+
+    await waitFor(() => expect(spendSaves).toHaveLength(1));
+    // A blank field is omitted (undefined) so the server clears it; 7 is sent.
+    expect(spendSaves[0].softUsd).toBe(7);
+    expect(spendSaves[0].hardUsd).toBeUndefined();
+  });
+
+  it("surfaces a server rejection (hard < soft) inline", async () => {
+    renderScreen(mockBackend({ spendSaves: [] }));
+
+    fireEvent.change(await screen.findByLabelText("Soft cap (USD)"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("Hard cap (USD)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: /save spend caps/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't save/i);
   });
 });
