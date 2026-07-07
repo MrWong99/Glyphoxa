@@ -21,3 +21,11 @@ Implementing #124/#125 (E6) required deciding where retries live, what is retrya
 ## Relationship to other ADRs
 
 ADR-0019/0026 (stages own resilience, adapters stay thin), ADR-0021 (injected time), ADR-0027 (barge-in cancellation contract), ADR-0032 (bounded labels, final-outcome-only series), ADR-0004 (provider interfaces unchanged).
+
+## Amendment 2026-07-07 (#239 review)
+
+Two refinements from the #125 PR review, both narrowing the metric semantics the section above records:
+
+- **`tts_total` is a *deliver* span, not synthesis time.** The lockstep `TeeSynthesizer` forwards each synthesized chunk in step with the playback pump (disgo's 20 ms sender), so the TTS stage's chunk drain is paced by playback: its duration tracks how long the sentence takes to *speak*, not to synthesize. True synthesis time is therefore unobservable at this seam, and the provider-latency signal already lives in `tts_ttfb`. `tts_total` is consequently recorded and documented as a deliver span — "synthesis plus paced playback delivery of one sentence" — and given its own wide buckets (0.5, 1, 2, 5, 10, 20, 30, 60 s) instead of the shared sub-5s SLO `latencyBuckets`, which would dump every real sentence into `+Inf`.
+
+- **`observe.CallOutcome` gains a fourth outcome, `canceled`.** The original classifier collapsed every non-nil ctx error into `timeout`. It now distinguishes a `context.Canceled` call ctx — a caller-driven barge-in / supersede (ADR-0027) — as `OutcomeCanceled`, while `context.DeadlineExceeded` stays `timeout`. A `canceled` outcome counts the call in `provider_calls` but does **not** increment `provider_errors`: a barge-in is not a vendor fault and must not inflate the error ratio. `timeout` and `error` remain faults and still bump `provider_errors`. The rule is shared verbatim across the STT, TTS and LLM stages (`Outcome.IsFault` gates the error bump). `canceled` is a bounded enum value (ADR-0032).

@@ -386,16 +386,23 @@ func (m *StreamManager) awaitCommit(ch <-chan stt.CommitResult, sentAt time.Time
 	case res := <-ch:
 		m.metrics.STTRequest(m.provider, m.now().Sub(sentAt))
 		if res.Err != nil {
+			// Provider health (#125): a resolved-but-failed commit is a stt-stage error.
+			m.metrics.ProviderCall(observe.StageSTT, m.provider, observe.OutcomeError)
+			m.metrics.ProviderError(observe.StageSTT, m.provider)
 			m.noteAuthBackoff(res.Err)
 			return stt.Transcript{}, false
 		}
+		m.metrics.ProviderCall(observe.StageSTT, m.provider, observe.OutcomeOK)
 		m.resetBackoff()
 		return res.Transcript, true
 	case <-timer.C:
 		// Record the span on timeout too: a stalled provider is exactly what this
 		// series exists to surface, and the batch adapter records its call on failure
-		// as well (batch parity).
+		// as well (batch parity). The provider-call counter mirrors it with a
+		// timeout outcome plus the error-only sibling (#125).
 		m.metrics.STTRequest(m.provider, m.now().Sub(sentAt))
+		m.metrics.ProviderCall(observe.StageSTT, m.provider, observe.OutcomeTimeout)
+		m.metrics.ProviderError(observe.StageSTT, m.provider)
 		return stt.Transcript{}, false
 	}
 }

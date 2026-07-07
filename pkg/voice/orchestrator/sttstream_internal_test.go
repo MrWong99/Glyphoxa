@@ -98,13 +98,22 @@ func (r *fakeStreamingRecognizer) openCount() int {
 	return r.opens
 }
 
-// spyStage records STTRequest calls; every other StageRecorder method is the no-op
-// from the embedded Discard.
+// spyStage records STTRequest and provider-call/error invocations; every other
+// StageRecorder method is the no-op from the embedded Discard.
 type spyStage struct {
 	observe.Discard
 	mu           sync.Mutex
 	sttRequests  int
 	lastProvider observe.Provider
+	calls        []spyProviderCall
+	errs         int
+}
+
+// spyProviderCall is one captured ProviderCall's bounded labels.
+type spyProviderCall struct {
+	stage    observe.Stage
+	provider observe.Provider
+	outcome  observe.Outcome
 }
 
 func (s *spyStage) STTRequest(p observe.Provider, _ time.Duration) {
@@ -114,10 +123,28 @@ func (s *spyStage) STTRequest(p observe.Provider, _ time.Duration) {
 	s.mu.Unlock()
 }
 
+func (s *spyStage) ProviderCall(stage observe.Stage, p observe.Provider, o observe.Outcome) {
+	s.mu.Lock()
+	s.calls = append(s.calls, spyProviderCall{stage: stage, provider: p, outcome: o})
+	s.mu.Unlock()
+}
+
+func (s *spyStage) ProviderError(observe.Stage, observe.Provider) {
+	s.mu.Lock()
+	s.errs++
+	s.mu.Unlock()
+}
+
 func (s *spyStage) requests() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sttRequests
+}
+
+func (s *spyStage) providerCalls() ([]spyProviderCall, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]spyProviderCall(nil), s.calls...), s.errs
 }
 
 // streamFrame builds a 32 ms / 16 kHz frame with marker written to sample 0, so a
@@ -306,6 +333,15 @@ func TestStreamManager_AwaitCommitSuccess(t *testing.T) {
 	if spy.lastProvider != observe.ProviderElevenLabs {
 		t.Errorf("stt_request provider = %q, want elevenlabs", spy.lastProvider)
 	}
+	// #125: a resolved commit moves provider_calls with outcome=ok and no errors.
+	calls, errs := spy.providerCalls()
+	wantOK := spyProviderCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeOK}
+	if len(calls) != 1 || calls[0] != wantOK {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, wantOK)
+	}
+	if errs != 0 {
+		t.Errorf("provider_errors = %d on a healthy commit, want 0", errs)
+	}
 	m.mu.Lock()
 	b := m.backoff
 	m.mu.Unlock()
@@ -351,6 +387,15 @@ func TestStreamManager_AwaitCommitTimesOut(t *testing.T) {
 	if spy.requests() != 1 {
 		t.Errorf("commit timeout recorded %d stt_request spans, want 1 (a stalled provider is a recorded round-trip)", spy.requests())
 	}
+	// #125: a stalled commit moves provider_calls with outcome=timeout PLUS one error.
+	calls, errs := spy.providerCalls()
+	wantTimeout := spyProviderCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeTimeout}
+	if len(calls) != 1 || calls[0] != wantTimeout {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, wantTimeout)
+	}
+	if errs != 1 {
+		t.Errorf("provider_errors = %d on a commit timeout, want 1", errs)
+	}
 }
 
 // TestStreamManager_AuthDialBacksOffAtCap pins that an auth-class DIAL rejection
@@ -390,12 +435,28 @@ func TestStreamManager_AuthDialBacksOffAtCap(t *testing.T) {
 // TestStreamManager_AwaitCommitErrorFallsBack pins that a provider commit error
 // falls back to batch (ok=false) and does not reset the backoff.
 func TestStreamManager_AwaitCommitErrorFallsBack(t *testing.T) {
-	m := NewStreamManager(&fakeStreamingRecognizer{}, WithStreamBackoff(time.Second, 30*time.Second), WithCommitTimeout(time.Second))
+	spy := &spyStage{}
+	m := NewStreamManager(&fakeStreamingRecognizer{},
+		WithStreamMetrics(spy, observe.ProviderElevenLabs),
+		WithStreamBackoff(time.Second, 30*time.Second), WithCommitTimeout(time.Second))
 	m.backoff = 8 * time.Second
 	ch := make(chan stt.CommitResult, 1)
 	ch <- stt.CommitResult{Err: &stt.StreamError{Code: "commit_throttled", Fatal: false, Err: errors.New("throttled")}}
 	if _, ok := m.awaitCommit(ch, time.Now()); ok {
 		t.Fatal("awaitCommit ok=true on a commit error; want false → batch fallback")
+	}
+	// #125: a commit error moves provider_calls with outcome=error PLUS one error,
+	// and still records the round-trip span (batch parity).
+	if spy.requests() != 1 {
+		t.Errorf("commit error recorded %d stt_request spans, want 1", spy.requests())
+	}
+	calls, errs := spy.providerCalls()
+	wantErr := spyProviderCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeError}
+	if len(calls) != 1 || calls[0] != wantErr {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, wantErr)
+	}
+	if errs != 1 {
+		t.Errorf("provider_errors = %d on a commit error, want 1", errs)
 	}
 	m.mu.Lock()
 	b := m.backoff

@@ -8,14 +8,109 @@ import (
 	"errors"
 	"io"
 	"math"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/hraban/opus"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
+
+// codecSpy is a [observe.StageRecorder] that counts the per-frame codec spans
+// (#125). Embeds [observe.Discard] so every other method is a no-op. Safe for
+// concurrent use (PlaybackSource may pull from another goroutine).
+type codecSpy struct {
+	observe.Discard
+	mu      sync.Mutex
+	decodes int
+	encodes int
+}
+
+func (s *codecSpy) CodecDecode(time.Duration) {
+	s.mu.Lock()
+	s.decodes++
+	s.mu.Unlock()
+}
+
+func (s *codecSpy) CodecEncode(time.Duration) {
+	s.mu.Lock()
+	s.encodes++
+	s.mu.Unlock()
+}
+
+func (s *codecSpy) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.decodes, s.encodes
+}
+
+// TestDecodeInbound_RecordsCodecDecodePerFrame pins the #125 codec_decode wiring:
+// each non-empty inbound Opus frame decoded records exactly one CodecDecode span,
+// so N inbound packets → N observations (the histogram's "per inbound frame"
+// contract). An empty payload decodes nothing and records nothing.
+func TestDecodeInbound_RecordsCodecDecodePerFrame(t *testing.T) {
+	packets := encodeOpus(t, sine(48000, 48000, 330), 48000)
+	spy := &codecSpy{}
+	c := New(WithMetrics(spy))
+	user := snowflake.ID(7)
+	for _, pkt := range packets {
+		if _, err := c.DecodeInbound(gxvoice.Frame{UserID: user, Opus: pkt}); err != nil {
+			t.Fatalf("DecodeInbound: %v", err)
+		}
+	}
+	// An empty payload is a no-op — it must not record a decode span.
+	if _, err := c.DecodeInbound(gxvoice.Frame{UserID: user, Opus: nil}); err != nil {
+		t.Fatalf("DecodeInbound(empty): %v", err)
+	}
+
+	decodes, _ := spy.counts()
+	if decodes != len(packets) {
+		t.Errorf("codec_decode recorded %d spans, want %d (one per decoded inbound frame)", decodes, len(packets))
+	}
+}
+
+// TestPlaybackSource_RecordsCodecEncodePerFrame pins the #125 codec_encode wiring:
+// each outbound Opus frame the playback source produces records exactly one
+// CodecEncode span. The chunk channel is PRE-FILLED and closed before the first
+// pull, so the measured cost is the enc.Encode work, never the synthesis-network
+// <-chunks wait (which would corrupt the series).
+func TestPlaybackSource_RecordsCodecEncodePerFrame(t *testing.T) {
+	const rate = 48000
+	chunks := make(chan tts.AudioChunk, 1)
+	chunks <- tts.AudioChunk{PCM: pcmBytes(sine(rate, rate, 440)), SampleRate: rate, Channels: 1}
+	close(chunks) // pre-filled + closed: NextFrame never blocks on synthesis
+
+	spy := &codecSpy{}
+	c := New(WithMetrics(spy))
+	src, err := c.PlaybackSource(chunks)
+	if err != nil {
+		t.Fatalf("PlaybackSource: %v", err)
+	}
+
+	var frames int
+	for {
+		_, err := src.NextFrame(context.Background())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextFrame: %v", err)
+		}
+		frames++
+	}
+
+	_, encodes := spy.counts()
+	if frames == 0 {
+		t.Fatal("playback produced no frames")
+	}
+	if encodes != frames {
+		t.Errorf("codec_encode recorded %d spans, want %d (one per outbound frame)", encodes, frames)
+	}
+}
 
 // encodeOpus encodes mono int16 PCM at rate into 20 ms Opus packets, the shape
 // Discord delivers. Used to synthesize inbound frames for DecodeInbound.

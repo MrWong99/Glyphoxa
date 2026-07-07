@@ -31,6 +31,7 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/hraban/opus"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -94,11 +95,38 @@ type Codec struct {
 	mu       sync.Mutex
 	decoders map[snowflake.ID]*inboundStream
 	calls    int // DecodeInbound calls since the last idle-stream sweep
+
+	// rec carries the #125 per-frame codec instrumentation: CodecDecode per inbound
+	// frame decoded, CodecEncode per outbound frame encoded. Defaults to a no-op
+	// (observe.Discard) so the keyless path stays silent.
+	rec observe.StageRecorder
 }
 
-// New returns a Codec ready to transcode. It implements [wire.Codec].
-func New() *Codec {
-	return &Codec{decoders: make(map[snowflake.ID]*inboundStream)}
+// Option configures a [Codec] at construction. [WithMetrics] opts the per-frame
+// codec_decode / codec_encode instrumentation in.
+type Option func(*Codec)
+
+// WithMetrics injects the #125 instrumentation: rec receives one
+// [observe.StageRecorder.CodecDecode] span per decoded inbound frame and one
+// CodecEncode per encoded outbound frame. A nil rec leaves the no-op default in
+// place. The stub build (no -tags opus) accepts the same option and ignores it.
+func WithMetrics(rec observe.StageRecorder) Option {
+	return func(c *Codec) {
+		if rec != nil {
+			c.rec = rec
+		}
+	}
+}
+
+// New returns a Codec ready to transcode. It implements [wire.Codec]. Pass
+// [WithMetrics] to record the per-frame codec spans; without it the codec records
+// nothing (the keyless default).
+func New(opts ...Option) *Codec {
+	c := &Codec{decoders: make(map[snowflake.ID]*inboundStream), rec: observe.Discard{}}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 var _ wire.Codec = (*Codec)(nil)
@@ -143,12 +171,17 @@ func (c *Codec) DecodeInbound(frame gxvoice.Frame) ([]audio.Frame, error) {
 	stream.lastPTS = frame.PTS
 	stream.hasPTS = true
 
+	// Time the decode+reframe work: one codec_decode span per inbound frame (#125).
+	// The measured section is exactly the Opus->PCM decode and the reframer regroup,
+	// the per-inbound-frame cost the series names.
+	decodeStart := time.Now()
 	n, err := stream.dec.Decode(frame.Opus, stream.pcm)
 	if err != nil {
 		return nil, fmt.Errorf("codec: decode Opus for user %s: %w", frame.UserID, err)
 	}
 
 	grouped := stream.reframe.Push(stream.pcm[:n])
+	c.rec.CodecDecode(time.Since(decodeStart))
 	if len(grouped) == 0 {
 		return nil, nil
 	}
@@ -213,6 +246,7 @@ func (c *Codec) PlaybackSource(chunks <-chan tts.AudioChunk) (gxvoice.Source, er
 		enc:     enc,
 		reframe: dsp.NewReframer(opusFrameSamples),
 		encBuf:  make([]byte, maxEncodedBytes),
+		rec:     c.rec,
 	}, nil
 }
 
@@ -227,6 +261,7 @@ type playbackSource struct {
 	resamp  *dsp.Resampler // built lazily from the first chunk's rate
 	reframe *dsp.Reframer
 	encBuf  []byte
+	rec     observe.StageRecorder // #125: codec_encode per outbound frame
 
 	ready   [][]int16 // resampled+reframed frames awaiting encode
 	drained bool      // chunk channel closed; flush the reframer tail once
@@ -260,7 +295,12 @@ func (p *playbackSource) NextFrame(ctx context.Context) ([]byte, error) {
 
 	frame := p.ready[0]
 	p.ready = p.ready[1:]
+	// Time ONLY the encode: one codec_encode span per outbound frame (#125). The
+	// <-chunks wait in pull() is deliberately excluded — it is synthesis network
+	// time, not codec cost, and would corrupt the series.
+	encStart := time.Now()
 	n, err := p.enc.Encode(frame, p.encBuf)
+	p.rec.CodecEncode(time.Since(encStart))
 	if err != nil {
 		return nil, fmt.Errorf("codec: encode Opus frame: %w", err)
 	}

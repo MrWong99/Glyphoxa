@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -29,18 +30,51 @@ import (
 type VAD struct {
 	bus     *voiceevent.Bus
 	session vad.SessionHandle
+
+	// rec/hangover carry the #125 instrumentation: one vad_hangover span per
+	// speech_end, recording the fixed end-of-speech detection lag
+	// (minSilenceFrames*frameMs) the stage is constructed with. The value is a
+	// constant, not derived per-frame, because vad.Session does not expose its
+	// minSilenceFrames — wirenpc computes it from the same consts it configures the
+	// session with. rec defaults to a no-op (observe.Discard) so the keyless path
+	// stays silent.
+	rec      observe.StageRecorder
+	hangover time.Duration
+}
+
+// VADOption configures a [VAD] at construction. [WithVADMetrics] opts the
+// vad_hangover instrumentation in.
+type VADOption func(*VAD)
+
+// WithVADMetrics injects the #125 instrumentation: rec receives one
+// [observe.StageRecorder.VADHangover] span per speech_end, valued hangover (the
+// fixed minSilenceFrames*frameMs end-of-speech lag). A nil rec leaves the no-op
+// default in place.
+func WithVADMetrics(rec observe.StageRecorder, hangover time.Duration) VADOption {
+	return func(v *VAD) {
+		if rec != nil {
+			v.rec = rec
+		}
+		v.hangover = hangover
+	}
 }
 
 // NewVAD wires session into bus. Both must be non-nil; passing nil for
 // either panics. The caller owns session and is responsible for closing it.
-func NewVAD(bus *voiceevent.Bus, session vad.SessionHandle) *VAD {
+// Pass [WithVADMetrics] to record the end-of-speech hangover; without it the
+// stage records nothing (the keyless default).
+func NewVAD(bus *voiceevent.Bus, session vad.SessionHandle, opts ...VADOption) *VAD {
 	if bus == nil {
 		panic("orchestrator.NewVAD: bus must not be nil")
 	}
 	if session == nil {
 		panic("orchestrator.NewVAD: session must not be nil")
 	}
-	return &VAD{bus: bus, session: session}
+	v := &VAD{bus: bus, session: session, rec: observe.Discard{}}
+	for _, o := range opts {
+		o(v)
+	}
+	return v
 }
 
 // Process feeds one PCM frame through the underlying VAD session and
@@ -64,6 +98,8 @@ func (v *VAD) Process(frame audio.Frame) error {
 			At:          time.Now(),
 			Probability: evt.Probability,
 		})
+		// #125: stamp the fixed end-of-speech detection lag once per speech_end.
+		v.rec.VADHangover(v.hangover)
 	}
 	return nil
 }

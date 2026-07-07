@@ -122,7 +122,17 @@ func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
 	// real wall-clock inside the response_latency span, and a failed/slow scribe
 	// call is exactly what this series exists to surface.
 	s.rec.STTRequest(s.provider, time.Since(start))
+	// Provider health (#125): count the call with its final outcome and bump the
+	// error-only sibling ONLY on a fault (error/timeout), never on a caller-driven
+	// cancel — a barge-in that cuts the recognizer ctx is OutcomeCanceled and must
+	// not inflate the error ratio (#239 review). The shared [observe.CallOutcome]
+	// rule keeps STT/TTS/LLM in agreement (a fired per-request timeout is timeout).
+	outcome := observe.CallOutcome(ctx, err)
+	s.rec.ProviderCall(observe.StageSTT, s.provider, outcome)
 	if err != nil {
+		if outcome.IsFault() {
+			s.rec.ProviderError(observe.StageSTT, s.provider)
+		}
 		return fmt.Errorf("orchestrator.STT.Transcribe: %w", err)
 	}
 	s.PublishFinal(ctx, t)

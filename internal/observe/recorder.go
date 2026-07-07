@@ -23,7 +23,40 @@
 // nil-check-free, matching pkg/voice's discardMetrics convention.
 package observe
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// CallOutcome classifies a provider call's terminal state from its error and the
+// call ctx, so the STT, TTS and LLM stages record [StageRecorder.ProviderCall]
+// with one shared rule: a nil err is [OutcomeOK]; a [context.Canceled] call ctx is
+// [OutcomeCanceled] (a caller-driven barge-in / supersede, NOT a vendor fault); a
+// [context.DeadlineExceeded] call ctx is [OutcomeTimeout] (a fault); any other
+// error is a vendor [OutcomeError] (a fault). The ctx state is checked before the
+// err's own type because a cancelled/expired ctx is the authoritative reason the
+// call ended even when the adapter surfaces its own wrapped error.
+func CallOutcome(ctx context.Context, err error) Outcome {
+	if err == nil {
+		return OutcomeOK
+	}
+	switch ctx.Err() {
+	case context.Canceled:
+		return OutcomeCanceled
+	case context.DeadlineExceeded:
+		return OutcomeTimeout
+	default:
+		return OutcomeError
+	}
+}
+
+// IsFault reports whether an outcome should increment provider_errors: a vendor
+// [OutcomeError] or a [OutcomeTimeout], but never [OutcomeOK] or the caller-driven
+// [OutcomeCanceled] (a barge-in / supersede is not a provider fault, so it must not
+// inflate the error-ratio). The three provider stages gate ProviderError on this.
+func (o Outcome) IsFault() bool {
+	return o == OutcomeError || o == OutcomeTimeout
+}
 
 // AgentRole is the bounded role label substituted for the unbounded agent_id /
 // guild on every stage histogram (ADR-0032 §2.1). Exactly two values reach a
@@ -67,6 +100,11 @@ const (
 	OutcomeOK      Outcome = "ok"
 	OutcomeError   Outcome = "error"
 	OutcomeTimeout Outcome = "timeout"
+	// OutcomeCanceled is a caller-driven cancel (a barge-in / supersede cutting the
+	// call's ctx), distinct from a vendor error or a timeout: it counts the call but
+	// is NOT a provider fault (see [Outcome.IsFault]). A bounded enum value per
+	// ADR-0032.
+	OutcomeCanceled Outcome = "canceled"
 )
 
 // TurnOutcome is the bounded result label on the turn-lifecycle counter
@@ -146,36 +184,34 @@ type StageRecorder interface {
 
 	// VADHangover is the speech-end detection lag (minSilenceFrames*frameMs),
 	// a fixed per-turn cost B3 tunes. (glyphoxa_voice_vad_hangover_seconds)
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11). Defined so the
-	// /metrics surface is spec-complete (ADR-0032), but no caller invokes it yet;
-	// the histogram stays empty until the VAD/segmenter (orchestrator) stamps it.
-	// An empty series here is expected, not a fault.
+	// WIRED (#125) by the VAD stage: one span per VADSpeechEnd, the constant the
+	// stage is constructed with.
 	VADHangover(d time.Duration)
 	// AddressDetect is the address-detection stage duration.
 	// (glyphoxa_voice_address_detect_seconds) — WIRED by the bus subscriber.
 	AddressDetect(d time.Duration)
 	// CodecDecode / CodecEncode are the per-direction Opus<->PCM costs.
-	// (glyphoxa_voice_codec_decode_seconds / _codec_encode_seconds)
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the wire codec
-	// (pkg/voice/wire/codec) stamps these. Empty until then, expected.
+	// (glyphoxa_voice_codec_decode_seconds / _codec_encode_seconds) — WIRED (#125)
+	// by the wire codec: CodecDecode per inbound frame decoded, CodecEncode per
+	// outbound frame encoded (the enc.Encode section only, never the chunk wait).
 	CodecDecode(d time.Duration)
 	CodecEncode(d time.Duration)
 
 	// STTRequest is the STT provider POST round-trip.
-	// (glyphoxa_voice_stt_request_seconds{provider})
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the STT adapter
-	// (pkg/voice/stt/elevenlabs) stamps it. Empty until then, expected.
+	// (glyphoxa_voice_stt_request_seconds{provider}) — WIRED by the STT stage
+	// (batch Transcribe and the streamed commit path).
 	STTRequest(provider Provider, d time.Duration)
 	// TTSTimeToFirstByte is the Synthesize call → first AudioChunk span
 	// (glyphoxa_voice_tts_ttfb_seconds{provider}) — WIRED by the bus subscriber.
 	TTSTimeToFirstByte(provider Provider, d time.Duration)
-	// TTSTotal is the full synthesis. (glyphoxa_voice_tts_total_seconds{provider})
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the TTS stage/
-	// adapter stamps it. Empty until then, expected.
+	// TTSTotal is the per-sentence TTS DELIVER span, NOT synthesis time.
+	// (glyphoxa_voice_tts_total_seconds{provider}) WIRED (#125) by the TTS stage:
+	// one span per successful Dispatch (Synthesize call through the full audio-chunk
+	// drain). Under the lockstep TeeSynthesizer the drain is paced by the playback
+	// pump (disgo's 20 ms sender), so this span tracks synthesis PLUS paced playback
+	// delivery of the sentence — true synthesis time is unobservable at this seam.
+	// The provider-latency signal lives in [StageRecorder.TTSTimeToFirstByte]; this
+	// series carries its own wide buckets (ADR-0044 amendment, #239 review).
 	TTSTotal(provider Provider, d time.Duration)
 
 	// LLMRound is one Provider.Complete round inside the agenttool loop. roundIndex
@@ -186,11 +222,9 @@ type StageRecorder interface {
 	// — WIRED by agenttool.providerAdapter.Generate.
 	LLMRound(provider Provider, roundIndex int, hadToolCall bool, d time.Duration)
 	// LLMTurn is the full agenttool loop (all rounds + tool exec) for the turn.
-	// (glyphoxa_voice_llm_turn_seconds{provider})
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the agenttool loop
-	// wrapper stamps the full-turn span (it currently records only per-round
-	// LLMRound). Empty until then, expected.
+	// (glyphoxa_voice_llm_turn_seconds{provider}) — WIRED (#125) by the agenttool
+	// Engine: one span per Generate/GenerateStream, spanning every round, recorded
+	// on the success AND error path so a failed turn's latency is still visible.
 	LLMTurn(provider Provider, d time.Duration)
 
 	// ProviderCall counts one vendor call at stage with its outcome; ProviderError

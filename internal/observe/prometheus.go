@@ -23,6 +23,15 @@ var latencyBuckets = []float64{
 	0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0,
 }
 
+// ttsDeliverBuckets size the tts_total DELIVER span, which is not a sub-second
+// latency but the whole-sentence delivery time: under the lockstep TeeSynthesizer
+// the drain is paced by the playback pump, so a sentence takes as long to deliver
+// as it takes to speak (seconds to tens of seconds). The SLO latencyBuckets top out
+// at 5s and would dump every real sentence into +Inf, so this series gets its own
+// wide bins (ADR-0044 amendment, #239 review). The provider-latency signal lives
+// in tts_ttfb (which keeps the SLO buckets).
+var ttsDeliverBuckets = []float64{0.5, 1, 2, 5, 10, 20, 30, 60}
+
 // PrometheusRecorder is the single adapter implementing both metric contracts —
 // pkg/voice's [voice.MetricsRecorder] (hot-path plumbing) and [StageRecorder]
 // (orchestrator stage/turn timings + provider calls). It owns its own
@@ -159,26 +168,32 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	r.playbackTotal = counterVec("playback_total", "Playbacks finished, by whether they were interrupted.", "interrupted")
 	r.bargeCancels = counter("barge_cancels_total", "Confirmed barge-ins that tore down an Agent's active turn (ADR-0027).")
 
-	// Of the per-stage histograms, only response_latency, address_detect and
-	// tts_ttfb have a live emit-site this sprint (the bus subscriber); llm_round
-	// is emitted by the agenttool adapter. The remaining six — vad_hangover,
-	// stt_request, tts_total, codec_decode, codec_encode, llm_turn — are RESERVED:
-	// registered so the /metrics surface is spec-complete (ADR-0032), but their
-	// emit-sites are carry-over task #11, so they expose an empty histogram (0
-	// observations) until wired. The Help text says so, so a consumer doesn't read
-	// the absence of samples as a fault.
-	const reserved = " RESERVED: emit-site not yet wired (carry-over task #11); empty until then."
-
+	// Every per-stage histogram now has a live emit-site (#125): response_latency,
+	// address_detect and tts_ttfb from the bus subscriber; llm_round from the
+	// agenttool adapter; and the six formerly-reserved families — vad_hangover,
+	// stt_request, tts_total, codec_decode, codec_encode, llm_turn — from the VAD /
+	// STT / TTS orchestrator stages, the wire codec, and the agenttool loop wrapper.
+	// So none carries a RESERVED marker: a consumer that sees no samples is reading a
+	// genuinely idle stage, not an unwired one.
 	r.responseLatency = hist("response_latency_seconds", "Headline SLO: VAD speech-end to first audio chunk handed to the playback pump.", "agent_role")
-	r.vadHangover = plainHist("vad_hangover_seconds", "VAD end-of-speech detection lag (minSilenceFrames*frameMs)."+reserved)
+	r.vadHangover = plainHist("vad_hangover_seconds", "VAD end-of-speech detection lag (minSilenceFrames*frameMs).")
 	r.addressDetect = plainHist("address_detect_seconds", "Address-detection stage duration.")
-	r.codecDecode = plainHist("codec_decode_seconds", "Opus->PCM decode per inbound frame."+reserved)
-	r.codecEncode = plainHist("codec_encode_seconds", "PCM->Opus encode per outbound frame."+reserved)
-	r.sttRequest = hist("stt_request_seconds", "STT provider POST round-trip."+reserved, "provider")
+	r.codecDecode = plainHist("codec_decode_seconds", "Opus->PCM decode per inbound frame.")
+	r.codecEncode = plainHist("codec_encode_seconds", "PCM->Opus encode per outbound frame.")
+	r.sttRequest = hist("stt_request_seconds", "STT provider POST round-trip.", "provider")
 	r.ttsTTFB = hist("tts_ttfb_seconds", "TTS Synthesize call to first audio chunk.", "provider")
-	r.ttsTotal = hist("tts_total_seconds", "Full TTS synthesis."+reserved, "provider")
+	// tts_total is a DELIVER span (synthesis + paced playback), not synthesis time,
+	// so it uses the wide ttsDeliverBuckets rather than the shared SLO buckets
+	// (ADR-0044 amendment, #239 review). Built inline because hist() bakes in
+	// latencyBuckets.
+	r.ttsTotal = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace, Subsystem: subsystem,
+		Name:    "tts_total_seconds",
+		Help:    "TTS deliver span: synthesis plus paced playback delivery of one sentence. Provider latency lives in tts_ttfb.",
+		Buckets: ttsDeliverBuckets,
+	}, []string{"provider"})
 	r.llmRound = hist("llm_round_seconds", "One LLM Complete round inside the agenttool loop.", "provider", "round_index", "had_tool_call")
-	r.llmTurn = hist("llm_turn_seconds", "Full agenttool loop (all rounds + tool exec)."+reserved, "provider")
+	r.llmTurn = hist("llm_turn_seconds", "Full agenttool loop (all rounds + tool exec).", "provider")
 
 	r.providerCalls = counterVec("provider_calls_total", "Vendor calls by stage, provider and outcome.", "stage", "provider", "outcome")
 	r.providerErrors = counterVec("provider_errors_total", "Vendor call errors by stage and provider.", "stage", "provider")

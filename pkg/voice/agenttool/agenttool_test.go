@@ -3,6 +3,7 @@ package agenttool_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/rand/v2"
 	"strings"
 	"sync"
@@ -174,10 +175,13 @@ type llmRound struct {
 // no-ops. Safe for the loop's single-goroutine use plus the race detector.
 type recordingStage struct {
 	observe.Discard
-	mu       sync.Mutex
-	rounds   []llmRound
-	callsOK  int
-	callsErr int
+	mu           sync.Mutex
+	rounds       []llmRound
+	callsOK      int
+	callsErr     int
+	turns        []observe.Provider // one LLMTurn span per Engine.Generate/GenerateStream
+	outcomes     []observe.Outcome  // every ProviderCall outcome, in order
+	providerErrs int                // ProviderError invocations
 }
 
 func (r *recordingStage) LLMRound(p observe.Provider, idx int, hadToolCall bool, _ time.Duration) {
@@ -186,9 +190,22 @@ func (r *recordingStage) LLMRound(p observe.Provider, idx int, hadToolCall bool,
 	r.rounds = append(r.rounds, llmRound{provider: p, roundIndex: idx, hadToolCall: hadToolCall})
 }
 
+func (r *recordingStage) LLMTurn(p observe.Provider, _ time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turns = append(r.turns, p)
+}
+
+func (r *recordingStage) turnSpans() []observe.Provider {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]observe.Provider(nil), r.turns...)
+}
+
 func (r *recordingStage) ProviderCall(_ observe.Stage, _ observe.Provider, outcome observe.Outcome) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.outcomes = append(r.outcomes, outcome)
 	if outcome == observe.OutcomeOK {
 		r.callsOK++
 	} else {
@@ -196,10 +213,22 @@ func (r *recordingStage) ProviderCall(_ observe.Stage, _ observe.Provider, outco
 	}
 }
 
+func (r *recordingStage) ProviderError(observe.Stage, observe.Provider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.providerErrs++
+}
+
 func (r *recordingStage) snapshot() ([]llmRound, int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]llmRound(nil), r.rounds...), r.callsOK, r.callsErr
+}
+
+func (r *recordingStage) providerCalls() ([]observe.Outcome, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]observe.Outcome(nil), r.outcomes...), r.providerErrs
 }
 
 // TestEngine_LLMRoundSpans_IndexAndToolCallPerRound pins the A3 per-round
@@ -269,6 +298,78 @@ func TestEngine_LLMRoundSpans_IndexResetsPerTurn(t *testing.T) {
 		if r.roundIndex != 0 {
 			t.Errorf("turn %d round_index = %d, want 0 (per-turn reset)", i, r.roundIndex)
 		}
+	}
+}
+
+// TestEngine_LLMTurn_OneSpanPerTurnAcrossRounds pins the #125 llm_turn wiring:
+// the Engine records exactly ONE LLMTurn span per Generate — the full agenttool
+// loop, spanning both rounds of a dice round-trip — labelled with the injected
+// provider, distinct from the per-round LLMRound spans (two here).
+func TestEngine_LLMTurn_OneSpanPerTurnAcrossRounds(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled well, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Roll a d20 for me."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	rounds, _, _ := rec.snapshot()
+	if len(rounds) != 2 {
+		t.Fatalf("recorded %d LLMRound spans, want 2 (round-trip)", len(rounds))
+	}
+	turns := rec.turnSpans()
+	if len(turns) != 1 {
+		t.Fatalf("recorded %d LLMTurn spans, want exactly 1 per turn (across all rounds)", len(turns))
+	}
+	if turns[0] != observe.ProviderGroq {
+		t.Errorf("LLMTurn provider = %q, want the injected groq label", turns[0])
+	}
+}
+
+// TestEngine_GenerateStream_RecordsOneLLMTurn pins that the streaming production
+// path records the SAME single LLMTurn span Generate does — the metric must not be
+// dropped by the streaming loop.
+func TestEngine_GenerateStream_RecordsOneLLMTurn(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled well, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.GenerateStream(context.Background(),
+		[]llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}},
+		func(string) error { return nil },
+	); err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+
+	if turns := rec.turnSpans(); len(turns) != 1 {
+		t.Fatalf("streaming recorded %d LLMTurn spans, want exactly 1", len(turns))
+	}
+}
+
+// TestEngine_LLMTurn_RecordsOnError pins that a turn whose loop fails still records
+// its LLMTurn span — the full-turn latency series must see failed turns too, not
+// just successful ones (otherwise a provider outage silently drops the samples).
+func TestEngine_LLMTurn_RecordsOnError(t *testing.T) {
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(errorEventProvider{}, tool.NewGrantSet(tool.NewRegistry()), "m", 0, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
+		t.Fatal("Generate on a failing provider returned nil error")
+	}
+	if turns := rec.turnSpans(); len(turns) != 1 {
+		t.Fatalf("recorded %d LLMTurn spans on the error path, want exactly 1", len(turns))
 	}
 }
 
@@ -550,6 +651,79 @@ func TestEngine_TruncatedStream_ReturnsError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "without done") {
 		t.Fatalf("Generate on truncated stream = %v, want truncation error", err)
 	}
+}
+
+// startErrProvider fails the Complete call itself (start error, no stream), the
+// shape a 4xx/5xx takes.
+type startErrProvider struct{}
+
+func (startErrProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	return nil, errors.New("provider: start boom")
+}
+
+// bargeStartProvider blocks the Complete call until the ctx is cancelled, then
+// returns ctx.Err() — a barge-in that cuts the dial in flight (a pre-cancelled ctx
+// would instead make the tool loop bail before it ever calls the provider).
+type bargeStartProvider struct{}
+
+func (bargeStartProvider) Complete(ctx context.Context, _ llm.Request) (<-chan llm.StreamEvent, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestEngine_StartError_ClassifiesOutcomeLikeStages pins the #239 alignment: the
+// LLM start-error path classifies via the shared observe.CallOutcome rule, so a
+// barge cancelling the dial in flight is outcome=canceled with NO provider_error
+// (not a fault), while a live-ctx start failure is outcome=error WITH a
+// provider_error. This keeps the LLM stage in agreement with STT/TTS.
+func TestEngine_StartError_ClassifiesOutcomeLikeStages(t *testing.T) {
+	empty := tool.NewGrantSet(tool.NewRegistry())
+
+	t.Run("barge cancel is canceled, not a fault", func(t *testing.T) {
+		rec := &recordingStage{}
+		eng := agenttool.NewEngine(bargeStartProvider{}, empty, "m", 0, 0,
+			agenttool.WithMetrics(rec, observe.ProviderGroq))
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := eng.Generate(ctx, []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
+			done <- err
+		}()
+		time.Sleep(20 * time.Millisecond) // let the loop reach the blocked Complete
+		cancel()                          // barge-in cuts the dial
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("Generate returned nil on a cancelled dial")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Generate did not return after the ctx was cancelled")
+		}
+		outcomes, provErrs := rec.providerCalls()
+		if len(outcomes) != 1 || outcomes[0] != observe.OutcomeCanceled {
+			t.Errorf("provider_call outcomes = %v, want [canceled]", outcomes)
+		}
+		if provErrs != 0 {
+			t.Errorf("provider_errors = %d on a barge cancel, want 0 (not a fault)", provErrs)
+		}
+	})
+
+	t.Run("live-ctx start failure is error + fault", func(t *testing.T) {
+		rec := &recordingStage{}
+		eng := agenttool.NewEngine(startErrProvider{}, empty, "m", 0, 0,
+			agenttool.WithMetrics(rec, observe.ProviderGroq))
+		if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
+			t.Fatal("Generate returned nil on a start failure")
+		}
+		outcomes, provErrs := rec.providerCalls()
+		if len(outcomes) != 1 || outcomes[0] != observe.OutcomeError {
+			t.Errorf("provider_call outcomes = %v, want [error]", outcomes)
+		}
+		if provErrs != 1 {
+			t.Errorf("provider_errors = %d on a vendor start failure, want 1", provErrs)
+		}
+	})
 }
 
 // errorEventProvider terminates the stream with an [llm.EventError].
