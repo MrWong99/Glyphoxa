@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -552,5 +553,20 @@ func TestDropWhenIdle(t *testing.T) {
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "ignored", TurnID: "t1"})
 	if got := r.Frames(fs.id.String(), 0); got != nil {
 		t.Errorf("idle relay buffered %d frames", len(got))
+	}
+}
+
+// TestView_ZeroLinesMarshalsEmptyArray is #248: a live session that has produced
+// no transcript lines yet must serve "lines":[] — never null — because the
+// Session screen reads lines.length straight off the snapshot JSON.
+func TestView_ZeroLinesMarshalsEmptyArray(t *testing.T) {
+	_, r, _, id := liveRelay(t)
+
+	b, err := json.Marshal(r.View(id))
+	if err != nil {
+		t.Fatalf("marshal View: %v", err)
+	}
+	if !strings.Contains(string(b), `"lines":[]`) {
+		t.Errorf("zero-line live View marshals %s, want \"lines\":[]", b)
 	}
 }

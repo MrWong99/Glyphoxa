@@ -783,3 +783,29 @@ describe("Session spend cap (#130)", () => {
     expect(screen.queryByTestId("spend-cap")).not.toBeInTheDocument();
   });
 });
+
+describe("Session zero-line live snapshot (#248)", () => {
+  it("survives a snapshot with null lines and renders the live badge", async () => {
+    // The pre-#248 relay (or any older server) serves "lines":null for a live
+    // session with no transcript yet; the screen must normalize it, not crash
+    // into the error boundary on lines.length.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          lines: null,
+          status: "live",
+          typing: { active: true, label: "Listening to the table…" },
+          connection: "connected",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+  });
+});
