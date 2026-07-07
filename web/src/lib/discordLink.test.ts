@@ -26,6 +26,11 @@ describe("parseChannelLink", () => {
       `https://discord.com/channels/${GUILD}/${CHANNEL}/`,
       `https://discord.com/channels/${GUILD}/${CHANNEL}?foo=bar`,
       `  https://discord.com/channels/${GUILD}/${CHANNEL}  `,
+      // Discord's embed-suppressed copy wraps the URL in angle brackets.
+      `<https://discord.com/channels/${GUILD}/${CHANNEL}>`,
+      // Legacy discordapp.com host — old links still resolve.
+      `https://discordapp.com/channels/${GUILD}/${CHANNEL}`,
+      `discordapp.com/channels/${GUILD}/${CHANNEL}`,
     ];
     for (const link of variants) {
       expect(parseChannelLink(link)).toEqual({ guildId: GUILD, channelId: CHANNEL });

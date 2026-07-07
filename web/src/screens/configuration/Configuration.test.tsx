@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
@@ -364,8 +364,10 @@ describe("Configuration", () => {
     expect(discordSaves).toHaveLength(0);
   });
 
-  it("persists autofilled IDs through the existing Save flow (#101)", async () => {
-    renderScreen();
+  it("persists autofilled IDs through Save into the right wire fields and re-seeds them on reload (#101)", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    const transport = mockBackend({ discordSaves });
+    const { unmount } = renderScreen(transport);
 
     fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
       target: { value: "discord.com/channels/472093001100472093/987654321098765432" },
@@ -373,8 +375,25 @@ describe("Configuration", () => {
     // The autofill marks the fields dirty, so Save picks up the pasted values.
     fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
 
-    expect(await screen.findByDisplayValue("472093001100472093")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("987654321098765432")).toBeInTheDocument();
+    // Pin the exact snowflake in the exact wire field: a guild/voice SWAP would
+    // still round-trip through the display, so a value-only check can't catch it.
+    await waitFor(() => expect(discordSaves).toHaveLength(1));
+    expect(discordSaves[0].guildId).toBe("472093001100472093");
+    expect(discordSaves[0].voiceChannelId).toBe("987654321098765432");
+
+    // Reload (AC2): a fresh mount against the SAME stateful backend re-seeds both
+    // fields from what was persisted — the values survive the round-trip, and
+    // each lands back in its OWN field (guild in Guild ID, channel in Voice).
+    unmount();
+    renderScreen(transport);
+    await waitFor(() =>
+      expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe(
+        "472093001100472093",
+      ),
+    );
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
   });
 
   it("rejects a non-link paste with an inline hint and leaves fields unchanged (#101)", async () => {

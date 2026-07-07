@@ -11,14 +11,25 @@ export interface ChannelLink {
 // Discord snowflakes are 17–20 digit ids (a 64-bit id rendered as decimal).
 const SNOWFLAKE = /^\d{17,20}$/;
 
+// A Discord channel host: discord.com, the legacy discordapp.com, or a client
+// subdomain of either (ptb./canary./www.).
+function isDiscordHost(host: string): boolean {
+  return ["discord.com", "discordapp.com"].some(
+    (base) => host === base || host.endsWith(`.${base}`),
+  );
+}
+
 // parseChannelLink extracts the guild + voice channel snowflakes from a pasted
 // channel deep-link, or returns null when the string is not one. It tolerates a
-// missing scheme, http/https, the ptb./canary. client subdomains, a trailing
-// slash, a query string, and surrounding whitespace — every variant resolves to
-// the same two ids. Anything else (a random string, a @me DM link, a non-Discord
-// host, short/invalid ids) yields null so the caller can surface a hint.
+// missing scheme, http/https, the ptb./canary. client subdomains, the legacy
+// discordapp.com host, angle brackets (Discord's embed-suppressed <url> copy), a
+// trailing slash, a query string, and surrounding whitespace — every variant
+// resolves to the same two ids. Anything else (a random string, a @me DM link, a
+// non-Discord host, short/invalid ids) yields null so the caller can surface a hint.
 export function parseChannelLink(input: string): ChannelLink | null {
-  const trimmed = input.trim();
+  // Strip surrounding whitespace, then the <…> Discord wraps a URL in to
+  // suppress its embed.
+  const trimmed = input.trim().replace(/^<(.*)>$/, "$1").trim();
   if (!trimmed) return null;
 
   // A scheme-less paste (the common "discord.com/channels/…") needs one to parse
@@ -32,9 +43,7 @@ export function parseChannelLink(input: string): ChannelLink | null {
     return null;
   }
 
-  // Host must be discord.com or one of its client subdomains (ptb./canary./www.).
-  const host = url.hostname.toLowerCase();
-  if (host !== "discord.com" && !host.endsWith(".discord.com")) return null;
+  if (!isDiscordHost(url.hostname.toLowerCase())) return null;
 
   // /channels/{guild}/{channel}[/…] — filter drops the empty segment a trailing
   // slash leaves behind. The query string lives in url.search, so it's ignored.
