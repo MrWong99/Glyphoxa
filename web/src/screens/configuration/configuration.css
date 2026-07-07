@@ -115,3 +115,90 @@
   align-items: center;
   gap: 8px;
 }
+
+/* "Paste a Discord link" autofill (#101/#105): the paste field plus, for an
+   invite, the resolving note and the voice-channel picker beneath it. */
+.gx-discord__link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-discord__resolving {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+  margin: 0;
+}
+
+/* Invite channel picker (#105): the resolved guild's voice channels as clickable
+   rows; picking one fills both ID fields. */
+.gx-invite-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+}
+
+.gx-invite-picker__header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-invite-picker__guild {
+  font-size: var(--body-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.gx-invite-picker__empty {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+  margin: 0;
+}
+
+.gx-invite-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.gx-invite-picker__row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gx-invite-picker__row:hover {
+  background: var(--surface-card-hover);
+  border-color: var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.gx-invite-picker__icon {
+  display: inline-flex;
+  color: var(--text-subtle);
+}
+
+.gx-invite-picker__name {
+  flex: 1;
+  font-size: var(--body-sm);
+}
+
+.gx-invite-picker__id {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--text-subtle);
+}

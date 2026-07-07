@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -14,9 +15,16 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/discordinvite"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
+
+// inviteCodePattern bounds an accepted Discord invite code: 2–64 chars of
+// letters, digits, and hyphens (vanity codes included). The SPA already extracted
+// the bare code from the pasted URL; this rejects anything that could not be one
+// before it reaches the REST call (which is also path-escaped, ADR-0047).
+var inviteCodePattern = regexp.MustCompile(`^[A-Za-z0-9-]{2,64}$`)
 
 // envPlaceholderLast4 is the credentials_last4 the seed writes for a
 // provider_config whose real key lives in ENV/the keyring, not the DB (ADR-0039;
@@ -88,6 +96,12 @@ type ProviderServer struct {
 	// bot-authorization URL (#110). Non-secret; empty when DISCORD_OAUTH_CLIENT_ID
 	// is unset, which the screen renders as a disabled action.
 	discordAppID string
+
+	// resolveInvite resolves a Discord invite code to its guild + voice channels
+	// using the decrypted Bot token (#105). It is a seam: NewProviderServer
+	// defaults it to the live discordinvite.Resolve, and unit tests override it
+	// with a fake so ResolveGuildInvite never touches the network.
+	resolveInvite func(ctx context.Context, token, code string) (discordinvite.Resolved, error)
 }
 
 var _ managementv1connect.ProviderServiceHandler = (*ProviderServer)(nil)
@@ -99,7 +113,11 @@ func NewProviderServer(store providerStore, cipher *crypto.Cipher, log *slog.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	return &ProviderServer{store: store, cipher: cipher, log: log}
+	s := &ProviderServer{store: store, cipher: cipher, log: log}
+	s.resolveInvite = func(ctx context.Context, token, code string) (discordinvite.Resolved, error) {
+		return discordinvite.Resolve(ctx, token, code, log)
+	}
+	return s
 }
 
 // SetHealthInvalidator wires the health-cache buster called after a successful
@@ -388,6 +406,98 @@ func (s *ProviderServer) SaveDiscordSettings(
 		GuildId:        dep.GuildID,
 		VoiceChannelId: dep.VoiceChannelID,
 	}), nil
+}
+
+// ResolveGuildInvite resolves a pasted Discord invite code to its Guild and that
+// Guild's voice channels, using the decrypted saved Bot token server-side (#105,
+// ADR-0047). It is a no-side-effects read: the resolver makes only Discord REST
+// GETs, and no state is written. The code is validated + path-escaped before the
+// call; ErrNotFound → NotFound, ErrNoAccess → FailedPrecondition ("not a member"),
+// and a missing saved token → FailedPrecondition ("save the token first").
+func (s *ProviderServer) ResolveGuildInvite(
+	ctx context.Context,
+	req *connect.Request[managementv1.ResolveGuildInviteRequest],
+) (*connect.Response[managementv1.ResolveGuildInviteResponse], error) {
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	code := req.Msg.GetInviteCode()
+	if !inviteCodePattern.MatchString(code) {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid invite code"))
+	}
+
+	token, err := s.resolveBotToken(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
+		// No saved Bot token (nor the ENV placeholder): the resolver cannot
+		// authenticate. Same code as "not a member" — the screen renders whichever
+		// message it gets, so they must differ (ADR-0047).
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("save the Discord bot token first"))
+	}
+
+	resolved, err := s.resolveInvite(ctx, token, code)
+	if err != nil {
+		switch {
+		case errors.Is(err, discordinvite.ErrNotFound):
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("invalid or expired invite"))
+		case errors.Is(err, discordinvite.ErrNoAccess):
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				errors.New("the Bot is not a member of that server"))
+		default:
+			s.log.Error("ResolveGuildInvite: resolve failed", "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+	}
+
+	channels := make([]*managementv1.VoiceChannel, 0, len(resolved.VoiceChannels))
+	for _, vc := range resolved.VoiceChannels {
+		channels = append(channels, &managementv1.VoiceChannel{Id: vc.ID, Name: vc.Name})
+	}
+	return connect.NewResponse(&managementv1.ResolveGuildInviteResponse{
+		GuildId:       resolved.Guild.ID,
+		GuildName:     resolved.Guild.Name,
+		VoiceChannels: channels,
+	}), nil
+}
+
+// resolveBotToken resolves the deployment Bot token for ResolveGuildInvite,
+// mirroring VoiceServer.resolveDiscordToken: no row / ENV placeholder -> "" (the
+// caller maps that to a FailedPrecondition), a real saved token -> decrypted
+// plaintext, a saved token with no cipher -> FailedPrecondition.
+func (s *ProviderServer) resolveBotToken(ctx context.Context, tenantID uuid.UUID) (string, error) {
+	dep, err := s.store.GetDeploymentConfig(ctx, tenantID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		s.log.Error("resolveBotToken: store read failed", "err", err)
+		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return s.openKey(dep.DiscordBotTokenLast4, dep.DiscordBotTokenCiphertext)
+}
+
+// openKey applies the hybrid decision to one (last4, ciphertext) pair, mirroring
+// VoiceServer.openKey: an unsaved/placeholder last4 -> "", a real key with no
+// cipher -> FailedPrecondition, otherwise the decrypted plaintext.
+func (s *ProviderServer) openKey(last4 string, ciphertext []byte) (string, error) {
+	if !isSaved(last4) {
+		return "", nil
+	}
+	if s.cipher == nil {
+		return "", connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
+	}
+	plaintext, err := s.cipher.Open(ciphertext)
+	if err != nil {
+		s.log.Error("openKey: decrypt failed", "err", err)
+		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return string(plaintext), nil
 }
 
 // seal encrypts a plaintext secret and returns the ciphertext + its last4. The

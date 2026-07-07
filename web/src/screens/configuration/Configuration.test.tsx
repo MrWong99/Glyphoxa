@@ -17,6 +17,7 @@ import {
   GetProviderHealthResponseSchema,
   ProviderHealthSchema,
   ListModelsResponseSchema,
+  ResolveGuildInviteResponseSchema,
   type ProviderHealth,
   type SaveDiscordSettingsRequest,
 } from "@gen/glyphoxa/management/v1/management_pb";
@@ -74,6 +75,13 @@ function mockBackend(
     // discordApplicationId seeds the server-provided Discord application id the
     // read echoes so the screen composes the bot-authorization URL (#110).
     discordApplicationId?: string;
+    // inviteResolve seeds the guild + voice channels ResolveGuildInvite returns
+    // for a pasted invite (#105). inviteError makes it fail instead.
+    inviteResolve?: { guildId: string; guildName: string; voiceChannels: { id: string; name: string }[] };
+    inviteError?: { code: Code; message: string };
+    // inviteCodes captures every ResolveGuildInvite request's code so a test can
+    // pin that the SPA sent the BARE code (not the full URL).
+    inviteCodes?: string[];
   } = {},
 ) {
   const state = {
@@ -154,6 +162,12 @@ function mockBackend(
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
         });
+      },
+      resolveGuildInvite: (req) => {
+        opts.inviteCodes?.push(req.inviteCode);
+        if (opts.inviteError) throw new ConnectError(opts.inviteError.message, opts.inviteError.code);
+        const r = opts.inviteResolve ?? { guildId: "111", guildName: "The Keep", voiceChannels: [] };
+        return create(ResolveGuildInviteResponseSchema, r);
       },
     });
   });
@@ -481,6 +495,128 @@ describe("Configuration", () => {
     );
     // A rejected paste's hint must not linger after a successful one.
     expect(screen.queryByText(/couldn't read that link/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("Configuration invite picker (#105)", () => {
+  it("resolves a pasted invite to the guild's voice channels, sending the bare code", async () => {
+    const inviteCodes: string[] = [];
+    renderScreen(
+      mockBackend({
+        inviteCodes,
+        inviteResolve: {
+          guildId: "111",
+          guildName: "The Keep",
+          voiceChannels: [
+            { id: "900", name: "War Room" },
+            { id: "901", name: "Tavern" },
+          ],
+        },
+      }),
+    );
+
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, { target: { value: "https://discord.gg/abc123" } });
+
+    // The BARE code crosses the wire — the SPA extracted it, not the whole URL.
+    await waitFor(() => expect(inviteCodes).toEqual(["abc123"]));
+
+    // The guild header + exactly the returned voice channels (name + snowflake).
+    expect(await screen.findByText("The Keep")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /War Room/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Tavern/ })).toBeInTheDocument();
+    expect(screen.getByText("900")).toBeInTheDocument();
+  });
+
+  it("fills both ID fields from a picked channel and persists them on Save", async () => {
+    const discordSaves: SaveDiscordSettingsRequest[] = [];
+    renderScreen(
+      mockBackend({
+        discordSaves,
+        inviteResolve: {
+          guildId: "472093001100472093",
+          guildName: "The Keep",
+          voiceChannels: [{ id: "987654321098765432", name: "War Room" }],
+        },
+      }),
+    );
+
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
+      target: { value: "discord.gg/abc123" },
+    });
+    // Pick the channel from the resolved picker.
+    fireEvent.click(await screen.findByRole("button", { name: /War Room/ }));
+
+    // Both fields fill from the RESOLVED guild + the PICKED channel.
+    expect((screen.getByLabelText("Guild ID") as HTMLInputElement).value).toBe("472093001100472093");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe(
+      "987654321098765432",
+    );
+
+    // Save carries BOTH exact snowflakes in their own wire fields (a swap would
+    // still round-trip through the display, so pin the exact field).
+    fireEvent.click(screen.getByRole("button", { name: /save discord settings/i }));
+    await waitFor(() => expect(discordSaves).toHaveLength(1));
+    expect(discordSaves[0].guildId).toBe("472093001100472093");
+    expect(discordSaves[0].voiceChannelId).toBe("987654321098765432");
+  });
+
+  it("renders a precondition failure verbatim with an add-bot hint, leaving fields unchanged", async () => {
+    renderScreen(
+      mockBackend({
+        inviteError: { code: Code.FailedPrecondition, message: "the Bot is not a member of that server" },
+      }),
+    );
+
+    const guild = await screen.findByLabelText("Guild ID");
+    fireEvent.change(guild, { target: { value: "existing-guild" } });
+
+    fireEvent.change(screen.getByLabelText(/paste a discord link/i), {
+      target: { value: "discord.gg/abc123" },
+    });
+
+    // The server message renders VERBATIM — no-token vs not-a-member share the
+    // FailedPrecondition code and differ only by this message.
+    expect(await screen.findByText("the Bot is not a member of that server")).toBeInTheDocument();
+    // …plus the hint pointing back at the Add-Glyphoxa action above.
+    expect(screen.getByText(/then paste the invite again/i)).toBeInTheDocument();
+
+    // A failed resolve touches nothing the operator already had.
+    expect((guild as HTMLInputElement).value).toBe("existing-guild");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+  });
+
+  it("surfaces an invalid/expired invite inline, leaving fields unchanged", async () => {
+    renderScreen(
+      mockBackend({
+        inviteError: { code: Code.NotFound, message: "invalid or expired invite" },
+      }),
+    );
+
+    const guild = await screen.findByLabelText("Guild ID");
+    fireEvent.change(guild, { target: { value: "existing-guild" } });
+
+    fireEvent.change(screen.getByLabelText(/paste a discord link/i), {
+      target: { value: "discord.gg/gone" },
+    });
+
+    expect(await screen.findByText(/invalid or expired/i)).toBeInTheDocument();
+    expect((guild as HTMLInputElement).value).toBe("existing-guild");
+    expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+  });
+
+  it("shows an empty-state line when the resolved guild has no voice channels", async () => {
+    renderScreen(
+      mockBackend({
+        inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] },
+      }),
+    );
+
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
+      target: { value: "discord.gg/abc123" },
+    });
+
+    expect(await screen.findByText(/no voice channels in the keep/i)).toBeInTheDocument();
   });
 });
 

@@ -576,6 +576,17 @@ service ProviderService {
   // channel IDs. An omitted bot_token leaves the stored token unchanged, so the
   // IDs can be saved without re-entering the secret. State-changing.
   rpc SaveDiscordSettings(SaveDiscordSettingsRequest) returns (SaveDiscordSettingsResponse);
+  // ResolveGuildInvite resolves a pasted Discord invite code to its Guild and
+  // that Guild's voice channels, using the decrypted saved deployment Bot token
+  // server-side (#105, ADR-0047). The SPA extracts the bare code from the pasted
+  // link (parseDiscordLink, zero network) and sends it here — the URL never
+  // crosses the wire. It is a no-side-effects read (CSRF-exempt), consistent with
+  // the other management reads: an invalid/expired code fails with CodeNotFound;
+  // a Guild the Bot is not a member of fails with CodeFailedPrecondition; a
+  // missing saved Bot token also fails with CodeFailedPrecondition.
+  rpc ResolveGuildInvite(ResolveGuildInviteRequest) returns (ResolveGuildInviteResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
 // ProviderCredential is the WRITE-ONLY view of a saved secret: never its value,
@@ -666,6 +677,37 @@ message SaveDiscordSettingsResponse {
   ProviderCredential credential = 1;
   string guild_id = 2;
   string voice_channel_id = 3;
+}
+
+// ResolveGuildInviteRequest carries the bare Discord invite code the SPA
+// extracted from a pasted invite link (parseDiscordLink, zero network), NOT the
+// full URL. The server validates ^[A-Za-z0-9-]{2,64}$ and path-escapes it before
+// the REST call (#105, ADR-0047).
+message ResolveGuildInviteRequest {
+  // invite_code is the bare invite code (e.g. "abc123"), not the full URL.
+  string invite_code = 1;
+}
+
+// VoiceChannel is one selectable Discord voice channel in the resolved Guild:
+// its snowflake and human-readable name. Only type-2 GUILD_VOICE channels are
+// returned — text, category, and stage channels are excluded (ADR-0047).
+message VoiceChannel {
+  // id is the channel's snowflake.
+  string id = 1;
+  // name is the channel's human-readable name.
+  string name = 2;
+}
+
+// ResolveGuildInviteResponse carries the resolved Guild and its voice channels,
+// sorted by Discord position then name.
+message ResolveGuildInviteResponse {
+  // guild_id is the resolved Guild's snowflake.
+  string guild_id = 1;
+  // guild_name is the resolved Guild's display name.
+  string guild_name = 2;
+  // voice_channels are the Guild's GUILD_VOICE channels, sorted by position then
+  // name; empty when the Guild has none.
+  repeated VoiceChannel voice_channels = 3;
 }
 
 // SessionService drives the live Voice Session from the Session screen (#72,
