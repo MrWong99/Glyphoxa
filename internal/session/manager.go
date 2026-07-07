@@ -71,7 +71,10 @@ var (
 type Store interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	CreateVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
-	EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error)
+	// CloseVoiceSession writes the terminal row: 'ended' (NULL reason) for a clean
+	// stop, or 'failed' + the readable reason for a fatal gateway rejection (#123).
+	// One write preserves the #143 end-write atomicity.
+	CloseVoiceSession(ctx context.Context, id uuid.UUID, status storage.VoiceSessionStatus, lineCount int, endReason *string) (storage.VoiceSession, error)
 	ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error)
 	// ListAgents returns the Active Campaign's roster (Butler + Character NPCs) so
 	// mute-all (#211) can target EVERY Agent, not just the voiced wirenpc Roster.
@@ -310,10 +313,16 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Config) {
 	defer close(as.done)
 
-	if err := m.run(ctx, cfg); err != nil && ctx.Err() == nil {
-		// A real loop error (not the expected cancellation) — log it; the session
-		// still ends cleanly below so the row never stays stuck 'running'.
-		m.log.Error("voice session loop exited with error", "err", err, "voice_session", as.session.ID)
+	loopErr := m.run(ctx, cfg)
+	// A non-nil loop error while ctx was NOT cancelled is a real failure, not the
+	// expected Stop/Shutdown cancellation: the session ends 'failed' with a readable
+	// reason instead of the clean 'ended' (#123). A fatal gateway rejection carries a
+	// classified reason ("invalid_bot_token: …"); any other loop error is recorded as
+	// "loop_error: …". Either way a single terminal write lands, so the row is never
+	// stuck 'running' (#143).
+	failed := loopErr != nil && ctx.Err() == nil
+	if failed {
+		m.log.Error("voice session loop exited with error", "err", loopErr, "voice_session", as.session.ID)
 	}
 
 	// The run ctx is cancelled on a Stop, so both end steps run on detached,
@@ -351,19 +360,28 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		chunkCancel()
 	}
 
-	// A FRESH deadline for the ended_at write, regardless of what Finalize
-	// consumed (#143): the row landing 'ended' is the invariant that matters.
+	// A FRESH deadline for the terminal write, regardless of what Finalize consumed
+	// (#143): the row landing terminal is the invariant that matters. One
+	// CloseVoiceSession stamps 'failed' + the readable reason, or 'ended' + NULL for
+	// a clean stop — the single write preserves #143's end-write atomicity.
+	status := storage.VoiceSessionEnded
+	var endReason *string
+	if failed {
+		status = storage.VoiceSessionFailed
+		reason := failureReason(loopErr)
+		endReason = &reason
+	}
 	endCtx, cancel := context.WithTimeout(base, m.endTimeout)
 	defer cancel()
-	ended, err := m.store.EndVoiceSession(endCtx, as.session.ID, lineCount)
+	ended, err := m.store.CloseVoiceSession(endCtx, as.session.ID, status, lineCount, endReason)
 
 	m.mu.Lock()
 	if err != nil {
 		// The row is still 'running' in the DB. Remember the failure so a waiting
 		// Stop surfaces it (#143 Defect A); the startup reconciliation repairs the
 		// row on the next boot. Still clear the active slot — the loop is gone.
-		as.endErr = fmt.Errorf("session: end voice session %s: %w", as.session.ID, err)
-		m.log.Error("end voice session", "err", err, "voice_session", as.session.ID)
+		as.endErr = fmt.Errorf("session: close voice session %s: %w", as.session.ID, err)
+		m.log.Error("close voice session", "err", err, "voice_session", as.session.ID)
 	} else {
 		as.session = ended
 	}
@@ -371,6 +389,19 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		m.active = nil
 	}
 	m.mu.Unlock()
+}
+
+// failureReason renders the persisted end_reason for a failed session (#123): a
+// fatal gateway rejection carries its classified "<reason>: <prose>" verbatim (so
+// the Session screen shows "invalid_bot_token: …"), while any other loop error is
+// tagged "loop_error: …" — distinguishing a classified fatal from an unexpected
+// exit in the durable record.
+func failureReason(loopErr error) string {
+	var fe *wirenpc.FatalError
+	if errors.As(loopErr, &fe) {
+		return fe.Error()
+	}
+	return "loop_error: " + loopErr.Error()
 }
 
 // Stop cancels the active session's loop and waits for it to end, returning the
