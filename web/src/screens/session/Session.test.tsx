@@ -441,6 +441,111 @@ describe("Session live transcript (#73)", () => {
   });
 });
 
+// failedTransport reports a terminal FAILED session (active:false) carrying an
+// end_reason — the reload-of-a-failed-session case (#123): the durable status is
+// the reload truth, so the screen must show Failed + the reason with no live stream.
+function failedTransport() {
+  const started = new Date(Date.now() - 5 * 1000);
+  const failed = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "failed",
+    startedAt: timestampFromDate(started),
+    endedAt: timestampFromDate(new Date()),
+    endReason: "invalid_bot_token: wirenpc: open gateway: websocket: close 4004: Authentication failed",
+  });
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: failed, active: false }),
+      startSession: () => create(StartSessionResponseSchema, { session: failed }),
+      stopSession: () => create(StopSessionResponseSchema, { session: failed }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session gateway connection state (#123)", () => {
+  it("reflects connecting then connected during a normal start", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ lines: [], status: "live", typing: { active: true, label: "Listening to the table…" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    await screen.findByText("Live");
+    const es = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("EventSource not opened yet");
+      return inst;
+    });
+
+    act(() => es.emit("connection", { state: "connecting" }));
+    expect(await screen.findByTestId("connection-state")).toHaveTextContent(/connecting/i);
+
+    act(() => es.emit("connection", { state: "connected" }));
+    await waitFor(() => expect(screen.getByTestId("connection-state")).toHaveTextContent(/connected/i));
+  });
+
+  it("shows Failed with a readable reason on a fatal rejection, without a reload", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ lines: [], status: "live", typing: { active: false, label: "" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    await screen.findByText("Live");
+    const es = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("EventSource not opened yet");
+      return inst;
+    });
+
+    act(() =>
+      es.emit("connection", {
+        state: "failed",
+        detail: "invalid_bot_token: wirenpc: open gateway: websocket: close 4004: Authentication failed",
+      }),
+    );
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(await screen.findByTestId("connection-failed")).toHaveTextContent(/invalid_bot_token/);
+  });
+
+  it("surfaces a failed session's reason on reload from getSession (terminal truth)", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ lines: [], status: "idle", typing: { active: false, label: "" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+
+    render(
+      <Providers transport={failedTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(await screen.findByTestId("connection-failed")).toHaveTextContent(/invalid_bot_token/);
+    // A terminal (non-active) session opens no live stream.
+    expect(MockEventSource.last()).toBeUndefined();
+  });
+});
+
 // searchTransport is an ended session whose persisted transcript renders, plus a
 // transcript-search RPC that filters a fixed match set by substring (a stand-in
 // for the server-side tsvector search). searchCalls records the debounced queries.

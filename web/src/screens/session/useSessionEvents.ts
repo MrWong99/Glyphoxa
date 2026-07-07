@@ -28,11 +28,21 @@ export interface TypingState {
   label: string;
 }
 
-// Transcript is the cached view the screen renders: the lines plus status/typing.
+// ConnectionState is the Voice Session's Discord gateway connection lifecycle as
+// the Session screen renders it (#123): connecting → connected on a normal start,
+// or failed with a readable reason on a fatal rejection.
+export type ConnectionState = "connecting" | "connected" | "failed";
+
+// Transcript is the cached view the screen renders: the lines plus status/typing
+// and the live gateway connection state (#123).
 export interface Transcript {
   lines: TranscriptLine[];
   status: "live" | "idle";
   typing: TypingState;
+  // connection is the latest gateway connection state, undefined before the first
+  // transition; connectionDetail is the readable reason on a failed connection.
+  connection?: ConnectionState;
+  connectionDetail?: string;
 }
 
 const EMPTY: Transcript = { lines: [], status: "idle", typing: { active: false, label: "" } };
@@ -112,6 +122,16 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     es.addEventListener("mute", (e) => {
       const m = JSON.parse((e as MessageEvent).data) as { agent_id: string; muted: boolean };
       patchOne(m.agent_id, m.muted);
+    });
+    es.addEventListener("connection", (e) => {
+      // The gateway connection state moved (#123): reflect connecting → connected
+      // live, or failed with its readable reason — no page reload.
+      const c = JSON.parse((e as MessageEvent).data) as { state: ConnectionState; detail?: string };
+      queryClient.setQueryData<Transcript>(key, (prev) => ({
+        ...(prev ?? EMPTY),
+        connection: c.state,
+        connectionDetail: c.detail ?? "",
+      }));
     });
 
     return () => es.close();
