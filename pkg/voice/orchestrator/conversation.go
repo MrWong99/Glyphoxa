@@ -43,6 +43,11 @@ type Conversation struct {
 	// Register gates the replier's routes on it and — when barge-in built the floor
 	// — binds a [MuteCut] reactor beside [BargeIn].
 	mutes MuteView
+
+	// gate is the live turn gate ([WithTurnGate], #130): nil = feature off. When
+	// set, Register installs it on the replier, which refuses a route whose new turn
+	// the gate denies (the spend soft cap) beside the mute pre-check.
+	gate TurnGate
 }
 
 // Option configures a [Conversation] at construction.
@@ -173,6 +178,10 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		// before taking the floor, so an addressed-but-muted Agent opens no turn.
 		// Independent of barge-in; nil is the feature-off default.
 		replier.mutes = c.mutes
+		// Live turn gate (#130): the replier refuses a NEW turn once the session's
+		// estimated spend crosses the soft cap. Independent of barge-in and mute; nil
+		// is the feature-off default.
+		replier.gate = c.gate
 		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the

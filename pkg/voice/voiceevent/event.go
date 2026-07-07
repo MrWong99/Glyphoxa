@@ -232,6 +232,11 @@ const (
 	// commit exactly as a barge would (delivered-sentences-only, ADR-0012), but the
 	// cause is a mute, never a barge.
 	TurnEndMute TurnEndReason = "mute"
+	// TurnEndSpendCap: the session's estimated spend crossed its soft cap, so the
+	// replier refused a NEW turn before taking the floor (#130, ADR-0046). Like
+	// [TurnEndMute] it is a deliberate policy stop, not a barge or a fault — the turn
+	// opened no floor, ran no producer, and produced no audio.
+	TurnEndSpendCap TurnEndReason = "spend_cap"
 )
 
 // TurnEnded marks a turn that ended for a known reason — distinct from a turn
@@ -290,6 +295,36 @@ type MuteChanged struct {
 
 // EventName implements [Event].
 func (MuteChanged) EventName() string { return "mute.changed" }
+
+// SpendCapLevel names which per-session spend cap a [SpendCapReached] announces
+// (#130, ADR-0046): the soft cap (refuse new turns) or the hard cap (end the
+// session). It is a bounded enum, DISTINCT from the [TurnEndReason] a refused turn
+// carries — this event is about the session-level cap crossing, not one turn.
+type SpendCapLevel string
+
+const (
+	// SpendCapSoft: the soft cap was crossed — the Session screen shows the
+	// spend-cap-reached state; new Agent turns are refused, in-flight ones finish.
+	SpendCapSoft SpendCapLevel = "soft"
+	// SpendCapHard: the hard cap was crossed — the session is ending itself cleanly.
+	SpendCapHard SpendCapLevel = "hard"
+)
+
+// SpendCapReached marks the moment a live Voice Session's estimated spend crossed
+// one of its per-Tenant caps (#130, ADR-0046). The session Manager publishes it
+// from the spend meter's once-firing callback AFTER it has taken effect (the gate
+// already refuses new turns for soft; the session is already ending for hard), so a
+// subscriber reacting to it sees a consistent state. The SSE relay forwards it as a
+// `spendcap` frame so the Session screen renders which cap tripped and the
+// (estimated) spend; the terminal reload truth for a hard-capped session is
+// GetSession (status + end_reason).
+type SpendCapReached struct {
+	At    time.Time
+	Level SpendCapLevel
+}
+
+// EventName implements [Event].
+func (SpendCapReached) EventName() string { return "spend.cap_reached" }
 
 // ConnectionState is the Voice Session's Discord gateway connection lifecycle as
 // seen by the web Session screen (#123, ADR-0020). It is a coarse UI/telemetry

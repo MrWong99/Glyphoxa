@@ -20,6 +20,11 @@ func (r *Replier) SetFloor(floor *Floor) { r.floor = floor }
 // Conversation.Register from [WithMute].
 func (r *Replier) SetMutes(v MuteView) { r.mutes = v }
 
+// SetGate installs the live turn gate on the replier for the spend-cap gate tests
+// (external test package, #130). Production wiring sets r.gate inside
+// Conversation.Register from [WithTurnGate].
+func (r *Replier) SetGate(g TurnGate) { r.gate = g }
+
 // SetErrorHandler installs onError on the segmenter for the off-loop STT error
 // tests (external test package). Production wiring sets it inside
 // Conversation.Register from [WithErrorHandler].
