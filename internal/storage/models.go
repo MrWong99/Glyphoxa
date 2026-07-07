@@ -29,10 +29,24 @@ const (
 
 // Tenant is the top-level isolation boundary.
 type Tenant struct {
-	ID        uuid.UUID
-	Name      string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID   uuid.UUID
+	Name string
+	// SpendCapSoftUSD / SpendCapHardUSD are the two independently opt-in per-Tenant
+	// spend caps (#130, ADR-0046): nil = that cap is off. They gate a Voice Session's
+	// estimated spend (an approximate figure, never a billed amount).
+	SpendCapSoftUSD *float64
+	SpendCapHardUSD *float64
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// SpendCaps is the get/set DTO for a Tenant's two spend caps (#130, ADR-0046),
+// each nil when that cap is unset. It is the storage-layer value the session
+// Manager maps onto its meter and the RPC round-trips; keeping it distinct from
+// spend.Caps keeps storage free of a spend-package import.
+type SpendCaps struct {
+	SoftUSD *float64
+	HardUSD *float64
 }
 
 // Campaign is a persistent TTRPG game owned by a Tenant and GM'd by one Member.
