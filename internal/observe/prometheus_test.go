@@ -179,6 +179,39 @@ func TestTTSTotalDeliverSpanBucketsAndHelp(t *testing.T) {
 	}
 }
 
+// TestUsageMeters_TokensCharactersAudioSeconds is the #127 AC pin (ADR-0045): the
+// three usage meters expose their series with provider-only bounds — LLM tokens
+// split by a required direction label (Groq prices input/output differently), TTS
+// characters and STT audio-seconds by provider. The model passed to LLMTokens is
+// for the spend meter (ADR-0046) and must NEVER become a Prometheus label
+// (ADR-0032 cardinality).
+func TestUsageMeters_TokensCharactersAudioSeconds(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.LLMTokens(ProviderGroq, "llama-3.3-70b-versatile", 100, 50)
+	rec.TTSCharacters(ProviderElevenLabs, 42)
+	rec.STTAudioSeconds(ProviderElevenLabs, 3200*time.Millisecond)
+
+	out := scrape(t, rec)
+
+	wantSeries := []string{
+		`glyphoxa_voice_llm_tokens_total{direction="input",provider="groq"} 100`,
+		`glyphoxa_voice_llm_tokens_total{direction="output",provider="groq"} 50`,
+		`glyphoxa_voice_tts_characters_total{provider="elevenlabs"} 42`,
+		`glyphoxa_voice_stt_audio_seconds_total{provider="elevenlabs"} 3.2`,
+	}
+	for _, want := range wantSeries {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q\n%s", want, filterGlyphoxa(out))
+		}
+	}
+
+	// The model rides only to the spend meter; it must not reach a series (ADR-0032).
+	if strings.Contains(out, "llama-3.3-70b-versatile") || strings.Contains(out, "model=") {
+		t.Errorf("model leaked into a series (must never be a label):\n%s", filterGlyphoxa(out))
+	}
+}
+
 func TestSessionGaugeTracksOpenClose(t *testing.T) {
 	rec := NewPrometheusRecorder()
 	rec.SessionOpened("a")

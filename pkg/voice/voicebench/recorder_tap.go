@@ -130,5 +130,11 @@ func (t *recorderTap) STTRequest(_ observe.Provider, d time.Duration) { t.add(St
 // surviving turns, not the outcome mix, so it is a no-op here.
 func (t *recorderTap) TurnOutcome(observe.TurnOutcome, observe.TurnReason) {}
 
+// Usage meters (#127) are a spend signal, not a latency one; the bench does not
+// harvest them, so they are no-ops here (the tap records only latency stages).
+func (t *recorderTap) LLMTokens(observe.Provider, string, int, int)    {}
+func (t *recorderTap) TTSCharacters(observe.Provider, int)             {}
+func (t *recorderTap) STTAudioSeconds(observe.Provider, time.Duration) {}
+
 // compile-time assertion: the tap satisfies the recorder the orchestrator drives.
 var _ observe.StageRecorder = (*recorderTap)(nil)

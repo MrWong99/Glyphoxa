@@ -242,6 +242,30 @@ type StageRecorder interface {
 	// (glyphoxa_voice_turn_total{outcome,reason}) — WIRED by the bus subscriber
 	// (first_audio on the first FirstAudio per turn, abandoned on a TTL reap).
 	TurnOutcome(outcome TurnOutcome, reason TurnReason)
+
+	// LLMTokens counts one completion's token usage split by direction (#127,
+	// ADR-0045): the provider-reported input/output counts, or a documented
+	// ceil(chars/4) estimate per direction when the provider reports none — never
+	// zero. model is carried for the per-model spend meter (ADR-0046) ONLY; the
+	// Prometheus adapter DROPS it — model is never a label (ADR-0032). direction is
+	// required because Groq prices input and output differently.
+	// (glyphoxa_voice_llm_tokens_total{provider,direction=input|output}) — WIRED by
+	// agenttool.providerAdapter after each Complete drain.
+	LLMTokens(provider Provider, model string, inputTokens, outputTokens int)
+	// TTSCharacters counts the characters (utf8 runes, not bytes) submitted to a
+	// TTS synthesizer (#127, ADR-0045): ElevenLabs bills submitted characters, so a
+	// sentence is counted on an accepted Synthesize even if a later barge cuts its
+	// audio. (glyphoxa_voice_tts_characters_total{provider}) — WIRED by the TTS
+	// stage after a successful Synthesize start.
+	TTSCharacters(provider Provider, chars int)
+	// STTAudioSeconds counts the audio duration submitted to an STT recognizer
+	// (#127, ADR-0045/0042): the batch path bills the submitted clip length, the
+	// streaming path the voiced+pre-roll duration accumulated per utterance and
+	// recorded at end-utterance regardless of commit outcome (audio sent is audio
+	// billed; a batch fallback after a failed commit truthfully double-records,
+	// since both calls billed). (glyphoxa_voice_stt_audio_seconds_total{provider})
+	// — WIRED by the STT batch stage and the StreamManager.
+	STTAudioSeconds(provider Provider, d time.Duration)
 }
 
 // Discard is the no-op StageRecorder used when none is configured, so call sites
@@ -261,6 +285,9 @@ func (Discard) LLMTurn(Provider, time.Duration)             {}
 func (Discard) ProviderCall(Stage, Provider, Outcome)       {}
 func (Discard) ProviderError(Stage, Provider)               {}
 func (Discard) TurnOutcome(TurnOutcome, TurnReason)         {}
+func (Discard) LLMTokens(Provider, string, int, int)        {}
+func (Discard) TTSCharacters(Provider, int)                 {}
+func (Discard) STTAudioSeconds(Provider, time.Duration)     {}
 
 // Static assertion that the no-op satisfies the contract.
 var _ StageRecorder = Discard{}
