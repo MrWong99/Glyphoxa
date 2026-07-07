@@ -184,6 +184,7 @@ type recordingStage struct {
 	turns        []observe.Provider // one LLMTurn span per Engine.Generate/GenerateStream
 	outcomes     []observe.Outcome  // every ProviderCall outcome, in order
 	providerErrs int                // ProviderError invocations
+	tokens       []llmTokensRec     // one LLMTokens per drained Complete (reported or estimate)
 }
 
 func (r *recordingStage) LLMRound(p observe.Provider, idx int, hadToolCall bool, _ time.Duration) {
@@ -196,6 +197,25 @@ func (r *recordingStage) LLMTurn(p observe.Provider, _ time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.turns = append(r.turns, p)
+}
+
+// llmTokensRec is one captured LLMTokens call: provider + model + the two counts.
+type llmTokensRec struct {
+	provider observe.Provider
+	model    string
+	in, out  int
+}
+
+func (r *recordingStage) LLMTokens(p observe.Provider, model string, in, out int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tokens = append(r.tokens, llmTokensRec{provider: p, model: model, in: in, out: out})
+}
+
+func (r *recordingStage) tokenSpans() []llmTokensRec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]llmTokensRec(nil), r.tokens...)
 }
 
 func (r *recordingStage) turnSpans() []observe.Provider {
@@ -833,6 +853,146 @@ func TestEngine_StartError_ClassifiesOutcomeLikeStages(t *testing.T) {
 		}
 		if provErrs != 1 {
 			t.Errorf("provider_errors = %d on a vendor start failure, want 1", provErrs)
+		}
+	})
+}
+
+// usageProvider streams a fixed exact text (no per-word spacing) and, optionally,
+// one provider-reported EventUsage, so the #127 usage-metering tests drive both the
+// reported-usage and estimate-fallback paths deterministically. usageFirst emits
+// the usage BEFORE the text so a barge (onText error on the first delta) can see it.
+// The channel is buffered so a test that bails early (barge) never leaks the
+// producer goroutine.
+type usageProvider struct {
+	text       string
+	usage      *llm.Usage
+	usageFirst bool
+}
+
+func (p usageProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent, 8)
+	go func() {
+		defer close(ch)
+		emitUsage := func() {
+			if p.usage != nil {
+				ch <- llm.StreamEvent{Type: llm.EventUsage, Usage: *p.usage}
+			}
+		}
+		if p.usageFirst {
+			emitUsage()
+		}
+		if p.text != "" {
+			ch <- llm.StreamEvent{Type: llm.EventText, Text: p.text}
+		}
+		if !p.usageFirst {
+			emitUsage()
+		}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}()
+	return ch, nil
+}
+
+// TestEngine_Usage_RecordsProviderReportedTokensAndModel pins the #127 happy path
+// (ADR-0045): a completion that reports usage records exactly one LLMTokens with the
+// provider-reported input/output counts, labelled with the injected provider AND the
+// adapter model (the model rides to the spend meter; Prometheus drops it later).
+func TestEngine_Usage_RecordsProviderReportedTokensAndModel(t *testing.T) {
+	prov := usageProvider{text: "Aye, traveler.", usage: &llm.Usage{InputTokens: 100, OutputTokens: 50}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test-model", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hello."}}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	toks := rec.tokenSpans()
+	if len(toks) != 1 {
+		t.Fatalf("recorded %d LLMTokens, want exactly 1", len(toks))
+	}
+	want := llmTokensRec{provider: observe.ProviderGroq, model: "claude-test-model", in: 100, out: 50}
+	if toks[0] != want {
+		t.Errorf("LLMTokens = %+v, want %+v (provider-reported counts + adapter model)", toks[0], want)
+	}
+}
+
+// TestEngine_Usage_EstimatesWhenProviderReportsNone pins the AC estimate fallback:
+// a completion with NO EventUsage (an old cassette, a gateway that omits it) records
+// a documented ceil(chars/4) estimate per direction — never zero. Sent text is the
+// one user message ("Hello." = 6 runes → 2); received text is the answer
+// ("abcdefghijkl" = 12 runes → 3).
+func TestEngine_Usage_EstimatesWhenProviderReportsNone(t *testing.T) {
+	prov := usageProvider{text: "abcdefghijkl"} // 12 runes, no usage reported
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGemini))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hello."}}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	toks := rec.tokenSpans()
+	if len(toks) != 1 {
+		t.Fatalf("recorded %d LLMTokens, want exactly 1 (estimate, never zero)", len(toks))
+	}
+	want := llmTokensRec{provider: observe.ProviderGemini, model: "m", in: 2, out: 3}
+	if toks[0] != want {
+		t.Errorf("estimate = %+v, want %+v (ceil(6/4)=2 in, ceil(12/4)=3 out)", toks[0], want)
+	}
+}
+
+// TestEngine_Usage_StartErrorRecordsNoTokens pins that a completion that never
+// starts (a start error) records NO usage — there was no completion to meter.
+func TestEngine_Usage_StartErrorRecordsNoTokens(t *testing.T) {
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(startErrProvider{}, tool.NewGrantSet(tool.NewRegistry()), "m", 0, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
+		t.Fatal("Generate returned nil on a start failure")
+	}
+	if toks := rec.tokenSpans(); len(toks) != 0 {
+		t.Errorf("recorded %d LLMTokens on a start error, want 0", len(toks))
+	}
+}
+
+// TestEngine_Usage_BargeRecordsReportedUsageOnlyIfSeen pins the barge rule
+// (ADR-0045): a barge (onText error) records the provider-reported usage IF it
+// already arrived, otherwise nothing — a partial turn is never estimated.
+func TestEngine_Usage_BargeRecordsReportedUsageOnlyIfSeen(t *testing.T) {
+	t.Run("usage already seen → recorded", func(t *testing.T) {
+		prov := usageProvider{text: "partial answer", usage: &llm.Usage{InputTokens: 30, OutputTokens: 5}, usageFirst: true}
+		rec := &recordingStage{}
+		eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+			agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+		_, err := eng.GenerateStream(context.Background(),
+			[]llm.Message{{Role: llm.RoleUser, Text: "Hello."}},
+			func(string) error { return errors.New("barge") })
+		if err == nil {
+			t.Fatal("GenerateStream returned nil on a barge")
+		}
+		toks := rec.tokenSpans()
+		want := llmTokensRec{provider: observe.ProviderGroq, model: "m", in: 30, out: 5}
+		if len(toks) != 1 || toks[0] != want {
+			t.Errorf("LLMTokens on a barge with usage seen = %+v, want one %+v (reported, not estimated)", toks, want)
+		}
+	})
+
+	t.Run("no usage yet → nothing", func(t *testing.T) {
+		prov := usageProvider{text: "partial answer"} // no usage before the barge
+		rec := &recordingStage{}
+		eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+			agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+		_, err := eng.GenerateStream(context.Background(),
+			[]llm.Message{{Role: llm.RoleUser, Text: "Hello."}},
+			func(string) error { return errors.New("barge") })
+		if err == nil {
+			t.Fatal("GenerateStream returned nil on a barge")
+		}
+		if toks := rec.tokenSpans(); len(toks) != 0 {
+			t.Errorf("LLMTokens on a barge with no usage = %+v, want none (never estimate a partial turn)", toks)
 		}
 	})
 }

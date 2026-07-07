@@ -81,6 +81,12 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	if c.reasoningEffort != "" {
 		params.ReasoningEffort = openai.ReasoningEffort(c.reasoningEffort)
 	}
+	if c.includeUsage {
+		// Ask for the trailing usage chunk (token metering, #127). Preset-gated: a
+		// gateway that rejects stream_options would 400, so only presets that verified
+		// the endpoint honours it turn this on.
+		params.StreamOptions = openai.ChatCompletionStreamOptionsParam{IncludeUsage: openai.Bool(true)}
+	}
 
 	// Non-standard body fields (e.g. Gemini's extra_body thinking_config) ride via
 	// the SDK's JSON-set escape hatch so nested values serialize verbatim.
@@ -289,6 +295,10 @@ func (c *Client) streamEvents(ctx context.Context, stream *ssestream.Stream[open
 	// and its count against maxStreamChunks — so a zero-content chunk flood trips
 	// a specific budget error here long before the transport cap.
 	var totalBytes, totalChunks int
+	// sawUsage guards against emitting more than one EventUsage (#127): only the
+	// trailing chunk carries a non-null usage, but the guard keeps the contract
+	// explicit even if a gateway repeats it.
+	var sawUsage bool
 
 	for stream.Next() {
 		if ctx.Err() != nil {
@@ -302,6 +312,20 @@ func (c *Client) streamEvents(ctx context.Context, stream *ssestream.Stream[open
 		if totalBytes += len(chunk.RawJSON()); totalBytes > maxStreamBytes {
 			fail(fmt.Sprintf("%s: response stream exceeded %d bytes", c.name, maxStreamBytes))
 			return
+		}
+		// Capture usage BEFORE the empty-choices skip below: the trailing usage chunk
+		// (include_usage) arrives with an empty choices array, so the continue guard
+		// would otherwise swallow it silently (#127, ADR-0045). All non-final chunks
+		// carry a null (zero) usage, so a non-zero prompt/completion count is the
+		// signal; emit exactly one EventUsage for it.
+		if u := chunk.Usage; !sawUsage && (u.PromptTokens != 0 || u.CompletionTokens != 0) {
+			sawUsage = true
+			if !send(llm.StreamEvent{Type: llm.EventUsage, Usage: llm.Usage{
+				InputTokens:  int(u.PromptTokens),
+				OutputTokens: int(u.CompletionTokens),
+			}}) {
+				return
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue // usage-only or otherwise choice-less trailing chunk

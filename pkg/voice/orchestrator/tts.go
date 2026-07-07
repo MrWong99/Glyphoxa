@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
@@ -159,6 +160,11 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 		}
 		return fmt.Errorf("orchestrator.TTS.Dispatch: %w", err)
 	}
+	// Usage metering (#127, ADR-0045): Synthesize accepted the request, so bill the
+	// submitted characters as utf8 runes (ElevenLabs bills submitted characters, not
+	// bytes). Counted here, before the drain, so a later barge cutting the audio still
+	// bills what was submitted. An atomic counter add; it never blocks or fails the turn.
+	s.rec.TTSCharacters(s.provider, utf8.RuneCountInString(sentence))
 	for range ch {
 	}
 	// The channel closed: record the DELIVER span and count the call OK. tts_total is

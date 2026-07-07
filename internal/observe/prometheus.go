@@ -68,6 +68,15 @@ type PrometheusRecorder struct {
 	providerCalls  *prometheus.CounterVec // stage, provider, outcome
 	providerErrors *prometheus.CounterVec // stage, provider
 
+	// provider usage (StageRecorder, #127 / ADR-0045): token / character / audio-
+	// second spend per provider. llmTokens splits by a required direction label
+	// (input|output) because Groq prices the two directions differently; model is
+	// NEVER a label (it rides only to the spend meter, ADR-0046). ttsCharacters and
+	// sttAudioSeconds carry the provider label only (ADR-0032 bounds).
+	llmTokens       *prometheus.CounterVec // provider, direction
+	ttsCharacters   *prometheus.CounterVec // provider
+	sttAudioSeconds *prometheus.CounterVec // provider
+
 	// turn lifecycle (StageRecorder): the survivorship counterpart to
 	// response_latency — every turn records one terminal outcome.
 	turnTotal *prometheus.CounterVec // outcome, reason
@@ -199,6 +208,12 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 	r.providerErrors = counterVec("provider_errors_total", "Vendor call errors by stage and provider.", "stage", "provider")
 	r.turnTotal = counterVec("turn_total", "Turns by terminal outcome and reason — the survivorship counterpart to response_latency (which records only turns that reached first audio).", "outcome", "reason")
 
+	// Provider usage meters (#127, ADR-0045). direction is required on llm_tokens
+	// (Groq prices input/output differently); model is never a label (ADR-0032).
+	r.llmTokens = counterVec("llm_tokens_total", "LLM tokens metered by provider and direction (provider-reported, or a ceil(chars/4) estimate when none is reported — never zero).", "provider", "direction")
+	r.ttsCharacters = counterVec("tts_characters_total", "TTS characters (utf8 runes) submitted per provider (billed even if a later barge cuts the audio).", "provider")
+	r.sttAudioSeconds = counterVec("stt_audio_seconds_total", "STT audio seconds submitted per provider (batch clip length, or streamed voiced+pre-roll duration).", "provider")
+
 	r.embeddingBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, // process-level, not a voice subsystem metric (ADR-0032)
 		Name:      "embedding_backlog",
@@ -224,6 +239,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
 		r.memoryRecall, r.kgFacts,
+		r.llmTokens, r.ttsCharacters, r.sttAudioSeconds,
 		// Standard runtime collectors so /metrics also reports process/Go health.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
@@ -293,6 +309,26 @@ func (r *PrometheusRecorder) ProviderError(s Stage, p Provider) {
 }
 func (r *PrometheusRecorder) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
 	r.turnTotal.WithLabelValues(string(outcome), string(reason)).Inc()
+}
+
+// LLMTokens records a completion's input/output token usage (#127, ADR-0045). The
+// model argument is DROPPED here — it exists only for the per-model spend meter
+// (ADR-0046); model is never a Prometheus label (ADR-0032). The two directions
+// land on separate series because Groq prices them differently.
+func (r *PrometheusRecorder) LLMTokens(p Provider, _ string, inputTokens, outputTokens int) {
+	r.llmTokens.WithLabelValues(string(p), "input").Add(float64(inputTokens))
+	r.llmTokens.WithLabelValues(string(p), "output").Add(float64(outputTokens))
+}
+
+// TTSCharacters records characters submitted to a TTS synthesizer (#127).
+func (r *PrometheusRecorder) TTSCharacters(p Provider, chars int) {
+	r.ttsCharacters.WithLabelValues(string(p)).Add(float64(chars))
+}
+
+// STTAudioSeconds records audio-seconds submitted to an STT recognizer (#127),
+// exported in the base unit seconds (Prometheus convention).
+func (r *PrometheusRecorder) STTAudioSeconds(p Provider, d time.Duration) {
+	r.sttAudioSeconds.WithLabelValues(string(p)).Add(d.Seconds())
 }
 
 // MemoryRecall counts one NPC memory recall by its bounded outcome (#122,

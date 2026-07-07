@@ -221,6 +221,42 @@ func TestTTS_Dispatch_RecordsProviderCallOutcomes(t *testing.T) {
 	})
 }
 
+// TestTTS_Dispatch_MetersSubmittedCharacters is the #127 TTS AC (ADR-0045): a
+// successful Synthesize start meters the submitted characters counted as utf8 RUNES
+// (not bytes — ElevenLabs bills characters), even if a later barge cuts the audio; a
+// start error meters nothing. "Hällo." is 6 runes but 7 bytes (ä is two bytes).
+func TestTTS_Dispatch_MetersSubmittedCharacters(t *testing.T) {
+	t.Run("successful start meters runes", func(t *testing.T) {
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		stage := orchestrator.NewTTS(h.Bus, closedChanSynth{},
+			orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+		if err := stage.Dispatch(context.Background(), "Hällo.", voicetest.LiveElevenLabsVoice()); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		got := spy.characters()
+		want := ttsCharsRec{provider: observe.ProviderElevenLabs, chars: 6}
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("tts_characters = %v, want one %+v (6 runes, not 7 bytes)", got, want)
+		}
+	})
+
+	t.Run("start error meters nothing", func(t *testing.T) {
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		stage := orchestrator.NewTTS(h.Bus, startErrSynth{},
+			orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+		if err := stage.Dispatch(context.Background(), "Hällo.", voicetest.LiveElevenLabsVoice()); err == nil {
+			t.Fatal("Dispatch: expected the synth start error to propagate")
+		}
+		if got := spy.characters(); len(got) != 0 {
+			t.Errorf("tts_characters on a start error = %v, want none (no submission billed)", got)
+		}
+	})
+}
+
 // TestTTS_Dispatch_KeylessRecordsNothing pins the keyless default: an option-less
 // NewTTS never nil-panics on the metric calls — the recorder defaults to
 // observe.Discard, so Dispatch works exactly as before the #125 wiring.

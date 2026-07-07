@@ -53,6 +53,31 @@ func captureServer(t *testing.T, capture *atomic.Value) *httptest.Server {
 	}))
 }
 
+// TestComplete_GeminiPreset_OmitsStreamOptions pins the #127 preset gate's
+// negative half (ADR-0045): the Gemini compat endpoint is not verified to honour
+// stream_options, so the preset must NOT send include_usage — a gateway that
+// rejects the field would 400 every turn. Token metering for Gemini falls back to
+// the ceil(chars/4) estimate instead.
+func TestComplete_GeminiPreset_OmitsStreamOptions(t *testing.T) {
+	var capture atomic.Value
+	srv := captureServer(t, &capture)
+	defer srv.Close()
+
+	c := gemini.New("k", gemini.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	drain(ch)
+
+	raw, _ := capture.Load().([]byte)
+	if strings.Contains(string(raw), "stream_options") {
+		t.Errorf("Gemini preset must omit stream_options (unverified endpoint); got %s", raw)
+	}
+}
+
 // TestNew_NoKey_NoEnv_CompleteReturnsMissingKeyError pins the link-time-safety
 // property shared with the anthropic and elevenlabs adapters: New must not panic
 // without an API key; the missing-key error surfaces at the first request and

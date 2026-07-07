@@ -84,6 +84,9 @@ func New(apiKey string, opts ...Option) *Client {
 		openaicompat.WithBaseURL(DefaultBaseURL),
 		openaicompat.WithModel(DefaultModel),
 		openaicompat.WithDefaultMaxTokens(DefaultMaxTokens),
+		// Groq honours stream_options.include_usage, so ask for the trailing usage
+		// chunk to meter tokens (#127, ADR-0045).
+		openaicompat.WithIncludeUsage(true),
 	}
 	// Caller options come last so WithBaseURL/WithModel overrides win.
 	return openaicompat.New(append(base, opts...)...)

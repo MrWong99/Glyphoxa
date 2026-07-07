@@ -62,6 +62,10 @@ type StreamManager struct {
 	utterOpen   bool   // between beginUtterance and endUtterance — partials publish only then
 	utterDead   bool   // stream was down at begin, or a send failed → this utterance is batch
 	lastPartial string // last published partial text, for consecutive-duplicate dedupe
+	// streamedDur accumulates the wall-clock duration of frames actually sent to the
+	// live session this utterance (pre-roll flush + voiced), reset at beginUtterance
+	// and metered at endUtterance (#127, ADR-0045/0042): audio sent is audio billed.
+	streamedDur time.Duration
 
 	// ring is the pre-roll buffer of the most recent idle (pre-speech) frames,
 	// streamed as context at beginUtterance. Audio-loop-only (idleFrame/beginUtterance
@@ -309,6 +313,7 @@ func (m *StreamManager) beginUtterance(at time.Time) string {
 	m.curUtterID = id
 	m.utterOpen = true
 	m.lastPartial = ""
+	m.streamedDur = 0 // reset the per-utterance billed-audio accumulator (#127)
 	s := m.stream
 	m.utterDead = s == nil
 	m.mu.Unlock()
@@ -325,8 +330,18 @@ func (m *StreamManager) beginUtterance(at time.Time) string {
 			m.streamFailed(s, err)
 			break
 		}
+		m.addStreamed(f) // pre-roll frame accepted → bill it (#127)
 	}
 	return id
+}
+
+// addStreamed adds one accepted frame's duration to the per-utterance billed-audio
+// accumulator (#127, ADR-0045/0042). Called only after a successful Send, so a frame
+// the provider rejected is never billed.
+func (m *StreamManager) addStreamed(f audio.Frame) {
+	m.mu.Lock()
+	m.streamedDur += frameDuration(f)
+	m.mu.Unlock()
 }
 
 // send streams one voiced frame to the session. On any send error the utterance is
@@ -350,7 +365,9 @@ func (m *StreamManager) send(f audio.Frame) {
 	}
 	if err := s.Send(f); err != nil {
 		m.streamFailed(s, err)
+		return
 	}
+	m.addStreamed(f) // voiced frame accepted → bill it (#127)
 }
 
 // endUtterance closes the utterance. When it streamed live to a healthy session it
@@ -362,7 +379,16 @@ func (m *StreamManager) endUtterance() (commit <-chan stt.CommitResult, sentAt t
 	m.utterOpen = false
 	dead := m.utterDead
 	s := m.stream
+	streamed := m.streamedDur
 	m.mu.Unlock()
+	// Meter the streamed audio once per utterance, regardless of the commit outcome
+	// below (#127, ADR-0045/0042): audio sent is audio billed. A pure-batch utterance
+	// streamed nothing (streamed == 0), so nothing is billed here — the batch path
+	// bills its clip; a fatal mid-utterance death bills only what streamed, and the
+	// batch fallback then bills its own clip (both calls truthfully billed).
+	if streamed > 0 {
+		m.metrics.STTAudioSeconds(m.provider, streamed)
+	}
 	if dead || s == nil {
 		return nil, time.Time{}, false
 	}

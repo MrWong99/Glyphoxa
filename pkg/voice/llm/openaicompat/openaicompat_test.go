@@ -96,6 +96,68 @@ func captureBody(t *testing.T, req llm.Request, opts ...openaicompat.Option) []b
 	return raw
 }
 
+// TestComplete_IncludeUsage_SetsStreamOptionsOnWire pins the #127 preset gate: with
+// WithIncludeUsage the request carries stream_options.include_usage=true (so the
+// trailing usage chunk is emitted); without it the field is omitted entirely — a
+// gateway that rejects stream_options would otherwise 400 every turn (ADR-0045).
+func TestComplete_IncludeUsage_SetsStreamOptionsOnWire(t *testing.T) {
+	req := llm.Request{Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}}}
+
+	on := captureBody(t, req, openaicompat.WithIncludeUsage(true))
+	var body struct {
+		StreamOptions *struct {
+			IncludeUsage *bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	if err := json.Unmarshal(on, &body); err != nil {
+		t.Fatalf("request body not JSON: %v\n%s", err, on)
+	}
+	if body.StreamOptions == nil || body.StreamOptions.IncludeUsage == nil || !*body.StreamOptions.IncludeUsage {
+		t.Errorf("with WithIncludeUsage the wire must carry stream_options.include_usage=true; got %s", on)
+	}
+
+	off := captureBody(t, req) // default: no include-usage
+	if strings.Contains(string(off), "stream_options") {
+		t.Errorf("without WithIncludeUsage the wire must omit stream_options entirely; got %s", off)
+	}
+}
+
+// TestComplete_TrailingUsageChunk_EmitsEventUsage is THE hoisted-capture regression
+// trap (#127): the final usage chunk arrives with an empty choices array. The
+// chunk loop's len(choices)==0 continue guard would silently swallow it, so usage
+// must be captured BEFORE that guard. One EventUsage with the reported tokens must
+// reach the consumer.
+func TestComplete_TrailingUsageChunk_EmitsEventUsage(t *testing.T) {
+	srv := sseServer(t, nil,
+		sse(`{"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}`),
+		sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`),
+		// Trailing usage chunk: empty choices, non-null usage.
+		sse(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`),
+	)
+	defer srv.Close()
+
+	c := newClient(srv.URL, openaicompat.WithIncludeUsage(true))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	var usageCount int
+	for _, ev := range collect(t, ch) {
+		if ev.Type == llm.EventUsage {
+			usageCount++
+			if ev.Usage.InputTokens != 100 || ev.Usage.OutputTokens != 50 {
+				t.Errorf("usage = %+v, want {InputTokens:100, OutputTokens:50}", ev.Usage)
+			}
+		}
+	}
+	if usageCount != 1 {
+		t.Fatalf("EventUsage count = %d, want exactly 1 (the trailing empty-choices chunk must not be swallowed)", usageCount)
+	}
+}
+
 // TestNew_NoKey_CompleteReturnsMissingKeyError pins the link-time-safety property
 // shared with the anthropic and elevenlabs adapters: New must not panic without
 // an API key; the missing-key error surfaces at the first request and names both

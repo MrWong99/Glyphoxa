@@ -168,6 +168,55 @@ func TestSTT_Transcribe_HungRecognizerBudgetNotMultiplied(t *testing.T) {
 	}
 }
 
+// batchFrames builds n 32 ms / 16 kHz PCM frames (512 samples each) for the STT
+// audio-seconds meter tests — n*32ms of submitted audio.
+func batchFrames(t *testing.T, n int) []audio.Frame {
+	t.Helper()
+	out := make([]audio.Frame, n)
+	for i := range out {
+		f, err := audio.NewFrame(make([]int16, 512), 16000, 32)
+		if err != nil {
+			t.Fatalf("audio.NewFrame: %v", err)
+		}
+		out[i] = f
+	}
+	return out
+}
+
+// TestSTT_Transcribe_MetersSubmittedAudioSeconds is the #127 STT AC (ADR-0045/0042):
+// a successful batch Transcribe meters the submitted audio length (N*32ms), and a
+// failed one meters nothing — only audio the recognizer actually consumed is billed.
+func TestSTT_Transcribe_MetersSubmittedAudioSeconds(t *testing.T) {
+	t.Run("success meters N*32ms", func(t *testing.T) {
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		stage := orchestrator.NewSTT(h.Bus, stubRecognizer{transcript: stt.Transcript{Text: "roll a d20"}},
+			orchestrator.WithSTTMetrics(spy, observe.ProviderElevenLabs))
+
+		if err := stage.Transcribe(context.Background(), batchFrames(t, 5)); err != nil {
+			t.Fatalf("Transcribe: %v", err)
+		}
+		got := spy.audioSeconds()
+		if len(got) != 1 || got[0] != 5*32*time.Millisecond {
+			t.Errorf("stt_audio_seconds = %v, want one 160ms span (5×32ms)", got)
+		}
+	})
+
+	t.Run("failure meters nothing", func(t *testing.T) {
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		stage := orchestrator.NewSTT(h.Bus, errorRecognizer{},
+			orchestrator.WithSTTMetrics(spy, observe.ProviderElevenLabs))
+
+		if err := stage.Transcribe(context.Background(), batchFrames(t, 5)); err == nil {
+			t.Fatal("Transcribe returned nil on a provider error")
+		}
+		if got := spy.audioSeconds(); len(got) != 0 {
+			t.Errorf("stt_audio_seconds on a failed transcribe = %v, want none (no audio billed)", got)
+		}
+	})
+}
+
 // stubRecognizer is a [stt.Recognizer] that returns a pinned [stt.Transcript]
 // regardless of input. Used to exercise the orchestrator stage's republish
 // contract independently of any real provider or cassette.

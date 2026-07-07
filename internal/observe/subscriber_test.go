@@ -58,6 +58,9 @@ func (r *recordingStage) LLMRound(Provider, int, bool, time.Duration) {}
 func (r *recordingStage) LLMTurn(Provider, time.Duration)             {}
 func (r *recordingStage) ProviderCall(Stage, Provider, Outcome)       {}
 func (r *recordingStage) ProviderError(Stage, Provider)               {}
+func (r *recordingStage) LLMTokens(Provider, string, int, int)        {}
+func (r *recordingStage) TTSCharacters(Provider, int)                 {}
+func (r *recordingStage) STTAudioSeconds(Provider, time.Duration)     {}
 func (r *recordingStage) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
