@@ -3,6 +3,7 @@ package elevenlabs_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 )
@@ -242,5 +245,34 @@ func TestTranscribe_Non2xx_WrapsOpAndStatus(t *testing.T) {
 		if !strings.Contains(got, must) {
 			t.Errorf("error %q missing required substring %q", got, must)
 		}
+	}
+}
+
+// TestTranscribe_429_TypedHTTPError pins that a non-2xx surfaces as an
+// errors.As-able [*providererr.HTTPError] the retry helper classifies (a 429 is
+// retryable), and that the error text stays byte-identical to the adapter's
+// pre-typed readErrorResponse literal (#124, ADR-0044).
+func TestTranscribe_429_TypedHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("slow down"))
+	}))
+	defer srv.Close()
+
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL))
+	_, err := c.Transcribe(context.Background(), nil)
+	var he *providererr.HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("error %v is not a *providererr.HTTPError", err)
+	}
+	if he.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", he.StatusCode)
+	}
+	if !retry.Retryable(err) {
+		t.Error("a 429 must be retryable")
+	}
+	const want = "elevenlabs.Transcribe: HTTP 429 429 Too Many Requests: slow down"
+	if err.Error() != want {
+		t.Errorf("error text = %q, want %q (byte-identical)", err.Error(), want)
 	}
 }

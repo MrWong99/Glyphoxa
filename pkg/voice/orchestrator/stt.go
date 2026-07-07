@@ -7,6 +7,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -45,6 +46,15 @@ type STT struct {
 	// context, never this one, so without this bound nothing interrupts the POST.
 	// Zero disables the bound (defaults to [defaultSTTRequestTimeout]).
 	timeout time.Duration
+
+	// retry bounds transient-failure retries around the recognizer call (#124,
+	// ADR-0044): a single 429/5xx or net.Error is retried with backoff INSIDE the
+	// existing per-request timeout, which stays the TOTAL budget wrapping the whole
+	// loop — never per-attempt (a 3×timeout budget would recreate the #91 serial-
+	// worker wedge). The zero value is a valid policy with retries on by defaults;
+	// [WithSTTRetry] threads the shared policy (its injected Sleep keeps cassette
+	// runs deterministic, ADR-0021).
+	retry retry.Policy
 }
 
 // defaultSTTRequestTimeout bounds one recognizer call when [WithSTTTimeout] is
@@ -64,6 +74,16 @@ type STTOption func(*STT)
 // recognizer recovery without waiting the full default.
 func WithSTTTimeout(d time.Duration) STTOption {
 	return func(s *STT) { s.timeout = d }
+}
+
+// WithSTTRetry sets the [retry.Policy] wrapping the recognizer call (#124): a
+// transient 429/5xx or net.Error is retried with backoff, a non-retryable error
+// (4xx auth) fails fast, and the retry loop lives INSIDE the per-request timeout
+// (the total budget). The policy's injected Sleep/Rand keep cassette runs
+// deterministic (ADR-0021). Unset leaves the zero-value policy (retries on with
+// defaults).
+func WithSTTRetry(p retry.Policy) STTOption {
+	return func(s *STT) { s.retry = p }
 }
 
 // WithSTTMetrics injects the stt_request instrumentation: rec receives one
@@ -117,7 +137,14 @@ func (s *STT) Transcribe(ctx context.Context, frames []audio.Frame) error {
 	}
 
 	start := time.Now()
-	t, err := s.recognizer.Transcribe(ctx, frames)
+	// Retry a transient failure (429/5xx/net) with backoff INSIDE the timeout above
+	// — which stays the TOTAL budget wrapping the whole loop, never per-attempt
+	// (#124, ADR-0044). A non-retryable error (4xx auth) fails fast; a barge/timeout
+	// cutting ctx aborts the loop at once. Metrics below fire on the FINAL outcome
+	// only (#125), so a recovered retry records one ok span, not one per attempt.
+	t, err := retry.Do(ctx, s.retry, func(ctx context.Context) (stt.Transcript, error) {
+		return s.recognizer.Transcribe(ctx, frames)
+	})
 	// Record the POST round-trip whether it succeeded or failed — both consumed
 	// real wall-clock inside the response_latency span, and a failed/slow scribe
 	// call is exactly what this series exists to surface.

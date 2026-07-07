@@ -25,6 +25,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -187,6 +188,15 @@ type Config struct {
 	// the turn: a slow/unavailable path degrades to nil. nil disables facts — the
 	// slot stays empty and the prompt is byte-identical to the pre-facts behavior.
 	Facts FactsRecaller
+
+	// Retry is the [retry.Policy] the default [providerEngine] wraps its LLM start
+	// call in (#124, ADR-0044): a transient 429/5xx or net.Error start-error is
+	// retried with backoff INSIDE the per-turn deadline, a non-retryable error fails
+	// fast, and a barge cutting ctx aborts at once. Used ONLY by the default engine
+	// — a custom [Config.Engine] (the tool-backed bridge) carries its own policy. The
+	// zero value is a valid retries-on policy (defaults), so the retry is on unless a
+	// caller narrows it.
+	Retry retry.Policy
 }
 
 // DefaultTurnTimeout is the per-turn LLM deadline applied when
@@ -227,7 +237,7 @@ func NewReplier(cfg Config) *Replier {
 		if cfg.Provider == nil {
 			panic("agent.NewReplier: one of Engine or Provider must be set")
 		}
-		engine = providerEngine{provider: cfg.Provider, model: cfg.Model, maxTokens: cfg.MaxTokens}
+		engine = providerEngine{provider: cfg.Provider, model: cfg.Model, maxTokens: cfg.MaxTokens, retry: cfg.Retry}
 	}
 	return &Replier{cfg: cfg, engine: engine}
 }
@@ -471,6 +481,12 @@ type providerEngine struct {
 	provider  llm.Provider
 	model     string
 	maxTokens int
+
+	// retry wraps the LLM start call (#124, ADR-0044): a transient start-error is
+	// retried with backoff, a non-retryable one fails fast, and a barge cutting ctx
+	// aborts at once. Only the start is retried — a mid-stream truncation below is
+	// never re-driven. Zero value is a valid retries-on policy.
+	retry retry.Policy
 }
 
 // Generate implements [Engine]. It runs one completion and returns the
@@ -478,10 +494,16 @@ type providerEngine struct {
 // an [llm.EventError], a ctx cancellation, or a silent truncation — is an
 // error: a partial sentence must never be spoken as the Agent's full reply.
 func (e providerEngine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
-	stream, err := e.provider.Complete(ctx, llm.Request{
-		Model:     e.model,
-		MaxTokens: e.maxTokens,
-		Messages:  messages,
+	// Retry a transient START failure (429/5xx/net) with backoff before draining
+	// (#124, ADR-0044); a non-retryable error fails fast and a barge cutting ctx
+	// aborts at once, bounded by the per-turn deadline. Only the start is retried —
+	// the mid-stream truncation guard below is never re-driven (re-speak risk).
+	stream, err := retry.Do(ctx, e.retry, func(ctx context.Context) (<-chan llm.StreamEvent, error) {
+		return e.provider.Complete(ctx, llm.Request{
+			Model:     e.model,
+			MaxTokens: e.maxTokens,
+			Messages:  messages,
+		})
 	})
 	if err != nil {
 		return "", err

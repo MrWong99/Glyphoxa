@@ -5,14 +5,123 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
 )
+
+// flakySynth returns errsBeforeOK failures (each the pinned err) then a
+// completed (closed, empty) audio channel, counting every call so a retry test
+// can prove the loop re-drove Synthesize exactly as expected.
+type flakySynth struct {
+	err          error
+	errsBeforeOK int
+	calls        int
+}
+
+func (s *flakySynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	s.calls++
+	if s.calls <= s.errsBeforeOK {
+		return nil, s.err
+	}
+	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch, nil
+}
+
+func (*flakySynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+func synth503() error {
+	return &providererr.HTTPError{Op: "elevenlabs.Synthesize", StatusCode: 503, Status: "503 Service Unavailable", Body: "down"}
+}
+
+// TestTTS_Dispatch_RetriesTransientThenSucceeds pins the TTS AC: a synthesizer
+// that returns one 503 then succeeds delivers the sentence, publishes exactly ONE
+// TTSInvoked (per Dispatch, never per attempt — ADR-0044), and records the final
+// outcome only: one tts_total span and one provider_call(ok).
+func TestTTS_Dispatch_RetriesTransientThenSucceeds(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	var invoked int
+	voiceevent.On(h.Bus, func(voiceevent.TTSInvoked) { invoked++ })
+
+	synth := &flakySynth{err: synth503(), errsBeforeOK: 1}
+	stage := orchestrator.NewTTS(h.Bus, synth,
+		orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs),
+		orchestrator.WithTTSRetry(instantRetry()))
+
+	if err := stage.Dispatch(context.Background(), "Aye.", voicetest.LiveElevenLabsVoice()); err != nil {
+		t.Fatalf("Dispatch after one transient 503: %v", err)
+	}
+	if synth.calls != 2 {
+		t.Errorf("synth calls = %d, want 2 (one 503 retried once)", synth.calls)
+	}
+	if invoked != 1 {
+		t.Errorf("TTSInvoked published %d times, want exactly 1 (one per Dispatch, never per attempt)", invoked)
+	}
+
+	_, ttsTotals, _, calls, errs := spy.snapshot()
+	if len(ttsTotals) != 1 {
+		t.Errorf("tts_total recorded %d spans, want 1 (final outcome only)", len(ttsTotals))
+	}
+	want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeOK}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v, want none (the retry recovered)", errs)
+	}
+}
+
+// TestTTS_Dispatch_CancelMidBackoffIsCanceled pins the barge contract on the TTS
+// stage: a ctx cancelled while a retry backoff is sleeping aborts promptly with
+// the ctx error, and the final outcome is canceled — a barge is not a vendor
+// fault, so provider_errors does not move (#239 rule, ADR-0027).
+func TestTTS_Dispatch_CancelMidBackoffIsCanceled(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	synth := &flakySynth{err: synth503(), errsBeforeOK: 99} // always transient-fails
+	p := retry.Policy{
+		Rand: func() float64 { return 1 },
+		Sleep: func(sctx context.Context, _ time.Duration) error {
+			cancel() // the barge lands during the backoff
+			<-sctx.Done()
+			return sctx.Err()
+		},
+	}
+	stage := orchestrator.NewTTS(h.Bus, synth,
+		orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs),
+		orchestrator.WithTTSRetry(p))
+
+	err := stage.Dispatch(ctx, "Aye.", voicetest.LiveElevenLabsVoice())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Dispatch err = %v, want context.Canceled (barge mid-backoff)", err)
+	}
+	if synth.calls != 1 {
+		t.Errorf("synth calls = %d, want 1 (the cancel aborted before the retry)", synth.calls)
+	}
+
+	_, ttsTotals, _, calls, errs := spy.snapshot()
+	if len(ttsTotals) != 0 {
+		t.Errorf("tts_total = %v, want none (no successful synthesis)", ttsTotals)
+	}
+	want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeCanceled}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v on a barge, want none (a cancel is not a fault)", errs)
+	}
+}
 
 // closedChanSynth is a [tts.Synthesizer] that accepts any sentence and returns
 // an already-closed audio channel, so Dispatch's drain returns immediately. It

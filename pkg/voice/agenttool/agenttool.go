@@ -28,6 +28,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 )
 
 // roundCounterKey is the context key under which [Engine.Generate] stores a
@@ -73,6 +74,14 @@ type providerAdapter struct {
 
 	rec      observe.StageRecorder
 	provName observe.Provider
+
+	// retry bounds transient-failure retries around the LLM START call (#124,
+	// ADR-0044): a single 429/5xx or net.Error is retried with backoff before the
+	// stream is drained, a non-retryable error fails fast, and a barge cutting ctx
+	// aborts at once — bounded by the Replier's per-turn deadline. ONLY the start is
+	// retried; a mid-stream failure is never retried (deltas may already be spoken).
+	// Zero value is a valid retries-on policy; [WithRetry] threads the shared one.
+	retry retry.Policy
 }
 
 // Generate implements [tool.Provider]. It issues one streaming completion for
@@ -108,11 +117,19 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 	round := nextRound(ctx)
 	start := time.Now()
 
-	stream, err := a.provider.Complete(ctx, llm.Request{
-		Model:     a.model,
-		MaxTokens: a.maxTokens,
-		Messages:  toLLMMessages(messages),
-		Tools:     toLLMToolDefs(tools),
+	// Retry a transient START failure (429/5xx/net) with backoff before draining
+	// any deltas (#124, ADR-0044); a non-retryable error fails fast and a barge
+	// cutting ctx aborts at once, bounded by the per-turn deadline. Only the start
+	// is retried — a mid-stream failure below is never re-driven (re-speak risk).
+	// Metrics below fire on the final outcome only (#125), so a recovered retry
+	// records one round span, not one per attempt.
+	stream, err := retry.Do(ctx, a.retry, func(ctx context.Context) (<-chan llm.StreamEvent, error) {
+		return a.provider.Complete(ctx, llm.Request{
+			Model:     a.model,
+			MaxTokens: a.maxTokens,
+			Messages:  toLLMMessages(messages),
+			Tools:     toLLMToolDefs(tools),
+		})
 	})
 	if err != nil {
 		// A start failure has no round span (no completion happened); attribute it to
@@ -229,6 +246,7 @@ type engineConfig struct {
 	rec      observe.StageRecorder
 	provName observe.Provider
 	language string
+	retry    retry.Policy
 }
 
 // WithMetrics injects the A3 per-round instrumentation: rec receives one
@@ -245,6 +263,16 @@ func WithMetrics(rec observe.StageRecorder, provName observe.Provider) EngineOpt
 		}
 		c.provName = provName
 	}
+}
+
+// WithRetry sets the [retry.Policy] wrapping the LLM start call inside the loop
+// (#124): a transient 429/5xx or net.Error start-error is retried with backoff,
+// a non-retryable error fails fast, and a barge cutting ctx aborts at once. Only
+// the start is retried — never a mid-stream delta failure. Its injected Sleep/Rand
+// keep cassette runs deterministic (ADR-0021). Without this option the zero-value
+// policy applies (retries on with defaults).
+func WithRetry(p retry.Policy) EngineOption {
+	return func(c *engineConfig) { c.retry = p }
 }
 
 // WithLanguage selects the dice gate's keyword set by Campaign Language (#226):
@@ -275,6 +303,7 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 		maxTokens: maxTokens,
 		rec:       cfg.rec,
 		provName:  cfg.provName,
+		retry:     cfg.retry,
 	}
 	newLoop := func(g *tool.GrantSet) *tool.Loop {
 		l := tool.NewLoop(adapter, g)

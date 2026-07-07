@@ -11,6 +11,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -70,6 +72,78 @@ func (f *fakeProvider) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.requests)
+}
+
+// flakyStartProvider start-errors its first errsBeforeOK Complete calls (each the
+// pinned err) then streams reply, counting calls so a retry test can prove the
+// default engine re-drove the LLM start (#124).
+type flakyStartProvider struct {
+	mu           sync.Mutex
+	err          error
+	errsBeforeOK int
+	reply        string
+	calls        int
+}
+
+func (f *flakyStartProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	f.mu.Unlock()
+	if n <= f.errsBeforeOK {
+		return nil, f.err
+	}
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		defer close(ch)
+		for _, w := range strings.Fields(f.reply) {
+			ch <- llm.StreamEvent{Type: llm.EventText, Text: w + " "}
+		}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}()
+	return ch, nil
+}
+
+func (f *flakyStartProvider) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// TestReply_DefaultEngine_RetriesTransientStartError pins that the default
+// (no-tool) engine retries a transient LLM start-error via [Config.Retry]: one
+// 503 then success produces the reply and calls the provider twice. The injected
+// Sleep keeps the test off the wall clock (ADR-0021).
+func TestReply_DefaultEngine_RetriesTransientStartError(t *testing.T) {
+	prov := &flakyStartProvider{
+		err:          &providererr.HTTPError{Op: "anthropic.Complete", StatusCode: 503, Status: "503 Service Unavailable", Body: "down"},
+		errsBeforeOK: 1,
+		reply:        "Aye, traveler.",
+	}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+		Retry: retry.Policy{
+			Sleep: func(context.Context, time.Duration) error { return nil },
+			Rand:  func() float64 { return 0 },
+		},
+	})
+
+	got := r.Reply()(t.Context(), routed("bart", "Hail."))
+	if len(got) == 0 {
+		t.Fatal("no reply produced after one transient 503")
+	}
+	var b strings.Builder
+	for _, rep := range got {
+		b.WriteString(rep.Sentence)
+	}
+	if !strings.Contains(b.String(), "traveler") {
+		t.Errorf("reply = %q, want the answer after the retry", b.String())
+	}
+	if prov.callCount() != 2 {
+		t.Errorf("provider Complete calls = %d, want 2 (one 503 retried once)", prov.callCount())
+	}
 }
 
 // sentinelMarkup is the audio-markup instruction the stub Synthesizer returns,

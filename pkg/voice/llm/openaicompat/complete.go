@@ -3,7 +3,9 @@ package openaicompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -11,6 +13,7 @@ import (
 	"github.com/openai/openai-go/v3/packages/ssestream"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 )
 
 // maxStreamBytes caps the raw bytes of one completion's response body. The cap
@@ -91,12 +94,34 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	// on the stream before any chunk is read; return it as the call-cannot-start
 	// error rather than a mid-stream EventError.
 	if err := stream.Err(); err != nil {
-		return nil, fmt.Errorf("%s.Complete: %w", c.name, err)
+		return nil, c.startError(err)
 	}
 
 	ch := make(chan llm.StreamEvent)
 	go c.streamEvents(ctx, stream, ch)
 	return ch, nil
+}
+
+// startError converts a stream-start failure into the call-cannot-start error.
+// A vendor HTTP status error — the SDK's *openai.Error, which carries the status
+// code — becomes a typed [*providererr.HTTPError] so the retry helper can
+// classify it (a 429/5xx is retryable) via errors.As, exactly like the
+// hand-rolled adapters (#124, ADR-0044). The Op/status/body preserve the
+// operation name, HTTP status, and the SDK's full message (which carries the
+// response body) so the surface stays diagnosable. Any non-HTTP startup failure
+// (transport, empty request) keeps the plain prose wrap — it is not retryable and
+// needs no status.
+func (c *Client) startError(err error) error {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode != 0 {
+		return &providererr.HTTPError{
+			Op:         c.name + ".Complete",
+			StatusCode: apiErr.StatusCode,
+			Status:     http.StatusText(apiErr.StatusCode),
+			Body:       err.Error(),
+		}
+	}
+	return fmt.Errorf("%s.Complete: %w", c.name, err)
 }
 
 // missingKeyHint renders the actionable tail of the missing-key error, naming the

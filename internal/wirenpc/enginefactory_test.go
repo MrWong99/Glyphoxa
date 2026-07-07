@@ -8,6 +8,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 )
 
 // modelCapturingProvider is a keyless streaming [llm.Provider] that records the
@@ -46,7 +47,7 @@ func (p *modelCapturingProvider) lastModel(t *testing.T) string {
 // the request it carried.
 func generateOnce(t *testing.T, spec npcSpec, prov llm.Provider) {
 	t.Helper()
-	factory := engineFactory(prov, tool.NewRegistry(), "en", observe.Discard{})
+	factory := engineFactory(prov, tool.NewRegistry(), "en", observe.Discard{}, retry.Policy{})
 	eng := factory(spec)
 	if _, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleSystem, Text: "You are Bart."},
