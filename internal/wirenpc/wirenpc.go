@@ -35,6 +35,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -855,16 +856,24 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	vadStage := orchestrator.NewVAD(bus, vadSession,
 		orchestrator.WithVADMetrics(stageMetrics, vadMinSilenceFrames*vadFrameMs*time.Millisecond))
 
+	// Bounded transient-error retry (#124, ADR-0044): one shared policy threaded
+	// into all three provider stages (STT, TTS, LLM). Log-only per-attempt detail;
+	// the injected time is the production timer (a live run, not a cassette), and the
+	// per-stage deadlines stay the hard bound the loop never extends.
+	retryPolicy := retry.Policy{Log: log}
+
 	// One recognizer instance backs both the batch stage and — when streaming is
 	// enabled and the adapter supports it — the stream manager (the ElevenLabs
 	// Client is both a batch stt.Recognizer and a stt.StreamingRecognizer, ADR-0042).
 	var recognizer stt.Recognizer = newSTT(keys.stt)
 	sttStage := orchestrator.NewSTT(bus, recognizer,
-		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
+		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs),
+		orchestrator.WithSTTRetry(retryPolicy))
 	// tts_total + tts-stage provider health (#125): ElevenLabs is the wired TTS
 	// provider (ADR-0039), so the spans are labelled elevenlabs.
 	ttsStage := orchestrator.NewTTS(bus, synth,
-		orchestrator.WithTTSMetrics(stageMetrics, observe.ProviderElevenLabs))
+		orchestrator.WithTTSMetrics(stageMetrics, observe.ProviderElevenLabs),
+		orchestrator.WithTTSRetry(retryPolicy))
 	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
 
 	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each
@@ -886,7 +895,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// each opening their own.
 	provider := newLLM(keys.llm)
 	reg := tool.BuiltinRegistry()
-	engineFor := engineFactory(provider, reg, language, stageMetrics)
+	engineFor := engineFactory(provider, reg, language, stageMetrics, retryPolicy)
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over a per-NPC engine carrying that NPC's
@@ -944,7 +953,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 // NO defaulting duplicated here (the AC "empty → provider default" is proven at
 // the adapter). language selects the dice gate's keyword set (#226); stageMetrics
 // labels the per-round LLM spans groq (A3).
-func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder) func(npcSpec) agent.Engine {
+func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder, retryPolicy retry.Policy) func(npcSpec) agent.Engine {
 	return func(spec npcSpec) agent.Engine {
 		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.model, 0, 0,
 			// Groq is the wired provider (see buildConversation's doc), so the
@@ -954,7 +963,11 @@ func engineFactory(provider llm.Provider, reg *tool.Registry, language string, s
 			// The dice gate selects its keyword set by Campaign Language (#226), so a
 			// German campaign arms the dice Tool for German roll requests instead of
 			// gating it out and forcing the model to improvise the roll.
-			agenttool.WithLanguage(language))
+			agenttool.WithLanguage(language),
+			// Bounded transient-error retry around the LLM start call (#124, ADR-0044):
+			// the same shared policy the STT/TTS stages carry, so one 429/5xx rides
+			// through inside the per-turn deadline.
+			agenttool.WithRetry(retryPolicy))
 	}
 }
 

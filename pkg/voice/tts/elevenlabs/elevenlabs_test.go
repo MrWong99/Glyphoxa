@@ -3,6 +3,7 @@ package elevenlabs_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
@@ -248,6 +251,38 @@ func TestSynthesize_NonOKResponse_ReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401") {
 		t.Errorf("error %q does not mention HTTP 401", err)
+	}
+}
+
+// TestSynthesize_429_TypedHTTPError pins that a non-2xx surfaces as an
+// errors.As-able [*providererr.HTTPError] the retry helper classifies (a 429 is
+// retryable), with the error text byte-identical to the adapter's pre-typed
+// readErrorResponse literal (#124, ADR-0044).
+func TestSynthesize_429_TypedHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, "slow down")
+	}))
+	defer srv.Close()
+
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL))
+	_, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{
+		Sentence: "hi",
+		Voice:    tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"},
+	})
+	var he *providererr.HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("error %v is not a *providererr.HTTPError", err)
+	}
+	if he.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", he.StatusCode)
+	}
+	if !retry.Retryable(err) {
+		t.Error("a 429 must be retryable")
+	}
+	const want = "elevenlabs.Synthesize: HTTP 429 429 Too Many Requests: slow down"
+	if err.Error() != want {
+		t.Errorf("error text = %q, want %q (byte-identical)", err.Error(), want)
 	}
 }
 

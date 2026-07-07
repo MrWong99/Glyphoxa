@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -31,6 +32,14 @@ type TTS struct {
 	rec      observe.StageRecorder
 	provider observe.Provider
 
+	// retry bounds transient-failure retries around the Synthesize START call
+	// (#124, ADR-0044): a single 429/5xx or net.Error is retried with backoff,
+	// a non-retryable error fails fast, and a barge cutting ctx aborts at once.
+	// ONLY the start is retried — a mid-stream failure (a chunk-drain error) is
+	// never retried because audio may already have been dispatched (re-speak risk).
+	// Zero value is a valid retries-on policy; [WithTTSRetry] threads the shared one.
+	retry retry.Policy
+
 	mu        sync.Mutex
 	nextIndex int
 }
@@ -51,6 +60,15 @@ func WithTTSMetrics(rec observe.StageRecorder, provider observe.Provider) TTSOpt
 		}
 		s.provider = provider
 	}
+}
+
+// WithTTSRetry sets the [retry.Policy] wrapping the Synthesize start call (#124):
+// a transient 429/5xx or net.Error is retried with backoff before first audio, a
+// non-retryable error fails fast, and a barge cutting ctx aborts at once. Only
+// the start is retried — never a mid-stream chunk failure. Its injected Sleep/Rand
+// keep cassette runs deterministic (ADR-0021). Unset leaves the zero-value policy.
+func WithTTSRetry(p retry.Policy) TTSOption {
+	return func(s *TTS) { s.retry = p }
 }
 
 // NewTTS wires synthesizer into bus. Both must be non-nil; passing nil panics.
@@ -117,9 +135,16 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	})
 
 	start := time.Now()
-	ch, err := s.synthesizer.Synthesize(ctx, tts.SynthesizeRequest{
-		Sentence: sentence,
-		Voice:    voice,
+	// Retry a transient START failure (429/5xx/net) with backoff before first audio
+	// (#124, ADR-0044); a non-retryable error fails fast and a barge cutting ctx
+	// aborts at once. Wrapping ONLY the start keeps the one-TTSInvoked-per-Dispatch
+	// contract (published above, never per attempt) and never re-speaks a
+	// mid-stream failure. Metrics below fire on the final outcome only (#125).
+	ch, err := retry.Do(ctx, s.retry, func(ctx context.Context) (<-chan tts.AudioChunk, error) {
+		return s.synthesizer.Synthesize(ctx, tts.SynthesizeRequest{
+			Sentence: sentence,
+			Voice:    voice,
+		})
 	})
 	if err != nil {
 		// A start error at the TTS stage (#125): count the call with its outcome and

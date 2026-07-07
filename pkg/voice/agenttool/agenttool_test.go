@@ -15,6 +15,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -298,6 +300,115 @@ func TestEngine_LLMRoundSpans_IndexResetsPerTurn(t *testing.T) {
 		if r.roundIndex != 0 {
 			t.Errorf("turn %d round_index = %d, want 0 (per-turn reset)", i, r.roundIndex)
 		}
+	}
+}
+
+// flakyStartProvider start-errors its first errsBeforeOK Complete calls (each the
+// pinned err) then streams the answer, counting calls so a retry test can prove
+// the loop re-drove the LLM start exactly as expected. Only the START is exercised
+// — the retry contract is start-errors-only (#124, ADR-0044).
+type flakyStartProvider struct {
+	err          error
+	errsBeforeOK int
+	answer       string
+	calls        int
+}
+
+func (p *flakyStartProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	p.calls++
+	if p.calls <= p.errsBeforeOK {
+		return nil, p.err
+	}
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		defer close(ch)
+		for _, w := range strings.Fields(p.answer) {
+			ch <- llm.StreamEvent{Type: llm.EventText, Text: w + " "}
+		}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}()
+	return ch, nil
+}
+
+// instantAgentRetry is the deterministic retry policy for the bridge tests: the
+// backoff is a no-op sleep with fixed jitter, so a retry never sleeps wall-clock
+// (ADR-0021). Defaults (3 attempts) otherwise stand.
+func instantAgentRetry() retry.Policy {
+	return retry.Policy{
+		Sleep: func(context.Context, time.Duration) error { return nil },
+		Rand:  func() float64 { return 0 },
+	}
+}
+
+// TestEngine_Generate_RetriesTransientStartError pins the LLM AC: a Complete that
+// start-errors one 429 then succeeds returns the full answer, and metrics record
+// the FINAL outcome only — one LLMRound span and one provider_call(ok), never one
+// per attempt (ADR-0044). No provider_error, because the retry recovered.
+func TestEngine_Generate_RetriesTransientStartError(t *testing.T) {
+	prov := &flakyStartProvider{
+		err:          &providererr.HTTPError{Op: "groq.Complete", StatusCode: 429, Status: "Too Many Requests", Body: "slow"},
+		errsBeforeOK: 1,
+		answer:       "Aye, traveler.",
+	}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hi."}})
+	if err != nil {
+		t.Fatalf("Generate after one transient 429: %v", err)
+	}
+	if strings.TrimSpace(got) != "Aye, traveler." {
+		t.Errorf("final text = %q, want the answer after the retry", got)
+	}
+	if prov.calls != 2 {
+		t.Errorf("provider Complete calls = %d, want 2 (one 429 retried once)", prov.calls)
+	}
+
+	rounds, callsOK, callsErr := rec.snapshot()
+	if len(rounds) != 1 {
+		t.Errorf("LLMRound spans = %d, want 1 (final round only, not one per attempt)", len(rounds))
+	}
+	if callsOK != 1 || callsErr != 0 {
+		t.Errorf("provider calls ok=%d err=%d, want 1/0 (final outcome only)", callsOK, callsErr)
+	}
+	if _, provErrs := rec.providerCalls(); provErrs != 0 {
+		t.Errorf("provider_errors = %d, want 0 (the retry recovered)", provErrs)
+	}
+}
+
+// TestEngine_Generate_NonRetryableStartErrorFailsFast pins that a 400 (bad
+// request / auth) start-error fails on the first attempt with no retry and no
+// sleep, and is recorded as a single provider fault.
+func TestEngine_Generate_NonRetryableStartErrorFailsFast(t *testing.T) {
+	prov := &flakyStartProvider{
+		err:          &providererr.HTTPError{Op: "groq.Complete", StatusCode: 400, Status: "Bad Request", Body: "nope"},
+		errsBeforeOK: 99,
+	}
+	rec := &recordingStage{}
+	p := instantAgentRetry()
+	p.Sleep = func(context.Context, time.Duration) error {
+		t.Error("a non-retryable 400 must not sleep")
+		return nil
+	}
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(p))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hi."}}); err == nil {
+		t.Fatal("Generate returned nil on a 400; want the bad-request error")
+	}
+	if prov.calls != 1 {
+		t.Errorf("provider Complete calls = %d, want 1 (a 400 is not retried)", prov.calls)
+	}
+
+	_, callsOK, callsErr := rec.snapshot()
+	if callsOK != 0 || callsErr != 1 {
+		t.Errorf("provider calls ok=%d err=%d, want 0/1", callsOK, callsErr)
+	}
+	if _, provErrs := rec.providerCalls(); provErrs != 1 {
+		t.Errorf("provider_errors = %d, want 1 (a 400 start error is a fault)", provErrs)
 	}
 }
 

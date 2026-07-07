@@ -12,6 +12,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
@@ -19,6 +21,152 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
 )
+
+// flakyRecognizer returns errsBeforeOK failures (each the pinned err) then the
+// pinned transcript, counting every call so a test can prove the retry loop
+// re-drove the recognizer exactly as many times as expected.
+type flakyRecognizer struct {
+	err          error
+	errsBeforeOK int
+	transcript   stt.Transcript
+	calls        int
+}
+
+func (r *flakyRecognizer) Transcribe(context.Context, []audio.Frame) (stt.Transcript, error) {
+	r.calls++
+	if r.calls <= r.errsBeforeOK {
+		return stt.Transcript{}, r.err
+	}
+	return r.transcript, nil
+}
+
+// countingHungRecognizer is a [hangingRecognizer] that counts its calls, so a
+// budget test can prove the total-budget timeout wraps the WHOLE retry loop —
+// the hung call is entered once, never once per attempt (the #91 wedge guard).
+type countingHungRecognizer struct{ calls int }
+
+func (r *countingHungRecognizer) Transcribe(ctx context.Context, _ []audio.Frame) (stt.Transcript, error) {
+	r.calls++
+	<-ctx.Done()
+	return stt.Transcript{}, ctx.Err()
+}
+
+// instantRetry is a [retry.Policy] with the wall-clock backoff replaced by a
+// no-op sleep and a fixed jitter, so a retry test is deterministic and never
+// sleeps (ADR-0021). Defaults (3 attempts) otherwise stand.
+func instantRetry() retry.Policy {
+	return retry.Policy{
+		Sleep: func(context.Context, time.Duration) error { return nil },
+		Rand:  func() float64 { return 0 },
+	}
+}
+
+// http429 / http401 build the typed provider errors the retry helper classifies.
+func http429() error {
+	return &providererr.HTTPError{Op: "elevenlabs.Transcribe", StatusCode: 429, Status: "429 Too Many Requests", Body: "slow down"}
+}
+func http401() error {
+	return &providererr.HTTPError{Op: "elevenlabs.Transcribe", StatusCode: 401, Status: "401 Unauthorized", Body: "bad key"}
+}
+
+// TestSTT_Transcribe_RetriesTransientThenSucceeds pins the headline AC: a
+// recognizer that returns one 429 then succeeds completes the turn normally
+// (one STTFinal), the worker recovers, and metrics record the FINAL outcome only
+// — exactly one stt_request span and one provider_call(ok), never one per
+// attempt (ADR-0044 §metrics).
+func TestSTT_Transcribe_RetriesTransientThenSucceeds(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	var finals int
+	voiceevent.On(h.Bus, func(voiceevent.STTFinal) { finals++ })
+
+	rec := &flakyRecognizer{err: http429(), errsBeforeOK: 1, transcript: stt.Transcript{Text: "roll a d20"}}
+	stage := orchestrator.NewSTT(h.Bus, rec,
+		orchestrator.WithSTTMetrics(spy, observe.ProviderElevenLabs),
+		orchestrator.WithSTTRetry(instantRetry()))
+
+	if err := stage.Transcribe(context.Background(), []audio.Frame{}); err != nil {
+		t.Fatalf("Transcribe after one transient 429: %v", err)
+	}
+	if rec.calls != 2 {
+		t.Errorf("recognizer calls = %d, want 2 (one 429 retried once)", rec.calls)
+	}
+	if finals != 1 {
+		t.Errorf("STTFinal published %d times, want exactly 1", finals)
+	}
+
+	sttReqs, _, _, calls, errs := spy.snapshot()
+	if len(sttReqs) != 1 {
+		t.Errorf("stt_request recorded %d spans, want 1 (final outcome only)", len(sttReqs))
+	}
+	want := providerCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeOK}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v, want none (the retry recovered)", errs)
+	}
+}
+
+// TestSTT_Transcribe_NonRetryableFailsFast pins that a 401 (invalid key) fails
+// on the first attempt with no retry and no sleep — under-retry is the safe
+// default for a non-transient auth failure.
+func TestSTT_Transcribe_NonRetryableFailsFast(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	p := instantRetry()
+	p.Sleep = func(context.Context, time.Duration) error {
+		t.Error("a non-retryable 401 must not sleep")
+		return nil
+	}
+	rec := &flakyRecognizer{err: http401(), errsBeforeOK: 99}
+	stage := orchestrator.NewSTT(h.Bus, rec,
+		orchestrator.WithSTTMetrics(spy, observe.ProviderElevenLabs),
+		orchestrator.WithSTTRetry(p))
+
+	err := stage.Transcribe(context.Background(), []audio.Frame{})
+	if err == nil {
+		t.Fatal("Transcribe returned nil on a 401; want the auth error")
+	}
+	if rec.calls != 1 {
+		t.Errorf("recognizer calls = %d, want 1 (a 401 is not retried)", rec.calls)
+	}
+	_, _, _, calls, errs := spy.snapshot()
+	want := providerCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeError}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 1 {
+		t.Errorf("provider_errors = %+v, want exactly one fault", errs)
+	}
+}
+
+// TestSTT_Transcribe_HungRecognizerBudgetNotMultiplied is THE budget test: the
+// per-request timeout is the TOTAL budget wrapping the whole retry loop, not a
+// per-attempt bound. A hung recognizer under a 50ms timeout is entered exactly
+// once and the whole call returns in ~one timeout, never N×timeout — the fix
+// that stops the retry policy from recreating the #91 serial-worker wedge.
+func TestSTT_Transcribe_HungRecognizerBudgetNotMultiplied(t *testing.T) {
+	h := voicetest.New(t)
+	rec := &countingHungRecognizer{}
+	stage := orchestrator.NewSTT(h.Bus, rec,
+		orchestrator.WithSTTTimeout(50*time.Millisecond),
+		orchestrator.WithSTTRetry(instantRetry()))
+
+	start := time.Now()
+	err := stage.Transcribe(context.Background(), []audio.Frame{})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context.DeadlineExceeded (the total budget firing)", err)
+	}
+	if rec.calls != 1 {
+		t.Errorf("recognizer called %d times, want 1 (total budget wraps the loop, not per-attempt)", rec.calls)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Transcribe took %v; a per-attempt budget would be ~N×50ms — the total budget was multiplied", elapsed)
+	}
+}
 
 // stubRecognizer is a [stt.Recognizer] that returns a pinned [stt.Transcript]
 // regardless of input. Used to exercise the orchestrator stage's republish

@@ -3,6 +3,7 @@ package anthropic_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/anthropic"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 )
 
 // Compile-time assertion: [anthropic.Client] satisfies [llm.Provider], the only
@@ -379,6 +382,37 @@ func TestComplete_Non2xx_WrapsOpAndStatus(t *testing.T) {
 		if !strings.Contains(err.Error(), must) {
 			t.Errorf("error %q missing required substring %q", err, must)
 		}
+	}
+}
+
+// TestComplete_429_TypedHTTPError pins that a non-2xx start response surfaces as
+// an errors.As-able [*providererr.HTTPError] the retry helper classifies (a 429
+// is retryable), with the error text byte-identical to the adapter's pre-typed
+// readErrorResponse literal (#124, ADR-0044).
+func TestComplete_429_TypedHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("slow down"))
+	}))
+	defer srv.Close()
+
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	_, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	var he *providererr.HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("error %v is not a *providererr.HTTPError", err)
+	}
+	if he.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", he.StatusCode)
+	}
+	if !retry.Retryable(err) {
+		t.Error("a 429 must be retryable")
+	}
+	const want = "anthropic.Complete: HTTP 429 429 Too Many Requests: slow down"
+	if err.Error() != want {
+		t.Errorf("error text = %q, want %q (byte-identical)", err.Error(), want)
 	}
 }
 

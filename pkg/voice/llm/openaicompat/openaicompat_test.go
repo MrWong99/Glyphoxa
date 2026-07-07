@@ -3,6 +3,7 @@ package openaicompat_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/openaicompat"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 )
 
 // Compile-time assertion: [openaicompat.Client] satisfies [llm.Provider], the
@@ -514,6 +517,39 @@ func TestComplete_Non2xx_WrapsProviderAndStatus(t *testing.T) {
 		t.Fatal("Complete with 401 returned nil error")
 	}
 	for _, must := range []string{"test.Complete", "401", "invalid_api_key"} {
+		if !strings.Contains(err.Error(), must) {
+			t.Errorf("error %q missing required substring %q", err, must)
+		}
+	}
+}
+
+// TestComplete_429_TypedHTTPError pins that the adapter converts the SDK's
+// *openai.Error into an errors.As-able [*providererr.HTTPError] carrying the
+// status code, so the retry helper classifies a 429 as retryable — the plumbing
+// #124 relies on for the Groq LLM start-call (ADR-0044). The message still names
+// the operation, status, and body for diagnosability.
+func TestComplete_429_TypedHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limit","code":"rate_limit_exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL)
+	_, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	var he *providererr.HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("error %v is not a *providererr.HTTPError", err)
+	}
+	if he.StatusCode != 429 {
+		t.Errorf("StatusCode = %d, want 429", he.StatusCode)
+	}
+	if !retry.Retryable(err) {
+		t.Error("a 429 must be retryable")
+	}
+	for _, must := range []string{"test.Complete", "429", "rate_limit_exceeded"} {
 		if !strings.Contains(err.Error(), must) {
 			t.Errorf("error %q missing required substring %q", err, must)
 		}
