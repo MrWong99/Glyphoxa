@@ -119,6 +119,14 @@ type muteFrame struct {
 	Muted   bool   `json:"muted"`
 }
 
+// spendcapFrame is the payload of a "spendcap" SSE frame (#130): the session's
+// estimated spend crossed a cap, so the Session screen renders the spend-cap-reached
+// state without a reload. Deliberately minimal (which cap) — the authoritative
+// current state + estimated spend is GetSession (spend_cap_state / estimated_spend_usd).
+type spendcapFrame struct {
+	Level string `json:"level"`
+}
+
 // connectionFrame is the payload of a "connection" SSE frame (#123): the Voice
 // Session's gateway connection state (connecting/connected/failed) and, on a fatal
 // failure, the readable reason. The Session screen flips its badge from this live;
@@ -335,6 +343,13 @@ func (r *Relay) project(e voiceevent.Event) {
 		// ring for Last-Event-ID replay; there is NO transcript-line change and NO
 		// snapshot change — a mid-session reload reads the true state from GetSession.
 		r.emit(Frame{Event: "mute", Data: mustJSON(muteFrame{AgentID: ev.AgentID, Muted: ev.Muted})})
+	case voiceevent.SpendCapReached:
+		// The session's estimated spend crossed a cap (#130): forward a "spendcap"
+		// frame so the Session screen shows the spend-cap-reached state live. It rides
+		// the ring for Last-Event-ID replay; there is NO transcript-line change — a
+		// mid-session reload reads the authoritative state + estimate from GetSession
+		// (spend_cap_state / estimated_spend_usd).
+		r.emit(Frame{Event: "spendcap", Data: mustJSON(spendcapFrame{Level: string(ev.Level)})})
 	case voiceevent.ConnectionStateChanged:
 		// The gateway connection state moved (#123): forward a "connection" frame so
 		// the Session screen flips connecting→connected, or to failed with its reason,
