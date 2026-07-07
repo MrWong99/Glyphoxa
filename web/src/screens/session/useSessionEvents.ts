@@ -85,7 +85,11 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     queryFn: async () => {
       const res = await fetch(`/api/v1/sessions/${sessionId}`, { credentials: "same-origin" });
       if (!res.ok) throw new Error(`session snapshot failed: ${res.status}`);
-      return (await res.json()) as Transcript;
+      // Normalize lines defensively: a zero-line snapshot must never surface as
+      // null or the screen's .length reads crash (#248) — the server contract is
+      // "lines":[], but the screen should survive an older/other server too.
+      const t = (await res.json()) as Transcript;
+      return { ...t, lines: t.lines ?? [] };
     },
   });
 

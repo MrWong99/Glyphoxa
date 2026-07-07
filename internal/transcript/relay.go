@@ -496,11 +496,18 @@ func (r *Relay) View(id string) View {
 		return View{Lines: []Line{}, Status: "idle", Typing: Typing{}}
 	}
 	return View{
-		Lines:      append([]Line(nil), r.lines...),
+		Lines:      copyLines(r.lines),
 		Status:     "live",
 		Typing:     r.typing,
 		Connection: r.connection,
 	}
+}
+
+// copyLines snapshots the ring's lines as a NON-NIL slice: the wire contract for
+// View.Lines is a JSON array, never null — a zero-line live session must serve
+// "lines":[] or the screen's .length read crashes (#248).
+func copyLines(lines []Line) []Line {
+	return append(make([]Line, 0, len(lines)), lines...)
 }
 
 // snapshot returns the initial-state View for id: the in-memory live state when id
@@ -511,7 +518,7 @@ func (r *Relay) snapshot(ctx context.Context, id string) View {
 	r.mu.Lock()
 	live := r.currentSessionID() == id && id == r.activeID
 	if live {
-		v := View{Lines: append([]Line(nil), r.lines...), Status: "live", Typing: r.typing, Connection: r.connection}
+		v := View{Lines: copyLines(r.lines), Status: "live", Typing: r.typing, Connection: r.connection}
 		r.mu.Unlock()
 		return v
 	}
