@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -150,16 +151,25 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 	var text []byte
 	var done bool
 	var streamErr error
+	// usage/haveUsage stash the provider-reported token accounting from the additive
+	// EventUsage (#127, ADR-0045). It rides a distinct event, not EventDone, and may
+	// arrive before or after done — draining to close (as we do) captures it either
+	// way.
+	var usage llm.Usage
+	var haveUsage bool
 	for ev := range stream {
 		switch ev.Type {
 		case llm.EventText:
 			text = append(text, ev.Text...)
 			if onText != nil {
 				if err := onText(ev.Text); err != nil {
-					// Downstream cancel (barge-in): record the round we did and stop.
+					// Downstream cancel (barge-in): record the round we did and stop. A
+					// barge records the provider-reported usage IF it already arrived, never
+					// an estimate — a partial turn is not metered by guesswork (ADR-0045).
 					out.Text = string(text)
 					a.rec.LLMRound(a.provName, round, len(out.ToolCalls) > 0, time.Since(start))
 					a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
+					a.recordReportedUsage(haveUsage, usage)
 					return out, err
 				}
 			}
@@ -169,6 +179,8 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 				Name:  ev.ToolCall.Name,
 				Input: ev.ToolCall.Input,
 			})
+		case llm.EventUsage:
+			usage, haveUsage = ev.Usage, true
 		case llm.EventDone:
 			done = true
 		case llm.EventError:
@@ -176,9 +188,12 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 		}
 	}
 	if streamErr != nil {
+		// A mid-stream error records reported usage if it arrived, else nothing.
+		a.recordReportedUsage(haveUsage, usage)
 		return tool.AssistantMessage{}, streamErr
 	}
 	if !done {
+		a.recordReportedUsage(haveUsage, usage)
 		if err := ctx.Err(); err != nil {
 			return tool.AssistantMessage{}, err
 		}
@@ -189,7 +204,47 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 	hadToolCall := len(out.ToolCalls) > 0
 	a.rec.LLMRound(a.provName, round, hadToolCall, time.Since(start))
 	a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
+	// A completed round meters its tokens: the provider-reported counts, or a
+	// documented ceil(chars/4) estimate per direction when none was reported — never
+	// zero (AC, ADR-0045). An atomic counter add; it never blocks or fails the turn.
+	a.recordUsage(haveUsage, usage, messages, out.Text)
 	return out, nil
+}
+
+// recordReportedUsage records provider-reported token usage if it arrived, else
+// nothing — the error/barge rule (ADR-0045): a partial or failed turn is metered
+// only by what the provider actually reported, never by a fabricated estimate.
+func (a providerAdapter) recordReportedUsage(have bool, u llm.Usage) {
+	if have {
+		a.rec.LLMTokens(a.provName, a.model, u.InputTokens, u.OutputTokens)
+	}
+}
+
+// recordUsage meters a completed round: the provider-reported counts, or a
+// documented ceil(chars/4) estimate per direction over the sent conversation and
+// the received text when the provider reported none — never zero (AC, ADR-0045).
+// model rides only to the spend meter (ADR-0046); Prometheus drops it.
+func (a providerAdapter) recordUsage(have bool, u llm.Usage, sent []tool.Message, received string) {
+	if have {
+		a.rec.LLMTokens(a.provName, a.model, u.InputTokens, u.OutputTokens)
+		return
+	}
+	a.rec.LLMTokens(a.provName, a.model, estimateTokens(sentRunes(sent)), estimateTokens(utf8.RuneCountInString(received)))
+}
+
+// estimateTokens is the ceil(chars/4) per-direction token estimate (ADR-0045): the
+// classic ~4-characters-per-token heuristic, integer ceil for a non-negative count.
+func estimateTokens(runes int) int { return (runes + 3) / 4 }
+
+// sentRunes sums the prose runes across the sent conversation — the input side of
+// the estimate. It counts message text only (an approximation, as documented on the
+// estimate path); tool-call arguments and results are not separately weighed.
+func sentRunes(msgs []tool.Message) int {
+	total := 0
+	for _, m := range msgs {
+		total += utf8.RuneCountInString(m.Text)
+	}
+	return total
 }
 
 // Engine is the [agent.Engine] that drives the tool-use loop. Build with
