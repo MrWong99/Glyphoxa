@@ -26,6 +26,8 @@ type fakeProviderStore struct {
 	configs map[string]storage.ProviderConfig // key: component|provider
 	dep     *storage.DeploymentConfig
 	tick    int
+	caps    storage.SpendCaps // per-Tenant spend caps (#130)
+	capsSet bool
 }
 
 func newFakeProviderStore() *fakeProviderStore {
@@ -98,6 +100,19 @@ func (f *fakeProviderStore) SaveDiscordChannels(_ context.Context, tenantID uuid
 	f.dep.VoiceChannelID = voiceChannelID
 	f.dep.UpdatedAt = f.now()
 	return *f.dep, nil
+}
+
+func (f *fakeProviderStore) GetTenantSpendCaps(context.Context, uuid.UUID) (storage.SpendCaps, error) {
+	if !f.capsSet {
+		return storage.SpendCaps{}, nil
+	}
+	return f.caps, nil
+}
+
+func (f *fakeProviderStore) SetTenantSpendCaps(_ context.Context, _ uuid.UUID, caps storage.SpendCaps) error {
+	f.caps = caps
+	f.capsSet = true
+	return nil
 }
 
 func testCipher(t *testing.T) *crypto.Cipher {

@@ -587,6 +587,51 @@ service ProviderService {
   rpc ResolveGuildInvite(ResolveGuildInviteRequest) returns (ResolveGuildInviteResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // GetSpendCaps returns the operator's two per-Tenant spend caps (#130,
+  // ADR-0046): the soft and hard USD thresholds, each absent when unset. It is a
+  // read (NO_SIDE_EFFECTS), so the CSRF check is skipped.
+  rpc GetSpendCaps(GetSpendCapsRequest) returns (GetSpendCapsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // SetSpendCaps stores the operator's two per-Tenant spend caps (#130): each
+  // omitted field clears that cap. A negative value is rejected with
+  // InvalidArgument, and when both are set hard must be >= soft (else
+  // InvalidArgument). Caps snapshot at the NEXT Voice Session start — a mid-session
+  // edit never changes the running session. State-changing: auth + CSRF guard it.
+  rpc SetSpendCaps(SetSpendCapsRequest) returns (SetSpendCapsResponse);
+}
+
+// SpendCaps is the wire view of a Tenant's two spend caps (#130, ADR-0046). Each
+// field is absent (no presence) when that cap is unset; both figures are USD
+// ESTIMATES, never billed amounts.
+message SpendCaps {
+  // soft_usd refuses NEW Agent turns once estimated spend crosses it (in-flight
+  // turns finish, transcription continues). Absent when unset.
+  optional double soft_usd = 1;
+  // hard_usd ends the Voice Session cleanly once estimated spend crosses it. Absent
+  // when unset. When both are set, hard_usd >= soft_usd (enforced at SetSpendCaps).
+  optional double hard_usd = 2;
+}
+
+// GetSpendCapsRequest is the (empty) request; the tenant is resolved server-side.
+message GetSpendCapsRequest {}
+
+// GetSpendCapsResponse carries the operator's current caps.
+message GetSpendCapsResponse {
+  SpendCaps caps = 1;
+}
+
+// SetSpendCapsRequest carries the caps to store; an omitted field clears that cap.
+message SetSpendCapsRequest {
+  // soft_usd / hard_usd: present to set, absent to clear. Negative is rejected;
+  // both present requires hard_usd >= soft_usd.
+  optional double soft_usd = 1;
+  optional double hard_usd = 2;
+}
+
+// SetSpendCapsResponse echoes the stored caps after the save.
+message SetSpendCapsResponse {
+  SpendCaps caps = 1;
 }
 
 // ProviderCredential is the WRITE-ONLY view of a saved secret: never its value,
@@ -827,6 +872,15 @@ message GetSessionResponse {
   // Voice Session is active — the reload truth for a mid-session page reload
   // (AC5). Empty when idle (a new session starts all-unmuted).
   repeated string muted_agent_ids = 3;
+  // spend_cap_state is the live session's spend-cap state (#130, ADR-0046): "soft"
+  // once the soft cap is crossed (new turns refused), "hard" once the hard cap is
+  // crossed (the session is ending), "" otherwise. Set only while active; the
+  // reload truth for the Session screen's spend-cap-reached badge.
+  string spend_cap_state = 4;
+  // estimated_spend_usd is the live session's accumulated spend ESTIMATE in USD
+  // (#130) — an approximate figure the screen labels "estimated", never a billed
+  // amount. 0 when idle or no caps are configured.
+  double estimated_spend_usd = 5;
 }
 
 // SetAgentMuteRequest toggles one Agent's mute in the live Voice Session (#211).
