@@ -189,6 +189,15 @@ func runWithReconnect(ctx context.Context, log *slog.Logger, p reconnectPolicy, 
 		if ctx.Err() != nil {
 			return nil // shutdown requested — stop retrying, exit clean (fixes SIGTERM->exit1)
 		}
+		// A fatal, non-retryable gateway rejection (bad Bot token, disallowed
+		// intents, gateway reject) can never succeed on retry, so stop at once and
+		// surface the classification instead of backing off forever (#123). The
+		// session Manager reads this to record the persisted status as failed. A
+		// transient failure (or a clean nil return) falls through to the backoff.
+		if fe := classifyFatal(err); fe != nil {
+			log.Error("voice connection failed fatally; not retrying", "err", fe, "reason", fe.Reason)
+			return fe
+		}
 		if !connectedAt.IsZero() && now().Sub(connectedAt) >= p.healthyAfter {
 			delay = p.initial // served healthily — forgive past failures (issue #44)
 		}
@@ -496,10 +505,30 @@ func Run(ctx context.Context, cfg Config) error {
 	// Note: disgo runs its own bounded reconnect during OpenGateway, so this
 	// policy governs the inter-cycle gap and post-join drops (a session that joins
 	// then later disconnects), not the initial dial retries disgo already handles.
-	return runWithReconnect(ctx, log, defaultReconnectPolicy(),
+	runErr := runWithReconnect(ctx, log, defaultReconnectPolicy(),
 		func(ctx context.Context, connected func()) error {
 			return connectAndServe(ctx, cfg, guild, channel, log, connected)
 		})
+	// A non-nil return is a FATAL, terminal failure (a classified *FatalError):
+	// publish the terminal connection.state{failed} with its readable reason so the
+	// Session screen flips to failed without a reload (#123). nil is a clean
+	// ctx-cancel shutdown — no failed frame. Nil-guarded: the env-only/bench paths
+	// carry no shared bus and this is a no-op there.
+	if runErr != nil {
+		publishConnectionState(cfg.Bus, voiceevent.ConnectionFailed, runErr.Error())
+	}
+	return runErr
+}
+
+// publishConnectionState publishes a [voiceevent.ConnectionStateChanged] onto bus,
+// unless bus is nil (the env-only/bench paths carry no shared bus). It is the one
+// seam the connection-state transitions go through so the nil-guard lives in one
+// place (#123).
+func publishConnectionState(bus *voiceevent.Bus, state voiceevent.ConnectionState, detail string) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(voiceevent.ConnectionStateChanged{At: time.Now(), State: state, Detail: detail})
 }
 
 // connectAndServe runs ONE connect-and-serve cycle: build the Discord client,
@@ -571,6 +600,19 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	cycleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The orchestrator bus is created here (not deeper) so the connection-state
+	// transitions ride the SAME bus as the pipeline's events (#123). The web tier
+	// injects ONE process-wide bus (cfg.Bus, issue #73) so the SSE relay subscribes
+	// once and keeps observing events across reconnect cycles and sessions; the
+	// env-only voice/bench paths leave it nil and get a fresh per-cycle bus (today's
+	// behavior, unchanged). Hoisted above acquireClient so {connecting} is published
+	// first thing each cycle, BEFORE the (possibly fatal) Discord client is acquired.
+	bus := cfg.Bus
+	if bus == nil {
+		bus = voiceevent.NewBus()
+	}
+	publishConnectionState(bus, voiceevent.ConnectionConnecting, "")
+
 	// Discord client: either the standing shared client the presence owns
 	// (cfg.Client, #102) or a per-cycle client this loop builds and closes. The
 	// shared client is already gateway-open and must NOT be closed here.
@@ -599,6 +641,9 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// a session that serves for a while and later drops reconnects on the initial
 	// delay (issue #44) while a join-then-immediate-fail keeps backing off.
 	connected()
+	// Announce the Bot is connected and serving so the Session screen flips
+	// connecting → connected live (#123). Rides the same bus as {connecting}.
+	publishConnectionState(bus, voiceevent.ConnectionConnected, "")
 	log.Info("joined voice channel", "guild", guild, "channel", channel, "npcs", npcNames(cfg.npcs))
 
 	// One Codec instance serves both directions: DecodeInbound (called from the
@@ -628,20 +673,10 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// (line above), and pipe.Run's own deferred cancel stops the Conversation
 	// first — so teardown order is conv-stop → pump.Close() → sess.Close(), which
 	// is the deterministic ordering the pump's Close() contract requires.
-	// The orchestrator bus is created here (not inside buildConversation) so the
-	// tee can publish FirstAudio (A3 hook 1) and the pump can publish FirstOpus
-	// (task #7, the audible-on-wire SLO end) onto the same bus the conversation's
-	// stages publish on and the metrics subscriber reads.
-	//
-	// The web tier injects ONE process-wide bus (cfg.Bus, issue #73) so the SSE
-	// transcript relay subscribes once and keeps observing events across reconnect
-	// cycles and sessions; the env-only voice/bench paths leave it nil and get a
-	// fresh per-cycle bus (today's behavior, unchanged).
-	bus := cfg.Bus
-	if bus == nil {
-		bus = voiceevent.NewBus()
-	}
-
+	// The orchestrator bus was created at the top of this cycle (so the tee can
+	// publish FirstAudio and the pump FirstOpus onto the same bus the conversation's
+	// stages publish on and the metrics/SSE subscribers read) and already carries
+	// this cycle's connection.state{connecting}/{connected} (#123).
 	pump := wire.NewPlaybackPump(sess, cdc, log, bus)
 	defer pump.Close()
 

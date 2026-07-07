@@ -144,6 +144,93 @@ func TestReconcileOrphanedVoiceSessions(t *testing.T) {
 	}
 }
 
+// TestCloseVoiceSessionFailed is #123: a fatal gateway rejection closes the row
+// with status='failed', ended_at set, and a readable end_reason — it round-trips
+// through Get/GetLatest, and the boot reconciliation (which targets only 'running')
+// leaves the terminal failed row untouched.
+func TestCloseVoiceSessionFailed(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+
+	reason := "invalid_bot_token: wirenpc: open gateway: websocket: close 4004: Authentication failed"
+	failed, err := st.CloseVoiceSession(ctx, vs.ID, storage.VoiceSessionFailed, 0, &reason)
+	if err != nil {
+		t.Fatalf("CloseVoiceSession(failed): %v", err)
+	}
+	if failed.Status != storage.VoiceSessionFailed {
+		t.Errorf("status = %q, want failed", failed.Status)
+	}
+	if failed.EndedAt == nil {
+		t.Fatal("ended_at is nil after a fatal close")
+	}
+	if failed.EndReason == nil || *failed.EndReason != reason {
+		t.Errorf("end_reason = %v, want %q", failed.EndReason, reason)
+	}
+
+	// The failed session is the latest — the idle Session screen surfaces it with
+	// its reason (AC1/AC3 reload truth).
+	latest, err := st.GetLatestVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("GetLatestVoiceSession: %v", err)
+	}
+	if latest.ID != vs.ID || latest.Status != storage.VoiceSessionFailed ||
+		latest.EndReason == nil || *latest.EndReason != reason {
+		t.Errorf("latest = %+v, want failed %s with reason", latest, vs.ID)
+	}
+
+	// A failed row is already terminal: boot reconciliation only closes 'running'
+	// rows, so it must count zero and leave this row exactly as it is (AC4).
+	n, err := st.ReconcileOrphanedVoiceSessions(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedVoiceSessions: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("reconciled = %d, want 0 (a failed row is not an orphan)", n)
+	}
+	after, err := st.GetVoiceSession(ctx, vs.ID)
+	if err != nil {
+		t.Fatalf("GetVoiceSession: %v", err)
+	}
+	if after.Status != storage.VoiceSessionFailed || after.EndReason == nil || *after.EndReason != reason {
+		t.Errorf("failed row after reconcile = %+v, want unchanged failed with reason", after)
+	}
+}
+
+// TestEndVoiceSessionDelegatesToEnded is #123: EndVoiceSession stays a thin
+// delegating wrapper over CloseVoiceSession — a normal stop still lands 'ended'
+// with a NULL end_reason (distinguishable from both orphaned and failed).
+func TestEndVoiceSessionDelegatesToEnded(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	ended, err := st.EndVoiceSession(ctx, vs.ID, 4)
+	if err != nil {
+		t.Fatalf("EndVoiceSession: %v", err)
+	}
+	if ended.Status != storage.VoiceSessionEnded || ended.EndedAt == nil {
+		t.Errorf("ended = %+v, want ended with ended_at", ended)
+	}
+	if ended.LineCount != 4 {
+		t.Errorf("line_count = %d, want 4", ended.LineCount)
+	}
+	if ended.EndReason != nil {
+		t.Errorf("end_reason = %q, want NULL for a clean end", *ended.EndReason)
+	}
+}
+
 // TestEndVoiceSessionNotFound asserts ending an unknown id is ErrNotFound (the
 // RPC maps it accordingly).
 func TestEndVoiceSessionNotFound(t *testing.T) {

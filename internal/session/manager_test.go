@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,8 +75,8 @@ func (f *fakeStore) CreateVoiceSession(_ context.Context, campaignID uuid.UUID) 
 	return vs, nil
 }
 
-func (f *fakeStore) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (storage.VoiceSession, error) {
-	// A real EndVoiceSession fails on an expired context (#143 Defect B pins
+func (f *fakeStore) CloseVoiceSession(ctx context.Context, id uuid.UUID, status storage.VoiceSessionStatus, lineCount int, endReason *string) (storage.VoiceSession, error) {
+	// A real CloseVoiceSession fails on an expired context (#143 Defect B pins
 	// exactly that), so the fake honours ctx like pgx would.
 	if err := ctx.Err(); err != nil {
 		return storage.VoiceSession{}, err
@@ -91,8 +93,9 @@ func (f *fakeStore) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount
 	}
 	end := f.now()
 	vs.EndedAt = &end
-	vs.Status = storage.VoiceSessionEnded
+	vs.Status = status
 	vs.LineCount = lineCount
+	vs.EndReason = endReason
 	f.sessions[id] = vs
 	return vs, nil
 }
@@ -689,6 +692,120 @@ func TestLoopExitClearsActive(t *testing.T) {
 	}
 	if _, ended := store.counts(); ended != 1 {
 		t.Errorf("ended rows = %d, want 1 after self-exit", ended)
+	}
+}
+
+// waitIdle polls Snapshot until the Manager reports no active session — the loop
+// exited and the terminal row landed. Fails the test if it stays active.
+func waitIdle(t *testing.T, mgr *session.Manager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, active := mgr.Snapshot(); !active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session still active; loop did not exit")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestFatalLoopErrorRecordsFailed is #123 (AC1/AC4): a loop that exits with a
+// classified fatal gateway rejection (NOT via Stop-cancellation) records the row
+// as 'failed' with ended_at set and an end_reason carrying the fatal reason —
+// "invalid_bot_token: …". The single-active guard is then freed, so a new Start is
+// accepted at once. errors.As recovers the *FatalError through the loop's %w wrap.
+func TestFatalLoopErrorRecordsFailed(t *testing.T) {
+	store := newFakeStore()
+	fatal := fmt.Errorf("wirenpc: run: %w", &wirenpc.FatalError{
+		Reason: wirenpc.ReasonInvalidBotToken,
+		Err:    errors.New("open gateway: websocket: close 4004: Authentication failed"),
+	})
+	mgr := newManager(t, store, func(context.Context, wirenpc.Config) error { return fatal }, true)
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitIdle(t, mgr)
+
+	store.mu.Lock()
+	row := store.sessions[vs.ID]
+	store.mu.Unlock()
+	if row.Status != storage.VoiceSessionFailed {
+		t.Errorf("failed session status = %q, want failed", row.Status)
+	}
+	if row.EndedAt == nil {
+		t.Error("failed session ended_at is nil, want set (no row stuck running, AC4)")
+	}
+	if row.EndReason == nil || !strings.HasPrefix(*row.EndReason, wirenpc.ReasonInvalidBotToken+":") {
+		t.Errorf("failed end_reason = %v, want %q prefix", row.EndReason, wirenpc.ReasonInvalidBotToken+":")
+	}
+
+	// Guard freed: idle after the fatal exit, and a new Start is accepted (AC4).
+	if _, active := mgr.Snapshot(); active {
+		t.Error("Snapshot still active after a fatal loop exit")
+	}
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Errorf("Start after a fatal failure = %v, want success (single-active guard freed)", err)
+	}
+	waitIdle(t, mgr) // let the second (also-fatal) loop unwind before the test ends
+}
+
+// TestPlainLoopErrorRecordsFailedLoopError is #123: a non-classified loop error
+// (an unexpected exit that is NOT a fatal gateway rejection) still ends the session
+// 'failed', tagged "loop_error: …" so the durable record distinguishes it from a
+// classified fatal.
+func TestPlainLoopErrorRecordsFailedLoopError(t *testing.T) {
+	store := newFakeStore()
+	mgr := newManager(t, store, func(context.Context, wirenpc.Config) error {
+		return errors.New("silero: onnx init failed")
+	}, true)
+
+	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitIdle(t, mgr)
+
+	store.mu.Lock()
+	row := store.sessions[vs.ID]
+	store.mu.Unlock()
+	if row.Status != storage.VoiceSessionFailed {
+		t.Errorf("status = %q, want failed", row.Status)
+	}
+	if row.EndReason == nil || !strings.HasPrefix(*row.EndReason, "loop_error:") {
+		t.Errorf("end_reason = %v, want %q prefix", row.EndReason, "loop_error:")
+	}
+}
+
+// TestCancelledLoopEndsCleanNilReason pins that a Stop-cancelled loop is a CLEAN
+// stop, NOT a failure: even though the runner returns ctx.Err() (non-nil), ctx was
+// cancelled, so the row lands 'ended' with a NULL end_reason — never 'failed' (#123).
+func TestCancelledLoopEndsCleanNilReason(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+
+	ended, err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ended.Status != storage.VoiceSessionEnded {
+		t.Errorf("status = %q, want ended (a Stop-cancelled loop is a clean stop, not failed)", ended.Status)
+	}
+	if ended.EndReason != nil {
+		t.Errorf("end_reason = %q, want NULL for a clean stop", *ended.EndReason)
 	}
 }
 

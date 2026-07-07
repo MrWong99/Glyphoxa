@@ -3,10 +3,13 @@ package wirenpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // fakeSleep records the backoff delays runWithReconnect asks it to wait and
@@ -237,6 +240,44 @@ func TestRunWithReconnect_CleanSessionCloseReconnects(t *testing.T) {
 	}
 	if fs.callCount != 1 {
 		t.Errorf("sleep called %d times, want 1 (a clean session close reconnects, it is not a shutdown)", fs.callCount)
+	}
+}
+
+// TestRunWithReconnect_FatalErrorStopsImmediately pins the #123 core: a
+// connect-and-serve attempt that returns a FATAL, non-retryable gateway rejection
+// (a wrapped close 4004) makes the loop STOP at once — it returns the classified
+// *FatalError, calls attempt exactly once, and NEVER sleeps. A transient failure
+// still backs off (the existing growing-backoff tests pin that), so this only
+// changes the terminal case.
+func TestRunWithReconnect_FatalErrorStopsImmediately(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// cancelAt is far past the single expected attempt: if the loop ever sleeps,
+	// callCount goes non-zero and the test fails before any cancel would fire.
+	fs := &fakeSleep{cancelAt: 99, cancel: cancel}
+	p := reconnectPolicy{initial: time.Second, max: 30 * time.Second, factor: 2, sleep: fs.sleep}
+
+	fatal := fmt.Errorf("wirenpc: open gateway: %w",
+		&websocket.CloseError{Code: 4004, Text: "Authentication failed"})
+	calls := 0
+	err := runWithReconnect(ctx, discardLogger(), p,
+		func(ctx context.Context, connected func()) error {
+			calls++
+			return fatal
+		})
+
+	var fe *FatalError
+	if !errors.As(err, &fe) {
+		t.Fatalf("runWithReconnect returned %v, want a *FatalError", err)
+	}
+	if fe.Reason != ReasonInvalidBotToken {
+		t.Errorf("fatal reason = %q, want %q", fe.Reason, ReasonInvalidBotToken)
+	}
+	if calls != 1 {
+		t.Errorf("attempt called %d times, want 1 (a fatal error must not retry)", calls)
+	}
+	if fs.callCount != 0 {
+		t.Errorf("sleep called %d times, want 0 (no backoff on a fatal error)", fs.callCount)
 	}
 }
 

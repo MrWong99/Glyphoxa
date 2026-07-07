@@ -585,6 +585,38 @@ func TestSessionGetIdleReturnsLastSession(t *testing.T) {
 	}
 }
 
+// TestSessionGetIdleReturnsFailedSessionReason is #123 (AC1/AC3 reload truth): a
+// session that ended in a fatal gateway rejection is surfaced idle as status
+// "failed" with its readable end_reason, so a page reload after a fatal start shows
+// why. Proves toProtoVoiceSession maps EndReason and GetSession's idle path carries it.
+func TestSessionGetIdleReturnsFailedSessionReason(t *testing.T) {
+	t.Parallel()
+	end := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	reason := "invalid_bot_token: wirenpc: open gateway: websocket: close 4004: Authentication failed"
+	store := &fakeSessionStore{
+		campaign: storage.Campaign{ID: uuid.New(), Name: "Sunless Citadel"},
+		latest: storage.VoiceSession{
+			ID: uuid.New(), Status: storage.VoiceSessionFailed, EndedAt: &end, EndReason: &reason,
+		},
+	}
+	client := newSessionClient(t, &fakeSessionManager{}, store)
+
+	resp, err := client.GetSession(context.Background(), connect.NewRequest(&managementv1.GetSessionRequest{}))
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if resp.Msg.GetActive() {
+		t.Error("active = true, want false when idle")
+	}
+	got := resp.Msg.GetSession()
+	if got == nil || got.GetStatus() != "failed" {
+		t.Fatalf("idle session = %+v, want failed", got)
+	}
+	if got.GetEndReason() != reason {
+		t.Errorf("end_reason = %q, want %q", got.GetEndReason(), reason)
+	}
+}
+
 // TestSessionStartHonorsDurableSelection is #108 web parity: with the operator's
 // /glyphoxa use selection set (campaign A) AND a newer implicit default (campaign
 // B), the web StartSession binds A — so the Session screen and the slash command

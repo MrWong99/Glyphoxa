@@ -291,6 +291,40 @@ type MuteChanged struct {
 // EventName implements [Event].
 func (MuteChanged) EventName() string { return "mute.changed" }
 
+// ConnectionState is the Voice Session's Discord gateway connection lifecycle as
+// seen by the web Session screen (#123, ADR-0020). It is a coarse UI/telemetry
+// state DISTINCT from the low-level pkg/voice voice.State: this taxonomy lives in
+// voiceevent so both the SSE relay and the deferred split-Mode VoiceControlService
+// path (ADR-0039) name the same states.
+type ConnectionState string
+
+const (
+	// ConnectionConnecting: a connect-and-serve cycle has begun but the voice
+	// channel join has not yet succeeded.
+	ConnectionConnecting ConnectionState = "connecting"
+	// ConnectionConnected: the Bot joined the voice channel and is serving.
+	ConnectionConnected ConnectionState = "connected"
+	// ConnectionFailed: the session hit a FATAL, non-retryable gateway rejection
+	// (invalid Bot token, disallowed intents, …) and reached its terminal failed
+	// state — the loop stops retrying rather than backing off forever.
+	ConnectionFailed ConnectionState = "failed"
+)
+
+// ConnectionStateChanged marks a transition of the Voice Session's gateway
+// connection state (#123). connectAndServe publishes {connecting} at the start of
+// each cycle and {connected} once the join succeeds; Run publishes {failed} with a
+// readable Detail when the loop returns a fatal classification. Detail carries the
+// [wirenpc.FatalError.Error] prose on a failed transition and is empty otherwise.
+// The SSE relay forwards it to the live Session screen (ADR-0014 Hop-B).
+type ConnectionStateChanged struct {
+	At     time.Time
+	State  ConnectionState
+	Detail string
+}
+
+// EventName implements [Event].
+func (ConnectionStateChanged) EventName() string { return "connection.state" }
+
 // Bus is an in-process pub/sub channel. Subscribers register a callback;
 // Publish invokes every callback synchronously in the calling goroutine.
 //

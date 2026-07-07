@@ -82,12 +82,20 @@ type DeploymentConfig struct {
 }
 
 // VoiceSessionStatus is a Voice Session's lifecycle state (#72). A session is
-// 'running' from Start until Stop (or loop exit), then 'ended'.
+// 'running' from Start until Stop (or loop exit), then 'ended' — or 'failed' when
+// a fatal, non-retryable gateway rejection ended it (#123).
 type VoiceSessionStatus string
 
 const (
 	VoiceSessionRunning VoiceSessionStatus = "running"
 	VoiceSessionEnded   VoiceSessionStatus = "ended"
+	// VoiceSessionFailed is the terminal state of a session whose Discord gateway
+	// connection failed FATALLY — a non-retryable rejection (invalid Bot token,
+	// disallowed intents, gateway reject) the reconnect loop stopped on rather than
+	// backing off forever (#123). The row's end_reason carries the readable cause.
+	// Like 'ended' it is terminal (never revived), but records that the session
+	// never served — distinct from a clean stop.
+	VoiceSessionFailed VoiceSessionStatus = "failed"
 )
 
 // VoiceSessionReasonOrphaned is the end_reason stamped by the boot-time
@@ -99,8 +107,9 @@ const VoiceSessionReasonOrphaned = "orphaned: reconciled at startup"
 // VoiceSession is one run of the live voice loop — the Bot's presence in one
 // Discord voice channel, bound to a Campaign (CONTEXT.md "Voice Session", #72).
 // EndedAt is nil while running; LineCount records transcript lines produced (0
-// for this stage — the live feed is #73). EndReason is nil for a clean end and
-// set when the boot reconciliation closed an orphaned row (#143).
+// for this stage — the live feed is #73). EndReason is nil for a clean end, and
+// set when the boot reconciliation closed an orphaned row (#143) or a fatal
+// gateway rejection ended the session as 'failed' (#123, the readable cause).
 type VoiceSession struct {
 	ID         uuid.UUID
 	CampaignID uuid.UUID

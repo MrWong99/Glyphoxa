@@ -199,6 +199,12 @@
   gap: var(--spacing-sm);
 }
 
+/* Live gateway connection sub-state beside the Live badge (Connecting…/Connected). */
+.gx-session__conn {
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+
 /* Subtle inset summary of the prior session, shown only while idle. */
 .gx-session__last {
   margin-top: var(--spacing-md);
@@ -206,6 +212,17 @@
   border-radius: var(--radius-md);
   background: var(--surface-inset);
   color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+
+/* A fatal gateway rejection: a prominent, readable failure banner (#123). */
+.gx-session__failed {
+  margin-top: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--danger, #b3261e);
+  background: color-mix(in srgb, var(--danger, #b3261e) 12%, transparent);
+  color: var(--danger, #b3261e);
   font-size: 0.875rem;
 }
 

@@ -755,7 +755,7 @@ message VoiceSession {
   string id = 1;
   // campaign_id is the campaign the session runs for.
   string campaign_id = 2;
-  // status is the lifecycle state: "running" or "ended".
+  // status is the lifecycle state: "running", "ended", or "failed" (#123).
   string status = 3;
   // started_at is when the session started.
   google.protobuf.Timestamp started_at = 4;
@@ -764,6 +764,10 @@ message VoiceSession {
   // line_count is how many transcript lines the session produced (0 this stage;
   // the live transcript feed is #73).
   uint32 line_count = 6;
+  // end_reason is the readable cause an abnormal end carries: the fatal gateway
+  // rejection reason for a "failed" session (#123), or the reconciled reason for a
+  // boot-orphaned row (#143). Empty for a clean "ended" stop and while running.
+  string end_reason = 7;
 }
 
 // GetSessionRequest is the (empty) request; the active campaign and the

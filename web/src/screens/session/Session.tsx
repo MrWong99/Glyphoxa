@@ -73,6 +73,21 @@ function useElapsed(startMs: number | null): number {
   return elapsed;
 }
 
+// connectionLabel renders the live gateway connection sub-state beside the Live
+// badge during a normal start (#123): "Connecting…" then "Connected". A failed
+// state is rendered as its own badge + reason, not here, so this returns null for
+// it (and for the pre-first-transition undefined).
+function connectionLabel(state: string | undefined): string | null {
+  switch (state) {
+    case "connecting":
+      return "Connecting…";
+    case "connected":
+      return "Connected";
+    default:
+      return null;
+  }
+}
+
 // lastSummary renders the idle "Last session ended …" line from an ended session.
 function lastSummary(session: VoiceSession): string {
   const endedMs = tsMs(session.endedAt);
@@ -132,6 +147,16 @@ export function Session() {
   const hasLines = transcript.lines.length > 0;
   const showTyping = active && transcript.typing.active;
 
+  // Gateway connection state (#123): a fatal rejection is failed from EITHER the
+  // durable session status (the reload/poll truth: status "failed" + end_reason) OR
+  // the live SSE "connection" frame (immediate, with its detail). The live
+  // connecting/connected labels reflect a normal start without a reload.
+  const sessionFailed = session?.status === "failed";
+  const liveFailed = active && transcript.connection === "failed";
+  const failed = sessionFailed || liveFailed;
+  const failureReason = sessionFailed ? session?.endReason : transcript.connectionDetail;
+  const connectingLabel = active && !failed ? connectionLabel(transcript.connection) : null;
+
   // Transcript search deep-link (#120): clicking a search hit highlights (and,
   // where the browser supports it, scrolls to) that line in the rendered
   // transcript. A hit for a line NOT in the current view — e.g. an older session —
@@ -166,7 +191,11 @@ export function Session() {
 
       <Card accent className="gx-session__control">
         <div className="gx-session__status">
-          {active ? (
+          {failed ? (
+            <Badge variant="danger" dot>
+              Failed
+            </Badge>
+          ) : active ? (
             <Badge variant="live" dot pulse>
               Live
             </Badge>
@@ -174,6 +203,11 @@ export function Session() {
             <Badge variant="neutral" dot>
               Idle
             </Badge>
+          )}
+          {connectingLabel && (
+            <span className="gx-session__conn" data-testid="connection-state">
+              {connectingLabel}
+            </span>
           )}
           <span className="gx-session__timer" data-testid="elapsed">
             {formatElapsed(elapsed)}
@@ -202,6 +236,12 @@ export function Session() {
           )}
         </div>
       </Card>
+
+      {failed && (
+        <div className="gx-session__failed" role="alert" data-testid="connection-failed">
+          {failureReason ? `Voice connection failed: ${failureReason}` : "Voice connection failed."}
+        </div>
+      )}
 
       {!active && session && session.status === "ended" && (
         <div className="gx-session__last">{lastSummary(session)}</div>

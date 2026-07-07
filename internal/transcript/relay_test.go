@@ -134,6 +134,71 @@ func TestProjection_MuteFrame(t *testing.T) {
 	}
 }
 
+// connFrame is the decoded payload of a "connection" SSE frame.
+type connFrame struct {
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+}
+
+// connectionFrames extracts and decodes the "connection" frames from a ring dump.
+func connectionFrames(t *testing.T, frames []Frame) []connFrame {
+	t.Helper()
+	var out []connFrame
+	for _, f := range frames {
+		if f.Event != "connection" {
+			continue
+		}
+		var c connFrame
+		if err := json.Unmarshal(f.Data, &c); err != nil {
+			t.Fatalf("connection frame payload: %v", err)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// TestProjection_ConnectionState is #123 (AC3): connecting→connected while active
+// emits two "connection" frames onto the ring and the live View reflects the latest
+// state; a fatal {failed} frame — published by the loop while the session is STILL
+// active (before the Manager clears the slot) — rides the ring too, carrying the
+// readable reason, so the Session screen flips to failed without a reload.
+func TestProjection_ConnectionState(t *testing.T) {
+	bus, r, fs, id := liveRelay(t)
+
+	bus.Publish(voiceevent.ConnectionStateChanged{At: at(1), State: voiceevent.ConnectionConnecting})
+	bus.Publish(voiceevent.ConnectionStateChanged{At: at(2), State: voiceevent.ConnectionConnected})
+
+	conns := connectionFrames(t, r.Frames(id, 0))
+	if len(conns) != 2 {
+		t.Fatalf("connection frames = %d, want 2 (connecting + connected)", len(conns))
+	}
+	if conns[0].State != "connecting" || conns[1].State != "connected" {
+		t.Errorf("connection frame states = %q/%q, want connecting/connected", conns[0].State, conns[1].State)
+	}
+	if v := r.View(id); v.Connection != "connected" {
+		t.Errorf("View().Connection = %q, want connected", v.Connection)
+	}
+
+	// The {failed} event arrives while the session is still active.
+	if _, active := fs.Snapshot(); !active {
+		t.Fatal("precondition: session must still be active when {failed} is published")
+	}
+	detail := "invalid_bot_token: wirenpc: open gateway: websocket: close 4004: Authentication failed"
+	bus.Publish(voiceevent.ConnectionStateChanged{At: at(3), State: voiceevent.ConnectionFailed, Detail: detail})
+
+	conns = connectionFrames(t, r.Frames(id, 0))
+	if len(conns) == 0 {
+		t.Fatal("no connection frames after failed")
+	}
+	last := conns[len(conns)-1]
+	if last.State != "failed" || last.Detail != detail {
+		t.Errorf("failed connection frame = %+v, want failed with detail %q", last, detail)
+	}
+	if v := r.View(id); v.Connection != "failed" {
+		t.Errorf("View().Connection = %q, want failed", v.Connection)
+	}
+}
+
 // TestProjection_ButlerKind checks the butler role maps to the butler kind + tag.
 func TestProjection_ButlerKind(t *testing.T) {
 	bus, r, _, id := liveRelay(t)
