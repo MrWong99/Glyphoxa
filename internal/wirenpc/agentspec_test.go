@@ -651,7 +651,6 @@ func TestSeedIdempotent(t *testing.T) {
 	}
 }
 
-
 // TestResolveNPCModel_BoundConfigOutranksTenantFallback pins the precedence
 // pure-functionally (#227 review finding): a resolver that ignored the bound
 // config and always returned the tenant fallback would pass the DB-backed

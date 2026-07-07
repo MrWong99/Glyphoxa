@@ -31,8 +31,8 @@ type fakeSessionManager struct {
 	stopErr          error
 	startCalls       int
 	muted            map[string]struct{}
-	rosterIDs        []string // ids SetAllMute mutes (the campaign roster the real Manager lists)
-	campaignAgentIDs []string // ids SetAgentMute accepts; others → ErrAgentNotInCampaign (Manager validates now)
+	rosterIDs        []string     // ids SetAllMute mutes (the campaign roster the real Manager lists)
+	campaignAgentIDs []string     // ids SetAgentMute accepts; others → ErrAgentNotInCampaign (Manager validates now)
 	spend            spend.Status // the live meter snapshot GetSession surfaces (#130)
 }
 

@@ -58,7 +58,9 @@ func TestReplier_SpendCapRefusesNewTurn(t *testing.T) {
 		t.Fatal("Greta must keep the floor after a spend-capped route was discarded")
 	}
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.TurnEnded) bool { return e.TurnID == "Tbart" && e.Reason == voiceevent.TurnEndSpendCap },
+		func(e voiceevent.TurnEnded) bool {
+			return e.TurnID == "Tbart" && e.Reason == voiceevent.TurnEndSpendCap
+		},
 		"turn.ended (spend_cap) for the discarded route",
 	)
 }
