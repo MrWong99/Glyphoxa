@@ -114,6 +114,16 @@ func testCipher(t *testing.T) *crypto.Cipher {
 // Connect-JSON client. WithProtoJSON also asserts the RPCs work over JSON.
 func newProviderClient(t *testing.T, store *fakeProviderStore, cipher *crypto.Cipher) (managementv1connect.ProviderServiceClient, uuid.UUID) {
 	t.Helper()
+	return clientForServer(t, rpc.NewProviderServer(store, cipher, nil))
+}
+
+// clientForServer mounts a PRE-BUILT ProviderServer behind the fixed-tenant
+// interceptor and returns a Connect-JSON client + the injected tenant. Callers
+// that must configure the server before it serves (e.g. SetDiscordApplicationID,
+// #110) build it and pass it in; newProviderClient is the common store+cipher
+// shortcut over this.
+func clientForServer(t *testing.T, server *rpc.ProviderServer) (managementv1connect.ProviderServiceClient, uuid.UUID) {
+	t.Helper()
 	tenantID := uuid.New()
 	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -121,7 +131,7 @@ func newProviderClient(t *testing.T, store *fakeProviderStore, cipher *crypto.Ci
 		}
 	})
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewProviderServer(store, cipher, nil).Handler(connect.WithInterceptors(inject)))
+	mux.Handle(server.Handler(connect.WithInterceptors(inject)))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return managementv1connect.NewProviderServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON()), tenantID
@@ -135,6 +145,37 @@ func credByProvider(creds []*managementv1.ProviderCredential, provider string) *
 		}
 	}
 	return nil
+}
+
+// TestProviderList_DiscordApplicationID pins #110: the configured Discord
+// application (client) id — the same app that backs operator login (ADR-0016) —
+// is exposed on the read so the SPA composes the bot-authorization URL without
+// hardcoding anything. Without the setter wired it reads empty, the fallback the
+// SPA renders as a disabled action + note.
+func TestProviderList_DiscordApplicationID(t *testing.T) {
+	t.Parallel()
+
+	srv := rpc.NewProviderServer(newFakeProviderStore(), testCipher(t), nil)
+	srv.SetDiscordApplicationID("123456789012345678")
+	client, _ := clientForServer(t, srv)
+
+	resp, err := client.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := resp.Msg.GetDiscordApplicationId(); got != "123456789012345678" {
+		t.Errorf("discord_application_id = %q, want 123456789012345678", got)
+	}
+
+	// No setter → empty on the wire (the missing-app-id fallback).
+	bare, _ := newProviderClient(t, newFakeProviderStore(), testCipher(t))
+	resp2, err := bare.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("List (bare): %v", err)
+	}
+	if got := resp2.Msg.GetDiscordApplicationId(); got != "" {
+		t.Errorf("discord_application_id without setter = %q, want empty", got)
+	}
 }
 
 func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
