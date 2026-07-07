@@ -70,6 +70,12 @@ type Client struct {
 	// via the SDK's JSON-set escape hatch (e.g. Gemini's
 	// extra_body.google.thinking_config). Nil omits them.
 	extraFields map[string]any
+	// includeUsage, when true, sets stream_options.include_usage so the provider
+	// streams a trailing usage chunk for token metering (#127, ADR-0045). It is
+	// preset-gated OFF by default: a gateway that rejects stream_options would 400
+	// every turn, so a preset only turns it on for endpoints known to honour it
+	// (Groq, OpenAI); Gemini leaves it off.
+	includeUsage bool
 
 	oai openai.Client
 }
@@ -89,6 +95,7 @@ type settings struct {
 	maxTokens       int
 	reasoningEffort string
 	extraFields     map[string]any
+	includeUsage    bool
 	httpClient      *http.Client
 }
 
@@ -129,6 +136,13 @@ func WithReasoningEffort(effort string) Option {
 // WithExtraFields sets non-standard top-level request-body fields merged onto
 // every completion (e.g. Gemini's extra_body passthrough). Nil omits them.
 func WithExtraFields(f map[string]any) Option { return func(s *settings) { s.extraFields = f } }
+
+// WithIncludeUsage enables stream_options.include_usage so the provider streams a
+// trailing usage chunk for token metering (#127, ADR-0045). Off by default and
+// preset-gated: only turn it on for endpoints known to honour stream_options
+// (Groq, OpenAI). A gateway that rejects the field would 400 every turn, so
+// Gemini leaves it off until verified.
+func WithIncludeUsage(on bool) Option { return func(s *settings) { s.includeUsage = on } }
 
 // defaultHTTPClient bounds the connection-establishment phases so a black-holed
 // endpoint fails in seconds instead of hanging a turn. No overall Timeout: that
@@ -244,6 +258,7 @@ func New(opts ...Option) *Client {
 		maxTokens:       s.maxTokens,
 		reasoningEffort: s.reasoningEffort,
 		extraFields:     s.extraFields,
+		includeUsage:    s.includeUsage,
 		oai:             openai.NewClient(reqOpts...),
 	}
 }

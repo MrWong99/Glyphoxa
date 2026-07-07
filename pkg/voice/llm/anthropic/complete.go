@@ -273,6 +273,11 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 	}
 	tools := map[int]*pendingTool{}
 
+	// inputTokens is stashed from message_start's usage (Anthropic reports the
+	// prompt tokens there) and combined with message_delta's output_tokens into the
+	// one EventUsage emitted before EventDone (#127, ADR-0045).
+	var inputTokens int
+
 	send := func(ev llm.StreamEvent) bool {
 		select {
 		case <-ctx.Done():
@@ -322,6 +327,11 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 		}
 
 		switch ev.Type {
+		case "message_start":
+			// Stash the prompt-token count; message_delta later carries output_tokens.
+			if ev.Message != nil && ev.Message.Usage != nil {
+				inputTokens = ev.Message.Usage.InputTokens
+			}
 		case "content_block_start":
 			if ev.ContentBlock.Type == "tool_use" {
 				tools[ev.Index] = &pendingTool{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
@@ -358,6 +368,18 @@ func streamEvents(ctx context.Context, r io.ReadCloser, ch chan<- llm.StreamEven
 				}
 			}
 		case "message_delta":
+			// Usage rides message_delta (output_tokens); emit ONE EventUsage carrying
+			// the stashed input plus this output, BEFORE EventDone (#127, ADR-0045). A
+			// stream that omits usage (an old cassette) sends nothing here, so the
+			// consumer estimates rather than recording zero.
+			if ev.Usage != nil {
+				if !send(llm.StreamEvent{Type: llm.EventUsage, Usage: llm.Usage{
+					InputTokens:  inputTokens,
+					OutputTokens: ev.Usage.OutputTokens,
+				}}) {
+					return
+				}
+			}
 			if ev.Delta.StopReason != "" {
 				if !send(llm.StreamEvent{Type: llm.EventDone, StopReason: ev.Delta.StopReason}) {
 					return
@@ -390,4 +412,19 @@ type sseEvent struct {
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
+	// Message carries the prompt-token usage on message_start; Usage carries the
+	// output-token usage on message_delta (#127). Both are pointers so an absent
+	// usage object (an old cassette, a gateway that omits it) is distinguishable
+	// from a zero count — nil means "no usage reported", not "zero tokens".
+	Message *struct {
+		Usage *usageWire `json:"usage"`
+	} `json:"message"`
+	Usage *usageWire `json:"usage"`
+}
+
+// usageWire is the Anthropic usage object as it appears on message_start
+// (input_tokens) and message_delta (output_tokens).
+type usageWire struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
 }

@@ -126,6 +126,78 @@ func TestComplete_TextStream_AccumulatesDeltas(t *testing.T) {
 	}
 }
 
+// TestComplete_Usage_EmitsOneEventUsageBeforeDone pins the #127 usage decode
+// (ADR-0045): input_tokens is stashed from message_start, output_tokens read from
+// message_delta, and exactly one EventUsage carrying both is emitted BEFORE the
+// terminating EventDone.
+func TestComplete_Usage_EmitsOneEventUsageBeforeDone(t *testing.T) {
+	srv := sseServer(t, nil,
+		sse(`{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}`),
+		sse(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		sse(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`),
+		sse(`{"type":"content_block_stop","index":0}`),
+		sse(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":40}}`),
+		sse(`{"type":"message_stop"}`),
+	)
+	defer srv.Close()
+
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	events := collect(t, ch)
+	var usageIdx, doneIdx = -1, -1
+	var usageCount int
+	for i, ev := range events {
+		switch ev.Type {
+		case llm.EventUsage:
+			usageCount++
+			usageIdx = i
+			if ev.Usage.InputTokens != 25 || ev.Usage.OutputTokens != 40 {
+				t.Errorf("usage = %+v, want {InputTokens:25, OutputTokens:40}", ev.Usage)
+			}
+		case llm.EventDone:
+			doneIdx = i
+		}
+	}
+	if usageCount != 1 {
+		t.Fatalf("EventUsage count = %d, want exactly 1", usageCount)
+	}
+	if usageIdx > doneIdx {
+		t.Errorf("EventUsage index %d is after EventDone index %d; want usage before done", usageIdx, doneIdx)
+	}
+}
+
+// TestComplete_NoUsage_EmitsNoEventUsage pins that a stream without usage fields
+// (an old cassette, or a gateway that omits them) emits NO EventUsage — the
+// consumer then estimates rather than recording a spurious zero.
+func TestComplete_NoUsage_EmitsNoEventUsage(t *testing.T) {
+	srv := sseServer(t, nil,
+		sse(`{"type":"message_start","message":{"id":"msg_1"}}`),
+		sse(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`),
+		sse(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`),
+		sse(`{"type":"message_stop"}`),
+	)
+	defer srv.Close()
+
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "Greet me."}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	for _, ev := range collect(t, ch) {
+		if ev.Type == llm.EventUsage {
+			t.Errorf("emitted an EventUsage for a usage-free stream: %+v", ev.Usage)
+		}
+	}
+}
+
 // TestComplete_ToolUseStream_DecodesCall pins the tool-use decode (the ADR-0028
 // seam): a content_block_start naming the tool, a run of input_json_delta lines
 // accumulating the arguments, and a content_block_stop produce exactly one

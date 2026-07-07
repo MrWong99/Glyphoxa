@@ -135,6 +135,42 @@ func TestComplete_ModelOverride(t *testing.T) {
 	}
 }
 
+// TestComplete_GroqPreset_RequestsUsage pins the #127 preset gate: Groq honours
+// stream_options, so the preset asks for the trailing usage chunk
+// (include_usage=true on the wire) to meter tokens (ADR-0045).
+func TestComplete_GroqPreset_RequestsUsage(t *testing.T) {
+	var capture atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capture.Store(readBody(r))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)))
+	}))
+	defer srv.Close()
+
+	c := groq.New("k", groq.WithBaseURL(srv.URL))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	drain(ch)
+
+	raw, _ := capture.Load().([]byte)
+	var body struct {
+		StreamOptions *struct {
+			IncludeUsage *bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("request body not JSON: %v\n%s", err, raw)
+	}
+	if body.StreamOptions == nil || body.StreamOptions.IncludeUsage == nil || !*body.StreamOptions.IncludeUsage {
+		t.Errorf("Groq preset must set stream_options.include_usage=true; got %s", raw)
+	}
+}
+
 // bodyModel extracts the "model" field from a captured request body.
 func bodyModel(t *testing.T, capture atomic.Value) string {
 	t.Helper()

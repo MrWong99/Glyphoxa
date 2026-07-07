@@ -170,11 +170,30 @@ const (
 	// channel right after. Consumers must treat the accumulated text as
 	// truncated and fail the turn rather than present it as a complete reply.
 	EventError
+
+	// EventUsage carries the provider's token accounting for the completion in
+	// [StreamEvent.Usage] (#127, ADR-0045). It is ADDITIVE (ADR-0021): it is the
+	// last iota so old cassettes never contain it and replay is byte-for-byte
+	// unchanged; a provider that reports no usage emits none and the consumer
+	// estimates rather than recording zero. It is NOT ordered relative to
+	// [EventDone] — Anthropic reports usage just before the stop (message_delta),
+	// OpenAI-compat in a trailing chunk after it — so consumers must drain the
+	// stream to close to see it, exactly as they already must.
+	EventUsage
 )
+
+// Usage is a completion's token accounting, carried on an [EventUsage] (#127,
+// ADR-0045). InputTokens is the prompt tokens, OutputTokens the generated
+// tokens; the two are metered on separate direction series because providers
+// (Groq) price them differently.
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+}
 
 // StreamEvent is one item in a [Provider] completion stream. The active fields
 // depend on Type: Text on [EventText], ToolCall on [EventToolCall], StopReason
-// on [EventDone].
+// on [EventDone], Usage on [EventUsage].
 type StreamEvent struct {
 	Type StreamEventType
 
@@ -190,6 +209,9 @@ type StreamEvent struct {
 	// Err is the failure description on an [EventError]. A string, not an
 	// error, so cassette recordings serialize it faithfully (ADR-0021).
 	Err string
+
+	// Usage is the token accounting on an [EventUsage].
+	Usage Usage
 }
 
 // Provider is the hot-path interface implemented by every LLM provider and by
