@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
@@ -55,6 +56,71 @@ func TestTTS_DispatchPublishesInvokedOnStartError(t *testing.T) {
 		func(e voiceevent.TTSInvoked) bool { return e.Sentence == sentence && e.Index == 0 },
 		"tts.invoked published for a start-errored sentence",
 	)
+}
+
+// TestTTS_Dispatch_RecordsProviderCallOutcomes pins the #125 provider-health
+// wiring on the TTS stage: a successful Dispatch records tts_total exactly once
+// and moves provider_calls with outcome=ok and no provider_errors; a Synthesize
+// start error moves provider_calls outcome=error PLUS provider_errors and records
+// NO tts_total (there was no synthesis to time). Labels stay the bounded
+// tts/elevenlabs enums (ADR-0032).
+func TestTTS_Dispatch_RecordsProviderCallOutcomes(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		stage := orchestrator.NewTTS(h.Bus, closedChanSynth{},
+			orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+		if err := stage.Dispatch(context.Background(), "Aye.", voicetest.LiveElevenLabsVoice()); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+
+		_, ttsTotals, _, calls, errs := spy.snapshot()
+		if len(ttsTotals) != 1 || ttsTotals[0] != observe.ProviderElevenLabs {
+			t.Errorf("tts_total recorded %v, want exactly one elevenlabs span", ttsTotals)
+		}
+		want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeOK}
+		if len(calls) != 1 || calls[0] != want {
+			t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+		}
+		if len(errs) != 0 {
+			t.Errorf("provider_errors = %+v, want none on the success path", errs)
+		}
+	})
+
+	t.Run("start error", func(t *testing.T) {
+		h := voicetest.New(t)
+		spy := &metricsSpy{}
+		stage := orchestrator.NewTTS(h.Bus, startErrSynth{},
+			orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+		if err := stage.Dispatch(context.Background(), "boom", voicetest.LiveElevenLabsVoice()); err == nil {
+			t.Fatal("Dispatch: expected the synth start error to propagate")
+		}
+
+		_, ttsTotals, _, calls, errs := spy.snapshot()
+		if len(ttsTotals) != 0 {
+			t.Errorf("tts_total recorded %v on a start error, want none (no synthesis timed)", ttsTotals)
+		}
+		want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeError}
+		if len(calls) != 1 || calls[0] != want {
+			t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+		}
+		if len(errs) != 1 || errs[0] != (providerErr{stage: observe.StageTTS, provider: observe.ProviderElevenLabs}) {
+			t.Errorf("provider_errors = %+v, want one tts/elevenlabs error", errs)
+		}
+	})
+}
+
+// TestTTS_Dispatch_KeylessRecordsNothing pins the keyless default: an option-less
+// NewTTS never nil-panics on the metric calls — the recorder defaults to
+// observe.Discard, so Dispatch works exactly as before the #125 wiring.
+func TestTTS_Dispatch_KeylessRecordsNothing(t *testing.T) {
+	h := voicetest.New(t)
+	stage := orchestrator.NewTTS(h.Bus, closedChanSynth{})
+	if err := stage.Dispatch(context.Background(), "Aye.", voicetest.LiveElevenLabsVoice()); err != nil {
+		t.Fatalf("Dispatch on a keyless TTS stage: %v", err)
+	}
 }
 
 // TestTTS_HelloTest_DispatchesSentence is TB6: the first TTS tracer bullet,

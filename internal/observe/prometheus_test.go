@@ -104,6 +104,58 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	}
 }
 
+// TestWiredHistogramsAndProviderCounters is the #125 AC pin: after one real
+// observation on each previously-reserved instrument, every one of the six
+// histogram families exposes a non-empty series, the STT and TTS provider-call /
+// provider-error counters carry the right stage labels, and NO help text still
+// advertises "RESERVED" (the markers are dropped as each emit-site is wired).
+func TestWiredHistogramsAndProviderCounters(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	// One observation on each of the six formerly-reserved histograms.
+	rec.VADHangover(384 * time.Millisecond)
+	rec.CodecDecode(2 * time.Millisecond)
+	rec.CodecEncode(1 * time.Millisecond)
+	rec.STTRequest(ProviderElevenLabs, 700*time.Millisecond)
+	rec.TTSTotal(ProviderElevenLabs, 900*time.Millisecond)
+	rec.LLMTurn(ProviderGroq, 1500*time.Millisecond)
+
+	// STT and TTS provider health: a call + error at each stage.
+	rec.ProviderCall(StageSTT, ProviderElevenLabs, OutcomeOK)
+	rec.ProviderError(StageSTT, ProviderElevenLabs)
+	rec.ProviderCall(StageTTS, ProviderElevenLabs, OutcomeError)
+	rec.ProviderError(StageTTS, ProviderElevenLabs)
+
+	out := scrape(t, rec)
+
+	wantSeries := []string{
+		`glyphoxa_voice_vad_hangover_seconds_count 1`,
+		`glyphoxa_voice_codec_decode_seconds_count 1`,
+		`glyphoxa_voice_codec_encode_seconds_count 1`,
+		`glyphoxa_voice_stt_request_seconds_count{provider="elevenlabs"} 1`,
+		`glyphoxa_voice_tts_total_seconds_count{provider="elevenlabs"} 1`,
+		`glyphoxa_voice_llm_turn_seconds_count{provider="groq"} 1`,
+		`glyphoxa_voice_provider_calls_total{outcome="ok",provider="elevenlabs",stage="stt"} 1`,
+		`glyphoxa_voice_provider_calls_total{outcome="error",provider="elevenlabs",stage="tts"} 1`,
+		`glyphoxa_voice_provider_errors_total{provider="elevenlabs",stage="stt"} 1`,
+		`glyphoxa_voice_provider_errors_total{provider="elevenlabs",stage="tts"} 1`,
+	}
+	for _, want := range wantSeries {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q\n%s", want, filterGlyphoxa(out))
+		}
+	}
+
+	// AC: the RESERVED markers are removed from the help text as each is wired.
+	if strings.Contains(out, "RESERVED") {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "RESERVED") {
+				t.Errorf("help text still carries RESERVED after wiring: %q", line)
+			}
+		}
+	}
+}
+
 func TestSessionGaugeTracksOpenClose(t *testing.T) {
 	rec := NewPrometheusRecorder()
 	rec.SessionOpened("a")

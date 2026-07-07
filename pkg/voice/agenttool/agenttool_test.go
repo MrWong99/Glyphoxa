@@ -178,12 +178,25 @@ type recordingStage struct {
 	rounds   []llmRound
 	callsOK  int
 	callsErr int
+	turns    []observe.Provider // one LLMTurn span per Engine.Generate/GenerateStream
 }
 
 func (r *recordingStage) LLMRound(p observe.Provider, idx int, hadToolCall bool, _ time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rounds = append(r.rounds, llmRound{provider: p, roundIndex: idx, hadToolCall: hadToolCall})
+}
+
+func (r *recordingStage) LLMTurn(p observe.Provider, _ time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turns = append(r.turns, p)
+}
+
+func (r *recordingStage) turnSpans() []observe.Provider {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]observe.Provider(nil), r.turns...)
 }
 
 func (r *recordingStage) ProviderCall(_ observe.Stage, _ observe.Provider, outcome observe.Outcome) {
@@ -269,6 +282,78 @@ func TestEngine_LLMRoundSpans_IndexResetsPerTurn(t *testing.T) {
 		if r.roundIndex != 0 {
 			t.Errorf("turn %d round_index = %d, want 0 (per-turn reset)", i, r.roundIndex)
 		}
+	}
+}
+
+// TestEngine_LLMTurn_OneSpanPerTurnAcrossRounds pins the #125 llm_turn wiring:
+// the Engine records exactly ONE LLMTurn span per Generate — the full agenttool
+// loop, spanning both rounds of a dice round-trip — labelled with the injected
+// provider, distinct from the per-round LLMRound spans (two here).
+func TestEngine_LLMTurn_OneSpanPerTurnAcrossRounds(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled well, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Roll a d20 for me."},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	rounds, _, _ := rec.snapshot()
+	if len(rounds) != 2 {
+		t.Fatalf("recorded %d LLMRound spans, want 2 (round-trip)", len(rounds))
+	}
+	turns := rec.turnSpans()
+	if len(turns) != 1 {
+		t.Fatalf("recorded %d LLMTurn spans, want exactly 1 per turn (across all rounds)", len(turns))
+	}
+	if turns[0] != observe.ProviderGroq {
+		t.Errorf("LLMTurn provider = %q, want the injected groq label", turns[0])
+	}
+}
+
+// TestEngine_GenerateStream_RecordsOneLLMTurn pins that the streaming production
+// path records the SAME single LLMTurn span Generate does — the metric must not be
+// dropped by the streaming loop.
+func TestEngine_GenerateStream_RecordsOneLLMTurn(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled well, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.GenerateStream(context.Background(),
+		[]llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}},
+		func(string) error { return nil },
+	); err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+
+	if turns := rec.turnSpans(); len(turns) != 1 {
+		t.Fatalf("streaming recorded %d LLMTurn spans, want exactly 1", len(turns))
+	}
+}
+
+// TestEngine_LLMTurn_RecordsOnError pins that a turn whose loop fails still records
+// its LLMTurn span — the full-turn latency series must see failed turns too, not
+// just successful ones (otherwise a provider outage silently drops the samples).
+func TestEngine_LLMTurn_RecordsOnError(t *testing.T) {
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(errorEventProvider{}, tool.NewGrantSet(tool.NewRegistry()), "m", 0, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
+		t.Fatal("Generate on a failing provider returned nil error")
+	}
+	if turns := rec.turnSpans(); len(turns) != 1 {
+		t.Fatalf("recorded %d LLMTurn spans on the error path, want exactly 1", len(turns))
 	}
 }
 

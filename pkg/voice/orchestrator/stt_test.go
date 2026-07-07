@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
@@ -39,6 +40,86 @@ type hangingRecognizer struct{}
 func (hangingRecognizer) Transcribe(ctx context.Context, _ []audio.Frame) (stt.Transcript, error) {
 	<-ctx.Done()
 	return stt.Transcript{}, ctx.Err()
+}
+
+// errorRecognizer is a [stt.Recognizer] that always returns a non-nil error with
+// a live context — a provider-side failure (a 500, a bad request), distinct from
+// the hung-then-cancelled recognizer whose error is ctx-driven.
+type errorRecognizer struct{}
+
+func (errorRecognizer) Transcribe(context.Context, []audio.Frame) (stt.Transcript, error) {
+	return stt.Transcript{}, errors.New("scribe 500")
+}
+
+// TestSTT_Transcribe_RecordsProviderCallOutcomes pins the #125 provider-health
+// wiring on the batch STT stage: a successful Transcribe moves provider_calls with
+// outcome=ok and no provider_errors; a provider error moves outcome=error PLUS
+// provider_errors; a call that hangs past the per-request timeout moves
+// outcome=timeout PLUS provider_errors. In all three the stt_request round-trip
+// histogram still records (the regression guard — it must not be dropped by the
+// new counter wiring). Labels stay the bounded stt/elevenlabs enums (ADR-0032).
+func TestSTT_Transcribe_RecordsProviderCallOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		recognizer  stt.Recognizer
+		opts        []orchestrator.STTOption
+		wantOutcome observe.Outcome
+		wantErr     bool
+	}{
+		{
+			name:        "success",
+			recognizer:  stubRecognizer{transcript: stt.Transcript{Text: "roll a d20"}},
+			wantOutcome: observe.OutcomeOK,
+		},
+		{
+			name:        "provider error",
+			recognizer:  errorRecognizer{},
+			wantOutcome: observe.OutcomeError,
+			wantErr:     true,
+		},
+		{
+			name:        "hung past timeout",
+			recognizer:  hangingRecognizer{},
+			opts:        []orchestrator.STTOption{orchestrator.WithSTTTimeout(30 * time.Millisecond)},
+			wantOutcome: observe.OutcomeTimeout,
+			wantErr:     true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := voicetest.New(t)
+			spy := &metricsSpy{}
+			opts := append([]orchestrator.STTOption{
+				orchestrator.WithSTTMetrics(spy, observe.ProviderElevenLabs),
+			}, tc.opts...)
+			stage := orchestrator.NewSTT(h.Bus, tc.recognizer, opts...)
+
+			err := stage.Transcribe(context.Background(), []audio.Frame{})
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("Transcribe err = %v, wantErr = %v", err, tc.wantErr)
+			}
+
+			sttReqs, _, _, calls, errs := spy.snapshot()
+
+			// The round-trip histogram records on every path — success, error, timeout.
+			if len(sttReqs) != 1 || sttReqs[0] != observe.ProviderElevenLabs {
+				t.Errorf("stt_request recorded %v, want exactly one elevenlabs span", sttReqs)
+			}
+			if len(calls) != 1 {
+				t.Fatalf("provider_calls recorded %d times, want exactly 1", len(calls))
+			}
+			want := providerCall{stage: observe.StageSTT, provider: observe.ProviderElevenLabs, outcome: tc.wantOutcome}
+			if calls[0] != want {
+				t.Errorf("provider_call = %+v, want %+v", calls[0], want)
+			}
+			if tc.wantErr {
+				if len(errs) != 1 || errs[0] != (providerErr{stage: observe.StageSTT, provider: observe.ProviderElevenLabs}) {
+					t.Errorf("provider_errors = %+v, want one stt/elevenlabs error", errs)
+				}
+			} else if len(errs) != 0 {
+				t.Errorf("provider_errors = %+v, want none on the success path", errs)
+			}
+		})
+	}
 }
 
 // TestSTT_Transcribe_BoundsHungRecognizer pins the wedge fix: a recognizer call

@@ -608,7 +608,11 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// knowledge: a default build still constructs and runs, just deaf+mute.
 	// Living in the shared Run core, this audio path covers BOTH the hardcoded
 	// and the RunFromDB paths (RunFromDB resolves the NPC then delegates here).
-	cdc := codec.New()
+	//
+	// codec_decode / codec_encode (#125): the codec stamps the per-frame Opus<->PCM
+	// costs against cfg.StageMetrics. A nil StageMetrics (env-only) keeps the no-op
+	// default via WithMetrics; the stub build accepts and ignores the same option.
+	cdc := codec.New(codec.WithMetrics(cfg.StageMetrics))
 
 	// Outbound (speak): the PlaybackPump drives the codec's PlaybackSource onto
 	// the Session, one sentence at a time (Session.Play auto-interrupts, so
@@ -844,7 +848,12 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	cleanup := func() {
 		_ = vadSession.Close()
 	}
-	vadStage := orchestrator.NewVAD(bus, vadSession)
+	// vad_hangover (#125): the fixed end-of-speech detection lag is a constant the
+	// stage cannot read off the Silero session (vad.Session doesn't expose
+	// minSilenceFrames), so compute it here from the same consts the session is
+	// configured with — vadMinSilenceFrames*vadFrameMs (= 384 ms).
+	vadStage := orchestrator.NewVAD(bus, vadSession,
+		orchestrator.WithVADMetrics(stageMetrics, vadMinSilenceFrames*vadFrameMs*time.Millisecond))
 
 	// One recognizer instance backs both the batch stage and — when streaming is
 	// enabled and the adapter supports it — the stream manager (the ElevenLabs
@@ -852,7 +861,10 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	var recognizer stt.Recognizer = newSTT(keys.stt)
 	sttStage := orchestrator.NewSTT(bus, recognizer,
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs))
-	ttsStage := orchestrator.NewTTS(bus, synth)
+	// tts_total + tts-stage provider health (#125): ElevenLabs is the wired TTS
+	// provider (ADR-0039), so the spans are labelled elevenlabs.
+	ttsStage := orchestrator.NewTTS(bus, synth,
+		orchestrator.WithTTSMetrics(stageMetrics, observe.ProviderElevenLabs))
 	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
 
 	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each

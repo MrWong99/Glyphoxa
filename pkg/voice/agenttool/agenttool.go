@@ -194,6 +194,15 @@ type Engine struct {
 	// The zero value "" selects the English keyword set ([needsDice] maps it to
 	// "en") — the default when no Campaign Language is wired.
 	language string
+
+	// rec/provName carry the #125 full-turn instrumentation: one
+	// [observe.StageRecorder.LLMTurn] span per Generate/GenerateStream (the whole
+	// tool loop — all rounds + tool exec), distinct from the per-round LLMRound the
+	// adapter records. Recorded on the success AND error path so a failed turn's
+	// latency is still visible. Default no-ops (observe.Discard, empty provider
+	// label), so the keyless path stays silent.
+	rec      observe.StageRecorder
+	provName observe.Provider
 }
 
 // loopFor selects the loop for this turn: the full grants when the utterance
@@ -277,6 +286,8 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 		full:     newLoop(grants),
 		gated:    newLoop(grants.Without(diceToolName)),
 		language: cfg.language,
+		rec:      cfg.rec,
+		provName: cfg.provName,
 	}
 }
 
@@ -285,7 +296,12 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 // per-turn round counter into ctx so the adapter's LLMRound spans index from 0
 // for this turn and never share state with a concurrent turn (barge-in).
 func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
-	return e.loopFor(messages).Run(withRoundCounter(ctx), toToolMessages(messages))
+	start := time.Now()
+	out, err := e.loopFor(messages).Run(withRoundCounter(ctx), toToolMessages(messages))
+	// #125: one full-turn span per Generate, spanning every round, recorded on the
+	// success AND error path so a turn that fails mid-loop is still measured.
+	e.rec.LLMTurn(e.provName, time.Since(start))
+	return out, err
 }
 
 // GenerateStream implements [agent.StreamingEngine] (B1): it runs the same
@@ -295,7 +311,12 @@ func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, 
 // [Engine.Generate], so the A3 LLMRound / provider-call metrics are recorded
 // identically on the streaming production path. Returns the full final text.
 func (e *Engine) GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (string, error) {
-	return e.loopFor(messages).RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
+	start := time.Now()
+	out, err := e.loopFor(messages).RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
+	// #125: the streaming production path records the same one-per-turn LLMTurn span
+	// Generate does, on success and error alike.
+	e.rec.LLMTurn(e.provName, time.Since(start))
+	return out, err
 }
 
 // toToolMessages converts the agent loop's [llm.Message]s into [tool.Message]s.

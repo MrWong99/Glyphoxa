@@ -23,7 +23,27 @@
 // nil-check-free, matching pkg/voice's discardMetrics convention.
 package observe
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// CallOutcome classifies a provider call's terminal state from its error and the
+// call ctx, so the STT and TTS stages record [StageRecorder.ProviderCall] with
+// the same rule the agenttool adapter already applies: a nil err is [OutcomeOK];
+// a non-nil ctx error (a fired deadline or a barge/supersede cancel) is the
+// timeout-shaped [OutcomeTimeout] regardless of the returned err; any other error
+// is a vendor [OutcomeError]. Keeping the classification in one place means the
+// three provider stages agree on the outcome label.
+func CallOutcome(ctx context.Context, err error) Outcome {
+	if err == nil {
+		return OutcomeOK
+	}
+	if ctx.Err() != nil {
+		return OutcomeTimeout
+	}
+	return OutcomeError
+}
 
 // AgentRole is the bounded role label substituted for the unbounded agent_id /
 // guild on every stage histogram (ADR-0032 §2.1). Exactly two values reach a
@@ -146,36 +166,29 @@ type StageRecorder interface {
 
 	// VADHangover is the speech-end detection lag (minSilenceFrames*frameMs),
 	// a fixed per-turn cost B3 tunes. (glyphoxa_voice_vad_hangover_seconds)
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11). Defined so the
-	// /metrics surface is spec-complete (ADR-0032), but no caller invokes it yet;
-	// the histogram stays empty until the VAD/segmenter (orchestrator) stamps it.
-	// An empty series here is expected, not a fault.
+	// WIRED (#125) by the VAD stage: one span per VADSpeechEnd, the constant the
+	// stage is constructed with.
 	VADHangover(d time.Duration)
 	// AddressDetect is the address-detection stage duration.
 	// (glyphoxa_voice_address_detect_seconds) — WIRED by the bus subscriber.
 	AddressDetect(d time.Duration)
 	// CodecDecode / CodecEncode are the per-direction Opus<->PCM costs.
-	// (glyphoxa_voice_codec_decode_seconds / _codec_encode_seconds)
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the wire codec
-	// (pkg/voice/wire/codec) stamps these. Empty until then, expected.
+	// (glyphoxa_voice_codec_decode_seconds / _codec_encode_seconds) — WIRED (#125)
+	// by the wire codec: CodecDecode per inbound frame decoded, CodecEncode per
+	// outbound frame encoded (the enc.Encode section only, never the chunk wait).
 	CodecDecode(d time.Duration)
 	CodecEncode(d time.Duration)
 
 	// STTRequest is the STT provider POST round-trip.
-	// (glyphoxa_voice_stt_request_seconds{provider})
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the STT adapter
-	// (pkg/voice/stt/elevenlabs) stamps it. Empty until then, expected.
+	// (glyphoxa_voice_stt_request_seconds{provider}) — WIRED by the STT stage
+	// (batch Transcribe and the streamed commit path).
 	STTRequest(provider Provider, d time.Duration)
 	// TTSTimeToFirstByte is the Synthesize call → first AudioChunk span
 	// (glyphoxa_voice_tts_ttfb_seconds{provider}) — WIRED by the bus subscriber.
 	TTSTimeToFirstByte(provider Provider, d time.Duration)
 	// TTSTotal is the full synthesis. (glyphoxa_voice_tts_total_seconds{provider})
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the TTS stage/
-	// adapter stamps it. Empty until then, expected.
+	// WIRED (#125) by the TTS stage: one span per successful Dispatch (Synthesize
+	// call through the full audio-chunk drain).
 	TTSTotal(provider Provider, d time.Duration)
 
 	// LLMRound is one Provider.Complete round inside the agenttool loop. roundIndex
@@ -186,11 +199,9 @@ type StageRecorder interface {
 	// — WIRED by agenttool.providerAdapter.Generate.
 	LLMRound(provider Provider, roundIndex int, hadToolCall bool, d time.Duration)
 	// LLMTurn is the full agenttool loop (all rounds + tool exec) for the turn.
-	// (glyphoxa_voice_llm_turn_seconds{provider})
-	//
-	// RESERVED — emit-site not yet wired (carry-over task #11); the agenttool loop
-	// wrapper stamps the full-turn span (it currently records only per-round
-	// LLMRound). Empty until then, expected.
+	// (glyphoxa_voice_llm_turn_seconds{provider}) — WIRED (#125) by the agenttool
+	// Engine: one span per Generate/GenerateStream, spanning every round, recorded
+	// on the success AND error path so a failed turn's latency is still visible.
 	LLMTurn(provider Provider, d time.Duration)
 
 	// ProviderCall counts one vendor call at stage with its outcome; ProviderError
