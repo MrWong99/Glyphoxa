@@ -83,6 +83,12 @@ function mockBackend(
     // for a pasted invite (#105). inviteError makes it fail instead.
     inviteResolve?: { guildId: string; guildName: string; voiceChannels: { id: string; name: string }[] };
     inviteError?: { code: Code; message: string };
+    // inviteResolver, when set, computes the response PER code (and may return a
+    // pending promise a test releases later) so a test can force a slow resolve
+    // for one invite and a fast one for another — the stale-response race (#245).
+    inviteResolver?: (
+      code: string,
+    ) => Promise<{ guildId: string; guildName: string; voiceChannels: { id: string; name: string }[] }>;
     // inviteCodes captures every ResolveGuildInvite request's code so a test can
     // pin that the SPA sent the BARE code (not the full URL).
     inviteCodes?: string[];
@@ -174,10 +180,12 @@ function mockBackend(
           voiceChannelId: state.voiceChannelId,
         });
       },
-      resolveGuildInvite: (req) => {
+      resolveGuildInvite: async (req) => {
         opts.inviteCodes?.push(req.inviteCode);
         if (opts.inviteError) throw new ConnectError(opts.inviteError.message, opts.inviteError.code);
-        const r = opts.inviteResolve ?? { guildId: "111", guildName: "The Keep", voiceChannels: [] };
+        const r = opts.inviteResolver
+          ? await opts.inviteResolver(req.inviteCode)
+          : (opts.inviteResolve ?? { guildId: "111", guildName: "The Keep", voiceChannels: [] });
         return create(ResolveGuildInviteResponseSchema, r);
       },
       getSpendCaps: () =>
@@ -609,12 +617,99 @@ describe("Configuration invite picker (#105)", () => {
     // The server message renders VERBATIM — no-token vs not-a-member share the
     // FailedPrecondition code and differ only by this message.
     expect(await screen.findByText("the Bot is not a member of that server")).toBeInTheDocument();
-    // …plus the hint pointing back at the Add-Glyphoxa action above.
+    // …plus the hint pointing back at the Add-Glyphoxa action, which renders at
+    // the FOOT of the card (below the Save button) — the direction word must match.
+    expect(screen.getByText(/at the foot of this card/i)).toBeInTheDocument();
     expect(screen.getByText(/then paste the invite again/i)).toBeInTheDocument();
 
     // A failed resolve touches nothing the operator already had.
     expect((guild as HTMLInputElement).value).toBe("existing-guild");
     expect((screen.getByLabelText("Voice channel ID") as HTMLInputElement).value).toBe("");
+  });
+
+  it("renders a DISTINCT precondition message verbatim without the add-bot hint (no-token FP)", async () => {
+    // The no-token precondition shares FailedPrecondition with not-a-member but
+    // differs by message. Using a message distinct from the production not-a-member
+    // string pins that the SERVER text is rendered — a hardcoded client message
+    // dies here — and that the add-bot hint (apt only for not-a-member) is absent.
+    renderScreen(
+      mockBackend({
+        inviteError: { code: Code.FailedPrecondition, message: "save the Discord bot token first" },
+      }),
+    );
+
+    fireEvent.change(await screen.findByLabelText(/paste a discord link/i), {
+      target: { value: "discord.gg/abc123" },
+    });
+
+    expect(await screen.findByText("save the Discord bot token first")).toBeInTheDocument();
+    // The add-bot hint would be wrong guidance here (the token, not the Bot, is
+    // missing), so it must NOT append to this message.
+    expect(screen.queryByText(/then paste the invite again/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/at the foot of this card/i)).not.toBeInTheDocument();
+  });
+
+  it("debounces the invite resolve so typing fires a single resolve, not one per keystroke", async () => {
+    const inviteCodes: string[] = [];
+    renderScreen(
+      mockBackend({
+        inviteCodes,
+        inviteResolve: { guildId: "111", guildName: "The Keep", voiceChannels: [] },
+      }),
+    );
+
+    // Four change events in a burst (as if typing the code). Without a debounce
+    // each fires an authed GET /invites — three of them 404s that burn Discord's
+    // rate budget; with it, only the final value resolves, exactly once.
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    fireEvent.change(paste, { target: { value: "discord.gg/ab" } });
+    fireEvent.change(paste, { target: { value: "discord.gg/abc" } });
+    fireEvent.change(paste, { target: { value: "discord.gg/abcd" } });
+    fireEvent.change(paste, { target: { value: "discord.gg/abc123" } });
+
+    await waitFor(() => expect(inviteCodes).toEqual(["abc123"]));
+    // Let any wrongly-scheduled extra resolve fire — none does.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(inviteCodes).toEqual(["abc123"]);
+  });
+
+  it("ignores a late resolve for a superseded invite (latest-wins)", async () => {
+    // Paste invite A (slow), then invite B (fast). B's picker renders; A's LATE
+    // response must not swap it back — picking a channel then would fill the wrong
+    // guild's snowflake and Save would persist it.
+    let releaseA: (v: {
+      guildId: string;
+      guildName: string;
+      voiceChannels: { id: string; name: string }[];
+    }) => void = () => {};
+    const gateA = new Promise<{
+      guildId: string;
+      guildName: string;
+      voiceChannels: { id: string; name: string }[];
+    }>((res) => {
+      releaseA = res;
+    });
+    const inviteResolver = (code: string) =>
+      code === "slowaaa"
+        ? gateA
+        : Promise.resolve({ guildId: "222", guildName: "Guild B", voiceChannels: [] });
+
+    renderScreen(mockBackend({ inviteResolver }));
+
+    const paste = await screen.findByLabelText(/paste a discord link/i);
+    // A's debounce ticks and A's resolve goes in flight (gated open).
+    fireEvent.change(paste, { target: { value: "discord.gg/slowaaa" } });
+    await new Promise((r) => setTimeout(r, 500));
+
+    // B supersedes A and resolves immediately → B's picker wins.
+    fireEvent.change(paste, { target: { value: "discord.gg/fastbbb" } });
+    expect(await screen.findByText("Guild B")).toBeInTheDocument();
+
+    // A's slow resolve lands late — the guard drops it, the picker stays B.
+    releaseA({ guildId: "111", guildName: "Guild A", voiceChannels: [] });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByText("Guild B")).toBeInTheDocument();
+    expect(screen.queryByText("Guild A")).not.toBeInTheDocument();
   });
 
   it("surfaces an invalid/expired invite inline, leaving fields unchanged", async () => {
