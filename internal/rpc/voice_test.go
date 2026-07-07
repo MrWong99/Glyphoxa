@@ -779,6 +779,14 @@ func (stubProviderStore) SaveDiscordChannels(_ context.Context, _ uuid.UUID, gui
 	return storage.DeploymentConfig{GuildID: guildID, VoiceChannelID: voiceChannelID}, nil
 }
 
+func (stubProviderStore) GetTenantSpendCaps(context.Context, uuid.UUID) (storage.SpendCaps, error) {
+	return storage.SpendCaps{}, nil
+}
+
+func (stubProviderStore) SetTenantSpendCaps(context.Context, uuid.UUID, storage.SpendCaps) error {
+	return nil
+}
+
 // ptr returns a pointer to v, for proto3 optional scalar fields.
 func ptr[T any](v T) *T { return &v }
 

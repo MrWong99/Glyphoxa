@@ -88,6 +88,12 @@ function connectionLabel(state: string | undefined): string | null {
   }
 }
 
+// formatUsd renders a USD estimate as $X.XX (#130). Always paired with an
+// "(estimated)" label at the call site — it is an approximate figure, not a bill.
+function formatUsd(usd: number): string {
+  return `$${usd.toFixed(2)}`;
+}
+
 // lastSummary renders the idle "Last session ended …" line from an ended session.
 function lastSummary(session: VoiceSession): string {
   const endedMs = tsMs(session.endedAt);
@@ -114,6 +120,13 @@ export function Session() {
 
   const active = data?.active ?? false;
   const session = data?.session;
+
+  // Spend-cap-reached state (#130, ADR-0046): the live reload truth is GetSession
+  // (spend_cap_state + estimated_spend_usd); the SSE "spendcap" frame patches the
+  // same cache so it appears without waiting for the interval refetch. Every
+  // surfaced figure is labelled an ESTIMATE.
+  const spendCapState = active ? data?.spendCapState : undefined;
+  const estimatedSpendUsd = data?.estimatedSpendUsd ?? 0;
 
   const invalidate = () =>
     queryClient.invalidateQueries({
@@ -240,6 +253,15 @@ export function Session() {
       {failed && (
         <div className="gx-session__failed" role="alert" data-testid="connection-failed">
           {failureReason ? `Voice connection failed: ${failureReason}` : "Voice connection failed."}
+        </div>
+      )}
+
+      {(spendCapState === "soft" || spendCapState === "hard") && (
+        <div className="gx-session__spendcap" role="alert" data-testid="spend-cap">
+          {spendCapState === "hard"
+            ? "Hard spend cap reached — the session is ending."
+            : "Soft spend cap reached — no new Agent turns (in-flight replies finish)."}{" "}
+          Estimated spend {formatUsd(estimatedSpendUsd)} (estimated).
         </div>
       )}
 

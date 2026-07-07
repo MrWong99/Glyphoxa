@@ -479,6 +479,14 @@ type Replier struct {
 	// TTS, no transcript line, and it can never supersede whoever holds the floor
 	// (AC3). Set only via the orchestrator wiring; not part of [NewReplier].
 	mutes MuteView
+
+	// gate, when non-nil, is the live turn gate (#130, [WithTurnGate]): once the
+	// session's estimated spend crosses the soft cap it refuses a NEW turn before
+	// the floor is taken — exactly like a muted route, but for the whole session. A
+	// SINGLE pre-check suffices (spend is monotonic, so no post-Take re-check like
+	// the mute race closure). Set only via the orchestrator wiring; not part of
+	// [NewReplier].
+	gate TurnGate
 }
 
 // NewReplier wires ttsStage and reply together. Both must be non-nil; passing
@@ -551,6 +559,17 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 		// the metrics subscriber records the precise cause.
 		if r.mutes != nil && r.mutes.Muted(e.Target.AgentID) {
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndMute})
+			return
+		}
+		// Spend soft cap (#130, AC3): once the session's estimated spend crosses the
+		// soft cap the gate refuses a NEW turn — discard the route BEFORE taking the
+		// floor, so no floor churn, no LLM call, no TTS, no transcript line, and it
+		// never supersedes whoever holds the floor. A SINGLE pre-check is airtight:
+		// spend is monotonic, so unlike mute the gate can never flip back to allowed
+		// between here and the Take. Announce a spend_cap-reason TurnEnded for the
+		// routed TurnID so the metrics subscriber records the precise cause.
+		if r.gate != nil && !r.gate.AllowTurn() {
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndSpendCap})
 			return
 		}
 		// Barge-in: take the floor and run the turn on its own goroutine so the

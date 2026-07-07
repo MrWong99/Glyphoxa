@@ -51,6 +51,14 @@ func (f *fakeInviteStore) SaveDiscordChannels(context.Context, uuid.UUID, string
 	return storage.DeploymentConfig{}, nil
 }
 
+func (f *fakeInviteStore) GetTenantSpendCaps(context.Context, uuid.UUID) (storage.SpendCaps, error) {
+	return storage.SpendCaps{}, nil
+}
+
+func (f *fakeInviteStore) SetTenantSpendCaps(context.Context, uuid.UUID, storage.SpendCaps) error {
+	return nil
+}
+
 // savedInviteStore builds a store holding a real Bot token sealed under a fresh
 // cipher, returning both so the test decrypts the token the handler passes to
 // the seam.

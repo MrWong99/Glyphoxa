@@ -315,6 +315,8 @@ func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string
 		return TurnAbandoned, ReasonBarge, "abandoned"
 	case voiceevent.TurnEndMute:
 		return TurnAbandoned, ReasonMute, "abandoned"
+	case voiceevent.TurnEndSpendCap:
+		return TurnAbandoned, ReasonSpendCap, "abandoned"
 	case voiceevent.TurnEndTTSError:
 		return TurnAbandoned, ReasonTTSError, "abandoned"
 	case voiceevent.TurnEndProviderError:

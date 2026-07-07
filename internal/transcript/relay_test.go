@@ -134,6 +134,37 @@ func TestProjection_MuteFrame(t *testing.T) {
 	}
 }
 
+// TestProjection_SpendCapFrame pins the spend-cap relay (#130): a SpendCapReached
+// projects a "spendcap" frame carrying the level, the frame rides the ring for a
+// Last-Event-ID reconnect, and it does NOT change the transcript snapshot lines
+// (the reload truth is GetSession).
+func TestProjection_SpendCapFrame(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+
+	bus.Publish(voiceevent.SpendCapReached{At: at(1), Level: voiceevent.SpendCapSoft})
+	bus.Publish(voiceevent.SpendCapReached{At: at(2), Level: voiceevent.SpendCapHard})
+
+	frames := r.Frames(id, 0)
+	var levels []string
+	for _, f := range frames {
+		if f.Event != "spendcap" {
+			continue
+		}
+		var p spendcapFrame
+		if err := json.Unmarshal(f.Data, &p); err != nil {
+			t.Fatalf("spendcap frame payload: %v", err)
+		}
+		levels = append(levels, p.Level)
+	}
+	if len(levels) != 2 || levels[0] != "soft" || levels[1] != "hard" {
+		t.Fatalf("spendcap frame levels = %v, want [soft hard]", levels)
+	}
+
+	if v := r.View(id); len(v.Lines) != 0 {
+		t.Fatalf("spendcap frame added %d transcript lines, want 0 (reload truth is GetSession)", len(v.Lines))
+	}
+}
+
 // connFrame is the decoded payload of a "connection" SSE frame.
 type connFrame struct {
 	State  string `json:"state"`

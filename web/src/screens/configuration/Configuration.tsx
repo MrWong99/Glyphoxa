@@ -230,14 +230,100 @@ export function Configuration() {
         </div>
       </Card>
 
-      {/* Session defaults — inert placeholders ("coming soon") */}
-      <h2 className="gx-section-title">Session defaults</h2>
-      <Card>
-        <div className="gx-defaults__body">
-          <span className="gx-coming-soon">Coming soon</span>
-        </div>
-      </Card>
+      {/* Per-session spend caps (#130, ADR-0046) */}
+      <h2 className="gx-section-title">Spend caps</h2>
+      <SpendCapsCard />
     </div>
+  );
+}
+
+// SpendCapsCard is the minimal soft/hard per-session spend-cap editor (#130,
+// ADR-0046): two USD inputs, blank = that cap unset. A soft cap refuses new Agent
+// turns once estimated spend crosses it (in-flight replies finish); a hard cap ends
+// the session. Both figures are ESTIMATES. The server validates (negative or
+// hard < soft => rejected) and caps snapshot at the NEXT session start. The `dirty`
+// ref guards the seed so a slow load / post-save refetch can't clobber typing.
+function SpendCapsCard() {
+  const queryClient = useQueryClient();
+  const capsQuery = useQuery(ProviderService.method.getSpendCaps, {});
+  const invalidate = () =>
+    queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({ schema: ProviderService.method.getSpendCaps, cardinality: "finite" }),
+    });
+  const save = useMutation(ProviderService.method.setSpendCaps, { onSuccess: invalidate });
+
+  const [soft, setSoft] = useState("");
+  const [hard, setHard] = useState("");
+  const dirty = useRef(false);
+  useEffect(() => {
+    if (capsQuery.data && !dirty.current) {
+      const caps = capsQuery.data.caps;
+      setSoft(caps?.softUsd != null ? String(caps.softUsd) : "");
+      setHard(caps?.hardUsd != null ? String(caps.hardUsd) : "");
+    }
+  }, [capsQuery.data]);
+  const editSoft = (v: string) => {
+    dirty.current = true;
+    setSoft(v);
+  };
+  const editHard = (v: string) => {
+    dirty.current = true;
+    setHard(v);
+  };
+
+  // A blank field is "unset" (omit it, presence-absent → clear); anything else is
+  // sent as-is and the server enforces non-negative + hard >= soft.
+  const parse = (v: string): number | undefined => {
+    const t = v.trim();
+    return t === "" ? undefined : Number(t);
+  };
+
+  return (
+    <Card>
+      <div className="gx-spendcaps">
+        <p className="gx-spendcaps__lede">
+          Stop a Voice Session when its estimated provider spend crosses a limit. Figures are estimates,
+          not billed amounts. Leave a field blank to disable that cap; changes apply to the next session.
+        </p>
+        <div className="gx-spendcaps__inputs">
+          <Input
+            label="Soft cap (USD)"
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="e.g. 5.00"
+            hint="No new Agent turns once crossed; in-flight replies finish."
+            value={soft}
+            onChange={(e) => editSoft(e.target.value)}
+          />
+          <Input
+            label="Hard cap (USD)"
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="e.g. 10.00"
+            hint="Ends the session cleanly. Must be ≥ the soft cap."
+            value={hard}
+            onChange={(e) => editHard(e.target.value)}
+          />
+        </div>
+        <div className="gx-spendcaps__save">
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={save.isPending}
+            onClick={() => save.mutate({ softUsd: parse(soft), hardUsd: parse(hard) })}
+          >
+            Save spend caps
+          </Button>
+          {save.isError && (
+            <span className="gx-spendcaps__error" role="alert">
+              Couldn&apos;t save: {save.error.message}
+            </span>
+          )}
+        </div>
+      </div>
+    </Card>
   );
 }
 

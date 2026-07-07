@@ -163,6 +163,10 @@ const (
 	// ReasonBarge (human interruption), so a mute does not collapse into
 	// no_first_audio.
 	ReasonMute TurnReason = "mute"
+	// ReasonSpendCap: the session's estimated spend crossed the soft cap, so the
+	// replier refused this NEW turn before it opened (#130) — a deliberate policy
+	// stop, distinct from a fault or a barge.
+	ReasonSpendCap TurnReason = "spend_cap"
 )
 
 // StageRecorder records the orchestrator's per-stage / per-turn latency

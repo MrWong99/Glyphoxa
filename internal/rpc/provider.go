@@ -42,6 +42,10 @@ type providerStore interface {
 	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 	SaveDiscordBotToken(ctx context.Context, tenantID uuid.UUID, ciphertext []byte, last4 string) (storage.DeploymentConfig, error)
 	SaveDiscordChannels(ctx context.Context, tenantID uuid.UUID, guildID, voiceChannelID string) (storage.DeploymentConfig, error)
+	// GetTenantSpendCaps / SetTenantSpendCaps back the per-Tenant spend caps
+	// Configuration surface (#130, ADR-0046).
+	GetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID) (storage.SpendCaps, error)
+	SetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID, caps storage.SpendCaps) error
 }
 
 // byokSlot is one Bring-Your-Own-Key provider the Configuration screen saves. A
@@ -463,6 +467,69 @@ func (s *ProviderServer) ResolveGuildInvite(
 		GuildName:     resolved.Guild.Name,
 		VoiceChannels: channels,
 	}), nil
+}
+
+// GetSpendCaps returns the operator's two per-Tenant spend caps (#130, ADR-0046),
+// each absent when unset. A missing tenant row is the no-caps default (both unset),
+// not an error. A read (NO_SIDE_EFFECTS).
+func (s *ProviderServer) GetSpendCaps(
+	ctx context.Context,
+	_ *connect.Request[managementv1.GetSpendCapsRequest],
+) (*connect.Response[managementv1.GetSpendCapsResponse], error) {
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	caps, err := s.store.GetTenantSpendCaps(ctx, tenantID)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		s.log.Error("GetSpendCaps: store read failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return connect.NewResponse(&managementv1.GetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
+}
+
+// SetSpendCaps stores the operator's two per-Tenant spend caps (#130). An omitted
+// field clears that cap; a negative value is InvalidArgument, and both-set requires
+// hard >= soft (InvalidArgument). Caps snapshot at the NEXT Voice Session start.
+func (s *ProviderServer) SetSpendCaps(
+	ctx context.Context,
+	req *connect.Request[managementv1.SetSpendCapsRequest],
+) (*connect.Response[managementv1.SetSpendCapsResponse], error) {
+	tenantID, err := s.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var caps storage.SpendCaps
+	if v := req.Msg.SoftUsd; v != nil {
+		if *v < 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("soft cap must not be negative"))
+		}
+		soft := *v
+		caps.SoftUSD = &soft
+	}
+	if v := req.Msg.HardUsd; v != nil {
+		if *v < 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("hard cap must not be negative"))
+		}
+		hard := *v
+		caps.HardUSD = &hard
+	}
+	if caps.SoftUSD != nil && caps.HardUSD != nil && *caps.HardUSD < *caps.SoftUSD {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("hard cap must be greater than or equal to the soft cap"))
+	}
+
+	if err := s.store.SetTenantSpendCaps(ctx, tenantID, caps); err != nil {
+		s.log.Error("SetSpendCaps: store write failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return connect.NewResponse(&managementv1.SetSpendCapsResponse{Caps: toProtoSpendCaps(caps)}), nil
+}
+
+// toProtoSpendCaps maps storage caps onto the wire view: a nil pointer stays absent
+// (no presence), so the screen distinguishes "unset" from "0".
+func toProtoSpendCaps(c storage.SpendCaps) *managementv1.SpendCaps {
+	return &managementv1.SpendCaps{SoftUsd: c.SoftUSD, HardUsd: c.HardUSD}
 }
 
 // resolveBotToken resolves the deployment Bot token for ResolveGuildInvite,

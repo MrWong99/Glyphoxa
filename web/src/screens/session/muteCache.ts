@@ -49,5 +49,18 @@ export function useMuteCache() {
     [queryClient, key],
   );
 
-  return { replace, patchOne };
+  // patchSpendCap flips the live spend-cap state on the same getSession cache from
+  // an SSE "spendcap" frame (#130), so the Session screen shows the
+  // spend-cap-reached state instantly. The interval getSession refetch reconciles
+  // the exact state AND the estimated_spend_usd figure the frame does not carry, so
+  // this is an instant-update optimisation over the authoritative reload truth.
+  const patchSpendCap = useCallback(
+    (level: string) =>
+      queryClient.setQueryData<GetSessionResponse>(key, (prev) =>
+        prev ? { ...prev, spendCapState: level } : prev,
+      ),
+    [queryClient, key],
+  );
+
+  return { replace, patchOne, patchSpendCap };
 }

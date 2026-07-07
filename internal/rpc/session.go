@@ -15,6 +15,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/session"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -33,6 +34,10 @@ type SessionManager interface {
 	SetAllMute(ctx context.Context, muted bool) ([]string, error)
 	// MutedAgentIDs is the reload truth (AC5): the muted set while active, nil idle.
 	MutedAgentIDs() []string
+	// Spend snapshots the active session's spend meter (#130, ADR-0046): estimated
+	// USD + cap state, the reload truth for the Session screen's spend-cap badge. The
+	// zero Status when idle or no caps are configured.
+	Spend() spend.Status
 }
 
 // SessionStore is the narrow storage surface SessionServer needs: the operator's
@@ -95,10 +100,15 @@ func (s *SessionServer) GetSession(
 	_ *connect.Request[managementv1.GetSessionRequest],
 ) (*connect.Response[managementv1.GetSessionResponse], error) {
 	if vs, active := s.mgr.Snapshot(); active {
+		// Spend-cap reload truth while live (#130): the badge reads the meter state +
+		// estimated spend the same way muted_agent_ids reads the mute set (AC5).
+		sp := s.mgr.Spend()
 		return connect.NewResponse(&managementv1.GetSessionResponse{
-			Session:       toProtoVoiceSession(vs),
-			Active:        true,
-			MutedAgentIds: s.mgr.MutedAgentIDs(), // reload truth while live (AC5)
+			Session:           toProtoVoiceSession(vs),
+			Active:            true,
+			MutedAgentIds:     s.mgr.MutedAgentIDs(), // reload truth while live (AC5)
+			SpendCapState:     string(sp.State),
+			EstimatedSpendUsd: sp.EstimatedUSD,
 		}), nil
 	}
 

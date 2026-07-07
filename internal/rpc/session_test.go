@@ -17,6 +17,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/session"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -30,8 +31,9 @@ type fakeSessionManager struct {
 	stopErr          error
 	startCalls       int
 	muted            map[string]struct{}
-	rosterIDs        []string // ids SetAllMute mutes (the campaign roster the real Manager lists)
-	campaignAgentIDs []string // ids SetAgentMute accepts; others → ErrAgentNotInCampaign (Manager validates now)
+	rosterIDs        []string     // ids SetAllMute mutes (the campaign roster the real Manager lists)
+	campaignAgentIDs []string     // ids SetAgentMute accepts; others → ErrAgentNotInCampaign (Manager validates now)
+	spend            spend.Status // the live meter snapshot GetSession surfaces (#130)
 }
 
 func (f *fakeSessionManager) Start(_ context.Context, _, campaignID uuid.UUID) (storage.VoiceSession, error) {
@@ -129,6 +131,12 @@ func (f *fakeSessionManager) MutedAgentIDs() []string {
 		return nil
 	}
 	return f.mutedIDsLocked()
+}
+
+func (f *fakeSessionManager) Spend() spend.Status {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spend
 }
 
 func (f *fakeSessionManager) mutedIDsLocked() []string {

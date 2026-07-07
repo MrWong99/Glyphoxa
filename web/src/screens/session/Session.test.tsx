@@ -709,3 +709,77 @@ describe("Session transcript search (#120)", () => {
     );
   });
 });
+
+// spendCapTransport reports a live session whose spend meter has crossed a cap,
+// so GetSession carries the spend-cap state + estimated spend (#130).
+function spendCapTransport(state: string, estimatedSpendUsd: number) {
+  const current = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "running",
+    startedAt: timestampFromDate(new Date()),
+  });
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () =>
+        create(GetSessionResponseSchema, {
+          session: current,
+          active: true,
+          spendCapState: state,
+          estimatedSpendUsd,
+        }),
+      startSession: () => create(StartSessionResponseSchema, { session: current }),
+      stopSession: () => create(StopSessionResponseSchema, { session: current }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session spend cap (#130)", () => {
+  beforeEach(() => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ lines: [], status: "live", typing: { active: true, label: "Listening to the table…" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+  });
+
+  it("renders the soft spend-cap badge with the estimated spend, labelled estimated", async () => {
+    render(
+      <Providers transport={spendCapTransport("soft", 3.21)} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    const badge = await screen.findByTestId("spend-cap");
+    expect(badge).toHaveTextContent(/soft spend cap reached/i);
+    expect(badge).toHaveTextContent(/no new agent turns/i);
+    expect(badge).toHaveTextContent("$3.21");
+    expect(badge).toHaveTextContent(/estimated/i);
+  });
+
+  it("renders the hard spend-cap badge when the hard cap is crossed", async () => {
+    render(
+      <Providers transport={spendCapTransport("hard", 10)} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    const badge = await screen.findByTestId("spend-cap");
+    expect(badge).toHaveTextContent(/hard spend cap reached/i);
+    expect(badge).toHaveTextContent("$10.00");
+  });
+
+  it("shows no spend-cap badge when no cap is crossed", async () => {
+    render(
+      <Providers transport={spendCapTransport("", 1.5)} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+    expect(screen.queryByTestId("spend-cap")).not.toBeInTheDocument();
+  });
+});
