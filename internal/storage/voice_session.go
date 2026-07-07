@@ -41,24 +41,35 @@ func (s *Store) CreateVoiceSession(ctx context.Context, campaignID uuid.UUID) (V
 	return v, nil
 }
 
-// EndVoiceSession closes a running Voice Session: it sets ended_at=now(),
-// status='ended' and the final line_count, returning the updated row. A missing
-// id yields ErrNotFound.
-func (s *Store) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (VoiceSession, error) {
+// CloseVoiceSession closes a running Voice Session with an explicit terminal
+// status and end_reason: it sets ended_at=now(), status, the final line_count, and
+// end_reason (NULL when endReason is nil), returning the updated row. A missing id
+// yields ErrNotFound. It is the single terminal-write seam (#123): [EndVoiceSession]
+// delegates to it for a clean stop ('ended', NULL reason), and the session Manager
+// calls it directly with 'failed' + the readable cause on a fatal gateway rejection.
+func (s *Store) CloseVoiceSession(ctx context.Context, id uuid.UUID, status VoiceSessionStatus, lineCount int, endReason *string) (VoiceSession, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE voice_sessions
-		    SET ended_at = now(), status = $2, line_count = $3
+		    SET ended_at = now(), status = $2, line_count = $3, end_reason = $4
 		  WHERE id = $1
 		 RETURNING `+voiceSessionColumns,
-		id, VoiceSessionEnded, lineCount)
+		id, status, lineCount, endReason)
 	v, err := scanVoiceSession(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return VoiceSession{}, ErrNotFound
 	}
 	if err != nil {
-		return VoiceSession{}, fmt.Errorf("storage: end voice session %s: %w", id, err)
+		return VoiceSession{}, fmt.Errorf("storage: close voice session %s: %w", id, err)
 	}
 	return v, nil
+}
+
+// EndVoiceSession closes a running Voice Session cleanly: status='ended' with a
+// NULL end_reason and the final line_count, returning the updated row. A missing
+// id yields ErrNotFound. It is a thin wrapper over [CloseVoiceSession] — the
+// clean-stop path that leaves end_reason NULL (distinct from orphaned/failed).
+func (s *Store) EndVoiceSession(ctx context.Context, id uuid.UUID, lineCount int) (VoiceSession, error) {
+	return s.CloseVoiceSession(ctx, id, VoiceSessionEnded, lineCount, nil)
 }
 
 // ReconcileOrphanedVoiceSessions closes every Voice Session row still marked
