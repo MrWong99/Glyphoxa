@@ -37,6 +37,14 @@ type campaignStore interface {
 	// than the profile default. UpdateAgent also uses it to read the owning
 	// campaign's language for a first-save voice default (#224).
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	// ListCampaigns/CreateCampaign/UpdateCampaign/SetActiveCampaign back the
+	// campaign management RPCs (#264): the name-ordered picker list, the tenant-
+	// scoped create (auto-Butler fires), the opaque name/system/language write, and
+	// the durable /glyphoxa use selection shared with the slash-command surface.
+	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	CreateCampaign(ctx context.Context, c storage.NewCampaign) (uuid.UUID, error)
+	UpdateCampaign(ctx context.Context, c storage.CampaignUpdate) (storage.Campaign, error)
+	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)

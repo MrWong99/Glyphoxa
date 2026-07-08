@@ -46,6 +46,22 @@ func (f fakeReader) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, e
 	return f.campaign, f.err
 }
 
+// The campaign management half of campaignStore (#264) is unused by the
+// GetActiveCampaign tests; stub it so fakeReader still satisfies the widened
+// interface. The management handlers exercise it via fakeCampaignStore.
+func (fakeReader) ListCampaigns(context.Context) ([]storage.Campaign, error) {
+	return nil, nil
+}
+func (fakeReader) CreateCampaign(context.Context, storage.NewCampaign) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+func (fakeReader) UpdateCampaign(context.Context, storage.CampaignUpdate) (storage.Campaign, error) {
+	return storage.Campaign{}, nil
+}
+func (fakeReader) SetActiveCampaign(context.Context, string, uuid.UUID) error {
+	return nil
+}
+
 // The roster + CRUD half of campaignStore is unused by the GetActiveCampaign
 // tests; stub it so fakeReader still satisfies the widened interface. The CRUD
 // handlers have their own fake (campaign_crud_test.go).

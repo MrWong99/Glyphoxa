@@ -182,3 +182,41 @@ func TestListAndGetCampaign(t *testing.T) {
 		t.Errorf("GetCampaign(random) = %v, want ErrNotFound", err)
 	}
 }
+
+// TestUpdateCampaign covers the #264 write against a real Postgres: name/system/
+// language are written verbatim (opaque free-text), updated_at is bumped, and an
+// unknown id is ErrNotFound.
+func TestUpdateCampaign(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, first := seedCampaign(t, dsn) // seeded: name "Lost Mine", system dnd5e, language en
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	before, err := st.GetCampaign(ctx, first)
+	if err != nil {
+		t.Fatalf("GetCampaign(before): %v", err)
+	}
+
+	updated, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{
+		ID: first, Name: "Renamed Quest", System: "Homebrew: 3d6 ⚔️", Language: "Draconic (made up)",
+	})
+	if err != nil {
+		t.Fatalf("UpdateCampaign: %v", err)
+	}
+	if updated.Name != "Renamed Quest" || updated.System != "Homebrew: 3d6 ⚔️" || updated.Language != "Draconic (made up)" {
+		t.Errorf("update did not write the opaque fields verbatim: %+v", updated)
+	}
+	if !updated.UpdatedAt.After(before.UpdatedAt) {
+		t.Errorf("updated_at not bumped: before %v, after %v", before.UpdatedAt, updated.UpdatedAt)
+	}
+	// The write persists — a fresh read reflects it.
+	reread, err := st.GetCampaign(ctx, first)
+	if err != nil || reread.Name != "Renamed Quest" || reread.System != "Homebrew: 3d6 ⚔️" {
+		t.Errorf("re-read after update = %+v, %v", reread, err)
+	}
+
+	// An unknown id is ErrNotFound (the RPC layer maps it to CodeNotFound).
+	if _, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{ID: uuid.New(), Name: "x"}); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("UpdateCampaign(random) = %v, want ErrNotFound", err)
+	}
+}

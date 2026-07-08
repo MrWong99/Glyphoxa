@@ -49,6 +49,40 @@ func (s *Store) CreateCampaign(ctx context.Context, c NewCampaign) (uuid.UUID, e
 	return id, nil
 }
 
+// CampaignUpdate is the input to UpdateCampaign. It carries the operator-editable
+// fields only — name/system/language; tenant_id, gm_member_id and the timestamps
+// are not settable here. System/Language are written verbatim as opaque free-text
+// strings (no validation at this layer), mirroring how they are stored on create.
+type CampaignUpdate struct {
+	ID       uuid.UUID
+	Name     string
+	System   string
+	Language string
+}
+
+// UpdateCampaign writes a campaign's name/system/language and bumps updated_at,
+// returning the updated row. A missing id yields ErrNotFound (the RPC layer maps
+// it to Connect CodeNotFound).
+func (s *Store) UpdateCampaign(ctx context.Context, c CampaignUpdate) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`UPDATE campaign SET
+		    name = $2,
+		    system = $3,
+		    language = $4,
+		    updated_at = now()
+		  WHERE id = $1
+		 RETURNING `+campaignColumns,
+		c.ID, c.Name, c.System, c.Language)
+	updated, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: update campaign %s: %w", c.ID, err)
+	}
+	return updated, nil
+}
+
 // NewProviderConfig is the input to CreateProviderConfig. CredentialsCiphertext
 // is the AES-GCM-sealed credential (see internal/storage/crypto); for the
 // self-host voice path the real key lives in the OS keyring and this carries a
