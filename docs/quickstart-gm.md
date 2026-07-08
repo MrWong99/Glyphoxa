@@ -55,10 +55,19 @@ Commands** and cannot join voice. Note that the shipped binary's `-mode` flag
 `migrate up` needs `$GLYPHOXA_DATABASE_URL` (or `$DATABASE_URL`). `seed`
 additionally needs `$GLYPHOXA_SECRET`, and fails loudly without it.
 
-`seed` is optional: if you skip it, the console's first-run flow offers **Create
-your first campaign** on the Configuration screen, which mints the Campaign and
-its **Butler** for you. Seeding just gives you a Campaign and one Character NPC
-to talk to immediately.
+> **`seed` is mandatory if you want voice in this build.** The voice loop does not
+> load the Active Campaign's roster — it hardcodes the seeded demo Tenant
+> **Glyphoxa Demo** and its Campaign **The Prancing Pony**
+> (`internal/wirenpc/agentspec.go`). Skip the seed, create your own Campaign in
+> the console, press **Start session**, and you get
+> `wirenpc: load NPCs: find tenant: … not found` plus a **Failed** badge.
+>
+> Consequence: **the voiced roster is always the seeded Campaign's Character
+> NPCs**, whichever Campaign the console calls Active. See §5a.
+
+The console *does* offer **Create your first campaign** on the Configuration
+screen when no Campaign exists yet (it mints the Campaign and its **Butler**).
+That path is real for the web tier; it is not enough for voice.
 
 ### First login is allowlist-gated
 
@@ -226,6 +235,15 @@ The roster lists the **Butler** first (gold badge, role locked, cannot be delete
 — exactly one per Campaign) then every **Character NPC**. **+ Add NPC** creates
 one named *New NPC* and selects it.
 
+> **The Butler does not speak in this build.** It is a placeholder row: required
+> and undeletable ([ADR-0009](adr/0009-single-agent-table-auto-butler.md)),
+> editable here — and never loaded into a Voice Session. The voice loop's roster
+> is Character NPCs only (`agent_role = 'character'`), so the Butler is never
+> registered for **Address Detection** and has no voice. Naming it out loud does
+> nothing. `/roll` is answered by the built-in `dice` Tool directly, not by the
+> Butler reasoning about it. Everything below about the Butler is about a row you
+> can edit, not an Agent you can talk to.
+
 The editor pane on the right holds:
 
 - **Name** and **Title** — the Title is a subtitle ("the innkeeper"). The Name is
@@ -238,10 +256,11 @@ The editor pane on the right holds:
   preview prints `Couldn't preview: …` inline (usually a missing or Degraded
   ElevenLabs key). With no catalog the dropdown still shows the NPC's persisted
   voice id, so a degraded TTS never wedges the screen.
-- **Address only — waits to be named** — when on, this NPC replies only when
-  addressed by name; it is excluded from Address Detection's last-speaker and
-  single-NPC fallbacks. The Butler is *always* Address-Only: its switch is forced
-  on and disabled.
+- **Address only — waits to be named** — when on, this Character NPC replies only
+  when addressed by name; it is excluded from Address Detection's last-speaker and
+  single-NPC fallbacks. The Butler's switch is forced on and disabled — but that
+  is bookkeeping, not behaviour: the Butler is in no roster, so naming it gets no
+  reply either way.
 - **Tools** — the **Tool Grant** toggles. One row per built-in Tool the server
   exposes (today: `dice`). Granting a Tool is what lets that Agent invoke it. A
   Tool that supports per-grant scoping also shows a raw-JSON scope field with a
@@ -263,15 +282,21 @@ Switch to **Knowledge**. An "entry" here is a **Node** of the Campaign's
 Create one with the editor card on the right: **Type**, **Name**, **Content**, and
 the **GM private** switch. Seven Node types:
 
-`Character` · `NPC` · `Location` · `Faction` · `Item` · `PlotThread` · `Note`
+`Character` · `NPC` · `Location` · `Faction` · `Item` · `Plot thread` · `Note`
 
 **The type is chosen once, on create, and is immutable** — the select is disabled
 when editing an existing entry.
 
-- **Public entries are injected into NPC prompts.** That is how an NPC knows the
-  tavern's name.
+- **A public entry reaches an NPC's prompt only through that NPC's Voiced-by
+  Node.** The facts an Agent gets are its own linked Node (see below) plus that
+  Node's one-hop Edge neighbours, capped, non-`gm_private` only. **An Agent with
+  no linked Node gets no Knowledge Graph facts at all** — there is no campaign-wide
+  fallback. So: to make an NPC know the tavern's name, give the NPC a Node, link
+  it with **Voiced by**, and connect it to the tavern's Node with an Edge.
 - **GM private entries never enter an NPC's prompt** and never reach the table.
-  They stay searchable for you, and carry a **GM private** badge in the list.
+  They stay searchable for you, and carry a **GM private** badge in the list. (A
+  `gm_private` Node is still traversed for its Edges — its neighbours can surface;
+  its own content never does.)
 
 The list groups entries by type and has a full-text **search** box (names and
 content).
@@ -288,8 +313,10 @@ Node to one of the Campaign's Character NPC Agents. The link is how an Agent fin
 perfectly normal, and so is an Agent with no Node.
 
 Deleting an entry is a hard delete and **cascades to every Edge that touches it**.
-The confirm dialog counts those relationships first and refuses to enable the
-confirm button until the count has landed.
+The confirm dialog counts those relationships first and keeps the confirm button
+disabled while the count is in flight. If the count *fails*, the button enables
+anyway and the dialog says the relationships couldn't be counted — the delete
+still cascades server-side.
 
 ---
 
@@ -316,6 +343,13 @@ order: the live Voice Session's Campaign → your durable `/glyphoxa use` select
 → *fail* with a message telling you to run `/glyphoxa use`. There is no
 most-recently-created fallback on the Slash Command surface.
 
+> **The Active Campaign does not choose who speaks — yet.** It binds the
+> `voice_sessions` row, the Transcript, and the mute rail. The *voiced roster* is
+> always the seeded **Glyphoxa Demo** / **The Prancing Pony** Campaign (§1). With
+> two Campaigns you hear the seed Campaign's NPCs while every console surface
+> names the other one — and that Campaign's per-row mute toggles then have nothing
+> to mute. Run your table on the seeded Campaign until this is fixed.
+
 The status badge reads **Idle**, **Live** (with a **Connecting…** → **Connected**
 sub-label while the gateway comes up) or **Failed** (with the reason). Beside it,
 an `HH:MM:SS` elapsed timer. When a Voice Session ends the screen shows a one-line
@@ -328,8 +362,10 @@ voice isn't available in this Mode, or the server is shutting down.
 ### 5b. The live transcript feed
 
 The **Live transcript** panel fills as people speak: one **Transcript Line** per
-human utterance or per coalesced Agent reply, each with speaker, an optional tag,
-and an `HH:MM:SS` timestamp. Between an utterance and a reply, a typing indicator
+human utterance or per coalesced Agent reply, each with a speaker, an optional tag,
+and an `HH:MM:SS` timestamp. Agent lines are named; **every human at the table
+shares one anonymous "Player" lane** — STT carries no speaker identity in this
+build, so the Transcript cannot tell your players apart. Between an utterance and a reply, a typing indicator
 shows which Agent is thinking. Lines are persisted, so reloading the page mid-
 session replays them.
 
@@ -341,11 +377,18 @@ session — not in the view"* note rather than jumping to an unrelated line.
 ### 5c. Per-Agent mute
 
 The right rail of the Session screen is the **Voice control** panel: one row per
-Agent of the Active Campaign (Butler first), with an `N of M voicing` count and a
-per-row mute toggle, plus **Mute all** / **Unmute all**.
+Agent of the Active Campaign (Butler first), an `N of M voicing` count, a per-row
+mute toggle, and one button whose label flips between **Mute all** and **Unmute
+all** depending on whether anything is currently unmuted.
 
-A muted Agent **stays in the scene but doesn't speak aloud** — it is still part of
-the Campaign, it just produces no audio. Unmute mid-session at any time.
+A muted Character NPC **stays in the scene but doesn't speak aloud** — it is still
+part of the Campaign, it just produces no audio. Unmute mid-session at any time.
+
+> Two rows in this rail lie by omission. The **Butler** row is listed and labelled
+> *Butler · voicing*, but the Butler is in no Voice Session roster and never emits
+> audio (§4a) — muting it changes nothing audible. And because the voiced roster is
+> always the seeded Campaign (§5a), a row for an NPC of some *other* Active
+> Campaign has no voice to mute either.
 
 The toggles are only actionable while a Voice Session is live; with no session
 every row shows unmuted and disabled. The `/glyphoxa mute` and `/glyphoxa muteall`
@@ -358,18 +401,21 @@ An Agent never holds the floor against a human
 ([ADR-0027](adr/0027-barge-in-confirm-window-cancels-turn.md)). What that means at
 the table:
 
-- **Just talk over the NPC.** Keep speaking for about a quarter-second
-  (the **Barge-in Confirm Window**, default ~250 ms of continuous voiced speech
-  from one participant) and the NPC cuts off *immediately* — mid-word, no drain,
-  no finishing the sentence. If two NPCs are answering together (an Ensemble
-  Turn), the whole turn dies, including a reply that was queued but not yet
-  spoken.
+- **Just talk over the NPC.** Keep speaking for about a quarter-second (the
+  **Barge-in Confirm Window** — fixed at 250 ms of continuous voiced speech in this
+  build; ADR-0027's per-Agent tunable is not wired) and the NPC cuts off
+  *immediately* — mid-word, no drain, no finishing the sentence. (Barge-in also
+  tears down a whole **Ensemble Turn**; Ensemble Turns are deferred and cannot
+  occur in this build — one utterance addresses at most one Agent.)
 - **A backchannel does not cut it off.** A "mhm", a "yeah", a cough — anything
   shorter than the window — is **Soft-overlap**. The NPC keeps going. Your
   backchannel is still transcribed and still becomes context for the next reply.
 - **Anyone at the table can barge in**, not just the person the NPC was answering,
-  and not just the GM. The window is measured per participant, so several people
-  murmuring at once never add up to a false interruption.
+  and not just the GM. ADR-0027 measures the window *per participant*, so parallel
+  backchannels never sum into a false trigger — but **this build runs one shared
+  VAD session with no speaker identity**, so overlapping table talk is heard as
+  one continuous voice and can cross the window together. Per-participant lanes
+  land with ADR-0050.
 - **The NPC cannot barge in on itself.** Nothing an Agent says is treated as a
   human speaking, and a turn that is still *thinking* (holding the floor before
   its first audio) cannot be barged — you haven't heard anything to react to yet.
@@ -385,8 +431,10 @@ the table:
 Registered per-Guild at boot against the configured Guild, on the Bot's standing
 gateway connection. They are available with **no Voice Session running**.
 
-**They exist only when the process drives voice** — `-mode all` or `-mode voice`.
-A `-mode web` process registers nothing.
+**They exist only under `-mode all`.** Registration lives in the web tier's boot
+path, guarded on that Instance also driving voice — so `-mode web` registers
+nothing, and `-mode voice` (which never builds the command registry) registers
+nothing either. Run `all`.
 
 Authorization is server-side; Discord's own command-permission settings are a UX
 hint only. In v1.0, **GM only** means *the invoking Discord User's snowflake is on
@@ -418,9 +466,10 @@ commands.
 |---|---|
 | Login bounces to *not on the operator allowlist* | Your snowflake isn't in `GLYPHOXA_OPERATOR_IDS`. There is no self-enrolment. |
 | The console is a blank page | The web bundle wasn't built before `make build` (configuration.md §3). |
-| No `/glyphoxa` commands in Discord | Running `-mode web`; or no Bot token saved; or no Guild ID saved; or the Bot was authorized without `applications.commands`. Re-save Discord settings to retrigger registration. |
+| No `/glyphoxa` commands in Discord | Running `-mode web` **or `-mode voice`** — only `-mode all` registers them; or no Bot token saved; or no Guild ID saved; or the Bot was authorized without `applications.commands`. Re-save Discord settings to retrigger registration. |
 | *the Bot is not a member of that server* on an invite paste | Step 2b — **Add Glyphoxa to your server**. |
 | **Start session** refuses | Read the message; it names the precondition. |
+| Session flips to **Failed** with `find tenant … not found` / `find campaign … not found` | `glyphoxa seed` was never run. The voice loop loads the seeded **Glyphoxa Demo** / **The Prancing Pony** Campaign, not your Active Campaign (§1, §5a). |
 | Session goes **Live**, nobody speaks | ElevenLabs badge **Degraded** or **Key needed**; or every Agent is muted; or your NPC is **Address only** and nobody said its Name. |
 | The NPC keeps getting cut off | Someone is barging in (§5d). Table chatter longer than ~250 ms of continuous speech from one person cancels the turn. |
 | Turns stop mid-session | Soft spend cap reached (§3c). The Session screen banner says so. |
