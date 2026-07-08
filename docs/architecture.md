@@ -150,12 +150,10 @@ snapshot, sub-millisecond, and fully unit-testable.
 
 **Tree vs ADR.**
 
-- ADR-0024 says "the Butler defaults `AddressOnly=true` … and responds to voice-address
-  only from the GM." **The Butler is never in a Voice Session at all**: the loop
-  loads `storage.CharacterAgents` (Character NPCs only,
-  `internal/wirenpc/agentspec.go`), so no Butler enters the Matcher or the Cast,
-  and no GM-vs-participant gate exists. `AddressOnly` is a real matcher capability
-  with no in-loop user today.
+- ADR-0024 says "the Butler defaults `AddressOnly=true` … and responds to
+  voice-address only from the GM." **The Butler cannot enter the Matcher by
+  construction** — see §3. `AddressOnly` is a real matcher capability with zero
+  in-loop users today, and no GM-vs-participant gate exists anywhere.
 - Agents carry aliases, and both Address Detection and `/glyphoxa mute` resolve
   them — but the Campaign screen ships **no alias editor**
   (`web/src/screens/campaign/Campaign.tsx` passes `aliases` straight through). The
@@ -301,11 +299,26 @@ One polymorphic `agents` table holds both Agent Roles — `butler` and `characte
 — so one Matcher and one Cast *can* host a mixed roster on one code path. A trigger
 (`00002_auto_butler.sql`) creates exactly one Butler per Campaign.
 
-**Tree vs ADR.** The Butler is a DB row and nothing more today: no code path gives
-it a voice. The live loop loads Character NPCs only (§2.2), and `/roll` is answered
-by the Bot binary invoking the `dice` Tool directly rather than by the Butler
-reasoning (§5). Its Persona, Voice and Tool Grants are editable in the console and
-currently drive nothing.
+**Tree vs ADR: the Butler is an undeletable DB row with no code path.** It is
+auto-created by the `00002_auto_butler.sql` trigger with `address_only = true`
+(a partial unique index forbids a second), it is editable in the console — Persona,
+Voice, Tool Grants — and **nothing it holds drives anything**. Three facts, each
+checkable:
+
+- The live loop never loads it. `loadSeededNPCs` calls `storage.CharacterAgents`
+  (`internal/wirenpc/agentspec.go`), Character NPCs only.
+- **It cannot enter the Matcher by construction, not merely by omission.**
+  Production builds the matcher at `internal/wirenpc/roster.go` via
+  `address.NewMatcher`, and that file's single `address.Agent` derivation site,
+  `matcherAgent`, hardcodes `AgentRole: "character"` for every Agent it registers.
+  `address.NewWholeWordMatcher(butler, npcs)` is the only constructor that accepts
+  a Butler — it panics unless `butler.AgentRole == "butler"` — and it has no
+  non-test caller.
+- No Slash Command reaches it either: `/roll` is answered by the Bot binary
+  invoking the built-in `dice` Tool directly (§5), never by the Butler reasoning.
+
+So the Butler exists in the schema, in the console, and in the ADRs. It does not
+exist at runtime.
 
 **Tool** is the domain term (`pkg/tool`). A Tool is `{name, input JSON schema,
 handler}`; its *backing* — built-in Go function or an out-of-process MCP Server —
@@ -663,12 +676,12 @@ the architecture question is already answered.
 |-----|----------|-------------------|
 | [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble Turns: speculative Lead + Cross-talk Reaction | Deferred by [0038](adr/0038-multi-npc-single-target-default-programmatic-roster.md). `MaxTargets` reaches the multi-target set; the turn-taking layer is not built. |
 | [0030](adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Side-effecting Tool intents flush at turn-commit | Not built. `pkg/tool/loop.go` hard-refuses non-read-only Tools. |
-| [0048](adr/0048-blob-storage-seam-postgres-v1.md) | `internal/blob` seam, Postgres bytea backend | No `internal/blob` package. |
-| [0049](adr/0049-background-job-runner.md) | One DB-backed job runner (`job` table) | No `job` table. `internal/embedworker` stays a bespoke poll loop, as the ADR allows. |
+| [0048](adr/0048-blob-storage-seam-postgres-v1.md) | a blob-storage seam package, Postgres bytea backend | No blob package exists; nothing binary is persisted. |
+| [0049](adr/0049-background-job-runner.md) | One DB-backed job runner over a job table | No job table exists. `internal/embedworker` stays a bespoke poll loop, as the ADR allows. |
 | [0050](adr/0050-per-speaker-utterance-segmentation.md) | N Speaker Lanes; `SpeakerID` on voice events | No `SpeakerID` anywhere. Human speech is still one anonymous lane (§2.6). |
 | [0051](adr/0051-rollover-tape-consent-retention.md) | Consent-gated 120 s Rollover Tape; Highlights | No audio is persisted. Blocks on 0048 + 0050. |
 | [0052](adr/0052-kg-write-proposals.md) | Agent KG writes land as GM-reviewed Knowledge Proposals | No proposal table, no `remember_knowledge` Tool. |
-| [0053](adr/0053-campaign-bundle-format.md) | Campaign Bundle: versioned gzipped-JSON export | No `internal/bundle` package. |
+| [0053](adr/0053-campaign-bundle-format.md) | Campaign Bundle: versioned gzipped-JSON export | No bundle package exists; there is no export or import path. |
 
 ## Where the tree and the ADRs disagree
 
@@ -683,7 +696,7 @@ disagreement is documented rather than discovered.
 | ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | five services, all `management.v1` | multi-tenant deferred (ADR-0039); `all` Mode drives sessions in-process |
 | ADR-0010: `/say <text> as:<agent>` | not registered | deferred; `/glyphoxa mute` + `muteall` shipped instead (#211) |
 | ADR-0010: permissions from `tenant_members.role` | operator allowlist membership | `tenant_members` does not exist (ADR-0010 #102 amendment, ADR-0041) |
-| ADR-0010/0024: the Butler answers reasoning commands and voice-address | the Butler is a DB row with no code path | the loop loads Character NPCs only; `/roll` runs the `dice` Tool directly (§2.2, §3, §5) |
+| ADR-0010/0024: the Butler answers reasoning commands and voice-address | an undeletable DB row with no code path; it cannot enter the Matcher by construction | `matcherAgent` hardcodes `AgentRole: "character"`; `NewWholeWordMatcher` has no non-test caller (§2.2, §3, §5) |
 | ADR-0019/0027: per-participant VAD sessions | one shared VAD session over the decoded stream | speaker identity stops at the codec (§2.6) |
 | ADR-0027: per-Agent barge-in confirm window | `bargeConfirmWindow` package const, 250 ms, one per Conversation | `internal/wirenpc/wirenpc.go`; a floor, not a sensitivity (§2.4) |
 | ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field exists | blocks on speaker attribution (§2.3, §2.6) |
