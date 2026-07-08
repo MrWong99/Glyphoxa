@@ -80,4 +80,21 @@ describe("AppShell", () => {
     expect(shell).not.toHaveAttribute("data-collapsed", "true");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
   });
+
+  it("renders interactive shell chrome with a dead backend (every RPC failing)", async () => {
+    // Backend unreachable at app load: the shell — sidebar, toggle, topbar —
+    // must stay functional, and the campaign switcher must settle into its
+    // non-blocking fallback label instead of wedging the topbar.
+    const { container } = render(
+      <Providers transport={createRouterTransport(() => {})} queryClient={makeQueryClient()}>
+        <AppShell tenantSlug="acme" user={user} />
+      </Providers>,
+    );
+
+    const toggle = screen.getByRole("button", { name: /toggle sidebar/i });
+    fireEvent.click(toggle);
+    expect(container.querySelector(".gx-shell")).toHaveAttribute("data-collapsed", "true");
+
+    expect(await screen.findByText("Select campaign")).toBeInTheDocument();
+  });
 });

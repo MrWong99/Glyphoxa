@@ -830,7 +830,16 @@ describe("Configuration first-run (#267)", () => {
   // A fresh, unseeded install: GetActiveCampaign is CodeNotFound until a campaign
   // is created here. CreateCampaign mints it, SetActiveCampaign selects it, and a
   // fresh GetActiveCampaign then resolves it — the create-then-activate flow.
-  function firstRunBackend(activeErrorCode?: Code) {
+  function firstRunBackend(
+    opts: {
+      activeErrorCode?: Code;
+      calls?: Record<string, number>;
+    } = {},
+  ) {
+    const { activeErrorCode } = opts;
+    const bump = (m: string) => {
+      if (opts.calls) opts.calls[m] = (opts.calls[m] ?? 0) + 1;
+    };
     const state: { campaign?: { id: string; name: string; system: string; language: string } } = {};
     return createRouterTransport(({ service }) => {
       service(VoiceService, {
@@ -857,15 +866,18 @@ describe("Configuration first-run (#267)", () => {
           });
         },
         createCampaign: (req) => {
+          bump("createCampaign");
           state.campaign = { id: "c-new", name: req.name, system: req.system, language: req.language };
           return create(CreateCampaignResponseSchema, {
             campaign: create(CampaignSchema, state.campaign),
           });
         },
-        setActiveCampaign: () =>
-          create(SetActiveCampaignResponseSchema, {
+        setActiveCampaign: () => {
+          bump("setActiveCampaign");
+          return create(SetActiveCampaignResponseSchema, {
             campaign: create(CampaignSchema, state.campaign!),
-          }),
+          });
+        },
       });
     });
   }
@@ -895,11 +907,30 @@ describe("Configuration first-run (#267)", () => {
     expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
   });
 
+  it("a double-click on Create fires exactly one CreateCampaign (no duplicate)", async () => {
+    const calls: Record<string, number> = {};
+    renderScreen(firstRunBackend({ calls }));
+
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Once Only" } });
+    const button = screen.getByRole("button", { name: /^create campaign$/i });
+
+    // Both clicks land in one tick — before any re-render — so render-scoped
+    // pending state can't stop the second one; only the flow ref can. An
+    // unguarded submit here used to mint two identical campaigns.
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    // The flow completes once and the header swaps in the created campaign.
+    expect(await screen.findByText("Once Only")).toBeInTheDocument();
+    expect(calls.createCampaign).toBe(1);
+    expect(calls.setActiveCampaign).toBe(1);
+  });
+
   it("keeps the error card (not the CTA) for a non-NotFound getActiveCampaign failure", async () => {
     // Only CodeNotFound means "no campaign yet". A real backend failure (server
     // down) must still show the error card — otherwise an install that already has
     // a campaign would be lured into creating a duplicate.
-    renderScreen(firstRunBackend(Code.Internal));
+    renderScreen(firstRunBackend({ activeErrorCode: Code.Internal }));
 
     expect(await screen.findByText(/could not load the active campaign/i)).toBeInTheDocument();
     expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();

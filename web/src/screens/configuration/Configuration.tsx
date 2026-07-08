@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/Input";
 import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
 import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
-import { isNotFound } from "@/lib/auth";
+import { isNotFound } from "@/lib/connectError";
 import { AddBotLink } from "./AddBotLink";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
 
@@ -120,42 +120,45 @@ export function Configuration() {
       <h1>Providers</h1>
       <p className="gx-providers__lede">Swap any engine with a config change — not a rewrite.</p>
 
-      {/* Active campaign — LIVE GetActiveCampaign (ADR-0039). A CodeNotFound means
-          no campaign exists yet: replace the error card with a create-first-campaign
-          flow so the web is the first-run path, not `glyphoxa seed` (#267). */}
+      {/* Active campaign — LIVE GetActiveCampaign (ADR-0039). Data-first: React
+          Query retains the last data through a failed background refetch, so an
+          already-loaded header rides out a transient blip instead of flashing the
+          error card. With no data, a CodeNotFound means no campaign exists yet:
+          the create-first-campaign flow replaces the error card so the web is the
+          first-run path, not `glyphoxa seed` (#267). */}
       <Card accent className="gx-providers__campaign">
-        {status === "error" && isNotFound(error) ? (
+        {campaign ? (
+          <div className="gx-campaign">
+            <Avatar name={campaign.name} size="lg" />
+            <div className="gx-campaign__meta">
+              <span className="gx-overline">Active campaign</span>
+              <span className="gx-campaign__name">{campaign.name}</span>
+              <div className="gx-campaign__attrs">
+                <span className="gx-campaign__attr">
+                  System
+                  <span className="gx-campaign__attr-value">{campaign.system}</span>
+                </span>
+                <span className="gx-campaign__attr">
+                  Language
+                  <span className="gx-campaign__attr-value">{campaign.language}</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : status === "error" && isNotFound(error) ? (
           <FirstCampaignCTA />
+        ) : status === "error" ? (
+          <div className="gx-campaign">
+            <p className="gx-campaign__error" role="alert">
+              Could not load the active campaign: {error.message}
+            </p>
+          </div>
         ) : (
           <div className="gx-campaign">
-            {status === "success" && campaign ? (
-              <>
-                <Avatar name={campaign.name} size="lg" />
-                <div className="gx-campaign__meta">
-                  <span className="gx-overline">Active campaign</span>
-                  <span className="gx-campaign__name">{campaign.name}</span>
-                  <div className="gx-campaign__attrs">
-                    <span className="gx-campaign__attr">
-                      System
-                      <span className="gx-campaign__attr-value">{campaign.system}</span>
-                    </span>
-                    <span className="gx-campaign__attr">
-                      Language
-                      <span className="gx-campaign__attr-value">{campaign.language}</span>
-                    </span>
-                  </div>
-                </div>
-              </>
-            ) : status === "error" ? (
-              <p className="gx-campaign__error" role="alert">
-                Could not load the active campaign: {error.message}
-              </p>
-            ) : (
-              <div className="gx-campaign__meta" data-testid="campaign-loading">
-                <span className="gx-overline">Active campaign</span>
-                <span className="gx-skeleton" />
-              </div>
-            )}
+            <div className="gx-campaign__meta" data-testid="campaign-loading">
+              <span className="gx-overline">Active campaign</span>
+              <span className="gx-skeleton" />
+            </div>
           </div>
         )}
       </Card>

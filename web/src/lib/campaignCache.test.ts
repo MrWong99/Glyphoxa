@@ -1,5 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
-import type { DescMethodUnary } from "@bufbuild/protobuf";
+import { describe, it, expect } from "vitest";
 import { create } from "@bufbuild/protobuf";
 import { QueryClient } from "@tanstack/react-query";
 import { createConnectQueryKey } from "@connectrpc/connect-query";
@@ -10,81 +9,141 @@ import {
   ProviderService,
   GetCampaignRosterResponseSchema,
   SearchNodesResponseSchema,
+  GetSessionResponseSchema,
   ListCampaignsResponseSchema,
+  ListProviderConfigsResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
-import { invalidateActiveCampaignScopedQueries } from "./campaignCache";
+import { invalidateActiveCampaignScopedQueries, watchVoiceSessionEnd } from "./campaignCache";
 
-// The exact set the sweep MUST cover — every Active-Campaign-scoped read across
-// the screens (roster/KG/session/transcript), keyed without an input so each
-// prefix-matches every cached argument variant.
-const SCOPED: DescMethodUnary[] = [
-  CampaignService.method.getActiveCampaign,
-  CampaignService.method.getCampaignRoster,
-  CampaignService.method.listNodes,
-  CampaignService.method.searchNodes,
-  CampaignService.method.listNodeEdges,
-  CampaignService.method.listToolGrants,
-  SessionService.method.getSession,
-  SessionService.method.searchTranscriptLines,
-];
+// Real connect-query keys, exactly as the screens' useQuery calls build them.
+const rosterKey = createConnectQueryKey({
+  schema: CampaignService.method.getCampaignRoster,
+  cardinality: "finite",
+  input: {},
+});
+const searchKey = createConnectQueryKey({
+  schema: CampaignService.method.searchNodes,
+  cardinality: "finite",
+  input: { query: "orc" },
+});
+const sessionKey = createConnectQueryKey({
+  schema: SessionService.method.getSession,
+  cardinality: "finite",
+  input: {},
+});
+const listKey = createConnectQueryKey({
+  schema: CampaignService.method.listCampaigns,
+  cardinality: "finite",
+  input: {},
+});
+const providerKey = createConnectQueryKey({
+  schema: ProviderService.method.listProviderConfigs,
+  cardinality: "finite",
+  input: {},
+});
 
-// Reads that MUST survive a switch: the operator's campaign set and the
-// Tenant-scoped BYOK config are identical across campaigns.
-const UNTOUCHED: DescMethodUnary[] = [
-  CampaignService.method.listCampaigns,
-  ProviderService.method.listProviderConfigs,
-];
+// primeAll seeds one representative of each cache population: campaign-scoped
+// reads (with and without inputs), campaign-invariant reads, a hypothetical
+// FUTURE campaign-scoped read this module has never heard of, and a
+// non-connect-query key.
+const futureKey = [
+  "connect-query",
+  {
+    serviceName: "glyphoxa.management.v1.CampaignService",
+    methodName: "ListKnowledgeProposals",
+    cardinality: "finite",
+  },
+] as const;
+const foreignKey = ["not-connect-query", "whatever"] as const;
 
-const finiteKey = (schema: DescMethodUnary) => createConnectQueryKey({ schema, cardinality: "finite" });
+function primeAll(queryClient: QueryClient) {
+  queryClient.setQueryData(rosterKey, create(GetCampaignRosterResponseSchema, { roster: [] }));
+  queryClient.setQueryData(searchKey, create(SearchNodesResponseSchema, { nodes: [] }));
+  queryClient.setQueryData(sessionKey, create(GetSessionResponseSchema, { active: false }));
+  queryClient.setQueryData(listKey, create(ListCampaignsResponseSchema, { campaigns: [] }));
+  queryClient.setQueryData(providerKey, create(ListProviderConfigsResponseSchema, {}));
+  queryClient.setQueryData(futureKey, { anything: true });
+  queryClient.setQueryData(foreignKey, { anything: true });
+}
+
+const invalidated = (queryClient: QueryClient, key: readonly unknown[]) =>
+  queryClient.getQueryState(key as unknown[])?.isInvalidated;
 
 describe("invalidateActiveCampaignScopedQueries", () => {
-  it("invalidates exactly the campaign-scoped reads and nothing else", async () => {
+  it("marks campaign-scoped reads stale and leaves campaign-invariant ones fresh", async () => {
     const queryClient = new QueryClient();
-    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    primeAll(queryClient);
 
     await invalidateActiveCampaignScopedQueries(queryClient);
 
-    // Every scoped read is swept…
-    for (const schema of SCOPED) {
-      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: finiteKey(schema) }));
-    }
-    // …and no campaign-invariant read is.
-    for (const schema of UNTOUCHED) {
-      expect(spy).not.toHaveBeenCalledWith(expect.objectContaining({ queryKey: finiteKey(schema) }));
-    }
-    // The sweep is exactly the scoped set — no more, no fewer.
-    expect(spy).toHaveBeenCalledTimes(SCOPED.length);
+    // Campaign-scoped reads — including keyed inputs — are swept…
+    expect(invalidated(queryClient, rosterKey)).toBe(true);
+    expect(invalidated(queryClient, searchKey)).toBe(true);
+    expect(invalidated(queryClient, sessionKey)).toBe(true);
+    // …campaign-invariant reads are not (the campaign set and the Tenant's BYOK
+    // config are identical across campaigns)…
+    expect(invalidated(queryClient, listKey)).toBe(false);
+    expect(invalidated(queryClient, providerKey)).toBe(false);
+    // …and keys that aren't connect-query reads are untouched.
+    expect(invalidated(queryClient, foreignKey)).toBe(false);
   });
 
-  it("marks a cached campaign-scoped query stale, leaving an unrelated one fresh", async () => {
+  it("fails SAFE: a future campaign-scoped read unknown to this module is swept too", async () => {
+    // The sweep is a deny-list, so a read RPC added later without touching
+    // campaignCache.ts gets an extra refetch (harmless) instead of silently
+    // serving the previous campaign's data (the failure mode an allow-list has).
     const queryClient = new QueryClient();
-    // Prime a scoped read under a realistic keyed input (roster's SearchNodes) and
-    // an unrelated one (listCampaigns). The sweep key carries no input, so it must
-    // prefix-match the primed input variant.
-    const rosterKey = createConnectQueryKey({
-      schema: CampaignService.method.getCampaignRoster,
-      cardinality: "finite",
-      input: {},
-    });
-    const searchKey = createConnectQueryKey({
-      schema: CampaignService.method.searchNodes,
-      cardinality: "finite",
-      input: { query: "orc" },
-    });
-    const listKey = createConnectQueryKey({
-      schema: CampaignService.method.listCampaigns,
-      cardinality: "finite",
-      input: {},
-    });
-    queryClient.setQueryData(rosterKey, create(GetCampaignRosterResponseSchema, { roster: [] }));
-    queryClient.setQueryData(searchKey, create(SearchNodesResponseSchema, { nodes: [] }));
-    queryClient.setQueryData(listKey, create(ListCampaignsResponseSchema, { campaigns: [] }));
+    primeAll(queryClient);
 
     await invalidateActiveCampaignScopedQueries(queryClient);
 
-    expect(queryClient.getQueryState(rosterKey)?.isInvalidated).toBe(true);
-    expect(queryClient.getQueryState(searchKey)?.isInvalidated).toBe(true);
-    // listCampaigns is untouched — a switch doesn't change the campaign set.
-    expect(queryClient.getQueryState(listKey)?.isInvalidated).toBe(false);
+    expect(invalidated(queryClient, futureKey)).toBe(true);
+  });
+});
+
+describe("watchVoiceSessionEnd", () => {
+  const setSession = (queryClient: QueryClient, active: boolean) =>
+    queryClient.setQueryData(sessionKey, create(GetSessionResponseSchema, { active }));
+
+  it("sweeps campaign-scoped caches when the Voice Session ends (active true→false)", () => {
+    const queryClient = new QueryClient();
+    const unsubscribe = watchVoiceSessionEnd(queryClient);
+    queryClient.setQueryData(rosterKey, create(GetCampaignRosterResponseSchema, { roster: [] }));
+
+    // First observation (live) only seeds the watcher — no sweep yet.
+    setSession(queryClient, true);
+    expect(invalidated(queryClient, rosterKey)).toBe(false);
+
+    // The Voice Session ends: the mid-session switch's "takes effect after it
+    // ends" moment — the sweep must fire now.
+    setSession(queryClient, false);
+    expect(invalidated(queryClient, rosterKey)).toBe(true);
+    unsubscribe();
+  });
+
+  it("does not sweep on first observing an idle Voice Session, nor on idle→idle", () => {
+    const queryClient = new QueryClient();
+    const unsubscribe = watchVoiceSessionEnd(queryClient);
+    queryClient.setQueryData(rosterKey, create(GetCampaignRosterResponseSchema, { roster: [] }));
+
+    // Mounting onto an already-idle cache must not fire (no transition)…
+    setSession(queryClient, false);
+    expect(invalidated(queryClient, rosterKey)).toBe(false);
+    // …and neither must the sweep's own getSession refresh re-reporting idle
+    // (false→false), which is what makes the watcher loop-free.
+    setSession(queryClient, false);
+    expect(invalidated(queryClient, rosterKey)).toBe(false);
+    unsubscribe();
+  });
+
+  it("stops watching after unsubscribe", () => {
+    const queryClient = new QueryClient();
+    const unsubscribe = watchVoiceSessionEnd(queryClient);
+    queryClient.setQueryData(rosterKey, create(GetCampaignRosterResponseSchema, { roster: [] }));
+
+    setSession(queryClient, true);
+    unsubscribe();
+    setSession(queryClient, false);
+    expect(invalidated(queryClient, rosterKey)).toBe(false);
   });
 });

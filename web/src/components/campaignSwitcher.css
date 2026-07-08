@@ -58,11 +58,10 @@
   text-align: left;
   line-height: 1.15;
 }
+/* Composes with the shared .gx-overline eyebrow (styles/base.css); only the
+ * compact trigger's size + muted color are overridden here. */
 .gx-campaign-switcher__overline {
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--text-subtle);
 }
 .gx-campaign-switcher__name {
@@ -150,11 +149,10 @@
   color: var(--text-muted);
   font-size: var(--body-sm);
 }
+/* Composes with the shared .gx-campaign__error alert treatment
+ * (styles/components.css); only panel-local padding lives here. */
 .gx-campaign-switcher__error {
-  margin: 0;
   padding: 0 var(--spacing-sm);
-  color: var(--status-danger);
-  font-size: var(--body-sm);
 }
 
 .gx-campaign-switcher__new {

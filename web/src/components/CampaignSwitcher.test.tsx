@@ -142,13 +142,54 @@ describe("CampaignSwitcher", () => {
 
     openPanel();
     const list = await screen.findByRole("group", { name: /campaigns/i });
-    const beta = within(list).getByRole("button", { name: /Beta Tale/ });
+    // Rows arrive async: the list is fetched lazily when the panel opens.
+    const beta = await within(list).findByRole("button", { name: /Beta Tale/ });
     const alpha = within(list).getByRole("button", { name: /Alpha Quest/ });
     // The active campaign carries aria-current; the other doesn't.
     expect(beta).toHaveAttribute("aria-current", "true");
     expect(alpha).not.toHaveAttribute("aria-current");
-    // No live session → no takes-effect notice (the "only while live" half of #266).
-    expect(screen.queryByText(/takes effect after this session/i)).not.toBeInTheDocument();
+    // No live Voice Session → no takes-effect notice (the "only while live" half of #266).
+    expect(screen.queryByText(/takes effect after it ends/i)).not.toBeInTheDocument();
+  });
+
+  it("does not fetch the campaign list until the panel opens", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a", calls }),
+    );
+
+    // The trigger label resolves from getActiveCampaign alone — the list stays
+    // unfetched while the switcher just sits in the topbar of every screen.
+    expect(await screen.findByText("Alpha Quest")).toBeInTheDocument();
+    expect(calls.listCampaigns ?? 0).toBe(0);
+
+    openPanel();
+    await screen.findByRole("group", { name: /campaigns/i });
+    await waitFor(() => expect(calls.listCampaigns).toBe(1));
+  });
+
+  it("closes without an RPC when the active campaign row is clicked", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({
+        campaigns: [
+          { id: "a", name: "Alpha Quest" },
+          { id: "b", name: "Beta Tale" },
+        ],
+        activeId: "b",
+        calls,
+      }),
+    );
+
+    expect(await screen.findByText("Beta Tale")).toBeInTheDocument();
+    openPanel();
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    fireEvent.click(await within(list).findByRole("button", { name: /Beta Tale/ }));
+
+    // Re-selecting the current campaign is a no-op: the panel just closes — no
+    // SetActiveCampaign write, no cache sweep.
+    expect(screen.queryByRole("group", { name: /campaigns/i })).not.toBeInTheDocument();
+    expect(calls.setActiveCampaign ?? 0).toBe(0);
   });
 
   it("switches the active campaign and sweeps campaign-scoped caches (no reload)", async () => {
@@ -173,7 +214,7 @@ describe("CampaignSwitcher", () => {
     // Switch to campaign A.
     openPanel();
     const list = await screen.findByRole("group", { name: /campaigns/i });
-    fireEvent.click(within(list).getByRole("button", { name: /Alpha Quest/ }));
+    fireEvent.click(await within(list).findByRole("button", { name: /Alpha Quest/ }));
 
     // The durable selection moved…
     await waitFor(() => expect(calls.setActiveCampaign).toBe(1));
@@ -241,13 +282,21 @@ describe("CampaignSwitcher", () => {
     expect(await screen.findByText("First Campaign")).toBeInTheDocument();
   });
 
-  it("shows the takes-effect-after-this-session notice while a session is live", async () => {
+  it("shows the takes-effect notice while a Voice Session is live — in list AND create mode", async () => {
     renderSwitcher(
       mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a", sessionActive: true }),
     );
     await screen.findByText("Alpha Quest");
     openPanel();
-    expect(await screen.findByText(/takes effect after this session/i)).toBeInTheDocument();
+    expect(await screen.findByText(/takes effect after it ends/i)).toBeInTheDocument();
+
+    // A create also ends in SetActiveCampaign, so the deferral cue must not
+    // disappear when the operator moves to the create form — without it, a
+    // mid-Voice-Session create closes onto an unchanged trigger and reads as a
+    // silent failure.
+    fireEvent.click(screen.getByRole("button", { name: /new campaign/i }));
+    await screen.findByLabelText("Name");
+    expect(screen.getByText(/takes effect after it ends/i)).toBeInTheDocument();
   });
 
   it("surfaces a create failure inline without closing the form", async () => {
@@ -313,6 +362,12 @@ describe("CampaignSwitcher", () => {
     expect(alert).toHaveTextContent(/couldn't switch to it/i);
     await waitFor(() => expect(calls.createCampaign).toBe(1));
     expect(calls.setActiveCampaign).toBe(1);
+
+    // The fields LOCK in the retry state: the campaign already exists with the
+    // submitted values, and an edit here would be silently discarded by the
+    // activation retry (rename is #268's slice).
+    expect(screen.getByLabelText("Name")).toBeDisabled();
+    expect(screen.getByLabelText("System")).toBeDisabled();
 
     // Retrying re-runs ONLY the activation — it must not mint a second campaign.
     fireEvent.click(screen.getByRole("button", { name: /retry activation/i }));

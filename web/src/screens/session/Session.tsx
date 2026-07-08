@@ -115,7 +115,12 @@ function lastSummary(session: VoiceSession): string {
 export function Session() {
   const queryClient = useQueryClient();
   const { data } = useQuery(SessionService.method.getSession, {}, { refetchInterval: sessionRefetchInterval });
-  const campaignQ = useQuery(CampaignService.method.getActiveCampaign, {});
+  // retry:false matches every other observer of this shared cache entry (the
+  // topbar switcher, Configuration): a fresh install's CodeNotFound settles at
+  // once whichever observer triggers the fetch, instead of retry semantics
+  // depending on mount order. The header renders from retained data, so a
+  // transient blip costs nothing visible here.
+  const campaignQ = useQuery(CampaignService.method.getActiveCampaign, {}, { retry: false });
   const campaignName = campaignQ.data?.campaign?.name;
 
   const active = data?.active ?? false;
