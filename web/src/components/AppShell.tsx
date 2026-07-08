@@ -7,6 +7,7 @@ import type { User } from "@gen/glyphoxa/management/v1/management_pb";
 
 import { Button } from "./ui/Button";
 import { SidebarUser } from "./SidebarUser";
+import { CampaignSwitcher } from "./CampaignSwitcher";
 
 // The persistent app shell — sidebar + topbar — ported from the handoff
 // ui_kits/glyphoxa-web/shell.jsx (its inline styles lifted onto .gx-shell* /
@@ -89,6 +90,9 @@ export function AppShell({ tenantSlug, user }: { tenantSlug: string; user: User 
           <div className="gx-topbar__titles">
             <div className="gx-topbar__title">{active?.title ?? "Glyphoxa"}</div>
           </div>
+          {/* The Active-Campaign switcher lives on every screen (#266a): the
+              titles' flex:1 pushes it to the topbar's right edge. */}
+          <CampaignSwitcher />
         </header>
 
         <main className="gx-content">

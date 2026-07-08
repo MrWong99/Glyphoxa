@@ -8,3 +8,13 @@ import { Code, ConnectError } from "@connectrpc/connect";
 export function isUnauthenticated(error: unknown): boolean {
   return ConnectError.from(error).code === Code.Unauthenticated;
 }
+
+// isNotFound reports whether an error from a Connect call is the server's
+// CodeNotFound. The campaign surfaces use it as the "no campaign exists yet"
+// signal (#267): GetActiveCampaign fails with CodeNotFound on a fresh, unseeded
+// install, which the web turns into a create-first-campaign flow rather than an
+// error card. ConnectError.from normalizes any thrown value, so a non-Connect
+// error resolves to Code.Unknown and never masquerades as NotFound.
+export function isNotFound(error: unknown): boolean {
+  return ConnectError.from(error).code === Code.NotFound;
+}

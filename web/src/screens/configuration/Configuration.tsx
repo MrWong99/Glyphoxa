@@ -17,6 +17,8 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Input } from "@/components/ui/Input";
 import { Combobox } from "@/components/ui/Combobox";
 import { Button } from "@/components/ui/Button";
+import { CreateCampaignForm, useCreateCampaign } from "@/components/CreateCampaignForm";
+import { isNotFound } from "@/lib/auth";
 import { AddBotLink } from "./AddBotLink";
 import { DiscordLinkAutofill } from "./DiscordLinkAutofill";
 
@@ -47,7 +49,13 @@ function healthFor(health: ProviderHealth[], provider: string): ProviderHealth |
 }
 
 export function Configuration() {
-  const { data, status, error } = useQuery(CampaignService.method.getActiveCampaign, {});
+  // retry:false so a fresh, unseeded install's CodeNotFound settles at once into
+  // the first-run create flow rather than backing off through three retries first.
+  const { data, status, error } = useQuery(
+    CampaignService.method.getActiveCampaign,
+    {},
+    { retry: false },
+  );
   const campaign = data?.campaign;
 
   const queryClient = useQueryClient();
@@ -112,38 +120,44 @@ export function Configuration() {
       <h1>Providers</h1>
       <p className="gx-providers__lede">Swap any engine with a config change — not a rewrite.</p>
 
-      {/* Active campaign — LIVE GetActiveCampaign (ADR-0039) */}
+      {/* Active campaign — LIVE GetActiveCampaign (ADR-0039). A CodeNotFound means
+          no campaign exists yet: replace the error card with a create-first-campaign
+          flow so the web is the first-run path, not `glyphoxa seed` (#267). */}
       <Card accent className="gx-providers__campaign">
-        <div className="gx-campaign">
-          {status === "success" && campaign ? (
-            <>
-              <Avatar name={campaign.name} size="lg" />
-              <div className="gx-campaign__meta">
-                <span className="gx-overline">Active campaign</span>
-                <span className="gx-campaign__name">{campaign.name}</span>
-                <div className="gx-campaign__attrs">
-                  <span className="gx-campaign__attr">
-                    System
-                    <span className="gx-campaign__attr-value">{campaign.system}</span>
-                  </span>
-                  <span className="gx-campaign__attr">
-                    Language
-                    <span className="gx-campaign__attr-value">{campaign.language}</span>
-                  </span>
+        {status === "error" && isNotFound(error) ? (
+          <FirstCampaignCTA />
+        ) : (
+          <div className="gx-campaign">
+            {status === "success" && campaign ? (
+              <>
+                <Avatar name={campaign.name} size="lg" />
+                <div className="gx-campaign__meta">
+                  <span className="gx-overline">Active campaign</span>
+                  <span className="gx-campaign__name">{campaign.name}</span>
+                  <div className="gx-campaign__attrs">
+                    <span className="gx-campaign__attr">
+                      System
+                      <span className="gx-campaign__attr-value">{campaign.system}</span>
+                    </span>
+                    <span className="gx-campaign__attr">
+                      Language
+                      <span className="gx-campaign__attr-value">{campaign.language}</span>
+                    </span>
+                  </div>
                 </div>
+              </>
+            ) : status === "error" ? (
+              <p className="gx-campaign__error" role="alert">
+                Could not load the active campaign: {error.message}
+              </p>
+            ) : (
+              <div className="gx-campaign__meta" data-testid="campaign-loading">
+                <span className="gx-overline">Active campaign</span>
+                <span className="gx-skeleton" />
               </div>
-            </>
-          ) : status === "error" ? (
-            <p className="gx-campaign__error" role="alert">
-              Could not load the active campaign: {error.message}
-            </p>
-          ) : (
-            <div className="gx-campaign__meta" data-testid="campaign-loading">
-              <span className="gx-overline">Active campaign</span>
-              <span className="gx-skeleton" />
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </Card>
 
       {/* Provider keys — write-only BYOK (ADR-0004) */}
@@ -233,6 +247,25 @@ export function Configuration() {
       {/* Per-session spend caps (#130, ADR-0046) */}
       <h2 className="gx-section-title">Spend caps</h2>
       <SpendCapsCard />
+    </div>
+  );
+}
+
+// FirstCampaignCTA replaces the active-campaign card on a fresh, unseeded install
+// (GetActiveCampaign → CodeNotFound). It runs the shared create-then-activate flow
+// (#267): creating here mints the campaign (auto-Butler, ADR-0009) and selects it,
+// and the sweep re-resolves GetActiveCampaign so this card swaps itself for the
+// live header — no reload, no `glyphoxa seed`.
+function FirstCampaignCTA() {
+  const create = useCreateCampaign();
+  return (
+    <div className="gx-first-campaign">
+      <span className="gx-overline">Active campaign</span>
+      <h2 className="gx-first-campaign__title">Create your first campaign</h2>
+      <p className="gx-first-campaign__lede">
+        No campaign yet. Create one to get started — its Butler is set up for you automatically.
+      </p>
+      <CreateCampaignForm onSubmit={create.submit} pending={create.pending} error={create.error} autoFocusName />
     </div>
   );
 }

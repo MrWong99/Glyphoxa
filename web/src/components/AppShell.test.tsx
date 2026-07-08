@@ -4,7 +4,15 @@ import type { ReactNode } from "react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
-import { UserSchema } from "@gen/glyphoxa/management/v1/management_pb";
+import {
+  CampaignService,
+  SessionService,
+  UserSchema,
+  CampaignSchema,
+  ListCampaignsResponseSchema,
+  GetActiveCampaignResponseSchema,
+  GetSessionResponseSchema,
+} from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 
@@ -21,17 +29,40 @@ import { AppShell } from "./AppShell";
 
 const user = create(UserSchema, { name: "Sora Vance", role: "operator", avatar: "" });
 
+// The topbar now hosts the CampaignSwitcher, which reads ListCampaigns /
+// GetActiveCampaign / GetSession — implement them so those queries resolve
+// cleanly instead of erroring/retrying under the shell test.
+const campaign = create(CampaignSchema, {
+  id: "c1",
+  name: "The Sunless Citadel",
+  system: "dnd5e",
+  language: "en",
+});
+function shellTransport() {
+  return createRouterTransport(({ service }) => {
+    service(CampaignService, {
+      listCampaigns: () => create(ListCampaignsResponseSchema, { campaigns: [campaign] }),
+      getActiveCampaign: () => create(GetActiveCampaignResponseSchema, { campaign }),
+    });
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { active: false }),
+    });
+  });
+}
+
 function renderShell() {
   return render(
-    <Providers transport={createRouterTransport(() => {})} queryClient={makeQueryClient()}>
+    <Providers transport={shellTransport()} queryClient={makeQueryClient()}>
       <AppShell tenantSlug="acme" user={user} />
     </Providers>,
   );
 }
 
 describe("AppShell", () => {
-  it("toggles the sidebar collapsed state from the topbar control", () => {
+  it("toggles the sidebar collapsed state from the topbar control", async () => {
     const { container } = renderShell();
+    // Let the switcher's initial reads settle so the topbar is stable first.
+    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
     const shell = container.querySelector(".gx-shell") as HTMLElement;
     const toggle = screen.getByRole("button", { name: /toggle sidebar/i });
 
