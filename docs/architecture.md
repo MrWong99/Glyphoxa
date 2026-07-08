@@ -128,22 +128,43 @@ the Transcript.
 > ADR-0024 ([deterministic fuzzy chain on raw STT](adr/0024-address-detection-deterministic-fuzzy-chain.md))
 
 Runs on the **raw** `STTFinal` — no LLM transcript-correction pass in front of it,
-which is what let v1 rewrite NPC names before the matcher saw them. The chain, per
-utterance (`pkg/voice/address`):
+which is what let v1 rewrite NPC names before the matcher saw them. ADR-0024 frames
+it as a four-stage chain (name → last-speaker → single-NPC fallback → none). In the
+tree it is not a chain of early-returns but a **weighted scoring stack** of
+`Heuristic`s, each contributing to a per-Agent score; the highest score wins. What
+production actually runs is `address.DefaultHeuristics()`
+(`pkg/voice/address/matcher.go` — the roster builds the Matcher with `Heuristics`
+nil, which falls back to it), **five** heuristics, not four:
 
-1. explicit name/alias match (fuzzy: per-language phonetic encoder, then a
-   Damerau-Levenshtein net; plus derived leading-consonant-truncation aliases,
-   exact-only and utterance-initial),
-2. last-speaker continuation,
-3. single active non-Address-Only NPC fallback,
-4. no target (still transcribed).
+| Heuristic | Weight | Mirrors ADR-0024 stage |
+|-----------|--------|------------------------|
+| `NameMatch` | 1.0 (decisive) | 1 — fuzzy name/alias: per-language phonetic encoder, then a Damerau-Levenshtein net, plus derived leading-consonant-truncation aliases (exact-only, utterance-initial) |
+| `LastAddressed` | 1.0 (decisive) | 2 — last-speaker continuation |
+| `RecentlyInterrupted` | 1.0 (decisive) | **none — not in ADR-0024** |
+| `ExpertOnRecentWord` | 0.5 (tie-break) | **none — not in ADR-0024** |
+| `SoleActiveNPC` | 1.0 (decisive) | 3 — single active non-Address-Only NPC fallback |
+
+Zero score ⇒ no target (ADR-0024 stage 4); the utterance is still transcribed. The
+two heuristics with no ADR-0024 stage both suppress themselves once any name matched,
+so they only reweight **unnamed** utterances:
+
+- `RecentlyInterrupted` favors an Agent barged in on within the last 15 s — the
+  social "we cut them off but still expect them to finish" bias ADR-0027 explicitly
+  *deferred to v1.5+*, yet it is live in the default stack.
+- `ExpertOnRecentWord` would nudge toward an Agent whose Expertise keywords the table
+  keeps saying — but it is **inert in production**: `matcherAgent`
+  (`internal/wirenpc/roster.go`) never populates `Expertise`, so it always scores 0.
+  It is dead weight in the shipped stack, not a behavior.
+
+This whole shape — a five-heuristic scoring stack where ADR-0024 documents a
+four-stage chain — is a tree-vs-ADR divergence, logged below.
 
 `Detect` returns a *set*. **`MaxTargets` defaults to 1**, so naming two NPCs in one
 breath fires one turn on the top-scored Agent (ADR-0038). An **Address-Only** Agent
-is reachable only through stage 1 and is excluded from stages 2 and 3. A muted Agent
-stays in the fuzzy index and is still matched by name, but is likewise excluded from
-every ambient heuristic — muting must never re-route an explicit address to a
-different NPC.
+is reachable only via `NameMatch`; no ambient heuristic (the other four) can ever
+route to it. A muted Agent stays in the fuzzy index and is still matched by name,
+but is likewise excluded from every ambient heuristic — muting must never re-route an
+explicit address to a different NPC.
 
 No LLM in the loop: matching is a pure function over a mutex-guarded index/roster
 snapshot, sub-millisecond, and fully unit-testable.
@@ -655,8 +676,24 @@ still the placeholder.
 init-container on every replica. The advisory lock makes concurrent migration
 *safe*; the hook makes it *run once and observably*.
 
-**Self-host** — the v1.0 target — is a systemd unit running `glyphoxa -mode all`.
-Secrets come from the environment or the OS keyring, never baked into the image.
+**Self-host** — the v1.0 target — is where the ADR and the tree diverge most. The
+*only* artifacts that ship are the `Dockerfile` and the Helm chart. ADR-0034's
+self-host story — a **systemd unit** running `glyphoxa -mode all`, plus a
+`compose.yml` (app + Postgres/pgvector) as the zero-to-running on-ramp — is
+**design-of-record, not in the tree**: `find` returns no `*.service` file and no
+`compose*.yml`, and `deploy/` holds only the chart.
+
+That gap is not cosmetic, because it compounds with a second one. ADR-0034's
+"`systemctl start` and go" pitch leans on `all`-Mode auto-migrate — which **is not
+wired** either (§1, §6.4). So a self-hoster today must run migrations by hand:
+
+```
+glyphoxa migrate up      # apply the schema first (all Modes assume it is current)
+glyphoxa -mode all       # then serve
+```
+
+Starting `-mode all` against an unmigrated database fails every query. Secrets come
+from the environment or the OS keyring, never baked into the image.
 
 CI (`.github/workflows/ci.yml`) gates every PR on `buf · proto · web · test ·
 integration · audio · image · helm · e2e · lint`. The default suite is **keyless**:
@@ -702,6 +739,8 @@ disagreement is documented rather than discovered.
 | ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field exists | blocks on speaker attribution (§2.3, §2.6) |
 | ADR-0023: TTS matrix is ElevenLabs + OpenAI | ElevenLabs only | OpenAI TTS adapter not built |
 | ADR-0011: default embeddings via Ollama; ADR-0004 names more providers | `pkg/voice/embeddings/ollama` only | the only shipped embeddings adapter |
+| ADR-0034: systemd unit + `compose.yml` for self-host | neither exists | only `Dockerfile` + the Helm chart ship; self-host is manual (§8) |
+| ADR-0024: a 4-stage address chain | a 5-heuristic scoring stack | `DefaultHeuristics` adds `RecentlyInterrupted` + `ExpertOnRecentWord` (§2.2) |
 
 ## See also
 
