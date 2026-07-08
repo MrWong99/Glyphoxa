@@ -23,3 +23,10 @@
   font-weight: var(--weight-semibold);
   color: var(--status-danger);
 }
+/* The Campaign Language cell (#268) stacks its SELECT over the "next Voice
+ * Session" deferral hint, matching the Input's label/field/hint rhythm. */
+.gx-campaign-create__lang {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
