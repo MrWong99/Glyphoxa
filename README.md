@@ -2,199 +2,183 @@
 
 # 🐉 Glyphoxa
 
-[![CI](https://github.com/MrWong99/glyphoxa/actions/workflows/ci.yml/badge.svg)](https://github.com/MrWong99/glyphoxa/actions/workflows/ci.yml)
+[![CI](https://github.com/MrWong99/Glyphoxa/actions/workflows/ci.yml/badge.svg)](https://github.com/MrWong99/Glyphoxa/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/MrWong99/glyphoxa)](https://goreportcard.com/report/github.com/MrWong99/glyphoxa)
+[![Go Report Card](https://goreportcard.com/badge/github.com/MrWong99/Glyphoxa)](https://goreportcard.com/report/github.com/MrWong99/Glyphoxa)
 [![codecov](https://codecov.io/github/MrWong99/Glyphoxa/graph/badge.svg?token=NCVR87I8YK)](https://codecov.io/github/MrWong99/Glyphoxa)
 
-**AI-Powered Voice NPCs for Tabletop RPGs** — a platform-agnostic, provider-independent voice AI framework that brings your NPCs to life.
+**AI voice NPCs and a per-Campaign knowledge base for tabletop RPGs.**
 
 ---
 
 ## What is Glyphoxa?
 
-Glyphoxa is a real-time voice AI framework that brings AI-driven talking personas into live voice chat sessions. Built for tabletop RPGs, it serves as a persistent AI co-pilot for the Dungeon Master — voicing NPCs with distinct personalities, transcribing sessions, and answering rules questions — without ever replacing the human storyteller.
+Glyphoxa is a multi-tenant TTRPG voice-and-knowledge platform. AI **Agents**
+join a Discord **Voice Session**, voice a Campaign's **Character NPCs**, and
+assist the **GM** — persisting **Transcripts** and a per-Campaign **Knowledge
+Graph**. It never replaces the human storyteller; it is a co-pilot for the GM.
 
-Written in Go for native concurrency and sub-2-second mouth-to-ear latency.
+The **GM** runs the game from Discord (**Slash Commands**) and from an operator
+web console (Provider Configs, Campaigns, Agents, Knowledge Graph, live
+sessions). Written in Go for native concurrency and a streaming voice pipeline.
 
-> **⚠️ Early Alpha** — Glyphoxa is under active development. APIs may change between commits.
+> **⚠️ Early Alpha** — under active development; APIs may change between commits.
+> The system overview, including where the code diverges from the ADRs, lives in
+> [docs/architecture.md](docs/architecture.md).
 
-## ✨ Features
+## Modes
 
-- 🗣️ **Voice NPC Personas** — AI-controlled NPCs with distinct voices, personalities, and backstories that speak in real-time
-- 🧠 **Hybrid Memory System** — NPCs remember. Hot layer for instant context, cold layer for deep history, knowledge graph for world state
-- 🔧 **MCP Tool Integration** — Plug-and-play tools (dice, rules lookup, image gen, web search) with performance-budgeted execution
-- 🔄 **Provider-Agnostic** — Swap LLM, STT, TTS, or audio platform with a config change, not a rewrite
-- ⚡ **Sub-2s Latency** — End-to-end streaming pipeline with speculative pre-fetch and sentence-level TTS
-- 🎭 **Multi-NPC Orchestration** — Multiple NPCs with address detection, turn-taking, and priority-based audio mixing
-- 📜 **Live Session Transcription** — Continuous STT with speaker identification for session logging and future lookup
-- 🧪 **Dual-Model Sentence Cascade** — Experimental: fast model opener + strong model continuation for perceived <600ms voice onset
-- 🗺️ **Entity Management** — Pre-session world-building with YAML campaign files and VTT imports (Foundry VTT, Roll20)
+One binary, `cmd/glyphoxa`, runs one **Mode** at a time via `-mode`
+([ADR-0005](docs/adr/0005-single-binary-modes-no-audio-rpc.md)). The shipped
+default is `voice`.
 
-## Deployment Modes
+| Mode | What it runs |
+|------|--------------|
+| `voice` (default) | A **Voice Instance**: the Discord Bot + the voice pipeline for one Guild/channel. No web API, no Slash Commands. |
+| `web` | A **Web Instance**: the operator console + Connect RPC API. Opens no Discord gateway, so it registers no Slash Commands. |
+| `all` | Both in one process: the web tier that also owns the standing Discord presence (Slash Commands) and drives the voice loop in-process. |
 
-Glyphoxa runs in four modes via `--mode`:
+`all` is the only Mode with the whole product in it. See
+[docs/architecture.md §1](docs/architecture.md) for the process topology and the
+`voice`-vs-`all` default rationale.
 
-| Mode | Description |
-|------|-------------|
-| `full` (default) | Single-process, self-hosted. No admin API, config from YAML. |
-| `gateway` | Multi-tenant orchestrator. Admin API, bot management, Discord voice ownership, audio streaming to workers via gRPC AudioBridge. |
-| `worker` | Voice pipeline executor. Receives audio from gateway via gRPC, runs VAD→STT→LLM→TTS pipeline, streams NPC audio back. |
-| `mcp-gateway` | Shared MCP tool server for workers. Stateless tools over HTTP. |
+## 🚀 Quick Start (self-host)
 
-## 🏗️ Architecture
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    Audio Transport                       │
-│              (Discord / WebRTC / Custom)                 │
-├────────────────────┬─────────────────────────────────────┤
-│   Audio In (VAD)   │          Audio Out (Mixer)          │
-├────────────────────┴─────────────────────────────────────┤
-│              Agent Orchestrator + Router                  │
-│    ┌─────────┐  ┌─────────┐  ┌─────────┐                │
-│    │ NPC #1  │  │ NPC #2  │  │ NPC #3  │  ...           │
-│    └────┬────┘  └────┬────┘  └────┬────┘                │
-├─────────┴────────────┴────────────┴──────────────────────┤
-│                  Voice Engines                            │
-│    Cascaded (STT→LLM→TTS) │ S2S (Gemini/OpenAI) │ ⚠Cascade │
-├──────────────────────────────────────────────────────────┤
-│   Memory Subsystem          │    MCP Tool Execution      │
-│  ┌─────┐ ┌─────┐ ┌─────┐  │  ┌──────┐ ┌──────┐         │
-│  │ Log │ │ Vec │ │Graph│  │  │ Dice │ │Rules │ ...      │
-│  └─────┘ └─────┘ └─────┘  │  └──────┘ └──────┘         │
-└──────────────────────────────────────────────────────────┘
-```
-
-## 🚀 Quick Start
+Glyphoxa self-hosts as a single **Operator**-owned deployment. The full runbook —
+every environment variable, the Discord OAuth app, and the operator allowlist —
+is [docs/configuration.md](docs/configuration.md); the game-running walkthrough is
+[docs/quickstart-gm.md](docs/quickstart-gm.md). The short path:
 
 ### Prerequisites
 
-- **Go 1.26+** with CGo enabled
-- **libopus** — `apt install libopus-dev` · `pacman -S opus` · `brew install opus`
-- **ONNX Runtime** — from [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases) (for Silero VAD)
-- **libdave** — `make dave-libs` (for Discord DAVE E2EE voice encryption)
+- **Go 1.26+** with a C toolchain (`CGO_ENABLED=1`)
+- **Node.js 20+ and npm** — the console bundle is embedded into the binary
+- **[buf](https://buf.build/docs/installation)** — generates the Connect/protobuf stubs
+- **Postgres with the [pgvector](https://github.com/pgvector/pgvector) extension**
+- For the `voice` loop: **libopus**, **ONNX Runtime** (Silero VAD), and DAVE
+  libraries — see [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md)
 
-### Build & Run
+### Build & run
 
-```bash
-git clone https://github.com/MrWong99/glyphoxa.git
-cd glyphoxa
+```sh
+git clone https://github.com/MrWong99/Glyphoxa.git
+cd Glyphoxa
 
-# Build
-make build
+cp .env.example .env              # set at least DB + SECRET; -mode all also needs the DISCORD_OAUTH_* vars + GLYPHOXA_OPERATOR_IDS — see docs/configuration.md §5–§6
+source .env                       # the template is shell-sourced (export NAME='value')
 
-# Run
-./bin/glyphoxa --config config.yaml
+make proto                        # buf generate → gen/
+(cd web && npm ci && npm run build)   # Vite bundle → internal/spa/dist
+make build                        # → bin/glyphoxa
+
+./bin/glyphoxa migrate up         # apply the schema (every Mode assumes it is current)
+./bin/glyphoxa seed               # seed the demo Tenant/Campaign/NPC (idempotent)
+./bin/glyphoxa -mode all          # serve the console + drive the voice loop
 ```
 
-For the **web tier** (Discord-OAuth operator login), copy `.env.example` to
-`.env`, fill it in, and follow the setup runbook in
-[docs/configuration.md](docs/configuration.md).
-
-### Development
-
-```bash
-# Run tests with race detector (459 tests)
-make test
-
-# Full pre-commit check (fmt + vet + test)
-make check
-```
+Then open `http://127.0.0.1:8080` and sign in with Discord. The OAuth app and the
+mandatory operator allowlist are set up in [docs/configuration.md](docs/configuration.md)
+§5–§6.
 
 ## 🔌 Provider Support
 
+Bring-your-own-keys (BYOK, [ADR-0004](docs/adr/0004-byok-provider-key-matrix.md)):
+Provider Configs are Tenant-scoped and encrypted at rest. Shipped adapters
+(`pkg/voice`):
+
 | Component | Providers |
 |-----------|-----------|
-| **STT** | ElevenLabs, Deepgram Nova-3, whisper.cpp (local) |
-| **LLM** | Groq, Google Gemini, OpenAI, Ollama (local) — via the official [OpenAI Go SDK](https://github.com/openai/openai-go) against OpenAI-compatible endpoints; Anthropic (native) — see [ADR-0037](docs/adr/0037-openai-go-sdk-for-llm-providers.md) |
-| **TTS** | ElevenLabs, Coqui XTTS (local) |
-| **S2S** | Gemini Live, OpenAI Realtime |
-| **Embeddings** | OpenAI, Ollama (local) |
-| **Audio** | Discord, WebRTC |
-| **Memory** | PostgreSQL + pgvector |
+| **STT** | ElevenLabs — batch + streaming ([ADR-0042](docs/adr/0042-streaming-stt-speculative-memory-recall.md)) |
+| **TTS** | ElevenLabs |
+| **LLM** | Groq, Google Gemini, Anthropic, OpenAI-compatible endpoints |
+| **Embeddings** | Ollama |
+| **VAD** | Silero (local, ONNX Runtime) |
+| **Audio** | Discord (DAVE/MLS end-to-end encrypted voice) |
+| **Storage** | PostgreSQL + pgvector |
 
-## ⚡ Performance Targets
+The MVP provider matrix is Groq (LLM) + ElevenLabs (STT + TTS). See
+[docs/architecture.md §2.7](docs/architecture.md) for which adapters are wired
+into the live loop.
 
-| Metric | Target | Hard Limit |
-|--------|--------|------------|
-| Mouth-to-ear latency | < 1.2s | 2.0s |
-| STT time-to-first-token | < 300ms | 500ms |
-| LLM time-to-first-token | < 400ms | 800ms |
-| TTS time-to-first-byte | < 200ms | 500ms |
-| Concurrent NPC voices | ≥ 3 | ≥ 1 |
-| Hot memory assembly | < 50ms | < 150ms |
+## ✨ What ships today
+
+- 🖥️ **Operator web console** — four screens (`login`, `configuration`,
+  `campaign`, `session`): Provider Configs + Discord settings + spend caps,
+  Campaigns/Agents/Tool Grants/Knowledge Graph, and Start/Stop of a live Voice
+  Session with the live Transcript feed and NPC roster + mute.
+- 🎙️ **Live Character NPCs** — a Voice Session voices a Campaign's Character NPCs
+  through a streaming VAD → STT → Address Detection → LLM → TTS pipeline.
+- 💬 **Slash Commands** (registered in `all` Mode) — `/roll <dice>` for anyone in
+  the Guild; and, GM-only, `/glyphoxa use|start|end|search|mute|muteall`.
+- 🗺️ **Knowledge Graph** — a per-Campaign structured wiki of typed Nodes and
+  Edges in Postgres ([ADR-0008](docs/adr/0008-postgres-knowledge-graph-layered.md)),
+  authored from the Campaign screen and fed into NPC Hot Context.
+- 📜 **Transcript persistence + search** — every Voice Session's Transcript Lines
+  are persisted for replay-on-reload and full-text search
+  ([ADR-0040](docs/adr/0040-transcript-line-persistence.md)), from the console or
+  via `/glyphoxa search`.
+- 💸 **Spend caps** — per-Tenant soft/hard cost caps on a Voice Session
+  ([ADR-0046](docs/adr/0046-spend-meter-price-map-cap-mechanics.md)).
+- 📦 **Container image + Helm chart** — one OCI image (`Dockerfile`) and a
+  Kubernetes chart (`deploy/charts/glyphoxa`), with migrations as a pre-install
+  hook Job ([ADR-0034](docs/adr/0034-deployment-artifacts.md)).
 
 ## 📦 Project Structure
 
 ```
-glyphoxa/
-├── cmd/glyphoxa/          # Entry point (--mode=full|gateway|worker|mcp-gateway)
+Glyphoxa/
+├── cmd/glyphoxa/          # Entry point: Modes (voice|web|all) + migrate/seed subcommands
 ├── internal/
-│   ├── agent/             # NPC agents, orchestrator, router, address detection
-│   ├── config/            # Configuration, tenant context, hot-reload
-│   ├── engine/            # Voice engines (S2S wrapper, sentence cascade)
-│   ├── entity/            # Entity management (CRUD, YAML, VTT import)
-│   ├── gateway/           # Admin API, bot manager, session orchestrator, gRPC
-│   ├── health/            # Health probes (/healthz, /readyz)
-│   ├── hotctx/            # Hot context assembly and formatting
-│   ├── mcp/               # MCP host, bridge, budget tiers, built-in tools
-│   ├── observe/           # Metrics, traces, structured logging (OTel)
-│   ├── resilience/        # Circuit breaker, retry patterns
-│   ├── session/           # Voice pipeline lifecycle (Runtime, WorkerHandler)
-│   └── transcript/        # Transcript correction pipeline
+│   ├── auth/              # Discord OAuth, operator allowlist, session cookies
+│   ├── presence/          # Standing Discord gateway + Slash Command surface
+│   ├── rpc/               # Connect service handlers (Campaign/Auth/Provider/Session/Voice)
+│   ├── session/           # In-process Voice Session Manager (Start/Stop)
+│   ├── transcript/        # Transcript Line relay (SSE) + Chunk writer
+│   ├── recall/            # NPC memory recall over Transcript Chunks
+│   ├── kgfacts/           # Knowledge Graph facts into Hot Context
+│   ├── embedworker/       # Async embedding backfill
+│   ├── spend/             # Spend meter + price map + caps
+│   ├── storage/           # Postgres store, migrations, BYOK crypto
+│   ├── observe/           # slog + Prometheus, /healthz, /readyz
+│   ├── spa/               # Embedded SPA (go:embed internal/spa/dist)
+│   ├── web/               # HTTP server + mounts
+│   ├── wirenpc/           # Voice-loop composition root against a live Discord session
+│   ├── discordinvite/     # Invite → Guild → voice channel resolution
+│   ├── discordtag/        # Bot tag lookup
+│   └── ci/                # CI helper checks
 ├── pkg/
-│   ├── audio/             # Platform + Connection interfaces, mixer, WebRTC
-│   ├── memory/            # Store interface, PostgreSQL + pgvector, knowledge graph
-│   └── provider/          # LLM, STT, TTS, S2S, VAD, Embeddings interfaces + impls
-├── deploy/helm/           # Kubernetes Helm chart (gateway, worker, MCP gateway)
-├── docs/design/           # Architecture and design documents
-├── proto/                 # gRPC service definitions
-├── research/              # Research notes
-└── configs/               # Example configuration files
+│   ├── tool/              # Tool interface + registry + built-in dice Tool
+│   └── voice/             # Voice pipeline: stt, tts, llm, embeddings, vad, wire, address, agent, orchestrator
+├── proto/                 # Connect/protobuf service definitions (buf)
+├── web/                   # Vite + React 18 SPA (operator console)
+├── deploy/charts/glyphoxa # Kubernetes Helm chart
+├── docs/                  # Architecture, configuration, ADRs, agent runbooks
+├── scripts/ · tests/      # Tooling and integration/e2e tests
+└── assets/                # Banner + logo art
 ```
+
+`gen/` (proto stubs) and `bin/` (build output) are generated and gitignored.
 
 ## 📖 Documentation
 
-Comprehensive guides for developers and contributors — see the [full documentation index](docs/README.md).
+Start at the [documentation index](docs/README.md).
 
 | Guide | Description |
 |-------|-------------|
-| [Getting Started](docs/getting-started.md) | Prerequisites, build, first run |
-| [Architecture](docs/architecture.md) | System layers, data flow, key packages |
-| [Configuration](docs/configuration.md) | Environment variables + Discord-OAuth / operator-allowlist setup runbook |
-| [Providers](docs/providers.md) | Provider system, adding new providers |
-| [NPC Agents](docs/npc-agents.md) | NPC definition, entities, campaigns |
-| [Memory](docs/memory.md) | 3-layer memory system |
-| [MCP Tools](docs/mcp-tools.md) | Tool system, building custom tools |
-| [Audio Pipeline](docs/audio-pipeline.md) | Audio flow, VAD, engine types |
-| [Commands](docs/commands.md) | Discord slash and voice commands |
-| [Deployment](docs/deployment.md) | Docker Compose, Kubernetes / Helm, production setup |
-| [Distributed Mode](docs/distributed-mode.md) | Gateway Audio Bridge, gRPC audio streaming, K8s deployment |
-| [Multi-Tenant](docs/multi-tenant.md) | Gateway, admin API, tenant model, usage tracking |
-| [Observability](docs/observability.md) | Metrics, Grafana, health endpoints |
-| [Testing](docs/testing.md) | Test conventions and patterns |
-| [Troubleshooting](docs/troubleshooting.md) | Common issues and debugging |
-
-## 📚 Design Documents
-
-| Document | Description |
-|----------|-------------|
-| [Overview](docs/design/00-overview.md) | Vision, goals, product principles |
-| [Architecture](docs/design/01-architecture.md) | System layers and data flow |
-| [Providers](docs/design/02-providers.md) | LLM, STT, TTS, Audio platform interfaces |
-| [Memory](docs/design/03-memory.md) | Hybrid memory system and knowledge graph |
-| [MCP Tools](docs/design/04-mcp-tools.md) | Tool integration and performance budgets |
-| [Sentence Cascade](docs/design/05-sentence-cascade.md) | ⚠️ Dual-model cascade (experimental) |
-| [NPC Agents](docs/design/06-npc-agents.md) | Agent design and multi-NPC orchestration |
-| [Technology](docs/design/07-technology.md) | Technology decisions and latency budget |
-| [Roadmap](docs/design/09-roadmap.md) | Development phases |
-| [Knowledge Graph](docs/design/10-knowledge-graph.md) | L3 graph schema and query patterns |
+| [Architecture](docs/architecture.md) | Current-system overview; every subsystem names its ADR(s), and every ADR-vs-code divergence is recorded. |
+| [Configuration & self-host setup](docs/configuration.md) | Every environment variable, the `.env` template, Postgres/pgvector, Discord OAuth, the operator allowlist, and the build order. |
+| [GM quickstart](docs/quickstart-gm.md) | From a fresh clone to a talking Character NPC in a Discord voice channel. |
+| [Live NPC run (developer)](docs/agents/live-npc-run.md) | The `voice`-mode live loop, `-hardcoded` NPC, and the `opus`/`dave`/`nolibopusfile` build tags. |
+| [ADRs](docs/adr/) | The Architecture Decision Records behind every subsystem. |
+| [Decisions ledger](DESIGN.md) | The full ADR ledger and open questions. |
+| [Domain glossary](CONTEXT.md) | The canonical vocabulary used across the codebase and docs. |
 
 ## 🤝 Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and workflow guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and
+workflow. Domain terms follow [CONTEXT.md](CONTEXT.md); code of conduct is
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 - **Bugs** → [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml)
 - **Features** → [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml)

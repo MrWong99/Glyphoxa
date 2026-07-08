@@ -20,8 +20,8 @@ mirror its §3 build order.
 ### Build & Test
 
 ```bash
-git clone https://github.com/MrWong99/glyphoxa.git
-cd glyphoxa
+git clone https://github.com/MrWong99/Glyphoxa.git
+cd Glyphoxa
 
 # 1. Generate the protobuf stubs → gen/ (Go + TS). gen/ is gitignored, so this
 #    must run first: the Go build and the SPA both import the generated code.
