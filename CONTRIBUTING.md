@@ -20,7 +20,7 @@ mirror its §3 build order.
 ### Build & Test
 
 ```bash
-git clone https://github.com/MrWong99/glyphoxa.git
+git clone https://github.com/MrWong99/Glyphoxa.git
 cd glyphoxa
 
 # 1. Generate the protobuf stubs → gen/ (Go + TS). gen/ is gitignored, so this
