@@ -45,6 +45,14 @@ type campaignStore interface {
 	CreateCampaign(ctx context.Context, c storage.NewCampaign) (uuid.UUID, error)
 	UpdateCampaign(ctx context.Context, c storage.CampaignUpdate) (storage.Campaign, error)
 	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
+	// The campaign archive lifecycle (#269): ListAllCampaigns is the archive-
+	// inclusive list the include_archived flag routes to; Archive/Unarchive/Delete
+	// are the lifecycle writes. Delete cascades in one statement; Archive clears any
+	// durable selection pointing at the campaign.
+	ListAllCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	ArchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	UnarchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	DeleteCampaign(ctx context.Context, id uuid.UUID) error
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
@@ -140,7 +148,7 @@ func (s *CampaignServer) GetActiveCampaign(
 // nullable GMMemberID is intentionally not mapped — it is not part of the
 // management.v1 Campaign message (SEAM #6).
 func toProtoCampaign(c storage.Campaign) *managementv1.Campaign {
-	return &managementv1.Campaign{
+	pb := &managementv1.Campaign{
 		Id:        c.ID.String(),
 		TenantId:  c.TenantID.String(),
 		Name:      c.Name,
@@ -149,6 +157,12 @@ func toProtoCampaign(c storage.Campaign) *managementv1.Campaign {
 		CreatedAt: timestamppb.New(c.CreatedAt),
 		UpdatedAt: timestamppb.New(c.UpdatedAt),
 	}
+	// archived_at is left unset (nil) for an active campaign so the wire "unset =
+	// active" contract holds; set only when the campaign is archived (#269).
+	if c.ArchivedAt != nil {
+		pb.ArchivedAt = timestamppb.New(*c.ArchivedAt)
+	}
+	return pb
 }
 
 // Handler builds the Connect HTTP handler for CampaignService and returns the
