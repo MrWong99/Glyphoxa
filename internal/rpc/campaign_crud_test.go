@@ -43,6 +43,20 @@ type fakeCampaignStore struct {
 	// (#222); getCampaignErr forces its failure path.
 	campaignsByID  map[uuid.UUID]storage.Campaign
 	getCampaignErr error
+
+	// Campaign management state (#264): campaignList backs ListCampaigns;
+	// createdCampaigns records CreateCampaign inputs (created rows also land in
+	// campaignsByID so a read-back resolves); updatedCampaigns records
+	// UpdateCampaign inputs; setActiveCalls records SetActiveCampaign inputs. The
+	// *Err hooks force each failure path.
+	campaignList      []storage.Campaign
+	listCampaignErr   error
+	createdCampaigns  []storage.NewCampaign
+	createCampaignErr error
+	updatedCampaigns  []storage.CampaignUpdate
+	updateCampaignErr error
+	setActiveCalls    []setActiveCall
+	setActiveErr      error
 	// listNodesCampaign/searchNodesCampaign record the campaign id ListNodes /
 	// SearchNodes resolved so the scope precedence can be asserted (#222).
 	listNodesCampaign   uuid.UUID
@@ -103,8 +117,17 @@ type setAgentCall struct {
 	agentID uuid.NullUUID
 }
 
+// setActiveCall records one SetActiveCampaign invocation for assertions (#264).
+type setActiveCall struct {
+	discordUserID string
+	campaignID    uuid.UUID
+}
+
 func newFakeStore() *fakeCampaignStore {
-	return &fakeCampaignStore{agents: map[uuid.UUID]storage.Agent{}}
+	return &fakeCampaignStore{
+		agents:        map[uuid.UUID]storage.Agent{},
+		campaignsByID: map[uuid.UUID]storage.Campaign{},
+	}
 }
 
 func (f *fakeCampaignStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
@@ -130,6 +153,51 @@ func (f *fakeCampaignStore) GetCampaign(_ context.Context, id uuid.UUID) (storag
 		return storage.Campaign{}, storage.ErrNotFound
 	}
 	return c, nil
+}
+
+func (f *fakeCampaignStore) ListCampaigns(context.Context) ([]storage.Campaign, error) {
+	return f.campaignList, f.listCampaignErr
+}
+
+func (f *fakeCampaignStore) CreateCampaign(_ context.Context, c storage.NewCampaign) (uuid.UUID, error) {
+	if f.createCampaignErr != nil {
+		return uuid.Nil, f.createCampaignErr
+	}
+	f.createdCampaigns = append(f.createdCampaigns, c)
+	id := uuid.New()
+	// Land the row so CreateCampaign's read-back (GetCampaign) resolves it.
+	f.campaignsByID[id] = storage.Campaign{
+		ID:       id,
+		TenantID: c.TenantID,
+		Name:     c.Name,
+		System:   c.System,
+		Language: c.Language,
+	}
+	return id, nil
+}
+
+func (f *fakeCampaignStore) UpdateCampaign(_ context.Context, c storage.CampaignUpdate) (storage.Campaign, error) {
+	if f.updateCampaignErr != nil {
+		return storage.Campaign{}, f.updateCampaignErr
+	}
+	f.updatedCampaigns = append(f.updatedCampaigns, c)
+	existing, ok := f.campaignsByID[c.ID]
+	if !ok {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	existing.Name = c.Name
+	existing.System = c.System
+	existing.Language = c.Language
+	f.campaignsByID[c.ID] = existing
+	return existing, nil
+}
+
+func (f *fakeCampaignStore) SetActiveCampaign(_ context.Context, discordUserID string, campaignID uuid.UUID) error {
+	if f.setActiveErr != nil {
+		return f.setActiveErr
+	}
+	f.setActiveCalls = append(f.setActiveCalls, setActiveCall{discordUserID: discordUserID, campaignID: campaignID})
+	return nil
 }
 
 func (f *fakeCampaignStore) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {

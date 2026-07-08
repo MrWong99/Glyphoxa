@@ -82,7 +82,10 @@ func (s *Store) GetUserByDiscordID(ctx context.Context, discordUserID string) (U
 // ADR-0009) on the users row keyed by Discord snowflake. It UPSERTS the row so a
 // GM who drives the slash-command surface before ever logging into the web tier
 // still gets a persisted selection; a later OAuth login refreshes the display
-// fields (UpsertUser) and preserves this selection. Idempotent.
+// fields (UpsertUser) and preserves this selection. Idempotent. A campaignID that
+// no longer exists trips the active_campaign_id FK (23503) and yields ErrNotFound
+// — the write can never store a dangling pointer, even if the campaign vanishes
+// between a caller's existence check and this write.
 func (s *Store) SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO users (discord_user_id, active_campaign_id)
@@ -90,6 +93,9 @@ func (s *Store) SetActiveCampaign(ctx context.Context, discordUserID string, cam
 		 ON CONFLICT (discord_user_id) DO UPDATE
 		   SET active_campaign_id = EXCLUDED.active_campaign_id, updated_at = now()`,
 		discordUserID, campaignID)
+	if code, ok := pgErrCode(err); ok && code == "23503" { // foreign_key_violation
+		return ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("storage: set active campaign for %q: %w", discordUserID, err)
 	}

@@ -13,9 +13,42 @@ option go_package = "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1;man
 // single-operator self-host (ADR-0039) it resolves the sole seeded tenant; the
 // X-Tenant-Id pass-through that scopes multi-tenant reads fills in later.
 service CampaignService {
-  // GetActiveCampaign returns the most-recently-created campaign for the
-  // operator. It fails with CodeNotFound when no campaign exists.
+  // GetActiveCampaign returns the operator's resolved Active Campaign: the live
+  // Voice Session's campaign when one is running, else the durable selection
+  // written by SetActiveCampaign / `/glyphoxa use`, else the most-recently-created
+  // campaign (#222). It fails with CodeNotFound when no campaign exists.
   rpc GetActiveCampaign(GetActiveCampaignRequest) returns (GetActiveCampaignResponse);
+
+  // ListCampaigns returns the operator's campaigns in name order (#264). It backs
+  // the web UI's campaign picker. It is a read (NO_SIDE_EFFECTS), so the CSRF
+  // check is exempt.
+  rpc ListCampaigns(ListCampaignsRequest) returns (ListCampaignsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateCampaign creates a campaign and returns it (#264). name is required
+  // (empty is CodeInvalidArgument); system/language are optional free-text. The
+  // tenant is resolved server-side (ADR-0039), and the ADR-0009 auto-Butler
+  // trigger fires so the new campaign has its Butler with the dice grant.
+  // State-changing: the auth + CSRF interceptors guard it.
+  rpc CreateCampaign(CreateCampaignRequest) returns (CreateCampaignResponse);
+
+  // UpdateCampaign writes a campaign's name/system/language and returns the
+  // updated campaign (#264). id is required; an unknown id is CodeNotFound and an
+  // empty name is CodeInvalidArgument. system/language are stored as opaque
+  // free-text strings (no validation) and take effect on the next Voice Session.
+  // State-changing: the auth + CSRF interceptors guard it.
+  rpc UpdateCampaign(UpdateCampaignRequest) returns (UpdateCampaignResponse);
+
+  // SetActiveCampaign records the operator's durable Active Campaign selection —
+  // the SAME users.active_campaign_id row `/glyphoxa use` writes, keeping both
+  // surfaces in lockstep (#264, migration 00014) — and returns the resulting
+  // resolved Active Campaign. campaign_id is validated first; an unknown id is
+  // CodeNotFound. The live-first resolution rule is untouched: while a Voice
+  // Session is live its campaign still wins, so the returned campaign may differ
+  // from the one just selected. State-changing: the auth + CSRF interceptors
+  // guard it.
+  rpc SetActiveCampaign(SetActiveCampaignRequest) returns (SetActiveCampaignResponse);
 
   // GetCampaignRoster returns the active campaign together with its ordered
   // roster — the Butler first, then the Character NPCs — each carrying a stable
@@ -401,7 +434,71 @@ message GetActiveCampaignRequest {}
 
 // GetActiveCampaignResponse carries the resolved active campaign.
 message GetActiveCampaignResponse {
-  // campaign is the most-recently-created campaign for the operator.
+  // campaign is the operator's resolved Active Campaign (live Voice Session's
+  // campaign → durable selection → most-recently-created fallback).
+  Campaign campaign = 1;
+}
+
+// ListCampaignsRequest is the (empty) request; the operator's campaigns are
+// resolved server-side (single operator, ADR-0039).
+message ListCampaignsRequest {}
+
+// ListCampaignsResponse carries the operator's campaigns in name order.
+message ListCampaignsResponse {
+  // campaigns are the operator's campaigns, name-ordered.
+  repeated Campaign campaigns = 1;
+}
+
+// CreateCampaignRequest is the "New campaign" payload. The tenant is resolved
+// server-side (single operator, ADR-0039).
+message CreateCampaignRequest {
+  // name is the campaign title; empty is rejected with CodeInvalidArgument.
+  string name = 1;
+  // system is the tabletop ruleset (e.g. "D&D 5e"); optional free-text.
+  string system = 2;
+  // language is the BCP-47 tag the campaign runs in (e.g. "en"); optional
+  // free-text.
+  string language = 3;
+}
+
+// CreateCampaignResponse carries the created campaign (its auto-Butler is created
+// as a side effect, ADR-0009).
+message CreateCampaignResponse {
+  // campaign is the newly created campaign.
+  Campaign campaign = 1;
+}
+
+// UpdateCampaignRequest carries a campaign's editable fields. system/language are
+// stored opaquely (no validation) and take effect on the next Voice Session.
+message UpdateCampaignRequest {
+  // id is the campaign to update; an unknown id fails with CodeNotFound.
+  string id = 1;
+  // name is the campaign title; empty is rejected with CodeInvalidArgument.
+  string name = 2;
+  // system is the tabletop ruleset; optional free-text, stored opaquely.
+  string system = 3;
+  // language is the BCP-47 tag; optional free-text, stored opaquely.
+  string language = 4;
+}
+
+// UpdateCampaignResponse carries the updated campaign.
+message UpdateCampaignResponse {
+  // campaign is the updated campaign.
+  Campaign campaign = 1;
+}
+
+// SetActiveCampaignRequest names the campaign to make the operator's durable
+// Active Campaign selection (#264).
+message SetActiveCampaignRequest {
+  // campaign_id is the campaign to select; an unknown id fails with CodeNotFound.
+  string campaign_id = 1;
+}
+
+// SetActiveCampaignResponse carries the resulting resolved Active Campaign. The
+// live-first rule still applies, so while a Voice Session is live this is that
+// session's campaign, not necessarily the one just selected.
+message SetActiveCampaignResponse {
+  // campaign is the resolved Active Campaign after the selection.
   Campaign campaign = 1;
 }
 

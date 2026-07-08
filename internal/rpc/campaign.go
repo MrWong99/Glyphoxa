@@ -23,9 +23,9 @@ import (
 )
 
 // campaignStore is the narrow storage surface CampaignServer needs — the active
-// campaign read plus the roster reads and the agent CRUD writes (#71).
-// *storage.Store satisfies it, so handlers can be driven by a fake in unit tests
-// and the real store in integration tests.
+// campaign read, the roster reads and agent CRUD writes (#71), and the campaign
+// management reads/writes (#264). *storage.Store satisfies it, so handlers can be
+// driven by a fake in unit tests and the real store in integration tests.
 type campaignStore interface {
 	// GetActiveCampaignForUser + GetActiveCampaign are the profile-first resolution
 	// (durable /glyphoxa use selection → most-recent fallback) the header + CRUD +
@@ -37,6 +37,14 @@ type campaignStore interface {
 	// than the profile default. UpdateAgent also uses it to read the owning
 	// campaign's language for a first-save voice default (#224).
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	// ListCampaigns/CreateCampaign/UpdateCampaign/SetActiveCampaign back the
+	// campaign management RPCs (#264): the name-ordered picker list, the tenant-
+	// scoped create (auto-Butler fires), the opaque name/system/language write, and
+	// the durable /glyphoxa use selection shared with the slash-command surface.
+	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	CreateCampaign(ctx context.Context, c storage.NewCampaign) (uuid.UUID, error)
+	UpdateCampaign(ctx context.Context, c storage.CampaignUpdate) (storage.Campaign, error)
+	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
