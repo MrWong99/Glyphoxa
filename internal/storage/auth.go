@@ -105,16 +105,19 @@ func (s *Store) SetActiveCampaign(ctx context.Context, discordUserID string, cam
 // GetActiveCampaignForUser returns the Campaign the operator selected via
 // /glyphoxa use (#108, ADR-0009 step 2), joining the users row's
 // active_campaign_id to campaign. ErrNotFound when the operator has no row, has
-// made no selection, or the chosen campaign has since been deleted (the FK's ON
-// DELETE SET NULL nulled the pointer) — the caller then falls through to the
+// made no selection, the chosen campaign has since been deleted (the FK's ON
+// DELETE SET NULL nulled the pointer), or the chosen campaign is now archived
+// (#269: an archived durable selection is treated as absent, so the caller falls
+// through to the GetActiveCampaign fallback — which also skips archived — exactly
+// as it does for a deleted one). The caller then falls through to the
 // GetActiveCampaign fallback (step 3). The columns are qualified to `c` because
 // users and campaign share id/name/created_at/updated_at.
 func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID string) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
-		        c.created_at, c.updated_at
+		        c.created_at, c.updated_at, c.archived_at
 		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
-		  WHERE u.discord_user_id = $1`, discordUserID)
+		  WHERE u.discord_user_id = $1 AND c.archived_at IS NULL`, discordUserID)
 	c, err := scanCampaign(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound

@@ -61,6 +61,12 @@ type Campaign struct {
 	Language   string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// ArchivedAt is when the campaign was archived (#269), or nil when active.
+	// Archived campaigns are excluded from ListCampaigns, the /glyphoxa use
+	// autocomplete, and the GetActiveCampaign most-recent fallback, and cannot back
+	// a Voice Session. Appended LAST in campaignColumns/scanCampaign (column-order
+	// coupling), so any new column follows it in both places.
+	ArchivedAt *time.Time
 }
 
 // ProviderConfig is a Tenant-scoped, encrypted BYOK credential record binding a
