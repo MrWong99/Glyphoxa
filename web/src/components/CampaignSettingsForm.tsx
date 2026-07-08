@@ -59,14 +59,28 @@ export function CampaignSettingsForm({
   const [language, setLanguage] = useState(campaign.language);
 
   // The Campaign Language choices come solely from the registered encoders.
-  const langQ = useQuery(CampaignService.method.listSupportedLanguages, {});
+  // retry:false so a failed load settles into the error hint at once rather than
+  // backing off first — the registry is a cheap in-process read, so a failure is
+  // a real signal to surface, not a transient to hammer through.
+  const langQ = useQuery(CampaignService.method.listSupportedLanguages, {}, { retry: false });
   const supported = langQ.data?.languages ?? [];
 
   const options = supported.map((code) => ({ value: code, label: languageLabel(code) }));
   // A stored language with no registered encoder still rides here as an extra
   // option so the SELECT can't silently coerce it to a supported one on save.
+  // Only claim "(unsupported)" once the registry has actually LOADED — while the
+  // query is pending or has failed, supported is empty for lack of an answer, not
+  // because the stored language is unregistered, so mislabelling it would be a
+  // lie (and a false claim on every transient). Until then the stored value rides
+  // as a plain option so the SELECT still shows the current selection.
   if (campaign.language && !supported.includes(campaign.language)) {
-    options.push({ value: campaign.language, label: `${languageLabel(campaign.language)} (unsupported)` });
+    const registryKnows = langQ.isSuccess;
+    options.push({
+      value: campaign.language,
+      label: registryKnows
+        ? `${languageLabel(campaign.language)} (unsupported)`
+        : languageLabel(campaign.language),
+    });
   }
 
   // listCampaigns is campaign-INVARIANT (lib/campaignCache.ts), so the sweep
@@ -131,6 +145,11 @@ export function CampaignSettingsForm({
             disabled={update.isPending}
           />
           <span className="gx-field__hint">Takes effect on the next Voice Session.</span>
+          {langQ.isError && (
+            <span className="gx-field__hint gx-field__hint--error" role="alert">
+              Couldn&apos;t load the language choices: {langQ.error.message}
+            </span>
+          )}
         </div>
       </div>
       <div className="gx-campaign-create__actions">

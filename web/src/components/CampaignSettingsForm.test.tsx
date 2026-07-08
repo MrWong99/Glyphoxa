@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import { createRouterTransport } from "@connectrpc/connect";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 
 import {
@@ -20,12 +20,19 @@ type Camp = { id?: string; name?: string; system?: string; language?: string };
 // UpdateCampaign echoes the request so a test can assert exactly what rode the
 // wire. `updated` captures the last UpdateCampaign request.
 function mockBackend(
-  opts: { languages?: string[]; updated?: { req?: Record<string, unknown> }; updateError?: string } = {},
+  opts: {
+    languages?: string[];
+    languagesError?: string;
+    updated?: { req?: Record<string, unknown> };
+    updateError?: string;
+  } = {},
 ) {
   return createRouterTransport(({ service }) => {
     service(CampaignService, {
-      listSupportedLanguages: () =>
-        create(ListSupportedLanguagesResponseSchema, { languages: opts.languages ?? ["de", "en"] }),
+      listSupportedLanguages: () => {
+        if (opts.languagesError) throw new ConnectError(opts.languagesError, Code.Unavailable);
+        return create(ListSupportedLanguagesResponseSchema, { languages: opts.languages ?? ["de", "en"] });
+      },
       updateCampaign: (req) => {
         if (opts.updated) opts.updated.req = { id: req.id, name: req.name, system: req.system, language: req.language };
         return create(UpdateCampaignResponseSchema, {
@@ -97,6 +104,45 @@ describe("CampaignSettingsForm", () => {
     // silently coerce it to a registered language.
     const list = await openLanguageSelect();
     expect(await within(list).findByRole("option", { name: /unsupported/i })).toBeInTheDocument();
+  });
+
+  it("follows the mocked registry, not a hardcoded language list", async () => {
+    // A DISTINCT set the shipped registry never returns: a regression that
+    // hardcodes en/de (and never calls the RPC) would show "de" and miss "xx",
+    // so this pins the SELECT to the RPC answer (ADR-0024, sole truth source).
+    renderForm({ campaign: makeCampaign({ language: "en" }) }, mockBackend({ languages: ["en", "xx"] }));
+
+    const list = await openLanguageSelect();
+    expect(await within(list).findByRole("option", { name: "xx" })).toBeInTheDocument();
+    expect(within(list).getByRole("option", { name: /English \(en\)/ })).toBeInTheDocument();
+    // "de" is registered by the real platform but NOT by this mock — it must be absent.
+    expect(within(list).queryByRole("option", { name: /German \(de\)/ })).not.toBeInTheDocument();
+  });
+
+  it("does not mislabel a stored registered language while the registry is still loading", () => {
+    // Open the SELECT synchronously, before ListSupportedLanguages resolves:
+    // supported is empty for lack of an answer, not because "en" is unregistered,
+    // so the stored value must ride as a plain option — never a false "unsupported".
+    renderForm({ campaign: makeCampaign({ language: "en" }) });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /language/i }), { key: "Enter" });
+    const list = screen.getByRole("listbox");
+    expect(within(list).queryByRole("option", { name: /unsupported/i })).not.toBeInTheDocument();
+  });
+
+  it("surfaces a registry load failure instead of mislabeling the stored language", async () => {
+    renderForm(
+      { campaign: makeCampaign({ language: "en" }) },
+      mockBackend({ languagesError: "registry offline" }),
+    );
+
+    // The error is shown (not swallowed)…
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn't load the language choices/i);
+    expect(alert).toHaveTextContent(/registry offline/);
+    // …and the stored value is not falsely branded unsupported on a failed load.
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /language/i }), { key: "Enter" });
+    const list = screen.getByRole("listbox");
+    expect(within(list).queryByRole("option", { name: /unsupported/i })).not.toBeInTheDocument();
   });
 
   it("suggests three systems via a datalist", () => {
