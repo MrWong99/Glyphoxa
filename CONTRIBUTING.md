@@ -7,9 +7,15 @@ you need to get started.
 
 ### Prerequisites
 
-- **Go 1.26+** with CGo enabled
+- **Go 1.26+** with CGo enabled (`CGO_ENABLED=1`)
+- **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go binary embeds (see the SPA step below)
+- **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs under `gen/` are generated, not committed
 - **libopus** — `apt install libopus-dev` (Debian/Ubuntu) · `pacman -S opus` (Arch) · `brew install opus` (macOS)
 - **ONNX Runtime** — shared library from [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases) (for Silero VAD)
+
+The full self-host setup (Postgres/pgvector, the `.env` template, Discord OAuth)
+lives in [docs/configuration.md](docs/configuration.md); the build steps below
+mirror its §3 build order.
 
 ### Build & Test
 
@@ -17,7 +23,15 @@ you need to get started.
 git clone https://github.com/MrWong99/glyphoxa.git
 cd glyphoxa
 
-# Build
+# 1. Generate the protobuf stubs → gen/ (Go + TS). gen/ is gitignored, so this
+#    must run first: the Go build and the SPA both import the generated code.
+make proto
+
+# 2. Build the SPA bundle → internal/spa/dist (go:embed). Must run before
+#    `make build` embeds the console; skipping it embeds a blank placeholder.
+make spa
+
+# 3. Build the binary → bin/glyphoxa
 make build
 
 # Run all tests with race detector
@@ -26,9 +40,32 @@ make test
 # Lint
 make lint
 
-# Full check (lint + vet + test)
+# Full check (fmt + vet + test) — the pre-push gate
 make check
 ```
+
+Order matters: `make proto` → `make spa` → `make build`, exactly as
+[docs/configuration.md](docs/configuration.md) §3 mandates.
+
+#### Audible local runs (voice mode)
+
+The audio codec (libopus) and DAVE/MLS encryption are opt-in native
+dependencies selected by build tags. A default build links stubs — the pipeline
+wires up but the audio loop exits with `wire: audio codec unavailable` on the
+first frame. For an **audible** (and encrypted) live run, install libdave and
+build with the audio tags:
+
+```bash
+make dave-libs   # installs libdave; prints the PKG_CONFIG_PATH / LD_LIBRARY_PATH exports to add
+CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
+```
+
+- `opus` — real Opus↔PCM codec (else the stub: no audio).
+- `dave` — real DAVE/MLS encryption (mandatory on production Discord; else unencrypted).
+- `nolibopusfile` — compiles out the unused libopusfile dependency; **required whenever `opus` is set**.
+
+See [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md) for the full
+`voice`-mode runbook.
 
 ## Development Workflow
 
@@ -66,7 +103,7 @@ Glyphoxa follows standard Go conventions with a few project-specific rules:
 - **Compile-time interface assertions** — `var _ Interface = (*Impl)(nil)`
 - **Mocks** live in `<package>/mock/` subdirectories
 
-For detailed testing patterns, mock conventions, and examples, see the [Testing Guide](docs/testing.md).
+For detailed testing patterns, mock conventions, and examples, see the [Voice Tests guide](docs/devs/voice-tests.md).
 
 ### Concurrency
 
@@ -84,11 +121,10 @@ For detailed testing patterns, mock conventions, and examples, see the [Testing 
 
 ## Architecture
 
-Before contributing a major feature, read the [design documents](docs/design/):
+Before contributing a major feature, read the architecture overview and the ADRs:
 
-- [Architecture](docs/design/01-architecture.md) — system layers and data flow
-- [Providers](docs/design/02-providers.md) — LLM, STT, TTS, Audio interfaces
-- [Roadmap](docs/design/09-roadmap.md) — development phases
+- [Architecture overview](docs/architecture.md) — the current-system overview; every subsystem names the ADR(s) that govern it
+- [Architecture Decision Records](docs/adr/) — the decisions ledger (system layers, provider seams, data flow)
 
 The core principle: **every external dependency sits behind an interface**. Swapping
 providers is a config change, not a rewrite.
