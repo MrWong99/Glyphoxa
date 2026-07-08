@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import * as RAlert from "@radix-ui/react-alert-dialog";
 
 import { Button } from "./Button";
@@ -46,18 +46,21 @@ export function ConfirmDialog({
 }) {
   const [typed, setTyped] = useState("");
 
-  // Reset the typed value on every close so a reopened dialog starts empty — a
-  // stale match must never let the next open confirm without a fresh re-type.
-  const handleOpenChange = (next: boolean) => {
-    if (!next) setTyped("");
-    onOpenChange(next);
-  };
+  // Reset the typed value whenever the dialog is closed — keyed on `open` rather
+  // than the Radix onOpenChange callback so it fires for BOTH close paths: the
+  // native Cancel/Escape (which flows through onOpenChange) AND a programmatic
+  // close by the caller (e.g. a delete's onSuccess flipping `open` to false,
+  // which bypasses onOpenChange). Either way a reopened dialog starts empty, so a
+  // stale match can't let the next open confirm without a fresh re-type.
+  useEffect(() => {
+    if (!open) setTyped("");
+  }, [open]);
 
   const typedGateOpen = confirmText === undefined || typed === confirmText;
   const disabled = confirmDisabled || !typedGateOpen;
 
   return (
-    <RAlert.Root open={open} onOpenChange={handleOpenChange}>
+    <RAlert.Root open={open} onOpenChange={onOpenChange}>
       <RAlert.Portal>
         <RAlert.Overlay className="gx-confirm__overlay" />
         {/* Radix auto-wires aria-describedby to the Description below when present. */}

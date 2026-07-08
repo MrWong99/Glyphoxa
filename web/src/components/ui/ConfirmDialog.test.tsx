@@ -187,6 +187,42 @@ describe("ConfirmDialog", () => {
     expect(screen.getByRole("button", { name: "Delete campaign" })).toBeDisabled();
   });
 
+  it("resets the typed confirmation on a PROGRAMMATIC close (bypassing onOpenChange)", () => {
+    // The caller closes the dialog itself (e.g. a delete's onSuccess flips `open`
+    // to false) — that never flows through Radix onOpenChange, so the reset must
+    // be keyed on `open`, not that callback.
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button onClick={() => setOpen(false)}>programmatic close</button>
+          <button onClick={() => setOpen(true)}>reopen</button>
+          <ConfirmDialog
+            open={open}
+            onOpenChange={setOpen}
+            title="Delete campaign?"
+            confirmLabel="Delete campaign"
+            confirmText="Lost Mine"
+            onConfirm={() => {}}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+
+    fireEvent.change(screen.getByTestId("confirm-text-input"), { target: { value: "Lost Mine" } });
+    expect(screen.getByRole("button", { name: "Delete campaign" })).toBeEnabled();
+
+    // Close programmatically (not via Cancel/Escape), then reopen: field empty,
+    // confirm disabled — the effect-based reset covered the non-onOpenChange path.
+    // The harness buttons sit behind the modal (aria-hidden), so query them with
+    // hidden:true.
+    fireEvent.click(screen.getByRole("button", { name: /programmatic close/i, hidden: true }));
+    fireEvent.click(screen.getByRole("button", { name: /reopen/i }));
+    expect((screen.getByTestId("confirm-text-input") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "Delete campaign" })).toBeDisabled();
+  });
+
   it("moves initial focus onto the Cancel button (AlertDialog contract)", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const trigger = document.createElement("button");

@@ -416,6 +416,46 @@ describe("CampaignSwitcher", () => {
     await waitFor(() => expect(calls.archiveCampaign).toBe(1));
   });
 
+  it("deletes an archived campaign THROUGH the open panel without the dismiss hook tearing it down mid-flow", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({
+        campaigns: [
+          { id: "a", name: "Alpha Quest" },
+          { id: "z", name: "Zombie Vault", archived: true },
+        ],
+        activeId: "a",
+        calls,
+      }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /show archived/i }));
+
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    const row = (await within(list).findByText("Zombie Vault")).closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: /Campaign actions/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Delete/ }));
+
+    // The confirm dialog is up. Interacting inside it fires mousedown on nodes
+    // that live OUTSIDE the panel's ref (Radix portal). The dismiss hook must NOT
+    // treat that as an outside click and tear the panel (and this dialog) down.
+    const dialog = await screen.findByRole("alertdialog");
+    const input = within(dialog).getByTestId("confirm-text-input");
+    fireEvent.mouseDown(input);
+
+    // Panel + dialog both survived the mousedown. The panel is aria-hidden by the
+    // modal (hidden:true), but crucially still MOUNTED — the bug tore it (and this
+    // dialog) out of the DOM entirely, which query would then fail.
+    expect(screen.getByRole("group", { name: /campaigns/i, hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    // Type the exact name and confirm — the delete fires.
+    fireEvent.change(input, { target: { value: "Zombie Vault" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete campaign" }));
+    await waitFor(() => expect(calls.deleteCampaign).toBe(1));
+  });
+
   it("retries only activation (no duplicate create) when the create succeeds but activation fails", async () => {
     const calls: Record<string, number> = {};
     renderSwitcher(
