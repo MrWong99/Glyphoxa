@@ -6,7 +6,7 @@ import { ConnectError } from "@connectrpc/connect";
 
 import { AuthService } from "@gen/glyphoxa/management/v1/management_pb";
 import type { User } from "@gen/glyphoxa/management/v1/management_pb";
-import { isUnauthenticated } from "@/lib/auth";
+import { isUnauthenticated } from "@/lib/connectError";
 
 // AuthGate is the SPA boot gate (ADR-0016 / ADR-0039): it probes
 // AuthService.GetCurrentUser and, on CodeUnauthenticated, redirects to /login.

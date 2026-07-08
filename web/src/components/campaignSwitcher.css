@@ -1,0 +1,189 @@
+/* Active-Campaign switcher (#267) — a topbar control (placement #266a) plus the
+ * shared campaign-create form. Reuses the .gx-select__content popover + .gx-select__item
+ * row vocabulary; adds gx-campaign-switcher* / gx-campaign-create* for the trigger,
+ * the campaign list, and the inline create form.
+ */
+
+.gx-campaign-switcher {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.gx-campaign-switcher__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 280px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+  color: var(--text-default);
+  cursor: pointer;
+  font-family: var(--font-base);
+  transition: background var(--duration-base) var(--ease-standard),
+    border-color var(--duration-base) var(--ease-standard);
+}
+.gx-campaign-switcher__trigger:hover {
+  background: rgba(144, 89, 255, 0.07);
+  border-color: var(--border-default);
+}
+.gx-campaign-switcher__trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.gx-campaign-switcher__trigger[data-firstrun] {
+  border-style: dashed;
+  border-color: var(--arcane);
+  color: var(--color-violet-10);
+}
+
+.gx-campaign-switcher__sigil {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  background: var(--gradient-arcane-diag);
+  box-shadow: var(--glow-arcane-soft);
+  color: #fff;
+}
+
+.gx-campaign-switcher__label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+  line-height: 1.15;
+}
+/* Composes with the shared .gx-overline eyebrow (styles/base.css); only the
+ * compact trigger's size + muted color are overridden here. */
+.gx-campaign-switcher__overline {
+  font-size: 10px;
+  color: var(--text-subtle);
+}
+.gx-campaign-switcher__name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gx-campaign-switcher__chevron {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+/* Panel — anchored under the trigger, right-aligned to sit under a right-hand
+ * topbar control. Reuses .gx-select__content for the surface/border/shadow. */
+.gx-campaign-switcher__panel {
+  position: absolute;
+  top: calc(100% + var(--spacing-xs));
+  right: 0;
+  min-width: 280px;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-campaign-switcher__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gx-campaign-switcher__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-default);
+}
+.gx-campaign-switcher__item:hover:not(:disabled) {
+  background: rgba(144, 89, 255, 0.12);
+}
+.gx-campaign-switcher__item[data-active] {
+  background: rgba(144, 89, 255, 0.18);
+  color: var(--text-strong);
+}
+.gx-campaign-switcher__item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.gx-campaign-switcher__item-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.gx-campaign-switcher__item-name {
+  font-size: var(--body-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gx-campaign-switcher__item-system {
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+.gx-campaign-switcher__notice {
+  margin: 0;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-xs);
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  font-size: var(--body-sm);
+}
+/* Composes with the shared .gx-campaign__error alert treatment
+ * (styles/components.css); only panel-local padding lives here. */
+.gx-campaign-switcher__error {
+  padding: 0 var(--spacing-sm);
+}
+
+.gx-campaign-switcher__new {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: transparent;
+  color: var(--color-violet-10);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.gx-campaign-switcher__new:hover {
+  background: rgba(144, 89, 255, 0.1);
+}
+
+.gx-campaign-switcher__create {
+  padding: var(--spacing-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+.gx-campaign-switcher__create-head {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-strong);
+}

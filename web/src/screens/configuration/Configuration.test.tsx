@@ -9,6 +9,8 @@ import {
   VoiceService,
   HealthStatus,
   GetActiveCampaignResponseSchema,
+  CreateCampaignResponseSchema,
+  SetActiveCampaignResponseSchema,
   CampaignSchema,
   ListProviderConfigsResponseSchema,
   ProviderCredentialSchema,
@@ -821,5 +823,116 @@ describe("Configuration spend caps (#130)", () => {
     fireEvent.click(screen.getByRole("button", { name: /save spend caps/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't save/i);
+  });
+});
+
+describe("Configuration first-run (#267)", () => {
+  // A fresh, unseeded install: GetActiveCampaign is CodeNotFound until a campaign
+  // is created here. CreateCampaign mints it, SetActiveCampaign selects it, and a
+  // fresh GetActiveCampaign then resolves it — the create-then-activate flow.
+  function firstRunBackend(
+    opts: {
+      activeErrorCode?: Code;
+      calls?: Record<string, number>;
+    } = {},
+  ) {
+    const { activeErrorCode } = opts;
+    const bump = (m: string) => {
+      if (opts.calls) opts.calls[m] = (opts.calls[m] ?? 0) + 1;
+    };
+    const state: { campaign?: { id: string; name: string; system: string; language: string } } = {};
+    return createRouterTransport(({ service }) => {
+      service(VoiceService, {
+        getProviderHealth: () => create(GetProviderHealthResponseSchema, { providers: [] }),
+        listModels: () => create(ListModelsResponseSchema, { models: [] }),
+      });
+      service(ProviderService, {
+        listProviderConfigs: () =>
+          create(ListProviderConfigsResponseSchema, {
+            credentials: [],
+            guildId: "",
+            voiceChannelId: "",
+            discordApplicationId: "",
+          }),
+        getSpendCaps: () => create(GetSpendCapsResponseSchema, { caps: create(SpendCapsSchema, {}) }),
+      });
+      service(CampaignService, {
+        getActiveCampaign: () => {
+          // A non-NotFound failure (server down) is a real error, NOT first-run.
+          if (activeErrorCode !== undefined) throw new ConnectError("boom", activeErrorCode);
+          if (!state.campaign) throw new ConnectError("no campaign", Code.NotFound);
+          return create(GetActiveCampaignResponseSchema, {
+            campaign: create(CampaignSchema, state.campaign),
+          });
+        },
+        createCampaign: (req) => {
+          bump("createCampaign");
+          state.campaign = { id: "c-new", name: req.name, system: req.system, language: req.language };
+          return create(CreateCampaignResponseSchema, {
+            campaign: create(CampaignSchema, state.campaign),
+          });
+        },
+        setActiveCampaign: () => {
+          bump("setActiveCampaign");
+          return create(SetActiveCampaignResponseSchema, {
+            campaign: create(CampaignSchema, state.campaign!),
+          });
+        },
+      });
+    });
+  }
+
+  it("replaces the CodeNotFound error card with a create-first-campaign CTA", async () => {
+    renderScreen(firstRunBackend());
+
+    // The create CTA — pre-filled with the seed defaults — stands in for the card.
+    expect(await screen.findByText(/create your first campaign/i)).toBeInTheDocument();
+    expect((screen.getByLabelText("System") as HTMLInputElement).value).toBe("dnd5e");
+    expect((screen.getByLabelText("Language") as HTMLInputElement).value).toBe("en");
+    // …and the old error card is gone.
+    expect(screen.queryByText(/could not load the active campaign/i)).not.toBeInTheDocument();
+  });
+
+  it("creates the first campaign from the CTA and swaps in the live header", async () => {
+    renderScreen(firstRunBackend());
+
+    fireEvent.change(await screen.findByLabelText("Name"), {
+      target: { value: "The Sunless Citadel" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^create campaign$/i }));
+
+    // After create → activate → sweep, GetActiveCampaign resolves and the header
+    // replaces the CTA — no reload, no `glyphoxa seed`.
+    expect(await screen.findByText("The Sunless Citadel")).toBeInTheDocument();
+    expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
+  });
+
+  it("a double-click on Create fires exactly one CreateCampaign (no duplicate)", async () => {
+    const calls: Record<string, number> = {};
+    renderScreen(firstRunBackend({ calls }));
+
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Once Only" } });
+    const button = screen.getByRole("button", { name: /^create campaign$/i });
+
+    // Both clicks land in one tick — before any re-render — so render-scoped
+    // pending state can't stop the second one; only the flow ref can. An
+    // unguarded submit here used to mint two identical campaigns.
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    // The flow completes once and the header swaps in the created campaign.
+    expect(await screen.findByText("Once Only")).toBeInTheDocument();
+    expect(calls.createCampaign).toBe(1);
+    expect(calls.setActiveCampaign).toBe(1);
+  });
+
+  it("keeps the error card (not the CTA) for a non-NotFound getActiveCampaign failure", async () => {
+    // Only CodeNotFound means "no campaign yet". A real backend failure (server
+    // down) must still show the error card — otherwise an install that already has
+    // a campaign would be lured into creating a duplicate.
+    renderScreen(firstRunBackend({ activeErrorCode: Code.Internal }));
+
+    expect(await screen.findByText(/could not load the active campaign/i)).toBeInTheDocument();
+    expect(screen.queryByText(/create your first campaign/i)).not.toBeInTheDocument();
   });
 });

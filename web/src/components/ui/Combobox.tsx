@@ -2,6 +2,8 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Command, defaultFilter } from "cmdk";
 import { ChevronDown, Check, Search } from "lucide-react";
 
+import { usePopoverDismiss } from "./usePopoverDismiss";
+
 // Combobox — a filterable, height-bounded picker for large/growing option lists
 // (the live ElevenLabs voice catalog, #88 slice 2). The plain Radix Select can't
 // filter, so this pairs cmdk (the ADR-0017 combobox library) with a lightweight
@@ -76,26 +78,13 @@ export function Combobox({
         o.label.toLowerCase() === customText.toLowerCase(),
     );
 
-  // Close on outside click / Escape so the popover behaves like a native select.
-  // Whenever the popover is closed — pick, Escape or outside click — the search
-  // resets so the next open shows the full, unfiltered list (#154).
+  // Close on outside click / Escape so the popover behaves like a native select
+  // (shared with the CampaignSwitcher panel). Whenever the popover is closed —
+  // pick, Escape or outside click — the search resets so the next open shows the
+  // full, unfiltered list (#154).
+  usePopoverDismiss(wrapRef, open, () => setOpen(false));
   useEffect(() => {
-    if (!open) {
-      setSearch("");
-      return;
-    }
-    const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    if (!open) setSearch("");
   }, [open]);
 
   const pick = (optValue: string) => {
