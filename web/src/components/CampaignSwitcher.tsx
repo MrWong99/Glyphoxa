@@ -11,14 +11,17 @@ import {
 } from "@/lib/campaignCache";
 import { isNotFound } from "@/lib/connectError";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
+import { Badge } from "@/components/ui/Badge";
+import { CampaignRowActions } from "./CampaignRowActions";
 import { CreateCampaignForm, useCreateCampaign } from "./CreateCampaignForm";
 
 import "./campaignSwitcher.css";
 
 // The Active-Campaign switcher (#267), placement decided in #266 (option a): a
 // topbar control visible on every screen, showing the resolved Active Campaign
-// and opening a panel to switch between campaigns or create a new one. Rename /
-// archive / delete are out of scope here (#268 / #265).
+// and opening a panel to switch between campaigns or create a new one. Per-row
+// archive / unarchive / delete land via CampaignRowActions and the "Show
+// archived" toggle (#269); rename lives in the settings editor (#268).
 //
 // Switching writes the durable selection (SetActiveCampaign) and runs the
 // Active-Campaign cache sweep so every campaign-scoped screen follows without a
@@ -57,10 +60,21 @@ export function CampaignSwitcher() {
   // call-to-action that opens straight into the create form.
   const firstRun = activeQ.isError && isNotFound(activeQ.error);
 
+  // The archive-management view (#269): "Show archived" folds the archived
+  // campaigns into the list so they can be unarchived or permanently deleted. Off
+  // by default — the common case is switching between active campaigns.
+  const [showArchived, setShowArchived] = useState(false);
+
   // The campaign list renders only inside the open panel, so it isn't fetched
   // from every screen on boot/focus — the query wakes when the panel opens (a
-  // create's invalidation just marks it stale for the next open).
-  const listQ = useQuery(CampaignService.method.listCampaigns, {}, { enabled: open });
+  // create's invalidation just marks it stale for the next open). includeArchived
+  // is part of the request, so toggling it fetches the archive-inclusive list under
+  // its own cache key (#269).
+  const listQ = useQuery(
+    CampaignService.method.listCampaigns,
+    { includeArchived: showArchived },
+    { enabled: open },
+  );
   const campaigns = listQ.data?.campaigns ?? [];
 
   // The live-Voice-Session notice needs Voice Session state only while the panel is
@@ -180,14 +194,18 @@ export function CampaignSwitcher() {
               <ul className="gx-campaign-switcher__list" role="group" aria-label="Campaigns">
                 {campaigns.map((c) => {
                   const isActive = c.id === activeId;
+                  // An archived campaign can't be switched to (it is excluded from
+                  // resolution, #269); its row shows the badge + the lifecycle menu
+                  // and its select button is disabled.
+                  const isArchived = c.archivedAt !== undefined;
                   return (
-                    <li key={c.id}>
+                    <li key={c.id} className="gx-campaign-switcher__row" data-archived={isArchived || undefined}>
                       <button
                         type="button"
                         aria-current={isActive || undefined}
                         className="gx-select__item gx-campaign-switcher__item"
                         data-active={isActive || undefined}
-                        disabled={switching}
+                        disabled={switching || isArchived}
                         onClick={() =>
                           isActive ? close() : setActive.mutate({ campaignId: c.id })
                         }
@@ -198,8 +216,14 @@ export function CampaignSwitcher() {
                             <span className="gx-campaign-switcher__item-system">{c.system}</span>
                           )}
                         </span>
+                        {isArchived && (
+                          <Badge variant="neutral" size="sm">
+                            Archived
+                          </Badge>
+                        )}
                         {isActive && <Check size={14} />}
                       </button>
+                      <CampaignRowActions campaign={{ id: c.id, name: c.name, archived: isArchived }} />
                     </li>
                   );
                 })}
@@ -215,6 +239,17 @@ export function CampaignSwitcher() {
 
               <button type="button" className="gx-campaign-switcher__new" onClick={enterCreate}>
                 <Plus size={15} /> New campaign
+              </button>
+
+              {/* Show-archived toggle (#269): folds archived campaigns into the
+                  list so they can be unarchived or permanently deleted. */}
+              <button
+                type="button"
+                className="gx-campaign-switcher__show-archived"
+                aria-pressed={showArchived}
+                onClick={() => setShowArchived((v) => !v)}
+              >
+                {showArchived ? "Hide archived" : "Show archived"}
               </button>
             </>
           )}

@@ -101,6 +101,20 @@
   gap: 2px;
 }
 
+/* Row (#269) — the switch button plus its per-row lifecycle menu on one line. */
+.gx-campaign-switcher__row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.gx-campaign-switcher__row > .gx-campaign-switcher__item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gx-campaign-switcher__row[data-archived] .gx-campaign-switcher__item-name {
+  color: var(--text-muted);
+}
+
 .gx-campaign-switcher__item {
   display: flex;
   align-items: center;
@@ -173,6 +187,26 @@
 }
 .gx-campaign-switcher__new:hover {
   background: rgba(144, 89, 255, 0.1);
+}
+
+/* Show/Hide archived toggle (#269) — a quiet footer control below "New campaign". */
+.gx-campaign-switcher__show-archived {
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-subtle);
+  font-family: var(--font-base);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.gx-campaign-switcher__show-archived:hover {
+  color: var(--text-muted);
+  background: rgba(144, 89, 255, 0.06);
+}
+.gx-campaign-switcher__show-archived[aria-pressed="true"] {
+  color: var(--text-muted);
 }
 
 .gx-campaign-switcher__create {

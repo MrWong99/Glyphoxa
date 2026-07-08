@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { useState } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -123,6 +124,67 @@ describe("ConfirmDialog", () => {
       String(c[0]).includes("Function components cannot be given refs"),
     );
     expect(refWarnings).toHaveLength(0);
+  });
+
+  it("with confirmText, keeps confirm disabled until the exact string is typed", () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        title="Delete campaign?"
+        confirmLabel="Delete campaign"
+        confirmText="Lost Mine"
+        onConfirm={onConfirm}
+      />,
+    );
+    const confirm = screen.getByRole("button", { name: "Delete campaign" });
+    // Disabled until the name matches — a click does nothing.
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    const input = screen.getByTestId("confirm-text-input");
+    // A near-miss stays disabled.
+    fireEvent.change(input, { target: { value: "Lost Min" } });
+    expect(confirm).toBeDisabled();
+    // Exact match enables it.
+    fireEvent.change(input, { target: { value: "Lost Mine" } });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets the typed confirmation when the dialog closes and reopens", () => {
+    const onConfirm = vi.fn();
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>reopen</button>
+          <ConfirmDialog
+            open={open}
+            onOpenChange={setOpen}
+            title="Delete campaign?"
+            confirmLabel="Delete campaign"
+            confirmText="Lost Mine"
+            onConfirm={onConfirm}
+          />
+        </>
+      );
+    }
+    render(<Harness />);
+
+    // Type the exact name so confirm is enabled.
+    fireEvent.change(screen.getByTestId("confirm-text-input"), { target: { value: "Lost Mine" } });
+    expect(screen.getByRole("button", { name: "Delete campaign" })).toBeEnabled();
+
+    // Cancel (closes), then reopen: the field is empty and confirm is disabled
+    // again — a prior match must not carry over.
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    fireEvent.click(screen.getByRole("button", { name: /reopen/i }));
+    expect((screen.getByTestId("confirm-text-input") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "Delete campaign" })).toBeDisabled();
   });
 
   it("moves initial focus onto the Cancel button (AlertDialog contract)", async () => {

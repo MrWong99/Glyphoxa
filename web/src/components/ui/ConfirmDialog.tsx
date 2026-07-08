@@ -1,7 +1,8 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import * as RAlert from "@radix-ui/react-alert-dialog";
 
 import { Button } from "./Button";
+import { Input } from "./Input";
 
 // ConfirmDialog — a modal confirmation gate on a Radix AlertDialog (ADR-0017:
 // Radix backs the accessibility-heavy primitives). Built for destructive actions
@@ -10,6 +11,11 @@ import { Button } from "./Button";
 // state in `onOpenChange`. AlertDialog's native behaviour supplies the rest —
 // Escape and Cancel dismiss without confirming, focus is trapped, and the
 // overlay does NOT close on click (a mis-click can't destroy data).
+//
+// For irreversible deletes (#269 campaign hard-delete) pass `confirmText`: the
+// dialog then renders a text field and keeps confirm disabled until the operator
+// re-types that exact string (e.g. the campaign name). The typed value resets
+// whenever the dialog closes, so a reopened dialog never inherits a prior entry.
 
 export function ConfirmDialog({
   open,
@@ -21,6 +27,8 @@ export function ConfirmDialog({
   onConfirm,
   confirmDisabled = false,
   destructive = true,
+  confirmText,
+  confirmTextLabel,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -31,9 +39,25 @@ export function ConfirmDialog({
   onConfirm: () => void;
   confirmDisabled?: boolean;
   destructive?: boolean;
+  // confirmText, when set, gates confirm behind an exact re-typed match (#269).
+  confirmText?: string;
+  // confirmTextLabel labels the confirmation field; defaults to a generic prompt.
+  confirmTextLabel?: ReactNode;
 }) {
+  const [typed, setTyped] = useState("");
+
+  // Reset the typed value on every close so a reopened dialog starts empty — a
+  // stale match must never let the next open confirm without a fresh re-type.
+  const handleOpenChange = (next: boolean) => {
+    if (!next) setTyped("");
+    onOpenChange(next);
+  };
+
+  const typedGateOpen = confirmText === undefined || typed === confirmText;
+  const disabled = confirmDisabled || !typedGateOpen;
+
   return (
-    <RAlert.Root open={open} onOpenChange={onOpenChange}>
+    <RAlert.Root open={open} onOpenChange={handleOpenChange}>
       <RAlert.Portal>
         <RAlert.Overlay className="gx-confirm__overlay" />
         {/* Radix auto-wires aria-describedby to the Description below when present. */}
@@ -41,6 +65,16 @@ export function ConfirmDialog({
           <RAlert.Title className="gx-confirm__title">{title}</RAlert.Title>
           {description && (
             <RAlert.Description className="gx-confirm__desc">{description}</RAlert.Description>
+          )}
+          {confirmText !== undefined && (
+            <Input
+              label={confirmTextLabel ?? `Type “${confirmText}” to confirm`}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              autoComplete="off"
+              autoFocus
+              data-testid="confirm-text-input"
+            />
           )}
           <div className="gx-confirm__actions">
             <RAlert.Cancel asChild>
@@ -50,7 +84,7 @@ export function ConfirmDialog({
               <Button
                 variant={destructive ? "danger" : "primary"}
                 onClick={onConfirm}
-                disabled={confirmDisabled}
+                disabled={disabled}
               >
                 {confirmLabel}
               </Button>
