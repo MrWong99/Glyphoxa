@@ -13,8 +13,10 @@ option go_package = "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1;man
 // single-operator self-host (ADR-0039) it resolves the sole seeded tenant; the
 // X-Tenant-Id pass-through that scopes multi-tenant reads fills in later.
 service CampaignService {
-  // GetActiveCampaign returns the most-recently-created campaign for the
-  // operator. It fails with CodeNotFound when no campaign exists.
+  // GetActiveCampaign returns the operator's resolved Active Campaign: the live
+  // Voice Session's campaign when one is running, else the durable selection
+  // written by SetActiveCampaign / `/glyphoxa use`, else the most-recently-created
+  // campaign (#222). It fails with CodeNotFound when no campaign exists.
   rpc GetActiveCampaign(GetActiveCampaignRequest) returns (GetActiveCampaignResponse);
 
   // ListCampaigns returns the operator's campaigns in name order (#264). It backs
@@ -432,7 +434,8 @@ message GetActiveCampaignRequest {}
 
 // GetActiveCampaignResponse carries the resolved active campaign.
 message GetActiveCampaignResponse {
-  // campaign is the most-recently-created campaign for the operator.
+  // campaign is the operator's resolved Active Campaign (live Voice Session's
+  // campaign → durable selection → most-recently-created fallback).
   Campaign campaign = 1;
 }
 

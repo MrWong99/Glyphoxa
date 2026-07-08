@@ -62,7 +62,9 @@ type CampaignUpdate struct {
 
 // UpdateCampaign writes a campaign's name/system/language and bumps updated_at,
 // returning the updated row. A missing id yields ErrNotFound (the RPC layer maps
-// it to Connect CodeNotFound).
+// it to Connect CodeNotFound). Like the other campaign reads/writes it is scoped
+// by id alone — single-operator today; tenant scoping fills in behind the
+// X-Tenant-Id pass-through later (ADR-0039).
 func (s *Store) UpdateCampaign(ctx context.Context, c CampaignUpdate) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE campaign SET

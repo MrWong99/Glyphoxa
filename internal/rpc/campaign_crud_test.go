@@ -124,7 +124,10 @@ type setActiveCall struct {
 }
 
 func newFakeStore() *fakeCampaignStore {
-	return &fakeCampaignStore{agents: map[uuid.UUID]storage.Agent{}}
+	return &fakeCampaignStore{
+		agents:        map[uuid.UUID]storage.Agent{},
+		campaignsByID: map[uuid.UUID]storage.Campaign{},
+	}
 }
 
 func (f *fakeCampaignStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
@@ -162,9 +165,6 @@ func (f *fakeCampaignStore) CreateCampaign(_ context.Context, c storage.NewCampa
 	}
 	f.createdCampaigns = append(f.createdCampaigns, c)
 	id := uuid.New()
-	if f.campaignsByID == nil {
-		f.campaignsByID = map[uuid.UUID]storage.Campaign{}
-	}
 	// Land the row so CreateCampaign's read-back (GetCampaign) resolves it.
 	f.campaignsByID[id] = storage.Campaign{
 		ID:       id,

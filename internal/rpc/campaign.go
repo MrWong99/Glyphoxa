@@ -23,9 +23,9 @@ import (
 )
 
 // campaignStore is the narrow storage surface CampaignServer needs — the active
-// campaign read plus the roster reads and the agent CRUD writes (#71).
-// *storage.Store satisfies it, so handlers can be driven by a fake in unit tests
-// and the real store in integration tests.
+// campaign read, the roster reads and agent CRUD writes (#71), and the campaign
+// management reads/writes (#264). *storage.Store satisfies it, so handlers can be
+// driven by a fake in unit tests and the real store in integration tests.
 type campaignStore interface {
 	// GetActiveCampaignForUser + GetActiveCampaign are the profile-first resolution
 	// (durable /glyphoxa use selection → most-recent fallback) the header + CRUD +

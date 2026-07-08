@@ -151,6 +151,12 @@ func (s *CampaignServer) SetActiveCampaign(
 	}
 
 	if err := s.store.SetActiveCampaign(ctx, u.DiscordUserID, id); err != nil {
+		// The write re-checks existence via the active_campaign_id FK, so a campaign
+		// deleted between the validation above and this write is still CodeNotFound,
+		// never a stored dangling pointer or a misleading CodeInternal.
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
+		}
 		slog.Default().Error("SetActiveCampaign: store write failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}

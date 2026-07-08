@@ -2,6 +2,8 @@ package rpc_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -12,9 +14,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
-
-	"net/http"
-	"net/http/httptest"
 )
 
 // mgmtClient stands up the CampaignService handler with an injected operator +
