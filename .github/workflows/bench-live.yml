@@ -25,7 +25,7 @@ jobs:
     # Skip silently on forks without the secrets configured, mirroring
     # record-live.yml — avoids a red run on every fork. The real key gate is the
     # t.Fatalf in TestBench_LiveSLO when a key env is empty.
-    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    if: github.repository == 'MrWong99/Glyphoxa'
     steps:
       - uses: actions/checkout@v7
         with:

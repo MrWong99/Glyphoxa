@@ -1,6 +1,6 @@
 # Sprint 2 Planning — Voice-Loop Latency Diagnosis & Benchmark Plan
 
-**Task:** #2 · **Author:** `latency` · **Scope:** read-only analysis of `Glyphoxa_v2` voice loop. No production code changed.
+**Task:** #2 · **Author:** `latency` · **Scope:** read-only analysis of `Glyphoxa` voice loop. No production code changed.
 
 **Symptom:** "Bart antwortet manchmal sehr spät" — *sometimes* very late responses. The operative word is **manchmal**: this is a **tail-latency / variance** problem, not a uniformly slow loop. The diagnosis below separates causes that explain the *intermittency* from causes that merely inflate the *baseline* every turn.
 

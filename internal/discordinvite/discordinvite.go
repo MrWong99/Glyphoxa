@@ -31,7 +31,7 @@ const liveAPIBaseURL = "https://discord.com/api/v10"
 
 // userAgent is the DiscordBot form Discord requires of bot REST callers, matching
 // internal/discordtag.
-const userAgent = "DiscordBot (https://github.com/MrWong99/Glyphoxa_v2, v2)"
+const userAgent = "DiscordBot (https://github.com/MrWong99/Glyphoxa, v2)"
 
 // guildVoiceType is Discord's channel type for a standard voice channel
 // (GUILD_VOICE). Text (0), category (4), and stage (13) are excluded (ADR-0047).

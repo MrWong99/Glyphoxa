@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     # Skip silently on forks without the secret, mirroring bench-live.yml. The
     # real key gate is the t.Skip in the test when GROQ_API_KEY is empty.
-    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    if: github.repository == 'MrWong99/Glyphoxa'
     steps:
       - uses: actions/checkout@v7
         with:

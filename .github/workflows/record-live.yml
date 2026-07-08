@@ -28,7 +28,7 @@ jobs:
     # configured. Avoids surfacing as a failed run on every PR sync from a
     # fork. The actual key gate happens at job start; this just keeps the
     # noise level low.
-    if: github.repository == 'MrWong99/Glyphoxa_v2'
+    if: github.repository == 'MrWong99/Glyphoxa'
     steps:
       - uses: actions/checkout@v7
         with:
