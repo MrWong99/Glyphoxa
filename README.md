@@ -65,7 +65,7 @@ is [docs/configuration.md](docs/configuration.md); the game-running walkthrough 
 git clone https://github.com/MrWong99/Glyphoxa.git
 cd Glyphoxa
 
-cp .env.example .env              # then set GLYPHOXA_DATABASE_URL + GLYPHOXA_SECRET
+cp .env.example .env              # set at least DB + SECRET; -mode all also needs the DISCORD_OAUTH_* vars + GLYPHOXA_OPERATOR_IDS — see docs/configuration.md §5–§6
 source .env                       # the template is shell-sourced (export NAME='value')
 
 make proto                        # buf generate → gen/
