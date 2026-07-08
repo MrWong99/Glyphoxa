@@ -1,6 +1,6 @@
 # Glyphoxa v2 — Design Tracker
 
-Resume-from-here doc for the interactive design grilling. Decisions are recorded as ADRs under [docs/adr/](docs/adr/); domain language lives in [CONTEXT.md](CONTEXT.md).
+Resume-from-here doc for the interactive design grilling. Decisions are recorded as ADRs under [docs/adr/](docs/adr/); domain language lives in [CONTEXT.md](CONTEXT.md). For what those decisions actually add up to in the tree today, read [docs/architecture.md](docs/architecture.md).
 
 **Next:** Q19 — First sprint scope (held until the live demo runs).
 
@@ -47,6 +47,20 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0037](docs/adr/0037-openai-go-sdk-for-llm-providers.md) | OpenAI Go SDK for LLM providers (openaicompat) | LLM provider |
 | [0038](docs/adr/0038-multi-npc-single-target-default-programmatic-roster.md) | Multi-NPC: single-target default, one shared floor, programmatic roster | multi-NPC epic |
 | [0039](docs/adr/0039-mvp-ui-backend-single-operator-web-tier.md) | MVP UI ↔ backend: single-operator self-host web tier | MVP UI integration |
+| [0040](docs/adr/0040-transcript-line-persistence.md) | Transcript lines: per-line persistence for Session replay | #74 |
+| [0041](docs/adr/0041-operator-allowlist-access-policy.md) | Operator access: mandatory Discord allowlist, no trust-on-first-use | #96, #112, #184 |
+| [0042](docs/adr/0042-streaming-stt-speculative-memory-recall.md) | Streaming STT (Scribe v2 Realtime, manual commit) + speculative memory recall | #122, #180 |
+| [0043](docs/adr/0043-gateway-fatal-transient-classification.md) | Gateway fatal-vs-transient classification and the connection-state taxonomy | #123 (E6) |
+| [0044](docs/adr/0044-provider-retry-policy-and-metric-placement.md) | Provider retry policy and provider-call metric placement | #124, #125 (E6) |
+| [0045](docs/adr/0045-provider-usage-metering-estimates.md) | Provider usage metering: event shape, labels, and estimate fallbacks | #127 (E6) |
+| [0046](docs/adr/0046-spend-meter-price-map-cap-mechanics.md) | Per-session spend meter: ownership, price map, and cap mechanics | #130 (E6) |
+| [0047](docs/adr/0047-discord-invite-resolver-bot-authorization.md) | Discord invite resolver and bot-authorization surface | #101, #105, #110 (E7) |
+| [0048](docs/adr/0048-blob-storage-seam-postgres-v1.md) | Blob storage seam: Postgres bytea behind a Store interface in v1 | #283 |
+| [0049](docs/adr/0049-background-job-runner.md) | Background work: one minimal DB-backed job runner | #284 |
+| [0050](docs/adr/0050-per-speaker-utterance-segmentation.md) | Per-speaker utterance segmentation: N Speaker Lanes, SpeakerID on events | #275 |
+| [0051](docs/adr/0051-rollover-tape-consent-retention.md) | Rollover tape: all-participant consent, bounded retention, GM-gated sharing | #303 |
+| [0052](docs/adr/0052-kg-write-proposals.md) | Agent KG writes land as GM-reviewed Knowledge Proposals | #298 |
+| [0053](docs/adr/0053-campaign-bundle-format.md) | Campaign Bundle: versioned gzipped-JSON export with mandatory secrets exclusion | #287 |
 
 ## Open questions
 
@@ -59,4 +73,4 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 - Distinguish what *failed* in v1 from what merely *lived* in v1. Identify the specific failure mode before rejecting tooling. (See ADR-0005 vs ADR-0014 — gRPC for audio failed; gRPC for control is fine.)
 - Test orchestration, not vendors. STT/TTS/LLM are inputs we trust. (See ADR-0019.)
 - Web UI design is anchored to Claude Design handoff bundles. Tokens stay in plain CSS so the design tool can read them; class-name vocabulary stays stable so each new bundle ports cleanly. (See ADR-0017.)
-- v1 lives at `/home/luk/Desktop/git/Glyphoxa` for reference (do not trust wholesale).
+- v1 is reference material, not a source of truth: consult it for a specific kernel (ADR-0007), never trust it wholesale.
