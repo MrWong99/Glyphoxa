@@ -183,3 +183,57 @@ func TestBargeIn_ConfirmWindowCrossingCancels(t *testing.T) {
 		t.Fatal("barge must free the floor")
 	}
 }
+
+// TestBargeIn_PerSpeakerWindowNotDisarmedByOther is step 9 (ADR-0050): speaker A's
+// confirm window is armed; speaker B's speech_end arrives inside it. B's speech_end
+// must NOT disarm A's window — A's sustained interruption still fires the barge, and
+// the BargeDetected names A. Under one shared VAD (the pre-lane MVP) B's pause would
+// have disarmed A's window and swallowed the interruption.
+func TestBargeIn_PerSpeakerWindowNotDisarmedByOther(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	turnCtx, release, _ := floor.Take(parent, "")
+	defer release()
+
+	t.Cleanup(orchestrator.NewBargeIn(floor, 40*time.Millisecond).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"}) // the Agent is audibly speaking
+
+	// A starts interrupting; B backchannels and stops — B's speech_end must leave A's
+	// window armed.
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "B"})
+	h.Bus.Publish(voiceevent.VADSpeechEnd{SpeakerID: "B"}) // only B stopped
+
+	select {
+	case <-turnCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("A's sustained interruption must fire the barge; B's speech_end wrongly disarmed A's window")
+	}
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.BargeDetected) bool { return e.SpeakerID == "A" },
+		"barge.detected attributed to speaker A",
+	)
+}
+
+// TestBargeIn_SameSpeakerSoftOverlapDisarms pins the complement: a speaker's OWN
+// speech_end inside the window disarms it (a soft-overlap backchannel from that
+// speaker), so no barge fires and the turn survives — the per-speaker analogue of
+// TestBargeIn_SoftOverlapDoesNotCancel.
+func TestBargeIn_SameSpeakerSoftOverlapDisarms(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	turnCtx, release, _ := floor.Take(parent, "")
+	defer release()
+
+	t.Cleanup(orchestrator.NewBargeIn(floor, 200*time.Millisecond).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+	h.Bus.Publish(voiceevent.VADSpeechEnd{SpeakerID: "A"}) // A's own backchannel ends the window
+
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+	if turnCtx.Err() != nil {
+		t.Fatal("a same-speaker soft-overlap backchannel must not cancel the turn")
+	}
+}

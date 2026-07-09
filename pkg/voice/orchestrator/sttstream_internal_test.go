@@ -625,3 +625,30 @@ func TestStreamManager_BoundedBackoff(t *testing.T) {
 		t.Errorf("only %d dial attempts; want at least %d (one per failed dial)", rec.openCount(), len(want))
 	}
 }
+
+// TestStreamManager_PartialsCarryLaneSpeakerID pins step 11 (ADR-0050): a manager
+// built for a Speaker Lane stamps that lane's SpeakerID on every STTPartial it
+// publishes, so a live-view/speculation consumer can attribute an in-flight
+// hypothesis to its speaker. The default lane leaves it "".
+func TestStreamManager_PartialsCarryLaneSpeakerID(t *testing.T) {
+	bus := voiceevent.NewBus()
+	var partials []voiceevent.STTPartial
+	voiceevent.On(bus, func(e voiceevent.STTPartial) { partials = append(partials, e) })
+
+	m := NewStreamManager(&fakeStreamingRecognizer{}, WithStreamSpeakerID("222"))
+	m.stream = &fakeStream{}
+	m.bus = bus
+
+	m.beginUtterance(time.Now())
+	m.onPartial("he")
+	m.onPartial("hello")
+
+	if len(partials) != 2 {
+		t.Fatalf("published %d partials, want 2", len(partials))
+	}
+	for _, p := range partials {
+		if p.SpeakerID != "222" {
+			t.Errorf("partial SpeakerID = %q, want \"222\"", p.SpeakerID)
+		}
+	}
+}
