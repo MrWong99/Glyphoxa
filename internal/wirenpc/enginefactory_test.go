@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -44,10 +45,10 @@ func (p *modelCapturingProvider) lastModel(t *testing.T) string {
 }
 
 // generateOnce drives one Agent turn through an engine so the provider records
-// the request it carried.
-func generateOnce(t *testing.T, spec npcSpec, prov llm.Provider) {
+// the request it carried. rec/provName label the LLM spans (#272).
+func generateOnce(t *testing.T, spec npcSpec, prov llm.Provider, rec observe.StageRecorder, provName observe.Provider) {
 	t.Helper()
-	factory := engineFactory(prov, tool.NewRegistry(), "en", observe.Discard{}, retry.Policy{})
+	factory := engineFactory(prov, tool.NewRegistry(), "en", rec, provName, retry.Policy{})
 	eng := factory(spec)
 	if _, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleSystem, Text: "You are Bart."},
@@ -57,13 +58,50 @@ func generateOnce(t *testing.T, spec npcSpec, prov llm.Provider) {
 	}
 }
 
+// labelCapturingRecorder records the provider label the engine tags its LLM spans
+// with, so the metrics-label threading (#272) is asserted without Prometheus.
+type labelCapturingRecorder struct {
+	observe.Discard
+	roundProvider  observe.Provider
+	tokensProvider observe.Provider
+	tokensModel    string
+}
+
+func (r *labelCapturingRecorder) LLMRound(p observe.Provider, _ int, _ bool, _ time.Duration) {
+	r.roundProvider = p
+}
+
+func (r *labelCapturingRecorder) LLMTokens(p observe.Provider, model string, _, _ int) {
+	r.tokensProvider = p
+	r.tokensModel = model
+}
+
 // TestEngineFactory_ThreadsConfiguredModel is the #227 unit pin: the model on the
 // npcSpec (resolved from provider_config) is the model the Groq request carries.
 func TestEngineFactory_ThreadsConfiguredModel(t *testing.T) {
 	prov := &modelCapturingProvider{}
-	generateOnce(t, npcSpec{agentID: "bart", name: "Bart", model: "meta-llama/llama-4-scout-17b-16e-instruct"}, prov)
+	generateOnce(t, npcSpec{agentID: "bart", name: "Bart", model: "meta-llama/llama-4-scout-17b-16e-instruct"}, prov, observe.Discard{}, observe.ProviderGroq)
 	if got := prov.lastModel(t); got != "meta-llama/llama-4-scout-17b-16e-instruct" {
 		t.Errorf("request model = %q, want the configured model", got)
+	}
+}
+
+// TestEngineFactory_LabelsMetricsWithProvider is the #272 guard: the provider label
+// engineFactory is built with reaches the LLM span metrics AND the token/price sink,
+// so a non-Groq voice session is not mispriced as groq. Without the threading the
+// engine hardcoded observe.ProviderGroq and this fails.
+func TestEngineFactory_LabelsMetricsWithProvider(t *testing.T) {
+	prov := &modelCapturingProvider{}
+	rec := &labelCapturingRecorder{}
+	generateOnce(t, npcSpec{agentID: "bart", name: "Bart", model: "claude-x"}, prov, rec, observe.ProviderAnthropic)
+	if rec.roundProvider != observe.ProviderAnthropic {
+		t.Errorf("LLMRound provider = %q, want anthropic", rec.roundProvider)
+	}
+	if rec.tokensProvider != observe.ProviderAnthropic {
+		t.Errorf("LLMTokens provider = %q, want anthropic", rec.tokensProvider)
+	}
+	if rec.tokensModel != "claude-x" {
+		t.Errorf("LLMTokens model = %q, want claude-x", rec.tokensModel)
 	}
 }
 
@@ -73,7 +111,7 @@ func TestEngineFactory_ThreadsConfiguredModel(t *testing.T) {
 // keeps the "empty → provider default" behavior with zero duplicated defaulting.
 func TestEngineFactory_EmptyModelFlowsThrough(t *testing.T) {
 	prov := &modelCapturingProvider{}
-	generateOnce(t, npcSpec{agentID: "bart", name: "Bart", model: ""}, prov)
+	generateOnce(t, npcSpec{agentID: "bart", name: "Bart", model: ""}, prov, observe.Discard{}, observe.ProviderGroq)
 	if got := prov.lastModel(t); got != "" {
 		t.Errorf("request model = %q, want empty (adapter fills the default)", got)
 	}

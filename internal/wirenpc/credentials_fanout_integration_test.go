@@ -63,3 +63,31 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 		t.Errorf("tts adapter got apiKey %q, want %q — keys.tts must reach the TTS adapter", gotTTS, keys.tts)
 	}
 }
+
+// TestBuildConversation_DispatchesOffProviderID is the #272 seam guard: the LLM
+// provider id buildConversation is handed reaches [newLLM] for adapter dispatch. A
+// buildConversation that ignored the param (reverting to hardwired groq) would leave
+// a DB Agent's non-Groq LLM config silently on Groq. It needs a real Silero VAD like
+// the fan-out guard, so it is tag-isolated behind `integration` (ADR-0033).
+func TestBuildConversation_DispatchesOffProviderID(t *testing.T) {
+	origLLM := newLLM
+	t.Cleanup(func() { newLLM = origLLM })
+
+	var gotProviderID string
+	newLLM = func(providerID, apiKey string) (llm.Provider, error) {
+		gotProviderID = providerID
+		return origLLM(providerID, apiKey)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log,
+		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, providerKeys{}, "anthropic", false, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildConversation: %v", err)
+	}
+	defer cleanup()
+
+	if gotProviderID != "anthropic" {
+		t.Errorf("newLLM got providerID %q, want %q — the Agent's LLM provider id must drive adapter dispatch, not a hardwired groq", gotProviderID, "anthropic")
+	}
+}

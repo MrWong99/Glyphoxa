@@ -131,12 +131,14 @@ func (p *stubProvider) Complete(_ context.Context, req llm.Request) (<-chan llm.
 		if p.text != "" {
 			ch <- llm.StreamEvent{Type: llm.EventText, Text: p.text}
 		}
+		// Usage rides before the error/truncation so a failed call can still see the
+		// provider-reported usage that already arrived (ADR-0045 error rule).
+		if p.usage != nil {
+			ch <- llm.StreamEvent{Type: llm.EventUsage, Usage: *p.usage}
+		}
 		if p.errText != "" {
 			ch <- llm.StreamEvent{Type: llm.EventError, Err: p.errText}
 			return
-		}
-		if p.usage != nil {
-			ch <- llm.StreamEvent{Type: llm.EventUsage, Usage: *p.usage}
 		}
 		if !p.noDone {
 			ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}

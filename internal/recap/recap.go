@@ -30,6 +30,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 )
 
 const (
@@ -136,7 +137,10 @@ func NewEngine(st Store, cipher *crypto.Cipher, metrics observe.StageRecorder, l
 // independently, and joined with per-session headers when there is more than one. A
 // single empty session — or all-empty in a multi-session set — yields
 // [ErrNoTranscript].
-func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (Result, error) {
+func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result, err error) {
+	// Dedup up front so a caller passing the same session twice (e.g. a sloppy
+	// "last N" list) recaps it — and spends on it — once, not per duplicate.
+	sessionIDs = dedupUUIDs(sessionIDs)
 	if len(sessionIDs) == 0 {
 		return Result{}, ErrNoTranscript
 	}
@@ -186,35 +190,58 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (Result, err
 	if err != nil {
 		return Result{}, fmt.Errorf("recap: build llm provider: %w", err)
 	}
+	// The default path (providerID "") sends request model "" (adapter fills the
+	// Groq default), but the spend sink must price on a real model, else (groq, "")
+	// misses the price map and warn-spams / inflates the estimate (#272 review).
+	priceModel := model
+	if providerID == "" {
+		priceModel = groq.DefaultModel
+	}
 
 	// Metering (gate #271 posture): a caps-free meter teed alongside the production
 	// recorder — usage is recorded and priced, but the meter has NO caps and the
 	// engine never reads one or calls AllowTurn (ADR-0046 is live-session-only).
 	meter := spend.NewMeter(spend.Caps{}, e.log, nil, nil)
 	caller := &llmCaller{
-		ctx:      ctx,
-		provider: provider,
-		model:    model,
-		label:    providerLabel(providerID),
-		rec:      observe.TeeUsage(e.metrics, meter),
+		ctx:        ctx,
+		provider:   provider,
+		model:      model,
+		priceModel: priceModel,
+		label:      providerLabel(providerID),
+		rec:        observe.TeeUsage(e.metrics, meter),
 	}
-
-	butlerSys := butlerSystemPrompt(butler.Persona, campaign.Language)
-	neutralSys := neutralSystemPrompt(campaign.Language)
 
 	chronIDs := make([]uuid.UUID, len(sessions))
 	for i, vs := range sessions {
 		chronIDs[i] = vs.ID
 	}
+	// Attribute whatever was spent to the recapped session id(s) — on success AND on
+	// a midway failure, so metered tokens are never orphaned (#272 review). Fires
+	// once the meter/caller exist; the earlier provider-resolution errors spent
+	// nothing and have no meter to report.
+	defer func() {
+		status := meter.Status()
+		e.log.Info("recap: llm usage",
+			"voice_session_ids", chronIDs,
+			"input_tokens", caller.totalIn,
+			"output_tokens", caller.totalOut,
+			"estimated_usd", status.EstimatedUSD,
+			"ok", err == nil,
+		)
+	}()
+
+	butlerSys := butlerSystemPrompt(butler.Persona, campaign.Language)
+	neutralSys := neutralSystemPrompt(campaign.Language)
+
 	multi := len(sessions) > 1
 
 	var parts []string
 	anyWindowed := false
 	produced := false
 	for _, vs := range sessions {
-		lines, err := e.st.ListTranscriptLines(ctx, vs.ID)
-		if err != nil {
-			return Result{}, fmt.Errorf("recap: load transcript for session %s: %w", vs.ID, err)
+		lines, lerr := e.st.ListTranscriptLines(ctx, vs.ID)
+		if lerr != nil {
+			return Result{}, fmt.Errorf("recap: load transcript for session %s: %w", vs.ID, lerr)
 		}
 		header := "**Session " + vs.StartedAt.UTC().Format(sessionHeaderTimeFormat) + " UTC**"
 		if len(lines) == 0 {
@@ -241,14 +268,6 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (Result, err
 	if !produced {
 		return Result{}, ErrNoTranscript
 	}
-
-	status := meter.Status()
-	e.log.Info("recap: llm usage",
-		"voice_session_ids", chronIDs,
-		"input_tokens", caller.totalIn,
-		"output_tokens", caller.totalOut,
-		"estimated_usd", status.EstimatedUSD,
-	)
 
 	return Result{
 		Text:       strings.Join(parts, "\n\n"),
@@ -304,6 +323,20 @@ func (e *Engine) resolveLLMConfig(ctx context.Context, tenantID uuid.UUID, butle
 	default:
 		return &pc, nil
 	}
+}
+
+// dedupUUIDs returns ids with duplicates removed, preserving first-seen order.
+func dedupUUIDs(ids []uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 // providerLabel maps a provider_config id to the bounded [observe.Provider] metric

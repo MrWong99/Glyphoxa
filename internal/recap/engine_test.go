@@ -254,3 +254,27 @@ func TestEmptyTranscripts(t *testing.T) {
 }
 
 func okFactory(_, _ string) (llm.Provider, error) { return &stubProvider{text: "recap text"}, nil }
+
+// TestDedupSessions: the same session passed twice is recapped — and spent on — once.
+func TestDedupSessions(t *testing.T) {
+	st := newFakeStore()
+	tenantID := uuid.New()
+	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "Butler."}
+	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+
+	calls := 0
+	factory := func(_, _ string) (llm.Provider, error) {
+		return &stubProvider{text: "recap", capture: func(llm.Request) { calls++ }}, nil
+	}
+	eng := NewEngine(st, nil, observe.Discard{}, nil, WithProviderFactory(factory))
+	res, err := eng.Recap(context.Background(), []uuid.UUID{sid, sid})
+	if err != nil {
+		t.Fatalf("Recap: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("provider calls = %d, want 1 (duplicate session deduped)", calls)
+	}
+	if len(res.SessionIDs) != 1 || res.SessionIDs[0] != sid {
+		t.Errorf("SessionIDs = %v, want [%s] deduped", res.SessionIDs, sid)
+	}
+}

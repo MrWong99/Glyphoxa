@@ -52,12 +52,19 @@ func neutralSystemPrompt(language string) string {
 
 // llmCaller drives one recap's LLM completions against a fixed provider/model,
 // metering each via rec and accumulating the token totals for the attribution log.
+//
+// model is the request model (empty lets the adapter pick its default). priceModel
+// is the model the spend sink prices on: it equals model except on the default path,
+// where model is "" but priceModel is groq.DefaultModel, so (groq, "") is never a
+// price-map miss (#272 review). The request model stays "" so the cassette hash and
+// the adapter default are unchanged.
 type llmCaller struct {
-	ctx      context.Context
-	provider llm.Provider
-	model    string
-	label    observe.Provider
-	rec      observe.StageRecorder
+	ctx        context.Context
+	provider   llm.Provider
+	model      string
+	priceModel string
+	label      observe.Provider
+	rec        observe.StageRecorder
 
 	totalIn  int
 	totalOut int
@@ -65,9 +72,12 @@ type llmCaller struct {
 
 // call runs one completion (system + user), drains it to close, and returns the
 // accumulated text. Usage is metered from the provider-reported [llm.EventUsage] or,
-// when none arrives, a documented ceil(chars/4) per-direction estimate — never zero
-// (ADR-0045). An [llm.EventError] or a stream that closes without an [llm.EventDone]
-// fails the call: a truncated recap is never presented as complete.
+// when none arrives on a COMPLETED call, a documented ceil(chars/4) per-direction
+// estimate (ADR-0045). An [llm.EventError] or a stream that closes without an
+// [llm.EventDone] fails the call — a truncated recap is never presented as complete
+// — but any provider-REPORTED usage that already arrived is still metered on those
+// paths (ADR-0045's error rule: a partial turn is metered by what was reported, not
+// by a fabricated estimate — matching agenttool).
 func (c *llmCaller) call(system, user string, maxTokens int) (string, error) {
 	stream, err := c.provider.Complete(c.ctx, llm.Request{
 		Model:     c.model,
@@ -98,9 +108,11 @@ func (c *llmCaller) call(system, user string, maxTokens int) (string, error) {
 		}
 	}
 	if streamErr != nil {
+		c.meterReported(haveUsage, usage)
 		return "", fmt.Errorf("recap: llm stream error: %w", streamErr)
 	}
 	if !done {
+		c.meterReported(haveUsage, usage)
 		if err := c.ctx.Err(); err != nil {
 			return "", err
 		}
@@ -112,17 +124,32 @@ func (c *llmCaller) call(system, user string, maxTokens int) (string, error) {
 	return text, nil
 }
 
-// meter records one completion's token usage: the provider-reported counts, or a
+// meter records a COMPLETED call's token usage: the provider-reported counts, or a
 // ceil(chars/4) per-direction estimate over the sent prompt and received text when
-// none was reported — never zero (ADR-0045). The model rides only to the sink for
-// pricing (ADR-0046); Prometheus drops it (ADR-0032).
+// none was reported. The input estimate is always >0 (the system+user prompt is
+// non-empty); a completed call that returned no text meters out=0, matching
+// agenttool. priceModel rides only to the sink for pricing (ADR-0046); Prometheus
+// drops it (ADR-0032).
 func (c *llmCaller) meter(haveUsage bool, u llm.Usage, sent, received string) {
 	in, out := u.InputTokens, u.OutputTokens
 	if !haveUsage {
 		in = estimateTokens(utf8.RuneCountInString(sent))
 		out = estimateTokens(utf8.RuneCountInString(received))
 	}
-	c.rec.LLMTokens(c.label, c.model, in, out)
+	c.record(in, out)
+}
+
+// meterReported records ONLY provider-reported usage (the error/truncation rule,
+// ADR-0045): a failed or truncated call is metered by what the provider actually
+// reported, never a fabricated estimate.
+func (c *llmCaller) meterReported(haveUsage bool, u llm.Usage) {
+	if haveUsage {
+		c.record(u.InputTokens, u.OutputTokens)
+	}
+}
+
+func (c *llmCaller) record(in, out int) {
+	c.rec.LLMTokens(c.label, c.priceModel, in, out)
 	c.totalIn += in
 	c.totalOut += out
 }
