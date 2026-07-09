@@ -357,6 +357,36 @@ describe("Session live transcript (#73)", () => {
     expect(await screen.findByText("recovered live line")).toBeInTheDocument();
   });
 
+  it("surfaces an error (not the silent empty state) when the live session's snapshot fails persistently", async () => {
+    // The live/current snapshot 500s on EVERY attempt: the retry budget (retry:2)
+    // absorbs transients, but a failure that outlasts it must surface — the #326
+    // accepted-residual was this case stranding the screen on "Listening…",
+    // masquerading as no-data.
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+
+    // Retries exhaust (1s + 2s backoff) → the inline error replaces the empty state.
+    expect(await screen.findByTestId("snapshot-error", {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.queryByText(/transcript lines will appear here/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/start a session to capture/i)).not.toBeInTheDocument();
+    // The toast fired too — same convention as the past-session surface, with the
+    // current-session wording.
+    await waitFor(() =>
+      expect(
+        vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't load the session transcript/i.test(String(m))),
+      ).toBe(true),
+    );
+    // The stream never opened (it is gated on snapshot success) — the error card
+    // is the operator's signal, not a dead "Listening…".
+    expect(MockEventSource.last()).toBeUndefined();
+  }, 15000);
+
   it("seeds from the snapshot then renders streamed lines + typing dots", async () => {
     // Snapshot: live + listening, no lines yet.
     globalThis.fetch = (async () =>
