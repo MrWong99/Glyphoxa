@@ -17,12 +17,13 @@ import (
 // fakeSessions is a settable Snapshot source: the relay attributes events and
 // derives status from whatever active session it reports.
 type fakeSessions struct {
-	id     uuid.UUID
-	active bool
+	id       uuid.UUID
+	campaign uuid.UUID
+	active   bool
 }
 
 func (f *fakeSessions) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{ID: f.id}, f.active
+	return storage.VoiceSession{ID: f.id, CampaignID: f.campaign}, f.active
 }
 
 func at(sec int) time.Time {
