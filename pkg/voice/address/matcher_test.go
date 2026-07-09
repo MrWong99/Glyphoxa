@@ -332,6 +332,16 @@ func TestMatcher_Add_Panics(t *testing.T) {
 		m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
 		m.Add(address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bartholomew"}})
 	})
+	// An unknown AgentRole is a wiring error: it would silently disarm the Butler
+	// GM-address gate (#280), which keys off AgentRoleButler. Fail closed at Add.
+	assertPanics(t, "unknown AgentRole", func() {
+		m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
+		m.Add(address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-x", AgentRole: "Butler", Name: "Titlecase"}})
+	})
+	assertPanics(t, "empty AgentRole", func() {
+		m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
+		m.Add(address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-y", AgentRole: "", Name: "Roleless"}})
+	})
 }
 
 // TestMatcher_TextEchoedVerbatim proves each decision carries the utterance text
@@ -384,6 +394,19 @@ func TestNewMatcher_Panics(t *testing.T) {
 	assertPanics(t, "empty AgentID", func() {
 		address.NewMatcher(address.Config{}, address.Agent{
 			Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Nameless"},
+		})
+	})
+	// Unknown / empty AgentRole must die at construction — an agent whose role is
+	// neither AgentRoleButler nor AgentRoleCharacter would silently disarm the
+	// Butler GM-address gate (#280).
+	assertPanics(t, "unknown AgentRole", func() {
+		address.NewMatcher(address.Config{}, address.Agent{
+			Target: voiceevent.AddressTarget{AgentID: "npc-x", AgentRole: "npc", Name: "Wrongrole"},
+		})
+	})
+	assertPanics(t, "empty AgentRole", func() {
+		address.NewMatcher(address.Config{}, address.Agent{
+			Target: voiceevent.AddressTarget{AgentID: "npc-y", AgentRole: "", Name: "Roleless"},
 		})
 	})
 }

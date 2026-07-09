@@ -64,6 +64,10 @@ type DetectorOption func(*AddressDetector)
 // A nil isGM leaves the gate off (the default). The Butler identity check is an
 // orchestration concern kept out of the pure text matcher (ADR-0024): the
 // matcher still scores only transcript text and never sees the SpeakerID.
+//
+// LATENT (Epic 7, #256): this detector-level drop runs after the matcher
+// committed slot/lastAddressed state; must move matcher-side before the Butler
+// joins the live roster.
 func WithButlerGMGate(isGM func(speakerID string) bool) DetectorOption {
 	return func(d *AddressDetector) { d.isGM = isGM }
 }
@@ -105,7 +109,7 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			// SpeakerID is not an allowlisted GM (empty fails closed). Fail
 			// closed means the utterance routes nowhere — the matcher is not
 			// re-invoked for a fallback. Character routes are never gated.
-			if d.isGM != nil && routed.Target.AgentRole == "butler" &&
+			if d.isGM != nil && routed.Target.AgentRole == voiceevent.AgentRoleButler &&
 				(final.SpeakerID == "" || !d.isGM(final.SpeakerID)) {
 				continue
 			}

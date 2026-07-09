@@ -16,8 +16,8 @@ import (
 // default route per CONTEXT.md; Bart stands in for a Character NPC active
 // in the Voice Session.
 var (
-	butlerTarget = voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Glyphoxa"}
-	bartTarget   = voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: "character", Name: "Bart"}
+	butlerTarget = voiceevent.AddressTarget{AgentID: "butler", AgentRole: voiceevent.AgentRoleButler, Name: "Glyphoxa"}
+	bartTarget   = voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: voiceevent.AgentRoleCharacter, Name: "Bart"}
 )
 
 // Canonical spoken text of each fixture clip — the meta.yaml script with its
@@ -109,7 +109,7 @@ func (f matchFunc) TargetMatch(text string) []voiceevent.AddressRouted { return 
 
 // goblinTarget is a Character NPC used only by the custom-matcher tests, to
 // keep them independent of the default matcher's name-matching fixtures.
-var goblinTarget = voiceevent.AddressTarget{AgentID: "npc-goblin", AgentRole: "character", Name: "Goblin"}
+var goblinTarget = voiceevent.AddressTarget{AgentID: "npc-goblin", AgentRole: voiceevent.AgentRoleCharacter, Name: "Goblin"}
 
 // TestAddressDetector_PublishesDecisionVerbatim proves the detector publishes
 // its matcher's [voiceevent.AddressRouted] unchanged — including its Text. The

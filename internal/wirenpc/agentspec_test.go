@@ -500,7 +500,7 @@ func (alwaysButler) TargetMatch(text string) []voiceevent.AddressRouted {
 	return []voiceevent.AddressRouted{{
 		At:     time.Now(),
 		Text:   text,
-		Target: voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Glyphoxa"},
+		Target: voiceevent.AddressTarget{AgentID: "butler", AgentRole: voiceevent.AgentRoleButler, Name: "Glyphoxa"},
 	}}
 }
 

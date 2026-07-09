@@ -108,7 +108,7 @@ func matcherAgent(spec npcSpec) address.Agent {
 	return address.Agent{
 		Target: voiceevent.AddressTarget{
 			AgentID:   spec.agentID,
-			AgentRole: "character",
+			AgentRole: voiceevent.AgentRoleCharacter,
 			Name:      spec.name,
 		},
 		Aliases:           spec.aliases,
