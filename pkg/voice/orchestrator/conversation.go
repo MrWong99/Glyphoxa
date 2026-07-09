@@ -120,7 +120,31 @@ func WithBargeInCoalesce(confirmWindow, coalesceWindow time.Duration) Option {
 // batch recognizer as the automatic fallback. A nil sm is ZERO behaviour change —
 // the byte-for-byte no-streaming default — so callers can wire it unconditionally.
 func WithStreamingSTT(sm *StreamManager) Option {
-	return func(c *Conversation) { c.seg.stream = sm }
+	return func(c *Conversation) { c.seg.lanes[""].stream = sm }
+}
+
+// WithSpeakerLanes enables per-speaker utterance segmentation (ADR-0050): an
+// attributed frame ([audio.Frame.Speaker] != "") opens a Speaker Lane — a VAD
+// session built by f, fed only that speaker's frames — so each speaker's utterances
+// are transcribed and attributed independently. A nil f (or leaving this option
+// unset) keeps the segmenter single-lane forever, byte-identical to the pre-lane
+// pipeline. The default (unattributed) lane always exists; f builds only the
+// non-default lanes and its close func releases each lane's ONNX session on reap.
+func WithSpeakerLanes(f LaneVADFactory) Option {
+	return func(c *Conversation) { c.seg.laneVADFactory = f }
+}
+
+// WithLaneStreamingSTT wires a per-Speaker-Lane streaming-STT transport (ADR-0042 ×
+// ADR-0050): f builds a [StreamManager] for a lane at its creation, capped at
+// maxLanes concurrent lane streams — past the cap a lane transcribes pure batch, so
+// concurrent sockets track concurrent speakers, not channel size. It complements
+// [WithStreamingSTT] (which wires the default lane's stream); a nil f leaves the
+// non-default lanes batch-only.
+func WithLaneStreamingSTT(f func(speakerID string) *StreamManager, maxLanes int) Option {
+	return func(c *Conversation) {
+		c.seg.laneStreamFactory = f
+		c.seg.maxStreamLanes = maxLanes
+	}
 }
 
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls

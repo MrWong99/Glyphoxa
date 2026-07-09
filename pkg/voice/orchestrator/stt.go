@@ -204,6 +204,7 @@ func (s *STT) PublishFinal(ctx context.Context, t stt.Transcript) {
 		TurnID:      voiceevent.NewTurnID(),
 		SpeechEndAt: speechEndAtFrom(ctx),
 		UtteranceID: utteranceIDFrom(ctx),
+		SpeakerID:   speakerIDFrom(ctx),
 	})
 }
 
@@ -246,5 +247,27 @@ func withUtteranceID(ctx context.Context, id string) context.Context {
 // transcribed without one (the batch path, or a direct Transcribe call).
 func utteranceIDFrom(ctx context.Context) string {
 	id, _ := ctx.Value(utteranceIDKey{}).(string)
+	return id
+}
+
+// speakerIDKey carries the Speaker Lane's id (ADR-0050) from the [Segmenter] to
+// [STT.PublishFinal] without widening the publish signature — pattern-copied from
+// [speechEndAtKey]. Unexported and orchestrator-internal.
+type speakerIDKey struct{}
+
+// withSpeakerID returns ctx carrying the utterance's Speaker Lane id; an empty id
+// (the default/unattributed lane, the single-lane MVP path) leaves ctx unchanged,
+// so [speakerIDFrom] yields "" and STTFinal.SpeakerID stays empty.
+func withSpeakerID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, speakerIDKey{}, id)
+}
+
+// speakerIDFrom recovers the Speaker Lane id stamped on this utterance, or "" for
+// the default lane (or a direct Transcribe call).
+func speakerIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(speakerIDKey{}).(string)
 	return id
 }

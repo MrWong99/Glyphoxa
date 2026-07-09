@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -67,7 +68,6 @@ type ErrorFunc func(error)
 // This is the bus-driven form of the accumulate-between-VAD-events loop the
 // slice-1 pipeline test used to spell out inline (ADR-0026).
 type Segmenter struct {
-	vad *VAD
 	stt *STT
 
 	// onError surfaces a recognizer error from the transcription worker (see
@@ -77,8 +77,10 @@ type Segmenter struct {
 	// [WithErrorHandler].
 	onError ErrorFunc
 	// jobs carries flushed segments from the audio loop to the single transcription
-	// worker (#24). Created and drained per [Segmenter.Bind] lifetime; buffered
-	// deeply enough that a normal call never backs the audio loop up on the send.
+	// worker (#24). ONE shared serial worker drains every lane's utterances, so STT
+	// cost per utterance is unchanged vs single-lane (ADR-0050). Created and drained
+	// per [Segmenter.Bind] lifetime; buffered deeply enough that a normal call never
+	// backs the audio loop up on the send.
 	jobs chan transcribeJob
 	// inflight counts segments enqueued but not yet transcribed, so
 	// [Segmenter.Flush] can wait for the backlog (incl. the final utterance) to
@@ -88,50 +90,100 @@ type Segmenter struct {
 	inflight sync.WaitGroup
 	worker   sync.WaitGroup
 
-	// stream is the optional streaming-STT transport (ADR-0042, [WithStreamingSTT]).
-	// When non-nil the segmenter mirrors each utterance onto it — pre-roll while
-	// idle, voiced frames while listening, a manual commit at speech-end — and the
-	// worker prefers the committed text, falling back to the batch recognizer on any
-	// failure. Nil is the byte-for-byte no-streaming default: none of the stream
-	// hooks fire and the batch path is untouched.
-	stream *StreamManager
-	// streamCancel stops the stream manager's maintainer; set at Bind (when stream
-	// is non-nil), called from the returned teardown.
-	streamCancel func()
+	// laneVADFactory builds a fresh per-Speaker-Lane VAD on first frame from a new
+	// speaker (ADR-0050). Nil = single-lane forever: every frame funnels to the
+	// default lane, byte-identical to the pre-lane pipeline. Set via
+	// [WithSpeakerLanes].
+	laneVADFactory LaneVADFactory
+	// laneStreamFactory builds a per-lane streaming-STT [StreamManager] at lane
+	// creation, capped at maxStreamLanes concurrent lane streams (past the cap a
+	// lane is pure batch). Nil = no per-lane streaming (the default lane keeps its
+	// own [WithStreamingSTT] manager). Set via [WithLaneStreamingSTT].
+	laneStreamFactory func(speakerID string) *StreamManager
+	maxStreamLanes    int
+	streamLanes       int // live non-default lane streams, for the cap
 
-	mu sync.Mutex
-	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of the most recent
-	// speech-end transition, captured so the flushed utterance's STTFinal can
-	// carry it forward (A3): it anchors the headline response-latency span at the
-	// turn's true speech-end without the metrics subscriber guessing. Zero until
-	// the first speech-end, and for a Flush with no preceding transition.
+	// laneIdleTTL is how long a Speaker Lane may sit unused before the reap sweep
+	// closes it (ADR-0050 "leave OR idle timeout"). nowFn is the injectable clock
+	// the TTL is measured against (real time in prod); both are test-overridable via
+	// [Segmenter.SetLaneReap]. sweepCalls counts Process calls toward the next sweep.
+	laneIdleTTL time.Duration
+	nowFn       func() time.Time
+	sweepCalls  int
+	sweepEvery  int // reap-sweep cadence in Process calls; [laneReapSweepEvery] in prod
+
+	mu  sync.Mutex
+	bus *voiceevent.Bus
+	// ctx is the context handed to STT.Transcribe when a segment flushes and to each
+	// per-lane stream's maintainer. It is the conversation's lifetime context,
+	// captured at Bind and cleared by the returned cancel; storing it lets Process
+	// stay frame-only (ctx-free) so the audio loop reads as a plain range over frames.
+	ctx context.Context
+	// lanes maps SpeakerID → its [lane]. The default lane (key "") is ALWAYS present,
+	// wraps the ctor-supplied *VAD, and is never reaped nor factory-built — it is the
+	// single-lane code path, byte-identical for an unattributed (Speaker()=="") frame.
+	// laneOrder is the non-default lanes in first-seen order, so [Segmenter.Flush]
+	// drains them deterministically after the default lane.
+	lanes     map[string]*lane
+	laneOrder []string
+}
+
+// lane is one Speaker Lane (ADR-0050): a VAD session fed only its speaker's frame
+// stream, emitting per-speaker utterance windows into the shared transcription
+// worker. The default lane (SpeakerID "") wraps the ctor-supplied VAD; every other
+// lane is factory-built on first frame and reaped on idle. All fields are guarded
+// by the [Segmenter]'s mu except vad (driven from the audio loop) and closeVAD.
+type lane struct {
+	id       string // the lane's SpeakerID ("" = default lane)
+	vad      *VAD
+	closeVAD func() // releases the factory-built VAD's ONNX session; nil for the default lane
+
+	listening bool
+	buf       []audio.Frame
+	// speechEndAt is the [voiceevent.VADSpeechEnd.At] of this lane's most recent
+	// speech-end, carried onto the flushed utterance's STTFinal (A3).
 	speechEndAt time.Time
-	// curUtteranceID and pendCommit/pendCommitSentAt carry the current utterance's
-	// streaming state from the VAD callbacks to the flush that enqueues its job. The
-	// id is minted at speech_start (beginUtterance); the commit handle is captured at
-	// speech_end (endUtterance) and consumed by the flush. All guarded by mu.
+	// curUtteranceID / pendCommit / pendCommitSentAt carry this lane's current
+	// utterance's streaming state from the VAD callbacks to the flush (ADR-0042).
 	curUtteranceID   string
 	pendCommit       <-chan stt.CommitResult
 	pendCommitSentAt time.Time
-	// ctx is the context handed to STT.Transcribe when a segment flushes. It is
-	// the conversation's lifetime context, captured at Bind and cleared by the
-	// returned cancel; storing it lets Process stay frame-only (ctx-free) so the
-	// audio loop reads as a plain range over frames.
-	ctx       context.Context
-	listening bool
-	buf       []audio.Frame
+	// stream is this lane's optional streaming-STT transport; nil = pure batch.
+	stream       *StreamManager
+	streamCancel func()
+	// lastSeen is the wall (nowFn) time of the last frame routed to this lane, for
+	// idle-TTL reaping.
+	lastSeen time.Time
 }
 
+// LaneVADFactory builds a fresh Speaker Lane VAD plus its close func (which
+// releases the ONNX session so a reaped lane does not leak an inferencer, ADR-0050
+// risk (b)). It returns an error the [Segmenter] degrades on: the speaker's frames
+// fall back to the default lane rather than dropping.
+type LaneVADFactory func() (v *VAD, close func(), err error)
+
+// defaultLaneIdleTTL is how long a Speaker Lane may sit unused before the reap
+// sweep closes it (ADR-0050 "leave OR idle timeout" — idle subsumes leave). Sized
+// generously so a mid-session pause never reaps an active participant's lane.
+const defaultLaneIdleTTL = 2 * time.Minute
+
+// laneReapSweepEvery is the reap-sweep cadence, counted in [Segmenter.Process]
+// calls — the same amortised-sweep precedent as the codec's pruneEvery, cheap
+// enough to keep the sweep off the hot path's tail.
+const laneReapSweepEvery = 1024
+
 // transcribeJob is one flushed utterance handed to the transcription worker: the
-// segment frames plus the per-segment state STT needs (the lifetime ctx and the
-// turn's speech-end time), snapshotted at enqueue so the worker never reads
-// mutable Segmenter state.
+// segment frames plus the per-segment state STT needs (the lifetime ctx, the turn's
+// speech-end time, and the lane's SpeakerID stamped on the STTFinal), snapshotted at
+// enqueue so the worker never reads mutable Segmenter/lane state.
 //
 // On the streaming path (ADR-0042) it additionally carries the utterance's manual
 // commit handle (nil = pure batch), the moment that commit was sent (for the
-// stt_request span), and the utterance id (stamped on the STTFinal so it joins its
-// partials). The worker prefers the committed text and falls back to the batch
-// recognizer — with these SAME locally-buffered seg frames — on any commit failure.
+// stt_request span), the utterance id (joining the STTFinal to its partials), and
+// the lane's [StreamManager] (whose awaitCommit resolves the commit — carried on the
+// job so a reaped lane's commit still resolves on the shared worker). The worker
+// prefers the committed text and falls back to the batch recognizer — with these
+// SAME locally-buffered seg frames — on any commit failure.
 type transcribeJob struct {
 	ctx          context.Context
 	seg          []audio.Frame
@@ -139,6 +191,8 @@ type transcribeJob struct {
 	commit       <-chan stt.CommitResult
 	commitSentAt time.Time
 	utteranceID  string
+	speakerID    string
+	stream       *StreamManager
 }
 
 // transcribeQueueDepth is the buffer on the worker's job channel. A flush enqueues
@@ -149,7 +203,10 @@ type transcribeJob struct {
 const transcribeQueueDepth = 64
 
 // NewSegmenter wires vad and stt together. Both must be non-nil; passing nil
-// for either panics. The caller owns the wrapped stages.
+// for either panics. The caller owns the wrapped stages. vad becomes the default
+// lane (SpeakerID ""), which is always present and never reaped — so with no
+// [WithSpeakerLanes] factory the segmenter is single-lane, byte-identical to the
+// pre-lane pipeline.
 func NewSegmenter(vad *VAD, stt *STT) *Segmenter {
 	if vad == nil {
 		panic("orchestrator.NewSegmenter: vad must not be nil")
@@ -157,8 +214,32 @@ func NewSegmenter(vad *VAD, stt *STT) *Segmenter {
 	if stt == nil {
 		panic("orchestrator.NewSegmenter: stt must not be nil")
 	}
-	return &Segmenter{vad: vad, stt: stt}
+	return &Segmenter{
+		stt:         stt,
+		laneIdleTTL: defaultLaneIdleTTL,
+		nowFn:       time.Now,
+		sweepEvery:  laneReapSweepEvery,
+		lanes:       map[string]*lane{"": {id: "", vad: vad}},
+	}
 }
+
+// SetLaneReap overrides the idle-TTL and clock the reap sweep uses (test seam;
+// production uses [defaultLaneIdleTTL] and time.Now). A non-positive ttl leaves the
+// default; a nil now leaves the current clock.
+func (s *Segmenter) SetLaneReap(ttl time.Duration, now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ttl > 0 {
+		s.laneIdleTTL = ttl
+	}
+	if now != nil {
+		s.nowFn = now
+	}
+}
+
+// now reads the segmenter's clock (real time in prod, faked in reap tests). Callers
+// must hold mu, or use it where a slightly stale read is harmless.
+func (s *Segmenter) now() time.Time { return s.nowFn() }
 
 // Bind subscribes the segmenter to the VAD speech transitions on bus and records
 // ctx as the context handed to STT.Transcribe on flush. It implements
@@ -172,14 +253,17 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 	}
 	s.mu.Lock()
 	s.ctx = ctx
+	s.bus = bus
 	jobs := make(chan transcribeJob, transcribeQueueDepth)
 	s.jobs = jobs
+	def := s.lanes[""]
 	s.mu.Unlock()
 
-	// Start the streaming transport's maintainer (eager dial) so utterance 1 can
-	// stream; nil stream = no-op (byte-for-byte batch path).
-	if s.stream != nil {
-		s.streamCancel = s.stream.bind(ctx, bus)
+	// Start the default lane's streaming transport (eager dial) so utterance 1 can
+	// stream; a nil stream = no-op (byte-for-byte batch path). Non-default lanes bind
+	// their own stream at lane creation (laneFor).
+	if def.stream != nil {
+		def.streamCancel = def.stream.bind(ctx, bus)
 	}
 
 	// One serial worker drains the queue, so transcriptions stay in speech order.
@@ -192,37 +276,52 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		}
 	})
 
+	// The speech transitions of EVERY lane's VAD land on this one bus; route each to
+	// its lane by SpeakerID ("" → default lane). A transition for an unknown lane (it
+	// was reaped between the frame and the synchronous publish) is dropped.
 	unsubStart := voiceevent.On(bus, func(start voiceevent.VADSpeechStart) {
 		s.mu.Lock()
-		s.listening = true
+		ln := s.lanes[start.SpeakerID]
+		if ln == nil {
+			s.mu.Unlock()
+			return
+		}
+		ln.listening = true
+		stream := ln.stream
 		s.mu.Unlock()
 		// Mint this utterance's id and, if the stream is up, flush the pre-roll ring —
 		// voiced frames then follow from Process (see [Segmenter.Process]).
-		if s.stream != nil {
-			id := s.stream.beginUtterance(start.At)
+		if stream != nil {
+			id := stream.beginUtterance(start.At)
 			s.mu.Lock()
-			s.curUtteranceID = id
+			ln.curUtteranceID = id
 			s.mu.Unlock()
 		}
 	})
 	unsubEnd := voiceevent.On(bus, func(end voiceevent.VADSpeechEnd) {
 		s.mu.Lock()
-		s.listening = false
+		ln := s.lanes[end.SpeakerID]
+		if ln == nil {
+			s.mu.Unlock()
+			return
+		}
+		ln.listening = false
 		// Remember this turn's true speech-end so the flushed utterance's STTFinal
-		// can carry it (A3); the next Process call after speech ends flushes.
-		s.speechEndAt = end.At
+		// can carry it (A3); the next Process call for this lane flushes.
+		ln.speechEndAt = end.At
+		stream := ln.stream
 		s.mu.Unlock()
 		// Local VAD is the sole endpointing authority (ADR-0042): the manual commit
 		// fires HERE, at the VAD speech-end, never provider-side. The handle is stashed
 		// for the imminent flush to attach to the job.
-		if s.stream != nil {
-			commit, sentAt, ok := s.stream.endUtterance()
+		if stream != nil {
+			commit, sentAt, ok := stream.endUtterance()
 			s.mu.Lock()
 			if ok {
-				s.pendCommit = commit
-				s.pendCommitSentAt = sentAt
+				ln.pendCommit = commit
+				ln.pendCommitSentAt = sentAt
 			} else {
-				s.pendCommit = nil
+				ln.pendCommit = nil
 			}
 			s.mu.Unlock()
 		}
@@ -230,14 +329,26 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 	return func() {
 		unsubStart()
 		unsubEnd()
-		if s.streamCancel != nil {
-			s.streamCancel()
-			s.streamCancel = nil
-		}
+		// Tear down every lane's stream and every FACTORY-built lane's VAD (the ONNX
+		// session — ADR-0050 risk (b)). The default lane's VAD is caller-owned and is
+		// NOT closed here.
 		s.mu.Lock()
+		lanes := make([]*lane, 0, len(s.lanes))
+		for _, ln := range s.lanes {
+			lanes = append(lanes, ln)
+		}
 		s.ctx = nil
 		s.jobs = nil
 		s.mu.Unlock()
+		for _, ln := range lanes {
+			if ln.streamCancel != nil {
+				ln.streamCancel()
+				ln.streamCancel = nil
+			}
+			if ln.closeVAD != nil {
+				ln.closeVAD()
+			}
+		}
 		// Closing the queue lets the worker drain any still-buffered jobs and exit;
 		// in the normal path Flush already emptied it, so this just stops the worker.
 		close(jobs)
@@ -260,50 +371,207 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 // The buffer is cleared synchronously so a failed utterance does not bleed into
 // the next, and a recognizer error surfaces via onError, not this return value.
 func (s *Segmenter) Process(frame audio.Frame) error {
-	if err := s.vad.Process(frame); err != nil {
+	s.reapIdleLanes()
+
+	sp := frame.Speaker()
+	if sp == "" {
+		// Unattributed frame (silence clock, a mixed/test frame): BROADCAST to every
+		// lane so each lane's VAD hangover advances (the silence clock is
+		// speaker-agnostic, ADR-0050) and any listening lane buffers the trailing
+		// audio. With only the default lane present this is exactly the pre-lane path.
+		s.mu.Lock()
+		targets := make([]*lane, 0, len(s.lanes))
+		for _, ln := range s.lanes {
+			targets = append(targets, ln)
+		}
+		s.mu.Unlock()
+		var firstErr error
+		for _, ln := range targets {
+			if err := s.processLane(ln, frame); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	// Attributed frame: route to its Speaker Lane, created on first frame. A nil or
+	// erroring factory degrades to the default lane (still transcribed) and reports
+	// the error once — the audio loop stays up (ADR-0050 risk (c)).
+	ln, err := s.laneFor(sp)
+	if err != nil && s.onError != nil {
+		s.onError(err)
+	}
+	return s.processLane(ln, frame)
+}
+
+// processLane drives one lane's VAD with the frame (re-stamped to the lane's id so
+// the transition routes back to this lane) and accumulates its utterance audio,
+// mirroring [Segmenter.Process]'s original single-lane body per lane. The VAD
+// publishes its transitions synchronously, so ln.listening is up to date by the
+// time this returns from vad.Process.
+func (s *Segmenter) processLane(ln *lane, frame audio.Frame) error {
+	f := frame
+	if f.Speaker() != ln.id {
+		f = f.WithSpeaker(ln.id) // e.g. a broadcast "" frame fed to an attributed lane
+	}
+	if err := ln.vad.Process(f); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
-	if s.listening {
-		s.buf = append(s.buf, frame)
+	ln.lastSeen = s.now()
+	if ln.listening {
+		ln.buf = append(ln.buf, f)
+		stream := ln.stream
 		s.mu.Unlock()
-		// Mirror the voiced frame onto the stream (additive; the local buffer above
-		// stays authoritative for the batch fallback). No-op when no stream is wired.
-		if s.stream != nil {
-			s.stream.send(frame)
+		// Mirror the voiced frame onto the lane's stream (additive; the local buffer
+		// above stays authoritative for the batch fallback). No-op when no stream.
+		if stream != nil {
+			stream.send(f)
 		}
 		return nil
 	}
-	seg := s.buf
-	s.buf = nil
+	seg := ln.buf
+	ln.buf = nil
 	ctx := s.ctx
-	speechEndAt := s.speechEndAt
-	commit := s.pendCommit
-	commitSentAt := s.pendCommitSentAt
-	utteranceID := s.curUtteranceID
-	s.pendCommit = nil
+	speechEndAt := ln.speechEndAt
+	commit := ln.pendCommit
+	commitSentAt := ln.pendCommitSentAt
+	utteranceID := ln.curUtteranceID
+	stream := ln.stream
+	ln.pendCommit = nil
 	s.mu.Unlock()
 
 	// A non-listening frame is pre-speech silence: fill the pre-roll ring (never
 	// streamed until the next utterance begins, so silence is not billed).
-	if s.stream != nil {
-		s.stream.idleFrame(frame)
+	if stream != nil {
+		stream.idleFrame(f)
 	}
-	s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID)
+	s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID, ln.id, stream)
 	return nil
+}
+
+// laneFor returns the Speaker Lane a speaker's frames feed, creating it on first
+// sight. With no [WithSpeakerLanes] factory (or a "" speaker) it funnels to the
+// default lane. A factory error — or a panic (ADR-0050 risk (c)) — is returned and
+// the frames degrade to the default lane; the returned *lane is never nil.
+func (s *Segmenter) laneFor(sp string) (*lane, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sp == "" || s.laneVADFactory == nil {
+		return s.lanes[""], nil
+	}
+	if ln, ok := s.lanes[sp]; ok {
+		ln.lastSeen = s.now()
+		return ln, nil
+	}
+	v, closeVAD, err := s.newLaneVAD()
+	if err != nil {
+		return s.lanes[""], err
+	}
+	ln := &lane{id: sp, vad: v, closeVAD: closeVAD, lastSeen: s.now()}
+	// Per-lane streaming under the concurrency cap (ADR-0050): the first maxStreamLanes
+	// lanes open a stream at creation (bound to the conversation ctx, reaped with the
+	// lane); past the cap a lane is pure batch. Only when a factory is wired AND the
+	// conversation is bound (s.ctx set).
+	if s.laneStreamFactory != nil && s.streamLanes < s.maxStreamLanes && s.ctx != nil && s.bus != nil {
+		if sm := s.laneStreamFactory(sp); sm != nil {
+			ln.stream = sm
+			ln.streamCancel = sm.bind(s.ctx, s.bus)
+			s.streamLanes++
+		}
+	}
+	s.lanes[sp] = ln
+	s.laneOrder = append(s.laneOrder, sp)
+	return ln, nil
+}
+
+// newLaneVAD calls the lane VAD factory, converting a panic into an error so a
+// misbehaving factory degrades one speaker to the default lane rather than taking
+// the audio loop down (ADR-0050 risk (c)). Called under mu.
+func (s *Segmenter) newLaneVAD() (v *VAD, closeVAD func(), err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			v, closeVAD, err = nil, nil, fmt.Errorf("orchestrator.Segmenter: lane VAD factory panicked: %v", r)
+		}
+	}()
+	return s.laneVADFactory()
+}
+
+// reapIdleLanes closes every non-default lane idle past laneIdleTTL, on the
+// amortised [laneReapSweepEvery] cadence (ADR-0050 lane lifecycle). A reaped lane's
+// still-buffered utterance is FLUSHED (dispatched, not dropped), its stream cancelled
+// and its VAD's ONNX session closed (risk (b)). The default lane is never reaped.
+func (s *Segmenter) reapIdleLanes() {
+	s.mu.Lock()
+	s.sweepCalls++
+	if s.sweepEvery <= 0 || s.sweepCalls < s.sweepEvery {
+		s.mu.Unlock()
+		return
+	}
+	s.sweepCalls = 0
+	cutoff := s.now().Add(-s.laneIdleTTL)
+	var reap []*lane
+	for id, ln := range s.lanes {
+		if id == "" || !ln.lastSeen.Before(cutoff) {
+			continue
+		}
+		reap = append(reap, ln)
+	}
+	for _, ln := range reap {
+		delete(s.lanes, ln.id)
+		s.removeLaneOrder(ln.id)
+		if ln.stream != nil {
+			s.streamLanes--
+		}
+	}
+	ctx := s.ctx
+	s.mu.Unlock()
+
+	for _, ln := range reap {
+		// Flush a still-buffered utterance so a reaped mid-utterance lane is not lost;
+		// dispatchTranscription is a no-op on an empty buffer.
+		s.mu.Lock()
+		seg := ln.buf
+		ln.buf = nil
+		speechEndAt := ln.speechEndAt
+		commit := ln.pendCommit
+		commitSentAt := ln.pendCommitSentAt
+		utteranceID := ln.curUtteranceID
+		stream := ln.stream
+		ln.pendCommit = nil
+		s.mu.Unlock()
+		s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID, ln.id, stream)
+		if ln.streamCancel != nil {
+			ln.streamCancel()
+		}
+		if ln.closeVAD != nil {
+			ln.closeVAD()
+		}
+	}
+}
+
+// removeLaneOrder drops id from the first-seen order slice. Called under mu.
+func (s *Segmenter) removeLaneOrder(id string) {
+	for i, v := range s.laneOrder {
+		if v == id {
+			s.laneOrder = append(s.laneOrder[:i], s.laneOrder[i+1:]...)
+			return
+		}
+	}
 }
 
 // dispatchTranscription enqueues a flushed segment for the transcription worker so
 // the audio intake loop is never blocked by the network-bound recognizer call
 // (#24); an empty segment is a no-op. The enqueue is counted on inflight so
 // [Segmenter.Flush] can drain the backlog before teardown. Each segment is owned
-// by the job (Process cleared s.buf before handing it over, so a subsequent append
-// cannot mutate it) and mints its own TurnID at STTFinal (stt.go). The send blocks
+// by the job (processLane cleared the lane's buf before handing it over, so a
+// subsequent append cannot mutate it) and mints its own TurnID at STTFinal (stt.go).
+// The send blocks
 // only if the queue is full (see [transcribeQueueDepth]). A recognizer error is
 // reported by the worker through onError — the side channel that replaces the
 // inline call's return value.
-func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit <-chan stt.CommitResult, commitSentAt time.Time, utteranceID string) {
+func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame, speechEndAt time.Time, commit <-chan stt.CommitResult, commitSentAt time.Time, utteranceID, speakerID string, stream *StreamManager) {
 	if len(seg) == 0 {
 		return
 	}
@@ -314,6 +582,8 @@ func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame
 		commit:       commit,
 		commitSentAt: commitSentAt,
 		utteranceID:  utteranceID,
+		speakerID:    speakerID,
+		stream:       stream,
 	}
 	s.mu.Lock()
 	jobs := s.jobs
@@ -347,24 +617,48 @@ func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame
 // via onError, so Flush always returns nil (the error return is retained for the
 // audio loop's call-site symmetry).
 func (s *Segmenter) Flush() error {
+	// Default lane first, then the non-default lanes in first-seen order, so the
+	// end-of-stream drain is deterministic (positional cassette replay relies on
+	// speech order within a lane; across lanes the default lane leads).
 	s.mu.Lock()
-	seg := s.buf
-	s.buf = nil
-	wasListening := s.listening
-	s.listening = false
+	order := append([]string{""}, s.laneOrder...)
+	lanes := make([]*lane, 0, len(order))
+	for _, id := range order {
+		if ln := s.lanes[id]; ln != nil {
+			lanes = append(lanes, ln)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, ln := range lanes {
+		s.flushLane(ln)
+	}
+	s.inflight.Wait()
+	return nil
+}
+
+// flushLane dispatches one lane's still-buffered utterance regardless of whether
+// speech is still active (the end-of-stream counterpart to [Segmenter.processLane]).
+func (s *Segmenter) flushLane(ln *lane) {
+	s.mu.Lock()
+	seg := ln.buf
+	ln.buf = nil
+	wasListening := ln.listening
+	ln.listening = false
 	ctx := s.ctx
-	commit := s.pendCommit
-	commitSentAt := s.pendCommitSentAt
-	utteranceID := s.curUtteranceID
-	s.pendCommit = nil
+	commit := ln.pendCommit
+	commitSentAt := ln.pendCommitSentAt
+	utteranceID := ln.curUtteranceID
+	stream := ln.stream
+	ln.pendCommit = nil
 	s.mu.Unlock()
 
 	// If the stream ended while speech was still active there was no VAD speech-end,
 	// so the open utterance never got its manual commit — request it now (ADR-0042),
 	// or fall to batch if the stream is down. A speech-end already emitted a handle
 	// captured above, so this only fires for a truly mid-utterance end-of-stream.
-	if wasListening && s.stream != nil {
-		if c, sentAt, ok := s.stream.endUtterance(); ok {
+	if wasListening && stream != nil {
+		if c, sentAt, ok := stream.endUtterance(); ok {
 			commit = c
 			commitSentAt = sentAt
 		}
@@ -372,9 +666,7 @@ func (s *Segmenter) Flush() error {
 
 	// A Flush has no speech-end transition (end-of-stream), so it carries the
 	// zero time — the STTFinal's SpeechEndAt is unset for a flushed final turn.
-	s.dispatchTranscription(ctx, seg, time.Time{}, commit, commitSentAt, utteranceID)
-	s.inflight.Wait()
-	return nil
+	s.dispatchTranscription(ctx, seg, time.Time{}, commit, commitSentAt, utteranceID, ln.id, stream)
 }
 
 // transcribe produces one utterance's authoritative STTFinal, carrying the turn's
@@ -399,9 +691,10 @@ func (s *Segmenter) transcribe(job transcribeJob) error {
 	}
 	ctx = withSpeechEndAt(ctx, job.speechEndAt)
 	ctx = withUtteranceID(ctx, job.utteranceID)
+	ctx = withSpeakerID(ctx, job.speakerID)
 
-	if job.commit != nil && s.stream != nil {
-		if t, ok := s.stream.awaitCommit(job.commit, job.commitSentAt); ok {
+	if job.commit != nil && job.stream != nil {
+		if t, ok := job.stream.awaitCommit(job.commit, job.commitSentAt); ok {
 			// Committed text is authoritative: publish it as this utterance's STTFinal
 			// with the SAME TurnID minting the batch path uses.
 			s.stt.PublishFinal(ctx, t)
