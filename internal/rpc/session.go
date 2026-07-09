@@ -77,6 +77,11 @@ const searchTranscriptLimit = 50
 // tier (ADR-0039); the client sends no limit.
 const listSessionsLimit = 50
 
+// maxRecapSessions caps how many Voice Sessions one GenerateRecap may span (#274).
+// The web recaps a single session; the cap is a spend guardrail (each session is a
+// money-spending LLM call, gate #271), set well above any realistic pick.
+const maxRecapSessions = 20
+
 // SessionServer implements the Connect SessionService over a SessionManager +
 // SessionStore: Start/Stop drive the in-process loop, GetSession reports the live
 // or last session.
@@ -388,9 +393,11 @@ func (s *SessionServer) ListSessions(
 // as SetAgentMute, so a probe can't learn whether a foreign id exists. Empty
 // session_ids is CodeInvalidArgument. Recapping a RUNNING session is allowed: its
 // Lines already exist and the snapshot simply grows, so the recap covers the
-// transcript as of the call. recap.ErrNoTranscript (nothing to summarize) is
+// transcript as of the call. recap.ErrNoTranscript (nothing to summarize) and
+// recap.ErrTranscriptTooLong (a retry can never succeed) are both static
 // CodeFailedPrecondition; any other engine error is logged and returned as a
-// static CodeInternal. State-changing (spends money): auth + CSRF guard it.
+// static CodeInternal. An over-cap session_ids count is CodeInvalidArgument (a
+// spend guardrail). State-changing (spends money): auth + CSRF guard it.
 func (s *SessionServer) GenerateRecap(
 	ctx context.Context,
 	req *connect.Request[managementv1.GenerateRecapRequest],
@@ -398,6 +405,12 @@ func (s *SessionServer) GenerateRecap(
 	rawIDs := req.Msg.GetSessionIds()
 	if len(rawIDs) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("at least one session id is required"))
+	}
+	// Belt-and-braces spend guard (gate #271): the web sends one id; an unreasonable
+	// count would fan out that many money-spending LLM calls. Cap it well above any
+	// realistic pick.
+	if len(rawIDs) > maxRecapSessions {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("too many session ids to recap at once"))
 	}
 
 	// A foreign/unknown/unparsable id names no session in the Active Campaign — one
@@ -436,6 +449,11 @@ func (s *SessionServer) GenerateRecap(
 	res, err := s.recapper.Recap(ctx, sessionIDs)
 	if errors.Is(err, recap.ErrNoTranscript) {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no transcript to summarize"))
+	}
+	if errors.Is(err, recap.ErrTranscriptTooLong) {
+		// Deterministic + operator-meaningful (a retry can never succeed): a precondition,
+		// not an internal fault. Name the condition without echoing internals.
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("transcript too long to recap"))
 	}
 	if err != nil {
 		s.log.Error("GenerateRecap: recap engine failed", "err", err)

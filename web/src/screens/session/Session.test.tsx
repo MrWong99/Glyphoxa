@@ -1375,6 +1375,52 @@ describe("Session recap (#274)", () => {
     fireEvent.click(within(picker).getByText(/5 lines/));
     await waitFor(() => expect(screen.queryByTestId("recap-result")).not.toBeInTheDocument());
   });
+
+  it("does NOT render an in-flight recap that resolves after the session changed", async () => {
+    const older = create(VoiceSessionSchema, {
+      id: "vsOld",
+      campaignId: "c1",
+      status: "ended",
+      startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+      endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+      lineCount: 5,
+    });
+    const latest = create(VoiceSessionSchema, {
+      id: "vs1",
+      campaignId: "c1",
+      status: "ended",
+      startedAt: timestampFromDate(new Date(recapStartISO)),
+      endedAt: timestampFromDate(new Date("2026-07-08T21:00:00Z")),
+      lineCount: 12,
+    });
+    // Gate the recap so it is still in flight when we switch sessions.
+    let release!: (r: ReturnType<typeof create<typeof GenerateRecapResponseSchema>>) => void;
+    const gate = new Promise<ReturnType<typeof create<typeof GenerateRecapResponseSchema>>>((res) => {
+      release = res;
+    });
+    const { transport } = recapTransport(() => gate, [latest, older]);
+
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // Recap the current (vs1) session; while it is pending, switch to the past one.
+    fireEvent.click(await screen.findByTestId("recap-button"));
+    expect(await screen.findByTestId("recap-pending")).toBeInTheDocument();
+    const picker = screen.getByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/5 lines/));
+
+    // Now the gated vs1 recap resolves — but vs1 is no longer on screen, so its
+    // result must be discarded, never rendered above vsOld's transcript.
+    await act(async () => {
+      release(create(GenerateRecapResponseSchema, { text: "Stale recap of vs1.", sessionIds: ["vs1"], windowed: false }));
+    });
+    await waitFor(() => expect(screen.queryByTestId("recap-pending")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("recap-result")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stale recap of vs1.")).not.toBeInTheDocument();
+  });
 });
 
 describe("Session zero-line live snapshot (#248)", () => {

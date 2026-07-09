@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { Play, Square, Search, ScrollText, Loader2 } from "lucide-react";
@@ -333,10 +333,27 @@ export function Session() {
   const generateRecap = useMutation(SessionService.method.generateRecap, {
     onError: (err: Error) => toast.error(`Couldn't generate the recap: ${err.message}`),
   });
+  // The rendered session the operator is looking at RIGHT NOW, tracked in a ref so
+  // the async onSuccess below can compare against it — a ~2min recap may resolve
+  // long after the operator switched sessions.
+  const renderedSessionIdRef = useRef(renderedSessionId);
+  useEffect(() => {
+    renderedSessionIdRef.current = renderedSessionId;
+  }, [renderedSessionId]);
   const runRecap = (vs: VoiceSession) => {
+    const coveredId = vs.id;
     generateRecap.mutate(
-      { sessionIds: [vs.id] },
-      { onSuccess: (res) => setRecapResult({ startedMs: tsMs(vs.startedAt), text: res.text }) },
+      { sessionIds: [coveredId] },
+      {
+        onSuccess: (res) => {
+          // Drop a recap whose covered session is no longer on screen: an in-flight
+          // call that resolves AFTER the operator switched sessions must not render
+          // "session of <old>" above the new session's transcript. The clear-on-change
+          // useEffect can't catch this — onSuccess fires after it already ran.
+          if (renderedSessionIdRef.current !== coveredId) return;
+          setRecapResult({ startedMs: tsMs(vs.startedAt), text: res.text });
+        },
+      },
     );
   };
   // A recap belongs to the session it covered; when the rendered session changes

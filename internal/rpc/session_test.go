@@ -181,6 +181,7 @@ type fakeSessionStore struct {
 
 	voiceSessions map[uuid.UUID]storage.VoiceSession // GenerateRecap ownership lookups (#274)
 	getVoiceErr   error                              // forced non-NotFound error for GetVoiceSession
+	getVoiceCalls int                                // GetVoiceSession call count (spend-cap guard test)
 }
 
 func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
@@ -240,6 +241,7 @@ func (f *fakeSessionStore) ListVoiceSessions(_ context.Context, campaignID uuid.
 }
 
 func (f *fakeSessionStore) GetVoiceSession(_ context.Context, id uuid.UUID) (storage.VoiceSession, error) {
+	f.getVoiceCalls++
 	if f.getVoiceErr != nil {
 		return storage.VoiceSession{}, f.getVoiceErr
 	}
@@ -1219,6 +1221,50 @@ func TestGenerateRecap_NoTranscriptIsFailedPrecondition(t *testing.T) {
 		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{vs.ID.String()}}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("no-transcript code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
+// TestGenerateRecap_TranscriptTooLongIsFailedPrecondition: recap.ErrTranscriptTooLong
+// is deterministic + operator-meaningful (a retry can never succeed), so it maps to
+// CodeFailedPrecondition, not the generic Internal.
+func TestGenerateRecap_TranscriptTooLongIsFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded}
+	store := recapStore(campaignID, vs)
+	engine := &fakeRecapEngine{err: recap.ErrTranscriptTooLong}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{vs.ID.String()}}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("too-long code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
+// TestGenerateRecap_TooManyIDsIsInvalidArgument: a request spanning an
+// unreasonable number of sessions is rejected CodeInvalidArgument before any
+// ownership lookup or engine call — a spend guardrail (gate #271).
+func TestGenerateRecap_TooManyIDsIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	engine := &fakeRecapEngine{}
+	store := recapStore(uuid.New())
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	ids := make([]string, 21) // just over the cap
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: ids}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("too-many-ids code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times for over-cap request, want 0", engine.calls)
+	}
+	if store.getVoiceCalls != 0 {
+		t.Errorf("store.GetVoiceSession called %d times for over-cap request, want 0", store.getVoiceCalls)
 	}
 }
 
