@@ -71,6 +71,14 @@ type campaignStore interface {
 	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
 	UpsertToolGrant(ctx context.Context, g storage.NewToolGrant) error
 	DeleteToolGrant(ctx context.Context, agentID uuid.UUID, toolName string) error
+	// Player Character (PC) CRUD (#276, E4): the campaign-scoped roster read plus
+	// create/update (incl. Discord-User rebind)/delete. All resolve the active
+	// campaign server-side like the Agent CRUD, so another campaign's Characters
+	// are never returned nor mutable.
+	ListCharacters(ctx context.Context, campaignID uuid.UUID) ([]storage.Character, error)
+	CreateCharacter(ctx context.Context, c storage.NewCharacter) (uuid.UUID, error)
+	UpdateCharacter(ctx context.Context, c storage.CharacterUpdate) (storage.Character, error)
+	DeleteCharacter(ctx context.Context, id uuid.UUID) error
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a

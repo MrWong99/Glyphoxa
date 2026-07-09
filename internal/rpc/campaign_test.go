@@ -135,6 +135,18 @@ func (fakeReader) UpsertToolGrant(context.Context, storage.NewToolGrant) error {
 func (fakeReader) DeleteToolGrant(context.Context, uuid.UUID, string) error {
 	return nil
 }
+func (fakeReader) ListCharacters(context.Context, uuid.UUID) ([]storage.Character, error) {
+	return nil, nil
+}
+func (fakeReader) CreateCharacter(context.Context, storage.NewCharacter) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+func (fakeReader) UpdateCharacter(context.Context, storage.CharacterUpdate) (storage.Character, error) {
+	return storage.Character{}, nil
+}
+func (fakeReader) DeleteCharacter(context.Context, uuid.UUID) error {
+	return nil
+}
 
 // newClient stands up the CampaignServer handler behind an httptest server and
 // returns a Connect-JSON client for it. WithProtoJSON forces the JSON codec on
