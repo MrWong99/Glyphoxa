@@ -15,6 +15,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
 import { KnowledgePanel } from "./KnowledgePanel";
+import { PlayersPanel } from "./PlayersPanel";
 
 import "./campaign.css";
 
@@ -56,9 +57,10 @@ export function Campaign() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = roster.find((a) => a.id === selectedId) ?? roster[0];
 
-  // Cast (roster editor) vs Knowledge (KG entries) — the design's seg-control
-  // beside the title. Cast is the default so the roster is what loads first (#71).
-  const [view, setView] = useState<"cast" | "knowledge">("cast");
+  // Cast (roster editor), Knowledge (KG entries), or Players (Character ↔ Discord
+  // User bindings, #279) — the design's seg-control beside the title. Cast is the
+  // default so the roster is what loads first (#71).
+  const [view, setView] = useState<"cast" | "knowledge" | "players">("cast");
 
   const invalidateRoster = () =>
     queryClient.invalidateQueries({
@@ -108,6 +110,15 @@ export function Campaign() {
             >
               Knowledge
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "players"}
+              data-active={view === "players" ? "true" : undefined}
+              onClick={() => setView("players")}
+            >
+              Players
+            </button>
           </div>
         </div>
         <div className="gx-campaign-screen__sub">
@@ -115,13 +126,17 @@ export function Campaign() {
           <span className="gx-campaign-screen__lede">
             {view === "knowledge"
               ? "What the world knows. Public entries prime your NPCs; GM-private ones stay yours."
-              : "One Butler is required; add as many NPCs as your table needs."}
+              : view === "players"
+                ? "Bind each Discord User to their Character so the transcript names their voice."
+                : "One Butler is required; add as many NPCs as your table needs."}
           </span>
         </div>
       </header>
 
       {view === "knowledge" ? (
         <KnowledgePanel />
+      ) : view === "players" ? (
+        <PlayersPanel />
       ) : status === "pending" ? (
         <div className="gx-skeleton" data-testid="roster-loading" />
       ) : status === "error" ? (

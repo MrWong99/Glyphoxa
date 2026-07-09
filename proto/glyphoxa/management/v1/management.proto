@@ -203,6 +203,17 @@ service CampaignService {
   // DeleteCharacter removes a Player Character by id (#276). An unknown id is
   // CodeNotFound. State-changing: the auth + CSRF interceptors guard it.
   rpc DeleteCharacter(DeleteCharacterRequest) returns (DeleteCharacterResponse);
+
+  // ListDiscordVoiceMembers lists the Discord Users currently in the operator's
+  // configured voice channel — the Players panel's member picker (#279). Read
+  // from the voice-state cache the Bot already receives (GuildVoiceStates
+  // intent, no privileged intent); each member's name comes from a REST
+  // GetMember. A nil presence / offline Bot / unresolved channel returns an
+  // empty list (never an error), so the UI falls back to free-text snowflake
+  // entry.
+  rpc ListDiscordVoiceMembers(ListDiscordVoiceMembersRequest) returns (ListDiscordVoiceMembersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
 // ToolGrant is one built-in Tool's availability and grant state for a single
@@ -1388,3 +1399,27 @@ message DeleteCharacterRequest {
 
 // DeleteCharacterResponse is empty.
 message DeleteCharacterResponse {}
+
+// DiscordVoiceMember is one Discord User currently in the operator's voice
+// channel (#279): the snowflake id to bind a Character to, a display name, and
+// an avatar URL for the picker row.
+message DiscordVoiceMember {
+  // discord_user_id is the Discord snowflake to bind.
+  string discord_user_id = 1;
+  // display_name is the member's guild display name (nickname → username).
+  string display_name = 2;
+  // avatar_url is the member's effective avatar URL (may be empty).
+  string avatar_url = 3;
+}
+
+// ListDiscordVoiceMembersRequest is the (empty) request; the voice channel is
+// resolved server-side from the deployment config (ADR-0039).
+message ListDiscordVoiceMembersRequest {}
+
+// ListDiscordVoiceMembersResponse carries the voice-channel occupants; empty
+// when the Bot is offline or no channel is configured (the UI falls back to
+// free-text snowflake entry).
+message ListDiscordVoiceMembersResponse {
+  // members are the Discord Users currently in the voice channel.
+  repeated DiscordVoiceMember members = 1;
+}

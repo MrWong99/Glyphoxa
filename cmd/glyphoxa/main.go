@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
@@ -530,7 +531,25 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			}
 		}
 	}
-	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, recapEngine, presenceRefresh)
+	// The Players panel member picker (#279) resolves the operator's voice channel
+	// from the deployment config and reads its occupants off the standing presence's
+	// voice-state cache. nil in web-only mode (no presence) so the RPC serves empty.
+	var memberLister func(context.Context) ([]presence.Member, error)
+	if pres != nil {
+		pres := pres
+		memberLister = func(ctx context.Context) ([]presence.Member, error) {
+			dep, err := store.GetLatestDeploymentConfig(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("resolve voice channel: %w", err)
+			}
+			channelID, err := snowflake.Parse(dep.VoiceChannelID)
+			if err != nil {
+				return nil, fmt.Errorf("parse voice channel id %q: %w", dep.VoiceChannelID, err)
+			}
+			return pres.VoiceChannelMembers(ctx, channelID)
+		}
+	}
+	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, recapEngine, presenceRefresh, memberLister)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -591,7 +610,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, recapEngine *recap.Engine, presenceRefresh func()) []web.Mount {
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -619,6 +638,14 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// campaign so the GM mutes the NPCs actually in the channel, not a durable
 	// selection changed mid-session (#222).
 	campaignSrv.SetSessions(mgr)
+	// The Players panel's member picker (#279) lists the Discord Users currently in
+	// the operator's configured voice channel, resolved from the deployment config
+	// and read off the standing presence's voice-state cache (no privileged intent).
+	// Wired only when a standing presence exists (memberLister non-nil); without it
+	// the RPC serves an empty list and the picker falls back to free-text entry.
+	if memberLister != nil {
+		campaignSrv.SetMemberLister(memberLister)
+	}
 	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +

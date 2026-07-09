@@ -18,6 +18,9 @@ import {
   ToolGrantSchema,
   ListToolGrantsResponseSchema,
   UpdateToolGrantResponseSchema,
+  CharacterSchema,
+  ListCharactersResponseSchema,
+  ListDiscordVoiceMembersResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -139,6 +142,15 @@ function mockTransport() {
         grants[req.agentId] = { granted: req.granted, config: req.granted ? req.config : "" };
         return create(UpdateToolGrantResponseSchema, { grant: grantEntry(req.agentId) });
       },
+      // Players view (#279): a single bound Character and no live members, enough
+      // for the tab-switch test to prove the panel mounts on its own RPCs.
+      listCharacters: () =>
+        create(ListCharactersResponseSchema, {
+          characters: [
+            create(CharacterSchema, { id: "pc-1", name: "Kira", discordUserId: "111111111111111111" }),
+          ],
+        }),
+      listDiscordVoiceMembers: () => create(ListDiscordVoiceMembersResponseSchema, {}),
     });
   });
   return { transport, npcs, previewCalls, grants };
@@ -318,6 +330,23 @@ describe("Campaign", () => {
     // VoiceService.ListVoices.
     fireEvent.click(await screen.findByText("Bart"));
     expect(await screen.findByText("ElevenLabs · Rachel")).toBeInTheDocument();
+  });
+
+  it("exposes a third Players tab and leaves Cast unchanged (#279)", async () => {
+    renderScreen();
+    // Cast is the default: the roster loads first.
+    expect(await screen.findByText("Bart")).toBeInTheDocument();
+
+    // Switch to Players — the panel mounts on its own ListCharacters RPC.
+    fireEvent.click(screen.getByRole("tab", { name: "Players" }));
+    expect(await screen.findByText("Kira")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add player/i })).toBeInTheDocument();
+    // The roster (Cast) is no longer mounted.
+    expect(screen.queryByText("Bart")).not.toBeInTheDocument();
+
+    // Back to Cast — the roster is unchanged.
+    fireEvent.click(screen.getByRole("tab", { name: "Cast" }));
+    expect(await screen.findByText("Bart")).toBeInTheDocument();
   });
 
   it("surfaces an error cue when the voice preview fails", async () => {

@@ -93,6 +93,12 @@ type CampaignServer struct {
 	// to the campaign actually voicing, not a durable selection changed mid-session
 	// (#222). Set once at boot before serving, so no lock is needed.
 	liveCampaign func() (uuid.UUID, bool)
+	// memberLister lists the Discord Users currently in the operator's voice
+	// channel for the Players panel picker (#279). Nil until SetMemberLister wires
+	// it (a keyless / bot-offline deployment leaves it nil); the handler then
+	// returns an empty list so the UI falls back to free-text snowflake entry. Set
+	// once at boot before serving, so no lock is needed.
+	memberLister voiceMemberLister
 }
 
 // NewCampaignServer wraps a campaignStore (e.g. *storage.Store) in a

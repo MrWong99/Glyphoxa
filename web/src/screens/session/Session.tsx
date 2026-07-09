@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { useSessionEvents, formatClock } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
+import { SessionBindAffordance } from "./SessionBindAffordance";
 
 import "./session.css";
 
@@ -419,6 +420,10 @@ export function Session() {
           )}
         </div>
       </Card>
+
+      {/* In-flight bind affordance (#279): while a session is live the GM can map an
+          unmapped Player to a Character without leaving/restarting the session. */}
+      {active && <SessionBindAffordance />}
 
       {failed && (
         <div className="gx-session__failed" role="alert" data-testid="connection-failed">
