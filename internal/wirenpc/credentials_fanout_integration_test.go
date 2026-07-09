@@ -47,7 +47,7 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	keys := providerKeys{llm: "L-llm-key", stt: "S-stt-key", tts: "T-tts-key"}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log,
-		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, keys, "", false, nil, nil, nil, nil)
+		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, keys, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestBuildConversation_DispatchesOffProviderID(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log,
-		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, providerKeys{}, "anthropic", false, nil, nil, nil, nil)
+		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, providerKeys{}, "anthropic", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
 	}

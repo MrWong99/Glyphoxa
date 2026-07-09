@@ -31,6 +31,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -166,7 +167,7 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	// assert it succeeds, and that the matcher routes a named utterance to the
 	// loaded Agent's identity (so the Persona the reply loop answers for and the
 	// Address Detection target agree — the chain that makes the NPC speak).
-	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation from DB-loaded NPC: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 
 	// The two NPCs must assemble into a Roster that routes each by name to its own
 	// identity — the end-to-end multi-NPC acceptance bar.
-	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil)
+	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(), slog.New(slog.NewTextHandler(io.Discard, nil)), specs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation from 2 DB NPCs: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestCampaignLanguageDrivesMatcherPhonetics(t *testing.T) {
 
 	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)), specs, loadedCampaign.Language,
-		ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil)
+		ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
 	}
@@ -374,7 +375,7 @@ func TestLoadedNPC_DerivesTruncationAliases(t *testing.T) {
 
 	conv, roster, cleanup, err := buildConversation(voiceevent.NewBus(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)), specs, loadedCampaign.Language,
-		ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil)
+		ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
 	}
@@ -472,7 +473,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	npcs := []npcSpec{hardcodedNPC()}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil)
+	conv1, _, cleanup1, err := buildConversation(voiceevent.NewBus(), log, npcs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("first buildConversation: %v", err)
 	}
@@ -481,7 +482,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	}
 	cleanup1() // end of reconnect cycle 1
 
-	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil)
+	conv2, _, cleanup2, err := buildConversation(voiceevent.NewBus(), log, npcs, "", ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("second buildConversation after cleanup: %v — cleanup destroyed the shared ONNX env?", err)
 	}
@@ -489,6 +490,65 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 		t.Fatal("second buildConversation returned a nil Conversation")
 	}
 	cleanup2()
+}
+
+// alwaysButler is a TargetMatcher that routes every utterance to the Butler,
+// isolating the gate test from the live fuzzy matcher's routing decisions.
+type alwaysButler struct{}
+
+func (alwaysButler) TargetMatch(text string) []voiceevent.AddressRouted {
+	return []voiceevent.AddressRouted{{
+		At:     time.Now(),
+		Text:   text,
+		Target: voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Glyphoxa"},
+	}}
+}
+
+// TestBuildConversation_ThreadsGMSpeakerIntoButlerGate proves the wiring half of
+// issue #280: Config.GMSpeaker flows into the AddressDetector's Butler GM-address
+// gate (ADR-0024/ADR-0050). It captures the DetectorOptions buildConversation
+// passes to newAddressDetector, then applies them to a detector over a
+// Butler-always matcher (isolating the gate from the live fuzzy matcher). A
+// Butler route then publishes only for the allowlisted GM SpeakerID and is
+// dropped for a non-GM one — so the gate is armed with GMSpeaker, not nil. Real
+// Silero, so integration.
+func TestBuildConversation_ThreadsGMSpeakerIntoButlerGate(t *testing.T) {
+	var capturedOpts []orchestrator.DetectorOption
+	orig := newAddressDetector
+	newAddressDetector = func(m orchestrator.TargetMatcher, opts ...orchestrator.DetectorOption) *orchestrator.AddressDetector {
+		capturedOpts = opts
+		return orig(m, opts...)
+	}
+	t.Cleanup(func() { newAddressDetector = orig })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gmSpeaker := func(id string) bool { return id == "gm-1" }
+	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log, []npcSpec{hardcodedNPC()}, "",
+		ttseleven.New(""), nil, providerKeys{}, "", false, nil, nil, nil, nil, gmSpeaker)
+	if err != nil {
+		t.Fatalf("buildConversation with GMSpeaker: %v", err)
+	}
+	t.Cleanup(cleanup)
+	if len(capturedOpts) == 0 {
+		t.Fatal("buildConversation passed no DetectorOptions — GM gate not threaded")
+	}
+
+	// Apply the captured options to a Butler-always matcher and drive the gate.
+	probe := orig(alwaysButler{}, capturedOpts...)
+	bus := voiceevent.NewBus()
+	t.Cleanup(probe.Bind(context.Background(), bus))
+	var routed []voiceevent.AddressRouted
+	voiceevent.On(bus, func(e voiceevent.AddressRouted) { routed = append(routed, e) })
+
+	bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "help", SpeakerID: "player-9"}) // non-GM → dropped
+	bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "help", SpeakerID: "gm-1"})     // GM → published
+
+	if len(routed) != 1 {
+		t.Fatalf("Butler routes published = %d, want 1 (GM only; non-GM dropped): %+v", len(routed), routed)
+	}
+	if routed[0].Target.AgentRole != "butler" {
+		t.Fatalf("published route AgentRole = %q, want butler", routed[0].Target.AgentRole)
+	}
 }
 
 // TestLoadSeededNPCs_ModelFromBoundLLMConfig is the #227 AC1 bar: a non-default
