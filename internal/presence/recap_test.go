@@ -340,46 +340,92 @@ func stripSpace(s string) string {
 	}, s)
 }
 
-// TestRecapDeliveryPublic is test-seq (7a): delivery=public → Defer(false) and a
-// PUBLIC Followup carrying the recap prose.
+// assertPublicDelivery encodes the Discord rule (finding 1): a public recap must
+// EDIT the ephemeral placeholder FIRST (so the channel never sees a dangling public
+// "thinking…"), THEN post the recap as real PUBLIC followups. It fails if the
+// placeholder edit isn't ephemeral, or if any recap-body message leaked out
+// ephemeral (the exact regression the wrong followup-only mechanism caused). Returns
+// the joined public body for content assertions.
+func assertPublicDelivery(t *testing.T, resp *fakeResponder) string {
+	t.Helper()
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatalf("recap always Defers ephemerally; deferred = %v", resp.deferred)
+	}
+	if len(resp.followups) < 2 {
+		t.Fatalf("public delivery must consume the placeholder THEN post public followups; got %+v", resp.followups)
+	}
+	if !resp.followups[0].ephemeral {
+		t.Errorf("the placeholder-consuming edit must be ephemeral (no public dangle); got public %q", resp.followups[0].content)
+	}
+	var b strings.Builder
+	for _, f := range resp.followups[1:] {
+		if f.ephemeral {
+			t.Errorf("recap body must be delivered PUBLIC, but a body message is ephemeral: %q", f.content)
+		}
+		b.WriteString(f.content)
+	}
+	return b.String()
+}
+
+// TestRecapDeliveryPublic is test-seq (7a): delivery=public → ephemeral Defer, the
+// placeholder consumed by an ephemeral edit, then the recap prose in a PUBLIC
+// Followup the channel can see.
 func TestRecapDeliveryPublic(t *testing.T) {
 	c := campaign("Lost Mine")
 	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
 	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
 	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"delivery": deliveryPublic})
 
-	if resp.deferred == nil || !*resp.deferred {
-		t.Fatalf("recap always Defers ephemerally (no dangling public placeholder); deferred = %v", resp.deferred)
-	}
-	if len(resp.followups) != 1 || resp.followups[0].ephemeral {
-		t.Fatalf("want one PUBLIC Followup, got %+v", resp.followups)
-	}
-	if !strings.Contains(resp.followups[0].content, "keep fell") {
-		t.Errorf("followup = %q, want the recap prose", resp.followups[0].content)
+	body := assertPublicDelivery(t, resp)
+	if !strings.Contains(body, "keep fell") {
+		t.Errorf("public body = %q, want the recap prose", body)
 	}
 }
 
 // TestRecapVoicedDegradesToPublic is test-seq (7b): delivery=voiced with a nil
 // ButlerVoicer (v1: the Butler is never voiced) degrades to PUBLIC text prefixed
-// with the degrade hint — ephemeral Defer, public followup.
+// with the degrade hint — placeholder consumed ephemerally, prose public.
 func TestRecapVoicedDegradesToPublic(t *testing.T) {
 	c := campaign("Lost Mine")
 	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
 	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
 	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"delivery": deliveryVoiced})
 
-	if resp.deferred == nil || !*resp.deferred {
-		t.Fatalf("degraded voiced recap still Defers ephemerally; deferred = %v", resp.deferred)
-	}
-	if len(resp.followups) != 1 || resp.followups[0].ephemeral {
-		t.Fatalf("want one PUBLIC Followup, got %+v", resp.followups)
-	}
-	body := resp.followups[0].content
+	body := assertPublicDelivery(t, resp)
 	if !strings.HasPrefix(body, voicedDegradeHint) {
-		t.Errorf("degraded reply = %q, want it prefixed with the degrade hint", body)
+		t.Errorf("degraded public body = %q, want it prefixed with the degrade hint", body)
 	}
 	if !strings.Contains(body, "keep fell") {
-		t.Errorf("degraded reply = %q, want it still carrying the recap prose", body)
+		t.Errorf("degraded public body = %q, want it still carrying the recap prose", body)
+	}
+}
+
+// TestRecapOversizedPublicSplits (finding 5c / oversized-public): an over-length
+// PUBLIC recap consumes the placeholder once (ephemeral), then posts MULTIPLE public
+// Followups each ≤2000 runes, in order, never truncated.
+func TestRecapOversizedPublicSplits(t *testing.T) {
+	c := campaign("Lost Mine")
+	store := recapStore(c, endedSession(c.ID, time.Now(), 400))
+	var sb strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&sb, "Ödland Zeile %d über die Höhle\n", i)
+	}
+	long := sb.String()
+	eng := &fakeRecapEngine{result: recap.Result{Text: long}}
+	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"delivery": deliveryPublic})
+
+	body := assertPublicDelivery(t, resp)
+	// >= 2 public body messages (placeholder edit + at least two parts => >= 3 total).
+	if len(resp.followups) < 3 {
+		t.Fatalf("oversized public recap = %d messages, want >= 3 (edit + multiple public parts)", len(resp.followups))
+	}
+	for i, f := range resp.followups[1:] {
+		if n := len([]rune(f.content)); n > discordMessageLimit {
+			t.Errorf("public part %d is %d runes, want <= %d", i, n, discordMessageLimit)
+		}
+	}
+	if stripSpace(body) != stripSpace(long) {
+		t.Error("re-joined public parts do not reproduce the recap (content lost or reordered)")
 	}
 }
 

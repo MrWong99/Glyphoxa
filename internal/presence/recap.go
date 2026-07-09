@@ -257,6 +257,8 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 		if err := butler.SpeakAsButler(ctx, text); err != nil {
 			return fmt.Errorf("presence: voice recap via butler: %w", err)
 		}
+		// The confirmation matches the ephemeral placeholder, so a plain Followup (which
+		// edits the placeholder in place) is exactly right.
 		return ic.Followup("Recap voiced in the voice channel.", true)
 	}
 
@@ -265,10 +267,30 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 		// Could not voice it — deliver as public text, explaining the switch.
 		body = voicedDegradeHint + "\n\n" + text
 	}
-	// A followup carries its own visibility: a public reply here is public even though
-	// the deferred placeholder is ephemeral (finding 1 — no dangling public "thinking").
-	for _, part := range splitFollowups(body, discordMessageLimit) {
-		if err := ic.Followup(part, !publicReply); err != nil {
+	parts := splitFollowups(body, discordMessageLimit)
+
+	if publicReply {
+		// The placeholder is ephemeral (we always Defer ephemerally). A Followup posted
+		// straight away would EDIT that placeholder — Discord IGNORES the ephemeral flag
+		// on the original-response edit, so the recap would land ephemeral and the
+		// channel would see nothing. Consume the placeholder FIRST with a short ephemeral
+		// note; THEN each Followup creates a real PUBLIC message honoring its flag
+		// (finding 1, per Discord's receiving-and-responding docs).
+		if err := ic.EditOriginal("Recap posted below."); err != nil {
+			return err
+		}
+		for _, part := range parts {
+			if err := ic.Followup(part, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Ephemeral delivery: the placeholder is already ephemeral, so the first Followup
+	// edits it (same visibility) and the rest are ephemeral messages — all GM-only.
+	for _, part := range parts {
+		if err := ic.Followup(part, true); err != nil {
 			return err
 		}
 	}
