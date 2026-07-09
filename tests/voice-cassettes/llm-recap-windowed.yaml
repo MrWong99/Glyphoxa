@@ -1,0 +1,40 @@
+exchanges:
+    - prompt_hash: 1f9c02b03f489d16d647fa4a77626b5d240e30f78112e425f10756e83dfede39
+      text: |-
+        Here is a concise summary of the events:
+
+        The heroes, guided by GM and Alice, went through 30 chapters. In each chapter, they:
+        - Explored a region (numbered from 0 to 30)
+        - Bargained with a faction (numbered from 0 to 30)
+        - Fought the beast of a hollow (numbered from 0 to 30)
+
+        The events were narrated in an alternating pattern between GM and Alice, with GM starting in chapter 0 and Alice starting in chapter 1.
+      stop_reason: stop
+    - prompt_hash: 20ecf47fab57bb181428cd3e87161e70bf629e7b1dc55498a58f8d0221a87a16
+      text: |-
+        Here is a concise summary of the transcript excerpt:
+
+        The heroes' activities are described in the following chapters:
+        - Chapter 31: Explored region 31, bargained with faction 31, and fought the beast of hollow 31.
+        - Chapter 32: Explored region 32, bargained with faction 32, and fought the beast of hollow 32.
+        - Chapter 33: Explored region 33, bargained with faction 33, and fought the beast of hollow 33.
+        - Chapter 34: Explored region 34, bargained with faction 34, and fought the beast of hollow 34.
+        - Chapter 35: Explored region 35, bargained with faction 35, and fought the beast of hollow 35.
+        - Chapter 36: Explored region 36, bargained with faction 36, and fought the beast of hollow 36.
+        - Chapter 37: Explored region 37, bargained with faction 37, and fought the beast of hollow 37.
+        - Chapter 38: Explored region 38, bargained with faction 38, and fought the beast of hollow 38.
+        - Chapter 39: Explored region 39, bargained with faction 39, and fought the beast of hollow 39.
+
+        The speakers are Alice and the GM (Game Master).
+      stop_reason: stop
+    - prompt_hash: dc83366a8f014bd3e02763942feb1b792fbb3ba176d7d427d6d19a6edf5301ff
+      text: |-
+        Another thrilling installment in the annals of our heroes' escapades. As I, Gimble, take up my pen to recount the events of our most recent session, I am reminded of the unrelenting pace at which our brave adventurers forge ahead.
+
+        In the chapters that followed their initial 30 exploits, our heroes found themselves facing an additional nine regions to explore, factions to bargain with, and beasts to vanquish. It began with Chapter 31, where they delved into region 31, negotiated with faction 31, and battled the beast residing within hollow 31. This pattern continued unabated, with each subsequent chapter presenting a new region, faction, and beast to overcome.
+
+        Thus, our heroes progressed through Chapters 32 to 39, exploring regions 32 to 39, engaging in diplomatic efforts with factions 32 to 39, and testing their mettle against the beasts lurking within hollows 32 to 39. Throughout this odyssey, the narrative was expertly woven by the alternating voices of the GM and Alice, each contributing their unique perspective to the unfolding tale.
+
+        As I record these events, I am struck by the unwavering dedication of our heroes, who face each new challenge with unshakeable resolve. And so, their legend grows, as does the chronicle of their deeds, which I am honored to preserve for posterity. Now, if you will excuse me, I must attend to my tea; the recounting of such valorous exploits can be quite taxing.
+      stop_reason: stop
+notes: Re-recorded against Groq llama-3.3-70b-versatile on 2026-07-09.

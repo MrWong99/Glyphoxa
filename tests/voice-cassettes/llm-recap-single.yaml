@@ -1,0 +1,8 @@
+exchanges:
+    - prompt_hash: 847b9f6a4d3463d9e31412bbf73ed443669fe457e83bbd84abb4385f1bbdc56c
+      text: |-
+        Yes, the party's latest escapade. As the sun dipped below the horizon, casting a dreary dusk over the landscape, our intrepid adventurers arrived at the ruined keep of Aethelred. They were promptly greeted by Bart, a somewhat unwelcoming gatekeeper, who demanded they pay a toll to pass. However, the party was not interested in such frivolities, as they were on a mission to uncover the buried crypt beneath the keep, and they happened to be in possession of the esteemed Sunstone relic.
+
+        In a turn of events that I can only describe as predictably ominous, the party's declaration of their intentions seemed to have an otherworldly effect. A chill wind began to stir, and the crypt door, as if beckoned by some unseen force, slowly creaked open before them. Bart, with a tone that suggested he had witnessed this sort of thing before, ominously warned the party that their fate was now their own to bear, cautioning that the dead are not known for their forgiving nature towards trespassers. And so, with that cheerful sentiment, the party was left to ponder the wisdom of proceeding into the depths of the mysterious and presumably deadly crypt.
+      stop_reason: stop
+notes: Re-recorded against Groq llama-3.3-70b-versatile on 2026-07-09.

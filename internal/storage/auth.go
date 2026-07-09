@@ -134,7 +134,11 @@ func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID stri
 // context-free analogue of GetActiveCampaignForUser: it joins any users row
 // carrying a non-null active_campaign_id to a non-archived campaign. Single
 // operator, so at most one such selection is meaningful; a tie breaks on the
-// most-recently-updated users row (the freshest /glyphoxa use). ErrNotFound when
+// most-recently-updated users row — the freshest login-or-selection, NOT strictly
+// the freshest campaign selection: UpsertUser bumps users.updated_at on EVERY OAuth
+// login, not only on SetActiveCampaign, so `ORDER BY u.updated_at` is a login clock,
+// not a selection clock. Acceptable under the single-operator model (ADR-0039),
+// where at most one operator has a durable selection anyway. ErrNotFound when
 // no operator has a durable, non-archived selection (deleted/archived selections
 // are treated as absent, matching GetActiveCampaignForUser), so the caller falls
 // through to the GetActiveCampaign recent fallback.

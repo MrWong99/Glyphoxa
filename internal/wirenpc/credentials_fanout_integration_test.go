@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -31,9 +31,9 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	t.Cleanup(func() { newLLM, newSTT, newTTS = origLLM, origSTT, origTTS })
 
 	var gotLLM, gotSTT, gotTTS string
-	newLLM = func(apiKey string, opts ...groq.Option) *groq.Client {
+	newLLM = func(providerID, apiKey string) (llm.Provider, error) {
 		gotLLM = apiKey
-		return origLLM(apiKey, opts...)
+		return origLLM(providerID, apiKey)
 	}
 	newSTT = func(apiKey string, opts ...stteleven.Option) *stteleven.Client {
 		gotSTT = apiKey
@@ -47,7 +47,7 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	keys := providerKeys{llm: "L-llm-key", stt: "S-stt-key", tts: "T-tts-key"}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log,
-		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, keys, false, nil, nil, nil, nil)
+		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, keys, "", false, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
 	}
