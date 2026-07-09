@@ -24,6 +24,7 @@ import {
   TranscriptLineMatchSchema,
   SearchTranscriptLinesResponseSchema,
   ListSessionsResponseSchema,
+  GenerateRecapResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -1181,6 +1182,198 @@ describe("Session past-session view across a campaign switch (#270 finding 1)", 
     expect(await screen.findByText("B current line")).toBeInTheDocument();
     expect(screen.queryByText("A archived line")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /back to current session/i })).not.toBeInTheDocument();
+  });
+});
+
+// --- Recap (#274) -----------------------------------------------------------
+
+// recapStartISO is the fixed start instant of the idle ended session the recap
+// tests cover; the result card's label is derived from it (formatStamp).
+const recapStartISO = "2026-07-08T20:15:00Z";
+
+// recapStampLabel replicates the screen's formatStamp for the covered session, so
+// the label assertion is timezone-consistent with the render (both run in this env).
+function recapStampLabel(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// recapTransport serves an IDLE ended session (vs1) plus a configurable
+// GenerateRecap handler, recording the session_ids each call requested. sessions
+// seeds the past-session picker (empty by default).
+function recapTransport(
+  recap: (req: { sessionIds: string[] }) => Promise<ReturnType<typeof create<typeof GenerateRecapResponseSchema>>>,
+  sessions: ReturnType<typeof create<typeof VoiceSessionSchema>>[] = [],
+) {
+  const ended = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(recapStartISO)),
+    endedAt: timestampFromDate(new Date("2026-07-08T21:00:00Z")),
+    lineCount: 12,
+  });
+  const requested: string[][] = [];
+  const transport = createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
+      listSessions: () => create(ListSessionsResponseSchema, { sessions }),
+      generateRecap: async (req) => {
+        requested.push(req.sessionIds);
+        return await recap(req);
+      },
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+  return { transport, requested };
+}
+
+describe("Session recap (#274)", () => {
+  beforeEach(() => {
+    vi.mocked(toast.error).mockClear();
+    // Idle snapshot for the covered session(s): no lines needed for the recap tests.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ lines: [], status: "idle", typing: { active: false, label: "" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+  });
+
+  it("recaps the latest ended session: pending spinner + disabled, then a labelled result card", async () => {
+    // Gate the recap so the pending state is observable (a real call can take ~2min).
+    let release!: (r: ReturnType<typeof create<typeof GenerateRecapResponseSchema>>) => void;
+    const gate = new Promise<ReturnType<typeof create<typeof GenerateRecapResponseSchema>>>((res) => {
+      release = res;
+    });
+    const { transport, requested } = recapTransport(() => gate);
+
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    const button = await screen.findByTestId("recap-button");
+    fireEvent.click(button);
+
+    // Pending: spinner shown, button disabled, no result yet.
+    expect(await screen.findByTestId("recap-pending")).toBeInTheDocument();
+    expect(screen.getByTestId("recap-button")).toBeDisabled();
+    expect(screen.queryByTestId("recap-result")).not.toBeInTheDocument();
+
+    // The mutation carried exactly the covered session id.
+    expect(requested).toEqual([["vs1"]]);
+
+    // Resolve → result card with the recap prose, labelled by the covered session's start.
+    await act(async () => {
+      release(create(GenerateRecapResponseSchema, { text: "The party bested the goblin warren.", sessionIds: ["vs1"], windowed: false }));
+    });
+    const result = await screen.findByTestId("recap-result");
+    expect(result).toHaveTextContent("The party bested the goblin warren.");
+    expect(result).toHaveTextContent(recapStampLabel(recapStartISO));
+    expect(screen.queryByTestId("recap-pending")).not.toBeInTheDocument();
+  });
+
+  it("recaps the picked past session (its id, not the current one)", async () => {
+    const older = create(VoiceSessionSchema, {
+      id: "vsOld",
+      campaignId: "c1",
+      status: "ended",
+      startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+      endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+      lineCount: 5,
+    });
+    const latest = create(VoiceSessionSchema, {
+      id: "vs1",
+      campaignId: "c1",
+      status: "ended",
+      startedAt: timestampFromDate(new Date(recapStartISO)),
+      endedAt: timestampFromDate(new Date("2026-07-08T21:00:00Z")),
+      lineCount: 12,
+    });
+    const { transport, requested } = recapTransport(
+      async () => create(GenerateRecapResponseSchema, { text: "Recap of the older delve.", sessionIds: ["vsOld"], windowed: true }),
+      [latest, older],
+    );
+
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // Browse the older past session, then recap it.
+    const picker = await screen.findByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/5 lines/));
+    fireEvent.click(await screen.findByTestId("recap-button"));
+
+    await waitFor(() => expect(requested).toEqual([["vsOld"]]));
+    expect(await screen.findByTestId("recap-result")).toHaveTextContent("Recap of the older delve.");
+  });
+
+  it("surfaces a recap failure as a toast (ADR-0017 sonner), no result card", async () => {
+    const { transport } = recapTransport(async () => {
+      throw new ConnectError("recap: no active campaign", Code.FailedPrecondition);
+    });
+
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    fireEvent.click(await screen.findByTestId("recap-button"));
+    await waitFor(() =>
+      expect(vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't generate the recap/i.test(String(m)))).toBe(true),
+    );
+    expect(screen.queryByTestId("recap-result")).not.toBeInTheDocument();
+  });
+
+  it("clears a shown recap when the viewed session changes", async () => {
+    const older = create(VoiceSessionSchema, {
+      id: "vsOld",
+      campaignId: "c1",
+      status: "ended",
+      startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+      endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+      lineCount: 5,
+    });
+    const latest = create(VoiceSessionSchema, {
+      id: "vs1",
+      campaignId: "c1",
+      status: "ended",
+      startedAt: timestampFromDate(new Date(recapStartISO)),
+      endedAt: timestampFromDate(new Date("2026-07-08T21:00:00Z")),
+      lineCount: 12,
+    });
+    const { transport } = recapTransport(
+      async () => create(GenerateRecapResponseSchema, { text: "A recap of the current session.", sessionIds: ["vs1"], windowed: false }),
+      [latest, older],
+    );
+
+    render(
+      <Providers transport={transport} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // Recap the default (current) session → result shows.
+    fireEvent.click(await screen.findByTestId("recap-button"));
+    expect(await screen.findByTestId("recap-result")).toBeInTheDocument();
+
+    // Browse a past session → the stale recap is dropped (it labelled the current one).
+    const picker = screen.getByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/5 lines/));
+    await waitFor(() => expect(screen.queryByTestId("recap-result")).not.toBeInTheDocument());
   });
 });
 

@@ -205,7 +205,8 @@
   font-size: 0.875rem;
 }
 
-/* Subtle inset summary of the prior session, shown only while idle. */
+/* Subtle inset summary of the prior session, shown only while idle. The Recap
+ * button sits at the end of the row (#274). */
 .gx-session__last {
   margin-top: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
@@ -213,6 +214,63 @@
   background: var(--surface-inset);
   color: var(--text-subtle);
   font-size: 0.875rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+}
+
+.gx-session__last-text {
+  min-width: 0;
+}
+
+/* The Recap control while browsing a past session (#274): a right-aligned bar
+ * above the transcript so the button sits with the picker, not the summary. */
+.gx-session__recap-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--spacing-sm);
+}
+
+/* Recap pending row (#274): a spinner + label that must survive a ~2min LLM call. */
+.gx-session__recap-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+
+/* Recap result card (#274): the regenerated recap, labelled with the covered
+ * session's start stamp. */
+.gx-session__recap {
+  margin-bottom: var(--spacing-md);
+}
+
+.gx-session__recap-label {
+  margin-bottom: var(--spacing-xs);
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gx-session__recap-text {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+/* Slow spin for the Loader2 recap spinner. */
+.gx-spin {
+  animation: gx-spin 1s linear infinite;
+}
+
+@keyframes gx-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* A fatal gateway rejection: a prominent, readable failure banner (#123). */

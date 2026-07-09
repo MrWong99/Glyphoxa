@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { Play, Square, Search } from "lucide-react";
+import { Play, Square, Search, ScrollText, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { timestampMs } from "@bufbuild/protobuf/wkt";
 
@@ -320,6 +320,33 @@ export function Session() {
     }
   }, [snapshotFailed, viewingPast]);
 
+  // Recap (#274, epic #252): the operator regenerates a Butler-flavoured recap of a
+  // Voice Session on demand — GenerateRecap is REGENERATED per call and never
+  // persisted (gate #271), spends provider money (guarded like a mutation), and can
+  // take ~2 min for a long session, so the pending state must survive that whole
+  // wait. The button covers the session ON SCREEN: the idle latest-session card
+  // recaps that ended session; while browsing a past session it recaps THAT viewed
+  // one. The result is a labelled card carrying the covered session's start stamp;
+  // it is cleared whenever the rendered session changes so a stale recap never sits
+  // under a different session. A failure surfaces as a toast (ADR-0017: sonner).
+  const [recapResult, setRecapResult] = useState<{ startedMs: number | null; text: string } | null>(null);
+  const generateRecap = useMutation(SessionService.method.generateRecap, {
+    onError: (err: Error) => toast.error(`Couldn't generate the recap: ${err.message}`),
+  });
+  const runRecap = (vs: VoiceSession) => {
+    generateRecap.mutate(
+      { sessionIds: [vs.id] },
+      { onSuccess: (res) => setRecapResult({ startedMs: tsMs(vs.startedAt), text: res.text }) },
+    );
+  };
+  // A recap belongs to the session it covered; when the rendered session changes
+  // (picker pick or back-to-current) drop it so it never mislabels another session.
+  useEffect(() => setRecapResult(null), [renderedSessionId]);
+
+  // The session the on-screen Recap button covers: the picked past session while
+  // browsing one, else the idle ended latest-session summary.
+  const viewedSession = viewingPast ? pastSessions.find((s) => s.id === viewedId) : undefined;
+
   return (
     <div className="gx-session">
       <div className="gx-session__main">
@@ -392,7 +419,24 @@ export function Session() {
       )}
 
       {!active && session && session.status === "ended" && (
-        <div className="gx-session__last">{lastSummary(session)}</div>
+        <div className="gx-session__last">
+          <span className="gx-session__last-text">{lastSummary(session)}</span>
+          {/* The latest-card Recap covers the idle ended session; hidden while
+              browsing a past one, whose own Recap button lives in the picker view
+              (so only one Recap button is ever on screen). */}
+          {!viewingPast && (
+            <Button
+              variant="secondary"
+              size="sm"
+              iconStart={<ScrollText size={15} />}
+              onClick={() => runRecap(session)}
+              disabled={generateRecap.isPending}
+              data-testid="recap-button"
+            >
+              Recap
+            </Button>
+          )}
+        </div>
       )}
 
       <section className="gx-session__transcript">
@@ -408,6 +452,21 @@ export function Session() {
             onBackToCurrent={() => viewSession(null)}
           />
         )}
+        {viewingPast && viewedSession && (
+          <div className="gx-session__recap-bar">
+            <Button
+              variant="secondary"
+              size="sm"
+              iconStart={<ScrollText size={15} />}
+              onClick={() => runRecap(viewedSession)}
+              disabled={generateRecap.isPending}
+              data-testid="recap-button"
+            >
+              Recap
+            </Button>
+          </div>
+        )}
+        <RecapView pending={generateRecap.isPending} result={recapResult} />
         <TranscriptSearch onOpen={openHit} />
         <Card>
           {snapshotFailed ? (
@@ -508,6 +567,37 @@ function SessionPicker({
         </button>
       )}
     </div>
+  );
+}
+
+// RecapView renders the Recap request's pending + result states (#274). While the
+// GenerateRecap call is in flight it shows a spinner (the button is disabled at the
+// call site) — the call can take ~2 min for a long session, so this pending row
+// must survive the whole wait. On success it shows a card labelled with the covered
+// session's start stamp holding the recap prose. Nothing renders before the first
+// Recap of the current view.
+function RecapView({
+  pending,
+  result,
+}: {
+  pending: boolean;
+  result: { startedMs: number | null; text: string } | null;
+}) {
+  if (pending) {
+    return (
+      <div className="gx-session__recap-pending" role="status" data-testid="recap-pending">
+        <Loader2 size={15} className="gx-spin" aria-hidden="true" />
+        <span>Generating recap…</span>
+      </div>
+    );
+  }
+  if (!result) return null;
+  const label = result.startedMs != null ? formatStamp(new Date(result.startedMs)) : "—";
+  return (
+    <Card className="gx-session__recap" data-testid="recap-result">
+      <div className="gx-session__recap-label">Recap · session of {label}</div>
+      <p className="gx-session__recap-text">{result.text}</p>
+    </Card>
   );
 }
 
