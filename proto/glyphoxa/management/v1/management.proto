@@ -40,6 +40,12 @@ service CampaignService {
   // State-changing: the auth + CSRF interceptors guard it.
   rpc UpdateCampaign(UpdateCampaignRequest) returns (UpdateCampaignResponse);
 
+  // ListSupportedLanguages returns the Campaign Language choices: the language
+  // codes with a registered phonetic encoder (ADR-0024 EncoderRegistry), sorted.
+  rpc ListSupportedLanguages(ListSupportedLanguagesRequest) returns (ListSupportedLanguagesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // SetActiveCampaign records the operator's durable Active Campaign selection —
   // the SAME users.active_campaign_id row `/glyphoxa use` writes, keeping both
   // surfaces in lockstep (#264, migration 00014) — and returns the resulting
@@ -485,6 +491,14 @@ message UpdateCampaignRequest {
 message UpdateCampaignResponse {
   // campaign is the updated campaign.
   Campaign campaign = 1;
+}
+
+message ListSupportedLanguagesRequest {}
+
+message ListSupportedLanguagesResponse {
+  // languages are the registered encoder codes as lowercase primary subtags
+  // (e.g. ["de","en"]), sorted.
+  repeated string languages = 1;
 }
 
 // SetActiveCampaignRequest names the campaign to make the operator's durable

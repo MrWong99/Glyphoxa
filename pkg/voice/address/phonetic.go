@@ -22,6 +22,7 @@
 package address
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/antzucaro/matchr"
@@ -94,6 +95,19 @@ func (r *EncoderRegistry) Register(lang string, enc Encoder) {
 		return
 	}
 	r.byLang[key] = enc
+}
+
+// Languages returns the registered language codes (normalized primary subtags),
+// sorted ascending. Empty registry -> empty slice. This is the sole language-
+// truth source for the Campaign Language choices (ADR-0024): a newly registered
+// encoder appears here automatically.
+func (r *EncoderRegistry) Languages() []string {
+	langs := make([]string, 0, len(r.byLang))
+	for lang := range r.byLang {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	return langs
 }
 
 // For returns the [Encoder] registered for lang and whether one was found.

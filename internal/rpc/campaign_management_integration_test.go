@@ -207,6 +207,87 @@ func TestCampaignManagement_Integration(t *testing.T) {
 	}
 }
 
+// TestUpdateCampaignLanguage_LeavesAgentVoiceUntouched pins the #268 decision that
+// a Campaign Language change mutates NOTHING downstream: existing Agents' voice
+// settings stay byte-identical (ADR-0009, #224). The first-save voice seeding
+// (applyVoiceSelection) lives ONLY on the agent-write path (UpdateAgent) and must
+// never fire from UpdateCampaign — this guards against a future re-seed regression
+// that would re-derive every Agent's voice from the new language.
+func TestUpdateCampaignLanguage_LeavesAgentVoiceUntouched(t *testing.T) {
+	dsn := startPostgres(t)
+	store, seededID := seedStore(t, dsn)
+	ctx := context.Background()
+
+	seeded, err := store.GetCampaign(ctx, seededID)
+	if err != nil {
+		t.Fatalf("GetCampaign(seeded): %v", err)
+	}
+	const operator = "operator-268"
+	client := mgmtIntegrationClient(t, store, seeded.TenantID, operator, nil)
+
+	// A fresh campaign in language "en" with its auto-Butler (ADR-0009), made the
+	// durable Active Campaign so the agent-write path resolves it (#222).
+	created, err := client.CreateCampaign(ctx, connect.NewRequest(&managementv1.CreateCampaignRequest{
+		Name: "Voice Guard", System: "dnd5e", Language: "en",
+	}))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	campID := created.Msg.GetCampaign().GetId()
+	if _, err := client.SetActiveCampaign(ctx, connect.NewRequest(&managementv1.SetActiveCampaignRequest{
+		CampaignId: campID,
+	})); err != nil {
+		t.Fatalf("SetActiveCampaign: %v", err)
+	}
+
+	butler, err := store.GetButler(ctx, uuid.MustParse(campID))
+	if err != nil {
+		t.Fatalf("GetButler: %v", err)
+	}
+
+	// Give the Butler a concrete voice via the agent-write path — this is where the
+	// language legitimately seeds the first-save voice default (#224).
+	if _, err := client.UpdateAgent(ctx, connect.NewRequest(&managementv1.UpdateAgentRequest{
+		Id: butler.ID.String(), Name: butler.Name, Title: butler.Title, Persona: butler.Persona,
+		Voice: "voice-en-123", AddressOnly: butler.AddressOnly,
+	})); err != nil {
+		t.Fatalf("UpdateAgent(seed voice): %v", err)
+	}
+	before, err := store.GetAgent(ctx, butler.ID)
+	if err != nil {
+		t.Fatalf("GetAgent(before): %v", err)
+	}
+	if len(before.Voice) == 0 {
+		t.Fatalf("precondition: Butler voice not seeded, got %q", string(before.Voice))
+	}
+
+	// The change under test: Campaign Language en -> de.
+	if _, err := client.UpdateCampaign(ctx, connect.NewRequest(&managementv1.UpdateCampaignRequest{
+		Id: campID, Name: "Voice Guard", System: "dnd5e", Language: "de",
+	})); err != nil {
+		t.Fatalf("UpdateCampaign(lang en->de): %v", err)
+	}
+
+	// The language column moved…
+	after, err := store.GetCampaign(ctx, uuid.MustParse(campID))
+	if err != nil {
+		t.Fatalf("GetCampaign(after): %v", err)
+	}
+	if after.Language != "de" {
+		t.Fatalf("campaign language = %q, want de", after.Language)
+	}
+	// …but the Butler's voice blob is byte-identical: a language change mutates no
+	// Agent voice (the #268 decision; applyVoiceSelection stays unused here).
+	agentAfter, err := store.GetAgent(ctx, butler.ID)
+	if err != nil {
+		t.Fatalf("GetAgent(after): %v", err)
+	}
+	if string(agentAfter.Voice) != string(before.Voice) {
+		t.Errorf("Butler voice changed on a language edit:\n before = %s\n after  = %s",
+			string(before.Voice), string(agentAfter.Voice))
+	}
+}
+
 // TestSetActiveCampaignLiveFirst_Integration pins the live-first resolution rule
 // (#222, #264) end to end: with a live Voice Session bound to campaign L, a
 // durable selection of a DIFFERENT campaign D is still written (both surfaces in
