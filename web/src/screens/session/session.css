@@ -407,7 +407,8 @@
 /* The currently-viewed session's chip: emphasized like the deep-link highlight. */
 .gx-session__picker-item[aria-pressed="true"] {
   background: var(--rune-soft, rgba(120, 160, 255, 0.14));
-  box-shadow: 0 0 0 1px var(--rune, rgba(120, 160, 255, 0.5)) inset;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rune, #00ddff) 45%, transparent)
+    inset;
 }
 
 .gx-session__picker-back {
@@ -419,7 +420,12 @@
 .gx-line--highlighted {
   background: var(--rune-soft, rgba(120, 160, 255, 0.14));
   border-radius: var(--radius-sm, 4px);
-  box-shadow: 0 0 0 2px var(--rune, rgba(120, 160, 255, 0.5)) inset;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rune, #00ddff) 45%, transparent)
+    inset;
+  /* Breathing room between the ring and the text, with a compensating
+   * negative margin so the line stays column-aligned with its neighbors. */
+  padding-inline: var(--spacing-sm, 8px);
+  margin-inline: calc(-1 * var(--spacing-sm, 8px));
 }
 
 /* Live transcript list: one row per line — speaker name, optional tag pill,

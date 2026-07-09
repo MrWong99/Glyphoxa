@@ -110,7 +110,10 @@
   --arcane-active: var(--color-violet-60);
   --arcane-ink: var(--color-violet-90);
   --rune: var(--color-blue-20);
-  --rune-soft: var(--color-blue-10);
+  /* Soft = a tint, not a solid: full-strength blue as a background fill
+   * glares against the dark violet surfaces (highlighted transcript lines,
+   * selected session chips). */
+  --rune-soft: color-mix(in srgb, var(--color-blue-20) 12%, transparent);
   --spell: var(--color-blue-40);
   --gold: var(--color-yellow-40);
   --ember: var(--color-orange-50);
