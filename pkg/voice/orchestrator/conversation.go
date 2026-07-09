@@ -242,6 +242,18 @@ func (c *Conversation) Feed(frame audio.Frame) error {
 	return c.seg.Process(frame)
 }
 
+// FeedSilence pushes one silence-CLOCK frame (issue #91) into the conversation. It is
+// the sibling of [Conversation.Feed] for the ONE unattributed source that must reach
+// every Speaker Lane: the wire tick branch (a paused speaker's packet gap) routes
+// synthesized silence here so every lane's VAD hangover advances toward its
+// speech_end (ADR-0050's speaker-agnostic silence clock), while real inbound audio —
+// including a not-yet-resolved SSRC — stays on [Conversation.Feed] and its own lane
+// (or the default lane). Distinguishing the two "" sources at source avoids sniffing
+// zero PCM (Opus can legally decode an all-zero frame).
+func (c *Conversation) FeedSilence(frame audio.Frame) error {
+	return c.seg.ProcessSilence(frame)
+}
+
 // Flush transcribes any utterance still buffered because the audio stream ended
 // while speech was active, then waits for every in-flight transcription to finish
 // (see [Segmenter.Flush]). Call it once after the last [Conversation.Feed] — at

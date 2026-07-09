@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
@@ -81,4 +82,61 @@ type stubRec struct{}
 
 func (stubRec) Transcribe(_ context.Context, _ []audio.Frame) (stt.Transcript, error) {
 	return stt.Transcript{}, nil
+}
+
+// TestSegmenter_StreamSlotRecycledOnReap is T5: with a per-lane stream cap of 1,
+// speaker A opens the one stream; after A's lane is reaped the slot is freed, so a
+// later speaker C opens a stream instead of falling to batch (reap decrements the
+// concurrency count — reviewer finding 5).
+func TestSegmenter_StreamSlotRecycledOnReap(t *testing.T) {
+	bus := voiceevent.NewBus()
+	seg := NewSegmenter(NewVAD(bus, silentSession{}), NewSTT(bus, stubRec{}))
+	seg.laneVADFactory = func() (*VAD, func(), error) {
+		return NewVAD(bus, silentSession{}), func() {}, nil
+	}
+	seg.laneStreamFactory = func(speakerID string) *StreamManager {
+		return NewStreamManager(&fakeStreamingRecognizer{stream: &fakeStream{}}, WithStreamSpeakerID(speakerID))
+	}
+	seg.maxStreamLanes = 1
+	now := time.Unix(0, 0)
+	seg.SetLaneReap(50*time.Millisecond, func() time.Time { return now })
+	seg.SetSweepEvery(1)
+	t.Cleanup(seg.Bind(t.Context(), bus))
+
+	if err := seg.Process(capTestFrame(t, "A")); err != nil { // A opens the one stream
+		t.Fatalf("Process A: %v", err)
+	}
+	seg.mu.Lock()
+	aStream := seg.lanes["A"].stream != nil
+	seg.mu.Unlock()
+	if !aStream {
+		t.Fatal("lane A has no stream, want one (under cap)")
+	}
+
+	// Reap A: advance past the TTL and tick the silence clock to trigger the sweep.
+	now = now.Add(time.Second)
+	if err := seg.ProcessSilence(capTestFrame(t, "")); err != nil {
+		t.Fatalf("ProcessSilence: %v", err)
+	}
+	seg.mu.Lock()
+	_, aGone := seg.lanes["A"]
+	freed := seg.streamLanes
+	seg.mu.Unlock()
+	if aGone {
+		t.Fatal("lane A was not reaped")
+	}
+	if freed != 0 {
+		t.Fatalf("streamLanes = %d after reap, want 0 (slot freed)", freed)
+	}
+
+	// C now opens a stream — the recycled slot.
+	if err := seg.Process(capTestFrame(t, "C")); err != nil {
+		t.Fatalf("Process C: %v", err)
+	}
+	seg.mu.Lock()
+	cStream := seg.lanes["C"].stream != nil
+	seg.mu.Unlock()
+	if !cStream {
+		t.Error("lane C has no stream — the reaped slot was not recycled (finding 5)")
+	}
 }

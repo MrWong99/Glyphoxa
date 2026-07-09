@@ -126,6 +126,11 @@ type Segmenter struct {
 	// drains them deterministically after the default lane.
 	lanes     map[string]*lane
 	laneOrder []string
+	// degraded records speakers whose lane VAD factory failed once: their frames fall
+	// to the default lane for the rest of the session and the error is reported ONCE
+	// (not per frame at ~31/s). Single-shot fail-closed — a bounded map keyed by the
+	// session's participants (ADR-0050 risk (c)).
+	degraded map[string]bool
 }
 
 // lane is one Speaker Lane (ADR-0050): a VAD session fed only its speaker's frame
@@ -220,6 +225,7 @@ func NewSegmenter(vad *VAD, stt *STT) *Segmenter {
 		nowFn:       time.Now,
 		sweepEvery:  laneReapSweepEvery,
 		lanes:       map[string]*lane{"": {id: "", vad: vad}},
+		degraded:    map[string]bool{},
 	}
 }
 
@@ -331,22 +337,35 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		unsubEnd()
 		// Tear down every lane's stream and every FACTORY-built lane's VAD (the ONNX
 		// session — ADR-0050 risk (b)). The default lane's VAD is caller-owned and is
-		// NOT closed here.
-		s.mu.Lock()
-		lanes := make([]*lane, 0, len(s.lanes))
-		for _, ln := range s.lanes {
-			lanes = append(lanes, ln)
+		// NOT closed here. Under mu we CAPTURE each lane's cancel/close funcs, null them,
+		// and drop the non-default lanes from the map — so a concurrent reap sweep (still
+		// on the audio-loop goroutine) can never double-close the same lane (finding 6).
+		// The captured funcs are then invoked outside the lock.
+		type teardown struct {
+			streamCancel func()
+			closeVAD     func()
 		}
+		s.mu.Lock()
+		tds := make([]teardown, 0, len(s.lanes))
+		for id, ln := range s.lanes {
+			tds = append(tds, teardown{streamCancel: ln.streamCancel, closeVAD: ln.closeVAD})
+			ln.streamCancel = nil
+			ln.closeVAD = nil
+			if id != "" {
+				delete(s.lanes, id)
+			}
+		}
+		s.laneOrder = nil
+		s.streamLanes = 0
 		s.ctx = nil
 		s.jobs = nil
 		s.mu.Unlock()
-		for _, ln := range lanes {
-			if ln.streamCancel != nil {
-				ln.streamCancel()
-				ln.streamCancel = nil
+		for _, td := range tds {
+			if td.streamCancel != nil {
+				td.streamCancel()
 			}
-			if ln.closeVAD != nil {
-				ln.closeVAD()
+			if td.closeVAD != nil {
+				td.closeVAD()
 			}
 		}
 		// Closing the queue lets the worker drain any still-buffered jobs and exit;
@@ -375,51 +394,87 @@ func (s *Segmenter) Process(frame audio.Frame) error {
 
 	sp := frame.Speaker()
 	if sp == "" {
-		// Unattributed frame (silence clock, a mixed/test frame): BROADCAST to every
-		// lane so each lane's VAD hangover advances (the silence clock is
-		// speaker-agnostic, ADR-0050) and any listening lane buffers the trailing
-		// audio. With only the default lane present this is exactly the pre-lane path.
+		// Unattributed INBOUND audio (an unresolved SSRC still voiced, a mixed/test
+		// frame): DEFAULT LANE ONLY — byte-identical to the pre-lane single-lane path,
+		// no re-stamp, barge key "" only. It transcribes unattributed
+		// (STTFinal.SpeakerID == "" → Butler fail-closed) and NEVER touches a Speaker
+		// Lane, so a not-yet-resolved speaker can never phantom-misattribute onto
+		// someone else's lane. The silence CLOCK uses [Segmenter.ProcessSilence]
+		// instead — the caller distinguishes the two "" sources at source (ADR-0050).
 		s.mu.Lock()
-		targets := make([]*lane, 0, len(s.lanes))
-		for _, ln := range s.lanes {
-			targets = append(targets, ln)
-		}
+		def := s.lanes[""]
 		s.mu.Unlock()
-		var firstErr error
-		for _, ln := range targets {
-			if err := s.processLane(ln, frame); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
+		return s.processLane(def, frame)
 	}
 
 	// Attributed frame: route to its Speaker Lane, created on first frame. A nil or
-	// erroring factory degrades to the default lane (still transcribed) and reports
-	// the error once — the audio loop stays up (ADR-0050 risk (c)).
+	// (once) erroring factory degrades to the default lane (still transcribed) and
+	// reports the error ONCE — the audio loop stays up (ADR-0050 risk (c)).
 	ln, err := s.laneFor(sp)
 	if err != nil && s.onError != nil {
 		s.onError(err)
 	}
-	return s.processLane(ln, frame)
-}
-
-// processLane drives one lane's VAD with the frame (re-stamped to the lane's id so
-// the transition routes back to this lane) and accumulates its utterance audio,
-// mirroring [Segmenter.Process]'s original single-lane body per lane. The VAD
-// publishes its transitions synchronously, so ln.listening is up to date by the
-// time this returns from vad.Process.
-func (s *Segmenter) processLane(ln *lane, frame audio.Frame) error {
+	// On the degrade path the lane is the default ("") but the frame is still stamped
+	// sp; re-stamp it to the lane's id so its VAD transition routes back to the default
+	// lane (and its STTFinal.SpeakerID is "" → Butler fail-closed). The happy path is a
+	// no-op (frame already == lane id).
 	f := frame
 	if f.Speaker() != ln.id {
-		f = f.WithSpeaker(ln.id) // e.g. a broadcast "" frame fed to an attributed lane
+		f = f.WithSpeaker(ln.id)
 	}
+	return s.processLane(ln, f)
+}
+
+// ProcessSilence feeds one silence-CLOCK frame (issue #91) to EVERY lane so each
+// lane's VAD hangover advances toward its speech_end — the silence clock is
+// speaker-agnostic (ADR-0050). It is the [Segmenter.Process] sibling for the ONE
+// unattributed source that must reach every lane; the caller (the wire tick branch)
+// routes clock frames here and real inbound audio through Process, so the two ""
+// sources are distinguished at source rather than by sniffing zero PCM (Opus can
+// legally decode an all-zero frame). Each lane's copy is re-stamped to that lane's id
+// so the resulting speech_end routes back to it; zero PCM never onsets speech, so a
+// silence frame only ever ADVANCES a listening lane, never opens one. A silence frame
+// DOES enter a listening lane's buffer (parity with the pre-lane single-lane path,
+// where clock frames were buffered). It also drives the reap sweep, so a fully-idle
+// table still ages out departed speakers' lanes.
+func (s *Segmenter) ProcessSilence(frame audio.Frame) error {
+	s.reapIdleLanes()
+
+	s.mu.Lock()
+	order := append([]string{""}, s.laneOrder...)
+	lanes := make([]*lane, 0, len(order))
+	for _, id := range order {
+		if ln := s.lanes[id]; ln != nil {
+			lanes = append(lanes, ln)
+		}
+	}
+	s.mu.Unlock()
+
+	var firstErr error
+	for _, ln := range lanes {
+		f := frame
+		if ln.id != "" {
+			f = frame.WithSpeaker(ln.id)
+		}
+		if err := s.processLane(ln, f); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// processLane drives one lane's VAD with the (already correctly-stamped) frame and
+// accumulates its utterance audio, mirroring the original single-lane body per lane.
+// The VAD publishes its transitions synchronously, so ln.listening is up to date by
+// the time this returns from vad.Process. It does NOT refresh ln.lastSeen: idle-reap
+// aging keys off attributed frames (via [Segmenter.laneFor]) only, so a lane still
+// ages while the speaker-agnostic silence clock ticks (risk: reap dead in prod).
+func (s *Segmenter) processLane(ln *lane, f audio.Frame) error {
 	if err := ln.vad.Process(f); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
-	ln.lastSeen = s.now()
 	if ln.listening {
 		ln.buf = append(ln.buf, f)
 		stream := ln.stream
@@ -458,7 +513,10 @@ func (s *Segmenter) processLane(ln *lane, frame audio.Frame) error {
 func (s *Segmenter) laneFor(sp string) (*lane, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sp == "" || s.laneVADFactory == nil {
+	// A speaker whose factory already failed once is degraded for the session: skip
+	// the retry AND the repeat onError (finding 3 — the factory was retried and
+	// onError fired ~31×/s before this).
+	if sp == "" || s.laneVADFactory == nil || s.degraded[sp] {
 		return s.lanes[""], nil
 	}
 	if ln, ok := s.lanes[sp]; ok {
@@ -467,6 +525,7 @@ func (s *Segmenter) laneFor(sp string) (*lane, error) {
 	}
 	v, closeVAD, err := s.newLaneVAD()
 	if err != nil {
+		s.degraded[sp] = true // single-shot fail-closed: report once, then default silently
 		return s.lanes[""], err
 	}
 	ln := &lane{id: sp, vad: v, closeVAD: closeVAD, lastSeen: s.now()}
@@ -511,42 +570,60 @@ func (s *Segmenter) reapIdleLanes() {
 	}
 	s.sweepCalls = 0
 	cutoff := s.now().Add(-s.laneIdleTTL)
-	var reap []*lane
+	ctx := s.ctx
+
+	// Snapshot everything a reaped lane needs — the flush state AND its cancel/close
+	// funcs — UNDER the lock, nulling the funcs and dropping the lane, so a concurrent
+	// Bind teardown can never also close it (finding 6). The heavy work (dispatch +
+	// close) then runs outside the lock.
+	type reaped struct {
+		id           string
+		seg          []audio.Frame
+		speechEndAt  time.Time
+		commit       <-chan stt.CommitResult
+		commitSentAt time.Time
+		utteranceID  string
+		stream       *StreamManager
+		streamCancel func()
+		closeVAD     func()
+	}
+	var reap []reaped
 	for id, ln := range s.lanes {
 		if id == "" || !ln.lastSeen.Before(cutoff) {
 			continue
 		}
-		reap = append(reap, ln)
-	}
-	for _, ln := range reap {
-		delete(s.lanes, ln.id)
-		s.removeLaneOrder(ln.id)
+		reap = append(reap, reaped{
+			id:           ln.id,
+			seg:          ln.buf,
+			speechEndAt:  ln.speechEndAt,
+			commit:       ln.pendCommit,
+			commitSentAt: ln.pendCommitSentAt,
+			utteranceID:  ln.curUtteranceID,
+			stream:       ln.stream,
+			streamCancel: ln.streamCancel,
+			closeVAD:     ln.closeVAD,
+		})
+		ln.buf = nil
+		ln.pendCommit = nil
+		ln.streamCancel = nil
+		ln.closeVAD = nil
 		if ln.stream != nil {
 			s.streamLanes--
 		}
+		delete(s.lanes, id)
+		s.removeLaneOrder(id)
 	}
-	ctx := s.ctx
 	s.mu.Unlock()
 
-	for _, ln := range reap {
+	for _, r := range reap {
 		// Flush a still-buffered utterance so a reaped mid-utterance lane is not lost;
 		// dispatchTranscription is a no-op on an empty buffer.
-		s.mu.Lock()
-		seg := ln.buf
-		ln.buf = nil
-		speechEndAt := ln.speechEndAt
-		commit := ln.pendCommit
-		commitSentAt := ln.pendCommitSentAt
-		utteranceID := ln.curUtteranceID
-		stream := ln.stream
-		ln.pendCommit = nil
-		s.mu.Unlock()
-		s.dispatchTranscription(ctx, seg, speechEndAt, commit, commitSentAt, utteranceID, ln.id, stream)
-		if ln.streamCancel != nil {
-			ln.streamCancel()
+		s.dispatchTranscription(ctx, r.seg, r.speechEndAt, r.commit, r.commitSentAt, r.utteranceID, r.id, r.stream)
+		if r.streamCancel != nil {
+			r.streamCancel()
 		}
-		if ln.closeVAD != nil {
-			ln.closeVAD()
+		if r.closeVAD != nil {
+			r.closeVAD()
 		}
 	}
 }

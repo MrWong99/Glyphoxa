@@ -1149,18 +1149,20 @@ func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics 
 const defaultStreamMaxLanes = 4
 
 // streamMaxLanes reads the per-lane streaming concurrency cap from
-// GLYPHOXA_STT_STREAM_MAX_LANES, falling back to [defaultStreamMaxLanes] when unset,
-// empty, or unparseable (a malformed value must not silently disable streaming).
+// GLYPHOXA_STT_STREAM_MAX_LANES. Absent, empty, or unparseable → [defaultStreamMaxLanes]
+// (a typo must not silently change behaviour). An explicit "0" IS honoured — it
+// disables per-lane streaming (0 lanes stream) while the default lane keeps its own
+// stream; a negative value is invalid and falls back to the default (finding 7).
 func streamMaxLanes() int {
 	v := os.Getenv("GLYPHOXA_STT_STREAM_MAX_LANES")
 	if v == "" {
 		return defaultStreamMaxLanes
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
+	if err != nil || n < 0 {
 		return defaultStreamMaxLanes
 	}
-	return n
+	return n // 0 = explicitly disabled
 }
 
 // buildLaneStreamFactory returns the per-Speaker-Lane [orchestrator.StreamManager]

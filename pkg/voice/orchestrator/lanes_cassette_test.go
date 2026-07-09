@@ -138,23 +138,65 @@ func TestConversation_TwoSpeakerCassette_DistinctSpeakerIDs(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	// Exactly two STTFinals, one per speaker, each matching its clip's ground truth.
-	bySpeaker := map[string]string{}
+	// Group EVERY STTFinal by speaker (finding 4: do not silently collapse dupes into a
+	// map — real Silero legitimately splits a clip with an internal pause into several
+	// segments, so each speaker may yield >1 final; each must still carry ITS speaker's
+	// id, never the other's). Assert: exactly two distinct SpeakerIDs (both attributed,
+	// neither ""), every final attributed to one of them, and the per-speaker CONCATENATED
+	// text matches its clip's ground truth (tolerant word-overlap, the house rule) with
+	// NO cross-contamination from the other speaker's clip — the real attribution proof.
+	joined := map[string][]string{}
+	var total int
 	for _, e := range h.Events() {
-		if f, ok := e.(voiceevent.STTFinal); ok {
-			bySpeaker[f.SpeakerID] = f.Text
+		f, ok := e.(voiceevent.STTFinal)
+		if !ok {
+			continue
 		}
+		total++
+		if f.SpeakerID != speakerHello && f.SpeakerID != speakerBart {
+			t.Errorf("STTFinal carries unexpected SpeakerID %q (want %q or %q)", f.SpeakerID, speakerHello, speakerBart)
+		}
+		joined[f.SpeakerID] = append(joined[f.SpeakerID], f.Text)
 	}
-	if len(bySpeaker) != 2 {
-		t.Fatalf("STTFinals by speaker = %v, want two distinct SpeakerIDs", bySpeaker)
+	if total < 2 {
+		t.Fatalf("STTFinal count = %d, want >= 2 (one utterance per speaker, possibly VAD-split)", total)
 	}
-	assertNormalized(t, bySpeaker[speakerHello], helloUtterance, speakerHello)
-	assertNormalized(t, bySpeaker[speakerBart], bartUtterance, speakerBart)
+	if len(joined) != 2 {
+		t.Fatalf("distinct SpeakerIDs = %v, want exactly two ({%s, %s})", keysOf(joined), speakerHello, speakerBart)
+	}
+	assertSpeakerText(t, joined[speakerHello], helloUtterance, bartUtterance, speakerHello)
+	assertSpeakerText(t, joined[speakerBart], bartUtterance, helloUtterance, speakerBart)
 }
 
-func assertNormalized(t *testing.T, got, want, speaker string) {
+// assertSpeakerText checks that EVERY final attributed to a speaker resolved to its
+// OWN clip's ground truth (normalized), and NONE to the OTHER clip — so a segment
+// mis-routed to the wrong lane (the exact failure Speaker Lanes prevent) fails loudly.
+// The clip-identity fake returns the whole ground-truth transcript per matched
+// segment, so a VAD-split clip yields several finals that each equal the ground truth
+// (asserted per-final rather than concatenated, which would double the text).
+func assertSpeakerText(t *testing.T, parts []string, want, other, speaker string) {
 	t.Helper()
-	if voicetest.NormalizeTranscript(got) != voicetest.NormalizeTranscript(want) {
-		t.Errorf("speaker %s transcript = %q, want (normalized) %q", speaker, got, want)
+	if len(parts) == 0 {
+		t.Errorf("speaker %s produced no STTFinal", speaker)
+		return
 	}
+	wn := voicetest.NormalizeTranscript(want)
+	on := voicetest.NormalizeTranscript(other)
+	for _, p := range parts {
+		gn := voicetest.NormalizeTranscript(p)
+		if gn != wn {
+			t.Errorf("speaker %s final = %q, want (normalized) %q", speaker, gn, wn)
+		}
+		if gn == on {
+			t.Errorf("speaker %s final matched the OTHER clip %q — cross-attribution", speaker, on)
+		}
+	}
+}
+
+func keysOf(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
