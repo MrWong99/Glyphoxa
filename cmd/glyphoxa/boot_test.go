@@ -175,6 +175,35 @@ func TestDevMode(t *testing.T) {
 	}
 }
 
+// TestGMSpeakerGate pins the Butler GM-address gate predicate wiring (#280,
+// ADR-0024/ADR-0050): dev mode auto-authorizes every speaker as GM (mirroring
+// the dev auto-auth operator), and otherwise the gate is operator-allowlist
+// membership — fail-closed on an empty SpeakerID and on a speaker off the list.
+func TestGMSpeakerGate(t *testing.T) {
+	allow := auth.ParseOperatorAllowlist("111,222")
+
+	// Dev mode: every speaker is the operator, so the gate admits all — including
+	// an empty SpeakerID and an id not on any allowlist.
+	dev := gmSpeakerGate(true, allow)
+	for _, id := range []string{"111", "999", ""} {
+		if !dev(id) {
+			t.Errorf("dev gmSpeakerGate(%q) = false, want true (dev auto-authorizes every speaker)", id)
+		}
+	}
+
+	// Non-dev: allowlist membership, fail closed off the list and on empty.
+	prod := gmSpeakerGate(false, allow)
+	if !prod("111") {
+		t.Error("gmSpeakerGate(false).(\"111\") = false, want true (on the allowlist)")
+	}
+	if prod("999") {
+		t.Error("gmSpeakerGate(false).(\"999\") = true, want false (off the allowlist)")
+	}
+	if prod("") {
+		t.Error("gmSpeakerGate(false).(\"\") = true, want false (empty SpeakerID never a GM)")
+	}
+}
+
 // TestSTTStreaming: the streaming-STT opt-in (ADR-0042, issue #180) is on only
 // when GLYPHOXA_STT_STREAMING holds a non-blank, non-falsy value, so the batch
 // path stays the byte-for-byte default until an operator explicitly opts in.
