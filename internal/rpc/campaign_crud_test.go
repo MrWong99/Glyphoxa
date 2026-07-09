@@ -123,6 +123,18 @@ type fakeCampaignStore struct {
 	grantListErr   error
 	grantUpsertErr error
 	grantDeleteErr error
+
+	// Player Character state (#276): characters backs ListCharacters/Update/Delete;
+	// charsCreated records CreateCharacter inputs; charsListCampaign records the
+	// campaign id ListCharacters resolved (scope assertion); the *Err hooks force
+	// each failure path (e.g. storage.ErrConflict, storage.ErrNotFound).
+	characters        []storage.Character
+	charsCreated      []storage.NewCharacter
+	charsListCampaign uuid.UUID
+	charCreateErr     error
+	charListErr       error
+	charUpdateErr     error
+	charDeleteErr     error
 }
 
 // setAgentCall records one SetNodeAgent invocation for assertions.
