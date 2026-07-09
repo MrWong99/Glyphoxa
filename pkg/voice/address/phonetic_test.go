@@ -1,6 +1,34 @@
 package address
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+// TestEncoderRegistry_Languages proves Languages() reports the registered
+// language codes as sorted, normalized primary subtags — the sole source for the
+// Campaign Language choices (ADR-0024). An empty registry yields an empty slice,
+// a BCP-47 tag registers under its primary subtag, and a nil-unregister drops it.
+func TestEncoderRegistry_Languages(t *testing.T) {
+	if got := NewEncoderRegistry().Languages(); len(got) != 0 {
+		t.Errorf("empty registry Languages() = %v, want empty", got)
+	}
+
+	if got := DefaultEncoders().Languages(); !reflect.DeepEqual(got, []string{"de", "en"}) {
+		t.Errorf("DefaultEncoders().Languages() = %v, want [de en]", got)
+	}
+
+	r := DefaultEncoders()
+	r.Register("fr-FR", EncoderFunc(func(s string) string { return s }))
+	if got := r.Languages(); !reflect.DeepEqual(got, []string{"de", "en", "fr"}) {
+		t.Errorf("after Register(fr-FR): Languages() = %v, want [de en fr]", got)
+	}
+
+	r.Register("en", nil) // unregister
+	if got := r.Languages(); !reflect.DeepEqual(got, []string{"de", "fr"}) {
+		t.Errorf("after unregister en: Languages() = %v, want [de fr]", got)
+	}
+}
 
 // TestNormalizeLang pins the BCP-47 → primary-subtag reduction the registry
 // keys on, so "en", "en-US", and "EN_us" all resolve to one Encoder.

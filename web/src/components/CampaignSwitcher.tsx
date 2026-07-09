@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Check, ChevronDown, Plus, Swords } from "lucide-react";
+import { Check, ChevronDown, Plus, Settings, Swords } from "lucide-react";
 
 import { CampaignService, SessionService } from "@gen/glyphoxa/management/v1/management_pb";
 import {
@@ -14,6 +14,7 @@ import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { Badge } from "@/components/ui/Badge";
 import { CampaignRowActions } from "./CampaignRowActions";
 import { CreateCampaignForm, useCreateCampaign } from "./CreateCampaignForm";
+import { CampaignSettingsForm } from "./CampaignSettingsForm";
 
 import "./campaignSwitcher.css";
 
@@ -33,7 +34,7 @@ import "./campaignSwitcher.css";
 
 // The panel is a single three-value state, so "which view" and "is it open" can
 // never desync — a stale create form can't survive a close/reopen.
-type Panel = "closed" | "list" | "create";
+type Panel = "closed" | "list" | "create" | "edit";
 
 export function CampaignSwitcher() {
   const queryClient = useQueryClient();
@@ -184,6 +185,18 @@ export function CampaignSwitcher() {
                 onCancel={firstRun ? undefined : () => setPanel("list")}
               />
             </div>
+          ) : panel === "edit" && activeCampaign ? (
+            // The per-campaign settings editor (#268), seeded from the resolved
+            // Active Campaign. It shares the create form's classes and, like a
+            // create, returns to the list on save or cancel.
+            <div className="gx-campaign-switcher__create">
+              <div className="gx-campaign-switcher__create-head">Campaign settings</div>
+              <CampaignSettingsForm
+                campaign={activeCampaign}
+                onSaved={() => setPanel("list")}
+                onCancel={() => setPanel("list")}
+              />
+            </div>
           ) : (
             <>
               {/* A labelled group of plain buttons (not a role=listbox): a short,
@@ -239,6 +252,18 @@ export function CampaignSwitcher() {
 
               <button type="button" className="gx-campaign-switcher__new" onClick={enterCreate}>
                 <Plus size={15} /> New campaign
+              </button>
+
+              {/* Edit the resolved Active Campaign's name / System / Language
+                  (#268). Disabled until a campaign resolves — there is nothing to
+                  edit before one exists (first run opens straight into create). */}
+              <button
+                type="button"
+                className="gx-campaign-switcher__new"
+                onClick={() => setPanel("edit")}
+                disabled={!activeCampaign}
+              >
+                <Settings size={15} /> Campaign settings
               </button>
 
               {/* Show-archived toggle (#269): folds archived campaigns into the

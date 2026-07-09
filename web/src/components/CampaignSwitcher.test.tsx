@@ -19,6 +19,8 @@ import {
   UnarchiveCampaignResponseSchema,
   DeleteCampaignResponseSchema,
   GetSessionResponseSchema,
+  ListSupportedLanguagesResponseSchema,
+  UpdateCampaignResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -41,6 +43,7 @@ function mockBackend(
     calls?: Record<string, number>;
     createError?: string;
     switchError?: string;
+    activeError?: string;
   } = {},
 ) {
   const state = {
@@ -93,6 +96,10 @@ function mockBackend(
       },
       getActiveCampaign: () => {
         bump("getActiveCampaign");
+        // A non-NotFound resolve failure (not first-run): the trigger falls back
+        // to "Select campaign" with no resolved active campaign, so any
+        // active-campaign-gated control (the settings button) must disable.
+        if (opts.activeError) throw new ConnectError(opts.activeError, Code.Internal);
         const a = resolveActive();
         if (!a) throw new ConnectError("no campaign", Code.NotFound);
         return create(GetActiveCampaignResponseSchema, { campaign: create(CampaignSchema, a) });
@@ -117,6 +124,19 @@ function mockBackend(
         const c = { id: `new-${state.next++}`, name: req.name, system: req.system, language: req.language, archivedAt: undefined };
         state.campaigns.push(c);
         return create(CreateCampaignResponseSchema, { campaign: create(CampaignSchema, c) });
+      },
+      listSupportedLanguages: () => {
+        bump("listSupportedLanguages");
+        return create(ListSupportedLanguagesResponseSchema, { languages: ["de", "en"] });
+      },
+      updateCampaign: (req) => {
+        bump("updateCampaign");
+        const c = state.campaigns.find((x) => x.id === req.id);
+        if (!c) throw new ConnectError("unknown campaign", Code.NotFound);
+        c.name = req.name;
+        c.system = req.system;
+        c.language = req.language;
+        return create(UpdateCampaignResponseSchema, { campaign: create(CampaignSchema, c) });
       },
     });
     service(SessionService, {
@@ -489,5 +509,101 @@ describe("CampaignSwitcher", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry activation/i }));
     await waitFor(() => expect(calls.setActiveCampaign).toBe(2));
     expect(calls.createCampaign).toBe(1);
+  });
+
+  it("opens the settings editor seeded with the active campaign (#268)", async () => {
+    renderSwitcher(
+      mockBackend({
+        campaigns: [{ id: "a", name: "Alpha Quest", system: "D&D 5e", language: "en" }],
+        activeId: "a",
+      }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    await screen.findByRole("group", { name: /campaigns/i });
+
+    // The list footer offers a "Campaign settings" action; it opens the edit form
+    // seeded from the resolved Active Campaign.
+    fireEvent.click(await screen.findByRole("button", { name: /campaign settings/i }));
+    expect(((await screen.findByLabelText("Name")) as HTMLInputElement).value).toBe("Alpha Quest");
+    expect((screen.getByLabelText("System") as HTMLInputElement).value).toBe("D&D 5e");
+    expect(screen.getByText(/next Voice Session/i)).toBeInTheDocument();
+  });
+
+  it("saves a rename and refreshes the picker list (#268, ADR-0018)", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({
+        campaigns: [{ id: "a", name: "Alpha Quest", system: "D&D 5e", language: "en" }],
+        activeId: "a",
+        calls,
+      }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    await screen.findByRole("group", { name: /campaigns/i });
+    const listedBefore = calls.listCampaigns;
+
+    // Rename via the settings editor, then Save.
+    fireEvent.click(await screen.findByRole("button", { name: /campaign settings/i }));
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Renamed Quest" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    // The write happened…
+    await waitFor(() => expect(calls.updateCampaign).toBe(1));
+    // …the editor closed back to the list…
+    const group = await screen.findByRole("group", { name: /campaigns/i });
+    // …listCampaigns is campaign-INVARIANT (the switch sweep skips it), so the
+    // save must invalidate it explicitly or the picker keeps the stale name.
+    await waitFor(() => expect(calls.listCampaigns).toBeGreaterThan(listedBefore));
+    expect(await within(group).findByRole("button", { name: /Renamed Quest/ })).toBeInTheDocument();
+    expect(within(group).queryByRole("button", { name: /Alpha Quest/ })).not.toBeInTheDocument();
+  });
+
+  it("returns to the list when the settings editor is cancelled (#268)", async () => {
+    renderSwitcher(mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a" }));
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /campaign settings/i }));
+    await screen.findByLabelText("Name");
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    // Back to the campaign list; the edit form is gone.
+    expect(await screen.findByRole("group", { name: /campaigns/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+  });
+
+  it("resets to the list view after the settings editor is left open and the panel is reopened (#268)", async () => {
+    renderSwitcher(mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a" }));
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /campaign settings/i }));
+    await screen.findByLabelText("Name");
+
+    // Close and reopen: the panel is a single state, so it can't reopen onto the
+    // stale edit form.
+    openPanel(); // closes
+    openPanel(); // reopens
+    expect(await screen.findByRole("group", { name: /campaigns/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+  });
+
+  it("has no settings action on the first-run create form (#268)", async () => {
+    renderSwitcher(mockBackend({ campaigns: [], calls: {} }));
+    // First run: the trigger opens straight into create; there's no active
+    // campaign to edit, so the settings action never offers a broken edit.
+    const trigger = await screen.findByRole("button", { name: /create your first campaign/i });
+    fireEvent.click(trigger);
+    // Create mode has no settings button at all — nothing to edit yet.
+    expect(screen.queryByRole("button", { name: /campaign settings/i })).not.toBeInTheDocument();
+  });
+
+  it("disables the settings action when no active campaign resolves (#268)", async () => {
+    // Campaigns exist but resolution FAILS (non-NotFound): the list still opens,
+    // and the settings button renders — but disabled, since there is no resolved
+    // Active Campaign to seed the editor with.
+    renderSwitcher(mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeError: "resolver down" }));
+    fireEvent.click(await screen.findByTestId("campaign-switcher-trigger"));
+    await screen.findByRole("group", { name: /campaigns/i });
+    expect(await screen.findByRole("button", { name: /campaign settings/i })).toBeDisabled();
   });
 });
