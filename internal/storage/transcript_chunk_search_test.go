@@ -117,11 +117,11 @@ func TestSearchChunksByCampaign_OrdersByCosineAndCapsAtK(t *testing.T) {
 	// exact cosine order below differs from the L2 order — it fails if <=> (cosine)
 	// is ever swapped for <-> (L2), a mutant that every small-norm vector alone
 	// (similar magnitudes → L2 order == cosine order) could not catch.
-	nearest := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(1, 0))    // cos 0
-	big := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(90, 9))       // cos ~0.005, L2 ~89.5
-	near := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.9, 0.1))   // cos ~0.006
-	mid := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.5, 0.5))    // cos ~0.293
-	far := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0, 1))        // cos 1.0
+	nearest := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(1, 0))  // cos 0
+	big := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(90, 9))     // cos ~0.005, L2 ~89.5
+	near := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.9, 0.1)) // cos ~0.006
+	mid := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0.5, 0.5))  // cos ~0.293
+	far := seedSearchChunk(t, st, campaignID, vs.ID, nil, vec768(0, 1))      // cos 1.0
 
 	got, err := st.SearchChunksByCampaign(ctx, campaignID, query, 5)
 	if err != nil {
