@@ -531,3 +531,14 @@
     opacity: 1;
   }
 }
+
+/* In-flight player-bind affordance (#279). */
+.gx-session__bind {
+  display: flex;
+}
+
+.gx-session__bind-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
