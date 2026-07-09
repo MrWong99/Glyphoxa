@@ -156,3 +156,66 @@ func TestTranscriptLineCascade(t *testing.T) {
 		t.Errorf("count after cascade = %d, %v; want 0, nil", n, err)
 	}
 }
+
+// TestTranscriptLineSpeakerID is #278 (E4, ADR-0050): a SpeakerID-bearing human
+// Line persists the Discord snowflake per row, while an unattributed utterance
+// (empty SpeakerID) persists NULL — asserted via direct SQL — and scans back as
+// "" ("" ↔ NULL round-trip, so the empty case is byte-identical to old behavior).
+func TestTranscriptLineSpeakerID(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	ts := time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC)
+
+	// An attributed human line and an unattributed one (empty SpeakerID).
+	lines := []storage.TranscriptLine{
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "u:1", Seq: 1, Who: "Player / DM", Kind: "player", TS: ts, Text: "Hello", SpeakerDiscordUserID: "111222333"},
+		{VoiceSessionID: vs.ID, CampaignID: campaignID, LineID: "u:2", Seq: 2, Who: "Player / DM", Kind: "player", TS: ts, Text: "Silent", SpeakerDiscordUserID: ""},
+	}
+	for _, l := range lines {
+		if err := st.UpsertTranscriptLine(ctx, l); err != nil {
+			t.Fatalf("UpsertTranscriptLine %s: %v", l.LineID, err)
+		}
+	}
+
+	// Direct SQL: the attributed row stores the snowflake, the empty one stores NULL.
+	var attributed string
+	if err := pool.QueryRow(ctx,
+		`SELECT speaker_discord_user_id FROM transcript_line WHERE voice_session_id=$1 AND line_id='u:1'`, vs.ID).
+		Scan(&attributed); err != nil {
+		t.Fatalf("select u:1 speaker: %v", err)
+	}
+	if attributed != "111222333" {
+		t.Errorf("u:1 speaker_discord_user_id = %q, want 111222333", attributed)
+	}
+	var isNull bool
+	if err := pool.QueryRow(ctx,
+		`SELECT speaker_discord_user_id IS NULL FROM transcript_line WHERE voice_session_id=$1 AND line_id='u:2'`, vs.ID).
+		Scan(&isNull); err != nil {
+		t.Fatalf("select u:2 null-check: %v", err)
+	}
+	if !isNull {
+		t.Errorf("empty SpeakerID must persist NULL, got non-null")
+	}
+
+	// Scan round-trips: "" for the unattributed row, the snowflake for the other.
+	got, err := st.ListTranscriptLines(ctx, vs.ID)
+	if err != nil {
+		t.Fatalf("ListTranscriptLines: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("list len = %d, want 2", len(got))
+	}
+	if got[0].SpeakerDiscordUserID != "111222333" {
+		t.Errorf("line[0].SpeakerDiscordUserID = %q, want 111222333", got[0].SpeakerDiscordUserID)
+	}
+	if got[1].SpeakerDiscordUserID != "" {
+		t.Errorf("line[1].SpeakerDiscordUserID = %q, want \"\" (NULL round-trips to empty)", got[1].SpeakerDiscordUserID)
+	}
+}

@@ -29,16 +29,30 @@ type TranscriptLine struct {
 	Kind           string
 	TS             time.Time
 	Text           string
+	// SpeakerDiscordUserID is the Discord snowflake of the human who spoke this Line
+	// (#278, ADR-0050), or "" for an unattributed utterance / an Agent reply. It
+	// round-trips "" ↔ NULL: NULLIF on write, COALESCE on scan.
+	SpeakerDiscordUserID string
 }
 
+// transcriptLineInsertColumns are the plain column names for INSERT; the SELECT
+// list (transcriptLineColumns) mirrors them but COALESCEs speaker_discord_user_id
+// to "". BOTH are ORDER-COUPLED with scanTranscriptLine and the INSERT VALUES list
+// — update all together. speaker_discord_user_id is NULLIF'd to NULL on write and
+// COALESCEd to "" on read ("" ↔ NULL round-trip for an unattributed utterance).
+const transcriptLineInsertColumns = `
+	voice_session_id, campaign_id, line_id, seq, who, tag, kind, ts, text,
+	speaker_discord_user_id`
+
 const transcriptLineColumns = `
-	voice_session_id, campaign_id, line_id, seq, who, tag, kind, ts, text`
+	voice_session_id, campaign_id, line_id, seq, who, tag, kind, ts, text,
+	COALESCE(speaker_discord_user_id, '')`
 
 func scanTranscriptLine(row pgx.Row) (TranscriptLine, error) {
 	var l TranscriptLine
 	err := row.Scan(
 		&l.VoiceSessionID, &l.CampaignID, &l.LineID, &l.Seq,
-		&l.Who, &l.Tag, &l.Kind, &l.TS, &l.Text,
+		&l.Who, &l.Tag, &l.Kind, &l.TS, &l.Text, &l.SpeakerDiscordUserID,
 	)
 	return l, err
 }
@@ -52,14 +66,15 @@ func scanTranscriptLine(row pgx.Row) (TranscriptLine, error) {
 // interleaved line landed between a reply's sentences.
 func (s *Store) UpsertTranscriptLine(ctx context.Context, l TranscriptLine) error {
 	_, err := s.db.Exec(ctx,
-		`INSERT INTO transcript_line (`+transcriptLineColumns+`)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO transcript_line (`+transcriptLineInsertColumns+`)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''))
 		 ON CONFLICT (voice_session_id, line_id) DO UPDATE
 		    SET who = EXCLUDED.who, tag = EXCLUDED.tag,
 		        kind = EXCLUDED.kind, ts = EXCLUDED.ts, text = EXCLUDED.text,
+		        speaker_discord_user_id = EXCLUDED.speaker_discord_user_id,
 		        updated_at = now()`,
 		l.VoiceSessionID, l.CampaignID, l.LineID, l.Seq,
-		l.Who, l.Tag, l.Kind, l.TS, l.Text)
+		l.Who, l.Tag, l.Kind, l.TS, l.Text, l.SpeakerDiscordUserID)
 	if err != nil {
 		return fmt.Errorf("storage: upsert transcript line %s/%s: %w", l.VoiceSessionID, l.LineID, err)
 	}
