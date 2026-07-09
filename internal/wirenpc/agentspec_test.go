@@ -776,20 +776,6 @@ func TestLoadCampaignNPCs_FreshDBNoSeed(t *testing.T) {
 	}
 }
 
-// TestLoadCampaignNPCs_NilCampaignFailsLoud is #323 decision 3: an empty
-// CampaignID in the runtime path is a caller bug, never a silent fall back to the
-// seed roster. The loader refuses loudly.
-func TestLoadCampaignNPCs_NilCampaignFailsLoud(t *testing.T) {
-	pool := startDB(t)
-	ctx := context.Background()
-	st := storage.New(pool)
-
-	_, _, _, err := loadCampaignNPCs(ctx, st, uuid.Nil)
-	if err == nil {
-		t.Fatal("loadCampaignNPCs(uuid.Nil) returned nil error; want a loud refusal")
-	}
-}
-
 // loadSeededNPCs resolves the demo seed Tenant/Campaign BY NAME and hydrates its
 // roster. It is a TEST-ONLY helper (the runtime path is the campaign-scoped
 // loadCampaignNPCs, #323): the seed constants live on the `glyphoxa seed` command

@@ -182,23 +182,65 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		cipher = nil
 	}
 
+	// ADR-0031 fail-fast: verify the schema is current BEFORE any other DB query.
+	// The campaign resolution below is now the first query this entrypoint makes, so
+	// the stale-schema guard has to run ahead of it — otherwise a fresh, unmigrated
+	// DB yields a raw "relation campaign does not exist" instead of the actionable
+	// `migrate up` message. RunFromDB re-checks (it is the invariant for all its
+	// callers, incl. the in-proc all-mode runner), but this early check keeps the
+	// ordering correct for the standalone path (#323).
+	if err := wirenpc.EnsureSchemaCurrent(ctx, dsn); err != nil {
+		return err
+	}
+
 	// Resolve the campaign this standalone voice node voices BEFORE handing off to
 	// RunFromDB (#323): the loop is campaign-scoped now, so it needs the bound
-	// Active Campaign in cfg.CampaignID. This node has no logged-in operator and no
-	// live session, so the shared Active-Campaign policy (ADR-0039) collapses to its
-	// last step — the most-recently-created, non-archived campaign (GetActiveCampaign).
-	// A fresh, empty DB has none: fail loudly with an actionable message instead of
-	// the old silent seed-roster / "find tenant: not found" behavior.
-	active, err := storage.New(pool).GetActiveCampaign(ctx)
+	// Active Campaign in cfg.CampaignID. This node has no logged-in operator ctx, so
+	// it applies the same durable→recent policy the web tier's resolveActiveCampaign
+	// uses (minus the live-session step, which no standalone boot has): the sole
+	// operator's /glyphoxa use selection first, else the most-recently-created
+	// campaign — so the standalone node and all-mode voice the SAME campaign. A
+	// fresh, empty DB fails loudly with an actionable message.
+	active, err := resolveStandaloneCampaign(ctx, storage.New(pool))
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return fmt.Errorf("voice mode: no Active Campaign to voice; create a campaign in the web UI or run `glyphoxa seed` to install the demo campaign")
-		}
-		return fmt.Errorf("voice: resolve active campaign: %w", err)
+		return err
 	}
 	cfg.CampaignID = active.ID
 
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
+}
+
+// standaloneCampaignResolver is the narrow store surface the standalone voice
+// node's Active-Campaign resolution reads (#323): the single operator's durable
+// /glyphoxa use selection, and the most-recently-created campaign fallback.
+// *storage.Store satisfies it; the ordering test injects a fake.
+type standaloneCampaignResolver interface {
+	GetOperatorActiveCampaign(ctx context.Context) (storage.Campaign, error)
+	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
+}
+
+// resolveStandaloneCampaign applies the durable→recent Active-Campaign policy for
+// a boot with no logged-in operator context (the standalone voice node, #323). It
+// mirrors the web tier's resolveActiveCampaign (internal/rpc) minus the live
+// Voice Session step — a standalone boot has none: the sole operator's durable
+// selection wins, else the most-recently-created campaign, else an actionable
+// no-campaign error (never a silent fall back to the seed roster).
+func resolveStandaloneCampaign(ctx context.Context, store standaloneCampaignResolver) (storage.Campaign, error) {
+	c, err := store.GetOperatorActiveCampaign(ctx)
+	if err == nil {
+		return c, nil
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		return storage.Campaign{}, fmt.Errorf("voice: resolve durable active campaign: %w", err)
+	}
+	c, err = store.GetActiveCampaign(ctx)
+	if err == nil {
+		return c, nil
+	}
+	if errors.Is(err, storage.ErrNotFound) {
+		return storage.Campaign{}, fmt.Errorf("voice mode: no Active Campaign to voice; create a campaign in the web UI, select one with /glyphoxa use, or run `glyphoxa seed` to install the demo campaign")
+	}
+	return storage.Campaign{}, fmt.Errorf("voice: resolve active campaign: %w", err)
 }
 
 // runWeb is the web/all-mode entrypoint (ADR-0039). It resolves the required DB

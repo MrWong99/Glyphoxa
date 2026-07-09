@@ -238,7 +238,7 @@ type npcSpec struct {
 	// per-NPC GrantSet against the shared Registry, so the LLM only ever sees the
 	// Tools this NPC is granted (#113). nil ⇒ granted nothing.
 	grants []tool.Grant
-	// model is the Groq model id this NPC's engine runs (#227): loadSeededNPCs
+	// model is the Groq model id this NPC's engine runs (#227): loadCampaignNPCs
 	// resolves it from the Agent's LLM provider_config, falling back to the
 	// tenant-level LLM row. Empty means "adapter default" — it flows verbatim into
 	// [llm.Request.Model], where the openaicompat adapter fills [groq.DefaultModel]
@@ -481,6 +481,16 @@ func ensureSchemaCurrent(ctx context.Context, dsn string) error {
 	}
 	defer db.Close()
 	return storage.EnsureCurrent(ctx, db)
+}
+
+// EnsureSchemaCurrent is the exported ADR-0031 fail-fast guard for callers that
+// must run a DB query BEFORE [RunFromDB] does its own internal check. The
+// standalone voice entrypoint resolves the Active Campaign before RunFromDB
+// (#323), so it runs this first to keep the stale-schema refusal (the actionable
+// `migrate up` message) ahead of any other query. It delegates to the same
+// self-contained schema-check seam RunFromDB uses.
+func EnsureSchemaCurrent(ctx context.Context, dsn string) error {
+	return ensureSchemaCurrent(ctx, dsn)
 }
 
 // Run builds and runs the live NPC voice loop until ctx is cancelled. It joins
@@ -1008,7 +1018,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 // model-threading contract (#227) is unit-testable with a fake provider that
 // captures the [llm.Request].
 //
-// spec.model — resolved from the Agent's LLM provider_config (loadSeededNPCs),
+// spec.model — resolved from the Agent's LLM provider_config (loadCampaignNPCs),
 // tenant-level row as fallback — flows verbatim into the request. Empty passes
 // through as "" so the openaicompat adapter fills [groq.DefaultModel]; there is
 // NO defaulting duplicated here (the AC "empty → provider default" is proven at
