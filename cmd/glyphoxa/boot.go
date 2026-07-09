@@ -81,6 +81,22 @@ func devMode(getenv func(string) string) bool {
 	return true
 }
 
+// gmSpeakerGate builds the SpeakerID→GM predicate arming the Butler GM-only
+// voice-address gate (#280, ADR-0024/ADR-0050). In dev mode every speaker is the
+// synthetic operator, so the gate admits all — mirroring the dev auto-auth that
+// treats every request as the seeded operator ([enableDevMode]). Otherwise the
+// GM identity is operator-allowlist membership (ADR-0041): allow.Contains is
+// fail-closed on an empty SpeakerID and on any snowflake off the list. An empty
+// allowlist yields a gate that admits nobody (Butler unaddressable by voice);
+// the caller warns on that, as boot refusal already guarantees a non-empty
+// allowlist in non-dev web/all mode.
+func gmSpeakerGate(dev bool, allow auth.OperatorAllowlist) func(string) bool {
+	if dev {
+		return func(string) bool { return true }
+	}
+	return allow.Contains
+}
+
 // sttStreaming reports whether the GLYPHOXA_STT_STREAMING opt-in enables the
 // streaming-STT transport (ADR-0042, issue #180). Same truthy parse as [devMode]:
 // blank or an explicit falsy spelling ("0"/"false"/"no"/"off", any case) is OFF;

@@ -41,6 +41,35 @@ type TargetMatcher interface {
 // standalone, in a hand-picked subset via [Bind], or bundled by a [Conversation].
 type AddressDetector struct {
 	matcher TargetMatcher
+	// isGM reports whether a SpeakerID belongs to the operator allowlist — the
+	// deterministic GM identity per ADR-0050 (allowlist membership, not a
+	// per-session binding). Nil means the Butler GM-address gate is off: every
+	// Butler route publishes as before, the byte-for-byte default for the
+	// voice-standalone and bench paths and every pre-gate call site.
+	isGM func(speakerID string) bool
+}
+
+// DetectorOption configures an [AddressDetector] at construction. Options are
+// variadic and backward compatible: a detector built with no options behaves
+// exactly as before the option seam existed.
+type DetectorOption func(*AddressDetector)
+
+// WithButlerGMGate enforces ADR-0024's Butler GM-only voice-address: a
+// Butler-addressed utterance publishes only when its [voiceevent.STTFinal]
+// SpeakerID is a GM per isGM (operator-allowlist membership, ADR-0050 /
+// ADR-0041). Utterances from a non-allowlisted or empty SpeakerID are dropped
+// (fail closed) — the route goes nowhere, the matcher is not re-invoked for a
+// fallback, and Character NPC routing is untouched.
+//
+// A nil isGM leaves the gate off (the default). The Butler identity check is an
+// orchestration concern kept out of the pure text matcher (ADR-0024): the
+// matcher still scores only transcript text and never sees the SpeakerID.
+//
+// LATENT (Epic 7, #256): this detector-level drop runs after the matcher
+// committed slot/lastAddressed state; must move matcher-side before the Butler
+// joins the live roster.
+func WithButlerGMGate(isGM func(speakerID string) bool) DetectorOption {
+	return func(d *AddressDetector) { d.isGM = isGM }
 }
 
 // NewAddressDetector builds a detector around matcher, which must be non-nil
@@ -50,11 +79,17 @@ type AddressDetector struct {
 // The matcher owns the Voice Session's routing targets and their validation;
 // construct it with the Tenant's Butler and the active Character NPCs (see
 // address.NewWholeWordMatcher or address.NewMatcher) before handing it here.
-func NewAddressDetector(matcher TargetMatcher) *AddressDetector {
+// Pass [WithButlerGMGate] to enforce the Butler GM-only address gate; with no
+// options the detector routes every matcher decision unconditionally.
+func NewAddressDetector(matcher TargetMatcher, opts ...DetectorOption) *AddressDetector {
 	if matcher == nil {
 		panic("orchestrator.NewAddressDetector: matcher must not be nil")
 	}
-	return &AddressDetector{matcher: matcher}
+	d := &AddressDetector{matcher: matcher}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
 }
 
 // Bind subscribes the detector to [voiceevent.STTFinal] on bus and returns a
@@ -70,6 +105,14 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	}
 	return voiceevent.On(bus, func(final voiceevent.STTFinal) {
 		for _, routed := range d.matcher.TargetMatch(final.Text) {
+			// Butler GM-only address gate (ADR-0024): drop a Butler route whose
+			// SpeakerID is not an allowlisted GM (empty fails closed). Fail
+			// closed means the utterance routes nowhere — the matcher is not
+			// re-invoked for a fallback. Character routes are never gated.
+			if d.isGM != nil && routed.Target.AgentRole == voiceevent.AgentRoleButler &&
+				(final.SpeakerID == "" || !d.isGM(final.SpeakerID)) {
+				continue
+			}
 			// Carry the turn correlation id (A3) from the utterance onto each
 			// routing decision it produced; the matcher does not know about it.
 			routed.TurnID = final.TurnID

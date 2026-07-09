@@ -389,6 +389,17 @@ type Config struct {
 	// voice standalone / the benchmark / an uncapped session are byte-for-byte
 	// unchanged.
 	Gate orchestrator.TurnGate
+
+	// GMSpeaker reports whether a Discord SpeakerID belongs to a Game Master —
+	// operator-allowlist membership per ADR-0050/ADR-0041, the deterministic GM
+	// identity with no per-session binding. When non-nil it arms the Butler
+	// GM-only voice-address gate (ADR-0024): a Butler-addressed utterance routes
+	// only from an allowlisted SpeakerID, and fails closed on any other or empty
+	// one; Character NPC routing is untouched. The live binary sets it to the
+	// parsed OperatorAllowlist's membership check (cmd/glyphoxa); nil is the
+	// feature-off default (voice standalone / the benchmark), so the gate is
+	// absent and every Butler route publishes as before.
+	GMSpeaker func(speakerID string) bool
 }
 
 // RunFromDB loads the bound Active Campaign's Character NPCs from Postgres (via
@@ -735,7 +746,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -820,6 +831,11 @@ var (
 	newLLM = llmbuild.New
 	newSTT = stteleven.New
 	newTTS = ttseleven.New
+	// newAddressDetector is the constructor seam for the address detector (#280):
+	// buildConversation dispatches through it so a test can capture the detector —
+	// and the Butler GM-gate option threaded onto it — without standing up the
+	// whole Conversation. The live path is orchestrator.NewAddressDetector verbatim.
+	newAddressDetector = orchestrator.NewAddressDetector
 )
 
 // llmProviderID reports the provider id of an LLM Provider Config for [newLLM]
@@ -918,7 +934,7 @@ func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView)
 	return unsub
 }
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -1041,7 +1057,11 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		roster.AddNPC(npc)
 	}
 
-	detector := orchestrator.NewAddressDetector(roster.matcher)
+	// Butler GM-only voice-address gate (#280, ADR-0024): WithButlerGMGate reads
+	// the utterance's SpeakerID (ADR-0050 attribution) to keep the Butler a
+	// GM-only voice address. A nil gmSpeaker (voice standalone / bench) passes a
+	// nil gate — off, so every Butler route publishes exactly as before.
+	detector := newAddressDetector(roster.matcher, orchestrator.WithButlerGMGate(gmSpeaker))
 
 	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),

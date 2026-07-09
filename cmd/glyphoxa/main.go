@@ -356,6 +356,18 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	var reg *presence.Registry
 	if withVoice {
 		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
+		// Butler GM-only voice-address gate (#280, ADR-0024/ADR-0050): arm the
+		// AddressDetector's Butler gate with GM identity — the same allowlist that
+		// guards the web login and the slash-command surface, reused (not
+		// re-parsed) so the GM is one server-side source of truth. Dev mode
+		// admits every speaker (mirrors dev auto-auth). Set on the base config
+		// BEFORE the Manager copies it, so every manager-started Voice Session
+		// inherits the gate. Only the voice-driving `all` mode reaches here; the
+		// env-only voice/bench paths leave it nil.
+		cfg.GMSpeaker = gmSpeakerGate(dev, allow)
+		if !dev && allow.Len() == 0 {
+			log.Warn("butler voice-address gate armed with empty allowlist; Butler unaddressable by voice")
+		}
 		gate := presence.NewGate(allow, func() string {
 			if pres == nil {
 				return ""

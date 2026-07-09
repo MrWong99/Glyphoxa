@@ -132,9 +132,20 @@ func (STTFinal) EventName() string { return "stt.final" }
 // for SSE consumers and test diagnostics, but not load-bearing for routing.
 type AddressTarget struct {
 	AgentID   string
-	AgentRole string // "butler" or "character"
+	AgentRole string // AgentRoleButler or AgentRoleCharacter
 	Name      string
 }
+
+// The two Agent Role values an [AddressTarget] may carry (CONTEXT.md "Agent
+// Role"). They are the sole valid AgentRole strings: the matchers validate
+// against them at construction and the Butler GM-address gate
+// ([orchestrator.WithButlerGMGate]) keys off AgentRoleButler, so a mistyped or
+// empty role is a wiring error caught loudly rather than a silently disarmed
+// gate.
+const (
+	AgentRoleButler    = "butler"
+	AgentRoleCharacter = "character"
+)
 
 // AddressRouted marks the routing decision for one [STTFinal] utterance.
 //

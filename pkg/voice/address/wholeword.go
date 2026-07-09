@@ -31,7 +31,7 @@ type WholeWordMatcher struct {
 // AgentRole "character" with a non-empty Name; a violation panics. These are
 // wiring errors caught at construction, not runtime conditions.
 func NewWholeWordMatcher(butler voiceevent.AddressTarget, npcs []voiceevent.AddressTarget) *WholeWordMatcher {
-	if butler.AgentRole != "butler" {
+	if butler.AgentRole != voiceevent.AgentRoleButler {
 		panic(`address.NewWholeWordMatcher: butler.AgentRole must be "butler"`)
 	}
 	if butler.Name == "" {
@@ -39,7 +39,7 @@ func NewWholeWordMatcher(butler voiceevent.AddressTarget, npcs []voiceevent.Addr
 	}
 	matchers := make([]*regexp.Regexp, len(npcs))
 	for i, npc := range npcs {
-		if npc.AgentRole != "character" {
+		if npc.AgentRole != voiceevent.AgentRoleCharacter {
 			panic(`address.NewWholeWordMatcher: npc.AgentRole must be "character"`)
 		}
 		if npc.Name == "" {

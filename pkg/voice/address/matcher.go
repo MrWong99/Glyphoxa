@@ -2,6 +2,7 @@ package address
 
 import (
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -205,6 +206,10 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 		if agents[i].Target.AgentID == "" {
 			panic("address.NewMatcher: agent Target.AgentID must not be empty")
 		}
+		if !validAgentRole(agents[i].Target.AgentRole) {
+			panic(`address.NewMatcher: agent Target.AgentRole must be "butler" or "character", got ` +
+				strconv.Quote(agents[i].Target.AgentRole))
+		}
 		agents[i].index = i
 	}
 
@@ -224,6 +229,14 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 	}
 	m.index = m.buildIndex()
 	return m
+}
+
+// validAgentRole reports whether role is one of the two valid Agent Role values
+// (CONTEXT.md "Agent Role"). Both matcher constructors reject anything else so a
+// mistyped or empty role dies at wiring time rather than silently disarming the
+// Butler GM-address gate (#280), which keys off [voiceevent.AgentRoleButler].
+func validAgentRole(role string) bool {
+	return role == voiceevent.AgentRoleButler || role == voiceevent.AgentRoleCharacter
 }
 
 // buildIndex rebuilds the fuzzy name index from the current m.agents. Callers
@@ -271,6 +284,10 @@ func (m *Matcher) Add(agents ...Agent) {
 	for _, a := range agents {
 		if a.Target.AgentID == "" {
 			panic("address.Matcher.Add: agent Target.AgentID must not be empty")
+		}
+		if !validAgentRole(a.Target.AgentRole) {
+			panic(`address.Matcher.Add: agent Target.AgentRole must be "butler" or "character", got ` +
+				strconv.Quote(a.Target.AgentRole))
 		}
 		if _, dup := seen[a.Target.AgentID]; dup {
 			panic("address.Matcher.Add: duplicate agent AgentID " + a.Target.AgentID)
