@@ -16,11 +16,19 @@ type recordedReply struct {
 	ephemeral bool
 }
 
-// fakeResponder records reply/defer/followup calls instead of hitting Discord.
+// fakeResponder records reply/defer/followup calls instead of hitting Discord. It
+// models Discord's documented interaction-response behavior so tests catch a
+// visibility regression: after a Defer, the FIRST post-defer message (an implicit
+// followup, or an explicit editOriginal) EDITS the original placeholder and its
+// visibility is forced to the Defer's (the ephemeral flag is ignored on the
+// original-response edit); only subsequent followups create fresh messages honoring
+// their own flag. Every post-defer message is recorded in followups in order, each
+// with its EFFECTIVE visibility.
 type fakeResponder struct {
-	replies   []recordedReply
-	followups []recordedReply
-	deferred  *bool
+	replies          []recordedReply
+	followups        []recordedReply
+	deferred         *bool
+	originalConsumed bool
 }
 
 func (f *fakeResponder) reply(content string, ephemeral bool) error {
@@ -34,7 +42,24 @@ func (f *fakeResponder) deferResponse(ephemeral bool) error {
 }
 
 func (f *fakeResponder) followup(content string, ephemeral bool) error {
-	f.followups = append(f.followups, recordedReply{content, ephemeral})
+	eff := ephemeral
+	if f.deferred != nil && !f.originalConsumed {
+		// First post-defer message edits the original placeholder: the flag is ignored
+		// and the defer's visibility is preserved.
+		eff = *f.deferred
+		f.originalConsumed = true
+	}
+	f.followups = append(f.followups, recordedReply{content, eff})
+	return nil
+}
+
+func (f *fakeResponder) editOriginal(content string) error {
+	vis := true
+	if f.deferred != nil {
+		vis = *f.deferred
+	}
+	f.originalConsumed = true
+	f.followups = append(f.followups, recordedReply{content, vis})
 	return nil
 }
 
