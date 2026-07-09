@@ -85,6 +85,66 @@ func TestProjection_LinesAndOrder(t *testing.T) {
 	}
 }
 
+// TestProjection_SpeakerID is #278: an STTFinal carrying a SpeakerID projects a
+// human Line stamped with that snowflake AND tees it onto the persisted op — while
+// the rendering (who / Kind / Tag) is UNTOUCHED ("Player / DM", player, no pill):
+// attribution is #281's slice, this only threads the id through.
+func TestProjection_SpeakerID(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello", TurnID: "t1", SpeakerID: "111"})
+
+	v := r.View(fs.id.String())
+	if len(v.Lines) != 1 {
+		t.Fatalf("got %d lines, want 1: %+v", len(v.Lines), v.Lines)
+	}
+	l := v.Lines[0]
+	if l.SpeakerID != "111" {
+		t.Errorf("Line.SpeakerID = %q, want 111", l.SpeakerID)
+	}
+	// Rendering untouched — attribution is #281, not this slice.
+	if l.Who != "Player / DM" || l.Kind != KindPlayer || l.Tag != "" {
+		t.Errorf("rendering changed: who=%q kind=%q tag=%q, want Player / DM / player / \"\"", l.Who, l.Kind, l.Tag)
+	}
+
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	got, _ := store.ListTranscriptLines(context.Background(), fs.id)
+	if len(got) != 1 {
+		t.Fatalf("persisted %d lines, want 1", len(got))
+	}
+	if got[0].SpeakerDiscordUserID != "111" {
+		t.Errorf("persisted SpeakerDiscordUserID = %q, want 111", got[0].SpeakerDiscordUserID)
+	}
+}
+
+// TestProjection_EmptySpeakerID is #278: an unattributed STTFinal (empty SpeakerID)
+// leaves Line.SpeakerID "" and persists it empty — the pre-#278 anonymous path,
+// byte-identical.
+func TestProjection_EmptySpeakerID(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Silent", TurnID: "t1"})
+
+	if l := r.View(fs.id.String()).Lines[0]; l.SpeakerID != "" {
+		t.Errorf("Line.SpeakerID = %q, want \"\" (unattributed)", l.SpeakerID)
+	}
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	got, _ := store.ListTranscriptLines(context.Background(), fs.id)
+	if got[0].SpeakerDiscordUserID != "" {
+		t.Errorf("persisted SpeakerDiscordUserID = %q, want \"\"", got[0].SpeakerDiscordUserID)
+	}
+}
+
 // TestProjection_MuteFrame pins the mute relay (#211): a MuteChanged projects a
 // "mute" frame carrying agent_id + muted, and the frame rides the ring so a
 // Last-Event-ID reconnect replays it (no snapshot change — the reload truth is

@@ -101,7 +101,13 @@ type openChunk struct {
 	turnIDs    []string     // Agent turns whose line lives in this chunk (detached on close)
 	agents     []uuid.UUID  // participated Agent ids, first-seen order
 	agentSeen  map[uuid.UUID]struct{}
-	timer      *time.Timer
+	// speakers is the distinct Discord snowflakes of the humans who spoke in this
+	// chunk (#278), collected EAGERLY at appendHuman — the STTFinal events are gone
+	// by closeChunk. First-seen order; an empty SpeakerID (unattributed) is never
+	// added. speakerSeen dedups.
+	speakers    []string
+	speakerSeen map[string]struct{}
+	timer       *time.Timer
 }
 
 // Chunker projects bus events into Transcript Chunks and writes them async. Safe
@@ -228,8 +234,24 @@ func (c *Chunker) rollover(vs storage.VoiceSession) {
 func (c *Chunker) appendHuman(ev voiceevent.STTFinal) {
 	oc := c.ensureOpen(ev.At)
 	oc.entries = append(oc.entries, &chunkLine{text: "Player / DM: " + ev.Text})
+	c.recordSpeaker(oc, ev.SpeakerID)
 	oc.count++
 	c.afterAppend(oc)
+}
+
+// recordSpeaker adds a human utterance's Speaker Lane snowflake to the chunk's
+// distinct speaker set (deduped, first-seen order), collected eagerly since the
+// event is gone by close (#278). An empty SpeakerID (unattributed, ADR-0050) is
+// never added.
+func (c *Chunker) recordSpeaker(oc *openChunk, speakerID string) {
+	if speakerID == "" {
+		return
+	}
+	if _, ok := oc.speakerSeen[speakerID]; ok {
+		return
+	}
+	oc.speakerSeen[speakerID] = struct{}{}
+	oc.speakers = append(oc.speakers, speakerID)
 }
 
 // bufferAgentSentence records one DISPATCHED sentence. TTSInvoked is a dispatch
@@ -320,9 +342,10 @@ func (c *Chunker) recordAgent(oc *openChunk, target voiceevent.AddressTarget) {
 func (c *Chunker) ensureOpen(at time.Time) *openChunk {
 	if c.open == nil {
 		oc := &openChunk{
-			startedAt:  at,
-			openedWall: time.Now(),
-			agentSeen:  map[uuid.UUID]struct{}{},
+			startedAt:   at,
+			openedWall:  time.Now(),
+			agentSeen:   map[uuid.UUID]struct{}{},
+			speakerSeen: map[string]struct{}{},
 		}
 		oc.timer = time.AfterFunc(c.window, func() { c.onTimer(oc) })
 		c.open = oc
@@ -382,11 +405,15 @@ func (c *Chunker) closeChunk(oc *openChunk) {
 	for i, e := range oc.entries {
 		texts[i] = e.text
 	}
+	speakers := oc.speakers
+	if speakers == nil {
+		speakers = []string{} // scan contract: non-nil empty when no attributed speaker
+	}
 	chunk := storage.TranscriptChunk{
 		CampaignID:            c.activeCampaignID,
 		VoiceSessionID:        c.activeUUID,
 		Content:               strings.Join(texts, "\n"),
-		SpeakerDiscordUserIDs: []string{},
+		SpeakerDiscordUserIDs: speakers,
 		ParticipatedAgentIDs:  oc.agents,
 		StartedAt:             oc.startedAt,
 	}

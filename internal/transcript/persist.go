@@ -56,15 +56,16 @@ func (r *Relay) persist(l Line, seq uint64) {
 		return
 	}
 	op := writeOp{line: &storage.TranscriptLine{
-		VoiceSessionID: r.activeUUID,
-		CampaignID:     r.activeCampaignID,
-		LineID:         l.ID,
-		Seq:            int64(seq), //nolint:gosec // seq is a small monotonic counter
-		Who:            l.Who,
-		Tag:            l.Tag,
-		Kind:           string(l.Kind),
-		TS:             l.TS,
-		Text:           l.Text,
+		VoiceSessionID:       r.activeUUID,
+		CampaignID:           r.activeCampaignID,
+		LineID:               l.ID,
+		Seq:                  int64(seq), //nolint:gosec // seq is a small monotonic counter
+		Who:                  l.Who,
+		Tag:                  l.Tag,
+		Kind:                 string(l.Kind),
+		TS:                   l.TS,
+		Text:                 l.Text,
+		SpeakerDiscordUserID: l.SpeakerID, // #278: "" (unattributed / Agent) → NULLIF → NULL in storage
 	}}
 	select {
 	case r.writeCh <- op:

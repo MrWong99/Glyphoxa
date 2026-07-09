@@ -95,6 +95,12 @@ type Line struct {
 	Kind Kind      `json:"kind"`
 	TS   time.Time `json:"ts"`
 	Text string    `json:"text"`
+	// SpeakerID is the Discord snowflake of the human who spoke this Line (#278,
+	// ADR-0050), threaded from STTFinal for persistence + later attribution (#281).
+	// Empty for an unattributed utterance or an Agent reply; the omitempty keeps the
+	// live-view wire byte-identical for the anonymous path. RENDERING is untouched —
+	// who/Kind still reflect the anonymous lane until #281 consumes this.
+	SpeakerID string `json:"speaker_id,omitempty"`
 }
 
 // Typing is the "is speaking" / "listening" indicator the SPA renders as the
@@ -291,11 +297,12 @@ func (r *Relay) project(e voiceevent.Event) {
 		// (ADR-0039: raw STT carries no speaker id).
 		r.humanSeq++
 		r.emitLine(Line{
-			ID:   "u:" + strconv.FormatUint(r.humanSeq, 10),
-			Who:  "Player / DM",
-			Kind: KindPlayer,
-			TS:   ev.At,
-			Text: ev.Text,
+			ID:        "u:" + strconv.FormatUint(r.humanSeq, 10),
+			Who:       "Player / DM",
+			Kind:      KindPlayer,
+			TS:        ev.At,
+			Text:      ev.Text,
+			SpeakerID: ev.SpeakerID, // #278: thread the Speaker Lane's snowflake through; rendering unchanged
 		})
 	case voiceevent.AddressRouted:
 		// Records WHO answers this turn; no line yet (no text).
