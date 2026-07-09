@@ -44,7 +44,7 @@ func TestSegmenter_LaneStreamCap(t *testing.T) {
 	var factoryCalls int
 	seg.laneStreamFactory = func(speakerID string) *StreamManager {
 		factoryCalls++
-		return NewStreamManager(&fakeStreamingRecognizer{}, WithStreamSpeakerID(speakerID))
+		return NewStreamManager(&fakeStreamingRecognizer{stream: &fakeStream{}}, WithStreamSpeakerID(speakerID))
 	}
 	seg.maxStreamLanes = 1
 	t.Cleanup(seg.Bind(t.Context(), bus))
