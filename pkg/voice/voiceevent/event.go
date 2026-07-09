@@ -20,9 +20,15 @@ type Event interface {
 }
 
 // VADSpeechStart marks the onset of an utterance as detected by the VAD stage.
+//
+// SpeakerID is the Discord snowflake string of the participant whose Speaker Lane
+// detected the onset (ADR-0050), or "" when the transition came off the default
+// (unattributed) lane — the single-lane MVP path, byte-identical to before speaker
+// lanes existed. Additive per ADR-0039's stated seam.
 type VADSpeechStart struct {
 	At          time.Time
 	Probability float64
+	SpeakerID   string
 }
 
 // EventName implements [Event].
@@ -31,9 +37,16 @@ func (VADSpeechStart) EventName() string { return "vad.speech_start" }
 // VADSpeechEnd marks the end of an utterance as detected by the VAD stage:
 // the speech-active state has been left because probability stayed below the
 // silence threshold for the configured number of consecutive frames.
+// SpeakerID is the Discord snowflake string of the participant whose Speaker Lane
+// detected the end-of-speech (ADR-0050), or "" for the default lane. NOTE: unlike
+// the ADR-0050 enumeration (VADSpeechStart / STTPartial / STTFinal / BargeDetected),
+// VADSpeechEnd also carries SpeakerID — lane routing of the bus-driven speech
+// transitions needs the speech-end attributed to disarm the right lane's barge
+// window and endpoint the right lane. Additive, in the ADR's spirit.
 type VADSpeechEnd struct {
 	At          time.Time
 	Probability float64
+	SpeakerID   string
 }
 
 // EventName implements [Event].
@@ -63,6 +76,10 @@ type STTPartial struct {
 	// UtteranceID is minted at the local VAD speech_start ([NewUtteranceID]) and
 	// joins this utterance's partials to the [STTFinal] its manual commit yields.
 	UtteranceID string
+	// SpeakerID is the Discord snowflake string of the Speaker Lane this partial's
+	// stream belongs to (ADR-0050), or "" for the default lane. Stamped by the
+	// per-lane [StreamManager] on the partials it publishes.
+	SpeakerID string
 }
 
 // EventName implements [Event].
@@ -92,6 +109,12 @@ type STTFinal struct {
 	// from (ADR-0042), minted at the local VAD speech_start. It is empty on the
 	// batch path (no stream, no partials) — the byte-for-byte no-streaming default.
 	UtteranceID string
+	// SpeakerID is the Discord snowflake string of the Speaker Lane this utterance
+	// was segmented on (ADR-0050) — the attribution Address Detection and the
+	// Transcript inherit. "" for the default (unattributed) lane, the single-lane
+	// MVP path. Stamped by [STT.PublishFinal] on both the batch and streamed-commit
+	// paths.
+	SpeakerID string
 }
 
 // EventName implements [Event].
@@ -266,11 +289,14 @@ func (TurnEnded) EventName() string { return "turn.ended" }
 // It is the observability signal for a yield that actually cancelled an active
 // turn — speech that finds no Agent speaking does not emit it.
 //
-// Per-participant attribution (interrupted_by_user_id) is deferred until the VAD
-// stage republishes per-participant speech events (ADR-0019); this slice runs a
-// single VAD session, so the event carries only the moment of the cut.
+// SpeakerID is the Discord snowflake string of the participant who barged — the
+// Speaker Lane whose confirmed speech reclaimed the floor (ADR-0050). It is ""
+// when the barge came off the default (single, unattributed) lane, the MVP path.
+// With per-speaker lanes the barge window is per-speaker, so this names exactly
+// who interrupted (needed by Epic 8's detector and future floor rules).
 type BargeDetected struct {
-	At time.Time
+	At        time.Time
+	SpeakerID string
 }
 
 // EventName implements [Event].

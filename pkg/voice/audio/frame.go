@@ -22,6 +22,14 @@ type Frame struct {
 	samples    []int16
 	sampleRate int
 	frameMs    int
+	// speaker is the attribution of this frame's audio: a Discord snowflake
+	// string for a frame decoded from one participant's Opus stream, or "" when
+	// the source is unknown (a mixed/silence-clock frame, or a test frame). It is
+	// private so it never widens the Frame construction contract — set only via
+	// [Frame.WithSpeaker] — and it is deliberately NOT part of the audio payload:
+	// [voicecassette.HashFrames] hashes only Samples(), so tagging a frame leaves
+	// cassette fingerprints untouched.
+	speaker string
 }
 
 // NewFrame wraps an existing []int16 slice as a Frame, validating that the
@@ -67,3 +75,21 @@ func (f Frame) SampleRate() int { return f.sampleRate }
 
 // FrameMs returns the frame duration in milliseconds.
 func (f Frame) FrameMs() int { return f.frameMs }
+
+// Speaker returns the frame's attribution — the Discord snowflake string of the
+// participant whose Opus stream it was decoded from, or "" (the zero value) when
+// the source is unattributed: a mixed/silence-clock frame, or a frame built
+// without [Frame.WithSpeaker]. Downstream the [orchestrator.Segmenter] routes an
+// attributed frame to its Speaker Lane and a "" frame to the default lane, so the
+// zero value reproduces today's single-lane behaviour exactly (ADR-0050).
+func (f Frame) Speaker() string { return f.speaker }
+
+// WithSpeaker returns a copy of f attributed to speaker id. It never mutates the
+// receiver (Frames are immutable from the caller's perspective) and shares the
+// same sample storage — only the attribution differs. Passing "" yields an
+// unattributed copy. The codec stamps each decoded frame with its
+// [gxvoice.Frame.UserID] here (ADR-0050).
+func (f Frame) WithSpeaker(id string) Frame {
+	f.speaker = id
+	return f
+}
