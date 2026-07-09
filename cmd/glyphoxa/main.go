@@ -390,6 +390,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return fmt.Errorf("web: %w", err)
 	}
 
+	// The one-shot recap Engine (#272) is constructed ONCE here so both consumers can
+	// share it: the /glyphoxa recap slash command (#273, registered below) and the
+	// GenerateRecap RPC (#274, wired through managementMounts). It reads transcripts
+	// via the store, decrypts a BYOK LLM key with cipher, meters usage into the process
+	// metrics, and logs attribution — but never persists a recap (ADR-0040).
+	recapEngine := recap.NewEngine(store, cipher, metrics, log)
+
 	if withVoice {
 		// The GM admin/session commands (#108, ADR-0010): /glyphoxa use sets the
 		// durable Active Campaign; start/end drive the SAME in-process Manager the
@@ -405,6 +412,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			presence.StartCommand(store, mgr),
 			presence.EndCommand(mgr),
 			presence.SearchCommand(store, mgr),
+			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
+			// Session via the SAME shared slash resolver, delivered per the invoker's
+			// choice (voiced/public/ephemeral, #271). butler is nil — the Butler is not
+			// voiced today (ADR-0009/0024), so a voiced request degrades to public text.
+			presence.RecapCommand(store, mgr, recapEngine, nil),
 			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
 			presence.MuteCommand(mgr, store),
