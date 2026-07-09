@@ -169,6 +169,30 @@ func TestListVoiceSessions(t *testing.T) {
 	if len(capped) != 2 || capped[0].ID != newest || capped[1].ID != middle {
 		t.Errorf("ListVoiceSessions(limit=2) = %v, want [%s %s]", capped, newest, middle)
 	}
+
+	// id DESC tiebreak: two rows sharing the SAME started_at must order by id DESC
+	// (deterministic, same tiebreak as GetLatestVoiceSession) so paging never
+	// duplicates or drops a row. A dedicated campaign isolates this from the above.
+	var tieCampaign uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name) VALUES ($1, 'Tie') RETURNING id`, tenantID).
+		Scan(&tieCampaign); err != nil {
+		t.Fatalf("insert tie campaign: %v", err)
+	}
+	tie := base.Add(9 * time.Hour)
+	a := mk(tieCampaign, tie, false)
+	b := mk(tieCampaign, tie, false)
+	hi, lo := a, b
+	if b.String() > a.String() { // uuid hex-string order matches Postgres uuid byte order
+		hi, lo = b, a
+	}
+	tied, err := st.ListVoiceSessions(ctx, tieCampaign, 50)
+	if err != nil {
+		t.Fatalf("ListVoiceSessions(tie): %v", err)
+	}
+	if len(tied) != 2 || tied[0].ID != hi || tied[1].ID != lo {
+		t.Errorf("equal started_at order = %v, want id DESC [%s %s]", tied, hi, lo)
+	}
 }
 
 // TestReconcileOrphanedVoiceSessions is #143's boot reconciliation against a

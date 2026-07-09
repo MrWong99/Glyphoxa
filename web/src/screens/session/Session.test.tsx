@@ -27,6 +27,7 @@ import {
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
+import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { MockEventSource } from "@/test/mockEventSource";
 import { Session, formatElapsed, sessionRefetchInterval, SESSION_REFETCH_MS } from "./Session";
 
@@ -893,10 +894,46 @@ describe("Session past-session picker (#270)", () => {
     expect(items.map((li) => li.getAttribute("data-line-id"))).toEqual(["u:1", "a:t1"]);
     // The latest session's lines are no longer on screen.
     expect(screen.queryByText("latest first line")).not.toBeInTheDocument();
+    // A picked PAST session opens NO live stream — pins the `active && !viewingPast`
+    // gate (#270 6a): replay is snapshot-only, never an EventSource.
+    expect(MockEventSource.last()).toBeUndefined();
 
     // Back to current returns to the latest session's transcript.
     fireEvent.click(screen.getByRole("button", { name: /back to current session/i }));
     expect(await screen.findByText("latest first line")).toBeInTheDocument();
+  });
+
+  it("surfaces an error (not the empty state) when a past session's snapshot fails to load (#270 finding 4)", async () => {
+    // vs1 (current) loads fine; vsOld's snapshot 500s.
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/sessions/vsOld")) {
+        return new Response("boom", { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({
+          lines: [{ id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "latest first line" }],
+          status: "idle",
+          typing: { active: false, label: "" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    render(
+      <Providers transport={pickerTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    const picker = await screen.findByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/5 lines/));
+
+    // Inline error shows + a toast fires — never the "Start a session…" empty state.
+    expect(await screen.findByTestId("snapshot-error")).toBeInTheDocument();
+    expect(screen.queryByText(/start a session to capture/i)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't load that session/i.test(String(m)))).toBe(true),
+    );
   });
 });
 
@@ -966,9 +1003,114 @@ describe("Session live default unchanged with picker present (#270 AC5)", () => 
     expect(await screen.findByText("Session transcript")).toBeInTheDocument();
     expect(await screen.findByText("old first line")).toBeInTheDocument();
 
-    // Back to current → the live feed is the default again.
+    // Back to current → the live feed is the default again AND its stream reopens:
+    // a newly streamed line renders (guards AC5 that returning resumes the live tail,
+    // #270 6b — not a frozen snapshot).
     fireEvent.click(screen.getByRole("button", { name: /back to current session/i }));
     expect(await screen.findByText("Live transcript")).toBeInTheDocument();
+    const es2 = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst || inst === es) throw new Error("live stream not reopened after returning");
+      return inst;
+    });
+    act(() =>
+      es2.emit("line", { id: "a:t2", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "back on the live tail" }),
+    );
+    expect(await screen.findByText("back on the live tail")).toBeInTheDocument();
+  });
+});
+
+// switchTransport is a MUTABLE two-campaign transport: flipping `state.campaign`
+// then invalidating the Active-Campaign-scoped caches models the topbar campaign
+// switch. Campaign A has a current + an older session; B has its own current.
+function switchTransport(state: { campaign: "A" | "B" }) {
+  const mk = (id: string, lineCount: number, status = "ended") =>
+    create(VoiceSessionSchema, {
+      id,
+      campaignId: state.campaign === "A" ? "cA" : "cB",
+      status,
+      startedAt: timestampFromDate(new Date(Date.now() - 60 * 60 * 1000)),
+      endedAt: timestampFromDate(new Date()),
+      lineCount,
+    });
+  const aCurrent = mk("vsA", 3);
+  const aOlder = create(VoiceSessionSchema, {
+    id: "vsAold",
+    campaignId: "cA",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+    lineCount: 9,
+  });
+  const bCurrent = mk("vsB", 7);
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () =>
+        create(GetSessionResponseSchema, {
+          session: state.campaign === "A" ? aCurrent : bCurrent,
+          active: false,
+        }),
+      listSessions: () =>
+        create(ListSessionsResponseSchema, {
+          sessions: state.campaign === "A" ? [aCurrent, aOlder] : [bCurrent],
+        }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, {
+            id: state.campaign === "A" ? "cA" : "cB",
+            name: state.campaign === "A" ? "Campaign A" : "Campaign B",
+          }),
+        }),
+    });
+  });
+}
+
+describe("Session past-session view across a campaign switch (#270 finding 1)", () => {
+  beforeEach(() => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const line = (text: string) => ({
+        lines: [{ id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text }],
+        status: "idle",
+        typing: { active: false, label: "" },
+      });
+      const text = url.includes("/vsAold")
+        ? "A archived line"
+        : url.includes("/vsB")
+          ? "B current line"
+          : "A current line";
+      return new Response(JSON.stringify(line(text)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+  });
+
+  it("resets the viewed past session so the new campaign never renders the old one's transcript", async () => {
+    const state: { campaign: "A" | "B" } = { campaign: "A" };
+    const qc = makeQueryClient();
+    render(
+      <Providers transport={switchTransport(state)} queryClient={qc}>
+        <Session />
+      </Providers>,
+    );
+
+    // In campaign A, browse the older (archived) session.
+    const picker = await screen.findByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/9 lines/));
+    expect(await screen.findByText("A archived line")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /back to current session/i })).toBeInTheDocument();
+
+    // Switch to campaign B and run the Active-Campaign sweep (topbar switch).
+    state.campaign = "B";
+    await act(async () => {
+      void invalidateActiveCampaignScopedQueries(qc);
+    });
+
+    // The view resets: B's current transcript renders, A's archived line is gone,
+    // and the "back to current" affordance (viewingPast) is cleared.
+    expect(await screen.findByText("B current line")).toBeInTheDocument();
+    expect(screen.queryByText("A archived line")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /back to current session/i })).not.toBeInTheDocument();
   });
 });
 

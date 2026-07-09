@@ -143,6 +143,7 @@ export function Session() {
   // transient blip costs nothing visible here.
   const campaignQ = useQuery(CampaignService.method.getActiveCampaign, {}, { retry: false });
   const campaignName = campaignQ.data?.campaign?.name;
+  const activeCampaignId = campaignQ.data?.campaign?.id ?? null;
 
   const active = data?.active ?? false;
   const session = data?.session;
@@ -174,6 +175,18 @@ export function Session() {
       }),
     });
 
+  // The past-session picker list goes stale on a Start: the new running row must
+  // appear (labelled "live") without waiting for a window refocus. Stop's stale is
+  // covered by the end-sweep (campaignCache watchVoiceSessionEnd), but Start has no
+  // such trigger, so refresh listSessions on a successful Start (#270).
+  const invalidateSessions = () =>
+    queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: SessionService.method.listSessions,
+        cardinality: "finite",
+      }),
+    });
+
   // A failing Start/Stop must not be swallowed (#144): surface it (ADR-0017:
   // sonner) and invalidate — a Stop that hits "no active session" means the
   // loop already died server-side, and the refetch snaps the badge off Live.
@@ -182,7 +195,10 @@ export function Session() {
     void invalidate();
   };
   const start = useMutation(SessionService.method.startSession, {
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      void invalidateSessions();
+    },
     onError: onError("start"),
   });
   const stop = useMutation(SessionService.method.stopSession, {
@@ -254,6 +270,27 @@ export function Session() {
     }
   }, [pendingJump, renderedSessionId, renderedLineIds]);
 
+  // viewSession is the ONE navigation seam: switching the viewed session ALWAYS
+  // drops any queued cross-session jump, so a manual pick never inherits a stale
+  // pendingJump from an earlier search click (which would surprise-scroll once that
+  // session's snapshot loads, #270 finding 3). Passing null returns to current/live.
+  const viewSession = (id: string | null) => {
+    setViewedId(id);
+    setPendingJump(null);
+  };
+
+  // Active-Campaign switch reset (#270 finding 1): the topbar switcher sweeps the
+  // Active-Campaign-scoped caches (campaignCache.ts), refetching listSessions +
+  // getSession for the NEW campaign — but viewedId/pendingJump are local state the
+  // sweep can't see, so without this the PREVIOUS campaign's past session keeps
+  // rendering under the new campaign's header ("silently serving the previous
+  // campaign's data" — the worst failure mode). Reset the view whenever the resolved
+  // Active Campaign id changes so a switch always lands on the new campaign's default.
+  useEffect(() => {
+    viewSession(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCampaignId]);
+
   // openHit routes a clicked search hit: if its line is on screen (same rendered
   // session), highlight it immediately; otherwise navigate to that session and
   // queue the jump for after its transcript loads (no more dead-end, #270 AC4).
@@ -265,6 +302,18 @@ export function Session() {
     setViewedId(sessionId === currentId ? null : sessionId);
     setPendingJump({ sessionId, lineId });
   };
+
+  // Failed past-session snapshot (#270 finding 4): a browse whose DB-backed snapshot
+  // fetch errors must NOT masquerade as the empty "start a session" state — that
+  // reads as a lost archive. Surface it: a toast once + an inline error in the
+  // transcript card. Only while viewing a PAST session (a live session's own
+  // failures are the #123 connection surface).
+  const pastSnapshotFailed = viewingPast && transcript.snapshotFailed;
+  useEffect(() => {
+    if (pastSnapshotFailed) {
+      toast.error("Couldn't load that session's transcript. It may be unavailable — try again.");
+    }
+  }, [pastSnapshotFailed]);
 
   return (
     <div className="gx-session">
@@ -350,17 +399,23 @@ export function Session() {
             sessions={pastSessions}
             renderedSessionId={renderedSessionId}
             viewingPast={viewingPast}
-            onPick={(id) => setViewedId(id === currentId ? null : id)}
-            onBackToCurrent={() => setViewedId(null)}
+            onPick={(id) => viewSession(id === currentId ? null : id)}
+            onBackToCurrent={() => viewSession(null)}
           />
         )}
         <TranscriptSearch onOpen={openHit} />
         <Card>
-          {!hasLines && !showTyping ? (
+          {pastSnapshotFailed ? (
+            <p className="gx-session__transcript-empty" role="alert" data-testid="snapshot-error">
+              Couldn't load this session's transcript. It may be unavailable — pick another session or try again.
+            </p>
+          ) : !hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
-              {active
+              {active && !viewingPast
                 ? "Listening… transcript lines will appear here."
-                : "Start a session to capture the table's voice transcript."}
+                : viewingPast
+                  ? "This session has no transcript lines."
+                  : "Start a session to capture the table's voice transcript."}
             </p>
           ) : (
             <ol className="gx-transcript">
