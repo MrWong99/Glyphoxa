@@ -2,6 +2,7 @@ package presence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -16,18 +17,38 @@ import (
 
 // fakeRecapEngine records the sessions it was asked to recap and returns a
 // canned Result/err, so the handler's session pick + delivery can be asserted
-// without a live LLM.
+// without a live LLM. With block set it hangs until the ctx is cancelled and
+// returns ctx.Err() — the recapOpTimeout stand-in for a stuck LLM.
 type fakeRecapEngine struct {
 	result recap.Result
 	err    error
+	block  bool
 	calls  int
 	gotIDs []uuid.UUID
 }
 
-func (f *fakeRecapEngine) Recap(_ context.Context, ids []uuid.UUID) (recap.Result, error) {
+func (f *fakeRecapEngine) Recap(ctx context.Context, ids []uuid.UUID) (recap.Result, error) {
 	f.calls++
 	f.gotIDs = ids
+	if f.block {
+		<-ctx.Done()
+		return recap.Result{}, ctx.Err()
+	}
 	return f.result, f.err
+}
+
+// fakeButlerVoicer records a voiced-recap request so the voiced happy path can be
+// asserted without a live voice loop.
+type fakeButlerVoicer struct {
+	spoken string
+	calls  int
+	err    error
+}
+
+func (f *fakeButlerVoicer) SpeakAsButler(_ context.Context, text string) error {
+	f.calls++
+	f.spoken = text
+	return f.err
 }
 
 // fakeRecapStore reuses the shared slash Active-Campaign resolver (fakeSessionStore)
@@ -184,33 +205,53 @@ func TestRecapNoActiveCampaign(t *testing.T) {
 	}
 }
 
-// TestRecapNoEndedSession is test-seq (4): the campaign has only a running session
-// (nothing ended) → an ephemeral "nothing to recap yet" reply, engine not called.
-func TestRecapNoEndedSession(t *testing.T) {
+// TestRecapNoRecappableSession is test-seq (4): the campaign has only a running
+// session and an EMPTY ended one (no transcript) → an ephemeral "no recappable
+// session" reply, engine not called (findings 2a/4).
+func TestRecapNoRecappableSession(t *testing.T) {
 	c := campaign("Lost Mine")
-	store := recapStore(c, runningSession(c.ID, time.Now()))
+	store := recapStore(c,
+		runningSession(c.ID, time.Now()),
+		endedSession(c.ID, time.Now().Add(-time.Hour), 0), // ended but no lines
+	)
 	eng := &fakeRecapEngine{}
 	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, nil)
 
 	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
 		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
 	}
-	if !strings.Contains(strings.ToLower(resp.followups[0].content), "nothing to recap") {
-		t.Errorf("no-ended reply = %q, want a 'nothing to recap' message", resp.followups[0].content)
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "no recappable session") {
+		t.Errorf("no-recappable reply = %q, want a 'no recappable session' message", resp.followups[0].content)
 	}
 	if eng.calls != 0 {
-		t.Errorf("engine ran %d times with no ended session, want 0", eng.calls)
+		t.Errorf("engine ran %d times with nothing recappable, want 0", eng.calls)
 	}
 }
 
-// TestRecapEngineErrorRepliesGeneric is test-seq (5): an engine failure (a stuck /
-// timed-out LLM stands in) surfaces the generic friendly ephemeral message via
-// Followup (the ACK is already sent), carries NO raw error text, and the handler
-// returns the wrapped error for the log.
+// TestRecapDefaultPickSkipsEmptyEnded is finding 2a: the default pick skips an empty
+// ended row (line_count 0) on top and recaps the older ENDED row that has a
+// transcript — an empty session must not hide a real recappable one.
+func TestRecapDefaultPickSkipsEmptyEnded(t *testing.T) {
+	c := campaign("Lost Mine")
+	empty := endedSession(c.ID, time.Date(2026, 6, 26, 18, 0, 0, 0, time.UTC), 0)
+	real := endedSession(c.ID, time.Date(2026, 6, 20, 18, 0, 0, 0, time.UTC), 55)
+	store := recapStore(c, empty, real) // newest-first: empty on top
+	eng := &fakeRecapEngine{result: recap.Result{Text: "recap"}}
+	dispatchRecap(t, store, &fakeVoice{}, eng, nil, nil)
+
+	if eng.calls != 1 || len(eng.gotIDs) != 1 || eng.gotIDs[0] != real.ID {
+		t.Fatalf("engine ids = %v, want [%s] (the older NON-empty ended session)", eng.gotIDs, real.ID)
+	}
+}
+
+// TestRecapEngineErrorRepliesGeneric is test-seq (5): an UNEXPECTED engine failure
+// surfaces the generic friendly ephemeral message via Followup (the ACK is already
+// sent), carries NO raw error text, and the handler returns the wrapped error for
+// the log.
 func TestRecapEngineErrorRepliesGeneric(t *testing.T) {
 	c := campaign("Lost Mine")
 	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
-	eng := &fakeRecapEngine{err: context.DeadlineExceeded}
+	eng := &fakeRecapEngine{err: errors.New("llm 500")}
 	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, nil)
 
 	if len(resp.replies) != 0 {
@@ -223,8 +264,32 @@ func TestRecapEngineErrorRepliesGeneric(t *testing.T) {
 	if !strings.Contains(strings.ToLower(got), "went wrong") {
 		t.Errorf("engine-error reply = %q, want the generic failure message", got)
 	}
-	if strings.Contains(got, "context deadline") {
+	if strings.Contains(got, "llm 500") {
 		t.Errorf("engine-error reply leaked the raw error: %q", got)
+	}
+}
+
+// TestRecapTimeoutRepliesFriendly is finding 5b: when the recap runs past
+// recapOpTimeout the engine's ctx is cancelled; the handler surfaces a friendly
+// "took too long" ephemeral reply (no raw error). Shrinking recapOpTimeout keeps the
+// test fast; DELETING the context.WithTimeout wrap in handleRecap would leave the ctx
+// deadline-less and hang this test (a blocking engine never returns) — proving the
+// timeout is load-bearing.
+func TestRecapTimeoutRepliesFriendly(t *testing.T) {
+	old := recapOpTimeout
+	recapOpTimeout = 30 * time.Millisecond
+	defer func() { recapOpTimeout = old }()
+
+	c := campaign("Lost Mine")
+	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
+	eng := &fakeRecapEngine{block: true}
+	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, nil)
+
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
+	}
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "too long") {
+		t.Errorf("timeout reply = %q, want a friendly 'took too long' message", resp.followups[0].content)
 	}
 }
 
@@ -283,8 +348,8 @@ func TestRecapDeliveryPublic(t *testing.T) {
 	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
 	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"delivery": deliveryPublic})
 
-	if resp.deferred == nil || *resp.deferred {
-		t.Fatalf("public recap must Defer publicly (ephemeral=false); deferred = %v", resp.deferred)
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatalf("recap always Defers ephemerally (no dangling public placeholder); deferred = %v", resp.deferred)
 	}
 	if len(resp.followups) != 1 || resp.followups[0].ephemeral {
 		t.Fatalf("want one PUBLIC Followup, got %+v", resp.followups)
@@ -296,15 +361,15 @@ func TestRecapDeliveryPublic(t *testing.T) {
 
 // TestRecapVoicedDegradesToPublic is test-seq (7b): delivery=voiced with a nil
 // ButlerVoicer (v1: the Butler is never voiced) degrades to PUBLIC text prefixed
-// with the degrade hint — Defer public, followup public.
+// with the degrade hint — ephemeral Defer, public followup.
 func TestRecapVoicedDegradesToPublic(t *testing.T) {
 	c := campaign("Lost Mine")
 	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
 	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
 	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"delivery": deliveryVoiced})
 
-	if resp.deferred == nil || *resp.deferred {
-		t.Fatalf("degraded voiced recap must Defer publicly; deferred = %v", resp.deferred)
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatalf("degraded voiced recap still Defers ephemerally; deferred = %v", resp.deferred)
 	}
 	if len(resp.followups) != 1 || resp.followups[0].ephemeral {
 		t.Fatalf("want one PUBLIC Followup, got %+v", resp.followups)
@@ -424,5 +489,80 @@ func TestRecapNonOperatorDenied(t *testing.T) {
 	}
 	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
 		t.Fatalf("denial = %+v, want one ephemeral reply", resp.replies)
+	}
+}
+
+// TestRecapVoicedHappyPath is finding 5a: delivery=voiced with a wired ButlerVoicer
+// AND a live session actually voices the recap — SpeakAsButler is called with the
+// recap prose and the GM gets an ephemeral confirmation (no public text dump).
+func TestRecapVoicedHappyPath(t *testing.T) {
+	c := campaign("Lost Mine")
+	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
+	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
+	voicer := &fakeButlerVoicer{}
+	live := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: c.ID}}
+	// A live session pins the Active Campaign to c, so seed its lookup too.
+	store.byID = map[uuid.UUID]storage.VoiceSession{}
+	store.fakeSessionStore.byID = map[uuid.UUID]storage.Campaign{c.ID: c}
+
+	resp := dispatchRecap(t, store, live, eng, voicer, map[string]string{"delivery": deliveryVoiced})
+
+	if voicer.calls != 1 || voicer.spoken != "The keep fell at dawn." {
+		t.Fatalf("SpeakAsButler = (calls %d, %q), want (1, the recap prose)", voicer.calls, voicer.spoken)
+	}
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("want one ephemeral confirmation Followup, got %+v", resp.followups)
+	}
+	if strings.Contains(resp.followups[0].content, "The keep fell") {
+		t.Errorf("voiced confirmation should NOT dump the prose as text; got %q", resp.followups[0].content)
+	}
+}
+
+// TestRecapPublicErrorStaysEphemeral is finding 5c: delivery=public with an error
+// path (no Active Campaign) must NOT leave a public reply — the Defer is ephemeral
+// and the error reply is ephemeral, so no dangling public "thinking…" for the
+// channel.
+func TestRecapPublicErrorStaysEphemeral(t *testing.T) {
+	store := &fakeRecapStore{fakeSessionStore: &fakeSessionStore{}} // no Active Campaign
+	eng := &fakeRecapEngine{}
+	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"delivery": deliveryPublic})
+
+	if resp.deferred == nil || !*resp.deferred {
+		t.Fatalf("Defer must be ephemeral even for delivery=public; deferred = %v", resp.deferred)
+	}
+	if len(resp.replies) != 0 {
+		t.Errorf("post-Defer error must not CreateMessage; replies = %+v", resp.replies)
+	}
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("public-delivery error must reply ONE EPHEMERAL Followup (no public dangle), got %+v", resp.followups)
+	}
+	if eng.calls != 0 {
+		t.Errorf("engine ran %d times on the no-campaign path, want 0", eng.calls)
+	}
+}
+
+// TestRecapExplicitEmptyTranscript is finding 2b: an explicit session id whose recap
+// yields recap.ErrNoTranscript is a NORMAL state — a friendly ephemeral "no
+// transcript" reply, NOT the generic "went wrong" failure.
+func TestRecapExplicitEmptyTranscript(t *testing.T) {
+	c := campaign("Lost Mine")
+	// A running session the GM explicitly targets (allowed) that has no lines yet.
+	live := runningSession(c.ID, time.Now())
+	store := recapStore(c, live)
+	eng := &fakeRecapEngine{err: recap.ErrNoTranscript}
+	resp := dispatchRecap(t, store, &fakeVoice{}, eng, nil, map[string]string{"session": live.ID.String()})
+
+	if eng.calls != 1 {
+		t.Fatalf("engine calls = %d, want 1 (an explicit running id is recappable)", eng.calls)
+	}
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("want one ephemeral Followup, got %+v", resp.followups)
+	}
+	got := strings.ToLower(resp.followups[0].content)
+	if !strings.Contains(got, "no transcript") {
+		t.Errorf("empty-transcript reply = %q, want a 'no transcript' message", resp.followups[0].content)
+	}
+	if strings.Contains(got, "went wrong") {
+		t.Errorf("empty transcript must not be a generic failure; got %q", resp.followups[0].content)
 	}
 }

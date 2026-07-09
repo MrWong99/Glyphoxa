@@ -19,13 +19,17 @@ import (
 // Discord's 3s deadline; the LLM recap — which fans out map-reduce windows and can
 // run for many seconds — runs under this explicit budget instead of an open-ended
 // one, well inside Discord's minutes-long follow-up window. A slow or stuck LLM
-// call is cut off here and surfaces as the friendly generic failure reply (#271).
-const recapOpTimeout = 120 * time.Second
+// call is cut off here and surfaces as the friendly "took too long" reply (#271).
+// It is a var (not a const) so a test can shrink it to assert the timeout
+// behaviorally without a 120s wait; production keeps 120s.
+var recapOpTimeout = 120 * time.Second
 
-// recapListLimit caps how many recent Voice Sessions the default picker scans for
-// the latest ended one (the running row sits on top and is skipped) and how many
-// the autocomplete offers — Discord's 25-choice hard cap either way.
-const recapListLimit = discordChoiceLimit
+// recapListLimit caps how many recent Voice Sessions the picker scans for a
+// recappable (ended, non-empty) row and the autocomplete offers before its own
+// 25-choice cap. 50 matches the web past-session picker's server policy
+// (rpc.listSessionsLimit, #270) so the slash surface sees the same window — enough
+// that a pageful of running/failed/empty rows can't hide a real recappable one.
+const recapListLimit = 50
 
 // Delivery choice values for /glyphoxa recap (#271 decision 6). They live HERE, in
 // the presence tier that owns the slash surface — deliberately NOT in proto, since
@@ -96,7 +100,7 @@ func RecapCommand(store RecapStore, voice VoiceControl, eng RecapEngine, butler 
 		Options: []discord.ApplicationCommandOption{
 			discord.ApplicationCommandOptionString{
 				Name:         "session",
-				Description:  "Which past session to recap (defaults to the latest ended one).",
+				Description:  "Which session to recap (defaults to the latest one with a transcript).",
 				Required:     false,
 				Autocomplete: true,
 			},
@@ -117,10 +121,14 @@ func RecapCommand(store RecapStore, voice VoiceControl, eng RecapEngine, butler 
 		},
 		Autocomplete: func(ctx context.Context, ac *Autocomplete) ([]discord.AutocompleteChoice, error) {
 			c, err := resolveActiveCampaign(ctx, store, voice, ac.UserID())
-			if err != nil {
-				// No Active Campaign (or a resolver hiccup) → offer nothing rather than
-				// leak or error; the GM sees an empty picker.
+			if errors.Is(err, ErrNoActiveCampaign) {
+				// No Active Campaign yet → offer nothing (empty picker); not an error.
 				return nil, nil
+			}
+			if err != nil {
+				// A real resolver/DB failure is returned so the Registry logs it rather
+				// than being silently swallowed as an empty picker (finding 6).
+				return nil, err
 			}
 			sessions, err := store.ListVoiceSessions(ctx, c.ID, recapListLimit)
 			if err != nil {
@@ -132,26 +140,27 @@ func RecapCommand(store RecapStore, voice VoiceControl, eng RecapEngine, butler 
 	}
 }
 
-// handleRecap runs one /glyphoxa recap interaction. Delivery/visibility is decided
-// BEFORE the Defer so the placeholder matches the reply; the pick + engine call run
-// under recapOpTimeout post-Defer.
+// handleRecap runs one /glyphoxa recap interaction. It ALWAYS Defers ephemerally:
+// the placeholder is then GM-only on every path, so an error (which is always an
+// ephemeral reply) never leaves a dangling PUBLIC "thinking…" for the whole channel.
+// A public/voiced-degraded SUCCESS is delivered as a PUBLIC Followup instead — a
+// followup carries its own visibility independent of the ephemeral placeholder. The
+// pick + engine call run under recapOpTimeout post-Defer (the Defer stopped the
+// first-response watchdog).
 func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice VoiceControl, eng RecapEngine, butler ButlerVoicer) error {
 	delivery := normalizeDelivery(ic)
 	sessionOpt, _ := ic.String("session")
 	sessionOpt = strings.TrimSpace(sessionOpt)
 
-	// Decide the delivery path (and its visibility) up front. A `voiced` request can
-	// only truly voice when a ButlerVoicer is wired AND a session is live; otherwise
-	// it degrades to public text (decision 6a). Everything is known here without a DB
-	// round trip, so the Defer visibility below is final.
+	// A `voiced` request can only truly voice when a ButlerVoicer is wired AND a
+	// session is live; otherwise it degrades to public text (decision 6a). Known here
+	// without a DB round trip. A successful text reply is PUBLIC for `public` and for
+	// a degraded `voiced`, else GM-only ephemeral.
 	_, live := voice.Snapshot()
 	voiceMode := delivery == deliveryVoiced && butler != nil && live
-	ephemeral := delivery == deliveryEphemeral
-	if voiceMode {
-		ephemeral = true // a voiced recap's confirmation is GM-only
-	}
+	publicReply := !voiceMode && (delivery == deliveryPublic || delivery == deliveryVoiced)
 
-	if err := ic.Defer(ephemeral); err != nil {
+	if err := ic.Defer(true); err != nil {
 		return fmt.Errorf("presence: defer recap: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, recapOpTimeout)
@@ -174,22 +183,34 @@ func handleRecap(ctx context.Context, ic *Interaction, store RecapStore, voice V
 	}
 
 	res, err := eng.Recap(ctx, []uuid.UUID{sessionID})
-	if err != nil {
-		// Surface a friendly failure (the Registry answers a returned error with a
-		// generic ephemeral message via Followup — the ACK is already sent), and log
-		// the wrapped cause. No raw error text ever reaches the GM.
+	switch {
+	case errors.Is(err, recap.ErrNoTranscript):
+		// A normal state (an empty ended session, or one the default filter let
+		// through by a race) — not a failure, so no ERROR log, just a plain reason.
+		return ic.ReplyEphemeral("That session has no transcript to recap.")
+	case errors.Is(err, context.DeadlineExceeded):
+		// The recapOpTimeout fired: a slow/stuck LLM. Friendly, no raw error, no ERROR
+		// log (an expected slow-path, not a bug).
+		return ic.ReplyEphemeral("The recap took too long to put together — try again in a moment.")
+	case err != nil:
+		// Unexpected failure: the Registry answers the returned error with a generic
+		// ephemeral message via Followup (the ACK is already sent) and logs the wrapped
+		// cause. No raw error text ever reaches the GM.
 		return fmt.Errorf("presence: recap session %s: %w", sessionID, err)
 	}
 
-	return deliverRecap(ctx, ic, butler, voiceMode, delivery, ephemeral, res.Text)
+	return deliverRecap(ctx, ic, butler, voiceMode, delivery, publicReply, res.Text)
 }
 
 // pickRecapSession resolves which Voice Session to recap. An explicit `session`
 // option must parse as a UUID and belong to the Active Campaign, else an ephemeral
-// error is sent and the engine is NOT called (ok=false). With no option it picks the
-// campaign's latest ENDED session (the running row, if any, sits on top of the
-// newest-first list and is skipped — NOT GetLatestVoiceSession, which returns the
-// running one while live).
+// error is sent and the engine is NOT called (ok=false); its STATUS is not
+// constrained — an explicit id may target any session, including a running one for a
+// partial recap, matching #274's GenerateRecap RPC so the two surfaces don't diverge.
+// With no option it picks the campaign's latest RECAPPABLE session — the newest
+// ENDED row with a non-empty transcript (line_count, written at close, skips a
+// running row on top AND an empty ended row, un-hiding an older real session). NOT
+// GetLatestVoiceSession, which returns the running one while live.
 func pickRecapSession(ctx context.Context, ic *Interaction, store RecapStore, campaignID uuid.UUID, sessionOpt string) (uuid.UUID, bool, error) {
 	if sessionOpt != "" {
 		id, perr := uuid.Parse(sessionOpt)
@@ -211,11 +232,19 @@ func pickRecapSession(ctx context.Context, ic *Interaction, store RecapStore, ca
 		return uuid.UUID{}, false, fmt.Errorf("presence: list voice sessions for recap: %w", err)
 	}
 	for _, vs := range sessions {
-		if vs.Status == storage.VoiceSessionEnded {
+		if isRecappable(vs) {
 			return vs.ID, true, nil
 		}
 	}
-	return uuid.UUID{}, false, ic.ReplyEphemeral("Nothing to recap yet — no ended voice session in this campaign.")
+	return uuid.UUID{}, false, ic.ReplyEphemeral("No recappable session found among the recent sessions of this campaign.")
+}
+
+// isRecappable reports whether a Voice Session can seed a default/autocomplete recap:
+// it must have ENDED and have a recorded transcript (line_count > 0). A running,
+// failed, or empty-ended session is excluded from the automatic pick — though an
+// explicit id may still target one (see pickRecapSession).
+func isRecappable(vs storage.VoiceSession) bool {
+	return vs.Status == storage.VoiceSessionEnded && vs.LineCount > 0
 }
 
 // deliverRecap routes the finished recap prose to its chosen surface. A voiced recap
@@ -223,7 +252,7 @@ func pickRecapSession(ctx context.Context, ic *Interaction, store RecapStore, ca
 // be voiced (the common v1 case) is degraded to public text with a leading hint. Text
 // delivery — public or ephemeral — is sent as one or more ordered Followups, each
 // kept under Discord's 2000-char cap (never truncated, #271).
-func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voiceMode bool, delivery string, ephemeral bool, text string) error {
+func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voiceMode bool, delivery string, publicReply bool, text string) error {
 	if voiceMode {
 		if err := butler.SpeakAsButler(ctx, text); err != nil {
 			return fmt.Errorf("presence: voice recap via butler: %w", err)
@@ -236,8 +265,10 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 		// Could not voice it — deliver as public text, explaining the switch.
 		body = voicedDegradeHint + "\n\n" + text
 	}
+	// A followup carries its own visibility: a public reply here is public even though
+	// the deferred placeholder is ephemeral (finding 1 — no dangling public "thinking").
 	for _, part := range splitFollowups(body, discordMessageLimit) {
-		if err := ic.Followup(part, ephemeral); err != nil {
+		if err := ic.Followup(part, !publicReply); err != nil {
 			return err
 		}
 	}
@@ -306,15 +337,16 @@ func lastBreakRune(runes []rune, limit int, ch rune) int {
 }
 
 // recapSessionChoices builds the /glyphoxa recap `session` autocomplete: the Active
-// Campaign's ENDED Voice Sessions only (a running session is not recappable),
-// each choice LABELLED "2006-01-02 15:04 · N lines" and CARRYING the session UUID as
-// its value. Capped at Discord's 25-choice limit. When the GM has typed, choices
-// whose label contains the typed text (case-insensitive) are kept.
+// Campaign's RECAPPABLE Voice Sessions only — ended, with a recorded transcript
+// (running/failed/empty rows are excluded; an explicit id may still target any of
+// them). Each choice is LABELLED "2006-01-02 15:04 · N lines" and CARRIES the session
+// UUID as its value. Capped at Discord's 25-choice limit. When the GM has typed,
+// choices whose label contains the typed text (case-insensitive) are kept.
 func recapSessionChoices(sessions []storage.VoiceSession, typed string) []discord.AutocompleteChoice {
 	needle := strings.ToLower(strings.TrimSpace(typed))
 	choices := make([]discord.AutocompleteChoice, 0, len(sessions))
 	for _, vs := range sessions {
-		if vs.Status != storage.VoiceSessionEnded {
+		if !isRecappable(vs) {
 			continue
 		}
 		label := fmt.Sprintf("%s · %d lines", vs.StartedAt.UTC().Format(sessionLabelTimeFormat), vs.LineCount)
