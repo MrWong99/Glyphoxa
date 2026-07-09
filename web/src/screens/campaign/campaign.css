@@ -581,3 +581,162 @@
   color: var(--text-subtle);
   margin: 0;
 }
+
+/* Players panel (#279): the Campaign screen's third view — Character ↔ Discord
+   User bindings. Reuses the roster two-col layout; rows mirror gx-roster items. */
+.gx-players {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.gx-players__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.gx-players__item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-default);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.gx-players__item:hover {
+  background: var(--surface-card-hover);
+}
+
+.gx-players__item[data-active="true"] {
+  border-color: var(--border-strong);
+  box-shadow: var(--glow-arcane-soft);
+}
+
+.gx-players__meta {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gx-players__name {
+  font-weight: var(--weight-semibold);
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-players__sub {
+  font-size: var(--body-xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-players__empty,
+.gx-players__prompt {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+}
+
+/* Bind form (shared by the Players panel and the Session in-flight affordance). */
+.gx-playerform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-playerform__aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-xs);
+}
+
+.gx-playerform__alias-remove {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.gx-playerform__alias-add,
+.gx-playerform__bind {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.gx-playerform__alias-add > .gx-field,
+.gx-playerform__bind > .gx-field {
+  flex: 1 1 auto;
+}
+
+.gx-playerform__picker-anchor {
+  position: relative;
+}
+
+.gx-playerform__picker {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 220px;
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--spacing-xs);
+  list-style: none;
+  background: var(--surface-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover, 0 8px 24px rgba(0, 0, 0, 0.4));
+}
+
+.gx-playerform__picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-default);
+  cursor: pointer;
+  text-align: left;
+}
+
+.gx-playerform__picker-item:hover {
+  background: var(--surface-card-hover);
+}
+
+.gx-playerform__picker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gx-playerform__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
