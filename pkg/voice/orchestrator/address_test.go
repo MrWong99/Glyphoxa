@@ -182,6 +182,89 @@ func TestAddressDetector_EmptyResultPublishesNothing(t *testing.T) {
 	voicetest.AssertNoEvent[voiceevent.AddressRouted](t, h)
 }
 
+// gmAllow adapts an allowlist set to the WithButlerGMGate predicate. Empty
+// SpeakerIDs are never members — the gate fails closed on unattributed lanes.
+func gmAllow(ids ...string) func(string) bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return func(id string) bool { return id != "" && set[id] }
+}
+
+// butlerMatcher stands in an algorithm that always routes to the Butler, so the
+// gate tests exercise the AgentRole == "butler" branch under full control.
+func butlerMatcher() matchFunc {
+	return func(text string) []voiceevent.AddressRouted {
+		return []voiceevent.AddressRouted{{At: time.Now(), Text: text, Target: butlerTarget}}
+	}
+}
+
+// TestAddressDetector_ButlerGMGate_AllowlistedPublishes is the gate's allow
+// case (ADR-0024/ADR-0050): a Butler-addressed utterance from an allowlisted
+// SpeakerID reaches the Butler unchanged.
+func TestAddressDetector_ButlerGMGate_AllowlistedPublishes(t *testing.T) {
+	h := voicetest.New(t)
+	d := orchestrator.NewAddressDetector(butlerMatcher(),
+		orchestrator.WithButlerGMGate(gmAllow("gm-snowflake")))
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Glyphoxa, help.", SpeakerID: "gm-snowflake"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.AddressRouted) bool { return e.Target == butlerTarget },
+		"address.routed → Butler for allowlisted SpeakerID",
+	)
+}
+
+// TestAddressDetector_ButlerGMGate_NonAllowlistedDropped is the gate's deny
+// case: a Butler-addressed utterance from a SpeakerID outside the operator
+// allowlist routes nowhere (fail closed, no matcher re-invocation).
+func TestAddressDetector_ButlerGMGate_NonAllowlistedDropped(t *testing.T) {
+	h := voicetest.New(t)
+	d := orchestrator.NewAddressDetector(butlerMatcher(),
+		orchestrator.WithButlerGMGate(gmAllow("gm-snowflake")))
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Glyphoxa, help.", SpeakerID: "player-snowflake"})
+
+	voicetest.AssertNoEvent[voiceevent.AddressRouted](t, h)
+}
+
+// TestAddressDetector_ButlerGMGate_UnattributedDropped is the fail-closed edge:
+// an empty SpeakerID (unattributed lane) is never a GM, so a Butler route is
+// dropped.
+func TestAddressDetector_ButlerGMGate_UnattributedDropped(t *testing.T) {
+	h := voicetest.New(t)
+	d := orchestrator.NewAddressDetector(butlerMatcher(),
+		orchestrator.WithButlerGMGate(gmAllow("gm-snowflake")))
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Glyphoxa, help.", SpeakerID: ""})
+
+	voicetest.AssertNoEvent[voiceevent.AddressRouted](t, h)
+}
+
+// TestAddressDetector_ButlerGMGate_CharacterUntouched proves the gate is
+// Butler-only: a Character NPC route publishes regardless of SpeakerID
+// (including empty), so the gate never touches Character address behaviour.
+func TestAddressDetector_ButlerGMGate_CharacterUntouched(t *testing.T) {
+	h := voicetest.New(t)
+	m := matchFunc(func(text string) []voiceevent.AddressRouted {
+		return []voiceevent.AddressRouted{{At: time.Now(), Text: text, Target: bartTarget}}
+	})
+	d := orchestrator.NewAddressDetector(m,
+		orchestrator.WithButlerGMGate(gmAllow("gm-snowflake")))
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart, hi.", SpeakerID: "player-snowflake"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.AddressRouted) bool { return e.Target == bartTarget },
+		"address.routed → Bart for non-GM SpeakerID (gate is Butler-only)",
+	)
+}
+
 // TestAddressDetector_NilMatcher_Panics pins that the detector has no matching
 // algorithm to fall back to: construction requires a matcher.
 func TestAddressDetector_NilMatcher_Panics(t *testing.T) {
