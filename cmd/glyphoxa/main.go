@@ -391,6 +391,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return fmt.Errorf("web: %w", err)
 	}
 
+	// The one-shot recap Engine (#272) is constructed ONCE here so both consumers can
+	// share it: the /glyphoxa recap slash command (#273, registered below) and the
+	// GenerateRecap RPC (#274, wired through managementMounts). It reads transcripts
+	// via the store, decrypts a BYOK LLM key with cipher, meters usage into the process
+	// metrics, and logs attribution — but never persists a recap (ADR-0040).
+	recapEngine := recap.NewEngine(store, cipher, metrics, log)
+
 	if withVoice {
 		// The GM admin/session commands (#108, ADR-0010): /glyphoxa use sets the
 		// durable Active Campaign; start/end drive the SAME in-process Manager the
@@ -406,6 +413,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			presence.StartCommand(store, mgr),
 			presence.EndCommand(mgr),
 			presence.SearchCommand(store, mgr),
+			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
+			// Session via the SAME shared slash resolver, delivered per the invoker's
+			// choice (voiced/public/ephemeral, #271). butler is nil — the Butler is not
+			// voiced today (ADR-0009/0024), so a voiced request degrades to public text.
+			presence.RecapCommand(store, mgr, recapEngine, nil),
 			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
 			presence.MuteCommand(mgr, store),
@@ -525,7 +537,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.VoiceChannelMembers(ctx, channelID)
 		}
 	}
-	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, presenceRefresh, memberLister)
+	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, recapEngine, presenceRefresh, memberLister)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -586,7 +598,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -653,9 +665,8 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// The recap engine regenerates Butler-flavoured Session recaps on demand
 	// (#272/#274, gate #271: never persisted). It spends provider money per call
 	// and meters usage, so SessionService.GenerateRecap is CSRF-guarded like a
-	// mutation. NOTE (#273 sibling): when the slash-command branch lands it owns a
-	// single recap.NewEngine construction — collapse this into that one instance.
-	recapEngine := recap.NewEngine(store, cipher, metrics, log)
+	// mutation. It is constructed ONCE in runWeb and passed in, so the GenerateRecap
+	// RPC (#274) and the /glyphoxa recap slash command (#273) share one instance.
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, recapEngine, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{

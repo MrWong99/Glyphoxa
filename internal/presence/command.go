@@ -344,9 +344,24 @@ func (ic *Interaction) Defer(ephemeral bool) error {
 	return nil
 }
 
-// Followup sends a message after a Defer.
+// Followup sends a message after a Defer. Per Discord's documented behavior, the
+// FIRST followup after a DEFERRED response actually EDITS the original deferred
+// placeholder (a new message is not created and the ephemeral flag is IGNORED — the
+// defer's visibility is preserved); only subsequent followups create fresh messages
+// honoring their own flags. A handler that wants a PUBLIC reply after an ephemeral
+// Defer must therefore EditOriginal first (to consume the placeholder) and then
+// Followup the public content.
 func (ic *Interaction) Followup(content string, ephemeral bool) error {
 	return ic.resp.followup(content, ephemeral)
+}
+
+// EditOriginal resolves the deferred "thinking…" placeholder by editing the original
+// interaction response in place. Its visibility is fixed to the Defer's (Discord
+// ignores an ephemeral flag on the original-response edit), so it is used to CONSUME
+// an ephemeral placeholder with a short note before sending PUBLIC Followups — which
+// then create real messages honoring their public flag. Only meaningful after Defer.
+func (ic *Interaction) EditOriginal(content string) error {
+	return ic.resp.editOriginal(content)
 }
 
 // Autocomplete is the handler's view of one autocomplete interaction.
@@ -392,6 +407,7 @@ type responder interface {
 	reply(content string, ephemeral bool) error
 	deferResponse(ephemeral bool) error
 	followup(content string, ephemeral bool) error
+	editOriginal(content string) error
 }
 
 // eventResponder is the production responder over a live slash-command event.
@@ -410,6 +426,15 @@ func (r *eventResponder) deferResponse(ephemeral bool) error {
 func (r *eventResponder) followup(content string, ephemeral bool) error {
 	_, err := r.event.Client().Rest.CreateFollowupMessage(
 		r.event.ApplicationID(), r.event.Token(), ephemeralMessage(content, ephemeral))
+	return err
+}
+
+// editOriginal edits the original interaction response — the deferred placeholder —
+// in place (Discord's Edit Original Interaction Response). It carries no ephemeral
+// flag: the original's visibility (set at Defer time) is preserved regardless.
+func (r *eventResponder) editOriginal(content string) error {
+	_, err := r.event.Client().Rest.UpdateInteractionResponse(
+		r.event.ApplicationID(), r.event.Token(), discord.MessageUpdate{Content: &content})
 	return err
 }
 
