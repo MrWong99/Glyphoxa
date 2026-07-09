@@ -128,7 +128,7 @@ func TestStartSessionRefusedWhenOnlyCampaignArchived(t *testing.T) {
 		}
 	})
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewSessionServer(mgr, store, nil).Handler(connect.WithInterceptors(inject)))
+	mux.Handle(rpc.NewSessionServer(mgr, store, nil, nil).Handler(connect.WithInterceptors(inject)))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
