@@ -94,6 +94,27 @@ function formatUsd(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+// formatStamp renders a session's started_at instant as a short "Mon D, HH:MM"
+// stamp for the past-session picker label.
+function formatStamp(d: Date): string {
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// sessionOption renders one past-session picker row's label: its start stamp plus
+// its line count — or "live" for the still-running session, whose line_count is 0
+// until it closes (#270).
+function sessionOption(vs: VoiceSession): string {
+  const startedMs = tsMs(vs.startedAt);
+  const when = startedMs != null ? formatStamp(new Date(startedMs)) : "—";
+  const count = vs.status === "running" ? "live" : `${vs.lineCount} lines`;
+  return `${when} · ${count}`;
+}
+
 // lastSummary renders the idle "Last session ended …" line from an ended session.
 function lastSummary(session: VoiceSession): string {
   const endedMs = tsMs(session.endedAt);
@@ -122,9 +143,22 @@ export function Session() {
   // transient blip costs nothing visible here.
   const campaignQ = useQuery(CampaignService.method.getActiveCampaign, {}, { retry: false });
   const campaignName = campaignQ.data?.campaign?.name;
+  const activeCampaignId = campaignQ.data?.campaign?.id ?? null;
 
   const active = data?.active ?? false;
   const session = data?.session;
+
+  // Past-session picker (#270): the operator can browse a prior Voice Session's
+  // persisted transcript. ListSessions returns the campaign's sessions newest-first
+  // (server-scoped, never a client id). viewedId is the session being VIEWED — null
+  // means the current/live default (AC5: the live feed stays the default). retry:false
+  // keeps the picker a soft feature — a server without the RPC just shows none.
+  const sessionsQ = useQuery(SessionService.method.listSessions, {}, { retry: false });
+  const pastSessions = sessionsQ.data?.sessions ?? [];
+  const [viewedId, setViewedId] = useState<string | null>(null);
+  const currentId = session?.id ?? null;
+  const viewingPast = viewedId != null && viewedId !== currentId;
+  const renderedSessionId = viewedId ?? currentId;
 
   // Spend-cap-reached state (#130, ADR-0046): the live reload truth is GetSession
   // (spend_cap_state + estimated_spend_usd); the SSE "spendcap" frame patches the
@@ -141,6 +175,18 @@ export function Session() {
       }),
     });
 
+  // The past-session picker list goes stale on a Start: the new running row must
+  // appear (labelled "live") without waiting for a window refocus. Stop's stale is
+  // covered by the end-sweep (campaignCache watchVoiceSessionEnd), but Start has no
+  // such trigger, so refresh listSessions on a successful Start (#270).
+  const invalidateSessions = () =>
+    queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: SessionService.method.listSessions,
+        cardinality: "finite",
+      }),
+    });
+
   // A failing Start/Stop must not be swallowed (#144): surface it (ADR-0017:
   // sonner) and invalidate — a Stop that hits "no active session" means the
   // loop already died server-side, and the refetch snaps the badge off Live.
@@ -149,7 +195,10 @@ export function Session() {
     void invalidate();
   };
   const start = useMutation(SessionService.method.startSession, {
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      void invalidateSessions();
+    },
     onError: onError("start"),
   });
   const stop = useMutation(SessionService.method.stopSession, {
@@ -160,8 +209,11 @@ export function Session() {
   // The timer runs only while live, counting up from the running session's start.
   const elapsed = useElapsed(active ? tsMs(session?.startedAt) : null);
 
-  // Live transcript: snapshot + SSE tail into the query cache (#73).
-  const transcript = useSessionEvents(session?.id, active);
+  // Transcript: snapshot + SSE tail into the query cache (#73). The rendered
+  // session is the one being VIEWED (viewedId ?? current); the live tail opens only
+  // when that IS the live session (active && !viewingPast) — browsing a past session
+  // replays its persisted snapshot with no stream (#270, AC5).
+  const transcript = useSessionEvents(renderedSessionId ?? undefined, active && !viewingPast, viewingPast);
   const hasLines = transcript.lines.length > 0;
   const showTyping = active && transcript.typing.active;
 
@@ -175,16 +227,15 @@ export function Session() {
   const failureReason = sessionFailed ? session?.endReason : transcript.connectionDetail;
   const connectingLabel = active && !failed ? connectionLabel(transcript.connection) : null;
 
-  // Transcript search deep-link (#120): clicking a search hit highlights (and,
-  // where the browser supports it, scrolls to) that line in the rendered
-  // transcript. A hit for a line NOT in the current view — e.g. an older session —
-  // can't scroll anywhere, so the search box shows an inline "not in the view" hint
-  // instead of a dead click (ADR-0011 amendment). Relay line ids RESTART per
-  // session ("u:<n>"/"a:<turn>"), so "in view" must match the hit's SESSION too —
-  // renderedSessionId + renderedLineIds — otherwise an older session's "u:3" would
-  // collide with the rendered session's own "u:3" and highlight the wrong line.
+  // Transcript search deep-link (#120, extended by #270): clicking a search hit
+  // highlights (and, where supported, scrolls to) that line. When the hit is on
+  // screen (same rendered session) it highlights at once; when it belongs to
+  // ANOTHER session — an older one — the click no longer dead-ends but navigates to
+  // that session's persisted transcript and jumps there once it loads (AC4). Relay
+  // line ids RESTART per session ("u:<n>"/"a:<turn>"), so both "in view" and the
+  // pending jump key on the hit's SESSION too (renderedSessionId + renderedLineIds),
+  // otherwise an older session's "u:3" would collide with the rendered "u:3".
   const [highlightedLineId, setHighlightedLineId] = useState<string | null>(null);
-  const renderedSessionId = session?.id ?? null;
   const renderedLineIds = useMemo(
     () => new Set(transcript.lines.map((l) => l.id)),
     [transcript.lines],
@@ -198,6 +249,71 @@ export function Session() {
       // jsdom / older browsers: scrollIntoView is a no-op; the highlight still applies.
     }
   };
+
+  // A stale highlight must not carry across a session switch — relay line ids
+  // restart per session, so the same id in the newly-viewed session is a different
+  // line. Clear it whenever the rendered session changes; the pending jump below
+  // re-applies the correct highlight once the new session's lines land.
+  useEffect(() => setHighlightedLineId(null), [renderedSessionId]);
+
+  // Pending cross-session jump (#270, AC4): clicking a search hit for a session
+  // that isn't on screen sets viewedId + this pending {sessionId, lineId}. Keyed on
+  // session AND line because line ids collide across sessions. Once that session's
+  // snapshot has loaded (renderedSessionId matches and the line is present), scroll
+  // + highlight it, then clear.
+  const [pendingJump, setPendingJump] = useState<{ sessionId: string; lineId: string } | null>(null);
+  useEffect(() => {
+    if (!pendingJump) return;
+    if (renderedSessionId === pendingJump.sessionId && renderedLineIds.has(pendingJump.lineId)) {
+      jumpToLine(pendingJump.lineId);
+      setPendingJump(null);
+    }
+  }, [pendingJump, renderedSessionId, renderedLineIds]);
+
+  // viewSession is the ONE navigation seam: switching the viewed session ALWAYS
+  // drops any queued cross-session jump, so a manual pick never inherits a stale
+  // pendingJump from an earlier search click (which would surprise-scroll once that
+  // session's snapshot loads, #270 finding 3). Passing null returns to current/live.
+  const viewSession = (id: string | null) => {
+    setViewedId(id);
+    setPendingJump(null);
+  };
+
+  // Active-Campaign switch reset (#270 finding 1): the topbar switcher sweeps the
+  // Active-Campaign-scoped caches (campaignCache.ts), refetching listSessions +
+  // getSession for the NEW campaign — but viewedId/pendingJump are local state the
+  // sweep can't see, so without this the PREVIOUS campaign's past session keeps
+  // rendering under the new campaign's header ("silently serving the previous
+  // campaign's data" — the worst failure mode). Reset the view whenever the resolved
+  // Active Campaign id changes so a switch always lands on the new campaign's default.
+  useEffect(() => {
+    viewSession(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCampaignId]);
+
+  // openHit routes a clicked search hit: if its line is on screen (same rendered
+  // session), highlight it immediately; otherwise navigate to that session and
+  // queue the jump for after its transcript loads (no more dead-end, #270 AC4).
+  const openHit = (sessionId: string, lineId: string) => {
+    if (sessionId === renderedSessionId && renderedLineIds.has(lineId)) {
+      jumpToLine(lineId);
+      return;
+    }
+    setViewedId(sessionId === currentId ? null : sessionId);
+    setPendingJump({ sessionId, lineId });
+  };
+
+  // Failed past-session snapshot (#270 finding 4): a browse whose DB-backed snapshot
+  // fetch errors must NOT masquerade as the empty "start a session" state — that
+  // reads as a lost archive. Surface it: a toast once + an inline error in the
+  // transcript card. Only while viewing a PAST session (a live session's own
+  // failures are the #123 connection surface).
+  const pastSnapshotFailed = viewingPast && transcript.snapshotFailed;
+  useEffect(() => {
+    if (pastSnapshotFailed) {
+      toast.error("Couldn't load that session's transcript. It may be unavailable — try again.");
+    }
+  }, [pastSnapshotFailed]);
 
   return (
     <div className="gx-session">
@@ -275,18 +391,31 @@ export function Session() {
       )}
 
       <section className="gx-session__transcript">
-        <h2 className="gx-section-title">{active ? "Live transcript" : "Session transcript"}</h2>
-        <TranscriptSearch
-          onJump={jumpToLine}
-          renderedSessionId={renderedSessionId}
-          renderedLineIds={renderedLineIds}
-        />
+        <h2 className="gx-section-title">
+          {active && !viewingPast ? "Live transcript" : "Session transcript"}
+        </h2>
+        {pastSessions.length > 0 && (
+          <SessionPicker
+            sessions={pastSessions}
+            renderedSessionId={renderedSessionId}
+            viewingPast={viewingPast}
+            onPick={(id) => viewSession(id === currentId ? null : id)}
+            onBackToCurrent={() => viewSession(null)}
+          />
+        )}
+        <TranscriptSearch onOpen={openHit} />
         <Card>
-          {!hasLines && !showTyping ? (
+          {pastSnapshotFailed ? (
+            <p className="gx-session__transcript-empty" role="alert" data-testid="snapshot-error">
+              Couldn't load this session's transcript. It may be unavailable — pick another session or try again.
+            </p>
+          ) : !hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
-              {active
+              {active && !viewingPast
                 ? "Listening… transcript lines will appear here."
-                : "Start a session to capture the table's voice transcript."}
+                : viewingPast
+                  ? "This session has no transcript lines."
+                  : "Start a session to capture the table's voice transcript."}
             </p>
           ) : (
             <ol className="gx-transcript">
@@ -330,28 +459,62 @@ export function Session() {
   );
 }
 
+// SessionPicker is the Session screen's past-session picker (#270): a compact list
+// of the campaign's Voice Sessions newest-first (ListSessions, server-scoped). Each
+// row is a button labelled by start stamp + line count ("live" for the running one);
+// picking it views that session's persisted transcript. The row matching the
+// rendered session is aria-pressed. While viewing a PAST session a "Back to current
+// session" control returns to the live/latest default (AC5).
+function SessionPicker({
+  sessions,
+  renderedSessionId,
+  viewingPast,
+  onPick,
+  onBackToCurrent,
+}: {
+  sessions: VoiceSession[];
+  renderedSessionId: string | null;
+  viewingPast: boolean;
+  onPick: (id: string) => void;
+  onBackToCurrent: () => void;
+}) {
+  return (
+    <div className="gx-session__picker" data-testid="session-picker">
+      <span className="gx-session__picker-label">Sessions</span>
+      <ul className="gx-session__picker-list">
+        {sessions.map((vs) => (
+          <li key={vs.id}>
+            <button
+              type="button"
+              className="gx-session__picker-item"
+              aria-pressed={vs.id === renderedSessionId}
+              onClick={() => onPick(vs.id)}
+            >
+              {sessionOption(vs)}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {viewingPast && (
+        <button type="button" className="gx-session__picker-back" onClick={onBackToCurrent}>
+          Back to current session
+        </button>
+      )}
+    </div>
+  );
+}
+
 // TranscriptSearch is the Session screen's transcript search box (#120, ADR-0011
 // amendment). It debounces the raw box value into a SearchTranscriptLines query
 // that runs ONLY while the trimmed query is non-empty — an empty box is the prompt
 // state, no RPC (keepPreviousData holds the last matches steady across keystrokes).
 // The server scopes the search to the operator's Active Campaign and shares the
 // one storage search path with /glyphoxa search (AC4/AC5). Each hit renders its
-// speaker, tag, timestamp, and matched text; clicking it asks the parent to
-// deep-link the line in the rendered transcript (onJump). "In view" means the hit
-// belongs to the RENDERED session (renderedSessionId) AND its line is on screen
-// (renderedLineIds) — line ids restart per session, so the session must match too.
-// A hit that isn't in view (an older session's line) shows an inline "not in the
-// view" hint on that result and does NOT highlight, rather than jumping to an
-// unrelated line that happens to share the id.
-function TranscriptSearch({
-  onJump,
-  renderedSessionId,
-  renderedLineIds,
-}: {
-  onJump: (lineId: string) => void;
-  renderedSessionId: string | null;
-  renderedLineIds: Set<string>;
-}) {
+// speaker, tag, timestamp, and matched text; clicking it asks the parent to open
+// the line (onOpen) — the parent highlights it when it is on screen, else navigates
+// to that session's transcript and jumps there once it loads (#270, AC4). Line ids
+// restart per session, so onOpen always carries the hit's session id too.
+function TranscriptSearch({ onOpen }: { onOpen: (sessionId: string, lineId: string) => void }) {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   useEffect(() => {
@@ -369,21 +532,7 @@ function TranscriptSearch({
     { enabled: searching, placeholderData: keepPreviousData, retry: false },
   );
   const lines = searchQuery.data?.lines ?? [];
-
-  // The clicked hit that isn't in the rendered view — flagged for the inline hint,
-  // keyed by sessionId:lineId (line ids collide across sessions). Cleared on a new
-  // query so a stale hint never lingers.
-  const [notInViewKey, setNotInViewKey] = useState<string | null>(null);
-  useEffect(() => setNotInViewKey(null), [debounced]);
   const hitKey = (sessionId: string, lineId: string) => `${sessionId}:${lineId}`;
-  const openHit = (sessionId: string, lineId: string) => {
-    if (sessionId === renderedSessionId && renderedLineIds.has(lineId)) {
-      onJump(lineId); // in view: highlight + scroll the rendered line
-      setNotInViewKey(null);
-    } else {
-      setNotInViewKey(hitKey(sessionId, lineId)); // older session: hint, no false highlight
-    }
-  };
 
   return (
     <div className="gx-tsearch">
@@ -405,7 +554,7 @@ function TranscriptSearch({
           <ul className="gx-tsearch__results" data-testid="transcript-search-results">
             {lines.map((m) => (
               <li key={hitKey(m.sessionId, m.lineId)}>
-                <button type="button" className="gx-tsearch__result" onClick={() => openHit(m.sessionId, m.lineId)}>
+                <button type="button" className="gx-tsearch__result" onClick={() => onOpen(m.sessionId, m.lineId)}>
                   <span className="gx-line__who" data-kind={m.kind}>
                     {m.who}
                   </span>
@@ -417,11 +566,6 @@ function TranscriptSearch({
                   <time className="gx-line__ts">{matchClock(m.ts)}</time>
                   <span className="gx-tsearch__text">{m.text}</span>
                 </button>
-                {notInViewKey === hitKey(m.sessionId, m.lineId) && (
-                  <span className="gx-tsearch__hint" role="note">
-                    From an earlier session — not in the view.
-                  </span>
-                )}
               </li>
             ))}
           </ul>

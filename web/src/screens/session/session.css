@@ -301,12 +301,59 @@
   color: var(--text-muted);
 }
 
-/* Inline hint on a hit whose line isn't in the rendered transcript (an older
- * session): explains why the click didn't scroll anywhere. */
-.gx-tsearch__hint {
-  display: block;
-  padding: 0 var(--spacing-sm) var(--spacing-xs, 4px);
+/* Past-session picker (#270): a compact row of past Voice Sessions above the
+ * search box; each is a chip-like button, the viewed one pressed. "Back to current
+ * session" returns to the live/latest default. */
+.gx-session__picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+}
+
+.gx-session__picker-label {
   font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.gx-session__picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs, 4px);
+}
+
+.gx-session__picker-item,
+.gx-session__picker-back {
+  padding: var(--spacing-xs, 4px) var(--spacing-sm);
+  border: 1px solid var(--border-subtle, var(--surface-inset));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface-inset);
+  color: var(--text-default);
+  cursor: pointer;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+.gx-session__picker-item:hover,
+.gx-session__picker-item:focus-visible,
+.gx-session__picker-back:hover,
+.gx-session__picker-back:focus-visible {
+  background: var(--surface-raised, rgba(255, 255, 255, 0.04));
+}
+
+/* The currently-viewed session's chip: emphasized like the deep-link highlight. */
+.gx-session__picker-item[aria-pressed="true"] {
+  background: var(--rune-soft, rgba(120, 160, 255, 0.14));
+  box-shadow: 0 0 0 1px var(--rune, rgba(120, 160, 255, 0.5)) inset;
+}
+
+.gx-session__picker-back {
+  background: transparent;
   color: var(--text-muted);
 }
 

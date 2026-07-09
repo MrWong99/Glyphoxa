@@ -50,6 +50,7 @@ type SessionStore interface {
 	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
 	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
+	ListVoiceSessions(ctx context.Context, campaignID uuid.UUID, limit int) ([]storage.VoiceSession, error)
 	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
 }
 
@@ -57,6 +58,11 @@ type SessionStore interface {
 // server policy for the single-operator web tier (ADR-0039), mirroring
 // searchNodesLimit; the client sends no limit.
 const searchTranscriptLimit = 50
+
+// listSessionsLimit caps the past-session picker's result set (#270). Like
+// searchTranscriptLimit it is a fixed server policy for the single-operator web
+// tier (ADR-0039); the client sends no limit.
+const listSessionsLimit = 50
 
 // SessionServer implements the Connect SessionService over a SessionManager +
 // SessionStore: Start/Stop drive the in-process loop, GetSession reports the live
@@ -320,6 +326,42 @@ func (s *SessionServer) SearchTranscriptLines(
 		out = append(out, toProtoTranscriptLineMatch(l))
 	}
 	return connect.NewResponse(&managementv1.SearchTranscriptLinesResponse{Lines: out}), nil
+}
+
+// ListSessions returns the operator's past Voice Sessions for the resolved Active
+// Campaign, newest-first, capped at listSessionsLimit (#270). It backs the Session
+// screen's past-session picker. The Campaign is resolved server-side with the SAME
+// searchCampaign policy SearchTranscriptLines uses — the live Voice Session's
+// campaign first (so the picker lists the session on screen and its siblings), else
+// the profile-first startCampaign (durable /glyphoxa use selection → most-recent
+// fallback). NEVER a client-supplied id (AC2), so it can never list another
+// campaign's sessions. No Active Campaign yields an empty list (never-run state,
+// not an error); a storage failure is CodeInternal. A read (NO_SIDE_EFFECTS).
+func (s *SessionServer) ListSessions(
+	ctx context.Context,
+	_ *connect.Request[managementv1.ListSessionsRequest],
+) (*connect.Response[managementv1.ListSessionsResponse], error) {
+	campaignID, ok, err := s.searchCampaign(ctx)
+	if err != nil {
+		s.log.Error("ListSessions: resolve active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if !ok {
+		// No Active Campaign: nothing to list yet (never-run state), not an error.
+		return connect.NewResponse(&managementv1.ListSessionsResponse{}), nil
+	}
+
+	sessions, err := s.store.ListVoiceSessions(ctx, campaignID, listSessionsLimit)
+	if err != nil {
+		s.log.Error("ListSessions: store list failed", "campaign_id", campaignID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	out := make([]*managementv1.VoiceSession, 0, len(sessions))
+	for _, vs := range sessions {
+		out = append(out, toProtoVoiceSession(vs))
+	}
+	return connect.NewResponse(&managementv1.ListSessionsResponse{Sessions: out}), nil
 }
 
 // searchCampaign resolves the campaign the web transcript search scopes to: the

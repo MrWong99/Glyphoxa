@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useMuteCache } from "./muteCache";
@@ -63,12 +63,26 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
   return { ...base, lines };
 }
 
-export function useSessionEvents(sessionId: string | undefined, active: boolean): Transcript {
+// SessionTranscript is the cached Transcript plus a transport signal the screen
+// needs but the cache must not carry: snapshotFailed is true when the DB-backed
+// snapshot fetch failed, so a picked past session can surface an error instead of
+// masquerading as the empty "start a session" state (#270).
+export type SessionTranscript = Transcript & { snapshotFailed: boolean };
+
+export function useSessionEvents(
+  sessionId: string | undefined,
+  active: boolean,
+  viewingPast = false,
+): SessionTranscript {
   const queryClient = useQueryClient();
   // The SSE "mute" frame patches the SHARED getSession cache (not the transcript
   // cache), so the Voice panel reflects a mute from EITHER surface without a
   // reload (#211, AC5). patchOne is referentially stable, so it is a safe effect dep.
   const { patchOne, patchSpendCap } = useMuteCache();
+  // Sessions whose live stream this hook has already opened at least once — the
+  // reopen-after-browse resync (#270) keys off it. A ref so it survives re-renders
+  // and effect re-runs without itself triggering one.
+  const streamedBefore = useRef<Set<string>>(new Set());
   // Fetch the snapshot for ANY session that exists — live OR ended. A reload of
   // an ended session replays its persisted history from the DB-backed snapshot
   // (#74); the live stream below only opens while the session is active.
@@ -77,11 +91,18 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
   // Snapshot seed: the initial state the live stream then tails (live), or the
   // persisted history (ended). staleTime is Infinity because the EventSource —
   // not refetching — keeps a live session current, and an ended one is immutable.
-  const { data, isSuccess } = useQuery<Transcript>({
+  const { data, isSuccess, isError } = useQuery<Transcript>({
     queryKey: transcriptKey(sessionId ?? ""),
     enabled: haveSession,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
+    // Retry policy splits by view (#270): for a PAST session, retry:false surfaces
+    // a failed snapshot at once (the screen shows an error) instead of masking it
+    // behind backoff. For the CURRENT/live session, KEEP retries so a transient 500
+    // is absorbed — else isSuccess never flips, the SSE tail never opens, and the
+    // live screen is stuck on "Listening…" forever (staleTime Infinity, no refocus
+    // refetch). A reopen resync or manual re-pick re-fetches either way.
+    retry: viewingPast ? false : 2,
     queryFn: async () => {
       const res = await fetch(`/api/v1/sessions/${sessionId}`, { credentials: "same-origin" });
       if (!res.ok) throw new Error(`session snapshot failed: ${res.status}`);
@@ -103,6 +124,18 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     // between the snapshot capture and the stream opening.
     if (!active || !sessionId || !isSuccess) return;
     const key = transcriptKey(sessionId);
+
+    // Reopen-after-browse resync (#270): browsing a past session closes this
+    // stream; returning re-runs the effect with a fresh everConnected=false, so the
+    // reconnect-invalidate below never fires for the first open. If we have streamed
+    // THIS session before (in this hook's life), the browse may have skipped more
+    // than the ring's 500-frame replay can recover, so re-fetch the authoritative
+    // snapshot on reopen. upsert-by-id makes the refetch + replay overlap idempotent.
+    if (streamedBefore.current.has(sessionId)) {
+      void queryClient.invalidateQueries({ queryKey: key });
+    }
+    streamedBefore.current.add(sessionId);
+
     const es = new EventSource(`/api/v1/sessions/${sessionId}/events`);
 
     // Re-sync the authoritative snapshot on a RECONNECT (any "open" after the
@@ -149,7 +182,10 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     return () => es.close();
   }, [active, sessionId, isSuccess, queryClient, patchOne, patchSpendCap]);
 
-  return data ?? EMPTY;
+  // snapshotFailed only counts for a session that exists — a null id is the
+  // never-run state, not a failure. The screen surfaces it only while browsing a
+  // PAST session (a live session's own failures are the #123 connection surface).
+  return { ...(data ?? EMPTY), snapshotFailed: haveSession && isError };
 }
 
 // formatClock renders an RFC3339 instant as zero-padded HH:MM:SS (the design's

@@ -23,9 +23,11 @@ import {
   CampaignSchema,
   TranscriptLineMatchSchema,
   SearchTranscriptLinesResponseSchema,
+  ListSessionsResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
+import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 import { MockEventSource } from "@/test/mockEventSource";
 import { Session, formatElapsed, sessionRefetchInterval, SESSION_REFETCH_MS } from "./Session";
 
@@ -320,6 +322,41 @@ describe("Session mutation failures (#144)", () => {
 });
 
 describe("Session live transcript (#73)", () => {
+  it("recovers a transient snapshot failure on the live session (retries, doesn't blank forever) (#270 finding 1)", async () => {
+    // The live/current snapshot 500s ONCE then succeeds — with staleTime Infinity and
+    // no refocus refetch, a non-retried failure would strand the screen on "Listening…"
+    // forever because the SSE tail only opens after the snapshot resolves.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response("boom", { status: 500 });
+      return new Response(
+        JSON.stringify({ lines: [], status: "live", typing: { active: true, label: "Listening to the table…" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // The retry lands the snapshot → the SSE stream opens → a streamed line renders.
+    const es = await waitFor(
+      () => {
+        const inst = MockEventSource.last();
+        if (!inst) throw new Error("live stream never opened — snapshot retry not absorbed");
+        return inst;
+      },
+      { timeout: 4000 },
+    );
+    act(() =>
+      es.emit("line", { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "recovered live line" }),
+    );
+    expect(await screen.findByText("recovered live line")).toBeInTheDocument();
+  });
+
   it("seeds from the snapshot then renders streamed lines + typing dots", async () => {
     // Snapshot: live + listening, no lines yet.
     globalThis.fetch = (async () =>
@@ -576,9 +613,18 @@ function searchTransport(searchCalls: string[]) {
       ts: timestampFromDate(new Date()), text: "old dragon mention",
     }),
   ];
+  const older = create(VoiceSessionSchema, {
+    id: "vsOld",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 3 * 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date(Date.now() - 2 * 60 * 60 * 1000)),
+    lineCount: 1,
+  });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
       getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
+      listSessions: () => create(ListSessionsResponseSchema, { sessions: [ended, older] }),
       searchTranscriptLines: (req) => {
         searchCalls.push(req.query);
         const q = req.query.toLowerCase();
@@ -596,21 +642,28 @@ function searchTransport(searchCalls: string[]) {
   });
 }
 
-// persistedTranscriptFetch stubs the DB-backed snapshot so the ended session's
-// transcript renders (needed for the click-to-highlight deep-link).
+// persistedTranscriptFetch stubs the DB-backed snapshot PER SESSION id (#270): the
+// rendered session (vs1) replays its two lines; an earlier session (vsOld) — which
+// SHARES the line id "u:1" — replays its OWN distinct line, so navigating to it and
+// jumping proves the session-scoped deep-link, not an id collision.
 function persistedTranscriptFetch() {
-  globalThis.fetch = (async () =>
-    new Response(
-      JSON.stringify({
-        lines: [
-          { id: "a:t1", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "Well met, traveller." },
-          { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "Where is the dragon?" },
-        ],
-        status: "idle",
-        typing: { active: false, label: "" },
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    )) as typeof fetch;
+  const snap = (lines: unknown[]) =>
+    new Response(JSON.stringify({ lines, status: "idle", typing: { active: false, label: "" } }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/v1/sessions/vsOld")) {
+      return snap([
+        { id: "u:1", who: "Grumnir", kind: "npc", ts: new Date().toISOString(), text: "old dragon mention" },
+      ]);
+    }
+    return snap([
+      { id: "a:t1", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "Well met, traveller." },
+      { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "Where is the dragon?" },
+    ]);
+  }) as typeof fetch;
 }
 
 function renderSearch(searchCalls: string[] = []) {
@@ -668,7 +721,7 @@ describe("Session transcript search (#120)", () => {
     });
   });
 
-  it("hints for an earlier-session hit that shares a line id, without highlighting the rendered line", async () => {
+  it("navigates to an earlier-session hit that shares a line id and highlights ITS line (#270 AC4)", async () => {
     renderSearch();
     expect(await screen.findByText("Where is the dragon?")).toBeInTheDocument();
 
@@ -678,17 +731,26 @@ describe("Session transcript search (#120)", () => {
     const results = await screen.findByTestId("transcript-search-results");
 
     // Click the older-session hit whose line id ("u:1") COLLIDES with the rendered
-    // line: it must show the hint AND must not highlight the rendered u:1.
+    // session's u:1. It must navigate to that session (replay ITS transcript) and
+    // highlight ITS u:1 — never the rendered session's colliding u:1.
     fireEvent.click(await within(results).findByText("old dragon mention"));
-    expect(await within(results).findByText(/not in the view/i)).toBeInTheDocument();
-    expect(document.querySelector('[data-line-id="u:1"]')).not.toHaveAttribute("data-highlighted");
-
-    // Clicking the in-view hit (same session) highlights that line and clears the hint.
-    fireEvent.click(within(results).getByText("Where is the dragon?"));
+    // The older session's own line is now on screen (session-scoped snapshot).
+    expect(await screen.findByText("old dragon mention")).toBeInTheDocument();
     await waitFor(() =>
       expect(document.querySelector('[data-line-id="u:1"]')).toHaveAttribute("data-highlighted", "true"),
     );
-    expect(within(results).queryByText(/not in the view/i)).not.toBeInTheDocument();
+    // The highlighted u:1 is the OLDER session's line — not the rendered session's
+    // colliding u:1 ("Where is the dragon?", which still shows only in the results).
+    expect(document.querySelector('[data-line-id="u:1"]')).toHaveTextContent("old dragon mention");
+    // A "Back to current session" affordance appears while viewing a past session.
+    expect(screen.getByRole("button", { name: /back to current session/i })).toBeInTheDocument();
+
+    // Clicking the current-session hit navigates back and highlights there.
+    fireEvent.click(within(results).getByText("Where is the dragon?"));
+    await waitFor(() =>
+      expect(document.querySelector('[data-line-id="u:1"]')).toHaveTextContent("Where is the dragon?"),
+    );
+    expect(document.querySelector('[data-line-id="u:1"]')).toHaveAttribute("data-highlighted", "true");
   });
 
   it("fires no RPC for a whitespace box and drops results when cleared", async () => {
@@ -781,6 +843,314 @@ describe("Session spend cap (#130)", () => {
     );
     expect(await screen.findByText("Live")).toBeInTheDocument();
     expect(screen.queryByTestId("spend-cap")).not.toBeInTheDocument();
+  });
+});
+
+// pickerFetch stubs the DB-backed snapshot per session id for the picker tests:
+// the latest session (vs1) replays two lines in seq order; an older one (vsOld)
+// replays its own two distinct lines. Proves AC3 (full transcript in seq order).
+function pickerFetch() {
+  const snap = (lines: unknown[]) =>
+    new Response(JSON.stringify({ lines, status: "idle", typing: { active: false, label: "" } }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/v1/sessions/vsOld")) {
+      return snap([
+        { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "old first line" },
+        { id: "a:t1", who: "Grumnir", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "old second line" },
+      ]);
+    }
+    return snap([
+      { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "latest first line" },
+      { id: "a:t1", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "latest second line" },
+    ]);
+  }) as typeof fetch;
+}
+
+// pickerTransport is an IDLE screen whose ListSessions returns two past sessions
+// newest-first — the latest (12 lines) then an older one (5 lines).
+function pickerTransport() {
+  const latest = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date()),
+    lineCount: 12,
+  });
+  const older = create(VoiceSessionSchema, {
+    id: "vsOld",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+    lineCount: 5,
+  });
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: latest, active: false }),
+      listSessions: () => create(ListSessionsResponseSchema, { sessions: [latest, older] }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session past-session picker (#270)", () => {
+  beforeEach(pickerFetch);
+
+  it("lists past sessions and replays a picked session's full transcript in seq order", async () => {
+    render(
+      <Providers transport={pickerTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // The picker lists both sessions, labelled with their line counts.
+    const picker = await screen.findByTestId("session-picker");
+    expect(within(picker).getByText(/12 lines/)).toBeInTheDocument();
+    expect(within(picker).getByText(/5 lines/)).toBeInTheDocument();
+
+    // The default view is the latest (current) session's persisted transcript.
+    expect(await screen.findByText("latest first line")).toBeInTheDocument();
+
+    // Pick the older session → its OWN transcript replays, in snapshot (seq) order.
+    fireEvent.click(within(picker).getByText(/5 lines/));
+    expect(await screen.findByText("old first line")).toBeInTheDocument();
+    expect(screen.getByText("old second line")).toBeInTheDocument();
+    const items = screen.getAllByRole("listitem").filter((li) => li.hasAttribute("data-line-id"));
+    expect(items.map((li) => li.getAttribute("data-line-id"))).toEqual(["u:1", "a:t1"]);
+    // The latest session's lines are no longer on screen.
+    expect(screen.queryByText("latest first line")).not.toBeInTheDocument();
+    // A picked PAST session opens NO live stream — pins the `active && !viewingPast`
+    // gate (#270 6a): replay is snapshot-only, never an EventSource.
+    expect(MockEventSource.last()).toBeUndefined();
+
+    // Back to current returns to the latest session's transcript.
+    fireEvent.click(screen.getByRole("button", { name: /back to current session/i }));
+    expect(await screen.findByText("latest first line")).toBeInTheDocument();
+  });
+
+  it("surfaces an error (not the empty state) when a past session's snapshot fails to load (#270 finding 4)", async () => {
+    // vs1 (current) loads fine; vsOld's snapshot 500s.
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/sessions/vsOld")) {
+        return new Response("boom", { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({
+          lines: [{ id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "latest first line" }],
+          status: "idle",
+          typing: { active: false, label: "" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    render(
+      <Providers transport={pickerTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    const picker = await screen.findByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/5 lines/));
+
+    // Inline error shows + a toast fires — never the "Start a session…" empty state.
+    expect(await screen.findByTestId("snapshot-error")).toBeInTheDocument();
+    expect(screen.queryByText(/start a session to capture/i)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't load that session/i.test(String(m)))).toBe(true),
+    );
+  });
+});
+
+// livePickerTransport is a LIVE session whose ListSessions also carries the running
+// row (labelled "live") plus a past one, to guard AC5: the live feed stays default.
+function livePickerTransport() {
+  const running = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: "running",
+    startedAt: timestampFromDate(new Date()),
+  });
+  const older = create(VoiceSessionSchema, {
+    id: "vsOld",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+    lineCount: 5,
+  });
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: running, active: true }),
+      listSessions: () => create(ListSessionsResponseSchema, { sessions: [running, older] }),
+      startSession: () => create(StartSessionResponseSchema, { session: running }),
+      stopSession: () => create(StopSessionResponseSchema, { session: running }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session live default unchanged with picker present (#270 AC5)", () => {
+  beforeEach(pickerFetch);
+
+  it("keeps the live feed as the default and returns to it after browsing a past session", async () => {
+    render(
+      <Providers transport={livePickerTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // Live is the default: Live badge + a "Live transcript" heading, the running
+    // row in the picker is labelled "live".
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+    expect(screen.getByText("Live transcript")).toBeInTheDocument();
+    const picker = await screen.findByTestId("session-picker");
+    expect(within(picker).getByText(/· live/)).toBeInTheDocument();
+
+    // The live stream opens and a streamed line renders (unchanged live behavior).
+    const es = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst) throw new Error("EventSource not opened yet");
+      return inst;
+    });
+    act(() =>
+      es.emit("line", { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "live line here" }),
+    );
+    expect(await screen.findByText("live line here")).toBeInTheDocument();
+
+    // Browse a past session → the heading switches away from Live transcript.
+    const esCountBeforeBrowse = MockEventSource.instances.length;
+    fireEvent.click(within(picker).getByText(/5 lines/));
+    expect(await screen.findByText("Session transcript")).toBeInTheDocument();
+    expect(await screen.findByText("old first line")).toBeInTheDocument();
+    // Pin the `active && !viewingPast` gate (#270 6b): browsing a past session opens
+    // NO new stream — not for vsOld, not at all. A broken gate would open ES(vsOld).
+    expect(MockEventSource.instances.length).toBe(esCountBeforeBrowse);
+    expect(MockEventSource.instances.some((i) => i.url.includes("vsOld"))).toBe(false);
+
+    // Back to current → the live feed is the default again AND its stream reopens:
+    // a newly streamed line renders (guards AC5 that returning resumes the live tail,
+    // #270 6b — not a frozen snapshot).
+    fireEvent.click(screen.getByRole("button", { name: /back to current session/i }));
+    expect(await screen.findByText("Live transcript")).toBeInTheDocument();
+    const es2 = await waitFor(() => {
+      const inst = MockEventSource.last();
+      if (!inst || inst === es) throw new Error("live stream not reopened after returning");
+      return inst;
+    });
+    act(() =>
+      es2.emit("line", { id: "a:t2", who: "Bart", tag: "NPC", kind: "npc", ts: new Date().toISOString(), text: "back on the live tail" }),
+    );
+    expect(await screen.findByText("back on the live tail")).toBeInTheDocument();
+  });
+});
+
+// switchTransport is a MUTABLE two-campaign transport: flipping `state.campaign`
+// then invalidating the Active-Campaign-scoped caches models the topbar campaign
+// switch. Campaign A has a current + an older session; B has its own current.
+function switchTransport(state: { campaign: "A" | "B" }) {
+  const mk = (id: string, lineCount: number, status = "ended") =>
+    create(VoiceSessionSchema, {
+      id,
+      campaignId: state.campaign === "A" ? "cA" : "cB",
+      status,
+      startedAt: timestampFromDate(new Date(Date.now() - 60 * 60 * 1000)),
+      endedAt: timestampFromDate(new Date()),
+      lineCount,
+    });
+  const aCurrent = mk("vsA", 3);
+  const aOlder = create(VoiceSessionSchema, {
+    id: "vsAold",
+    campaignId: "cA",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+    lineCount: 9,
+  });
+  const bCurrent = mk("vsB", 7);
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () =>
+        create(GetSessionResponseSchema, {
+          session: state.campaign === "A" ? aCurrent : bCurrent,
+          active: false,
+        }),
+      listSessions: () =>
+        create(ListSessionsResponseSchema, {
+          sessions: state.campaign === "A" ? [aCurrent, aOlder] : [bCurrent],
+        }),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, {
+            id: state.campaign === "A" ? "cA" : "cB",
+            name: state.campaign === "A" ? "Campaign A" : "Campaign B",
+          }),
+        }),
+    });
+  });
+}
+
+describe("Session past-session view across a campaign switch (#270 finding 1)", () => {
+  beforeEach(() => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const line = (text: string) => ({
+        lines: [{ id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text }],
+        status: "idle",
+        typing: { active: false, label: "" },
+      });
+      const text = url.includes("/vsAold")
+        ? "A archived line"
+        : url.includes("/vsB")
+          ? "B current line"
+          : "A current line";
+      return new Response(JSON.stringify(line(text)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+  });
+
+  it("resets the viewed past session so the new campaign never renders the old one's transcript", async () => {
+    const state: { campaign: "A" | "B" } = { campaign: "A" };
+    const qc = makeQueryClient();
+    render(
+      <Providers transport={switchTransport(state)} queryClient={qc}>
+        <Session />
+      </Providers>,
+    );
+
+    // In campaign A, browse the older (archived) session.
+    const picker = await screen.findByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/9 lines/));
+    expect(await screen.findByText("A archived line")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /back to current session/i })).toBeInTheDocument();
+
+    // Switch to campaign B and run the Active-Campaign sweep (topbar switch).
+    state.campaign = "B";
+    await act(async () => {
+      void invalidateActiveCampaignScopedQueries(qc);
+    });
+
+    // The view resets: B's current transcript renders, A's archived line is gone,
+    // and the "back to current" affordance (viewingPast) is cleared.
+    expect(await screen.findByText("B current line")).toBeInTheDocument();
+    expect(screen.queryByText("A archived line")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /back to current session/i })).not.toBeInTheDocument();
   });
 });
 
