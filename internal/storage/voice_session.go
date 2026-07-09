@@ -104,6 +104,39 @@ func (s *Store) GetVoiceSession(ctx context.Context, id uuid.UUID) (VoiceSession
 	return v, nil
 }
 
+// ListVoiceSessions returns a Campaign's Voice Sessions newest-first (started_at
+// DESC, id DESC — the same tiebreak as GetLatestVoiceSession), the running row
+// included, capped at limit. It backs the Session screen's past-session picker
+// (#270): the operator picks a prior session to replay its persisted transcript.
+// It reuses voiceSessionColumns/scanVoiceSession and is served by
+// voice_sessions_campaign_idx (no migration). An empty result is not an error
+// (the never-run picker state).
+func (s *Store) ListVoiceSessions(ctx context.Context, campaignID uuid.UUID, limit int) ([]VoiceSession, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+voiceSessionColumns+`
+		   FROM voice_sessions
+		  WHERE campaign_id = $1
+		  ORDER BY started_at DESC, id DESC
+		  LIMIT $2`, campaignID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list voice sessions for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	sessions := make([]VoiceSession, 0)
+	for rows.Next() {
+		v, err := scanVoiceSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan voice session for campaign %s: %w", campaignID, err)
+		}
+		sessions = append(sessions, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list voice sessions for campaign %s: %w", campaignID, err)
+	}
+	return sessions, nil
+}
+
 // GetLatestVoiceSession returns a Campaign's most-recently-started Voice Session,
 // or ErrNotFound when none has ever run. It backs the Session screen's idle
 // last-session summary (#72): when no session is active, the screen shows when

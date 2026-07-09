@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -82,6 +83,91 @@ func TestVoiceSessionLifecycle(t *testing.T) {
 	}
 	if latest.ID != vs.ID || latest.Status != storage.VoiceSessionEnded || latest.LineCount != 7 {
 		t.Errorf("GetLatestVoiceSession = %+v, want ended %s with 7 lines", latest, vs.ID)
+	}
+}
+
+// TestListVoiceSessions is #270's archive read against a real Postgres:
+// ListVoiceSessions returns a Campaign's Voice Sessions newest-first (started_at
+// DESC, id DESC — the same tiebreak as GetLatestVoiceSession), includes the still-
+// running row, honours the LIMIT, and never leaks another Campaign's sessions.
+func TestListVoiceSessions(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A second campaign whose sessions must never surface in campaignID's list.
+	var otherCampaign uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name) VALUES ($1, 'Other') RETURNING id`, tenantID).
+		Scan(&otherCampaign); err != nil {
+		t.Fatalf("insert other campaign: %v", err)
+	}
+
+	// No session yet → empty, not an error (the never-run picker state).
+	empty, err := st.ListVoiceSessions(ctx, campaignID, 50)
+	if err != nil {
+		t.Fatalf("ListVoiceSessions on empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("ListVoiceSessions on empty = %d rows, want 0", len(empty))
+	}
+
+	// Three sessions for campaignID at explicit, increasing started_at instants:
+	// the first two ended, the newest still running (line_count stays 0 until close).
+	base := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	mk := func(campaign uuid.UUID, started time.Time, running bool) uuid.UUID {
+		var id uuid.UUID
+		status := storage.VoiceSessionEnded
+		if running {
+			status = storage.VoiceSessionRunning
+		}
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO voice_sessions (campaign_id, started_at, status)
+			 VALUES ($1, $2, $3) RETURNING id`, campaign, started, status).Scan(&id); err != nil {
+			t.Fatalf("insert voice session: %v", err)
+		}
+		return id
+	}
+	oldest := mk(campaignID, base, false)
+	middle := mk(campaignID, base.Add(1*time.Hour), false)
+	newest := mk(campaignID, base.Add(2*time.Hour), true) // the running row
+	// A newer session in the OTHER campaign — must be excluded.
+	mk(otherCampaign, base.Add(3*time.Hour), false)
+
+	// Full list: newest-first, the running row included, other campaign excluded.
+	all, err := st.ListVoiceSessions(ctx, campaignID, 50)
+	if err != nil {
+		t.Fatalf("ListVoiceSessions: %v", err)
+	}
+	gotIDs := []uuid.UUID{}
+	for _, v := range all {
+		if v.CampaignID != campaignID {
+			t.Errorf("session %s belongs to campaign %s, want %s (cross-campaign leak)", v.ID, v.CampaignID, campaignID)
+		}
+		gotIDs = append(gotIDs, v.ID)
+	}
+	want := []uuid.UUID{newest, middle, oldest}
+	if len(gotIDs) != len(want) {
+		t.Fatalf("ListVoiceSessions = %v, want newest-first %v", gotIDs, want)
+	}
+	for i := range want {
+		if gotIDs[i] != want[i] {
+			t.Errorf("ListVoiceSessions[%d] = %s, want %s (newest-first)", i, gotIDs[i], want[i])
+		}
+	}
+	// The running row is present and still marked running.
+	if all[0].ID != newest || all[0].Status != storage.VoiceSessionRunning || all[0].EndedAt != nil {
+		t.Errorf("newest = %+v, want the running row with no ended_at", all[0])
+	}
+
+	// Limit honoured: only the two newest.
+	capped, err := st.ListVoiceSessions(ctx, campaignID, 2)
+	if err != nil {
+		t.Fatalf("ListVoiceSessions(limit=2): %v", err)
+	}
+	if len(capped) != 2 || capped[0].ID != newest || capped[1].ID != middle {
+		t.Errorf("ListVoiceSessions(limit=2) = %v, want [%s %s]", capped, newest, middle)
 	}
 }
 

@@ -169,6 +169,12 @@ type fakeSessionStore struct {
 	searchCampaign uuid.UUID // the campaign id the handler passed to search
 	searchQuery    string
 	searchCalls    int
+
+	listSessions    []storage.VoiceSession
+	listErr         error
+	listCampaign    uuid.UUID // the campaign id the handler passed to ListVoiceSessions (#270)
+	listLimit       int       // the limit the handler passed (the fixed server policy)
+	listSessionCall int
 }
 
 func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
@@ -215,6 +221,16 @@ func (f *fakeSessionStore) SearchTranscriptLines(_ context.Context, campaignID u
 		return nil, f.searchErr
 	}
 	return f.searchLines, nil
+}
+
+func (f *fakeSessionStore) ListVoiceSessions(_ context.Context, campaignID uuid.UUID, limit int) ([]storage.VoiceSession, error) {
+	f.listSessionCall++
+	f.listCampaign = campaignID
+	f.listLimit = limit
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listSessions, nil
 }
 
 func newSessionClient(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore) managementv1connect.SessionServiceClient {
@@ -470,6 +486,117 @@ func TestSessionMute_CSRFGuardsMutationNotRead(t *testing.T) {
 	// The read is exempt — no token still reaches the handler.
 	if _, err := client.GetSession(ctx, connect.NewRequest(&managementv1.GetSessionRequest{})); connect.CodeOf(err) == connect.CodePermissionDenied {
 		t.Error("GetSession must be CSRF-exempt (NO_SIDE_EFFECTS read)")
+	}
+}
+
+// TestListSessions_ScopesToActiveCampaignAndMaps is #270's server half: with no
+// live session, ListSessions resolves the operator's Active Campaign server-side
+// (never a client id), passes THAT id + the fixed listSessionsLimit to the one
+// storage list method, and maps the rows newest-first via toProtoVoiceSession —
+// including the running row (line_count 0 until close).
+func TestListSessions_ScopesToActiveCampaignAndMaps(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	end := time.Date(2026, 7, 9, 13, 0, 0, 0, time.UTC)
+	running := storage.VoiceSession{
+		ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionRunning,
+		StartedAt: time.Date(2026, 7, 9, 14, 0, 0, 0, time.UTC),
+	}
+	ended := storage.VoiceSession{
+		ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded,
+		StartedAt: time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC), EndedAt: &end, LineCount: 9,
+	}
+	store := &fakeSessionStore{
+		campaign:     storage.Campaign{ID: campaignID, Name: "Sunless Citadel"},
+		latestErr:    storage.ErrNotFound,
+		listSessions: []storage.VoiceSession{running, ended}, // newest-first, as storage returns
+	}
+	client := newSessionClient(t, &fakeSessionManager{}, store)
+
+	resp, err := client.ListSessions(context.Background(), connect.NewRequest(&managementv1.ListSessionsRequest{}))
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if store.listCampaign != campaignID {
+		t.Errorf("listed campaign = %s, want the Active Campaign %s (server-resolved, not client)", store.listCampaign, campaignID)
+	}
+	if store.listLimit != 50 {
+		t.Errorf("list limit = %d, want the fixed server policy 50", store.listLimit)
+	}
+	got := resp.Msg.GetSessions()
+	if len(got) != 2 {
+		t.Fatalf("got %d sessions, want 2", len(got))
+	}
+	if got[0].GetId() != running.ID.String() || got[0].GetStatus() != "running" || got[0].GetEndedAt() != nil {
+		t.Errorf("sessions[0] = %+v, want the mapped running row with no ended_at", got[0])
+	}
+	if got[1].GetId() != ended.ID.String() || got[1].GetStatus() != "ended" || got[1].GetLineCount() != 9 {
+		t.Errorf("sessions[1] = %+v, want the mapped ended row with 9 lines", got[1])
+	}
+}
+
+// TestListSessions_PrefersLiveSessionCampaign pins the live-first scope (mirrors
+// SearchTranscriptLines): while a Voice Session is live, ListSessions scopes to
+// the LIVE session's campaign, not a since-changed durable selection (AC2/AC5).
+func TestListSessions_PrefersLiveSessionCampaign(t *testing.T) {
+	t.Parallel()
+	liveCampaign := uuid.New()
+	durable := storage.Campaign{ID: uuid.New(), Name: "Durable A"}
+	mgr := &fakeSessionManager{
+		active:  true,
+		current: storage.VoiceSession{ID: uuid.New(), CampaignID: liveCampaign, Status: storage.VoiceSessionRunning},
+	}
+	store := &fakeSessionStore{forUser: durable, campaign: durable, latestErr: storage.ErrNotFound}
+	client := newSessionClientAs(t, mgr, store, storage.User{DiscordUserID: "999"})
+
+	if _, err := client.ListSessions(context.Background(), connect.NewRequest(&managementv1.ListSessionsRequest{})); err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if store.listCampaign != liveCampaign {
+		t.Errorf("listed campaign = %s, want the LIVE session's %s (not the durable %s)", store.listCampaign, liveCampaign, durable.ID)
+	}
+}
+
+// TestListSessions_NoCampaignReturnsEmpty: with no live session and no Active
+// Campaign (never-run state), ListSessions returns an empty list — not an error —
+// and never reaches storage.
+func TestListSessions_NoCampaignReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	store := &fakeSessionStore{campaignErr: storage.ErrNotFound}
+	client := newSessionClient(t, &fakeSessionManager{}, store)
+
+	resp, err := client.ListSessions(context.Background(), connect.NewRequest(&managementv1.ListSessionsRequest{}))
+	if err != nil {
+		t.Fatalf("ListSessions with no campaign = %v, want nil (graceful empty)", err)
+	}
+	if len(resp.Msg.GetSessions()) != 0 {
+		t.Errorf("got %d sessions, want 0 when there is no Active Campaign", len(resp.Msg.GetSessions()))
+	}
+	if store.listSessionCall != 0 {
+		t.Errorf("store.ListVoiceSessions called %d times with no campaign, want 0", store.listSessionCall)
+	}
+}
+
+// TestListSessions_CSRFExemptAsRead: with the CSRF interceptor mounted and no
+// token, the state-changing StartSession is PermissionDenied while the
+// side-effect-free ListSessions (NO_SIDE_EFFECTS) is exempt and reaches the handler.
+func TestListSessions_CSRFExemptAsRead(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+		connect.WithInterceptors(auth.NewCSRFInterceptor()),
+	))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+	ctx := context.Background()
+
+	_, startErr := client.StartSession(ctx, connect.NewRequest(&managementv1.StartSessionRequest{}))
+	if got := connect.CodeOf(startErr); got != connect.CodePermissionDenied {
+		t.Errorf("StartSession code = %v, want PermissionDenied (CSRF-guarded mutation)", got)
+	}
+	if _, err := client.ListSessions(ctx, connect.NewRequest(&managementv1.ListSessionsRequest{})); connect.CodeOf(err) == connect.CodePermissionDenied {
+		t.Error("ListSessions must be CSRF-exempt (NO_SIDE_EFFECTS read)")
 	}
 }
 

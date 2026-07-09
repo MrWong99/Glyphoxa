@@ -977,6 +977,30 @@ service SessionService {
   rpc SearchTranscriptLines(SearchTranscriptLinesRequest) returns (SearchTranscriptLinesResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // ListSessions returns the operator's past Voice Sessions for the resolved
+  // Active Campaign, newest-first (started_at DESC, id DESC), capped at a fixed
+  // server limit (#270). It backs the Session screen's past-session picker: the
+  // operator picks a prior session to replay its persisted transcript. The
+  // Campaign is resolved server-side exactly like SearchTranscriptLines (the live
+  // Voice Session's campaign when one runs, else the durable /glyphoxa use
+  // selection, else the most-recent fallback) — NEVER a client-supplied id, so it
+  // can never list another campaign's sessions. A never-run state yields an empty
+  // list, not an error. It is a read (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// ListSessionsRequest is the (empty) request; the Active Campaign is resolved
+// server-side (single operator, ADR-0039) — the client never supplies a campaign id.
+message ListSessionsRequest {}
+
+// ListSessionsResponse carries the campaign's past Voice Sessions newest-first
+// (started_at DESC, id DESC), capped by the server's fixed listSessionsLimit.
+message ListSessionsResponse {
+  // sessions are the campaign's Voice Sessions, newest-first, including the
+  // running one when a session is live.
+  repeated VoiceSession sessions = 1;
 }
 
 // TranscriptLineMatch is one transcript-search hit (#120): the rendered Line's
