@@ -62,6 +62,22 @@ func (fakeReader) SetActiveCampaign(context.Context, string, uuid.UUID) error {
 	return nil
 }
 
+// The archive lifecycle half of campaignStore (#269) is unused by the
+// GetActiveCampaign tests; stub it so fakeReader still satisfies the widened
+// interface. The archive handlers exercise it via fakeCampaignStore.
+func (fakeReader) ListAllCampaigns(context.Context) ([]storage.Campaign, error) {
+	return nil, nil
+}
+func (fakeReader) ArchiveCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{}, nil
+}
+func (fakeReader) UnarchiveCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+	return storage.Campaign{}, nil
+}
+func (fakeReader) DeleteCampaign(context.Context, uuid.UUID) error {
+	return nil
+}
+
 // The roster + CRUD half of campaignStore is unused by the GetActiveCampaign
 // tests; stub it so fakeReader still satisfies the widened interface. The CRUD
 // handlers have their own fake (campaign_crud_test.go).

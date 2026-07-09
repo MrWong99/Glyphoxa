@@ -1,7 +1,8 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import * as RAlert from "@radix-ui/react-alert-dialog";
 
 import { Button } from "./Button";
+import { Input } from "./Input";
 
 // ConfirmDialog — a modal confirmation gate on a Radix AlertDialog (ADR-0017:
 // Radix backs the accessibility-heavy primitives). Built for destructive actions
@@ -10,6 +11,11 @@ import { Button } from "./Button";
 // state in `onOpenChange`. AlertDialog's native behaviour supplies the rest —
 // Escape and Cancel dismiss without confirming, focus is trapped, and the
 // overlay does NOT close on click (a mis-click can't destroy data).
+//
+// For irreversible deletes (#269 campaign hard-delete) pass `confirmText`: the
+// dialog then renders a text field and keeps confirm disabled until the operator
+// re-types that exact string (e.g. the campaign name). The typed value resets
+// whenever the dialog closes, so a reopened dialog never inherits a prior entry.
 
 export function ConfirmDialog({
   open,
@@ -21,6 +27,8 @@ export function ConfirmDialog({
   onConfirm,
   confirmDisabled = false,
   destructive = true,
+  confirmText,
+  confirmTextLabel,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -31,7 +39,26 @@ export function ConfirmDialog({
   onConfirm: () => void;
   confirmDisabled?: boolean;
   destructive?: boolean;
+  // confirmText, when set, gates confirm behind an exact re-typed match (#269).
+  confirmText?: string;
+  // confirmTextLabel labels the confirmation field; defaults to a generic prompt.
+  confirmTextLabel?: ReactNode;
 }) {
+  const [typed, setTyped] = useState("");
+
+  // Reset the typed value whenever the dialog is closed — keyed on `open` rather
+  // than the Radix onOpenChange callback so it fires for BOTH close paths: the
+  // native Cancel/Escape (which flows through onOpenChange) AND a programmatic
+  // close by the caller (e.g. a delete's onSuccess flipping `open` to false,
+  // which bypasses onOpenChange). Either way a reopened dialog starts empty, so a
+  // stale match can't let the next open confirm without a fresh re-type.
+  useEffect(() => {
+    if (!open) setTyped("");
+  }, [open]);
+
+  const typedGateOpen = confirmText === undefined || typed === confirmText;
+  const disabled = confirmDisabled || !typedGateOpen;
+
   return (
     <RAlert.Root open={open} onOpenChange={onOpenChange}>
       <RAlert.Portal>
@@ -42,6 +69,16 @@ export function ConfirmDialog({
           {description && (
             <RAlert.Description className="gx-confirm__desc">{description}</RAlert.Description>
           )}
+          {confirmText !== undefined && (
+            <Input
+              label={confirmTextLabel ?? `Type “${confirmText}” to confirm`}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              autoComplete="off"
+              autoFocus
+              data-testid="confirm-text-input"
+            />
+          )}
           <div className="gx-confirm__actions">
             <RAlert.Cancel asChild>
               <Button variant="ghost">{cancelLabel}</Button>
@@ -50,7 +87,7 @@ export function ConfirmDialog({
               <Button
                 variant={destructive ? "danger" : "primary"}
                 onClick={onConfirm}
-                disabled={confirmDisabled}
+                disabled={disabled}
               >
                 {confirmLabel}
               </Button>

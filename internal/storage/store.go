@@ -65,13 +65,13 @@ func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 
 const campaignColumns = `
 	id, tenant_id, gm_member_id, name, system, language,
-	created_at, updated_at`
+	created_at, updated_at, archived_at`
 
 func scanCampaign(row pgx.Row) (Campaign, error) {
 	var c Campaign
 	err := row.Scan(
 		&c.ID, &c.TenantID, &c.GMMemberID, &c.Name, &c.System, &c.Language,
-		&c.CreatedAt, &c.UpdatedAt,
+		&c.CreatedAt, &c.UpdatedAt, &c.ArchivedAt,
 	)
 	return c, err
 }
@@ -80,11 +80,15 @@ func scanCampaign(row pgx.Row) (Campaign, error) {
 // one. Glyphoxa is single-operator today (one Tenant), so the global latest is
 // the sole Tenant's latest. Tenant scoping fills in behind the X-Tenant-Id
 // pass-through later (ADR-0039), at which point this gains a WHERE tenant_id = $1.
-// No campaign yields ErrNotFound (the RPC layer maps it to Connect CodeNotFound).
+// Archived campaigns are excluded from this fallback (#269): an only-archived DB
+// resolves to ErrNotFound, so an archived campaign can never be the implicit
+// Active Campaign nor start a Voice Session. No campaign yields ErrNotFound (the
+// RPC layer maps it to Connect CodeNotFound).
 func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT `+campaignColumns+`
 		   FROM campaign
+		  WHERE archived_at IS NULL
 		  ORDER BY created_at DESC, id DESC
 		  LIMIT 1`)
 	c, err := scanCampaign(row)
@@ -112,12 +116,14 @@ func (s *Store) GetCampaign(ctx context.Context, id uuid.UUID) (Campaign, error)
 	return c, nil
 }
 
-// ListCampaigns returns every Campaign ordered by name (then id for a stable
-// tie-break) — the /glyphoxa use autocomplete source (#108). Single-operator
-// today, so it is unscoped, mirroring GetActiveCampaign; tenant scoping fills in
-// behind the X-Tenant-Id pass-through later (ADR-0039).
+// ListCampaigns returns every ACTIVE Campaign ordered by name (then id for a
+// stable tie-break) — the /glyphoxa use autocomplete source (#108). Archived
+// campaigns are excluded (#269): the autocomplete inherits that filter with no
+// code change of its own. Single-operator today, so it is unscoped, mirroring
+// GetActiveCampaign; tenant scoping fills in behind the X-Tenant-Id pass-through
+// later (ADR-0039). See ListAllCampaigns for the archive-inclusive read.
 func (s *Store) ListCampaigns(ctx context.Context) ([]Campaign, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+campaignColumns+` FROM campaign ORDER BY name, id`)
+	rows, err := s.db.Query(ctx, `SELECT `+campaignColumns+` FROM campaign WHERE archived_at IS NULL ORDER BY name, id`)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list campaigns: %w", err)
 	}

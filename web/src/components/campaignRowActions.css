@@ -1,0 +1,70 @@
+/* Per-row campaign lifecycle menu (#269) — a kebab trigger opening a small
+ * archive/unarchive/delete menu. Reuses the .gx-select__content popover +
+ * .gx-select__item row vocabulary from the switcher.
+ */
+
+.gx-campaign-row-actions {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.gx-campaign-row-actions__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.gx-campaign-row-actions__trigger:hover {
+  background: rgba(144, 89, 255, 0.12);
+  color: var(--text-default);
+}
+.gx-campaign-row-actions__trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.gx-campaign-row-actions__menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 20;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--spacing-xs);
+}
+.gx-campaign-row-actions__menu .gx-select__item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-default);
+  font-family: var(--font-base);
+  font-size: var(--body-sm);
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+}
+.gx-campaign-row-actions__menu .gx-select__item:hover:not(:disabled) {
+  background: rgba(144, 89, 255, 0.12);
+}
+.gx-campaign-row-actions__menu .gx-select__item:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.gx-campaign-row-actions__menu .gx-select__item--danger {
+  color: var(--danger, #e5484d);
+}
+.gx-campaign-row-actions__menu .gx-select__item--danger:hover:not(:disabled) {
+  background: rgba(229, 72, 77, 0.12);
+}

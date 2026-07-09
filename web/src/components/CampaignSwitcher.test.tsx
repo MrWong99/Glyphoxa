@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
+import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { useQuery } from "@connectrpc/connect-query";
 
 import {
@@ -14,6 +15,9 @@ import {
   GetCampaignRosterResponseSchema,
   SetActiveCampaignResponseSchema,
   CreateCampaignResponseSchema,
+  ArchiveCampaignResponseSchema,
+  UnarchiveCampaignResponseSchema,
+  DeleteCampaignResponseSchema,
   GetSessionResponseSchema,
   ListSupportedLanguagesResponseSchema,
   UpdateCampaignResponseSchema,
@@ -22,7 +26,7 @@ import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { CampaignSwitcher } from "./CampaignSwitcher";
 
-type Camp = { id: string; name: string; system?: string; language?: string };
+type Camp = { id: string; name: string; system?: string; language?: string; archived?: boolean };
 
 // A stateful Connect backend for the switcher: ListCampaigns reflects creates,
 // SetActiveCampaign moves the durable selection, and GetActiveCampaign/roster
@@ -48,6 +52,8 @@ function mockBackend(
       name: c.name,
       system: c.system ?? "",
       language: c.language ?? "",
+      // archived campaigns carry an archivedAt timestamp on the wire (#269).
+      archivedAt: c.archived ? timestampFromDate(new Date("2026-07-09T00:00:00Z")) : undefined,
     })),
     activeId: opts.activeId,
     next: 1,
@@ -55,18 +61,38 @@ function mockBackend(
   const bump = (m: string) => {
     if (opts.calls) opts.calls[m] = (opts.calls[m] ?? 0) + 1;
   };
+  const isArchived = (c: { archivedAt?: unknown }) => c.archivedAt !== undefined;
   const resolveActive = () => {
-    if (state.campaigns.length === 0) return undefined;
-    return state.campaigns.find((c) => c.id === state.activeId) ?? state.campaigns[state.campaigns.length - 1];
+    const active = state.campaigns.filter((c) => !isArchived(c));
+    if (active.length === 0) return undefined;
+    return active.find((c) => c.id === state.activeId) ?? active[active.length - 1];
   };
 
   return createRouterTransport(({ service }) => {
     service(CampaignService, {
-      listCampaigns: () => {
+      listCampaigns: (req) => {
         bump("listCampaigns");
+        const rows = req.includeArchived ? state.campaigns : state.campaigns.filter((c) => !isArchived(c));
         return create(ListCampaignsResponseSchema, {
-          campaigns: state.campaigns.map((c) => create(CampaignSchema, c)),
+          campaigns: rows.map((c) => create(CampaignSchema, c)),
         });
+      },
+      archiveCampaign: (req) => {
+        bump("archiveCampaign");
+        const c = state.campaigns.find((x) => x.id === req.id);
+        if (c) c.archivedAt = timestampFromDate(new Date("2026-07-09T00:00:00Z"));
+        return create(ArchiveCampaignResponseSchema, { campaign: c && create(CampaignSchema, c) });
+      },
+      unarchiveCampaign: (req) => {
+        bump("unarchiveCampaign");
+        const c = state.campaigns.find((x) => x.id === req.id);
+        if (c) c.archivedAt = undefined;
+        return create(UnarchiveCampaignResponseSchema, { campaign: c && create(CampaignSchema, c) });
+      },
+      deleteCampaign: (req) => {
+        bump("deleteCampaign");
+        state.campaigns = state.campaigns.filter((x) => x.id !== req.id);
+        return create(DeleteCampaignResponseSchema, {});
       },
       getActiveCampaign: () => {
         bump("getActiveCampaign");
@@ -95,7 +121,7 @@ function mockBackend(
       createCampaign: (req) => {
         bump("createCampaign");
         if (opts.createError) throw new ConnectError(opts.createError, Code.Internal);
-        const c = { id: `new-${state.next++}`, name: req.name, system: req.system, language: req.language };
+        const c = { id: `new-${state.next++}`, name: req.name, system: req.system, language: req.language, archivedAt: undefined };
         state.campaigns.push(c);
         return create(CreateCampaignResponseSchema, { campaign: create(CampaignSchema, c) });
       },
@@ -358,6 +384,96 @@ describe("CampaignSwitcher", () => {
     // the long-lived switcher, so re-entering create mode resets them.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("");
+  });
+
+  it("toggles the archived campaigns into the list via Show archived", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({
+        campaigns: [
+          { id: "a", name: "Alpha Quest" },
+          { id: "z", name: "Zombie Vault", archived: true },
+        ],
+        activeId: "a",
+        calls,
+      }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+
+    // Default: only the active campaign shows; the archived one is hidden.
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    await within(list).findByRole("button", { name: /Alpha Quest/ });
+    expect(within(list).queryByText("Zombie Vault")).not.toBeInTheDocument();
+
+    // Show archived → the request flips includeArchived, the archived row appears
+    // with an "Archived" badge and its switch button disabled.
+    fireEvent.click(screen.getByRole("button", { name: /show archived/i }));
+    await waitFor(() => expect(within(list).queryByText("Zombie Vault")).toBeInTheDocument());
+    const archivedRow = within(list).getByText("Zombie Vault").closest("li")!;
+    expect(within(archivedRow).getByText("Archived")).toBeInTheDocument();
+    // The switch button of the archived row is disabled (can't be made active).
+    expect(within(archivedRow).getByRole("button", { name: /Zombie Vault/ })).toBeDisabled();
+
+    // Hide again → the archived row is gone.
+    fireEvent.click(screen.getByRole("button", { name: /hide archived/i }));
+    await waitFor(() => expect(within(list).queryByText("Zombie Vault")).not.toBeInTheDocument());
+  });
+
+  it("archives an active campaign from its row menu", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a", calls }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    const row = (await within(list).findByText("Alpha Quest")).closest("li")!;
+
+    // Open the row's action menu and archive.
+    fireEvent.click(within(row).getByRole("button", { name: /Campaign actions/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Archive$/ }));
+    await waitFor(() => expect(calls.archiveCampaign).toBe(1));
+  });
+
+  it("deletes an archived campaign THROUGH the open panel without the dismiss hook tearing it down mid-flow", async () => {
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({
+        campaigns: [
+          { id: "a", name: "Alpha Quest" },
+          { id: "z", name: "Zombie Vault", archived: true },
+        ],
+        activeId: "a",
+        calls,
+      }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: /show archived/i }));
+
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    const row = (await within(list).findByText("Zombie Vault")).closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: /Campaign actions/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Delete/ }));
+
+    // The confirm dialog is up. Interacting inside it fires mousedown on nodes
+    // that live OUTSIDE the panel's ref (Radix portal). The dismiss hook must NOT
+    // treat that as an outside click and tear the panel (and this dialog) down.
+    const dialog = await screen.findByRole("alertdialog");
+    const input = within(dialog).getByTestId("confirm-text-input");
+    fireEvent.mouseDown(input);
+
+    // Panel + dialog both survived the mousedown. The panel is aria-hidden by the
+    // modal (hidden:true), but crucially still MOUNTED — the bug tore it (and this
+    // dialog) out of the DOM entirely, which query would then fail.
+    expect(screen.getByRole("group", { name: /campaigns/i, hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    // Type the exact name and confirm — the delete fires.
+    fireEvent.change(input, { target: { value: "Zombie Vault" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete campaign" }));
+    await waitFor(() => expect(calls.deleteCampaign).toBe(1));
   });
 
   it("retries only activation (no duplicate create) when the create succeeds but activation fails", async () => {

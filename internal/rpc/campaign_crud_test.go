@@ -57,6 +57,20 @@ type fakeCampaignStore struct {
 	updateCampaignErr error
 	setActiveCalls    []setActiveCall
 	setActiveErr      error
+	// Archive lifecycle state (#269): allCampaignList backs ListAllCampaigns;
+	// archiveCalls/unarchiveCalls/deleteCalls record the ids each handler passed;
+	// the *Result campaigns are returned on the happy path, and the *Err hooks force
+	// each failure path (e.g. storage.ErrNotFound, storage.ErrNotArchived).
+	allCampaignList   []storage.Campaign
+	listAllErr        error
+	archiveCalls      []uuid.UUID
+	archiveResult     storage.Campaign
+	archiveErr        error
+	unarchiveCalls    []uuid.UUID
+	unarchiveResult   storage.Campaign
+	unarchiveErr      error
+	deleteCalls       []uuid.UUID
+	deleteCampaignErr error
 	// listNodesCampaign/searchNodesCampaign record the campaign id ListNodes /
 	// SearchNodes resolved so the scope precedence can be asserted (#222).
 	listNodesCampaign   uuid.UUID
@@ -198,6 +212,31 @@ func (f *fakeCampaignStore) SetActiveCampaign(_ context.Context, discordUserID s
 	}
 	f.setActiveCalls = append(f.setActiveCalls, setActiveCall{discordUserID: discordUserID, campaignID: campaignID})
 	return nil
+}
+
+func (f *fakeCampaignStore) ListAllCampaigns(context.Context) ([]storage.Campaign, error) {
+	return f.allCampaignList, f.listAllErr
+}
+
+func (f *fakeCampaignStore) ArchiveCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	f.archiveCalls = append(f.archiveCalls, id)
+	if f.archiveErr != nil {
+		return storage.Campaign{}, f.archiveErr
+	}
+	return f.archiveResult, nil
+}
+
+func (f *fakeCampaignStore) UnarchiveCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+	f.unarchiveCalls = append(f.unarchiveCalls, id)
+	if f.unarchiveErr != nil {
+		return storage.Campaign{}, f.unarchiveErr
+	}
+	return f.unarchiveResult, nil
+}
+
+func (f *fakeCampaignStore) DeleteCampaign(_ context.Context, id uuid.UUID) error {
+	f.deleteCalls = append(f.deleteCalls, id)
+	return f.deleteCampaignErr
 }
 
 func (f *fakeCampaignStore) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {

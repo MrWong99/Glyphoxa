@@ -153,6 +153,28 @@ service CampaignService {
   // unregistered tool_name is CodeInvalidArgument. State-changing: the auth + CSRF
   // interceptors guard it exactly like the other CampaignService mutations.
   rpc UpdateToolGrant(UpdateToolGrantRequest) returns (UpdateToolGrantResponse);
+
+  // ArchiveCampaign archives a campaign (#269): it is excluded from
+  // ListCampaigns, the /glyphoxa use autocomplete, and the Active-Campaign
+  // fallback, and can no longer start a Voice Session. Archive is idempotent. The
+  // campaign backing the LIVE Voice Session cannot be archived
+  // (CodeFailedPrecondition); an unknown id is CodeNotFound. State-changing: the
+  // auth + CSRF interceptors guard it.
+  rpc ArchiveCampaign(ArchiveCampaignRequest) returns (ArchiveCampaignResponse);
+
+  // UnarchiveCampaign clears a campaign's archived state, returning it to the
+  // active set (#269). An unknown id is CodeNotFound. State-changing: the auth +
+  // CSRF interceptors guard it.
+  rpc UnarchiveCampaign(UnarchiveCampaignRequest) returns (UnarchiveCampaignResponse);
+
+  // DeleteCampaign permanently removes an ALREADY-ARCHIVED campaign and cascades
+  // to its Agents, Knowledge Graph, transcripts, and Voice Sessions (#269). A
+  // non-archived campaign is refused with CodeFailedPrecondition (archive first);
+  // the campaign backing the LIVE Voice Session cannot be deleted
+  // (CodeFailedPrecondition); an unknown id is CodeNotFound. Irreversible — the
+  // web UI gates it behind a re-typed campaign name. State-changing: the auth +
+  // CSRF interceptors guard it.
+  rpc DeleteCampaign(DeleteCampaignRequest) returns (DeleteCampaignResponse);
 }
 
 // ToolGrant is one built-in Tool's availability and grant state for a single
@@ -432,6 +454,11 @@ message Campaign {
   google.protobuf.Timestamp created_at = 6;
   // updated_at is when the campaign was last modified.
   google.protobuf.Timestamp updated_at = 7;
+  // archived_at is when the campaign was archived (#269); unset means active. An
+  // archived campaign is excluded from the default list, the /glyphoxa use
+  // autocomplete, and the Active-Campaign fallback, and cannot start a Voice
+  // Session.
+  google.protobuf.Timestamp archived_at = 8;
 }
 
 // GetActiveCampaignRequest is the (empty) request for GetActiveCampaign; the
@@ -445,9 +472,13 @@ message GetActiveCampaignResponse {
   Campaign campaign = 1;
 }
 
-// ListCampaignsRequest is the (empty) request; the operator's campaigns are
+// ListCampaignsRequest carries the archive filter; the operator's campaigns are
 // resolved server-side (single operator, ADR-0039).
-message ListCampaignsRequest {}
+message ListCampaignsRequest {
+  // include_archived returns archived campaigns alongside active ones when true
+  // (the archive-management panel, #269). Default false = active campaigns only.
+  bool include_archived = 1;
+}
 
 // ListCampaignsResponse carries the operator's campaigns in name order.
 message ListCampaignsResponse {
@@ -515,6 +546,43 @@ message SetActiveCampaignResponse {
   // campaign is the resolved Active Campaign after the selection.
   Campaign campaign = 1;
 }
+
+// ArchiveCampaignRequest names the campaign to archive (#269).
+message ArchiveCampaignRequest {
+  // id is the campaign to archive; an unknown id fails with CodeNotFound.
+  string id = 1;
+}
+
+// ArchiveCampaignResponse carries the archived campaign (archived_at set).
+message ArchiveCampaignResponse {
+  // campaign is the archived campaign.
+  Campaign campaign = 1;
+}
+
+// UnarchiveCampaignRequest names the campaign to unarchive (#269).
+message UnarchiveCampaignRequest {
+  // id is the campaign to unarchive; an unknown id fails with CodeNotFound.
+  string id = 1;
+}
+
+// UnarchiveCampaignResponse carries the reactivated campaign (archived_at unset).
+message UnarchiveCampaignResponse {
+  // campaign is the reactivated campaign.
+  Campaign campaign = 1;
+}
+
+// DeleteCampaignRequest names the already-archived campaign to permanently
+// delete (#269). It carries the id only: the delete is gated server-side by the
+// archived precondition, and the re-typed name confirmation is a UI-only guard.
+message DeleteCampaignRequest {
+  // id is the campaign to delete; it must already be archived
+  // (CodeFailedPrecondition otherwise) and an unknown id fails with CodeNotFound.
+  string id = 1;
+}
+
+// DeleteCampaignResponse is empty: a successful delete removes the campaign and
+// everything cascading from it.
+message DeleteCampaignResponse {}
 
 // AuthService exposes the operator's authenticated identity to the SPA boot
 // flow (ADR-0016 / ADR-0039). The session itself is issued by the net/http

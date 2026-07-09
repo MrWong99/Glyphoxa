@@ -21,12 +21,18 @@ import (
 // NO_SIDE_EFFECTS; mutations are CSRF-guarded by the interceptor stack.
 
 // ListCampaigns returns the operator's campaigns in name order (the store's stable
-// name-then-id ordering). A storage failure is CodeInternal.
+// name-then-id ordering). By default only ACTIVE campaigns are returned; when
+// include_archived is set the archived ones are included too — the archive-
+// management panel's view (#269). A storage failure is CodeInternal.
 func (s *CampaignServer) ListCampaigns(
 	ctx context.Context,
-	_ *connect.Request[managementv1.ListCampaignsRequest],
+	req *connect.Request[managementv1.ListCampaignsRequest],
 ) (*connect.Response[managementv1.ListCampaignsResponse], error) {
-	campaigns, err := s.store.ListCampaigns(ctx)
+	list := s.store.ListCampaigns
+	if req.Msg.GetIncludeArchived() {
+		list = s.store.ListAllCampaigns
+	}
+	campaigns, err := list(ctx)
 	if err != nil {
 		slog.Default().Error("ListCampaigns: store list failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -142,12 +148,19 @@ func (s *CampaignServer) SetActiveCampaign(
 
 	// Validate the target exists before persisting the pointer — an unknown id is
 	// a client error (CodeNotFound), never a silently-stored dangling selection.
-	if _, err := s.store.GetCampaign(ctx, id); err != nil {
+	target, err := s.store.GetCampaign(ctx, id)
+	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
 		}
 		slog.Default().Error("SetActiveCampaign: validate campaign failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	// An archived campaign cannot be the Active Campaign (#269): it is excluded from
+	// every resolution surface, so selecting it would resolve to a DIFFERENT campaign
+	// (the fallback) — refuse up front with a clear precondition failure instead.
+	if target.ArchivedAt != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("campaign is archived"))
 	}
 
 	if err := s.store.SetActiveCampaign(ctx, u.DiscordUserID, id); err != nil {
