@@ -132,3 +132,31 @@ func TestFromPCM16LE_DecodesLittleEndianSignedSamples(t *testing.T) {
 		}
 	}
 }
+
+func TestFrame_WithSpeaker_RoundTrips(t *testing.T) {
+	t.Parallel()
+
+	base, err := audio.NewFrame(make([]int16, 512), 16000, 32)
+	if err != nil {
+		t.Fatalf("NewFrame: %v", err)
+	}
+
+	// Zero value is unattributed.
+	if got := base.Speaker(); got != "" {
+		t.Errorf("zero-value Frame.Speaker() = %q, want \"\"", got)
+	}
+
+	tagged := base.WithSpeaker("111")
+	if got := tagged.Speaker(); got != "111" {
+		t.Errorf("Speaker() = %q, want \"111\"", got)
+	}
+	// WithSpeaker returns a copy: the original stays unattributed (immutable).
+	if got := base.Speaker(); got != "" {
+		t.Errorf("original Frame.Speaker() = %q after WithSpeaker, want \"\" (copy, not mutate)", got)
+	}
+	// The copy preserves the audio payload and geometry.
+	if len(tagged.Samples()) != len(base.Samples()) || tagged.SampleRate() != base.SampleRate() || tagged.FrameMs() != base.FrameMs() {
+		t.Errorf("WithSpeaker altered frame geometry: samples=%d rate=%d ms=%d",
+			len(tagged.Samples()), tagged.SampleRate(), tagged.FrameMs())
+	}
+}

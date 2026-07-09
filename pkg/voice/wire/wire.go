@@ -262,8 +262,11 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 				continue
 			}
 			// The speaker stopped and audio has been idle for one frame interval:
-			// advance the VAD with one frame of silence so the utterance endpoints.
-			if err := p.conv.Feed(p.silence); err != nil {
+			// advance the VAD with one frame of silence so the utterance endpoints. This
+			// is the speaker-agnostic silence CLOCK — it must reach EVERY Speaker Lane's
+			// VAD hangover, so it routes through FeedSilence, distinct from the per-speaker
+			// inbound audio on Feed below (ADR-0050).
+			if err := p.conv.FeedSilence(p.silence); err != nil {
 				p.log.Debug("feed silence frame", "err", err)
 			}
 		case frame, ok := <-inbound:

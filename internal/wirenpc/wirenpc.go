@@ -15,6 +15,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/disgoorg/disgo"
@@ -952,8 +954,30 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// stage cannot read off the Silero session (vad.Session doesn't expose
 	// minSilenceFrames), so compute it here from the same consts the session is
 	// configured with — vadMinSilenceFrames*vadFrameMs (= 384 ms).
+	vadHangover := vadMinSilenceFrames * vadFrameMs * time.Millisecond
 	vadStage := orchestrator.NewVAD(bus, vadSession,
-		orchestrator.WithVADMetrics(stageMetrics, vadMinSilenceFrames*vadFrameMs*time.Millisecond))
+		orchestrator.WithVADMetrics(stageMetrics, vadHangover))
+
+	// Speaker Lanes (ADR-0050): each Discord participant's already-separated frame
+	// stream (codec stamps Frame.UserID) opens its own VAD lane, so utterances are
+	// segmented and attributed per speaker. The lane factory builds a fresh Silero
+	// session PER lane from the SAME process-global engine (NewSession is cheap; the
+	// engine is the ONNX singleton, never re-created) and its close releases that
+	// lane's ONNX inferencer on reap (risk (b)). The default lane keeps vadSession;
+	// the factory builds only the non-default lanes.
+	laneVADFactory := func() (*orchestrator.VAD, func(), error) {
+		sess, err := engine.NewSession(vad.Config{
+			SampleRate:       vadSampleRate,
+			FrameSizeMs:      vadFrameMs,
+			SpeechThreshold:  0.5,
+			SilenceThreshold: 0.35,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("open lane VAD session: %w", err)
+		}
+		v := orchestrator.NewVAD(bus, sess, orchestrator.WithVADMetrics(stageMetrics, vadHangover))
+		return v, func() { _ = sess.Close() }, nil
+	}
 
 	// Bounded transient-error retry (#124, ADR-0044): one shared policy threaded
 	// into all three provider stages (STT, TTS, LLM). Log-only per-attempt detail;
@@ -974,6 +998,11 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		orchestrator.WithTTSMetrics(stageMetrics, observe.ProviderElevenLabs),
 		orchestrator.WithTTSRetry(retryPolicy))
 	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
+	// Per-lane streaming STT (ADR-0042 × ADR-0050): each Speaker Lane opens its own
+	// stream (stamping its SpeakerID on partials) under a concurrency cap, so
+	// concurrent sockets track concurrent speakers, not channel size. Nil unless
+	// streaming is on AND the adapter streams — the byte-for-byte batch default.
+	laneStreamFactory := buildLaneStreamFactory(recognizer, streaming, stageMetrics)
 
 	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each
 	// NPC carries its own grants (spec.grants — from its tool_agent_grant rows on
@@ -1032,6 +1061,15 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// batch path, so this option is unconditional — buildStreamManager returns nil
 		// unless GLYPHOXA_STT_STREAMING is set AND the adapter is a StreamingRecognizer.
 		orchestrator.WithStreamingSTT(streamMgr),
+		// Speaker Lanes (ADR-0050): attributed inbound frames open per-speaker VAD
+		// lanes so utterances are segmented and attributed independently. A single
+		// participant still gets one lane transcribed exactly as today; the default
+		// (unattributed) lane carries the silence clock. Unconditional — the factory is
+		// only invoked for a non-empty SpeakerID.
+		orchestrator.WithSpeakerLanes(laneVADFactory),
+		// Per-lane streaming STT under the env cap (ADR-0042 × ADR-0050). A nil factory
+		// (batch default) leaves the lanes batch-only, so this is unconditional.
+		orchestrator.WithLaneStreamingSTT(laneStreamFactory, streamMaxLanes()),
 		// Per-Agent mute (#211): the replier discards a muted addressee's route
 		// before taking the floor, and a MuteCut reactor cuts the floor when the
 		// speaking Agent is muted. A nil view is the feature-off default (voice
@@ -1103,4 +1141,46 @@ func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics 
 	}
 	return orchestrator.NewStreamManager(sr,
 		orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs))
+}
+
+// defaultStreamMaxLanes caps concurrent per-lane streaming-STT sockets (ADR-0050):
+// concurrent connections equal concurrent speakers, not channel size. Sized for a
+// typical active table; past it a lane transcribes pure batch.
+const defaultStreamMaxLanes = 4
+
+// streamMaxLanes reads the per-lane streaming concurrency cap from
+// GLYPHOXA_STT_STREAM_MAX_LANES. Absent, empty, or unparseable → [defaultStreamMaxLanes]
+// (a typo must not silently change behaviour). An explicit "0" IS honoured — it
+// disables per-lane streaming (0 lanes stream) while the default lane keeps its own
+// stream; a negative value is invalid and falls back to the default (finding 7).
+func streamMaxLanes() int {
+	v := os.Getenv("GLYPHOXA_STT_STREAM_MAX_LANES")
+	if v == "" {
+		return defaultStreamMaxLanes
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return defaultStreamMaxLanes
+	}
+	return n // 0 = explicitly disabled
+}
+
+// buildLaneStreamFactory returns the per-Speaker-Lane [orchestrator.StreamManager]
+// factory when streaming is enabled AND the wired recognizer streams, else nil (the
+// batch default). It is the lane analogue of [buildStreamManager]: each lane's
+// manager stamps its SpeakerID on partials (ADR-0050). The provider label is
+// elevenlabs (the only streaming STT adapter in the MVP matrix, ADR-0039).
+func buildLaneStreamFactory(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder) func(speakerID string) *orchestrator.StreamManager {
+	if !streaming {
+		return nil
+	}
+	sr, ok := recognizer.(stt.StreamingRecognizer)
+	if !ok {
+		return nil
+	}
+	return func(speakerID string) *orchestrator.StreamManager {
+		return orchestrator.NewStreamManager(sr,
+			orchestrator.WithStreamMetrics(stageMetrics, observe.ProviderElevenLabs),
+			orchestrator.WithStreamSpeakerID(speakerID))
+	}
 }

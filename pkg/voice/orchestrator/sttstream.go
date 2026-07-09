@@ -40,6 +40,12 @@ type StreamManager struct {
 	metrics  observe.StageRecorder
 	provider observe.Provider
 
+	// speakerID is the Speaker Lane this manager serves (ADR-0050), stamped on every
+	// [voiceevent.STTPartial] it publishes. "" for the default (unattributed) lane —
+	// the single-lane MVP path, unchanged. Set at construction via
+	// [WithStreamSpeakerID].
+	speakerID string
+
 	// sleep/now are the deterministic-test seams, copied from wirenpc.reconnectPolicy:
 	// sleep blocks for d or until ctx is cancelled; now stamps the commit-latency
 	// span and partial timestamps. Production uses real time.
@@ -127,6 +133,14 @@ func WithStreamMetrics(rec observe.StageRecorder, p observe.Provider) StreamMana
 		}
 		m.provider = p
 	}
+}
+
+// WithStreamSpeakerID sets the Speaker Lane id this manager serves (ADR-0050),
+// stamped on every [voiceevent.STTPartial] it publishes. The per-lane stream factory
+// ([WithLaneStreamingSTT]) sets it to the lane's speaker; the default lane leaves it
+// "" (the single-lane MVP path).
+func WithStreamSpeakerID(id string) StreamManagerOption {
+	return func(m *StreamManager) { m.speakerID = id }
 }
 
 // NewStreamManager wires rec as the streaming recognizer. rec must be non-nil;
@@ -451,7 +465,7 @@ func (m *StreamManager) onPartial(text string) {
 	if bus == nil {
 		return
 	}
-	bus.Publish(voiceevent.STTPartial{At: m.now(), Text: text, UtteranceID: id})
+	bus.Publish(voiceevent.STTPartial{At: m.now(), Text: text, UtteranceID: id, SpeakerID: m.speakerID})
 }
 
 // streamFailed records a send/commit failure against session s: the utterance is

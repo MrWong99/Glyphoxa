@@ -363,3 +363,46 @@ func rms(s []int16) float64 {
 	}
 	return math.Sqrt(sum / float64(len(s)))
 }
+
+// TestDecodeInbound_StampsSpeakerFromUserID pins the ADR-0050 codec stamp: every
+// decoded audio.Frame carries its speaker's Discord snowflake string, so the
+// segmenter can route it to that speaker's lane. A known UserID stamps its
+// String(); the zero UserID (SSRC not yet resolved) MUST stay unattributed ("") —
+// snowflake.ID(0).String() is "0", so a naive stamp would misattribute unknown
+// audio to a bogus "0" speaker.
+func TestDecodeInbound_StampsSpeakerFromUserID(t *testing.T) {
+	packets := encodeOpus(t, sine(48000, 48000, 330), 48000)
+	c := New()
+	user := snowflake.ID(4242)
+
+	var sawAttributed bool
+	for _, pkt := range packets {
+		out, err := c.DecodeInbound(gxvoice.Frame{UserID: user, Opus: pkt})
+		if err != nil {
+			t.Fatalf("DecodeInbound: %v", err)
+		}
+		for _, f := range out {
+			if f.Speaker() != user.String() {
+				t.Fatalf("frame Speaker() = %q, want %q", f.Speaker(), user.String())
+			}
+			sawAttributed = true
+		}
+	}
+	if !sawAttributed {
+		t.Fatal("no attributed frames emitted")
+	}
+
+	// Unknown SSRC (zero UserID) must stay "" — never the literal "0".
+	c2 := New()
+	for _, pkt := range packets {
+		out, err := c2.DecodeInbound(gxvoice.Frame{UserID: 0, Opus: pkt})
+		if err != nil {
+			t.Fatalf("DecodeInbound(zero user): %v", err)
+		}
+		for _, f := range out {
+			if f.Speaker() != "" {
+				t.Fatalf("zero-UserID frame Speaker() = %q, want \"\" (unattributed)", f.Speaker())
+			}
+		}
+	}
+}

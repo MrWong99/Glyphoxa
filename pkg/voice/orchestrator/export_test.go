@@ -30,6 +30,35 @@ func (r *Replier) SetGate(g TurnGate) { r.gate = g }
 // Conversation.Register from [WithErrorHandler].
 func (s *Segmenter) SetErrorHandler(fn ErrorFunc) { s.onError = fn }
 
+// SetLaneVADFactory installs the per-Speaker-Lane VAD factory for the lane tests
+// (external test package). Production wiring sets it inside NewConversation from
+// [WithSpeakerLanes].
+func (s *Segmenter) SetLaneVADFactory(f LaneVADFactory) { s.laneVADFactory = f }
+
+// SetLaneStreamFactory installs the per-lane streaming-STT factory and cap for the
+// lane tests (external test package). Production wiring sets it from
+// [WithLaneStreamingSTT].
+func (s *Segmenter) SetLaneStreamFactory(f func(speakerID string) *StreamManager, maxLanes int) {
+	s.laneStreamFactory = f
+	s.maxStreamLanes = maxLanes
+}
+
+// LaneCount reports the number of live lanes (including the default lane), for the
+// reap tests (external test package).
+func (s *Segmenter) LaneCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.lanes)
+}
+
+// SetSweepEvery overrides the reap-sweep cadence (Process calls per sweep) so a
+// reap test triggers a sweep without 1024 frames (external test package).
+func (s *Segmenter) SetSweepEvery(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepEvery = n
+}
+
 // WaitStreamUp blocks until the manager has a live session or timeout elapses,
 // reporting whether one came up. Test-only: pipeline tests feed the first
 // utterance only after the eager dial completes, so utterance 1 streams
