@@ -32,10 +32,21 @@ export function SessionBindAffordance() {
   const [targetId, setTargetId] = useState(NEW_TARGET);
 
   // Soft reads: retry:false + empty fallbacks so a degraded call never blocks the
-  // affordance (the picker just falls back to free-text).
-  const charactersQuery = useQuery(CampaignService.method.listCharacters, {}, { retry: false });
+  // affordance (the picker just falls back to free-text). enabled:open so nothing
+  // fetches while collapsed — the reads (incl. the live GetMember fan-out behind
+  // ListDiscordVoiceMembers) fire only when the GM opens the form, never repeatedly
+  // on window focus during a live session.
+  const charactersQuery = useQuery(
+    CampaignService.method.listCharacters,
+    {},
+    { retry: false, enabled: open },
+  );
   const characters = useMemo(() => charactersQuery.data?.characters ?? [], [charactersQuery.data]);
-  const membersQuery = useQuery(CampaignService.method.listDiscordVoiceMembers, {}, { retry: false });
+  const membersQuery = useQuery(
+    CampaignService.method.listDiscordVoiceMembers,
+    {},
+    { retry: false, enabled: open },
+  );
   const members = useMemo(() => membersQuery.data?.members ?? [], [membersQuery.data]);
 
   const target = characters.find((c) => c.id === targetId) ?? null;

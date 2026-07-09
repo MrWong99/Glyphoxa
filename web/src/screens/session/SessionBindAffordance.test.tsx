@@ -99,19 +99,25 @@ describe("SessionBindAffordance", () => {
     expect(sessionControlCalls).toEqual([]);
   });
 
-  it("offers binding to an existing Character (reassign) without leaving the session", async () => {
-    renderAffordance();
+  it("reassigns an existing Character to a new Discord User — updateCharacter, not create", async () => {
+    const { reassigned, created, sessionControlCalls } = renderAffordance();
     fireEvent.click(screen.getByTestId("bind-player-open"));
 
-    // The open form exposes a Character selector so an unmapped speaker can be bound
-    // to an EXISTING Character (reassign), not only a new one — its default is a new
-    // Character. Driving the Radix dropdown itself is covered by the create path.
-    expect(await screen.findByLabelText("Character")).toBeInTheDocument();
-    expect(screen.getByText("New Character")).toBeInTheDocument();
+    // Pick the existing Character as the bind target (reassign mode). Radix Select
+    // opens on Enter over its combobox, then the option is clickable.
+    fireEvent.keyDown(await screen.findByRole("combobox", { name: "Character" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "Aravel" }));
 
-    // Cancel closes back to the single collapsed control.
-    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
-    expect(screen.getByTestId("bind-player-open")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Character name")).not.toBeInTheDocument();
+    // The form reseeds from the chosen Character; rebind them to a new Discord User.
+    const idField = await screen.findByLabelText("Discord user ID");
+    expect(idField).toHaveValue("111111111111111111");
+    fireEvent.change(idField, { target: { value: "999999999999999999" } });
+    fireEvent.click(screen.getByRole("button", { name: /reassign/i }));
+
+    await waitFor(() => expect(reassigned).toHaveLength(1));
+    expect(reassigned[0]).toEqual({ id: "ch-1", discordUserId: "999999999999999999" });
+    // Reassign is an UPDATE, never a create, and never restarts the session.
+    expect(created).toEqual([]);
+    expect(sessionControlCalls).toEqual([]);
   });
 });
