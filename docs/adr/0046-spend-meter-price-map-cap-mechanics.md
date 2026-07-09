@@ -17,6 +17,29 @@ Implementing #130 (E6, under the ADR-0004 amendment) required deciding where the
 - **Gating inside the address detector or segmenter** — would silence transcription; the AC requires transcription to continue under a soft cap.
 - **Failed-status rows on hard cap** — the session did exactly what it was configured to do; `failed` is reserved for faults (ADR-0043).
 
+## Amendment (2026-07-09, #272 recap engine)
+
+The cap mechanics above are **live-Voice-Session-only**. The Recap engine
+(`internal/recap`, E3) is an *idle* off-session LLM call — it summarizes a past
+session and does not belong to any running session's meter. Its metering posture
+(gate #271):
+
+- **Metered, never cap-gated.** Each recap builds its own caps-free
+  `spend.NewMeter(spend.Caps{}, …)` teed alongside the production recorder via
+  `observe.TeeUsage`, so usage is priced and the `glyphoxa_voice_llm_tokens_total`
+  series still moves. The engine **never** reads a tenant cap and **never** calls
+  `AllowTurn`: `recap.Store` deliberately omits any spend-cap method, so the code
+  *cannot* gate on a cap. A recap is never refused for spend — the soft/hard-cap
+  consequences here are exclusively the live session's concern.
+- **Usage attributed to the recapped Voice Session id(s).** Beyond the counters,
+  the engine emits one structured `recap: llm usage` log line carrying the
+  `voice_session_ids`, the input/output token totals, and the meter's
+  `EstimatedUSD`, so an operator can attribute recap spend to the session(s) it
+  summarized.
+
+This is additive: the live-session meter, caps, gate, and `SpendCapReached`
+mechanics are unchanged.
+
 ## Relationship to other ADRs
 
 ADR-0004 (amendment is the spec this implements), ADR-0045 (usage capture points), ADR-0043 (close seam + end_reason prefixes), ADR-0032 (no session labels), ADR-0020/0014/0039 (event + SSE + screen surface).

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
@@ -29,29 +30,13 @@ type providerKeys struct {
 }
 
 // resolveKey resolves ONE component's API key under the hybrid BYOK policy
-// (ADR-0039):
+// (ADR-0039).
 //
-//   - cfg == nil, or cfg.CredentialsLast4 == "env" (the seeded placeholder):
-//     no real key in the DB -> "" so the adapter falls back to its env var.
-//   - a real saved key (last4 != "env") but no cipher: a CLEAR error, never a
-//     silent empty key (AC2) — boot without $GLYPHOXA_SECRET cannot quietly
-//     ignore a configured key and degrade to ENV.
-//   - a real saved key the cipher cannot open: a CLEAR error wrapping crypto's.
-//   - otherwise: the decrypted plaintext key.
-//
-// component only labels the error so an operator knows which key failed.
+// It is a one-line delegate to [llmbuild.ResolveKey]: the resolver was moved
+// verbatim into internal/llmbuild (#272) so the Recap engine shares the same BYOK
+// credential resolution as the live voice loop, under identical semantics.
 func resolveKey(cipher *crypto.Cipher, cfg *storage.ProviderConfig, component storage.Component) (string, error) {
-	if cfg == nil || cfg.CredentialsLast4 == credPlaceholderLast4 {
-		return "", nil
-	}
-	if cipher == nil {
-		return "", fmt.Errorf("wirenpc: %s key needs decryption but the credential cipher is unavailable; set $GLYPHOXA_SECRET (ADR-0004)", component)
-	}
-	plaintext, err := cipher.Open(cfg.CredentialsCiphertext)
-	if err != nil {
-		return "", fmt.Errorf("wirenpc: decrypt %s key: %w", component, err)
-	}
-	return string(plaintext), nil
+	return llmbuild.ResolveKey(cipher, cfg, component)
 }
 
 // ResolveDiscordToken resolves the Discord bot token a UI-started session drives

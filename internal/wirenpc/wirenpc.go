@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the database/sql "pgx" driver for the goose-backed schema check
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -34,7 +35,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agenttool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
@@ -339,6 +339,12 @@ type Config struct {
 	// adapters. An empty key means "adapter ENV fallback", so the zero value (the
 	// env-only Run path) reproduces today's behavior untouched.
 	keys providerKeys
+	// llmProviderID is the primary Agent's LLM Provider Config provider id (#272):
+	// buildConversation dispatches [newLLM] off it so a DB Agent bound to a non-Groq
+	// LLM provider gets that adapter. Empty (the env-only Run path, or a nil LLM
+	// config) resolves to the Groq default (ADR-0036) — byte-identical to the
+	// pre-#272 hardwired constructor.
+	llmProviderID string
 	// language is the Campaign Language (CONTEXT.md) of the campaign the npcs
 	// were loaded from: it selects the Roster matcher's phonetic encoder (#199).
 	// RunFromDB sets it from the campaign row; the env-only Run path leaves it
@@ -444,6 +450,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 
 	cfg.npcs = npcs
 	cfg.keys = keys
+	cfg.llmProviderID = llmProviderID(primary.LLMConfig)
 	cfg.language = campaign.Language
 	return Run(ctx, cfg)
 }
@@ -726,7 +733,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -808,10 +815,34 @@ func npcVoice() tts.Voice {
 // would otherwise revert the feature to ENV while every providerKeys{} test
 // stayed green. Production always uses the real constructors.
 var (
-	newLLM = groq.New
+	newLLM = llmbuild.New
 	newSTT = stteleven.New
 	newTTS = ttseleven.New
 )
+
+// llmProviderID reports the provider id of an LLM Provider Config for [newLLM]
+// dispatch (#272). A nil config — the env-only [Run] path, or a DB Agent with no
+// bound LLM config — yields "", which [llmbuild.New] resolves to the Groq default
+// (ADR-0036), keeping the pre-#272 hardwired-groq behaviour byte-identical.
+func llmProviderID(cfg *storage.ProviderConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Provider
+}
+
+// llmProviderLabel maps an LLM provider id to its bounded [observe.Provider] metric
+// label (#272): the empty id (env-only / nil config) is Groq (ADR-0036). The wired
+// ids equal their observe constants, so the cast is exact. It keeps the per-round
+// LLM spans AND the spend price lookup keyed to the ACTUAL provider — a non-Groq
+// adapter mislabelled groq would price (groq, claude-model) as a miss and trip caps
+// on the frontier default.
+func llmProviderLabel(providerID string) observe.Provider {
+	if providerID == "" {
+		return observe.ProviderGroq
+	}
+	return observe.Provider(providerID)
+}
 
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
 // → STT (ElevenLabs) → Address Detection → production Reply (the Agent loop over
@@ -838,13 +869,14 @@ var (
 // registered encoder — including the env-only path's "" — resolves to "en"
 // (see matcherLanguage).
 //
-// All NPCs share ONE Groq tool-engine (one client, the `dice` grant in code —
-// Tool Grants are a #6 table, not yet seeded). The LLM provider is Groq (model
-// llama-3.3-70b-versatile via the OpenAI-compat endpoint). The DB Agent's
-// provider_config provider/model is recorded but adapter selection is not yet
-// driven by it; the wired adapter is Groq for any NPC in this tree. Keyless
-// cassette tests replay the Anthropic adapter behind the same llm.Provider
-// interface.
+// All NPCs share ONE tool-engine (one client, the `dice` grant in code — Tool
+// Grants are a #6 table, not yet seeded). The LLM adapter is dispatched off the
+// primary Agent's provider_config.provider via llmProviderID -> [newLLM]
+// ([llmbuild.New], #272): the seed's groq config (model llama-3.3-70b-versatile via
+// the OpenAI-compat endpoint) and the env-only "" both resolve to Groq (ADR-0036),
+// so this stays byte-identical to the pre-#272 hardwired constructor, while a saved
+// non-Groq LLM config now gets its own adapter. Keyless cassette tests replay the
+// Anthropic adapter behind the same llm.Provider interface.
 //
 // synth is the [tts.Synthesizer] the TTS stage drives. [Run] passes a
 // [wire.TeeSynthesizer] wrapping the real ElevenLabs synthesizer so the
@@ -884,7 +916,7 @@ func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView)
 	return unsub
 }
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -960,9 +992,16 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// runnable NPC. The Groq client and the Registry are shared across every NPC
 	// — only the GrantSet differs per NPC — so N NPCs reuse one client rather than
 	// each opening their own.
-	provider := newLLM(keys.llm)
+	// Dispatch the LLM adapter off the Agent's Provider Config provider id (#272):
+	// an empty id (env-only path, or a nil LLM config) resolves to the Groq default
+	// (ADR-0036), so the seed's groq config stays byte-identical and the keyless
+	// cassette gate holds. A saved non-Groq provider now gets its own adapter.
+	provider, err := newLLM(llmProviderID, keys.llm)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("wirenpc: build LLM provider: %w", err)
+	}
 	reg := tool.BuiltinRegistry()
-	engineFor := engineFactory(provider, reg, language, stageMetrics, retryPolicy)
+	engineFor := engineFactory(provider, reg, language, stageMetrics, llmProviderLabel(llmProviderID), retryPolicy)
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over a per-NPC engine carrying that NPC's
@@ -1022,15 +1061,16 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 // tenant-level row as fallback — flows verbatim into the request. Empty passes
 // through as "" so the openaicompat adapter fills [groq.DefaultModel]; there is
 // NO defaulting duplicated here (the AC "empty → provider default" is proven at
-// the adapter). language selects the dice gate's keyword set (#226); stageMetrics
-// labels the per-round LLM spans groq (A3).
-func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder, retryPolicy retry.Policy) func(npcSpec) agent.Engine {
+// the adapter). language selects the dice gate's keyword set (#226). provName is
+// the ACTUAL LLM provider (#272): it labels the per-round LLM spans (A3) AND keys
+// the spend price lookup, so a non-Groq adapter is not mispriced as groq.
+func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder, provName observe.Provider, retryPolicy retry.Policy) func(npcSpec) agent.Engine {
 	return func(spec npcSpec) agent.Engine {
 		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.model, 0, 0,
-			// Groq is the wired provider (see buildConversation's doc), so the
-			// per-round LLM spans (A3) are labelled groq. The no-op recorder keeps the
-			// keyless path silent; the live binary / benchmark inject a real one.
-			agenttool.WithMetrics(stageMetrics, observe.ProviderGroq),
+			// The per-round LLM spans (A3) and the spend price lookup are labelled with
+			// the actual provider (#272). The no-op recorder keeps the keyless path
+			// silent; the live binary / benchmark inject a real one.
+			agenttool.WithMetrics(stageMetrics, provName),
 			// The dice gate selects its keyword set by Campaign Language (#226), so a
 			// German campaign arms the dice Tool for German roll requests instead of
 			// gating it out and forcing the model to improvise the roll.

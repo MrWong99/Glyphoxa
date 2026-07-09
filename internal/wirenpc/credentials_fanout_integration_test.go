@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	stteleven "github.com/MrWong99/Glyphoxa/pkg/voice/stt/elevenlabs"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -31,9 +31,9 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	t.Cleanup(func() { newLLM, newSTT, newTTS = origLLM, origSTT, origTTS })
 
 	var gotLLM, gotSTT, gotTTS string
-	newLLM = func(apiKey string, opts ...groq.Option) *groq.Client {
+	newLLM = func(providerID, apiKey string) (llm.Provider, error) {
 		gotLLM = apiKey
-		return origLLM(apiKey, opts...)
+		return origLLM(providerID, apiKey)
 	}
 	newSTT = func(apiKey string, opts ...stteleven.Option) *stteleven.Client {
 		gotSTT = apiKey
@@ -47,7 +47,7 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	keys := providerKeys{llm: "L-llm-key", stt: "S-stt-key", tts: "T-tts-key"}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log,
-		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, keys, false, nil, nil, nil, nil)
+		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, keys, "", false, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("buildConversation: %v", err)
 	}
@@ -61,5 +61,33 @@ func TestBuildConversation_RoutesEachKeyToItsAdapter(t *testing.T) {
 	}
 	if gotTTS != keys.tts {
 		t.Errorf("tts adapter got apiKey %q, want %q — keys.tts must reach the TTS adapter", gotTTS, keys.tts)
+	}
+}
+
+// TestBuildConversation_DispatchesOffProviderID is the #272 seam guard: the LLM
+// provider id buildConversation is handed reaches [newLLM] for adapter dispatch. A
+// buildConversation that ignored the param (reverting to hardwired groq) would leave
+// a DB Agent's non-Groq LLM config silently on Groq. It needs a real Silero VAD like
+// the fan-out guard, so it is tag-isolated behind `integration` (ADR-0033).
+func TestBuildConversation_DispatchesOffProviderID(t *testing.T) {
+	origLLM := newLLM
+	t.Cleanup(func() { newLLM = origLLM })
+
+	var gotProviderID string
+	newLLM = func(providerID, apiKey string) (llm.Provider, error) {
+		gotProviderID = providerID
+		return origLLM(providerID, apiKey)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, _, cleanup, err := buildConversation(voiceevent.NewBus(), log,
+		[]npcSpec{hardcodedNPC()}, "", ttseleven.New(""), nil, providerKeys{}, "anthropic", false, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildConversation: %v", err)
+	}
+	defer cleanup()
+
+	if gotProviderID != "anthropic" {
+		t.Errorf("newLLM got providerID %q, want %q — the Agent's LLM provider id must drive adapter dispatch, not a hardwired groq", gotProviderID, "anthropic")
 	}
 }
