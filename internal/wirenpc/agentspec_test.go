@@ -671,3 +671,138 @@ func TestResolveNPCModel_BoundConfigOutranksTenantFallback(t *testing.T) {
 		t.Errorf("nil bound + no tenant = %q, want empty (adapter default)", got)
 	}
 }
+
+// TestLoadCampaignNPCs_ScopesToBoundCampaign is #323 acceptance (a): the
+// campaign-scoped loader voices the BOUND Active Campaign's roster and Language,
+// not the hardcoded seed. Seed the demo (Glyphoxa Demo / The Prancing Pony /
+// Bart), create a SECOND active campaign X (its own tenant) with a Character NPC
+// Yara and a distinct Language, then load X — the result must contain Yara (not
+// Bart) and carry X's Language.
+func TestLoadCampaignNPCs_ScopesToBoundCampaign(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// The seed roster is the trap: a campaign-blind loader would return Bart / "en".
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+
+	tenantX, err := st.CreateTenant(ctx, "Operator X")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campX, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantX,
+		Name:     "Campaign X",
+		System:   "dnd5e",
+		Language: "fr", // distinct from the seed's "en" so a leak is visible
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign (X): %v", err)
+	}
+	if _, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID:  campX,
+		Role:        storage.AgentRoleCharacter,
+		Name:        "Yara",
+		Persona:     "You are Yara, the seer of Campaign X.",
+		AddressOnly: false,
+		Aliases:     []string{"seer"},
+	}); err != nil {
+		t.Fatalf("CreateAgent (Yara): %v", err)
+	}
+
+	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campX)
+	if err != nil {
+		t.Fatalf("loadCampaignNPCs(X): %v", err)
+	}
+	if loadedCampaign.Language != "fr" {
+		t.Errorf("loaded campaign Language = %q, want X's %q", loadedCampaign.Language, "fr")
+	}
+	names := map[string]bool{}
+	for _, s := range specs {
+		names[s.name] = true
+	}
+	if !names["Yara"] {
+		t.Errorf("loaded roster %v does not contain Yara — the bound campaign was ignored", names)
+	}
+	if names["Bart"] {
+		t.Errorf("loaded roster %v contains the seed NPC Bart — the loader voiced the seed campaign", names)
+	}
+}
+
+// TestLoadCampaignNPCs_FreshDBNoSeed is #323 acceptance (b): on a fresh, UNSEEDED
+// install (the tenant is named "Glyphoxa", not "Glyphoxa Demo"), a session for a
+// non-seed campaign loads THAT campaign's roster and must NOT hard-fail with
+// "find tenant: not found" — the seed-name resolution that broke unseeded installs.
+func TestLoadCampaignNPCs_FreshDBNoSeed(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A fresh install: a "Glyphoxa" tenant + one campaign, no seed. The seed-name
+	// loader's FindTenantByName("Glyphoxa Demo") would ErrNotFound here.
+	tenantID, err := st.CreateTenant(ctx, "Glyphoxa")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campID, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID,
+		Name:     "My First Campaign",
+		System:   "dnd5e",
+		Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	if _, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campID,
+		Role:       storage.AgentRoleCharacter,
+		Name:       "Wren",
+		Persona:    "You are Wren, the first NPC of a self-made campaign.",
+	}); err != nil {
+		t.Fatalf("CreateAgent (Wren): %v", err)
+	}
+
+	specs, _, loadedCampaign, err := loadCampaignNPCs(ctx, st, campID)
+	if err != nil {
+		t.Fatalf("loadCampaignNPCs on a fresh unseeded DB errored (must not): %v", err)
+	}
+	if loadedCampaign.ID != campID {
+		t.Errorf("loaded campaign ID = %s, want %s", loadedCampaign.ID, campID)
+	}
+	if len(specs) != 1 || specs[0].name != "Wren" {
+		t.Errorf("loaded roster = %+v, want the single Character NPC Wren", specs)
+	}
+}
+
+// TestLoadCampaignNPCs_NilCampaignFailsLoud is #323 decision 3: an empty
+// CampaignID in the runtime path is a caller bug, never a silent fall back to the
+// seed roster. The loader refuses loudly.
+func TestLoadCampaignNPCs_NilCampaignFailsLoud(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	_, _, _, err := loadCampaignNPCs(ctx, st, uuid.Nil)
+	if err == nil {
+		t.Fatal("loadCampaignNPCs(uuid.Nil) returned nil error; want a loud refusal")
+	}
+}
+
+// loadSeededNPCs resolves the demo seed Tenant/Campaign BY NAME and hydrates its
+// roster. It is a TEST-ONLY helper (the runtime path is the campaign-scoped
+// loadCampaignNPCs, #323): the seed constants live on the `glyphoxa seed` command
+// and these tests only, never in the voice loop. Kept here so the many seed→load
+// integration tests below read unchanged.
+func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
+	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
+	if err != nil {
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
+	}
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	if err != nil {
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
+	}
+	return loadCampaignRoster(ctx, st, campaign)
+}

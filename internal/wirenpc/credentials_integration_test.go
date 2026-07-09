@@ -24,9 +24,10 @@ import (
 // seedRealKeyNPC seeds the demo Tenant/Campaign with provider_config rows whose
 // credentials are REAL sealed keys (last4 != "env" — the web-app BYOK path),
 // bound to one Character NPC, so loadSeededNPCs/RunFromDB read them back. It uses
-// the demo names loadSeededNPCs looks up. Returns the tenant ID and the three
+// the demo names loadSeededNPCs looks up. Returns the tenant ID, the campaign ID
+// (the #323 campaign-scoped RunFromDB needs it in Config.CampaignID) and the three
 // plaintext keys the bridge must reproduce.
-func seedRealKeyNPC(t *testing.T, ctx context.Context, st *storage.Store, cipher *crypto.Cipher) (uuid.UUID, providerKeys) {
+func seedRealKeyNPC(t *testing.T, ctx context.Context, st *storage.Store, cipher *crypto.Cipher) (uuid.UUID, uuid.UUID, providerKeys) {
 	t.Helper()
 	want := providerKeys{
 		llm: "sk-llm-REALsecret-0001",
@@ -82,7 +83,7 @@ func seedRealKeyNPC(t *testing.T, ctx context.Context, st *storage.Store, cipher
 	}); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
-	return tenantID, want
+	return tenantID, campaignID, want
 }
 
 // TestRunFromDB_DecryptsSavedKeys is the AC1 proof against a real DB: a saved
@@ -96,7 +97,7 @@ func TestRunFromDB_DecryptsSavedKeys(t *testing.T) {
 	st := storage.New(pool)
 	cipher := testCipher(t)
 
-	tenantID, want := seedRealKeyNPC(t, ctx, st, cipher)
+	tenantID, _, want := seedRealKeyNPC(t, ctx, st, cipher)
 
 	_, primary, gotCampaign, err := loadSeededNPCs(ctx, st)
 	if err != nil {
@@ -160,10 +161,12 @@ func TestRunFromDB_DecryptFailureSurfacesClearError(t *testing.T) {
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	seedRealKeyNPC(t, ctx, st, testCipher(t)) // sealed with one cipher...
-	wrong := testCipher(t)                    // ...opened with another -> fails
+	_, campaignID, _ := seedRealKeyNPC(t, ctx, st, testCipher(t)) // sealed with one cipher...
+	wrong := testCipher(t)                                        // ...opened with another -> fails
 
-	err := RunFromDB(ctx, Config{}, pool, wrong)
+	// CampaignID is set so RunFromDB gets past the #323 campaign-scoped load and
+	// fails AT key resolution (the AC2 seam), not at the loader.
+	err := RunFromDB(ctx, Config{CampaignID: campaignID}, pool, wrong)
 	if err == nil {
 		t.Fatal("RunFromDB returned nil with an undecryptable saved key; a broken key must fail clearly, not silently fall back to ENV (AC2)")
 	}

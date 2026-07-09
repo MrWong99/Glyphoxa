@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -180,6 +181,22 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 			"use env-var API keys unless a saved BYOK key requires $GLYPHOXA_SECRET", "err", err)
 		cipher = nil
 	}
+
+	// Resolve the campaign this standalone voice node voices BEFORE handing off to
+	// RunFromDB (#323): the loop is campaign-scoped now, so it needs the bound
+	// Active Campaign in cfg.CampaignID. This node has no logged-in operator and no
+	// live session, so the shared Active-Campaign policy (ADR-0039) collapses to its
+	// last step — the most-recently-created, non-archived campaign (GetActiveCampaign).
+	// A fresh, empty DB has none: fail loudly with an actionable message instead of
+	// the old silent seed-roster / "find tenant: not found" behavior.
+	active, err := storage.New(pool).GetActiveCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("voice mode: no Active Campaign to voice; create a campaign in the web UI or run `glyphoxa seed` to install the demo campaign")
+		}
+		return fmt.Errorf("voice: resolve active campaign: %w", err)
+	}
+	cfg.CampaignID = active.ID
 
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
 }

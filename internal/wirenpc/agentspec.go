@@ -179,43 +179,48 @@ func SeedNPC(ctx context.Context, pool *pgxpool.Pool, cipher *crypto.Cipher, log
 	return nil
 }
 
-// loadSeededNPCs reads ALL the demo Campaign's Character NPCs from the DB and
-// maps each to the npcSpec the voice loop builds its Roster from. The
-// auto-created Butler is ignored (it is the slash-command Agent for #6, not
-// voiced here). This is the INITIAL roster membership; NPCs join and leave at
-// runtime via the programmatic [Roster] API (#49). The single-NPC default of the
-// demo seed yields a one-element slice — the pre-Roster behavior unchanged.
-//
-// AgentID is each Agent's DB UUID as a string — the stable identity Address
-// Detection routes on (the in-code path used "bart"; the value only has to be
-// consistent between the matcher and the Persona, which it is).
-//
-// It also surfaces the loaded Campaign row — carrying the owning tenant ID
-// (the credential bridge, issue #69) and the Campaign Language (the matcher's
-// phonetic scheme, #199) — and the PRIMARY (first) Character's LoadedAgent, the
-// bit the credential bridge resolves the session BYOK keys from. The primary's
-// LoadedAgent already carries its LLM/TTS provider configs (LoadAgent joins
-// them), so this returns them rather than re-querying. A single set of keys
-// backs the whole session (one shared Groq client + one ElevenLabs synth across
-// the Roster — see buildConversation), so the primary agent is the
-// representative; per-NPC adapter selection is a later concern.
-func loadSeededNPCs(ctx context.Context, st *storage.Store) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
-	tenant, err := st.FindTenantByName(ctx, SeedTenantName)
-	if err != nil {
-		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: find tenant: %w", err)
+// loadCampaignNPCs is the runtime roster loader (#323): it resolves ONE Campaign
+// BY ID — the bound Active Campaign the Voice Session carries — and reads its
+// Character NPCs + Language, replacing the seed-name resolution [loadSeededNPCs]
+// used before. There is NO seed-name fallback here (decision 3): an empty
+// campaignID is a caller bug (the loop config never received the selected
+// campaign), so it fails loudly rather than silently voicing the seed roster, and
+// an unknown id surfaces GetCampaign's ErrNotFound. This is what makes the voiced
+// roster / TTS voices / Campaign Language follow the operator's selection on
+// multi-campaign installs, and what lets an unseeded install (whose tenant is
+// "Glyphoxa", not "Glyphoxa Demo") voice its own campaign instead of hard-failing
+// on the seed tenant lookup.
+func loadCampaignNPCs(ctx context.Context, st *storage.Store, campaignID uuid.UUID) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
+	if campaignID == uuid.Nil {
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: no Active Campaign bound to the Voice Session (empty campaign id); select a campaign before starting a session")
 	}
-
-	campaign, err := st.FindCampaignByName(ctx, tenant.ID, SeedCampaignName)
+	campaign, err := st.GetCampaign(ctx, campaignID)
 	if err != nil {
-		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: find campaign: %w", err)
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: get campaign %s: %w", campaignID, err)
 	}
+	return loadCampaignRoster(ctx, st, campaign)
+}
 
+// loadCampaignRoster is the shared roster hydration the loaders end in: given a
+// resolved Campaign, read its Character NPCs and map each to the npcSpec the voice
+// loop builds its Roster from. The auto-created Butler is ignored (it is the
+// slash-command Agent, not voiced here — decision 5 / #299). Split out so the
+// runtime by-id loader ([loadCampaignNPCs], #323) and the seed-name test helper
+// (loadSeededNPCs, in the integration tests) share ONE mapping and can't drift.
+//
+// It surfaces the loaded Campaign row — carrying the owning tenant ID (the
+// credential bridge, #69) and the Campaign Language (the matcher's phonetic
+// scheme, #199) — and the PRIMARY (first) Character's LoadedAgent, from which the
+// credential bridge resolves the session BYOK keys (a single key set backs the
+// whole Roster; per-NPC adapter selection is a later concern). The contract below
+// (tenant-model fallback, once-per-session grant read) is unchanged.
+func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage.Campaign) ([]npcSpec, storage.LoadedAgent, storage.Campaign, error) {
 	chars, err := st.CharacterAgents(ctx, campaign.ID)
 	if err != nil {
 		return nil, storage.LoadedAgent{}, storage.Campaign{}, err
 	}
 	if len(chars) == 0 {
-		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: no Character NPC in %q", SeedCampaignName)
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: no Character NPC in %q", campaign.Name)
 	}
 
 	// The tenant-level LLM model is the fallback for any NPC not bound to its own

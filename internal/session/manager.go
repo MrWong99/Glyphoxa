@@ -322,6 +322,11 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	cfg.Token = token
 	cfg.Guild = dep.GuildID
 	cfg.Channel = dep.VoiceChannelID
+	// Carry the selected campaign into the loop (#323): the same id stamped onto the
+	// voice_sessions row (CreateVoiceSession above) drives RunFromDB's campaign-scoped
+	// roster/language load, so the voiced roster can never diverge from the bound
+	// Active Campaign.
+	cfg.CampaignID = campaignID
 
 	// A background context so the loop survives the HTTP request that started it;
 	// the Manager holds cancel and reaps it on Stop / Shutdown.

@@ -21,6 +21,7 @@ import (
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the database/sql "pgx" driver for the goose-backed schema check
 
@@ -281,6 +282,15 @@ type Config struct {
 	// channel to join. Required.
 	Guild   string
 	Channel string
+	// CampaignID is the bound Active Campaign whose roster this loop voices (#323).
+	// RunFromDB loads THIS campaign's Character NPCs + Language via the
+	// campaign-scoped loader — it never resolves the seed campaign by name. The
+	// session Manager sets it in Start alongside Token/Guild/Channel (the id is
+	// already in hand from CreateVoiceSession); the standalone voice-mode entrypoint
+	// resolves it from the Active-Campaign policy before calling RunFromDB. An
+	// uuid.Nil value is a caller bug: RunFromDB refuses to start loudly rather than
+	// silently voicing the wrong (seed) roster.
+	CampaignID uuid.UUID
 	// Client, when non-nil, is the standing shared Discord client the boot-owned
 	// presence owns (ADR-0010 amendment, #102): connectAndServe borrows it per
 	// cycle instead of constructing its own with disgo.New / OpenGateway, and does
@@ -373,9 +383,12 @@ type Config struct {
 	Gate orchestrator.TurnGate
 }
 
-// RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
-// storage layer) and runs the live voice loop with them, instead of the in-code
-// NPC. pool is an already-open pgxpool the caller owns (and closes) — voice mode
+// RunFromDB loads the bound Active Campaign's Character NPCs from Postgres (via
+// the task-#8 storage layer, scoped by cfg.CampaignID — #323) and runs the live
+// voice loop with them, instead of the in-code NPC. The campaign id is the
+// selection the Voice Session carries; an empty id fails loudly rather than
+// silently voicing the seed roster. pool is an already-open pgxpool the caller
+// owns (and closes) — voice mode
 // opens exactly one pool that ALSO backs the /readyz probe, and all/web mode
 // hands in its existing request pool, so the voice path never opens a second
 // duplicate handle. This is the task-#5 DB-load path: the only thing it changes
@@ -398,7 +411,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	// serving Modes (voice) never auto-migrate, so a DB behind the embedded
 	// migrations must refuse to start with the actionable `migrate up` message
 	// rather than running queries against a schema the code no longer matches.
-	// This runs before loadSeededNPCs (the first query). The schema check needs a
+	// This runs before loadCampaignNPCs (the first query). The schema check needs a
 	// database/sql handle (goose's API), which the pgxpool can't provide, so the
 	// dsn is recovered from the pool's own config — no second connection string
 	// threaded through the callers.
@@ -407,7 +420,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	}
 
 	st := storage.New(pool)
-	npcs, primary, campaign, err := loadSeededNPCs(ctx, st)
+	npcs, primary, campaign, err := loadCampaignNPCs(ctx, st, cfg.CampaignID)
 	if err != nil {
 		return err
 	}

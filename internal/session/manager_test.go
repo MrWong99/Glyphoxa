@@ -293,6 +293,30 @@ func TestStartStopLifecycle(t *testing.T) {
 	}
 }
 
+// TestStart_PassesCampaignIDToLoop is the #323 fix: the selected campaign must
+// reach the wirenpc loop so the voiced roster / TTS voices / language come from
+// the bound Active Campaign, not the hardcoded seed. Start already stamps the id
+// onto the voice_sessions row (CreateVoiceSession); it must also set it on the
+// loop cfg (cfg.CampaignID) so RunFromDB's campaign-scoped loader reads it.
+func TestStart_PassesCampaignIDToLoop(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+
+	tenantID, campaignID := uuid.New(), uuid.New()
+	if _, err := mgr.Start(context.Background(), tenantID, campaignID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+	if got := runner.cfg().CampaignID; got != campaignID {
+		t.Errorf("loop cfg CampaignID = %s, want selected campaign %s", got, campaignID)
+	}
+}
+
 // TestSecondStartRejected is AC2: a second Start while one is active is rejected
 // (single-active-session guard), and no second row is written.
 func TestSecondStartRejected(t *testing.T) {
