@@ -2,9 +2,11 @@ package rpc_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
@@ -175,6 +178,10 @@ type fakeSessionStore struct {
 	listCampaign    uuid.UUID // the campaign id the handler passed to ListVoiceSessions (#270)
 	listLimit       int       // the limit the handler passed (the fixed server policy)
 	listSessionCall int
+
+	voiceSessions map[uuid.UUID]storage.VoiceSession // GenerateRecap ownership lookups (#274)
+	getVoiceErr   error                              // forced non-NotFound error for GetVoiceSession
+	getVoiceCalls int                                // GetVoiceSession call count (spend-cap guard test)
 }
 
 func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
@@ -233,6 +240,55 @@ func (f *fakeSessionStore) ListVoiceSessions(_ context.Context, campaignID uuid.
 	return f.listSessions, nil
 }
 
+func (f *fakeSessionStore) GetVoiceSession(_ context.Context, id uuid.UUID) (storage.VoiceSession, error) {
+	f.getVoiceCalls++
+	if f.getVoiceErr != nil {
+		return storage.VoiceSession{}, f.getVoiceErr
+	}
+	vs, ok := f.voiceSessions[id]
+	if !ok {
+		return storage.VoiceSession{}, storage.ErrNotFound
+	}
+	return vs, nil
+}
+
+// fakeRecapEngine records the ids it is asked to recap and returns a canned
+// result or error, so the GenerateRecap handler's wiring + error mapping are
+// tested without an LLM.
+type fakeRecapEngine struct {
+	gotIDs []uuid.UUID
+	calls  int
+	result recap.Result
+	err    error
+}
+
+func (f *fakeRecapEngine) Recap(_ context.Context, ids []uuid.UUID) (recap.Result, error) {
+	f.calls++
+	f.gotIDs = ids
+	if f.err != nil {
+		return recap.Result{}, f.err
+	}
+	return f.result, nil
+}
+
+// newRecapClient mounts a SessionServer with an injected recap engine + an
+// authenticated operator, for the GenerateRecap tests.
+func newRecapClient(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore, recapper rpc.RecapEngine) managementv1connect.SessionServiceClient {
+	t.Helper()
+	tenantID := uuid.New()
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			ctx = auth.WithTenant(ctx, tenantID)
+			return next(ctx, req)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(mgr, store, recapper, nil).Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+}
+
 func newSessionClient(t *testing.T, mgr rpc.SessionManager, store rpc.SessionStore) managementv1connect.SessionServiceClient {
 	return newSessionClientAs(t, mgr, store, storage.User{})
 }
@@ -253,7 +309,7 @@ func newSessionClientAs(t *testing.T, mgr rpc.SessionManager, store rpc.SessionS
 		}
 	})
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewSessionServer(mgr, store, nil).Handler(connect.WithInterceptors(inject)))
+	mux.Handle(rpc.NewSessionServer(mgr, store, nil, nil).Handler(connect.WithInterceptors(inject)))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
@@ -467,7 +523,7 @@ func TestGetSession_CarriesMutedAgentIds(t *testing.T) {
 func TestSessionMute_CSRFGuardsMutationNotRead(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil, nil).Handler(
 		connect.WithInterceptors(auth.NewCSRFInterceptor()),
 	))
 	srv := httptest.NewServer(mux)
@@ -583,7 +639,7 @@ func TestListSessions_NoCampaignReturnsEmpty(t *testing.T) {
 func TestListSessions_CSRFExemptAsRead(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil, nil).Handler(
 		connect.WithInterceptors(auth.NewCSRFInterceptor()),
 	))
 	srv := httptest.NewServer(mux)
@@ -968,7 +1024,7 @@ func TestSearchTranscriptNoCampaignReturnsEmpty(t *testing.T) {
 func TestSearchTranscriptAuthGatesLikeSiblings(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil, nil).Handler(
 		connect.WithInterceptors(auth.NewAuthInterceptor(denyAuth{})),
 	))
 	srv := httptest.NewServer(mux)
@@ -992,7 +1048,7 @@ func TestSearchTranscriptAuthGatesLikeSiblings(t *testing.T) {
 func TestSearchTranscriptCSRFExemptAsRead(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil).Handler(
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), nil, nil).Handler(
 		connect.WithInterceptors(auth.NewCSRFInterceptor()),
 	))
 	srv := httptest.NewServer(mux)
@@ -1008,5 +1064,268 @@ func TestSearchTranscriptCSRFExemptAsRead(t *testing.T) {
 	// The read is exempt — no token still reaches the handler.
 	if _, err := client.SearchTranscriptLines(ctx, connect.NewRequest(&managementv1.SearchTranscriptLinesRequest{Query: "dragon"})); connect.CodeOf(err) == connect.CodePermissionDenied {
 		t.Error("SearchTranscriptLines must be CSRF-exempt (NO_SIDE_EFFECTS read)")
+	}
+}
+
+// recapStore returns a fake store whose Active Campaign owns the given sessions,
+// so a GenerateRecap over those ids passes the ownership check.
+func recapStore(campaignID uuid.UUID, sessions ...storage.VoiceSession) *fakeSessionStore {
+	m := make(map[uuid.UUID]storage.VoiceSession, len(sessions))
+	for _, vs := range sessions {
+		m[vs.ID] = vs
+	}
+	return &fakeSessionStore{
+		campaign:      storage.Campaign{ID: campaignID, Name: "Sunless Citadel"},
+		latestErr:     storage.ErrNotFound,
+		voiceSessions: m,
+	}
+}
+
+// TestGenerateRecap_EmptyIDsIsInvalidArgument: no session ids is
+// CodeInvalidArgument and never reaches the engine.
+func TestGenerateRecap_EmptyIDsIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	engine := &fakeRecapEngine{}
+	client := newRecapClient(t, &fakeSessionManager{}, recapStore(uuid.New()), engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: nil}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("empty ids code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times for empty ids, want 0", engine.calls)
+	}
+}
+
+// TestGenerateRecap_UnparsableIDIsNotFound: a non-UUID id names no session and is
+// CodeNotFound (never reaching the engine) — the never-leak-existence posture.
+func TestGenerateRecap_UnparsableIDIsNotFound(t *testing.T) {
+	t.Parallel()
+	engine := &fakeRecapEngine{}
+	client := newRecapClient(t, &fakeSessionManager{}, recapStore(uuid.New()), engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{"not-a-uuid"}}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("unparsable id code = %v, want NotFound", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times for unparsable id, want 0", engine.calls)
+	}
+}
+
+// TestGenerateRecap_ForeignCampaignIDIsNotFound: a session that exists but belongs
+// to another Campaign is CodeNotFound — existence is never leaked, and the engine
+// is never asked to cross campaigns (AC1).
+func TestGenerateRecap_ForeignCampaignIDIsNotFound(t *testing.T) {
+	t.Parallel()
+	activeCampaign := uuid.New()
+	foreign := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New(), Status: storage.VoiceSessionEnded}
+	store := recapStore(activeCampaign, foreign) // exists in the store, but owned by another campaign
+	engine := &fakeRecapEngine{}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{foreign.ID.String()}}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("foreign-campaign id code = %v, want NotFound", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times for foreign id, want 0", engine.calls)
+	}
+}
+
+// TestGenerateRecap_MissingIDIsNotFound: a well-formed id that no session matches
+// (storage.ErrNotFound) is CodeNotFound.
+func TestGenerateRecap_MissingIDIsNotFound(t *testing.T) {
+	t.Parallel()
+	engine := &fakeRecapEngine{}
+	client := newRecapClient(t, &fakeSessionManager{}, recapStore(uuid.New()), engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{uuid.NewString()}}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("missing id code = %v, want NotFound", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times for missing id, want 0", engine.calls)
+	}
+}
+
+// TestGenerateRecap_NoActiveCampaignIsFailedPrecondition: with no live session and
+// no Active Campaign, GenerateRecap is CodeFailedPrecondition — there is no
+// campaign to scope ownership to.
+func TestGenerateRecap_NoActiveCampaignIsFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	store := &fakeSessionStore{campaignErr: storage.ErrNotFound}
+	engine := &fakeRecapEngine{}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{uuid.NewString()}}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("no-campaign code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times with no campaign, want 0", engine.calls)
+	}
+}
+
+// TestGenerateRecap_HappyPath: the handler resolves the Active Campaign, checks
+// every id's ownership, calls the engine with the parsed UUIDs, and maps the
+// Result onto the wire (text / session_ids / windowed).
+func TestGenerateRecap_HappyPath(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	s1 := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded}
+	s2 := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded}
+	store := recapStore(campaignID, s1, s2)
+	engine := &fakeRecapEngine{result: recap.Result{
+		Text:       "The party bested the goblin warren.",
+		SessionIDs: []uuid.UUID{s1.ID, s2.ID},
+		Windowed:   true,
+	}}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	resp, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{s1.ID.String(), s2.ID.String()}}))
+	if err != nil {
+		t.Fatalf("GenerateRecap: %v", err)
+	}
+	if len(engine.gotIDs) != 2 || engine.gotIDs[0] != s1.ID || engine.gotIDs[1] != s2.ID {
+		t.Errorf("engine got ids %v, want the parsed UUIDs [%s %s]", engine.gotIDs, s1.ID, s2.ID)
+	}
+	if resp.Msg.GetText() != "The party bested the goblin warren." {
+		t.Errorf("text = %q, want the engine's recap prose", resp.Msg.GetText())
+	}
+	if got := resp.Msg.GetSessionIds(); len(got) != 2 || got[0] != s1.ID.String() || got[1] != s2.ID.String() {
+		t.Errorf("session_ids = %v, want [%s %s]", got, s1.ID, s2.ID)
+	}
+	if !resp.Msg.GetWindowed() {
+		t.Error("windowed = false, want true (mapped from the Result)")
+	}
+}
+
+// TestGenerateRecap_NoTranscriptIsFailedPrecondition: recap.ErrNoTranscript
+// (nothing to summarize) maps to CodeFailedPrecondition, not Internal.
+func TestGenerateRecap_NoTranscriptIsFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded}
+	store := recapStore(campaignID, vs)
+	engine := &fakeRecapEngine{err: recap.ErrNoTranscript}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{vs.ID.String()}}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("no-transcript code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
+// TestGenerateRecap_TranscriptTooLongIsFailedPrecondition: recap.ErrTranscriptTooLong
+// is deterministic + operator-meaningful (a retry can never succeed), so it maps to
+// CodeFailedPrecondition, not the generic Internal.
+func TestGenerateRecap_TranscriptTooLongIsFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded}
+	store := recapStore(campaignID, vs)
+	engine := &fakeRecapEngine{err: recap.ErrTranscriptTooLong}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{vs.ID.String()}}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("too-long code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
+// TestGenerateRecap_TooManyIDsIsInvalidArgument: a request spanning an
+// unreasonable number of sessions is rejected CodeInvalidArgument before any
+// ownership lookup or engine call — a spend guardrail (gate #271).
+func TestGenerateRecap_TooManyIDsIsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	engine := &fakeRecapEngine{}
+	store := recapStore(uuid.New())
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	ids := make([]string, 21) // just over the cap
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: ids}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("too-many-ids code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if engine.calls != 0 {
+		t.Errorf("engine called %d times for over-cap request, want 0", engine.calls)
+	}
+	if store.getVoiceCalls != 0 {
+		t.Errorf("store.GetVoiceSession called %d times for over-cap request, want 0", store.getVoiceCalls)
+	}
+}
+
+// TestGenerateRecap_EngineErrorIsInternal: any other engine failure is a logged,
+// static CodeInternal — the underlying error is never echoed to the client.
+func TestGenerateRecap_EngineErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	vs := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionEnded}
+	store := recapStore(campaignID, vs)
+	engine := &fakeRecapEngine{err: errors.New("groq: 500 upstream boom")}
+	client := newRecapClient(t, &fakeSessionManager{}, store, engine)
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{vs.ID.String()}}))
+	if connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("engine-error code = %v, want Internal", connect.CodeOf(err))
+	}
+	if err != nil && strings.Contains(err.Error(), "boom") {
+		t.Errorf("error message %q leaks the underlying engine error", err.Error())
+	}
+}
+
+// TestGenerateRecap_RunningSessionAllowed pins the documented policy: a RUNNING
+// Voice Session may be recapped (its Lines exist; the snapshot grows). The live
+// session's campaign scopes ownership, and the engine is called with its id.
+func TestGenerateRecap_RunningSessionAllowed(t *testing.T) {
+	t.Parallel()
+	campaignID := uuid.New()
+	running := storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID, Status: storage.VoiceSessionRunning}
+	store := recapStore(campaignID, running)
+	mgr := &fakeSessionManager{active: true, current: running}
+	engine := &fakeRecapEngine{result: recap.Result{Text: "so far…", SessionIDs: []uuid.UUID{running.ID}}}
+	client := newRecapClient(t, mgr, store, engine)
+
+	if _, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{running.ID.String()}})); err != nil {
+		t.Fatalf("GenerateRecap of running session: %v", err)
+	}
+	if len(engine.gotIDs) != 1 || engine.gotIDs[0] != running.ID {
+		t.Errorf("engine got %v, want the running session id %s", engine.gotIDs, running.ID)
+	}
+}
+
+// TestGenerateRecap_CSRFGuardsAsMutation pins the ADR-0039 posture: GenerateRecap
+// spends provider money, so it is deliberately NOT NO_SIDE_EFFECTS — with the CSRF
+// interceptor mounted and no double-submit token it is PermissionDenied, exactly
+// like StartSession.
+func TestGenerateRecap_CSRFGuardsAsMutation(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(&fakeSessionManager{}, activeStore(), &fakeRecapEngine{}, nil).Handler(
+		connect.WithInterceptors(auth.NewCSRFInterceptor()),
+	))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	_, err := client.GenerateRecap(context.Background(),
+		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{uuid.NewString()}}))
+	if got := connect.CodeOf(err); got != connect.CodePermissionDenied {
+		t.Errorf("GenerateRecap code = %v, want PermissionDenied (CSRF-guarded mutation)", got)
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
@@ -505,7 +506,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			}
 		}
 	}
-	mounts := managementMounts(store, cipher, log, mgr, relay, presenceRefresh)
+	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, presenceRefresh)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -566,7 +567,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, presenceRefresh func()) []web.Mount {
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, presenceRefresh func()) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -622,7 +623,13 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, log *slog.Log
 	providerSrv.SetDiscordApplicationID(clientID)
 	providerPath, providerHandler := providerSrv.Handler(stack.HandlerOptions()...)
 	voicePath, voiceHandler := voiceSrv.Handler(stack.HandlerOptions()...)
-	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, log).Handler(stack.HandlerOptions()...)
+	// The recap engine regenerates Butler-flavoured Session recaps on demand
+	// (#272/#274, gate #271: never persisted). It spends provider money per call
+	// and meters usage, so SessionService.GenerateRecap is CSRF-guarded like a
+	// mutation. NOTE (#273 sibling): when the slash-command branch lands it owns a
+	// single recap.NewEngine construction — collapse this into that one instance.
+	recapEngine := recap.NewEngine(store, cipher, metrics, log)
+	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, recapEngine, log).Handler(stack.HandlerOptions()...)
 
 	return []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),

@@ -989,6 +989,32 @@ service SessionService {
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // GenerateRecap regenerates a Butler-flavored Recap over the given sessions
+  // (#271: never persisted). Every session_id must belong to the resolved
+  // Active Campaign (cross-campaign/unparsable -> CodeNotFound). Deliberately
+  // NOT NO_SIDE_EFFECTS: each call spends provider money + records usage, so
+  // CSRF + auth guard it like a mutation.
+  rpc GenerateRecap(GenerateRecapRequest) returns (GenerateRecapResponse);
+}
+
+// GenerateRecapRequest carries the Voice Session ids to recap; each must belong
+// to the server-resolved Active Campaign (ADR-0039) — a cross-campaign or
+// unparsable id is CodeNotFound (existence never leaked).
+message GenerateRecapRequest {
+  // session_ids are the Voice Sessions to summarize into one recap.
+  repeated string session_ids = 1;
+}
+
+// GenerateRecapResponse carries the regenerated recap prose, the recapped
+// session ids (chronological), and whether any session took the map-reduce
+// (windowed) path.
+message GenerateRecapResponse {
+  // text is the Butler-flavored recap prose.
+  string text = 1;
+  // session_ids are the recapped sessions in chronological (started_at) order.
+  repeated string session_ids = 2;
+  // windowed reports whether any session was map-reduced over windows.
+  bool windowed = 3;
 }
 
 // ListSessionsRequest is the (empty) request; the Active Campaign is resolved

@@ -14,6 +14,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -52,6 +53,18 @@ type SessionStore interface {
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
 	ListVoiceSessions(ctx context.Context, campaignID uuid.UUID, limit int) ([]storage.VoiceSession, error)
 	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
+	// GetVoiceSession loads one Voice Session by id for the GenerateRecap ownership
+	// check (#274): the resolved Active Campaign must own every requested id, else
+	// CodeNotFound (existence never leaked). storage.ErrNotFound for a missing id.
+	GetVoiceSession(ctx context.Context, id uuid.UUID) (storage.VoiceSession, error)
+}
+
+// RecapEngine regenerates a Butler-flavoured Recap over the given Voice Sessions
+// (#272/#274). *recap.Engine satisfies it; tests inject a fake. It NEVER persists
+// (gate #271) and spends provider money per call, so GenerateRecap is guarded like
+// a mutation (ADR-0039).
+type RecapEngine interface {
+	Recap(ctx context.Context, sessionIDs []uuid.UUID) (recap.Result, error)
 }
 
 // searchTranscriptLimit caps a transcript search result set (#120). It is a fixed
@@ -64,23 +77,29 @@ const searchTranscriptLimit = 50
 // tier (ADR-0039); the client sends no limit.
 const listSessionsLimit = 50
 
+// maxRecapSessions caps how many Voice Sessions one GenerateRecap may span (#274).
+// The web recaps a single session; the cap is a spend guardrail (each session is a
+// money-spending LLM call, gate #271), set well above any realistic pick.
+const maxRecapSessions = 20
+
 // SessionServer implements the Connect SessionService over a SessionManager +
 // SessionStore: Start/Stop drive the in-process loop, GetSession reports the live
 // or last session.
 type SessionServer struct {
-	mgr   SessionManager
-	store SessionStore
-	log   *slog.Logger
+	mgr      SessionManager
+	store    SessionStore
+	recapper RecapEngine
+	log      *slog.Logger
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)
 
-// NewSessionServer wraps the manager + store in a SessionServer.
-func NewSessionServer(mgr SessionManager, store SessionStore, log *slog.Logger) *SessionServer {
+// NewSessionServer wraps the manager + store + recap engine in a SessionServer.
+func NewSessionServer(mgr SessionManager, store SessionStore, recapper RecapEngine, log *slog.Logger) *SessionServer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &SessionServer{mgr: mgr, store: store, log: log}
+	return &SessionServer{mgr: mgr, store: store, recapper: recapper, log: log}
 }
 
 // Handler builds the Connect HTTP handler for SessionService and returns its
@@ -362,6 +381,94 @@ func (s *SessionServer) ListSessions(
 		out = append(out, toProtoVoiceSession(vs))
 	}
 	return connect.NewResponse(&managementv1.ListSessionsResponse{Sessions: out}), nil
+}
+
+// GenerateRecap regenerates a Butler-flavoured Recap over the requested Voice
+// Sessions (#274, gate #271: never persisted). The Campaign is resolved
+// server-side via the SAME searchCampaign policy the reads use (live Voice
+// Session first, else the profile-first durable selection / most-recent fallback)
+// — no Active Campaign is CodeFailedPrecondition. Every session_id MUST belong to
+// that resolved Campaign: an unparsable id, a storage.ErrNotFound, or a session
+// whose CampaignID differs is CodeNotFound — the SAME never-leak-existence posture
+// as SetAgentMute, so a probe can't learn whether a foreign id exists. Empty
+// session_ids is CodeInvalidArgument. Recapping a RUNNING session is allowed: its
+// Lines already exist and the snapshot simply grows, so the recap covers the
+// transcript as of the call. recap.ErrNoTranscript (nothing to summarize) and
+// recap.ErrTranscriptTooLong (a retry can never succeed) are both static
+// CodeFailedPrecondition; any other engine error is logged and returned as a
+// static CodeInternal. An over-cap session_ids count is CodeInvalidArgument (a
+// spend guardrail). State-changing (spends money): auth + CSRF guard it.
+func (s *SessionServer) GenerateRecap(
+	ctx context.Context,
+	req *connect.Request[managementv1.GenerateRecapRequest],
+) (*connect.Response[managementv1.GenerateRecapResponse], error) {
+	rawIDs := req.Msg.GetSessionIds()
+	if len(rawIDs) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("at least one session id is required"))
+	}
+	// Belt-and-braces spend guard (gate #271): the web sends one id; an unreasonable
+	// count would fan out that many money-spending LLM calls. Cap it well above any
+	// realistic pick.
+	if len(rawIDs) > maxRecapSessions {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("too many session ids to recap at once"))
+	}
+
+	// A foreign/unknown/unparsable id names no session in the Active Campaign — one
+	// static NotFound for all three, so existence is never leaked (mirrors SetAgentMute).
+	notFound := connect.NewError(connect.CodeNotFound, errors.New("no such session in the Active Campaign"))
+
+	campaignID, ok, err := s.searchCampaign(ctx)
+	if err != nil {
+		s.log.Error("GenerateRecap: resolve active campaign failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if !ok {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no active campaign"))
+	}
+
+	sessionIDs := make([]uuid.UUID, 0, len(rawIDs))
+	for _, raw := range rawIDs {
+		id, perr := uuid.Parse(raw)
+		if perr != nil {
+			return nil, notFound // a non-UUID id names no session
+		}
+		vs, gerr := s.store.GetVoiceSession(ctx, id)
+		if errors.Is(gerr, storage.ErrNotFound) {
+			return nil, notFound
+		}
+		if gerr != nil {
+			s.log.Error("GenerateRecap: load voice session failed", "err", gerr)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		if vs.CampaignID != campaignID {
+			return nil, notFound // cross-campaign id: never leak that it exists
+		}
+		sessionIDs = append(sessionIDs, id)
+	}
+
+	res, err := s.recapper.Recap(ctx, sessionIDs)
+	if errors.Is(err, recap.ErrNoTranscript) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no transcript to summarize"))
+	}
+	if errors.Is(err, recap.ErrTranscriptTooLong) {
+		// Deterministic + operator-meaningful (a retry can never succeed): a precondition,
+		// not an internal fault. Name the condition without echoing internals.
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("transcript too long to recap"))
+	}
+	if err != nil {
+		s.log.Error("GenerateRecap: recap engine failed", "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	outIDs := make([]string, len(res.SessionIDs))
+	for i, id := range res.SessionIDs {
+		outIDs[i] = id.String()
+	}
+	return connect.NewResponse(&managementv1.GenerateRecapResponse{
+		Text:       res.Text,
+		SessionIds: outIDs,
+		Windowed:   res.Windowed,
+	}), nil
 }
 
 // searchCampaign resolves the campaign the web transcript search scopes to: the
