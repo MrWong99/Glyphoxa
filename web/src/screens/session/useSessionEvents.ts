@@ -69,7 +69,11 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 // masquerading as the empty "start a session" state (#270).
 export type SessionTranscript = Transcript & { snapshotFailed: boolean };
 
-export function useSessionEvents(sessionId: string | undefined, active: boolean): SessionTranscript {
+export function useSessionEvents(
+  sessionId: string | undefined,
+  active: boolean,
+  viewingPast = false,
+): SessionTranscript {
   const queryClient = useQueryClient();
   // The SSE "mute" frame patches the SHARED getSession cache (not the transcript
   // cache), so the Voice panel reflects a mute from EITHER surface without a
@@ -92,10 +96,13 @@ export function useSessionEvents(sessionId: string | undefined, active: boolean)
     enabled: haveSession,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
-    // retry:false surfaces a failed snapshot at once (the screen shows an error for a
-    // past session, #270) instead of masking it behind seconds of backoff; a reopen
-    // resync or a manual re-pick re-fetches anyway.
-    retry: false,
+    // Retry policy splits by view (#270): for a PAST session, retry:false surfaces
+    // a failed snapshot at once (the screen shows an error) instead of masking it
+    // behind backoff. For the CURRENT/live session, KEEP retries so a transient 500
+    // is absorbed — else isSuccess never flips, the SSE tail never opens, and the
+    // live screen is stuck on "Listening…" forever (staleTime Infinity, no refocus
+    // refetch). A reopen resync or manual re-pick re-fetches either way.
+    retry: viewingPast ? false : 2,
     queryFn: async () => {
       const res = await fetch(`/api/v1/sessions/${sessionId}`, { credentials: "same-origin" });
       if (!res.ok) throw new Error(`session snapshot failed: ${res.status}`);

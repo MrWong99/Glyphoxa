@@ -322,6 +322,41 @@ describe("Session mutation failures (#144)", () => {
 });
 
 describe("Session live transcript (#73)", () => {
+  it("recovers a transient snapshot failure on the live session (retries, doesn't blank forever) (#270 finding 1)", async () => {
+    // The live/current snapshot 500s ONCE then succeeds — with staleTime Infinity and
+    // no refocus refetch, a non-retried failure would strand the screen on "Listening…"
+    // forever because the SSE tail only opens after the snapshot resolves.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response("boom", { status: 500 });
+      return new Response(
+        JSON.stringify({ lines: [], status: "live", typing: { active: true, label: "Listening to the table…" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    render(
+      <Providers transport={liveTransport()} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+
+    // The retry lands the snapshot → the SSE stream opens → a streamed line renders.
+    const es = await waitFor(
+      () => {
+        const inst = MockEventSource.last();
+        if (!inst) throw new Error("live stream never opened — snapshot retry not absorbed");
+        return inst;
+      },
+      { timeout: 4000 },
+    );
+    act(() =>
+      es.emit("line", { id: "u:1", who: "Player / DM", kind: "player", ts: new Date().toISOString(), text: "recovered live line" }),
+    );
+    expect(await screen.findByText("recovered live line")).toBeInTheDocument();
+  });
+
   it("seeds from the snapshot then renders streamed lines + typing dots", async () => {
     // Snapshot: live + listening, no lines yet.
     globalThis.fetch = (async () =>
@@ -999,9 +1034,14 @@ describe("Session live default unchanged with picker present (#270 AC5)", () => 
     expect(await screen.findByText("live line here")).toBeInTheDocument();
 
     // Browse a past session → the heading switches away from Live transcript.
+    const esCountBeforeBrowse = MockEventSource.instances.length;
     fireEvent.click(within(picker).getByText(/5 lines/));
     expect(await screen.findByText("Session transcript")).toBeInTheDocument();
     expect(await screen.findByText("old first line")).toBeInTheDocument();
+    // Pin the `active && !viewingPast` gate (#270 6b): browsing a past session opens
+    // NO new stream — not for vsOld, not at all. A broken gate would open ES(vsOld).
+    expect(MockEventSource.instances.length).toBe(esCountBeforeBrowse);
+    expect(MockEventSource.instances.some((i) => i.url.includes("vsOld"))).toBe(false);
 
     // Back to current → the live feed is the default again AND its stream reopens:
     // a newly streamed line renders (guards AC5 that returning resumes the live tail,

@@ -213,7 +213,7 @@ export function Session() {
   // session is the one being VIEWED (viewedId ?? current); the live tail opens only
   // when that IS the live session (active && !viewingPast) — browsing a past session
   // replays its persisted snapshot with no stream (#270, AC5).
-  const transcript = useSessionEvents(renderedSessionId ?? undefined, active && !viewingPast);
+  const transcript = useSessionEvents(renderedSessionId ?? undefined, active && !viewingPast, viewingPast);
   const hasLines = transcript.lines.length > 0;
   const showTyping = active && transcript.typing.active;
 
