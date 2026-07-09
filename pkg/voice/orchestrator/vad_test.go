@@ -165,3 +165,37 @@ func TestVAD_TwoUtteranceTest_EmitsTwoSpeechStarts(t *testing.T) {
 
 	voicetest.AssertEventCount[voiceevent.VADSpeechStart](t, h, 2)
 }
+
+// TestVAD_StampsSpeakerIDFromFrame pins that the VAD stage stamps each published
+// speech transition with the processed frame's Speaker() (ADR-0050): an attributed
+// frame yields VADSpeechStart/End carrying that SpeakerID, and an unattributed ("")
+// frame leaves the events' SpeakerID empty — the single-lane MVP path unchanged.
+func TestVAD_StampsSpeakerIDFromFrame(t *testing.T) {
+	bus := voiceevent.NewBus()
+	var starts []voiceevent.VADSpeechStart
+	var ends []voiceevent.VADSpeechEnd
+	voiceevent.On(bus, func(e voiceevent.VADSpeechStart) { starts = append(starts, e) })
+	voiceevent.On(bus, func(e voiceevent.VADSpeechEnd) { ends = append(ends, e) })
+
+	stage := orchestrator.NewVAD(bus, &scriptedVAD{events: []vad.VADEventType{
+		vad.VADSpeechStart, vad.VADSpeechEnd,
+	}})
+
+	base, err := audio.NewFrame(make([]int16, 512), 16000, 32)
+	if err != nil {
+		t.Fatalf("audio.NewFrame: %v", err)
+	}
+	if err := stage.Process(base.WithSpeaker("42")); err != nil { // → speech_start
+		t.Fatalf("Process: %v", err)
+	}
+	if err := stage.Process(base.WithSpeaker("42")); err != nil { // → speech_end
+		t.Fatalf("Process: %v", err)
+	}
+
+	if len(starts) != 1 || starts[0].SpeakerID != "42" {
+		t.Errorf("VADSpeechStart SpeakerID = %+v, want one with \"42\"", starts)
+	}
+	if len(ends) != 1 || ends[0].SpeakerID != "42" {
+		t.Errorf("VADSpeechEnd SpeakerID = %+v, want one with \"42\"", ends)
+	}
+}

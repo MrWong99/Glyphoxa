@@ -87,16 +87,23 @@ func (v *VAD) Process(frame audio.Frame) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator.VAD.Process: %w", err)
 	}
+	// The transition inherits the frame's attribution (ADR-0050): a per-lane VAD is
+	// fed only its speaker's frames, so stamping frame.Speaker() names the lane the
+	// segmenter routes this transition to. An unattributed ("") frame — the default
+	// lane / single-lane MVP path — leaves SpeakerID empty, unchanged.
+	speaker := frame.Speaker()
 	switch evt.Type {
 	case vad.VADSpeechStart:
 		v.bus.Publish(voiceevent.VADSpeechStart{
 			At:          time.Now(),
 			Probability: evt.Probability,
+			SpeakerID:   speaker,
 		})
 	case vad.VADSpeechEnd:
 		v.bus.Publish(voiceevent.VADSpeechEnd{
 			At:          time.Now(),
 			Probability: evt.Probability,
+			SpeakerID:   speaker,
 		})
 		// #125: stamp the fixed end-of-speech detection lag once per speech_end.
 		v.rec.VADHangover(v.hangover)

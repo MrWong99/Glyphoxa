@@ -185,13 +185,21 @@ func (c *Codec) DecodeInbound(frame gxvoice.Frame) ([]audio.Frame, error) {
 	if len(grouped) == 0 {
 		return nil, nil
 	}
+	// Stamp each decoded frame with its speaker so the segmenter can route it to
+	// that speaker's lane (ADR-0050). GUARD: snowflake.ID(0).String() == "0", not
+	// "" — an unresolved SSRC (zero UserID, audio before the speaking event) must
+	// stay unattributed, so only a non-zero UserID stamps a SpeakerID.
+	var speaker string
+	if frame.UserID != 0 {
+		speaker = frame.UserID.String()
+	}
 	frames := make([]audio.Frame, 0, len(grouped))
 	for _, samples := range grouped {
 		f, err := audio.NewFrame(samples, vadSampleRate, vadFrameMs)
 		if err != nil {
 			return nil, fmt.Errorf("codec: build audio frame: %w", err)
 		}
-		frames = append(frames, f)
+		frames = append(frames, f.WithSpeaker(speaker))
 	}
 	return frames, nil
 }
