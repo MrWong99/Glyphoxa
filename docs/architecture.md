@@ -326,7 +326,7 @@ auto-created by the `00002_auto_butler.sql` trigger with `address_only = true`
 Voice, Tool Grants — and **nothing it holds drives anything**. Three facts, each
 checkable:
 
-- The live loop never loads it. `loadSeededNPCs` calls `storage.CharacterAgents`
+- The live loop never loads it. `loadCampaignNPCs` calls `storage.CharacterAgents`
   (`internal/wirenpc/agentspec.go`), Character NPCs only.
 - **It cannot enter the Matcher by construction, not merely by omission.**
   Production builds the matcher at `internal/wirenpc/roster.go` via

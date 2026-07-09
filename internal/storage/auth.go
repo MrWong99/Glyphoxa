@@ -128,6 +128,34 @@ func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID stri
 	return c, nil
 }
 
+// GetOperatorActiveCampaign returns the durable Active Campaign selection of the
+// single operator, for a surface with NO logged-in user context — the standalone
+// voice node (#323, ADR-0039 single-operator pass-through). It is the
+// context-free analogue of GetActiveCampaignForUser: it joins any users row
+// carrying a non-null active_campaign_id to a non-archived campaign. Single
+// operator, so at most one such selection is meaningful; a tie breaks on the
+// most-recently-updated users row (the freshest /glyphoxa use). ErrNotFound when
+// no operator has a durable, non-archived selection (deleted/archived selections
+// are treated as absent, matching GetActiveCampaignForUser), so the caller falls
+// through to the GetActiveCampaign recent fallback.
+func (s *Store) GetOperatorActiveCampaign(ctx context.Context) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
+		        c.created_at, c.updated_at, c.archived_at
+		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
+		  WHERE c.archived_at IS NULL
+		  ORDER BY u.updated_at DESC, u.id
+		  LIMIT 1`)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: operator active campaign: %w", err)
+	}
+	return c, nil
+}
+
 // NewSession is the input to CreateSession. Token is the opaque random secret
 // the auth tier minted; ExpiresAt is the absolute expiry the validator enforces.
 type NewSession struct {

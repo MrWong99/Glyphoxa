@@ -119,6 +119,42 @@ func TestActiveCampaignOverridesImplicitDefault(t *testing.T) {
 	}
 }
 
+// TestGetOperatorActiveCampaign is the #323 standalone-voice durable read (no
+// logged-in user context): the sole operator's /glyphoxa use selection is
+// returned even when a NEWER campaign is the most-recently-created implicit
+// default — so the standalone voice node and the web tier voice the SAME
+// campaign. With no durable selection at all it is ErrNotFound, so the caller
+// falls through to GetActiveCampaign.
+func TestGetOperatorActiveCampaign(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, older := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// No operator has selected anything yet → ErrNotFound (falls through to recent).
+	if _, err := st.GetOperatorActiveCampaign(ctx); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetOperatorActiveCampaign before any selection = %v, want ErrNotFound", err)
+	}
+
+	// A newer campaign is the implicit recent default...
+	newer := insertCampaign(t, st, tenantID, "Newer Campaign")
+	if def, err := st.GetActiveCampaign(ctx); err != nil || def.ID != newer {
+		t.Fatalf("implicit default = %s, %v; want the newer campaign %s", def.ID, err, newer)
+	}
+	// ...but the operator durably selected the OLDER one via /glyphoxa use.
+	if err := st.SetActiveCampaign(ctx, gmSnowflake, older); err != nil {
+		t.Fatalf("SetActiveCampaign: %v", err)
+	}
+
+	got, err := st.GetOperatorActiveCampaign(ctx)
+	if err != nil {
+		t.Fatalf("GetOperatorActiveCampaign: %v", err)
+	}
+	if got.ID != older {
+		t.Errorf("operator active campaign = %s, want the durable older selection %s (not the recent default)", got.ID, older)
+	}
+}
+
 // TestGetActiveCampaignForUserClearedOnDeletedCampaign proves the FK's ON DELETE
 // SET NULL clears a stale selection: deleting the chosen campaign makes
 // GetActiveCampaignForUser return ErrNotFound (so the slash surface then fails

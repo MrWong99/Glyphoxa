@@ -21,6 +21,7 @@ import (
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/gateway"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the database/sql "pgx" driver for the goose-backed schema check
 
@@ -237,7 +238,7 @@ type npcSpec struct {
 	// per-NPC GrantSet against the shared Registry, so the LLM only ever sees the
 	// Tools this NPC is granted (#113). nil ⇒ granted nothing.
 	grants []tool.Grant
-	// model is the Groq model id this NPC's engine runs (#227): loadSeededNPCs
+	// model is the Groq model id this NPC's engine runs (#227): loadCampaignNPCs
 	// resolves it from the Agent's LLM provider_config, falling back to the
 	// tenant-level LLM row. Empty means "adapter default" — it flows verbatim into
 	// [llm.Request.Model], where the openaicompat adapter fills [groq.DefaultModel]
@@ -281,6 +282,15 @@ type Config struct {
 	// channel to join. Required.
 	Guild   string
 	Channel string
+	// CampaignID is the bound Active Campaign whose roster this loop voices (#323).
+	// RunFromDB loads THIS campaign's Character NPCs + Language via the
+	// campaign-scoped loader — it never resolves the seed campaign by name. The
+	// session Manager sets it in Start alongside Token/Guild/Channel (the id is
+	// already in hand from CreateVoiceSession); the standalone voice-mode entrypoint
+	// resolves it from the Active-Campaign policy before calling RunFromDB. An
+	// uuid.Nil value is a caller bug: RunFromDB refuses to start loudly rather than
+	// silently voicing the wrong (seed) roster.
+	CampaignID uuid.UUID
 	// Client, when non-nil, is the standing shared Discord client the boot-owned
 	// presence owns (ADR-0010 amendment, #102): connectAndServe borrows it per
 	// cycle instead of constructing its own with disgo.New / OpenGateway, and does
@@ -373,9 +383,12 @@ type Config struct {
 	Gate orchestrator.TurnGate
 }
 
-// RunFromDB loads the seeded Character NPCs from Postgres (via the task-#8
-// storage layer) and runs the live voice loop with them, instead of the in-code
-// NPC. pool is an already-open pgxpool the caller owns (and closes) — voice mode
+// RunFromDB loads the bound Active Campaign's Character NPCs from Postgres (via
+// the task-#8 storage layer, scoped by cfg.CampaignID — #323) and runs the live
+// voice loop with them, instead of the in-code NPC. The campaign id is the
+// selection the Voice Session carries; an empty id fails loudly rather than
+// silently voicing the seed roster. pool is an already-open pgxpool the caller
+// owns (and closes) — voice mode
 // opens exactly one pool that ALSO backs the /readyz probe, and all/web mode
 // hands in its existing request pool, so the voice path never opens a second
 // duplicate handle. This is the task-#5 DB-load path: the only thing it changes
@@ -398,7 +411,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	// serving Modes (voice) never auto-migrate, so a DB behind the embedded
 	// migrations must refuse to start with the actionable `migrate up` message
 	// rather than running queries against a schema the code no longer matches.
-	// This runs before loadSeededNPCs (the first query). The schema check needs a
+	// This runs before loadCampaignNPCs (the first query). The schema check needs a
 	// database/sql handle (goose's API), which the pgxpool can't provide, so the
 	// dsn is recovered from the pool's own config — no second connection string
 	// threaded through the callers.
@@ -407,7 +420,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	}
 
 	st := storage.New(pool)
-	npcs, primary, campaign, err := loadSeededNPCs(ctx, st)
+	npcs, primary, campaign, err := loadCampaignNPCs(ctx, st, cfg.CampaignID)
 	if err != nil {
 		return err
 	}
@@ -468,6 +481,16 @@ func ensureSchemaCurrent(ctx context.Context, dsn string) error {
 	}
 	defer db.Close()
 	return storage.EnsureCurrent(ctx, db)
+}
+
+// EnsureSchemaCurrent is the exported ADR-0031 fail-fast guard for callers that
+// must run a DB query BEFORE [RunFromDB] does its own internal check. The
+// standalone voice entrypoint resolves the Active Campaign before RunFromDB
+// (#323), so it runs this first to keep the stale-schema refusal (the actionable
+// `migrate up` message) ahead of any other query. It delegates to the same
+// self-contained schema-check seam RunFromDB uses.
+func EnsureSchemaCurrent(ctx context.Context, dsn string) error {
+	return ensureSchemaCurrent(ctx, dsn)
 }
 
 // Run builds and runs the live NPC voice loop until ctx is cancelled. It joins
@@ -995,7 +1018,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 // model-threading contract (#227) is unit-testable with a fake provider that
 // captures the [llm.Request].
 //
-// spec.model — resolved from the Agent's LLM provider_config (loadSeededNPCs),
+// spec.model — resolved from the Agent's LLM provider_config (loadCampaignNPCs),
 // tenant-level row as fallback — flows verbatim into the request. Empty passes
 // through as "" so the openaicompat adapter fills [groq.DefaultModel]; there is
 // NO defaulting duplicated here (the AC "empty → provider default" is proven at
