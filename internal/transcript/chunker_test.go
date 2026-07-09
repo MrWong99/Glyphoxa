@@ -274,6 +274,89 @@ func TestChunker_AgentReplyCoalesces(t *testing.T) {
 	}
 }
 
+// TestChunker_ChunkCarriesDistinctSpeakerSet is #278: a chunk whose human
+// utterances came from two Speaker Lanes carries the DISTINCT speaker set (deduped,
+// first-seen order), collected eagerly at append time (the events are gone by
+// flush). An agent-only chunk keeps an empty set.
+func TestChunker_ChunkCarriesDistinctSpeakerSet(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	// Two lanes, one repeats — the set dedups to [111, 222] in first-seen order.
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "a", TurnID: "t", SpeakerID: "111"})
+	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "b", TurnID: "t", SpeakerID: "222"})
+	bus.Publish(voiceevent.STTFinal{At: at(3), Text: "c", TurnID: "t", SpeakerID: "111"})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	if want := []string{"111", "222"}; !equalStrs(got[0].SpeakerDiscordUserIDs, want) {
+		t.Errorf("speakers = %v, want %v (distinct, first-seen order)", got[0].SpeakerDiscordUserIDs, want)
+	}
+}
+
+// TestChunker_AgentOnlyChunkHasNoSpeakers is #278: an agent-only chunk carries an
+// empty (non-nil) speaker set — unchanged from the pre-#278 anonymous behaviour.
+func TestChunker_AgentOnlyChunkHasNoSpeakers(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "Well met.", at(2))
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	if len(got[0].SpeakerDiscordUserIDs) != 0 {
+		t.Errorf("speakers = %v, want empty (agent-only chunk)", got[0].SpeakerDiscordUserIDs)
+	}
+	if got[0].SpeakerDiscordUserIDs == nil {
+		t.Errorf("speakers is nil, want non-nil empty slice (scan contract)")
+	}
+}
+
+// TestChunker_UnattributedUtteranceAbsentFromSpeakerSet is #278: an unattributed
+// utterance (empty SpeakerID) is NEVER added to the chunk's speaker set.
+func TestChunker_UnattributedUtteranceAbsentFromSpeakerSet(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "named", TurnID: "t", SpeakerID: "111"})
+	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "anon", TurnID: "t"}) // empty SpeakerID
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if want := []string{"111"}; !equalStrs(got[0].SpeakerDiscordUserIDs, want) {
+		t.Errorf("speakers = %v, want %v (empty SpeakerID excluded)", got[0].SpeakerDiscordUserIDs, want)
+	}
+}
+
+func equalStrs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestChunker_DispatchedButNotDeliveredIsIgnored is #104 + ADR-0012: TTSInvoked is
 // a dispatch attempt, not delivery. A sentence dispatched but never delivered (no
 // FirstAudio — e.g. a Synthesize start-error) leaves the chunk unchanged and the
