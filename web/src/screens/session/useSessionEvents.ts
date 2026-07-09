@@ -65,8 +65,9 @@ function upsertLine(prev: Transcript | undefined, line: TranscriptLine): Transcr
 
 // SessionTranscript is the cached Transcript plus a transport signal the screen
 // needs but the cache must not carry: snapshotFailed is true when the DB-backed
-// snapshot fetch failed, so a picked past session can surface an error instead of
-// masquerading as the empty "start a session" state (#270).
+// snapshot fetch failed with nothing cached, so the screen — a picked past session
+// AND the current/live one — can surface an error instead of masquerading as the
+// empty "start a session" / "Listening…" state (#270).
 export type SessionTranscript = Transcript & { snapshotFailed: boolean };
 
 export function useSessionEvents(
@@ -101,7 +102,8 @@ export function useSessionEvents(
     // behind backoff. For the CURRENT/live session, KEEP retries so a transient 500
     // is absorbed — else isSuccess never flips, the SSE tail never opens, and the
     // live screen is stuck on "Listening…" forever (staleTime Infinity, no refocus
-    // refetch). A reopen resync or manual re-pick re-fetches either way.
+    // refetch); a failure that outlasts the budget surfaces the same snapshot
+    // error. A reopen resync or manual re-pick re-fetches either way.
     retry: viewingPast ? false : 2,
     queryFn: async () => {
       const res = await fetch(`/api/v1/sessions/${sessionId}`, { credentials: "same-origin" });
@@ -183,9 +185,10 @@ export function useSessionEvents(
   }, [active, sessionId, isSuccess, queryClient, patchOne, patchSpendCap]);
 
   // snapshotFailed only counts for a session that exists — a null id is the
-  // never-run state, not a failure. The screen surfaces it only while browsing a
-  // PAST session (a live session's own failures are the #123 connection surface).
-  return { ...(data ?? EMPTY), snapshotFailed: haveSession && isError };
+  // never-run state, not a failure — and only when the snapshot NEVER landed (no
+  // cached data): a failed resync refetch keeps rendering the retained lines
+  // instead of swapping a visible transcript for an error card.
+  return { ...(data ?? EMPTY), snapshotFailed: haveSession && isError && !data };
 }
 
 // formatClock renders an RFC3339 instant as zero-padded HH:MM:SS (the design's

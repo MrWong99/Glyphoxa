@@ -303,17 +303,22 @@ export function Session() {
     setPendingJump({ sessionId, lineId });
   };
 
-  // Failed past-session snapshot (#270 finding 4): a browse whose DB-backed snapshot
-  // fetch errors must NOT masquerade as the empty "start a session" state — that
-  // reads as a lost archive. Surface it: a toast once + an inline error in the
-  // transcript card. Only while viewing a PAST session (a live session's own
-  // failures are the #123 connection surface).
-  const pastSnapshotFailed = viewingPast && transcript.snapshotFailed;
+  // Failed transcript snapshot (#270 finding 4, extended to the current session):
+  // a DB-backed snapshot fetch that errors must NOT masquerade as the empty state —
+  // "start a session" reads as a lost archive, "Listening…" as a mute table. A past
+  // session fails fast (retry:false); the current one lands here only after the
+  // retry budget absorbed transient blips (useSessionEvents retry policy). Surface
+  // it either way: a toast once + an inline error in the transcript card.
+  const snapshotFailed = transcript.snapshotFailed;
   useEffect(() => {
-    if (pastSnapshotFailed) {
-      toast.error("Couldn't load that session's transcript. It may be unavailable — try again.");
+    if (snapshotFailed) {
+      toast.error(
+        viewingPast
+          ? "Couldn't load that session's transcript. It may be unavailable — try again."
+          : "Couldn't load the session transcript. It may be unavailable — reload to try again.",
+      );
     }
-  }, [pastSnapshotFailed]);
+  }, [snapshotFailed, viewingPast]);
 
   return (
     <div className="gx-session">
@@ -405,9 +410,11 @@ export function Session() {
         )}
         <TranscriptSearch onOpen={openHit} />
         <Card>
-          {pastSnapshotFailed ? (
+          {snapshotFailed ? (
             <p className="gx-session__transcript-empty" role="alert" data-testid="snapshot-error">
-              Couldn't load this session's transcript. It may be unavailable — pick another session or try again.
+              {viewingPast
+                ? "Couldn't load this session's transcript. It may be unavailable — pick another session or try again."
+                : "Couldn't load the session transcript. It may be unavailable — reload to try again."}
             </p>
           ) : !hasLines && !showTyping ? (
             <p className="gx-session__transcript-empty">
