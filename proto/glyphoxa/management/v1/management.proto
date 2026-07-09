@@ -175,6 +175,34 @@ service CampaignService {
   // web UI gates it behind a re-typed campaign name. State-changing: the auth +
   // CSRF interceptors guard it.
   rpc DeleteCampaign(DeleteCampaignRequest) returns (DeleteCampaignResponse);
+
+  // ListCharacters returns the active campaign's Player Characters (PCs) in
+  // stable display order (#276, E4). It is a read (NO_SIDE_EFFECTS), so the CSRF
+  // check is exempt; no campaign is CodeNotFound.
+  rpc ListCharacters(ListCharactersRequest) returns (ListCharactersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateCharacter adds a Player Character to the active campaign and returns it
+  // (#276). name is required and discord_user_id must be a Discord snowflake
+  // (decimal digits only) — either invalid is CodeInvalidArgument; a Discord User
+  // already playing a Character in the campaign is CodeAlreadyExists (one
+  // Character per Discord User per Campaign). State-changing: the auth + CSRF
+  // interceptors guard it.
+  rpc CreateCharacter(CreateCharacterRequest) returns (CreateCharacterResponse);
+
+  // UpdateCharacter saves a Character's editor fields (name, aliases,
+  // discord_user_id) and returns the updated Character (#276). Rebinding
+  // discord_user_id to a different Discord User is a normal update (it stays
+  // required); an empty name or a non-snowflake discord_user_id is
+  // CodeInvalidArgument; an unknown id is CodeNotFound; a collision with another
+  // Character's Discord User is CodeAlreadyExists. State-changing: the auth + CSRF
+  // interceptors guard it.
+  rpc UpdateCharacter(UpdateCharacterRequest) returns (UpdateCharacterResponse);
+
+  // DeleteCharacter removes a Player Character by id (#276). An unknown id is
+  // CodeNotFound. State-changing: the auth + CSRF interceptors guard it.
+  rpc DeleteCharacter(DeleteCharacterRequest) returns (DeleteCharacterResponse);
 }
 
 // ToolGrant is one built-in Tool's availability and grant state for a single
@@ -1264,3 +1292,73 @@ message GetProviderHealthResponse {
   // providers is the tested status for each credential slot.
   repeated ProviderHealth providers = 1;
 }
+
+// Character is a Player Character (PC) played by one Discord User (#276, E4,
+// ADR-0003). discord_user_id is mandatory (Players are scoped via the Characters
+// they play, not Tenant membership); linked_user_id is the dormant Discord-OAuth
+// link and is empty until the Player first signs in. aliases feed Address
+// Detection like an Agent's aliases.
+message Character {
+  // id is the server-assigned Character id.
+  string id = 1;
+  // name is the Character's display name.
+  string name = 2;
+  // aliases are alternate names Address Detection also matches.
+  repeated string aliases = 3;
+  // discord_user_id is the Discord snowflake of the Player (mandatory).
+  string discord_user_id = 4;
+  // linked_user_id is the linked Glyphoxa user id, empty until Discord OAuth.
+  string linked_user_id = 5;
+}
+
+// ListCharactersRequest is the (empty) request; the campaign is resolved
+// server-side (ADR-0039).
+message ListCharactersRequest {}
+
+// ListCharactersResponse carries the active campaign's Player Characters.
+message ListCharactersResponse {
+  // characters is the campaign's PC roster in display order.
+  repeated Character characters = 1;
+}
+
+// CreateCharacterRequest carries a new Player Character's editor fields; the
+// campaign is resolved server-side.
+message CreateCharacterRequest {
+  // name is required (empty is CodeInvalidArgument).
+  string name = 1;
+  // aliases are optional alternate names.
+  repeated string aliases = 2;
+  // discord_user_id must be a Discord snowflake (decimal digits only).
+  string discord_user_id = 3;
+}
+
+// CreateCharacterResponse carries the created Player Character.
+message CreateCharacterResponse {
+  Character character = 1;
+}
+
+// UpdateCharacterRequest is a full-field save; discord_user_id may rebind the
+// Character to a different Discord User (it stays required).
+message UpdateCharacterRequest {
+  // id addresses the Character to update.
+  string id = 1;
+  // name is required (empty is CodeInvalidArgument).
+  string name = 2;
+  // aliases replace the Character's alias set.
+  repeated string aliases = 3;
+  // discord_user_id must be a Discord snowflake (decimal digits only).
+  string discord_user_id = 4;
+}
+
+// UpdateCharacterResponse carries the updated Player Character.
+message UpdateCharacterResponse {
+  Character character = 1;
+}
+
+// DeleteCharacterRequest addresses the Player Character to delete.
+message DeleteCharacterRequest {
+  string id = 1;
+}
+
+// DeleteCharacterResponse is empty.
+message DeleteCharacterResponse {}
