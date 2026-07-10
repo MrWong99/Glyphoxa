@@ -96,10 +96,15 @@ func seedTenant(t *testing.T, pool *pgxpool.Pool, name string) uuid.UUID {
 	return id
 }
 
-func countBlobs(t *testing.T, pool *pgxpool.Pool) int {
+// countBlobs counts rows for ONE tenant, not the whole table — a global count
+// would break the suite's GLYPHOXA_TEST_DSN shared-DB mode (no truncation
+// between tests → cross-test row bleed). Mirrors the repo pattern
+// (campaign_archive_test.go).
+func countBlobs(t *testing.T, pool *pgxpool.Pool, tenant uuid.UUID) int {
 	t.Helper()
 	var n int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM blob`).Scan(&n); err != nil {
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM blob WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
 		t.Fatalf("count blobs: %v", err)
 	}
 	return n
@@ -166,11 +171,17 @@ func TestPutUpsert(t *testing.T) {
 	if err := store.Put(ctx, key, "text/plain", bytes.NewReader([]byte("first")), 5); err != nil {
 		t.Fatalf("Put first: %v", err)
 	}
+	_, firstMeta, err := store.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get first: %v", err)
+	}
+	// Guarantee wall-clock advances so a now()-stamp on conflict would differ.
+	time.Sleep(10 * time.Millisecond)
 	if err := store.Put(ctx, key, "audio/opus", bytes.NewReader([]byte("second!")), 7); err != nil {
 		t.Fatalf("Put second: %v", err)
 	}
 
-	if n := countBlobs(t, pool); n != 1 {
+	if n := countBlobs(t, pool, tenant); n != 1 {
 		t.Fatalf("row count = %d, want 1 (upsert)", n)
 	}
 	rc, meta, err := store.Get(ctx, key)
@@ -181,6 +192,11 @@ func TestPutUpsert(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	if string(got) != "second!" || meta.ContentType != "audio/opus" || meta.Size != 7 {
 		t.Fatalf("after upsert got %q/%q/%d, want second!/audio/opus/7", got, meta.ContentType, meta.Size)
+	}
+	// created_at is birth time, not last-write time — ADR-0051 retention math
+	// depends on it, so an upsert must NOT restamp it.
+	if !meta.CreatedAt.Equal(firstMeta.CreatedAt) {
+		t.Fatalf("CreatedAt = %v after upsert, want unchanged %v", meta.CreatedAt, firstMeta.CreatedAt)
 	}
 }
 
@@ -202,7 +218,7 @@ func TestPutSizeMismatch(t *testing.T) {
 		t.Fatal("Put long stream err = nil, want error")
 	}
 
-	if n := countBlobs(t, pool); n != 0 {
+	if n := countBlobs(t, pool, tenant); n != 0 {
 		t.Fatalf("row count = %d, want 0 (no row on size mismatch)", n)
 	}
 }
@@ -265,8 +281,11 @@ func TestTenantIsolation(t *testing.T) {
 	if string(gotA) != "AAA" || string(gotB) != "BBB" {
 		t.Fatalf("cross-tenant bleed: A=%q B=%q, want AAA/BBB", gotA, gotB)
 	}
-	if n := countBlobs(t, pool); n != 2 {
-		t.Fatalf("row count = %d, want 2", n)
+	if n := countBlobs(t, pool, tenantA); n != 1 {
+		t.Fatalf("tenant A row count = %d, want 1", n)
+	}
+	if n := countBlobs(t, pool, tenantB); n != 1 {
+		t.Fatalf("tenant B row count = %d, want 1", n)
 	}
 
 	// A key without a tenant prefix never reaches SQL.

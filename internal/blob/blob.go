@@ -103,10 +103,21 @@ func ValidateKey(key string) (tenantID uuid.UUID, err error) {
 	if perr != nil {
 		return uuid.Nil, ErrInvalidKey
 	}
+	// uuid.Parse tolerates braces/urn/no-dash forms; require the canonical dashed
+	// string so one logical blob has exactly one key. A non-canonical hand-built
+	// key would otherwise become an orphan the E8 delete hook can never
+	// reconstruct via Key().
+	if segs[1] != tenant.String() {
+		return uuid.Nil, ErrInvalidKey
+	}
 	// segs[2] = owner-kind, segs[3] = owner-id, segs[4] = name. Kind and name
 	// must be non-empty; a slash inside either is impossible (it would raise the
-	// segment count above five).
+	// segment count above five). The owner-id gets the same canonical-uuid
+	// discipline as the tenant.
 	if segs[2] == "" || segs[4] == "" {
+		return uuid.Nil, ErrInvalidKey
+	}
+	if owner, oerr := uuid.Parse(segs[3]); oerr != nil || segs[3] != owner.String() {
 		return uuid.Nil, ErrInvalidKey
 	}
 	return tenant, nil

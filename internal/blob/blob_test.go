@@ -72,6 +72,12 @@ func TestValidateKeyRejectsMalformed(t *testing.T) {
 		"empty name":       "t/11111111-1111-1111-1111-111111111111/highlight/22222222-2222-2222-2222-222222222222/",
 		"four segments":    "t/11111111-1111-1111-1111-111111111111/highlight/clip.opus",
 		"six segments":     "t/11111111-1111-1111-1111-111111111111/highlight/22222222-2222-2222-2222-222222222222/sub/clip.opus",
+		// uuid.Parse tolerates these non-canonical forms; a valid key must carry
+		// the canonical dashed uuid only, so one blob has exactly one key.
+		"braced tenant":   "t/{11111111-1111-1111-1111-111111111111}/highlight/22222222-2222-2222-2222-222222222222/clip.opus",
+		"undashed tenant": "t/11111111111111111111111111111111/highlight/22222222-2222-2222-2222-222222222222/clip.opus",
+		"undashed owner":  "t/11111111-1111-1111-1111-111111111111/highlight/22222222222222222222222222222222/clip.opus",
+		"non-uuid owner":  "t/11111111-1111-1111-1111-111111111111/highlight/not-a-uuid/clip.opus",
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {

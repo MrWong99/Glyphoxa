@@ -33,7 +33,9 @@ var _ Store = (*Postgres)(nil)
 // Put stores the blob, upserting on key conflict (ADR-0048 semantics). It
 // validates size and key BEFORE reading r or touching the DB, then reads
 // EXACTLY size bytes plus one probe byte — a short or over-long stream is an
-// error and no row is written. The tenant_id column is derived from the key.
+// error and no row is written. The tenant_id column is derived from the key. An
+// upsert preserves the original created_at (so Meta.CreatedAt is birth time, not
+// last-write time — ADR-0051 retention math depends on it).
 func (p *Postgres) Put(ctx context.Context, key, contentType string, r io.Reader, size int64) error {
 	if size < 0 {
 		return fmt.Errorf("blob: negative size %d", size)
@@ -68,8 +70,7 @@ func (p *Postgres) Put(ctx context.Context, key, contentType string, r io.Reader
 		     tenant_id    = EXCLUDED.tenant_id,
 		     content_type = EXCLUDED.content_type,
 		     size         = EXCLUDED.size,
-		     bytes        = EXCLUDED.bytes,
-		     created_at   = now()`,
+		     bytes        = EXCLUDED.bytes`,
 		key, tenantID, contentType, size, buf)
 	if err != nil {
 		return fmt.Errorf("blob: put %s: %w", key, err)
