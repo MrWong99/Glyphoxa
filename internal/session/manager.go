@@ -23,6 +23,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -241,6 +242,19 @@ func (m *Manager) SetMemory(r agent.MemoryRecaller) {
 // start, so no lock is needed. nil leaves facts off (the prompt stays byte-identical).
 func (m *Manager) SetFacts(f agent.FactsRecaller) {
 	m.base.Facts = f
+}
+
+// SetToolDeps wires the built-in knowledge Tools' read sources onto the base
+// voice config every manager-started session copies (#296, S1): the adapter
+// backing transcript_search and kg_query. Like SetFacts it flows through Start →
+// RunFromDB → connectAndServe → buildConversation → tool.BuiltinRegistry, so a
+// live NPC granted a knowledge Tool actually reaches the DB. The adapter needs
+// the Manager as its active-session source, so the Manager is built first and the
+// deps back-wired before any session starts — no lock needed. The zero value
+// leaves the Tools registered but unavailable at Execute (the prompt/loop still
+// behave, the model just gets an "unavailable" tool result).
+func (m *Manager) SetToolDeps(d tool.Deps) {
+	m.base.ToolDeps = d
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no
@@ -716,6 +730,74 @@ func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) 
 		}
 	}
 	return ids, nil
+}
+
+// SayAs publishes a GM-puppeteered direct-speech request (#295, ADR-0010): the
+// voiced Character NPC with agentID speaks text verbatim in the live Voice Session.
+// It refuses when idle (ErrNoActiveSession) and rejects an agentID that is not a
+// VOICED Agent of the active session's Campaign — a foreign agent, an unknown id,
+// or the Address-Only Butler (never voiced, ADR-0009/0024; the Butler on-ramp is a
+// #299-blocked follow-up) — with ErrAgentNotInCampaign.
+//
+// Validation and the publish are SESSION-ATOMIC (mirrors SetAgentMute): the active
+// session is captured, its Campaign is listed with m.mu released (the store read may
+// block), then the event is published only if the SAME session is still active — so
+// a session swap between the roster read and the publish can never voice a foreign
+// agent into the new session. It publishes [voiceevent.SpeakRequested] carrying the
+// agent's Target (id + character role + display name), a fresh TurnID, and the text
+// — NOT [voiceevent.AddressRouted], which would trigger the LLM Replier (ADR-0024).
+// The GM mute is deliberately NOT consulted here (puppeteering is a GM override, so
+// a muted NPC still speaks a /say — the DirectSpeech reactor bypasses the mute gate).
+func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
+	m.mu.Lock()
+	as := m.active
+	if as == nil {
+		m.mu.Unlock()
+		return ErrNoActiveSession
+	}
+	campaignID := as.campaignID
+	m.mu.Unlock()
+
+	agents, err := m.store.ListAgents(ctx, campaignID)
+	if err != nil {
+		return fmt.Errorf("session: list agents for say: %w", err)
+	}
+	var target storage.Agent
+	found := false
+	for _, a := range voicedAgents(agents) {
+		if a.ID.String() == agentID {
+			target = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ErrAgentNotInCampaign
+	}
+
+	m.mu.Lock()
+	if m.active != as {
+		// The session ended or rolled over between the roster read and the publish:
+		// abort rather than voice into a different (or no) session.
+		m.mu.Unlock()
+		return ErrNoActiveSession
+	}
+	bus := m.base.Bus
+	m.mu.Unlock()
+
+	if bus != nil {
+		bus.Publish(voiceevent.SpeakRequested{
+			At:     time.Now(),
+			TurnID: voiceevent.NewTurnID(),
+			Target: voiceevent.AddressTarget{
+				AgentID:   agentID,
+				AgentRole: voiceevent.AgentRoleCharacter,
+				Name:      target.Name,
+			},
+			Text: text,
+		})
+	}
+	return nil
 }
 
 // agentInList reports whether agentID (a UUID string) names an Agent in agents.

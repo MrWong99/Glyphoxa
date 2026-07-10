@@ -58,23 +58,28 @@ type CampaignUpdate struct {
 	Name     string
 	System   string
 	Language string
+	// TapeArmed, when non-nil, sets the rollover-tape opt-in (#306, ADR-0051); nil
+	// leaves the current value unchanged (the proto field is `optional`, so an
+	// UpdateCampaign that does not touch the tape must not silently disarm it).
+	TapeArmed *bool
 }
 
-// UpdateCampaign writes a campaign's name/system/language and bumps updated_at,
-// returning the updated row. A missing id yields ErrNotFound (the RPC layer maps
-// it to Connect CodeNotFound). Like the other campaign reads/writes it is scoped
-// by id alone — single-operator today; tenant scoping fills in behind the
-// X-Tenant-Id pass-through later (ADR-0039).
+// UpdateCampaign writes a campaign's name/system/language (and tape_armed when set)
+// and bumps updated_at, returning the updated row. A missing id yields ErrNotFound
+// (the RPC layer maps it to Connect CodeNotFound). Like the other campaign
+// reads/writes it is scoped by id alone — single-operator today; tenant scoping
+// fills in behind the X-Tenant-Id pass-through later (ADR-0039).
 func (s *Store) UpdateCampaign(ctx context.Context, c CampaignUpdate) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE campaign SET
 		    name = $2,
 		    system = $3,
 		    language = $4,
+		    tape_armed = COALESCE($5, tape_armed),
 		    updated_at = now()
 		  WHERE id = $1
 		 RETURNING `+campaignColumns,
-		c.ID, c.Name, c.System, c.Language)
+		c.ID, c.Name, c.System, c.Language, c.TapeArmed)
 	updated, err := scanCampaign(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound

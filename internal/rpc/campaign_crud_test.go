@@ -113,9 +113,12 @@ type fakeCampaignStore struct {
 	edgesOut      []storage.KGEdgeWithNodes
 	edgesIn       []storage.KGEdgeWithNodes
 	nodeEdgesErr  error
-	setAgentCalls []setAgentCall
-	setAgentNode  storage.KGNode
-	setAgentErr   error
+	// nodeEdgesCampaign records the campaign id ListNodeEdges resolved (#356), so a
+	// unit test can assert the read was scoped to the active campaign.
+	nodeEdgesCampaign uuid.UUID
+	setAgentCalls     []setAgentCall
+	setAgentNode      storage.KGNode
+	setAgentErr       error
 	// deleteEdgeCampaign/setAgentCampaign record the campaign id the Edge-delete /
 	// voiced-by link were scoped to (#342), so a unit test can assert the handler
 	// passed the resolved active campaign down.
@@ -234,6 +237,9 @@ func (f *fakeCampaignStore) UpdateCampaign(_ context.Context, c storage.Campaign
 	existing.Name = c.Name
 	existing.System = c.System
 	existing.Language = c.Language
+	if c.TapeArmed != nil { // optional: nil leaves it unchanged (COALESCE semantics)
+		existing.TapeArmed = *c.TapeArmed
+	}
 	f.campaignsByID[c.ID] = existing
 	return existing, nil
 }
@@ -411,7 +417,8 @@ func (f *fakeCampaignStore) DeleteEdge(_ context.Context, campaignID, _ uuid.UUI
 	return f.edgeDeleteErr
 }
 
-func (f *fakeCampaignStore) NodeEdges(_ context.Context, _ uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
+func (f *fakeCampaignStore) NodeEdges(_ context.Context, campaignID, _ uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
+	f.nodeEdgesCampaign = campaignID
 	return f.edgesOut, f.edgesIn, f.nodeEdgesErr
 }
 
@@ -887,7 +894,8 @@ func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
-	store.campaign = storage.Campaign{ID: uuid.New(), Language: "de"}
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID, Language: "de"}
 	id := uuid.New()
 
 	tuned := ttseleven.DefaultVoice("v1", "en")
@@ -896,7 +904,7 @@ func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VoiceToJSON: %v", err)
 	}
-	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old", Voice: blob}
+	store.agents[id] = storage.Agent{ID: id, CampaignID: campID, Role: storage.AgentRoleCharacter, Name: "Old", Voice: blob}
 	client := crudClient(t, store)
 
 	// Same id: the persisted bytes must be byte-identical afterward.
@@ -919,6 +927,44 @@ func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	}
 	if after.VoiceID != "v2" || after.ProviderID != ttseleven.ProviderID || len(after.Settings) == 0 {
 		t.Errorf("voice change dropped tuning: %+v", after)
+	}
+}
+
+// TestUpdateAgent_CrossCampaignPreReadIsNotFound is #356: the load-bearing
+// pre-read (GetAgent, kept for voice preservation) must not leak across
+// campaigns. An operator whose active campaign is A cannot update — or read the
+// voice of — an Agent that belongs to campaign B by id: the pre-read is scoped to
+// the active campaign, so a mismatch is CodeNotFound before any write, with the
+// same ErrNotFound discipline as the scoped store UPDATE (#353).
+func TestUpdateAgent_CrossCampaignPreReadIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	// The Agent exists, but in ANOTHER campaign, with a tuned voice that must not leak.
+	foreignAgent := uuid.New()
+	tuned, err := storage.VoiceToJSON(ttseleven.DefaultVoice("secret", "en"))
+	if err != nil {
+		t.Fatalf("VoiceToJSON: %v", err)
+	}
+	store.agents[foreignAgent] = storage.Agent{
+		ID: foreignAgent, CampaignID: uuid.New(), Role: storage.AgentRoleCharacter, Voice: tuned,
+	}
+	client := crudClient(t, store)
+
+	resp, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: foreignAgent.String(), Name: "Hijack"}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (cross-campaign agent)", got)
+	}
+	if resp != nil {
+		t.Error("cross-campaign UpdateAgent must not return an agent payload")
+	}
+	// No write reached the store at all — updateAgentCampaign stays its zero value
+	// (the fake's UpdateAgent never ran). A regression writing with CampaignID=nil
+	// or the foreign id would also be caught (must be exactly uuid.Nil).
+	if store.updateAgentCampaign != uuid.Nil {
+		t.Errorf("cross-campaign UpdateAgent leaked a write scoped to %s, want no write", store.updateAgentCampaign)
 	}
 }
 
@@ -982,7 +1028,7 @@ func TestUpdateAgent_ScopesToActiveCampaign(t *testing.T) {
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	id := uuid.New()
-	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old"}
+	store.agents[id] = storage.Agent{ID: id, CampaignID: activeID, Role: storage.AgentRoleCharacter, Name: "Old"}
 	client := crudClient(t, store)
 
 	if _, err := client.UpdateAgent(context.Background(),

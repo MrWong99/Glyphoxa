@@ -56,3 +56,31 @@ func (s *firstOpusSource) NextFrame(ctx context.Context) ([]byte, error) {
 	}
 	return frame, err
 }
+
+// tappedSource decorates a playback [gxvoice.Source] to copy every Opus frame it
+// yields to a tap — the rollover tape's agent-speech capture point (#306). Agent
+// audio is always on tape (ADR-0051). The tap runs inline on disgo's 20 ms sender
+// goroutine and must not block; only frames actually yielded (no error) are
+// tapped, so a barge-cancelled sentence taps nothing.
+type tappedSource struct {
+	inner gxvoice.Source
+	tap   func(opus []byte)
+}
+
+// newTappedSource wraps inner so each yielded frame is passed to tap. A nil tap
+// returns inner unwrapped — no overhead when the tape is not armed.
+func newTappedSource(inner gxvoice.Source, tap func(opus []byte)) gxvoice.Source {
+	if tap == nil {
+		return inner
+	}
+	return &tappedSource{inner: inner, tap: tap}
+}
+
+// NextFrame forwards to the inner Source and taps each frame it yields.
+func (s *tappedSource) NextFrame(ctx context.Context) ([]byte, error) {
+	frame, err := s.inner.NextFrame(ctx)
+	if err == nil {
+		s.tap(frame)
+	}
+	return frame, err
+}

@@ -498,6 +498,10 @@ message Campaign {
   // autocomplete, and the Active-Campaign fallback, and cannot start a Voice
   // Session.
   google.protobuf.Timestamp archived_at = 8;
+  // tape_armed is the GM opt-in that arms the rollover tape for this campaign's
+  // Voice Sessions (#306, ADR-0051). Default false: capture is hard-disabled
+  // without it, and even armed, only individually consenting speakers are taped.
+  bool tape_armed = 9;
 }
 
 // GetActiveCampaignRequest is the (empty) request for GetActiveCampaign; the
@@ -555,6 +559,10 @@ message UpdateCampaignRequest {
   string system = 3;
   // language is the BCP-47 tag; optional free-text, stored opaquely.
   string language = 4;
+  // tape_armed, when present, sets the rollover-tape opt-in (#306, ADR-0051);
+  // absent leaves the current value unchanged, so an edit that does not touch the
+  // tape never silently disarms it.
+  optional bool tape_armed = 5;
 }
 
 // UpdateCampaignResponse carries the updated campaign.

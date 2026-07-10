@@ -50,8 +50,11 @@ func TestToolGrants_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants(butler): %v", err)
 	}
-	if g := butlerGrants.Msg.GetGrants(); len(g) != 1 || g[0].GetToolName() != "dice" || !g[0].GetGranted() {
-		t.Fatalf("butler grants = %+v, want dice granted (seeded)", g)
+	// The catalog now lists every built-in (dice + the #296 knowledge Tools); assert
+	// by the GRANTED set, not by catalog index — the auto-Butler is seeded with dice
+	// only (migration 00013), the rest listed present-but-off.
+	if granted := grantedNames(butlerGrants.Msg.GetGrants()); len(granted) != 1 || granted[0] != "dice" {
+		t.Fatalf("butler granted = %v, want [dice] (seeded); full catalog = %+v", granted, butlerGrants.Msg.GetGrants())
 	}
 
 	// A fresh Character NPC has no grants → dice listed but off.
@@ -218,6 +221,47 @@ func TestToolGrants_CrossCampaign_Integration(t *testing.T) {
 	}
 }
 
+// TestListToolGrants_CrossCampaign_Integration is #356: the READ is scoped too.
+// With a live Voice Session pinning the active campaign to A, an operator must not
+// be able to READ campaign B's Butler grant configs by id — ListToolGrants is
+// CodeNotFound, not a leaked catalog of B's grants.
+func TestListToolGrants_CrossCampaign_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, campaignA := seedStore(t, dsn) // A + its auto-Butler (seeded dice grant)
+	ctx := context.Background()
+
+	a, err := store.GetActiveCampaign(ctx) // == A, carries the tenant id
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	campaignB, err := store.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: a.TenantID, Name: "Other Table", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	butlerB, err := store.GetButler(ctx, campaignB)
+	if err != nil {
+		t.Fatalf("GetButler B: %v", err)
+	}
+
+	// Pin the active campaign to A via a live Voice Session, then mount the server.
+	srv := rpc.NewCampaignServer(store)
+	srv.SetSessions(liveMgr(campaignA))
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, s.URL, connect.WithProtoJSON())
+
+	_, err = client.ListToolGrants(ctx, connect.NewRequest(&managementv1.ListToolGrantsRequest{
+		AgentId: butlerB.ID.String(),
+	}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("cross-campaign ListToolGrants code = %v, want NotFound", got)
+	}
+}
+
 // listGrants is a small helper that lists an Agent's grant states or fails the test.
 func listGrants(t *testing.T, client managementv1connect.CampaignServiceClient, agentID string) []*managementv1.ToolGrant {
 	t.Helper()
@@ -253,7 +297,7 @@ func hydratedDeclarations(t *testing.T, store *storage.Store, agentID uuid.UUID)
 		t.Fatalf("hydrate: ListToolGrants(%s): %v", agentID, err)
 	}
 	grants := storage.GrantsFromRows(rows)
-	decls := tool.NewGrantSet(tool.BuiltinRegistry(), grants...).Declarations()
+	decls := tool.NewGrantSet(tool.BuiltinRegistry(tool.Deps{}), grants...).Declarations()
 	names := make([]string, len(decls))
 	for i, d := range decls {
 		names[i] = d.Name

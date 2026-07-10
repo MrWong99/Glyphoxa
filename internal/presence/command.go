@@ -72,6 +72,12 @@ type Registry struct {
 	mu    sync.RWMutex
 	cmds  map[string]Command // dispatch key -> command
 	order []string           // registration order, for deterministic Definitions
+	// componentHandlers are the message-component (button/select) listeners, invoked
+	// in registration order for every component interaction. Each decides by custom
+	// id whether it owns the interaction (the tape-consent buttons, #306); a handler
+	// that does not own it returns without responding. Registered at boot alongside
+	// commands (they need no Guild registration — buttons carry their own ids).
+	componentHandlers []func(*events.ComponentInteractionCreate)
 }
 
 // NewRegistry builds an empty Registry over a Gate. Register commands at boot,
@@ -93,6 +99,27 @@ func (r *Registry) Register(cmds ...Command) {
 			r.order = append(r.order, c.Path)
 		}
 		r.cmds[c.Path] = c
+	}
+}
+
+// RegisterComponentHandler adds a message-component (button/select) listener,
+// invoked for every component interaction (#306). Boot-time only. The handler owns
+// its own custom-id namespace and must ignore interactions it does not recognise.
+func (r *Registry) RegisterComponentHandler(h func(*events.ComponentInteractionCreate)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.componentHandlers = append(r.componentHandlers, h)
+}
+
+// HandleComponent is the disgo listener for message-component interactions: it
+// fans the event out to every registered component handler, each of which decides
+// by custom id whether the interaction is theirs.
+func (r *Registry) HandleComponent(e *events.ComponentInteractionCreate) {
+	r.mu.RLock()
+	handlers := r.componentHandlers
+	r.mu.RUnlock()
+	for _, h := range handlers {
+		h(e)
 	}
 }
 

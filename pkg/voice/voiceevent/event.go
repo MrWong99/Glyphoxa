@@ -170,6 +170,66 @@ type AddressRouted struct {
 // EventName implements [Event].
 func (AddressRouted) EventName() string { return "address.routed" }
 
+// EnsembleRouted marks the routing decision for one [STTFinal] utterance that
+// addressed TWO OR MORE Agents at once (ADR-0024 returns a set when
+// address.Config.MaxTargets > 1). It is the atomic Ensemble Turn signal (ADR-0025):
+// the address detector publishes exactly ONE EnsembleRouted for the whole set
+// instead of N independent [AddressRouted], so the turn-taking layer runs the set
+// as ONE floor-holding unit (speculative fan-out + Lead race) rather than N
+// contending turns. A single-target utterance still publishes a plain
+// [AddressRouted] — the byte-identical MaxTargets=1 default, where the ensemble
+// branch is dead code.
+//
+// Targets are the post-GM-gate survivors in the matcher's score-sorted order
+// (Targets[0] is the top-scored), and len(Targets) >= 2 by construction. Text and
+// TurnID mirror [AddressRouted]: the utterance text and the correlation id copied
+// from the originating [STTFinal] (A3).
+type EnsembleRouted struct {
+	At      time.Time
+	Text    string
+	TurnID  string
+	Targets []AddressTarget
+}
+
+// EventName implements [Event].
+func (EnsembleRouted) EventName() string { return "address.ensemble" }
+
+// EnsembleLead marks the Agent the speculative race elected as the Ensemble Turn's
+// Lead (ADR-0025, #301): the first candidate to finish a complete, non-empty draft
+// takes the floor and speaks under the ensemble's ORIGINAL TurnID. It is published
+// the moment the Lead is chosen, before its first sentence dispatches, so the
+// transcript relay attributes the turn's line to the winning Agent (exactly as
+// [AddressRouted] does for a single-target turn). The losing candidates' drafts are
+// discarded (ADR-0012 — a loser commits nothing); their Reactions are #302.
+type EnsembleLead struct {
+	At     time.Time
+	TurnID string
+	Target AddressTarget
+}
+
+// EventName implements [Event].
+func (EnsembleLead) EventName() string { return "ensemble.lead" }
+
+// SpeakRequested marks a GM-puppeteered direct-speech request: the `/say <text>
+// as:<agent>` slash command (ADR-0010, #295) asks an Agent to speak Text verbatim,
+// bypassing Address Detection and the LLM Replier entirely (ADR-0024 — /say is the
+// explicit-target path, so it must NOT publish [AddressRouted], which would trigger
+// the LLM Replier). It is the seam between the session Manager (which validates the
+// active session + agent and publishes this) and the orchestrator's DirectSpeech
+// reactor (which takes the barge-in floor and dispatches Text to TTS in the Agent's
+// Voice). Target names the Agent whose Voice speaks; TurnID is minted at publish so
+// the resulting [TTSInvoked] / [FirstAudio] / [FirstOpus] and the transcript line
+// projection correlate exactly as an LLM turn's do (A3, ADR-0012/0040).
+type SpeakRequested struct {
+	At     time.Time
+	TurnID string
+	Target AddressTarget
+	Text   string
+}
+
+// EventName implements [Event].
+func (SpeakRequested) EventName() string { return "speak.requested" }
+
 // TTSInvoked marks the dispatch of one sentence to the TTS stage.
 //
 // Per ADR-0021's TTS cassette policy the observable contract for TTS is "the
@@ -332,6 +392,23 @@ type MuteChanged struct {
 
 // EventName implements [Event].
 func (MuteChanged) EventName() string { return "mute.changed" }
+
+// TapeConsentChanged marks a change to one Speaker's rollover-tape consent (#306,
+// ADR-0051) in the live Voice Session. The presence layer publishes it AFTER
+// persisting the consent row (the [MuteChanged] ordering precedent: the durable
+// state is written before the event), and the wirenpc wiring reacts by calling
+// tape.SetConsent — arming or clearing that Speaker's lane. Granted=true means the
+// Speaker just consented (their audio may now be captured); Granted=false is a
+// revoke (future capture stops and their existing ring is cleared).
+type TapeConsentChanged struct {
+	At         time.Time
+	CampaignID string
+	SpeakerID  string
+	Granted    bool
+}
+
+// EventName implements [Event].
+func (TapeConsentChanged) EventName() string { return "tape.consent_changed" }
 
 // SpendCapLevel names which per-session spend cap a [SpendCapReached] announces
 // (#130, ADR-0046): the soft cap (refuse new turns) or the hard cap (end the

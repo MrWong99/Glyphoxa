@@ -65,7 +65,7 @@ type campaignStore interface {
 	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
 	CreateEdge(ctx context.Context, e storage.NewKGEdge) (storage.KGEdge, error)
 	DeleteEdge(ctx context.Context, campaignID, id uuid.UUID) error
-	NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
+	NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
 	SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
@@ -118,7 +118,7 @@ type SpeakerInvalidator interface {
 // (ADR-0028), so the grants a GM can toggle are exactly the Tools a Voice Session
 // runs; nothing external configures it.
 func NewCampaignServer(s campaignStore) *CampaignServer {
-	return &CampaignServer{store: s, tools: tool.BuiltinRegistry()}
+	return &CampaignServer{store: s, tools: tool.BuiltinRegistry(tool.Deps{})}
 }
 
 // compile-time assertion that CampaignServer satisfies the generated handler.
@@ -197,6 +197,7 @@ func toProtoCampaign(c storage.Campaign) *managementv1.Campaign {
 		Language:  c.Language,
 		CreatedAt: timestamppb.New(c.CreatedAt),
 		UpdatedAt: timestamppb.New(c.UpdatedAt),
+		TapeArmed: c.TapeArmed,
 	}
 	// archived_at is left unset (nil) for an active campaign so the wire "unset =
 	// active" contract holds; set only when the campaign is archived (#269).

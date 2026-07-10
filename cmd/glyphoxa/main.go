@@ -21,9 +21,11 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
+	"github.com/MrWong99/Glyphoxa/internal/knowledge"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
@@ -78,6 +80,12 @@ func main() {
 			return
 		case "seed":
 			if err := RunSeed(context.Background(), log, os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "export":
+			if err := RunExport(context.Background(), os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -216,6 +224,14 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		return err
 	}
 	cfg.CampaignID = active.ID
+
+	// Standalone voice mode wires no knowledge-Tool sources (cfg.ToolDeps stays
+	// zero): the transcript_search / kg_query built-ins are still registered and
+	// grantable, but a call reports "unavailable in this mode" rather than reading
+	// the DB (#296). Only the web/all boot builds the adapter (over the session
+	// Manager). Log it once so an operator who granted an NPC a knowledge Tool and
+	// runs a pure `-mode voice` node knows why it stays silent.
+	log.Info("standalone voice mode: knowledge Tools (transcript_search, kg_query) are unavailable; run -mode all or web to enable them")
 
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
 }
@@ -429,6 +445,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		})
 		reg = presence.NewRegistry(gate, log)
 		reg.Register(presence.RollCommand(tool.NewDice()))
+		// Rollover-tape consent buttons (#306, ADR-0051): the disclosure message's
+		// Consent/Revoke buttons write the presser's consent row and publish
+		// TapeConsentChanged on the SAME process-wide bus the session Manager uses, so
+		// a live tape arms or clears that Speaker's lane.
+		reg.RegisterComponentHandler(presence.NewConsentButtons(store, eventBus, log).HandleComponent)
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
 		// session; set BEFORE the Manager copies cfg into its base config. Note:
@@ -486,6 +507,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
 			presence.MuteCommand(mgr, store),
 			presence.MuteAllCommand(mgr),
+			// /say <text> as:<agent> (#295, ADR-0010): GM puppeteering. The Manager is the
+			// SayControl (its SayAs publishes SpeakRequested on the shared bus, which the
+			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the
+			// voiced roster for the resolver + autocomplete.
+			presence.SayCommand(mgr, store),
 		)
 		// Bring the presence up at boot (AC: the commands appear with no Voice
 		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
@@ -592,6 +618,19 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// the feature on keyless deployments. It owns no goroutine/subscription, so
 	// there is nothing to Close.
 	mgr.SetFacts(kgfacts.New(store, mgr, metrics, log, kgfacts.Config{}))
+
+	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
+	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
+	// KG-facts recall it needs only the process store + the session Manager (for the
+	// active Campaign), no embeddings provider — so a keyless deployment still lets a
+	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
+	// the base voice config every session copies; in web-only mode the Manager starts
+	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
+	knowledgeAdapter := knowledge.New(store, mgr)
+	mgr.SetToolDeps(tool.Deps{
+		Transcripts: knowledgeAdapter,
+		KG:          knowledgeAdapter,
+	})
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /
@@ -765,6 +804,13 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// RPC (#274) and the /glyphoxa recap slash command (#273) share one instance.
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, recapEngine, log).Handler(stack.HandlerOptions()...)
 
+	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
+	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
+	// download does not fit Connect's message model. Operator-only via
+	// auth.RequireSession, the same gate the relay reads (ADR-0041). #291 adds the
+	// POST import mount here next.
+	bundleHandler := &bundle.Handler{Store: store, Log: log}
+
 	return []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
@@ -778,6 +824,8 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 		// validates the glyphoxa_session cookie the EventSource/fetch send.
 		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
+		// Campaign bundle export (#290): streamed gzip download, operator-gated.
+		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}

@@ -39,6 +39,22 @@ type PlaybackPump struct {
 	stop  chan struct{} // closed by Close to tell the worker to exit
 	done  chan struct{} // closed by the worker when it has exited
 	once  sync.Once
+
+	// outboundTap, when set, is called with every Opus frame pulled to the wire
+	// (the rollover tape's agent-speech capture point, #306). Agent audio is always
+	// on tape (ADR-0051). Nil by default — no tap means unchanged playback; the tap
+	// MUST NOT block, it runs on disgo's 20 ms sender goroutine.
+	outboundTap func(opus []byte)
+}
+
+// PumpOption configures a [PlaybackPump] at construction.
+type PumpOption func(*PlaybackPump)
+
+// WithOutboundOpusTap installs a tap called with each Opus frame the pump pulls to
+// the wire (#306's agent-speech capture). The tap MUST NOT block. Without it,
+// playback is unchanged.
+func WithOutboundOpusTap(tap func(opus []byte)) PumpOption {
+	return func(p *PlaybackPump) { p.outboundTap = tap }
 }
 
 type playJob struct {
@@ -51,17 +67,18 @@ type playJob struct {
 // be non-nil. logger receives a warning per failed sentence playback (a mute
 // NPC must be diagnosable, not silent); nil discards them. bus is optional: when
 // non-nil, the first Opus frame of each turn publishes [voiceevent.FirstOpus] —
-// the audible-on-wire SLO boundary (task #7); nil disables it.
-func NewPlaybackPump(sess *gxvoice.Session, codec Codec, logger *slog.Logger, bus *voiceevent.Bus) *PlaybackPump {
+// the audible-on-wire SLO boundary (task #7); nil disables it. opts add optional
+// taps (see [WithOutboundOpusTap]).
+func NewPlaybackPump(sess *gxvoice.Session, codec Codec, logger *slog.Logger, bus *voiceevent.Bus, opts ...PumpOption) *PlaybackPump {
 	if sess == nil {
 		panic("wire.NewPlaybackPump: session must not be nil")
 	}
-	return newPump(realPlayer{sess}, codec, logger, bus)
+	return newPump(realPlayer{sess}, codec, logger, bus, opts...)
 }
 
 // newPump is the testable core over the sessionPlayer seam, so the cross-
 // sentence serialization can be exercised with a fake player and no live Session.
-func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voiceevent.Bus) *PlaybackPump {
+func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voiceevent.Bus, opts ...PumpOption) *PlaybackPump {
 	if codec == nil {
 		panic("wire.NewPlaybackPump: codec must not be nil")
 	}
@@ -83,6 +100,9 @@ func newPump(player sessionPlayer, codec Codec, logger *slog.Logger, bus *voicee
 		queue: make(chan playJob, 1),
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
+	}
+	for _, o := range opts {
+		o(p)
 	}
 	go p.run()
 	return p
@@ -136,7 +156,7 @@ func (p *PlaybackPump) run() {
 			// but it must not be invisible either: a persistent failure here is
 			// "the NPC went mute", so warn on everything except the expected
 			// barge-in interrupt and ctx cancellation.
-			if err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus); err != nil &&
+			if err := playSentenceBus(job.ctx, p.player, p.codec, job.chunks, p.bus, p.outboundTap); err != nil &&
 				!errors.Is(err, gxvoice.ErrInterrupted) && !errors.Is(err, context.Canceled) {
 				p.logger.Warn("wire: sentence playback failed", "err", err)
 			}

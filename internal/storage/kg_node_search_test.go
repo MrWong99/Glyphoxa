@@ -184,3 +184,50 @@ func TestSearchNodes_UsesFtsIndex(t *testing.T) {
 		t.Errorf("query plan does not use the fts GIN index (substring scan?):\n%s", plan.String())
 	}
 }
+
+// TestSearchPublicNodes_ExcludesPrivateBeforeLimit is the #296 ADR-0008 pin: the
+// prompt-facing search must exclude gm_private Nodes IN THE QUERY, before the
+// LIMIT — a post-fetch filter would drop the top-N ranked rows when they are all
+// gm_private and starve a public match ranked just past the limit. Five private
+// hits are inserted AFTER the sole public one so, newest-first within equal rank,
+// they sort above it; with LIMIT 1 only a before-limit exclusion returns the
+// public Node. SearchNodes (GM-facing) still returns the private rows.
+func TestSearchPublicNodes_ExcludesPrivateBeforeLimit(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	pub, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignID, Type: storage.KGNodeNPC, Name: "Duke Aldric", Body: "rules openly duke",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode public: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := st.CreateNode(ctx, storage.NewKGNode{
+			CampaignID: campaignID, Type: storage.KGNodeFaction, Name: "Duke Cabal", Body: "duke secret", GMPrivate: true,
+		}); err != nil {
+			t.Fatalf("CreateNode private %d: %v", i, err)
+		}
+	}
+
+	// LIMIT 1: the private rows out-rank the public one, so a before-limit exclusion
+	// is the only way the public Node survives.
+	pubOnly, err := st.SearchPublicNodes(ctx, campaignID, "duke", 1)
+	if err != nil {
+		t.Fatalf("SearchPublicNodes: %v", err)
+	}
+	if len(pubOnly) != 1 || pubOnly[0].ID != pub.ID {
+		t.Fatalf("SearchPublicNodes(limit 1) = %v, want the public Duke Aldric — private hits above the limit must not starve it", searchNames(pubOnly))
+	}
+
+	// GM-facing SearchNodes still surfaces the private rows.
+	all, err := st.SearchNodes(ctx, campaignID, "duke", 50)
+	if err != nil {
+		t.Fatalf("SearchNodes: %v", err)
+	}
+	if len(all) != 6 {
+		t.Errorf("SearchNodes(GM) = %d matches, want 6 (1 public + 5 private)", len(all))
+	}
+}

@@ -48,6 +48,20 @@ type Conversation struct {
 	// set, Register installs it on the replier, which refuses a route whose new turn
 	// the gate denies (the spend soft cap) beside the mute pre-check.
 	gate TurnGate
+
+	// voiceOf is the /say direct-speech voice lookup ([WithDirectSpeech], #295): nil
+	// = feature off. When set, Register binds a [DirectSpeech] reactor on
+	// SpeakRequested, sharing the barge-in floor (so a barge cancels a /say) and the
+	// turn gate. Deliberately independent of the mute view (GM puppeteering bypasses
+	// mute).
+	voiceOf VoiceLookup
+
+	// ensemble is the Ensemble Turn speaker ([WithEnsemble], #301): nil = feature
+	// off. When set, Register installs it on the replier, which runs a
+	// [voiceevent.EnsembleRouted] as a speculative fan-out + Lead race (ADR-0025).
+	// It REQUIRES barge-in (an ensemble is one floor-holding unit); Register panics
+	// if set without [WithBargeIn]/[WithBargeInCoalesce].
+	ensemble EnsembleSpeaker
 }
 
 // Option configures a [Conversation] at construction.
@@ -147,6 +161,32 @@ func WithLaneStreamingSTT(f func(speakerID string) *StreamManager, maxLanes int)
 	}
 }
 
+// WithDirectSpeech enables the GM /say direct-speech path (#295, ADR-0010): a
+// [DirectSpeech] reactor renders a [voiceevent.SpeakRequested] to TTS in the Agent's
+// Voice, looked up via voiceOf. It requires a non-nil TTS stage; Register panics
+// otherwise. The reactor shares the barge-in floor built for [WithReply] (so a human
+// barge cancels a /say) and honors [WithTurnGate], but deliberately bypasses the
+// mute view — /say is a GM override. A nil voiceOf is the feature-off default. It is
+// independent of [WithReply]: /say publishes SpeakRequested, never AddressRouted, so
+// it never wakes the LLM Replier (ADR-0024).
+func WithDirectSpeech(voiceOf VoiceLookup) Option {
+	return func(c *Conversation) { c.voiceOf = voiceOf }
+}
+
+// WithEnsemble enables Ensemble Turns (ADR-0025, #301): when one utterance
+// addresses two or more Agents the detector publishes a [voiceevent.EnsembleRouted],
+// and the replier fans the candidates out into parallel speculative Drafts, races
+// them, and lets the first complete non-empty draft (the Lead) take the floor and
+// speak — the losers' drafts are discarded (Reactions are #302). It REQUIRES
+// barge-in ([WithBargeIn]/[WithBargeInCoalesce]) — the whole ensemble is ONE
+// floor-holding unit, so a single barge tears the unit down (ADR-0027); Register
+// panics if the speaker is set without it. A nil speaker is the feature-off default,
+// where an EnsembleRouted degrades to the top-scored single route. The production
+// speaker is agent.Cast (which also drives [WithReplyStream]).
+func WithEnsemble(s EnsembleSpeaker) Option {
+	return func(c *Conversation) { c.ensemble = s }
+}
+
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
 // the reactors fire inside bus callbacks (currently the replier's TTS dispatch).
 // Without it such failures are dropped silently.
@@ -188,6 +228,13 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	if c.reply != nil && c.replyStream != nil {
 		panic("orchestrator.Conversation.Register: WithReply and WithReplyStream are mutually exclusive")
 	}
+	// Ensemble Turn speaker (#301, ADR-0025) REQUIRES the barge-in floor — an ensemble
+	// is one floor-holding unit. Validate UNCONDITIONALLY (before the reply-strategy
+	// branch), so WithEnsemble without barge-in is a loud wiring error even when no
+	// reply strategy is set, not a silent no-op.
+	if c.ensemble != nil && !c.bargeEnabled {
+		panic("orchestrator.Conversation.Register: WithEnsemble requires WithBargeIn or WithBargeInCoalesce")
+	}
 	if c.reply != nil || c.replyStream != nil {
 		if c.tts == nil {
 			panic("orchestrator.Conversation.Register: a reply strategy was set but no TTS stage was provided")
@@ -206,6 +253,10 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		// estimated spend crosses the soft cap. Independent of barge-in and mute; nil
 		// is the feature-off default.
 		replier.gate = c.gate
+		// Ensemble Turn speaker (#301, ADR-0025): the replier runs a multi-Agent
+		// EnsembleRouted as a speculative fan-out + Lead race. The barge-in requirement
+		// is validated above (unconditionally); here just install it.
+		replier.ensemble = c.ensemble
 		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the
@@ -228,6 +279,20 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 			}
 		}
 		reactors = append(reactors, replier)
+	}
+	// GM /say direct speech (#295): a DirectSpeech reactor on SpeakRequested, sharing
+	// the barge-in floor (built above for the reply path, so a barge cancels a /say)
+	// and the turn gate. Bound AFTER the replier so a SpeakRequested and an
+	// AddressRouted never contend — they are distinct events on distinct turns. It
+	// requires a TTS stage; nil voiceOf is the feature-off default.
+	if c.voiceOf != nil {
+		if c.tts == nil {
+			panic("orchestrator.Conversation.Register: WithDirectSpeech was set but no TTS stage was provided")
+		}
+		ds := NewDirectSpeech(c.tts, c.voiceOf, c.onError)
+		ds.floor = c.floor // shared with the barge path (nil when barge-in is off)
+		ds.gate = c.gate
+		reactors = append(reactors, ds)
 	}
 	return Bind(ctx, c.bus, reactors...)
 }

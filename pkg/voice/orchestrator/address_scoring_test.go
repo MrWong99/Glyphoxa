@@ -104,25 +104,58 @@ func TestScoringMatcher_Mishearing_RoutesToNPC(t *testing.T) {
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
 }
 
-// TestScoringMatcher_Ensemble_PublishesEveryTarget proves the detector
-// publishes every decision the scoring matcher returns: with the single-target
-// cap lifted (an ensemble matcher), an utterance naming two NPCs yields two
-// address.routed events (an Ensemble Turn, ADR-0025), not one.
-func TestScoringMatcher_Ensemble_PublishesEveryTarget(t *testing.T) {
+// TestScoringMatcher_Ensemble_PublishesOneEnsembleRouted proves the detector makes
+// a multi-Agent decision set ATOMIC (ADR-0025, #301): with the single-target cap
+// lifted (an ensemble matcher), an utterance naming two NPCs yields exactly ONE
+// address.ensemble carrying both score-sorted targets — and ZERO plain
+// address.routed events. This REWRITES the earlier
+// TestScoringMatcher_Ensemble_PublishesEveryTarget (which asserted two
+// address.routed): the #301 contract supersedes it — an Ensemble Turn is one
+// floor-holding unit, so the detector emits one event, not N.
+func TestScoringMatcher_Ensemble_PublishesOneEnsembleRouted(t *testing.T) {
 	h := voicetest.New(t)
 	butlerAg, bartAg, goblinAg := scoringAgents()
 	d := newEnsembleDetector(butlerAg, bartAg, goblinAg)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start arguing"})
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start arguing", TurnID: "T-e"})
 
-	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 2)
+	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 1)
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 0)
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.AddressRouted) bool { return e.Target.AgentID == bartTarget.AgentID },
-		"address.routed → Bart",
+		func(e voiceevent.EnsembleRouted) bool {
+			if len(e.Targets) != 2 || e.TurnID != "T-e" {
+				return false
+			}
+			// Both named NPCs are present in the set.
+			ids := map[string]bool{}
+			for _, tgt := range e.Targets {
+				ids[tgt.AgentID] = true
+			}
+			return ids[bartTarget.AgentID] && ids[goblinTarget.AgentID]
+		},
+		"address.ensemble carrying both Bart and Goblin (score-sorted set)",
 	)
+}
+
+// TestScoringMatcher_SingleNameUnderEnsembleCap_PublishesPlainAddressRouted proves
+// the ensemble branch is dead code for a single-target utterance even when the cap
+// is lifted (#301 AC4): one named NPC yields exactly one plain address.routed and
+// no address.ensemble, so the single-route path is untouched.
+func TestScoringMatcher_SingleNameUnderEnsembleCap_PublishesPlainAddressRouted(t *testing.T) {
+	h := voicetest.New(t)
+	butlerAg, bartAg, goblinAg := scoringAgents()
+	d := newEnsembleDetector(butlerAg, bartAg, goblinAg)
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart, what's the special tonight?", TurnID: "T-s"})
+
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 1)
+	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 0)
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.AddressRouted) bool { return e.Target.AgentID == goblinTarget.AgentID },
-		"address.routed → Goblin",
+		func(e voiceevent.AddressRouted) bool {
+			return e.Target.AgentID == bartTarget.AgentID && e.TurnID == "T-s"
+		},
+		"address.routed → Bart (single-target, plain path)",
 	)
 }

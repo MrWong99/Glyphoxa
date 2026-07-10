@@ -38,7 +38,11 @@ func (p *Presence) MemberDisplayName(ctx context.Context, discordUserID string) 
 	if err != nil {
 		return "", fmt.Errorf("presence: parse user id %q: %w", discordUserID, err)
 	}
-	m, err := p.fetchMember(ctx, guildID, userID)
+	c, err := p.Client()
+	if err != nil {
+		return "", fmt.Errorf("presence: fetch guild member %s: %w", discordUserID, err)
+	}
+	m, err := p.fetchMember(ctx, c.Rest, guildID, userID)
 	if err != nil {
 		return "", fmt.Errorf("presence: fetch guild member %s: %w", discordUserID, err)
 	}
@@ -48,13 +52,10 @@ func (p *Presence) MemberDisplayName(ctx context.Context, discordUserID string) 
 	return m.EffectiveName(), nil
 }
 
-// restGetMember is the production member fetch: it borrows the standing client and
-// calls its REST GetMember. ErrNoClient in the wait-state propagates so the
-// resolver negative-caches and retries.
-func (p *Presence) restGetMember(ctx context.Context, guildID, userID snowflake.ID) (*discord.Member, error) {
-	c, err := p.Client()
-	if err != nil {
-		return nil, err
-	}
-	return c.Rest.GetMember(guildID, userID, rest.WithCtx(ctx))
+// restGetMember is the production member fetch: it calls GetMember on the REST
+// client the caller borrowed once via p.Client(). Callers borrow first (so
+// ErrNoClient in the wait-state surfaces there, letting the resolver
+// negative-cache and retry), then hand the rest.Rest here.
+func (p *Presence) restGetMember(ctx context.Context, r rest.Rest, guildID, userID snowflake.ID) (*discord.Member, error) {
+	return r.GetMember(guildID, userID, rest.WithCtx(ctx))
 }

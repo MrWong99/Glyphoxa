@@ -124,7 +124,7 @@ func TestPlaySentenceBus_WrapsWithCtxTurnID(t *testing.T) {
 	chunks := make(chan tts.AudioChunk)
 	close(chunks) // no chunks needed; the codec ignores them here
 
-	if err := playSentenceBus(ctx, &pullingPlayer{}, codec, chunks, bus); err != nil {
+	if err := playSentenceBus(ctx, &pullingPlayer{}, codec, chunks, bus, nil); err != nil {
 		t.Fatalf("playSentenceBus: %v", err)
 	}
 	if len(*got) != 1 || (*got)[0].TurnID != "Twire" {
@@ -149,7 +149,7 @@ func TestPlaySentenceBus_TwoSentencesPublishPerSource(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		chunks := make(chan tts.AudioChunk)
 		close(chunks)
-		if err := playSentenceBus(ctx, &pullingPlayer{}, codec, chunks, bus); err != nil {
+		if err := playSentenceBus(ctx, &pullingPlayer{}, codec, chunks, bus, nil); err != nil {
 			t.Fatalf("sentence %d: playSentenceBus: %v", i, err)
 		}
 	}

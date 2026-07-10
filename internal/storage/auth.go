@@ -115,7 +115,7 @@ func (s *Store) SetActiveCampaign(ctx context.Context, discordUserID string, cam
 func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID string) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
-		        c.created_at, c.updated_at, c.archived_at
+		        c.created_at, c.updated_at, c.archived_at, c.tape_armed
 		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
 		  WHERE u.discord_user_id = $1 AND c.archived_at IS NULL`, discordUserID)
 	c, err := scanCampaign(row)
@@ -145,7 +145,7 @@ func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID stri
 func (s *Store) GetOperatorActiveCampaign(ctx context.Context) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
-		        c.created_at, c.updated_at, c.archived_at
+		        c.created_at, c.updated_at, c.archived_at, c.tape_armed
 		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
 		  WHERE c.archived_at IS NULL
 		  ORDER BY u.updated_at DESC, u.id

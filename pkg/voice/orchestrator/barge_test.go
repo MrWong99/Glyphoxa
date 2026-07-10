@@ -205,15 +205,17 @@ func TestBargeIn_PerSpeakerWindowNotDisarmedByOther(t *testing.T) {
 	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "B"})
 	h.Bus.Publish(voiceevent.VADSpeechEnd{SpeakerID: "B"}) // only B stopped
 
-	select {
-	case <-turnCtx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("A's sustained interruption must fire the barge; B's speech_end wrongly disarmed A's window")
-	}
-	voicetest.AssertEvent(t, h,
+	// fire() cancels turnCtx BEFORE it publishes BargeDetected, so syncing on
+	// turnCtx.Done() then snapshotting the log races the publish (the sibling flake
+	// this fix targets). WaitEvent polls until the BargeDetected is observed; once
+	// it is, the earlier cancel is guaranteed visible.
+	voicetest.WaitEvent(t, h, 2*time.Second,
 		func(e voiceevent.BargeDetected) bool { return e.SpeakerID == "A" },
-		"barge.detected attributed to speaker A",
+		"barge.detected attributed to speaker A (A's sustained interruption; B's speech_end must not disarm A's window)",
 	)
+	if turnCtx.Err() == nil {
+		t.Fatal("the barge must have cancelled the turn before publishing BargeDetected")
+	}
 }
 
 // TestBargeIn_SameSpeakerSoftOverlapDisarms pins the complement: a speaker's OWN

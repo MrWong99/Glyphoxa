@@ -853,9 +853,14 @@ type ReplyFunc func(ctx context.Context, e voiceevent.AddressRouted) []Reply
 // sentence reaches TTS (and audio begins) before the whole completion is
 // generated. dispatch sends one sentence through the TTS stage and blocks until
 // that sentence is synthesized (the serial, one-at-a-time contract the
-// [PlaybackPump] depends on); it returns ctx.Err() if the turn was cancelled, so
-// the producer can stop generating and emitting pending sentences (a mid-stream
-// barge-in now cancels generation itself, not just post-hoc dispatch).
+// [PlaybackPump] depends on).
+//
+// dispatch's return is the deliver-then-commit signal (ADR-0012): a nil return
+// means the sentence was fully synthesized under a live turn ctx — delivered, so
+// the producer may commit it to history. It returns ctx.Err() if the turn was
+// cancelled BEFORE or DURING the sentence's drain (a mid-stream barge/mute cuts
+// the sentence's tail audio before its last frame is forwarded — not delivered),
+// so the producer stops generating AND does not commit that undelivered sentence.
 //
 // ctx is the per-turn context (the barge-in floor's, under [WithBargeIn]); the
 // producer must thread it into its LLM call so a cancel tears generation down.
@@ -894,6 +899,16 @@ type Replier struct {
 	// the mute race closure). Set only via the orchestrator wiring; not part of
 	// [NewReplier].
 	gate TurnGate
+
+	// ensemble, when non-nil, is the Ensemble Turn speaker ([WithEnsemble], #301,
+	// ADR-0025): on a [voiceevent.EnsembleRouted] the replier fans the candidates
+	// out into parallel [EnsembleSpeaker.Draft]s, races them, and lets the first
+	// complete non-empty draft (the Lead) take the floor and speak. Nil degrades an
+	// EnsembleRouted to the top-scored single route ([Replier.handleRouted]). Set
+	// only via the orchestrator wiring; not part of [NewReplier]. It requires the
+	// barge-in floor (WithEnsemble panics at Register without it) — the whole
+	// ensemble is ONE floor-holding unit.
+	ensemble EnsembleSpeaker
 }
 
 // NewReplier wires ttsStage and reply together. Both must be non-nil; passing
@@ -923,16 +938,35 @@ func NewStreamReplier(ttsStage *TTS, reply StreamReplyFunc, onError ErrorFunc) *
 	return &Replier{tts: ttsStage, replyStream: reply, onError: onError}
 }
 
-// Bind subscribes the replier to [voiceevent.AddressRouted] on bus and returns a
-// function that removes the subscription. It implements [Reactor]; bus must be
-// non-nil. Each [Reply] the [ReplyFunc] returns is dispatched in order under
-// ctx; a dispatch failure is reported through the ErrorFunc (callbacks cannot
-// return errors) and does not stop the remaining replies.
+// Bind subscribes the replier to [voiceevent.AddressRouted] AND
+// [voiceevent.EnsembleRouted] on bus and returns a function that removes both
+// subscriptions. It implements [Reactor]; bus must be non-nil. Each [Reply] the
+// [ReplyFunc] returns is dispatched in order under ctx; a dispatch failure is
+// reported through the ErrorFunc (callbacks cannot return errors) and does not stop
+// the remaining replies. An EnsembleRouted runs the speculative fan-out + Lead race
+// ([Replier.handleEnsemble], #301) when an [EnsembleSpeaker] is wired, else degrades
+// to the top-scored single route.
 func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func()) {
 	if bus == nil {
 		panic("orchestrator.Replier.Bind: bus must not be nil")
 	}
-	return voiceevent.On(bus, func(e voiceevent.AddressRouted) {
+	unsubRouted := voiceevent.On(bus, func(e voiceevent.AddressRouted) {
+		r.handleRouted(ctx, bus, e)
+	})
+	unsubEnsemble := voiceevent.On(bus, func(e voiceevent.EnsembleRouted) {
+		r.handleEnsemble(ctx, bus, e)
+	})
+	return func() {
+		unsubEnsemble()
+		unsubRouted()
+	}
+}
+
+// handleRouted runs one single-target routing decision: the pre-#301 reply-reactor
+// body, unchanged. It is a method (not an inline closure) so [Replier.handleEnsemble]
+// can degrade a one-survivor / no-ensemble-speaker EnsembleRouted onto it.
+func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voiceevent.AddressRouted) {
+	{
 		// Carry the turn correlation id (A3) into the dispatch context so the TTS
 		// stage and the wire tee stamp the same id on TTSInvoked / FirstAudio.
 		// Installed before the floor is taken so both the sync and barge-in
@@ -1022,7 +1056,7 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 				bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: reason})
 			}
 		}()
-	})
+	}
 }
 
 // dispatchAll renders one routing decision under ctx, returning the turn-end
@@ -1080,6 +1114,15 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 				return ctx.Err()
 			}
 			ttsFailed = true
+			return nil
+		}
+		// Deliver-then-commit re-check (ADR-0012): Dispatch returns nil even when a
+		// barge/mute cancelled the turn DURING the drain — the vendor call succeeded
+		// but the sentence's tail audio was cut before its last frame was forwarded,
+		// so it was NOT delivered. Report the cancel so the producer does not commit
+		// this undelivered sentence.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		return nil
 	}
