@@ -807,8 +807,8 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
 	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
 	// download does not fit Connect's message model. Operator-only via
-	// auth.RequireSession, the same gate the relay reads (ADR-0041). #291 adds the
-	// POST import mount here next.
+	// auth.RequireSession, the same gate the relay reads (ADR-0041). The GET export
+	// (#290) and the POST import (#291) share this handler.
 	bundleHandler := &bundle.Handler{Store: store, Log: log}
 
 	return []web.Mount{
@@ -826,6 +826,11 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
 		// Campaign bundle export (#290): streamed gzip download, operator-gated.
 		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
+		// Campaign bundle import (#291): multipart upload, operator-gated, plus the
+		// plain-HTTP CSRF double-submit (ADR-0016) the SPA satisfies with the
+		// script-readable glyphoxa_csrf cookie — a state-changing POST outside the
+		// Connect chain needs it (RequireSession alone gates only the session).
+		{Path: "POST /api/v1/campaigns/import", Handler: auth.RequireSession(store, auth.RequireCSRF(http.HandlerFunc(bundleHandler.ServeImport)))},
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}

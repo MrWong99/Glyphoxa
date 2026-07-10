@@ -44,10 +44,22 @@ func New(pool *pgxpool.Pool) *Store {
 
 // InTx runs fn against a Store bound to a single transaction, committing if fn
 // returns nil and rolling back otherwise. Used by multi-row operations that must
-// be atomic (e.g. the live-NPC seed). Not available on a tx-bound Store.
+// be atomic (e.g. the live-NPC seed).
+//
+// On a Store ALREADY bound to a transaction (created by an enclosing InTx), it
+// FLATTENS: fn runs against the same tx-bound Store, with no nested Begin and no
+// savepoint (#291). This lets a method that uses InTx internally (e.g.
+// CreateEdge) compose inside a larger import transaction. The caveat is that the
+// inner call's atomicity then becomes the OUTER transaction's: an error raised
+// after such an inner "commit" still rolls the whole outer tx back — there is no
+// independent inner rollback boundary. That is exactly what the bundle importer
+// wants (one all-or-nothing import), but a caller relying on partial-commit
+// semantics from a nested InTx would be surprised.
 func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 	if s.pool == nil {
-		return errors.New("storage: InTx requires a pool-backed Store")
+		// Already tx-bound: run in the ambient transaction (flatten). No commit or
+		// rollback here — the outermost InTx owns the transaction boundary.
+		return fn(s)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
