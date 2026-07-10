@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -201,6 +202,55 @@ func TestServeImport(t *testing.T) {
 		// session user, not a client header).
 		if _, err := st.FindCampaignByName(ctx, tenantID, "Uploaded Campaign"); err != nil {
 			t.Fatalf("imported campaign not found under operator tenant: %v", err)
+		}
+	})
+
+	t.Run("response carries dropped_participant_refs (stable shape, zero absent)", func(t *testing.T) {
+		body, ct := multipartBundle(t, good)
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, authedImport(t, body, ct))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code=%d body=%q, want 200", rec.Code, rec.Body.String())
+		}
+		// The field is ALWAYS present (ADR-0053 §4 stable response shape): a bundle
+		// with no unmappable participant refs still marshals it as 0, never omitted.
+		if !strings.Contains(rec.Body.String(), `"dropped_participant_refs"`) {
+			t.Errorf("200 body missing dropped_participant_refs field: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("dropped_participant_refs counts unmappable refs from history", func(t *testing.T) {
+		base := time.Date(2026, 6, 7, 20, 0, 0, 0, time.UTC)
+		ended := base.Add(time.Hour)
+		dropper := encodeBundle(t, &bundle.Bundle{
+			FormatVersion: bundle.FormatVersion,
+			Campaign: bundle.Campaign{
+				Name: "Dropped Refs", System: "dnd5e", Language: "en",
+				Agents: []bundle.Agent{{ID: "a1", Role: "character", Name: "Bart"}},
+				History: &bundle.History{Sessions: []bundle.Session{{
+					ID: "s1", StartedAt: base, EndedAt: &ended, Status: "ended", LineCount: 0,
+					Chunks: []bundle.Chunk{{
+						Content:              "the dragon spoke of gold",
+						ParticipatedAgentIDs: []string{"a1", "ghost"},
+						StartedAt:            base,
+					}},
+				}}},
+			},
+		})
+		body, ct := multipartBundle(t, dropper)
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, authedImport(t, body, ct))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code=%d body=%q, want 200", rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			DroppedParticipantRefs int `json:"dropped_participant_refs"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode 200 body: %v", err)
+		}
+		if payload.DroppedParticipantRefs != 1 {
+			t.Errorf("dropped_participant_refs = %d, want 1 (ghost dropped)", payload.DroppedParticipantRefs)
 		}
 	})
 }
