@@ -25,6 +25,26 @@ const migrateUsage = `usage: glyphoxa migrate <up|down|status|version>
 
 Connection string is read from $GLYPHOXA_DATABASE_URL (or $DATABASE_URL).`
 
+// autoMigrate applies all pending migrations to the DB at dsn under the ADR-0031
+// advisory lock. It is the `all`-Mode startup auto-migrate (ADR-0031/ADR-0034):
+// a bare `glyphoxa -mode all` — the self-host default, and what `docker compose
+// up` / `systemctl start` run — brings a fresh DB current with no manual
+// `migrate up` step, so the operator's whole story is "point it at Postgres +
+// keys and start it." The advisory lock makes it safe to run at every boot and
+// idempotent once current. Serving Modes (voice/web) never call this: they
+// assume a current schema and fail fast if behind.
+func autoMigrate(ctx context.Context, dsn string) error {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("auto-migrate: open db: %w", err)
+	}
+	defer db.Close()
+	if err := storage.MigrateUp(ctx, db); err != nil {
+		return fmt.Errorf("auto-migrate: %w", err)
+	}
+	return nil
+}
+
 // RunMigrate is the entry point for the `migrate` subcommand. args are the
 // arguments after "migrate" (e.g. ["up"]). The control-plane task wires this
 // into the root command; `all` Mode startup instead calls storage.MigrateUp

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
 // fakeOAuthStore is an in-memory auth.OAuthStore recording what seedDevSession
@@ -145,6 +147,60 @@ func TestRequireWebEnv(t *testing.T) {
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("empty-env error %q does not name %s", err, want)
+		}
+	}
+}
+
+// TestDefaultMode pins ADR-0005 / ADR-0034: `glyphoxa` with no -mode flag boots
+// `all` (the self-host default), while an explicit -mode still wins. The default
+// flows through flag parsing exactly as main() registers it, so a regression of
+// the constant back to `voice` fails here (issue #282, AC3 first half).
+func TestDefaultMode(t *testing.T) {
+	if defaultMode != "all" {
+		t.Fatalf("defaultMode = %q, want %q (ADR-0005/0034 self-host default)", defaultMode, "all")
+	}
+
+	// No -mode: the registered default applies.
+	fs := flag.NewFlagSet("glyphoxa", flag.ContinueOnError)
+	mode := fs.String("mode", defaultMode, "process mode: voice|web|all")
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse empty args: %v", err)
+	}
+	if *mode != "all" {
+		t.Errorf("no -mode flag: mode = %q, want %q", *mode, "all")
+	}
+
+	// Explicit -mode voice still selects voice (AC3: explicit voice unchanged).
+	fs = flag.NewFlagSet("glyphoxa", flag.ContinueOnError)
+	mode = fs.String("mode", defaultMode, "process mode: voice|web|all")
+	if err := fs.Parse([]string{"-mode", "voice"}); err != nil {
+		t.Fatalf("parse -mode voice: %v", err)
+	}
+	if *mode != "voice" {
+		t.Errorf("-mode voice: mode = %q, want %q", *mode, "voice")
+	}
+}
+
+// TestRequireVoiceTarget pins AC3's second half: voice mode demands BOTH -guild
+// and -channel — the default flip to `all` must not relax that. Each missing
+// half is a fatal error; both present passes.
+func TestRequireVoiceTarget(t *testing.T) {
+	cases := []struct {
+		guild, channel string
+		wantErr        bool
+	}{
+		{"g", "c", false},
+		{"", "c", true},
+		{"g", "", true},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		err := requireVoiceTarget(wirenpc.Config{Guild: c.guild, Channel: c.channel})
+		if c.wantErr && err == nil {
+			t.Errorf("requireVoiceTarget(guild=%q, channel=%q) = nil, want an error", c.guild, c.channel)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("requireVoiceTarget(guild=%q, channel=%q) = %v, want nil", c.guild, c.channel, err)
 		}
 	}
 }
