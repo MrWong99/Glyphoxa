@@ -601,6 +601,52 @@ func TestMatcherAgent_DerivesTruncationAliases(t *testing.T) {
 	}
 }
 
+// TestMatcherAgent_ButlerRoleAndAddressOnly pins the #299 Butler derivation: a
+// butler-role spec produces an address.Agent with AgentRole "butler" and
+// AddressOnly true, so ambient heuristics never route to it. A zero-role spec
+// stays a non-AddressOnly Character (byte-identical to the pre-#299 default).
+func TestMatcherAgent_ButlerRoleAndAddressOnly(t *testing.T) {
+	butlerSpec := npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: string(voiceevent.AgentRoleButler), addressOnly: true}
+	got := matcherAgent(butlerSpec)
+	if got.Target.AgentRole != voiceevent.AgentRoleButler {
+		t.Fatalf("butler matcherAgent role = %q, want %q", got.Target.AgentRole, voiceevent.AgentRoleButler)
+	}
+	if !got.AddressOnly {
+		t.Fatal("butler matcherAgent must be AddressOnly")
+	}
+
+	character := matcherAgent(specFor("npc-bart", "Bart", ""))
+	if character.Target.AgentRole != voiceevent.AgentRoleCharacter {
+		t.Fatalf("zero-role matcherAgent role = %q, want %q", character.Target.AgentRole, voiceevent.AgentRoleCharacter)
+	}
+	if character.AddressOnly {
+		t.Fatal("Character matcherAgent must not be AddressOnly")
+	}
+}
+
+// TestRoster_ButlerExcludedFromFallback is the AC3 pin at the Roster level: in a
+// scene of one Character NPC + the Address-Only Butler, an unnamed utterance
+// reaches the Character via the sole-NPC fallback (the Butler is not counted),
+// while naming the Butler reaches it. NPC-only routing is unchanged by the
+// Butler's presence.
+func TestRoster_ButlerExcludedFromFallback(t *testing.T) {
+	synth := &recordingSynth{}
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: string(voiceevent.AgentRoleButler), addressOnly: true,
+		voice: tts.Voice{ProviderID: "test", VoiceID: "glyphoxa", Name: "Glyphoxa"}})
+
+	if got := routedTo(r, "so what is on tap tonight?"); got != "npc-bart" {
+		t.Fatalf("unnamed utterance routed to %q, want npc-bart (Butler excluded from fallback)", got)
+	}
+	if got := routedTo(r, "Glyphoxa, roll two d6"); got != "glyphoxa" {
+		t.Fatalf("named-Butler utterance routed to %q, want glyphoxa", got)
+	}
+}
+
 // TestRoster_TruncatedNameRoutesViaDerivedAlias is the end-to-end #197 bar over
 // the Roster: a "de" scene of Bart/Greta/Marek routes an utterance opening with
 // the STT truncation "Art" to Bart and "Arek" to Marek via their derived

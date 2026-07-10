@@ -105,12 +105,17 @@ func matcherLanguage(lang string) string {
 // identically. A lone Character NPC is not AddressOnly, so it catches unaddressed
 // speech via the single-NPC fallback (CONTEXT.md "Address-Only").
 func matcherAgent(spec npcSpec) address.Agent {
+	role := spec.role
+	if role == "" {
+		role = voiceevent.AgentRoleCharacter // pre-#299 default: an unroled spec is a Character NPC
+	}
 	return address.Agent{
 		Target: voiceevent.AddressTarget{
 			AgentID:   spec.agentID,
-			AgentRole: voiceevent.AgentRoleCharacter,
+			AgentRole: role,
 			Name:      spec.name,
 		},
+		AddressOnly:       spec.addressOnly,
 		Aliases:           spec.aliases,
 		TruncationAliases: address.DeriveTruncationAliases(append([]string{spec.name}, spec.aliases...)...),
 	}

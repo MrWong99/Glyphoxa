@@ -240,6 +240,17 @@ type npcSpec struct {
 	// per-NPC GrantSet against the shared Registry, so the LLM only ever sees the
 	// Tools this NPC is granted (#113). nil ⇒ granted nothing.
 	grants []tool.Grant
+	// role is this Agent's Role (CONTEXT.md "Agent Role"): "butler" or "character"
+	// (empty ⇒ character, the pre-#299 default). It flows into the routing target's
+	// AgentRole so the matcher's Butler GM-gate and the detector can tell the two
+	// apart, and it gates the Butler-only wiring (default persona, text delivery,
+	// voice-gap logging) in loadCampaignRoster / rosterDepsForLive.
+	role string
+	// addressOnly marks an Agent reachable only by an explicit name match (the
+	// Butler, ADR-0024): matcherAgent stamps it onto the address.Agent so ambient
+	// heuristics (continuation, single-NPC fallback) never route to it. false ⇒ a
+	// normal Character NPC (the pre-#299 default).
+	addressOnly bool
 	// model is the Groq model id this NPC's engine runs (#227): loadCampaignNPCs
 	// resolves it from the Agent's LLM provider_config, falling back to the
 	// tenant-level LLM row. Empty means "adapter default" — it flows verbatim into
