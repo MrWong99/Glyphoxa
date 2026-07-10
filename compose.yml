@@ -50,8 +50,12 @@ services:
       - .env
     environment:
       # Point the app at the in-compose Postgres service (overrides the .env DSN).
+      # NOTE: POSTGRES_PASSWORD is spliced RAW into this URL, so a value
+      # containing '@', ':', '/', or '?' would corrupt it — keep the password
+      # URL-safe (alphanumerics), or URL-encode it here if you must use those.
+      # GLYPHOXA_LOG_FORMAT + the provider/OAuth/allowlist vars come from .env
+      # (env_file above); nothing else needs overriding here.
       GLYPHOXA_DATABASE_URL: postgres://glyphoxa:${POSTGRES_PASSWORD:-glyphoxa}@postgres:5432/glyphoxa?sslmode=disable
-      GLYPHOXA_LOG_FORMAT: ${GLYPHOXA_LOG_FORMAT:-json}
     ports:
       # Loopback-only by default; matches the DISCORD_OAUTH_REDIRECT_URL default
       # (http://127.0.0.1:8080/...). Change the host side to expose it on a LAN,

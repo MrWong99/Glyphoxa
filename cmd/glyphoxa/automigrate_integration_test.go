@@ -83,3 +83,35 @@ func TestAutoMigrate(t *testing.T) {
 		t.Fatalf("autoMigrate second run (already current): %v, want nil", err)
 	}
 }
+
+// TestEnsureSchemaReady pins the boot schema-preflight branch on withVoice (the
+// conditional finding #3 flagged as untested): `all` Mode (withVoice=true)
+// auto-migrates a fresh DB, but a web-only replica (withVoice=false) must NOT
+// migrate — per ADR-0031 it assumes a current schema and fails fast with the
+// actionable error, so N replicas never race the migration. Flipping the guard
+// breaks one half of this test.
+func TestEnsureSchemaReady(t *testing.T) {
+	dsn := startPostgres(t)
+	ctx := context.Background()
+
+	// Web-only against a fresh, unmigrated DB: fail fast, and DO NOT migrate.
+	if err := ensureSchemaReady(ctx, dsn, false); err == nil {
+		t.Fatal("ensureSchemaReady(web-only) on an unmigrated DB returned nil, want a fail-fast error")
+	}
+	if err := wirenpc.EnsureSchemaCurrent(ctx, dsn); err == nil {
+		t.Fatal("web-only preflight migrated the DB; it must assume a current schema, never apply migrations")
+	}
+
+	// All-mode against the same fresh DB: auto-migrate to current.
+	if err := ensureSchemaReady(ctx, dsn, true); err != nil {
+		t.Fatalf("ensureSchemaReady(all) on a fresh DB: %v, want nil (auto-migrate)", err)
+	}
+	if err := wirenpc.EnsureSchemaCurrent(ctx, dsn); err != nil {
+		t.Fatalf("after all-mode preflight the schema should be current: %v", err)
+	}
+
+	// Web-only against the now-current DB: clean pass (schema is current).
+	if err := ensureSchemaReady(ctx, dsn, false); err != nil {
+		t.Fatalf("ensureSchemaReady(web-only) on a current DB: %v, want nil", err)
+	}
+}

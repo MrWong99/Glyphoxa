@@ -210,7 +210,8 @@ Then open `http://127.0.0.1:8080` and **Sign in with Discord**.
 - **Postgres data** persists in the named `pgdata` volume across `up`/`down`.
   The DB password defaults to `glyphoxa`; set `POSTGRES_PASSWORD` in the shell
   (or the compose interpolation `.env`) to change it — it feeds both the DB and
-  the app DSN.
+  the app DSN. It is spliced raw into the DSN, so keep it URL-safe
+  (alphanumerics); a `@`/`:`/`/`/`?` would corrupt the URL unless URL-encoded.
 - The app port publishes on `127.0.0.1:8080` (loopback), matching the default
   OAuth redirect. To reach it from a LAN, change the host side of the `ports:`
   mapping and update `DISCORD_OAUTH_REDIRECT_URL` to match.
@@ -243,6 +244,7 @@ DISCORD_OAUTH_CLIENT_ID=CHANGE_ME
 DISCORD_OAUTH_CLIENT_SECRET=CHANGE_ME
 DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
 GLYPHOXA_OPERATOR_IDS=000000000000000000
+GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
 EOF
 sudo chmod 0600 /etc/glyphoxa/env    # holds secrets
 
@@ -259,9 +261,15 @@ curl -fsS http://127.0.0.1:8080/     # SPA served → login screen reachable
 
 Validate the unit file itself (no host state needed) with
 `systemd-analyze verify deploy/glyphoxa.service`. The unit is hardened
-(`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp`); if you
-run the voice loop, set `GLYPHOXA_ONNX_LIB` in the env file to a preinstalled
-ONNX Runtime so the Silero VAD never fetches one at start.
+(`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp`). The
+service user has no home, so `ProtectHome=true` would block the Silero VAD's
+default `$HOME/.cache` download of the ONNX Runtime: the unit therefore sets
+`XDG_CACHE_HOME` to a systemd-managed `CacheDirectory` (`/var/cache/glyphoxa`).
+Pointing `GLYPHOXA_ONNX_LIB` at a preinstalled `libonnxruntime.so` (as the env
+file above does) skips that download entirely — recommended if you run the voice
+loop. `/etc/glyphoxa/env` is required (no `-` prefix on `EnvironmentFile`): a
+missing file fails the unit up front rather than crash-looping the binary on
+absent secrets.
 
 ## Environment variable reference
 

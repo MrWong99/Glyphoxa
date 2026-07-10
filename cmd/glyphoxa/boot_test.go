@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
@@ -159,31 +159,53 @@ func TestDefaultMode(t *testing.T) {
 	if defaultMode != "all" {
 		t.Fatalf("defaultMode = %q, want %q (ADR-0005/0034 self-host default)", defaultMode, "all")
 	}
+}
 
-	// No -mode: the registered default applies.
-	fs := flag.NewFlagSet("glyphoxa", flag.ContinueOnError)
-	mode := fs.String("mode", defaultMode, "process mode: voice|web|all")
-	if err := fs.Parse(nil); err != nil {
-		t.Fatalf("parse empty args: %v", err)
-	}
-	if *mode != "all" {
-		t.Errorf("no -mode flag: mode = %q, want %q", *mode, "all")
-	}
+// TestVoiceEntryRequiresTarget drives the REAL voice entry path (runVoice) to
+// pin AC3's second half: the default flip to `all` must not relax voice mode's
+// -guild/-channel requirement. With a token present but a missing guild/channel,
+// runVoice returns the target error before any DB/network work; with both
+// present it proceeds PAST that gate and fails later for a different reason (no
+// DB configured) — proving the gate itself passed, not the whole boot.
+func TestVoiceEntryRequiresTarget(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	metrics := observe.NewPrometheusRecorder()
+	t.Setenv("DISCORD_BOT_TOKEN", "test-token")
+	// Force the no-DB early return for the both-present case so runVoice never
+	// dials Postgres or the network from this unit test.
+	t.Setenv("GLYPHOXA_DATABASE_URL", "")
+	t.Setenv("DATABASE_URL", "")
 
-	// Explicit -mode voice still selects voice (AC3: explicit voice unchanged).
-	fs = flag.NewFlagSet("glyphoxa", flag.ContinueOnError)
-	mode = fs.String("mode", defaultMode, "process mode: voice|web|all")
-	if err := fs.Parse([]string{"-mode", "voice"}); err != nil {
-		t.Fatalf("parse -mode voice: %v", err)
+	const targetMsg = "-guild and -channel are required"
+	cases := []struct {
+		name           string
+		guild, channel string
+		wantTargetErr  bool
+	}{
+		{"missing both", "", "", true},
+		{"missing channel", "g", "", true},
+		{"missing guild", "", "c", true},
+		{"both present", "g", "c", false},
 	}
-	if *mode != "voice" {
-		t.Errorf("-mode voice: mode = %q, want %q", *mode, "voice")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// metricsAddr "" keeps runVoice off any listener; the target gate is
+			// reached before that anyway.
+			err := runVoice(log, wirenpc.Config{Guild: c.guild, Channel: c.channel}, false, metrics, "")
+			targetErr := err != nil && strings.Contains(err.Error(), targetMsg)
+			if c.wantTargetErr && !targetErr {
+				t.Errorf("runVoice(guild=%q, channel=%q) err = %v, want the %q target error", c.guild, c.channel, err, targetMsg)
+			}
+			if !c.wantTargetErr && targetErr {
+				t.Errorf("runVoice(guild=%q, channel=%q) returned the target error despite both flags set: %v", c.guild, c.channel, err)
+			}
+		})
 	}
 }
 
-// TestRequireVoiceTarget pins AC3's second half: voice mode demands BOTH -guild
-// and -channel — the default flip to `all` must not relax that. Each missing
-// half is a fatal error; both present passes.
+// TestRequireVoiceTarget pins the target-flag predicate directly: voice mode
+// demands BOTH -guild and -channel. Each missing half is an error; both present
+// passes.
 func TestRequireVoiceTarget(t *testing.T) {
 	cases := []struct {
 		guild, channel string

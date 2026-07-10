@@ -19,6 +19,9 @@
 #        DISCORD_OAUTH_CLIENT_SECRET=...
 #        DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
 #        GLYPHOXA_OPERATOR_IDS=000000000000000000
+#        GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so  # recommended: point at a
+#          # preinstalled ONNX Runtime so the Silero VAD never downloads one at the
+#          # first Voice Session (else it caches under /var/cache/glyphoxa, below).
 #   4. Install this file to /etc/systemd/system/glyphoxa.service, then:
 #        systemctl daemon-reload && systemctl enable --now glyphoxa
 #        systemctl status glyphoxa   # smoke check: active (running)
@@ -37,20 +40,30 @@ User=glyphoxa
 Group=glyphoxa
 
 # Config + secrets. systemd EnvironmentFile is KEY=VALUE (no `export`); see the
-# install notes above. Prefix with '-' so a missing file is a clear ExecStart
-# failure (fatal boot preflight naming the missing var) rather than a unit-load
-# error.
-EnvironmentFile=-/etc/glyphoxa/env
+# install notes above. No '-' prefix: the file holds the required DB/OAuth/secret
+# vars, so a missing /etc/glyphoxa/env should fail the unit with a clear systemd
+# "file not found" up front — better than a '-' that starts the binary env-less
+# and leaves it crash-looping on the boot preflight naming each missing var.
+EnvironmentFile=/etc/glyphoxa/env
+
+# The Silero VAD caches a downloaded ONNX Runtime under $XDG_CACHE_HOME (Go's
+# os.UserCacheDir). The service user has no home and ProtectHome=true blocks
+# $HOME/.cache anyway, so point the cache at a systemd-managed, service-owned
+# directory (CacheDirectory creates /var/cache/glyphoxa, mode 0755, owned by the
+# service user). Set GLYPHOXA_ONNX_LIB in the env file to a preinstalled lib to
+# skip the download entirely (then this cache stays unused).
+CacheDirectory=glyphoxa
+Environment=XDG_CACHE_HOME=/var/cache/glyphoxa
 
 ExecStart=/usr/local/bin/glyphoxa -mode all
 Restart=on-failure
 RestartSec=5
 
 # --- Hardening -------------------------------------------------------------
-# The app needs no write access to the system: config comes from the env file.
-# ProtectSystem=full keeps /usr, /boot, /etc read-only while leaving /var
-# writable (the Silero VAD may cache a downloaded ONNX runtime there unless
-# GLYPHOXA_ONNX_LIB points at a preinstalled lib).
+# The app needs no write access to the system beyond its cache dir: config comes
+# from the env file. ProtectSystem=full keeps /usr, /boot, /etc read-only;
+# CacheDirectory carves out the one writable path (/var/cache/glyphoxa) the VAD
+# needs, so ProtectHome=true can stay on.
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true

@@ -219,6 +219,26 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
 }
 
+// ensureSchemaReady runs the boot schema preflight for the web/all entrypoint
+// (ADR-0031). In `all` Mode (withVoice) it auto-applies the embedded migrations
+// under the advisory lock — the self-host "start it and go" story (ADR-0034). A
+// web-only replica (withVoice false) never migrates: it only verifies the schema
+// is current and returns the actionable `migrate up` error if behind, so N web
+// replicas can never race the migration and a behind DB fails the boot loudly
+// instead of surfacing raw "relation does not exist" at first query.
+func ensureSchemaReady(ctx context.Context, dsn string, withVoice bool) error {
+	if withVoice {
+		return autoMigrate(ctx, dsn)
+	}
+	// Web-only: verify, never migrate. The wrap keeps a stable checkpoint marker
+	// while preserving the storage layer's verbatim actionable `migrate up`
+	// message via %w.
+	if err := wirenpc.EnsureSchemaCurrent(ctx, dsn); err != nil {
+		return fmt.Errorf("schema preflight: %w", err)
+	}
+	return nil
+}
+
 // requireVoiceTarget enforces that explicit voice mode names BOTH a Discord
 // guild and a voice channel (issue #282, AC3): the default Mode flipped to `all`,
 // but a standalone voice node still has no way to pick a channel on its own, so
@@ -298,18 +318,16 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// `all`-Mode startup auto-migrate (ADR-0031/ADR-0034): the self-host default
+	// Boot schema preflight (ADR-0031/ADR-0034): the self-host default `all` Mode
 	// applies pending migrations at boot under the advisory lock, so a bare
 	// `glyphoxa -mode all` — what `docker compose up` and `systemctl start` run —
 	// reaches a current schema with no manual `migrate up` step (issue #282). A
-	// web-only replica (withVoice false) does NOT auto-migrate: per ADR-0031 the
-	// serving Modes assume a current schema and fail fast if behind, so N web
-	// replicas never race the migration — the migrate hook / all-Mode owns it.
-	// Runs BEFORE the boot sweep + any query below, which need the schema present.
-	if withVoice {
-		if err := autoMigrate(ctx, dsn); err != nil {
-			return fmt.Errorf("web: %w", err)
-		}
+	// web-only replica does NOT auto-migrate: it verifies the schema is current and
+	// fails fast with an actionable message if behind, so N web replicas never race
+	// the migration — the migrate hook / all-Mode owns it. Runs BEFORE the boot
+	// sweep + any query below, which all need the schema present.
+	if err := ensureSchemaReady(ctx, dsn, withVoice); err != nil {
+		return fmt.Errorf("web: %w", err)
 	}
 
 	pool, err := pgxpool.New(ctx, dsn)
