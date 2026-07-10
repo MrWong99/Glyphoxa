@@ -244,7 +244,10 @@ DISCORD_OAUTH_CLIENT_ID=CHANGE_ME
 DISCORD_OAUTH_CLIENT_SECRET=CHANGE_ME
 DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
 GLYPHOXA_OPERATOR_IDS=000000000000000000
-GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
+# Uncomment ONLY if you preinstalled the ONNX Runtime at this path — the value is
+# used verbatim with no existence check, so a wrong/missing path breaks the VAD.
+# Left commented, the VAD auto-downloads to /var/cache/glyphoxa on first use.
+# GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
 EOF
 sudo chmod 0600 /etc/glyphoxa/env    # holds secrets
 

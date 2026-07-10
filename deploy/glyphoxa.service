@@ -19,9 +19,11 @@
 #        DISCORD_OAUTH_CLIENT_SECRET=...
 #        DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
 #        GLYPHOXA_OPERATOR_IDS=000000000000000000
-#        GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so  # recommended: point at a
-#          # preinstalled ONNX Runtime so the Silero VAD never downloads one at the
-#          # first Voice Session (else it caches under /var/cache/glyphoxa, below).
+#      Optional — commented by default. The value is used verbatim with NO
+#      existence check, so set it ONLY if you actually preinstalled the lib:
+#        # GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
+#      Left unset, the Silero VAD auto-downloads the ONNX Runtime to the
+#      CacheDirectory (/var/cache/glyphoxa) on the first Voice Session.
 #   4. Install this file to /etc/systemd/system/glyphoxa.service, then:
 #        systemctl daemon-reload && systemctl enable --now glyphoxa
 #        systemctl status glyphoxa   # smoke check: active (running)
