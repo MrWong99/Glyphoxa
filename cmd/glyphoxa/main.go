@@ -25,6 +25,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
+	"github.com/MrWong99/Glyphoxa/internal/knowledge"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
@@ -223,6 +224,14 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 		return err
 	}
 	cfg.CampaignID = active.ID
+
+	// Standalone voice mode wires no knowledge-Tool sources (cfg.ToolDeps stays
+	// zero): the transcript_search / kg_query built-ins are still registered and
+	// grantable, but a call reports "unavailable in this mode" rather than reading
+	// the DB (#296). Only the web/all boot builds the adapter (over the session
+	// Manager). Log it once so an operator who granted an NPC a knowledge Tool and
+	// runs a pure `-mode voice` node knows why it stays silent.
+	log.Info("standalone voice mode: knowledge Tools (transcript_search, kg_query) are unavailable; run -mode all or web to enable them")
 
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
 }
@@ -604,6 +613,19 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// the feature on keyless deployments. It owns no goroutine/subscription, so
 	// there is nothing to Close.
 	mgr.SetFacts(kgfacts.New(store, mgr, metrics, log, kgfacts.Config{}))
+
+	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
+	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
+	// KG-facts recall it needs only the process store + the session Manager (for the
+	// active Campaign), no embeddings provider — so a keyless deployment still lets a
+	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
+	// the base voice config every session copies; in web-only mode the Manager starts
+	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
+	knowledgeAdapter := knowledge.New(store, mgr)
+	mgr.SetToolDeps(tool.Deps{
+		Transcripts: knowledgeAdapter,
+		KG:          knowledgeAdapter,
+	})
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /

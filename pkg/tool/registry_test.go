@@ -62,19 +62,16 @@ func TestRegistryToolsSorted(t *testing.T) {
 	}
 }
 
-// TestBuiltinRegistryIsDiceOnly: the shared built-in set is exactly [dice] and it
-// is a plain on/off grant (no scope editor). This is the source the grant editor
-// and the live loop both build from — they must agree on the available Tools.
-func TestBuiltinRegistryIsDiceOnly(t *testing.T) {
-	tools := BuiltinRegistry().Tools()
-	if len(tools) != 1 || tools[0].Name() != "dice" {
-		t.Fatalf("BuiltinRegistry Tools = %+v, want exactly [dice]", tools)
+// TestBuiltinRegistryHasDice: dice remains a registered, plain on/off grant (no
+// scope editor). The full catalog (dice + the knowledge Tools) is pinned in
+// builtins_test.go; this guards dice's grant shape specifically.
+func TestBuiltinRegistryHasDice(t *testing.T) {
+	dice, ok := BuiltinRegistry(Deps{}).Get("dice")
+	if !ok {
+		t.Fatal("BuiltinRegistry must have dice registered")
 	}
-	if tools[0].SupportsScope() {
+	if dice.SupportsScope() {
 		t.Error("dice must not advertise scope support (it carries no per-grant config)")
-	}
-	if _, ok := BuiltinRegistry().Get("dice"); !ok {
-		t.Error("BuiltinRegistry must have dice registered")
 	}
 }
 

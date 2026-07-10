@@ -64,9 +64,9 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 		rec = observe.Discard{}
 	}
 
-	reg := tool.BuiltinRegistry()
+	reg := tool.BuiltinRegistry(tool.Deps{})
 	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "dice"})
-	engine := agenttool.NewEngine(cfg.Provider, grants, "", 0, 0,
+	engine := agenttool.NewEngine(cfg.Provider, grants, "", "", 0, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 	replier := agent.NewReplier(agent.Config{

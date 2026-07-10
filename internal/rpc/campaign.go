@@ -118,7 +118,7 @@ type SpeakerInvalidator interface {
 // (ADR-0028), so the grants a GM can toggle are exactly the Tools a Voice Session
 // runs; nothing external configures it.
 func NewCampaignServer(s campaignStore) *CampaignServer {
-	return &CampaignServer{store: s, tools: tool.BuiltinRegistry()}
+	return &CampaignServer{store: s, tools: tool.BuiltinRegistry(tool.Deps{})}
 }
 
 // compile-time assertion that CampaignServer satisfies the generated handler.

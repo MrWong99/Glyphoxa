@@ -390,6 +390,16 @@ type Config struct {
 	// unchanged.
 	Gate orchestrator.TurnGate
 
+	// ToolDeps injects the built-in knowledge Tools' read sources (S1, #296): the
+	// transcript-search and KG-query retrieval paths the tool-use loop calls. The
+	// web tier builds the internal/knowledge adapter over the process store +
+	// session Manager and sets it on the session Manager's base config; it flows
+	// through connectAndServe → buildConversation → tool.BuiltinRegistry(cfg.ToolDeps),
+	// so a live NPC granted kg_query/transcript_search actually reaches the DB. The
+	// zero value (voice/bench standalone) registers the Tools but reports them
+	// unavailable at Execute — the loop feeds that back and continues, never panics.
+	ToolDeps tool.Deps
+
 	// GMSpeaker reports whether a Discord SpeakerID belongs to a Game Master —
 	// operator-allowlist membership per ADR-0050/ADR-0041, the deterministic GM
 	// identity with no per-session binding. When non-nil it arms the Butler
@@ -746,7 +756,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -934,7 +944,7 @@ func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView)
 	return unsub
 }
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -1045,7 +1055,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("wirenpc: build LLM provider: %w", err)
 	}
-	reg := tool.BuiltinRegistry()
+	reg := tool.BuiltinRegistry(toolDeps)
 	engineFor := engineFactory(provider, reg, language, stageMetrics, llmProviderLabel(llmProviderID), retryPolicy)
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
@@ -1131,7 +1141,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 // the spend price lookup, so a non-Groq adapter is not mispriced as groq.
 func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder, provName observe.Provider, retryPolicy retry.Policy) func(npcSpec) agent.Engine {
 	return func(spec npcSpec) agent.Engine {
-		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.model, 0, 0,
+		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.agentID, spec.model, 0, 0,
 			// The per-round LLM spans (A3) and the spend price lookup are labelled with
 			// the actual provider (#272). The no-op recorder keeps the keyless path
 			// silent; the live binary / benchmark inject a real one.

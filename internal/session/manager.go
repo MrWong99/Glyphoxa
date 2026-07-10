@@ -23,6 +23,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
+	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -241,6 +242,19 @@ func (m *Manager) SetMemory(r agent.MemoryRecaller) {
 // start, so no lock is needed. nil leaves facts off (the prompt stays byte-identical).
 func (m *Manager) SetFacts(f agent.FactsRecaller) {
 	m.base.Facts = f
+}
+
+// SetToolDeps wires the built-in knowledge Tools' read sources onto the base
+// voice config every manager-started session copies (#296, S1): the adapter
+// backing transcript_search and kg_query. Like SetFacts it flows through Start →
+// RunFromDB → connectAndServe → buildConversation → tool.BuiltinRegistry, so a
+// live NPC granted a knowledge Tool actually reaches the DB. The adapter needs
+// the Manager as its active-session source, so the Manager is built first and the
+// deps back-wired before any session starts — no lock needed. The zero value
+// leaves the Tools registered but unavailable at Execute (the prompt/loop still
+// behave, the model just gets an "unavailable" tool result).
+func (m *Manager) SetToolDeps(d tool.Deps) {
+	m.base.ToolDeps = d
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no

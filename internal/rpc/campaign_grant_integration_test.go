@@ -50,8 +50,11 @@ func TestToolGrants_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants(butler): %v", err)
 	}
-	if g := butlerGrants.Msg.GetGrants(); len(g) != 1 || g[0].GetToolName() != "dice" || !g[0].GetGranted() {
-		t.Fatalf("butler grants = %+v, want dice granted (seeded)", g)
+	// The catalog now lists every built-in (dice + the #296 knowledge Tools); assert
+	// by the GRANTED set, not by catalog index — the auto-Butler is seeded with dice
+	// only (migration 00013), the rest listed present-but-off.
+	if granted := grantedNames(butlerGrants.Msg.GetGrants()); len(granted) != 1 || granted[0] != "dice" {
+		t.Fatalf("butler granted = %v, want [dice] (seeded); full catalog = %+v", granted, butlerGrants.Msg.GetGrants())
 	}
 
 	// A fresh Character NPC has no grants → dice listed but off.
@@ -294,7 +297,7 @@ func hydratedDeclarations(t *testing.T, store *storage.Store, agentID uuid.UUID)
 		t.Fatalf("hydrate: ListToolGrants(%s): %v", agentID, err)
 	}
 	grants := storage.GrantsFromRows(rows)
-	decls := tool.NewGrantSet(tool.BuiltinRegistry(), grants...).Declarations()
+	decls := tool.NewGrantSet(tool.BuiltinRegistry(tool.Deps{}), grants...).Declarations()
 	names := make([]string, len(decls))
 	for i, d := range decls {
 		names[i] = d.Name
