@@ -212,8 +212,8 @@ func TestServeImport(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("code=%d body=%q, want 200", rec.Code, rec.Body.String())
 		}
-		// The field is ALWAYS present (ADR-0053 §4 stable response shape): a bundle
-		// with no unmappable participant refs still marshals it as 0, never omitted.
+		// The field is ALWAYS present so the response shape is stable for clients: a
+		// bundle with no unmappable participant refs still marshals it as 0, never omitted.
 		if !strings.Contains(rec.Body.String(), `"dropped_participant_refs"`) {
 			t.Errorf("200 body missing dropped_participant_refs field: %s", rec.Body.String())
 		}

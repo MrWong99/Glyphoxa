@@ -80,9 +80,9 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 // importResponse is the ServeImport 200 body: the minted campaign identity plus
 // the per-section counts the UI surfaces ("Imported <name>"). A history-less
 // bundle reports zero sessions/lines/chunks. DroppedParticipantRefs is ALWAYS
-// present (ADR-0053 §4 stable shape) — a chunk participant ref that mapped to no
-// imported Agent was dropped (not fatal), and a nonzero count also lands as a
-// slog.Warn in the importer (#381).
+// present so the response shape is stable for clients — a chunk participant ref
+// that mapped to no imported Agent was dropped (not fatal), and a nonzero count
+// also lands as a slog.Warn in the importer (#381).
 type importResponse struct {
 	CampaignID             string `json:"campaign_id"`
 	Name                   string `json:"name"`
