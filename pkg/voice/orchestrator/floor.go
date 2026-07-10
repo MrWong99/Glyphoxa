@@ -197,6 +197,22 @@ func (f *Floor) YieldAgent(agentID string) (turnID string, yielded bool) {
 	return turnID, true
 }
 
+// SetHolderAgent retargets the floor's coalesce anchor and mute-cut key
+// ([Floor.holderAgent]) onto agentID, but only while turnID still holds the floor
+// (holderTurn == turnID AND a turn is held). It is the Ensemble Lead election
+// (#301, ADR-0025): the floor is Taken under the coalesce anchor Targets[0], and
+// once the speculative race elects a Lead the floor must name THAT agent so a
+// per-Agent mute cut ([Floor.YieldAgent], #211) and the coalesce window both key on
+// whoever is actually speaking. A stale turnID — a late election for a turn already
+// superseded/yielded — is a no-op, so it can never retarget a newer holder.
+func (f *Floor) SetHolderAgent(turnID, agentID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cancel != nil && f.holderTurn == turnID {
+		f.holderAgent = agentID
+	}
+}
+
 // Active reports whether a turn currently holds the floor (a turn is in flight,
 // from its [Floor.Take] until release/Yield — which spans the pre-audio LLM phase
 // as well as playback). It is a point-in-time read; callers must tolerate the

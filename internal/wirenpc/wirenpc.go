@@ -33,6 +33,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
@@ -413,6 +414,23 @@ type Config struct {
 	// unavailable at Execute — the loop feeds that back and continues, never panics.
 	ToolDeps tool.Deps
 
+	// Tape, when non-nil, is the rollover tape (#306, ADR-0051) this Voice Session
+	// captures into: connectAndServe wires the inbound Opus tap (consented Speaker
+	// audio) and the outbound Opus tap (agent speech, always on) into it, posts the
+	// in-channel consent disclosure after joining, and subscribes tape.SetConsent to
+	// TapeConsentChanged. nil means the Campaign is not armed (default OFF) — NO
+	// tape, NO taps, NO disclosure, so the loop is byte-identical to the pre-tape
+	// path. RunFromDB constructs it (from campaign.tape_armed + the consent set) and
+	// owns its Close; it lives across reconnect cycles for the whole session.
+	Tape *tape.Tape
+	// TapeConsent is the durable consent surface the tape reseeds from and the
+	// voice-mode consent buttons write to (#306): ListTapeConsent authoritatively
+	// reseeds the tape each cycle (so a revoke during a reconnect gap still lands),
+	// and Upsert/DeleteTapeConsent back the standalone voice-mode client's own
+	// consent-button listener (all mode's presence owns its own). Set by RunFromDB
+	// alongside Tape; nil when the campaign is not armed.
+	TapeConsent TapeConsentStore
+
 	// GMSpeaker reports whether a Discord SpeakerID belongs to a Game Master —
 	// operator-allowlist membership per ADR-0050/ADR-0041, the deterministic GM
 	// identity with no per-session binding. When non-nil it arms the Butler
@@ -488,6 +506,25 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	cfg.keys = keys
 	cfg.llmProviderID = llmProviderID(primary.LLMConfig)
 	cfg.language = campaign.Language
+
+	// Rollover tape (#306, ADR-0051): armed ONLY when the Campaign opted in
+	// (tape_armed). Seed it with the individually-consenting Speakers; agent speech
+	// is always captured regardless. The tape lives across reconnect cycles for the
+	// whole session and is discarded here at session end — only promoted Highlights
+	// outlive it (a later slice). Default OFF: an unarmed campaign gets no tape, no
+	// taps, no capture whatsoever.
+	if campaign.TapeArmed {
+		consented, err := st.ListTapeConsent(ctx, cfg.CampaignID)
+		if err != nil {
+			return fmt.Errorf("wirenpc: load tape consent: %w", err)
+		}
+		tp := tape.New(tape.Window, consented, log)
+		defer tp.Close()
+		cfg.Tape = tp
+		cfg.TapeConsent = st
+		log.Info("rollover tape armed", "campaign", cfg.CampaignID, "consented_speakers", len(consented))
+	}
+
 	return Run(ctx, cfg)
 }
 
@@ -634,7 +671,7 @@ var newDiscordClient = disgo.New
 // owned by the presence) and reports owned=false so the caller never closes it;
 // a provider error fails the cycle so runWithReconnect retries. Otherwise it
 // builds and opens a per-cycle client (today's behavior) and reports owned=true.
-func acquireClient(ctx context.Context, cfg Config, log *slog.Logger) (client *bot.Client, owned bool, err error) {
+func acquireClient(ctx context.Context, cfg Config, bus *voiceevent.Bus, log *slog.Logger) (client *bot.Client, owned bool, err error) {
 	if cfg.Client != nil {
 		c, err := cfg.Client(ctx)
 		if err != nil {
@@ -647,7 +684,7 @@ func acquireClient(ctx context.Context, cfg Config, log *slog.Logger) (client *b
 	// after disgo builds its VoiceManager). DaveOption() is a no-op stub unless the
 	// binary was built with -tags dave; NewManager(WithDave(true)) then warns if
 	// encryption was expected but unavailable.
-	c, err := newDiscordClient(cfg.Token,
+	opts := []bot.ConfigOpt{
 		// Own disgo's logger explicitly (A1): route it through the same filtered
 		// app logger so the benign DAVE-decrypt noise is tamed even if disgo ever
 		// stops reading slog.Default().
@@ -658,10 +695,29 @@ func acquireClient(ctx context.Context, cfg Config, log *slog.Logger) (client *b
 		// segfaulting disgo's voice gateway on the VoiceServerUpdate join path.
 		// GuildVoiceStates (+Guilds) is the minimum to populate that state.
 		bot.WithGatewayConfigOpts(gateway.WithIntents(
-			gateway.IntentGuilds|gateway.IntentGuildVoiceStates,
+			gateway.IntentGuilds | gateway.IntentGuildVoiceStates,
 		)),
 		gxvoice.DaveOption(),
-	)
+	}
+	// Standalone voice mode has no boot-owned presence to answer the tape consent
+	// disclosure's buttons (#306, finding 5), so THIS per-cycle client must carry
+	// the listener itself — otherwise every Consent/Revoke press fails. The all-mode
+	// shared client (cfg.Client != nil, handled above) gets it from the presence.
+	//
+	// It MUST run off the gateway read goroutine: the handler does a DB upsert, a
+	// publish, an authoritative reconcile (2nd DB round-trip + tape ctrl) and a
+	// Discord REST reply, and stalling the read goroutine on all that misses
+	// heartbeats → reconnect churn (the exact ADR-0010 hazard the presence guards
+	// with async events — see internal/presence). So enable async event delivery
+	// alongside the listener, mirroring defaultClientBuilder. Gated on the listener
+	// so a nil-Tape cycle keeps today's synchronous, listener-free client unchanged.
+	if l := tapeConsentListener(cfg.TapeConsent, bus, log); l != nil {
+		opts = append(opts,
+			bot.WithEventListenerFunc(l),
+			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
+		)
+	}
+	c, err := newDiscordClient(cfg.Token, opts...)
 	if err != nil {
 		return nil, false, fmt.Errorf("wirenpc: build Discord client: %w", err)
 	}
@@ -700,7 +756,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// Discord client: either the standing shared client the presence owns
 	// (cfg.Client, #102) or a per-cycle client this loop builds and closes. The
 	// shared client is already gateway-open and must NOT be closed here.
-	client, owned, err := acquireClient(cycleCtx, cfg, log)
+	client, owned, err := acquireClient(cycleCtx, cfg, bus, log)
 	if err != nil {
 		return err
 	}
@@ -761,7 +817,9 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// publish FirstAudio and the pump FirstOpus onto the same bus the conversation's
 	// stages publish on and the metrics/SSE subscribers read) and already carries
 	// this cycle's connection.state{connecting}/{connected} (#123).
-	pump := wire.NewPlaybackPump(sess, cdc, log, bus)
+	// tapePumpOptions adds the outbound (agent-speech) tape tap when the campaign is
+	// armed (#306); nil tape → no option → unchanged playback.
+	pump := wire.NewPlaybackPump(sess, cdc, log, bus, tapePumpOptions(cfg.Tape)...)
 	defer pump.Close()
 
 	// cfg.keys.tts is the resolved BYOK TTS key (issue #69): the decrypted saved
@@ -800,6 +858,21 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// standalone / bench unchanged).
 	defer wireMutes(bus, roster, cfg.Mutes)()
 
+	// Rollover-tape consent (#306, ADR-0051): reseed the tape from the durable
+	// consent rows at cycle start and reconcile on every (campaign-filtered)
+	// TapeConsentChanged, and post the in-channel consent disclosure with
+	// grant/revoke buttons. A nil Tape (campaign not armed) makes both inert, so the
+	// loop is unchanged.
+	defer wireTapeConsent(cycleCtx, bus, cfg.Tape, cfg.CampaignID, cfg.TapeConsent, log)()
+	if cfg.Tape != nil {
+		if err := postTapeDisclosure(cycleCtx, client, channel, cfg.CampaignID); err != nil {
+			// A failed disclosure post must not tear down the session — capture is
+			// still consent-gated (only prior consenters are taped), and the operator
+			// can re-post. Log and continue.
+			log.Warn("post tape consent disclosure", "err", err)
+		}
+	}
+
 	// Inbound (hear): the pipeline pumps Session.Inbound through the same Codec's
 	// DecodeInbound into the orchestrator. It tags its inbound counters (A2) with
 	// the guild and shares the run's MetricsRecorder.
@@ -811,8 +884,10 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// runs at the VAD frame geometry (vadSampleRate/vadFrameMs) so silero endpoints
 	// ~vadMinSilenceFrames*vadFrameMs (= 384 ms) after the speaker stops — the
 	// natural cadence the bargeConfirm/floorCoalesce windows already account for.
-	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics,
-		wire.WithSilenceClock(vadSampleRate, vadFrameMs))
+	// tapeInboundOptions adds the inbound (consented Speaker) tape tap when armed
+	// (#306); nil tape → no option → byte-identical inbound loop.
+	pipeOpts := append([]wire.Option{wire.WithSilenceClock(vadSampleRate, vadFrameMs)}, tapeInboundOptions(cfg.Tape)...)
+	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics, pipeOpts...)
 	return pipe.Run(cycleCtx, sess)
 }
 
@@ -1031,6 +1106,89 @@ func wireMutes(bus *voiceevent.Bus, roster *Roster, mutes orchestrator.MuteView)
 		// seed must be under the Roster lock.
 		roster.ApplyMutes(mutes.Muted)
 	}
+	return unsub
+}
+
+// tapeInboundOptions returns the [wire.Pipeline] options that copy every consented
+// inbound Speaker frame into the rollover tape (#306). A nil tape (campaign not
+// armed) returns nothing, so the pipeline is byte-identical to the pre-tape loop.
+// The tap runs inline on the audio loop: tape.AppendInbound is non-blocking and
+// drops unconsented Speakers before any buffer (ADR-0051), so it adds no latency.
+func tapeInboundOptions(t *tape.Tape) []wire.Option {
+	if t == nil {
+		return nil
+	}
+	return []wire.Option{
+		wire.WithInboundTap(func(f gxvoice.Frame) {
+			t.AppendInbound(f.UserID.String(), f.Opus, time.Now())
+		}),
+	}
+}
+
+// tapePumpOptions returns the [wire.PlaybackPump] options that copy every agent
+// Opus frame pulled to the wire into the rollover tape's always-on agent lane
+// (#306, ADR-0051). A nil tape returns nothing (unchanged playback).
+func tapePumpOptions(t *tape.Tape) []wire.PumpOption {
+	if t == nil {
+		return nil
+	}
+	return []wire.PumpOption{
+		wire.WithOutboundOpusTap(func(opus []byte) {
+			t.AppendAgent(opus, time.Now())
+		}),
+	}
+}
+
+// TapeConsentReader is the authoritative consent read the tape reseeds from (#306):
+// the durable tape_consent rows for a Campaign. *storage.Store satisfies it.
+type TapeConsentReader interface {
+	ListTapeConsent(ctx context.Context, campaignID uuid.UUID) ([]string, error)
+}
+
+// wireTapeConsent keeps the tape's consent set converged to the DURABLE truth
+// (#306, ADR-0051), the exact discipline the mute wiring uses (wireMutes): it
+// re-reads the authoritative consent rows rather than trusting an event payload, so
+// two out-of-order events can't leave the tape granted while the DB says revoked.
+//
+//   - It reseeds from ListTapeConsent at cycle start, so a grant/revoke that landed
+//     while nothing was subscribed (a reconnect backoff gap — the subscription is
+//     per cycle but the tape is per session) is applied on the next cycle.
+//   - On every TapeConsentChanged it filters e.CampaignID to THIS session's campaign
+//     — a press against a stale disclosure for another campaign (a reused channel)
+//     must not arm a lane here — then re-reads the store and reconciles the whole set.
+//
+// It returns the unsubscribe func for the caller to defer. A nil tape (campaign not
+// armed) does nothing.
+func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, campaignID uuid.UUID, store TapeConsentReader, log *slog.Logger) func() {
+	if t == nil {
+		return func() {}
+	}
+	if store == nil {
+		// A wiring bug: the tape is armed but no consent reader was threaded through
+		// (RunFromDB sets both together). Refuse to reconcile against a nil store —
+		// which would panic — and log loudly; the tape keeps its construction-time
+		// seed rather than crashing the session.
+		log.Error("tape: armed but no consent reader wired; live consent changes will not apply", "campaign", campaignID)
+		return func() {}
+	}
+	reconcile := func() {
+		consented, err := store.ListTapeConsent(ctx, campaignID)
+		if err != nil {
+			log.Warn("tape: reconcile consent from store", "campaign", campaignID, "err", err)
+			return
+		}
+		t.ReconcileConsent(consented)
+	}
+	// Subscribe BEFORE the seed reconcile so an event landing in the seed window is
+	// not lost (the wireMutes precedent): worst case is one extra idempotent
+	// reconcile, never a dropped consent change.
+	unsub := voiceevent.On(bus, func(e voiceevent.TapeConsentChanged) {
+		if e.CampaignID != campaignID.String() {
+			return // a consent press for a different campaign — not ours
+		}
+		reconcile() // re-read the durable truth; ignore the (possibly stale/reordered) payload
+	})
+	reconcile() // authoritative reseed at cycle start (catches changes during a reconnect gap)
 	return unsub
 }
 

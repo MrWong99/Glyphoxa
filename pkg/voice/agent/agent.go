@@ -342,6 +342,108 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 	return []orchestrator.Reply{{Sentence: reply, Voice: r.cfg.Persona.Voice}}
 }
 
+// Draft produces the Agent's would-be reply text for one utterance WITHOUT
+// mutating any state — the speculative fan-out half of an Ensemble Turn (ADR-0025,
+// #301). It assembles the SAME Hot Context [Replier.turn] would (system prompt +
+// bounded recent Transcript + the user message), but on a SNAPSHOT copy of the
+// history, so a candidate that LOSES the Lead race commits nothing: no user
+// message appended, no assistant message recorded (ADR-0012's zero-commit rule,
+// made structural). An empty completion returns "", nil (the Agent says nothing);
+// an engine error — including a ctx cancel when the loser's shared draft context is
+// cut after the winner is elected — returns "", err. The winning candidate's
+// [Replier.SpeakDraft] is what actually commits the turn.
+//
+// It honors ctx (bounded by [Config.TurnTimeout] like the LLM turn) and consults
+// Memory/Facts under it, so a barge tearing down the whole ensemble unwinds every
+// in-flight draft.
+func (r *Replier) Draft(ctx context.Context, text string) (string, error) {
+	ctx, cancel := r.withTurnTimeout(ctx)
+	defer cancel()
+
+	// Snapshot the history and append the user message on the COPY — Draft must not
+	// touch the loop's live history (purity).
+	r.mu.Lock()
+	history := append(make([]llm.Message, 0, len(r.history)+1), r.history...)
+	r.mu.Unlock()
+	history = append(history, llm.Message{Role: llm.RoleUser, Text: text})
+	history = trimHistory(history, r.cfg.HistoryTurns)
+
+	// Recall + facts run under ctx, never mutating loop state (they never did).
+	mem := r.recall(ctx, text)
+	facts := r.facts(ctx)
+
+	msgs := make([]llm.Message, 0, len(history)+1)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem, facts)})
+	msgs = append(msgs, history...)
+
+	reply, err := r.engine.Generate(ctx, msgs)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(reply), nil
+}
+
+// SpeakDraft speaks an already-generated draft (the winning Lead's, from a prior
+// [Replier.Draft]) as this Agent's turn (ADR-0025, #301). It appends the user
+// message (parity with [Replier.streamTurn], which always records the utterance it
+// answered), sentence-splits draft, and dispatches each sentence in order,
+// committing to history ONLY the text actually delivered (ADR-0012). dispatch is
+// the deliver-then-commit signal: a sentence joins the committed text only once
+// dispatch returns nil (fully synthesized under a live turn ctx); a dispatch
+// reporting the turn cancelled (a barge cutting the ensemble mid-draft) stops the
+// drain, and the sentences forwarded before the cut are committed while the rest
+// are dropped. It returns the delivered text; a ctx-cancel is the expected barge
+// path, not a failure, so it returns a nil error there.
+func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
+	r.mu.Lock()
+	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: userText})
+	r.trimHistoryLocked()
+	r.mu.Unlock()
+
+	var split sentenceSplitter
+	var spoken strings.Builder
+	voice := r.cfg.Persona.Voice
+
+	// Deliver-then-commit (ADR-0012, mirrors streamTurn's emit): dispatch FIRST; a
+	// sentence joins the spoken builder only once dispatch returns nil.
+	emit := func(sentence string) error {
+		if e := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); e != nil {
+			return e
+		}
+		if spoken.Len() > 0 {
+			spoken.WriteByte(' ')
+		}
+		spoken.WriteString(sentence)
+		return nil
+	}
+
+	var dispErr error
+	for _, sentence := range split.Push(draft) {
+		if e := emit(sentence); e != nil {
+			dispErr = e
+			break
+		}
+	}
+	// Flush the trailing unterminated sentence — unless the turn was cut, in which
+	// case its tail was never spoken and must not be dispatched.
+	if dispErr == nil && ctx.Err() == nil {
+		if tail := split.Flush(); tail != "" {
+			if e := emit(tail); e != nil {
+				dispErr = e
+			}
+		}
+	}
+
+	r.commitSpoken(spoken.String())
+
+	// A cancel is the expected barge path (the whole ensemble was torn down), not a
+	// turn failure; surface only a genuine dispatch error under a live ctx.
+	if ctx.Err() != nil {
+		return spoken.String(), nil
+	}
+	return spoken.String(), dispErr
+}
+
 // ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop
 // in streaming mode (B1): it dispatches each sentence of the reply to TTS the
 // moment it is ready, so first audio begins after the first sentence rather than
@@ -750,13 +852,20 @@ func memoryBlock(mem Memory) string {
 // HistoryTurns remain, keeping the most recent. A zero or negative
 // HistoryTurns means unbounded. Caller holds r.mu.
 func (r *Replier) trimHistoryLocked() {
-	if r.cfg.HistoryTurns <= 0 || len(r.history) <= r.cfg.HistoryTurns {
-		return
+	r.history = trimHistory(r.history, r.cfg.HistoryTurns)
+}
+
+// trimHistory keeps at most the last keep user/assistant messages of history,
+// re-slicing onto a fresh backing array when it trims (so the dropped turns can be
+// GC'd and the retained slice does not pin the whole conversation). A zero or
+// negative keep means unbounded, and a history already within the bound is returned
+// unchanged (same backing) — so the live [Replier.trimHistoryLocked] path is
+// byte-for-byte identical while [Replier.Draft] can trim a history COPY too.
+func trimHistory(history []llm.Message, keep int) []llm.Message {
+	if keep <= 0 || len(history) <= keep {
+		return history
 	}
-	// Re-slice onto a fresh backing array so the dropped turns can be GC'd and
-	// the retained slice does not pin the whole conversation.
-	keep := r.cfg.HistoryTurns
 	trimmed := make([]llm.Message, keep)
-	copy(trimmed, r.history[len(r.history)-keep:])
-	r.history = trimmed
+	copy(trimmed, history[len(history)-keep:])
+	return trimmed
 }

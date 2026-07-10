@@ -114,6 +114,15 @@ func TestMuteChanged_EventName(t *testing.T) {
 	}
 }
 
+func TestTapeConsentChanged_EventName(t *testing.T) {
+	t.Parallel()
+
+	got := TapeConsentChanged{}.EventName()
+	if got != "tape.consent_changed" {
+		t.Errorf("EventName = %q, want %q", got, "tape.consent_changed")
+	}
+}
+
 func TestConnectionStateChanged_EventName(t *testing.T) {
 	t.Parallel()
 

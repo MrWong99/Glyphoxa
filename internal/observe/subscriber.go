@@ -130,6 +130,7 @@ func (s *StageSubscriber) Subscribe(bus *voiceevent.Bus) (unsubscribe func()) {
 	unsubs := []func(){
 		voiceevent.On(bus, s.onSTTFinal),
 		voiceevent.On(bus, s.onAddressRouted),
+		voiceevent.On(bus, s.onEnsembleRouted),
 		voiceevent.On(bus, s.onTTSInvoked),
 		voiceevent.On(bus, s.onFirstAudio),
 		voiceevent.On(bus, s.onFirstOpus),
@@ -177,6 +178,37 @@ func (s *StageSubscriber) onAddressRouted(e voiceevent.AddressRouted) {
 
 	// address_detect = route decision − transcript. Only when we have the
 	// STTFinal anchor (sttFinalAt set); otherwise we can't compute the span.
+	if !t.sttFinalAt.IsZero() {
+		s.rec.AddressDetect(e.At.Sub(t.sttFinalAt))
+	}
+}
+
+// onEnsembleRouted stage-marks an Ensemble Turn's routing decision exactly like
+// onAddressRouted (#301): the ensemble opens ONE turn under its TurnID, so the
+// role (Targets[0], the top-scored/eventual coalesce anchor) and the address_detect
+// span are recorded the same way a single-target route is. The elected Lead speaks
+// under this same TurnID, so its FirstOpus/latency pair against this mark.
+func (s *StageSubscriber) onEnsembleRouted(e voiceevent.EnsembleRouted) {
+	if e.TurnID == "" || len(e.Targets) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.turns[e.TurnID]
+	if t == nil {
+		t = &turnState{}
+		s.turns[e.TurnID] = t
+	}
+	// TODO(#301): the role label uses Targets[0].AgentRole (the top-scored coalesce
+	// anchor), which may not match the eventually-elected Lead's AgentRole. It is a
+	// metrics label only (ADR-0032 §2.1 — never a per-turn identity), and an
+	// ensemble's candidates share the character role in practice, so the approximation
+	// is harmless; revisit if a mixed-role ensemble (Butler + Character) ever ships.
+	t.role = normalizeRole(e.Targets[0].AgentRole)
+	t.roleKnown = true
+	t.routedAt = e.At
+	t.lastSeen = s.now()
+
 	if !t.sttFinalAt.IsZero() {
 		s.rec.AddressDetect(e.At.Sub(t.sttFinalAt))
 	}

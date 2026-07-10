@@ -203,6 +203,44 @@ func TestUpdateCampaign_HappyPath(t *testing.T) {
 	}
 }
 
+// TestUpdateCampaign_TapeArmed pins the rollover-tape opt-in through the RPC
+// (#306, ADR-0051): setting tape_armed=true persists and is returned, and a
+// later update that omits tape_armed (the optional field) leaves it armed rather
+// than silently disarming it.
+func TestUpdateCampaign_TapeArmed(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	id := uuid.New()
+	store.campaignsByID = map[uuid.UUID]storage.Campaign{
+		id: {ID: id, TenantID: uuid.New(), Name: "Old", Language: "en"},
+	}
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+
+	armed := true
+	resp, err := client.UpdateCampaign(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCampaignRequest{
+			Id: id.String(), Name: "Old", TapeArmed: &armed,
+		}))
+	if err != nil {
+		t.Fatalf("UpdateCampaign (arm): %v", err)
+	}
+	if !resp.Msg.GetCampaign().GetTapeArmed() {
+		t.Fatalf("tape_armed not returned after arm: %+v", resp.Msg.GetCampaign())
+	}
+
+	// A subsequent update that omits tape_armed must not disarm it.
+	resp, err = client.UpdateCampaign(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCampaignRequest{
+			Id: id.String(), Name: "Renamed",
+		}))
+	if err != nil {
+		t.Fatalf("UpdateCampaign (rename): %v", err)
+	}
+	if !resp.Msg.GetCampaign().GetTapeArmed() {
+		t.Fatalf("omitting tape_armed disarmed the campaign: %+v", resp.Msg.GetCampaign())
+	}
+}
+
 // TestUpdateCampaign_OpaqueFreeText pins the #264 opacity rule: an arbitrary,
 // non-vocabulary system/language string reaches storage verbatim — no validation
 // rejects it (curation is the settings-editor slice's call).
