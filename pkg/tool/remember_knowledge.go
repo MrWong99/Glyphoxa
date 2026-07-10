@@ -8,10 +8,12 @@ import (
 	"unicode/utf8"
 )
 
-// MaxProposalTextRunes caps the free-text fields a remember_knowledge proposal
-// carries (fact / body / name), in runes: a pathological wall of text has no
-// business in the GM's review queue, and the cap bounds one proposed_write's
-// jsonb. Enforced in the handler, per-field, before the writer is ever called.
+// MaxProposalTextRunes caps the free-text (prose) fields a remember_knowledge
+// proposal carries — fact and body — in runes: a pathological wall of text has no
+// business in the GM's review queue. The shorter entity-name fields (subject,
+// target, name) are capped at MaxKGNameRunes instead. Together these two caps
+// bound EVERY field, so one proposed_write's jsonb is bounded. Enforced in the
+// handler, per-field, before the writer is ever called.
 const MaxProposalTextRunes = 2000
 
 // Proposal kinds (ADR-0052). fact/edge may be proposed own_node or campaign;
@@ -227,12 +229,21 @@ func validateArgs(a rememberArgs) error {
 		if err := capText("fact", a.Fact); err != nil {
 			return err
 		}
+		if err := capName("subject", a.Subject); err != nil {
+			return err
+		}
 	case proposalKindEdge:
 		if !relationValues[a.Relation] {
 			return fmt.Errorf("remember_knowledge: %q is not a known relation", a.Relation)
 		}
 		if strings.TrimSpace(a.Target) == "" {
 			return fmt.Errorf("remember_knowledge: an edge requires a 'target'")
+		}
+		if err := capName("subject", a.Subject); err != nil {
+			return err
+		}
+		if err := capName("target", a.Target); err != nil {
+			return err
 		}
 	case proposalKindNode:
 		if strings.TrimSpace(a.Name) == "" {
@@ -253,10 +264,21 @@ func validateArgs(a rememberArgs) error {
 	return nil
 }
 
-// capText rejects a field longer than MaxProposalTextRunes (rune-counted).
+// capText rejects a prose field longer than MaxProposalTextRunes (rune-counted).
 func capText(field, s string) error {
 	if utf8.RuneCountInString(s) > MaxProposalTextRunes {
 		return fmt.Errorf("remember_knowledge: %s is too long (max %d characters)", field, MaxProposalTextRunes)
+	}
+	return nil
+}
+
+// capName rejects an entity-name field (subject/target) longer than
+// MaxKGNameRunes (rune-counted). It is scope-blind so the cap holds for an
+// own_node edge target as well as a campaign subject/target — no field escapes
+// unbounded into the proposed_write jsonb.
+func capName(field, s string) error {
+	if utf8.RuneCountInString(s) > MaxKGNameRunes {
+		return fmt.Errorf("remember_knowledge: %s is too long (max %d characters)", field, MaxKGNameRunes)
 	}
 	return nil
 }

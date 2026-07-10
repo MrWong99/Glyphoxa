@@ -51,6 +51,7 @@ var (
 // write seam — no OwnNode lookup, no proposal row.
 func TestRememberKnowledge_ArgValidation(t *testing.T) {
 	long := strings.Repeat("x", MaxProposalTextRunes+1)
+	longName := strings.Repeat("x", MaxKGNameRunes+1) // entity names cap at MaxKGNameRunes
 	cases := []struct {
 		name string
 		args string
@@ -59,8 +60,11 @@ func TestRememberKnowledge_ArgValidation(t *testing.T) {
 		{"empty kind", `{"kind":""}`},
 		{"fact missing text", `{"kind":"fact","subject":"The Duke"}`},
 		{"fact too long", `{"kind":"fact","subject":"X","fact":"` + long + `"}`},
+		{"fact subject too long", `{"kind":"fact","subject":"` + longName + `","fact":"x"}`},
 		{"edge bad relation", `{"kind":"edge","subject":"X","relation":"loves","target":"Y"}`},
 		{"edge missing target", `{"kind":"edge","subject":"X","relation":"knows"}`},
+		{"edge subject too long", `{"kind":"edge","subject":"` + longName + `","relation":"knows","target":"Y"}`},
+		{"edge target too long", `{"kind":"edge","subject":"X","relation":"knows","target":"` + longName + `"}`},
 		{"node missing name", `{"kind":"node","node_type":"npc"}`},
 		{"node bad type", `{"kind":"node","name":"X","node_type":"dragon"}`},
 		{"node name too long", `{"kind":"node","node_type":"npc","name":"` + long + `"}`},
