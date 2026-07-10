@@ -104,3 +104,28 @@ func (c *Cast) Reply() orchestrator.ReplyFunc {
 		return r.Reply()(ctx, e)
 	}
 }
+
+// Draft implements [orchestrator.EnsembleSpeaker]: it produces the addressed
+// Agent's would-be reply text WITHOUT mutating anything (the speculative fan-out
+// half of an Ensemble Turn, ADR-0025/#301), by delegating to that member's
+// [Replier.Draft]. An unknown (or removed) Agent yields "", nil — the same "no one
+// answers" signal the coordinator reads as an empty draft, never an error.
+func (c *Cast) Draft(ctx context.Context, e voiceevent.AddressRouted) (string, error) {
+	r := c.lookup(e.Target.AgentID)
+	if r == nil {
+		return "", nil // no Agent answers for this route
+	}
+	return r.Draft(ctx, e.Text)
+}
+
+// Speak implements [orchestrator.EnsembleSpeaker]: it speaks the winning Lead's
+// pre-generated draft as the addressed Agent's turn (committing the delivered text
+// to that member's history, ADR-0012), by delegating to [Replier.SpeakDraft]. An
+// unknown Agent dispatches nothing and returns "", nil.
+func (c *Cast) Speak(ctx context.Context, e voiceevent.AddressRouted, draft string, dispatch func(orchestrator.Reply) error) (string, error) {
+	r := c.lookup(e.Target.AgentID)
+	if r == nil {
+		return "", nil // no Agent answers for this route
+	}
+	return r.SpeakDraft(ctx, e.Text, draft, dispatch)
+}

@@ -219,3 +219,61 @@ var (
 	_ orchestrator.StreamReplyFunc = agent.NewCast().ReplyStream()
 	_ orchestrator.ReplyFunc       = agent.NewCast().Reply()
 )
+
+// TestCast_Draft_RoutesByAgentID pins the EnsembleSpeaker.Draft half (#301): a
+// Draft for agent B produces B's would-be text (via B's Replier), and an unknown
+// Agent yields "", nil — the "no one answers" signal the coordinator treats as an
+// empty draft.
+func TestCast_Draft_RoutesByAgentID(t *testing.T) {
+	a := castReplier("a", &fakeStreamEngine{deltas: []string{"I am A."}})
+	b := castReplier("b", &fakeStreamEngine{deltas: []string{"I am B."}})
+	cast := agent.NewCast(a, b)
+
+	draft, err := cast.Draft(context.Background(), routed("b", "who are you?"))
+	if err != nil {
+		t.Fatalf("Draft: %v", err)
+	}
+	if draft != "I am B." {
+		t.Fatalf("draft = %q, want B's text", draft)
+	}
+
+	// Unknown Agent: no member answers, "" nil (not an error).
+	got, err := cast.Draft(context.Background(), routed("zzz", "hello"))
+	if err != nil || got != "" {
+		t.Fatalf("Draft(unknown) = (%q, %v), want (\"\", nil)", got, err)
+	}
+}
+
+// TestCast_Speak_RoutesByAgentID pins the EnsembleSpeaker.Speak half (#301): a
+// Speak for agent B dispatches B's draft in B's Voice and returns the delivered
+// text; an unknown Agent dispatches nothing and returns "", nil.
+func TestCast_Speak_RoutesByAgentID(t *testing.T) {
+	a := castReplier("a", &fakeStreamEngine{deltas: []string{"unused"}})
+	b := castReplier("b", &fakeStreamEngine{deltas: []string{"unused"}})
+	cast := agent.NewCast(a, b)
+
+	var got []orchestrator.Reply
+	delivered, err := cast.Speak(context.Background(), routed("b", "who are you?"), "I am B.", func(rep orchestrator.Reply) error {
+		got = append(got, rep)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	if delivered != "I am B." {
+		t.Fatalf("delivered = %q, want the draft text", delivered)
+	}
+	if len(got) != 1 || got[0].Voice.VoiceID != "b" {
+		t.Fatalf("dispatched = %+v, want one sentence in b's voice", got)
+	}
+
+	// Unknown Agent: nothing dispatched, "" nil.
+	got = nil
+	delivered, err = cast.Speak(context.Background(), routed("zzz", "x"), "hi", func(rep orchestrator.Reply) error {
+		got = append(got, rep)
+		return nil
+	})
+	if err != nil || delivered != "" || len(got) != 0 {
+		t.Fatalf("Speak(unknown) = (%q, %v) dispatched %d, want (\"\", nil) and no dispatch", delivered, err, len(got))
+	}
+}

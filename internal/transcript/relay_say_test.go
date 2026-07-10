@@ -63,3 +63,30 @@ func TestProjection_SayPersistenceTeeFires(t *testing.T) {
 		t.Errorf("persisted say line = {id %q who %q text %q}, want {a:s1 Bart Aye.}", got[0].LineID, got[0].Who, got[0].Text)
 	}
 }
+
+// TestProjection_EnsembleLeadAttributesLine pins #301: the Ensemble Turn's Lead
+// speaks under the ensemble's original TurnID, and its EnsembleLead attribution
+// makes the coalesced reply land as the Lead's line (a:<turn>, the Lead's name +
+// NPC pill) — exactly like an AddressRouted turn. A losing candidate publishes no
+// EnsembleLead and no TTSInvoked, so it leaves no line.
+func TestProjection_EnsembleLeadAttributesLine(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+
+	bus.Publish(voiceevent.EnsembleLead{
+		At: at(1), TurnID: "e1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", Index: 0, TurnID: "e1"})
+
+	v := r.View(id)
+	if len(v.Lines) != 1 {
+		t.Fatalf("got %d lines, want 1: %+v", len(v.Lines), v.Lines)
+	}
+	l := v.Lines[0]
+	if l.ID != "a:e1" || l.Who != "Bart" || l.Kind != KindNPC || l.Tag != "NPC" {
+		t.Errorf("ensemble lead line meta = {id %q who %q kind %q tag %q}, want {a:e1 Bart npc NPC}", l.ID, l.Who, l.Kind, l.Tag)
+	}
+	if l.Text != "I speak first." {
+		t.Errorf("ensemble lead line text = %q, want the Lead's reply", l.Text)
+	}
+}
