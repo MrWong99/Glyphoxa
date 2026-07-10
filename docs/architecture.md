@@ -25,7 +25,9 @@ shipped sections implies code that does not exist.
 > ADR-0039 ([single-operator web tier](adr/0039-mvp-ui-backend-single-operator-web-tier.md))
 
 One binary, `cmd/glyphoxa`, runs in one of **three Modes**, selected by `-mode`.
-**The shipped default is `-mode voice`**, not `all` — see [Tree vs ADR](#tree-vs-adr) below.
+**The default is `-mode all`** — the self-host target (ADR-0005/ADR-0034); it
+auto-applies migrations at startup, so a bare `glyphoxa` reaches a serving,
+migrated instance. An explicit `-mode voice`/`web` still overrides it.
 
 | Mode | What the process is | What it runs |
 |------|---------------------|--------------|
@@ -53,9 +55,6 @@ Two other subcommands sit beside the Modes: `glyphoxa migrate` (ADR-0031) and
 
 ### Tree vs ADR
 
-- ADR-0005 names `all` the default Mode. The binary defaults `-mode` to `voice`
-  (`cmd/glyphoxa/main.go`), a recorded MVP choice, not silent drift — the comment
-  at the flag says so.
 - ADR-0005 specifies a `voice_sessions(guild_id PK, voice_instance_id,
   claimed_at, heartbeat_at)` claim table plus `LISTEN/NOTIFY` handoff. **Not
   built.** The shipped `voice_sessions` table
@@ -588,7 +587,10 @@ goose v3 with plain SQL files in `internal/storage/migrations/`, embedded via
 `//go:embed`, sequential zero-padded prefixes, up + down in one file. The provider
 takes a Postgres advisory-lock session locker (`internal/storage/migrate.go`) so
 simultaneous instance startups serialize — the same Postgres coordination substrate
-ADR-0005 chose, no new infrastructure. Applied with `glyphoxa migrate up`.
+ADR-0005 chose, no new infrastructure. Applied with `glyphoxa migrate up`, or
+automatically at startup in the default `-mode all` (`autoMigrate` in
+`cmd/glyphoxa`, under the same advisory lock) — the serving `web`/`voice` Modes
+assume a current schema and fail fast if behind (ADR-0031).
 
 ### 6.5 Credentials
 
@@ -699,24 +701,19 @@ still the placeholder.
 init-container on every replica. The advisory lock makes concurrent migration
 *safe*; the hook makes it *run once and observably*.
 
-**Self-host** — the v1.0 target — is where the ADR and the tree diverge most. The
-*only* artifacts that ship are the `Dockerfile` and the Helm chart. ADR-0034's
-self-host story — a **systemd unit** running `glyphoxa -mode all`, plus a
-`compose.yml` (app + Postgres/pgvector) as the zero-to-running on-ramp — is
-**design-of-record, not in the tree**: `find` returns no `*.service` file and no
-`compose*.yml`, and `deploy/` holds only the chart.
-
-That gap is not cosmetic, because it compounds with a second one. ADR-0034's
-"`systemctl start` and go" pitch leans on `all`-Mode auto-migrate — which **is not
-wired** either (§1, §6.4). So a self-hoster today must run migrations by hand:
-
-```
-glyphoxa migrate up      # apply the schema first (all Modes assume it is current)
-glyphoxa -mode all       # then serve
-```
-
-Starting `-mode all` against an unmigrated database fails every query. Secrets come
-from the environment or the OS keyring, never baked into the image.
+**Self-host** — the v1.0 target — ships the full ADR-0034 on-ramp: the
+`Dockerfile`, a root **`compose.yml`** (app + Postgres/pgvector) as the
+zero-to-running path, and a **systemd unit** (`deploy/glyphoxa.service`) running
+`glyphoxa -mode all` as a non-root user. Both lean on `all`-Mode **startup
+auto-migrate** (ADR-0031, wired in `runWeb` via `autoMigrate`): the process
+applies the embedded migrations under the advisory lock at boot, so
+`docker compose up` / `systemctl start` reach the login screen against a migrated
+database with **no manual `migrate up` step**. A web-only replica does *not*
+auto-migrate — per ADR-0031 the serving Modes assume a current schema and fail
+fast — so N replicas never race; only `all` Mode (and the Helm migrate hook) owns
+the migration. Secrets come from the environment (`.env` for compose,
+`EnvironmentFile=/etc/glyphoxa/env` for systemd) or the OS keyring, never baked
+into the image.
 
 CI (`.github/workflows/ci.yml`) gates every PR on `buf · proto · web · test ·
 integration · audio · image · helm · e2e · lint`. The default suite is **keyless**:
@@ -750,9 +747,7 @@ disagreement is documented rather than discovered.
 
 | ADR says | The tree does | Why / where |
 |----------|---------------|-------------|
-| ADR-0005: default Mode is `all` | `-mode` defaults to `voice` | recorded MVP choice; migrates with #6 (`cmd/glyphoxa/main.go`) |
 | ADR-0005: `voice_sessions` claim table with `voice_instance_id` / heartbeat / `LISTEN/NOTIFY` | a per-Campaign session record, no claiming | one Voice Instance in the v1.0 self-host shape; orphans swept at boot |
-| ADR-0031: `all` Mode auto-migrates at startup | only `glyphoxa migrate up` migrates | `storage.MigrateUp` exists but is unwired from the Mode entrypoints |
 | ADR-0015: `TenantService`, `glyphoxa.voice.v1.VoiceControlService` | five services, all `management.v1` | multi-tenant deferred (ADR-0039); `all` Mode drives sessions in-process |
 | ADR-0010: `/say <text> as:<agent>` | not registered | deferred; `/glyphoxa mute` + `muteall` shipped instead (#211) |
 | ADR-0010: permissions from `tenant_members.role` | operator allowlist membership | `tenant_members` does not exist (ADR-0010 #102 amendment, ADR-0041) |
@@ -762,7 +757,6 @@ disagreement is documented rather than discovered.
 | ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field exists | blocks on speaker attribution (§2.3, §2.6) |
 | ADR-0023: TTS matrix is ElevenLabs + OpenAI | ElevenLabs only | OpenAI TTS adapter not built |
 | ADR-0011: default embeddings via Ollama; ADR-0004 names more providers | `pkg/voice/embeddings/ollama` only | the only shipped embeddings adapter |
-| ADR-0034: systemd unit + `compose.yml` for self-host | neither exists | only `Dockerfile` + the Helm chart ship; self-host is manual (§8) |
 | ADR-0024: a 4-stage address chain | a 5-heuristic scoring stack | `DefaultHeuristics` adds `RecentlyInterrupted` + `ExpertOnRecentWord` (§2.2) |
 
 ## See also
