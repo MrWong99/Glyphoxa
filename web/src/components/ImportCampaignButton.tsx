@@ -77,6 +77,12 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
   // gone by the time the upload resolves. Capture the file, then upload against
   // that value — a failure surfaces in the standalone alert below the trigger
   // (not the now-closed dialog), and a success opens the switch prompt.
+  //
+  // Both outcomes ALSO toast (ADR-0017): between the confirm dialog closing and
+  // the success dialog opening no modal is mounted, so an Escape / outside-click
+  // can dismiss the whole switcher panel and unmount this component mid-upload —
+  // the inline alert/dialog would then report nowhere. The toast is anchored
+  // outside the panel, so feedback survives that unmount either way.
   const runImport = async (file: File) => {
     setBusy(true);
     setError(null);
@@ -86,8 +92,11 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
       // switches to it — listCampaigns is sweep-invariant, so invalidate it now.
       void invalidateList();
       setSummary(result);
+      toast.success(`Imported “${result.name}”`);
     } catch (err) {
-      setError((err as Error).message);
+      const message = (err as Error).message;
+      setError(message);
+      toast.error(`Couldn't import campaign: ${message}`);
     } finally {
       setBusy(false);
     }
@@ -95,11 +104,15 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
 
   return (
     <>
+      {/* Driven programmatically from the visible trigger, so it's an off-screen,
+          non-focusable, screen-reader-hidden element — not a stray tab stop. */}
       <input
         ref={inputRef}
         type="file"
         accept=".gz,.json,application/gzip,application/json"
         className="gx-import-campaign__input"
+        tabIndex={-1}
+        aria-hidden="true"
         onChange={onFileChosen}
       />
       <button

@@ -27,9 +27,15 @@ const FALLBACK_FILENAME = "campaign.glyphoxa.json.gz";
 
 // downloadBlob saves a blob to disk by clicking a transient <a download>. The
 // anchor is appended (some browsers ignore a click on a detached node), clicked,
-// then removed and its object URL revoked so nothing leaks. Defensively no-op
-// outside a real browser (jsdom, where URL.createObjectURL is unimplemented) so
-// callers can fire-and-forget — mirrors audio.ts's jsdom guard.
+// then removed. Defensively no-op outside a real browser (jsdom, where
+// URL.createObjectURL is unimplemented) so callers can fire-and-forget — mirrors
+// audio.ts's jsdom guard.
+//
+// The object URL is revoked on a DEFERRED timer, not synchronously: Safari
+// historically aborts an in-flight download when its blob URL is revoked in the
+// same tick as the click, and bundles run up to the 32 MiB cap (ADR-0048). A
+// ~10s delay lets the browser start reading the blob before it's released; the
+// leak window is bounded and one-shot.
 export function downloadBlob(blob: Blob, filename: string): void {
   if (typeof document === "undefined" || typeof URL?.createObjectURL !== "function") return;
   const url = URL.createObjectURL(blob);
@@ -42,7 +48,7 @@ export function downloadBlob(blob: Blob, filename: string): void {
     a.click();
     a.remove();
   } finally {
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 }
 
@@ -84,12 +90,17 @@ export async function importCampaignBundle(file: File): Promise<ImportSummary> {
     headers: token ? { "X-CSRF-Token": token } : {},
   });
   if (!res.ok) {
-    let message = `Import failed (${res.status})`;
+    // The importer's JSON errors carry {"error": …} (400 bad bundle, 500), but the
+    // MaxBytesReader 413 is plain text ("bundle exceeds maximum upload size"). Read
+    // the body ONCE as text and prefer its JSON error field when it parses, else
+    // fall back to the raw text — so BOTH shapes surface cleanly (AC: oversized).
+    const text = (await res.text()).trim();
+    let message = text || `Import failed (${res.status})`;
     try {
-      const body = (await res.json()) as { error?: string };
+      const body = JSON.parse(text) as { error?: string };
       if (body?.error) message = body.error;
     } catch {
-      // Non-JSON body (e.g. a proxy's 413 page) — keep the status-based message.
+      // Non-JSON body (the plain-text 413) — keep the raw text.
     }
     throw new Error(message);
   }

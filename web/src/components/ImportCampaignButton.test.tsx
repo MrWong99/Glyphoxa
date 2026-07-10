@@ -21,6 +21,12 @@ vi.mock("@/lib/download", () => ({ importCampaignBundle: vi.fn() }));
 import { importCampaignBundle, type ImportSummary } from "@/lib/download";
 const mockImport = vi.mocked(importCampaignBundle);
 
+// Toasts are the unmount-proof feedback channel (they render outside the panel),
+// so assert them directly rather than only the inline alert/dialog.
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+import { toast } from "sonner";
+const mockToast = vi.mocked(toast);
+
 const summaryFixture: ImportSummary = {
   campaignId: "imported-1",
   name: "The Prancing Pony",
@@ -90,6 +96,8 @@ function pickFile(name = "bundle.glyphoxa.json.gz") {
 
 beforeEach(() => {
   mockImport.mockReset();
+  mockToast.success.mockReset();
+  mockToast.error.mockReset();
 });
 
 describe("ImportCampaignButton", () => {
@@ -113,6 +121,18 @@ describe("ImportCampaignButton", () => {
     const success = await screen.findByRole("alertdialog");
     expect(within(success).getByRole("heading", { name: /Imported.*The Prancing Pony/ })).toBeInTheDocument();
     expect(within(success).getByRole("button", { name: /Switch/ })).toBeInTheDocument();
+    // A toast fires too — unmount-proof feedback if the panel closes mid-flow.
+    await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith(expect.stringMatching(/The Prancing Pony/)));
+  });
+
+  it("toasts the failure so feedback survives a mid-upload panel dismissal", async () => {
+    mockImport.mockRejectedValue(new Error("import failed"));
+    renderButton();
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+    // The confirm dialog is already closed by Radix; without a toast a failure
+    // after a panel dismissal would report nowhere.
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(expect.stringMatching(/import failed/)));
   });
 
   it("surfaces the server error message when the import fails", async () => {

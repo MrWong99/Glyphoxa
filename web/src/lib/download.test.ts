@@ -38,15 +38,23 @@ describe("downloadBlob", () => {
       return el;
     });
 
+    vi.useFakeTimers();
     downloadBlob(new Blob(["x"]), "camp.glyphoxa.json.gz");
 
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(clicked).not.toBeNull();
     expect(clicked!.download).toBe("camp.glyphoxa.json.gz");
     expect(clicked!.href).toContain("blob:export");
-    // The transient anchor is gone and its object URL released — no DOM/blob leak.
+    // The transient anchor is gone immediately.
     expect(document.querySelector("a")).toBeNull();
+
+    // The object URL is revoked on a DEFERRED timer (Safari aborts large-blob
+    // downloads on an immediate revoke), so it's still live right after the click…
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    // …and released once the timer fires — no leak.
+    vi.advanceTimersByTime(10_000);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:export");
+    vi.useRealTimers();
   });
 });
 
@@ -156,17 +164,21 @@ describe("importCampaignBundle", () => {
     vi.unstubAllGlobals();
   });
 
-  it("throws the server {error} message on a 413 oversized response", async () => {
+  it("throws the server's PLAIN-TEXT message on a 413 oversized response", async () => {
+    // ServeImport's MaxBytesReader 413 is http.Error plain text, NOT JSON — the
+    // client must surface it verbatim, not a generic "Import failed (413)".
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ error: "bundle too large (limit 32 MiB)" }), {
+        new Response("bundle exceeds maximum upload size\n", {
           status: 413,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
         }),
       ),
     );
-    await expect(importCampaignBundle(bundleFile())).rejects.toThrow(/too large/);
+    await expect(importCampaignBundle(bundleFile())).rejects.toThrow(
+      /bundle exceeds maximum upload size/,
+    );
     vi.unstubAllGlobals();
   });
 });
