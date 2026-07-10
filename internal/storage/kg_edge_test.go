@@ -159,7 +159,7 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	}
 
 	// Deleting Aldric cascades the remaining incident Edge (Cyra knows Aldric).
-	if err := st.DeleteNode(ctx, aldric.ID); err != nil {
+	if err := st.DeleteNode(ctx, campaignID, aldric.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	outC, inC, err := st.NodeEdges(ctx, cyra.ID)
@@ -225,7 +225,7 @@ func TestSetNodeAgent(t *testing.T) {
 	if _, err := st.SetNodeAgent(ctx, npc.ID, uuid.NullUUID{UUID: agentID, Valid: true}); err != nil {
 		t.Fatalf("SetNodeAgent relink: %v", err)
 	}
-	if err := st.DeleteAgent(ctx, agentID); err != nil {
+	if err := st.DeleteAgent(ctx, campaignID, agentID); err != nil {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 	nodes, err := st.ListNodes(ctx, campaignID)

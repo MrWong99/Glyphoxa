@@ -326,6 +326,62 @@ func TestDeleteNode_StorageErrorIsInternal(t *testing.T) {
 	}
 }
 
+// TestUpdateNode_ScopesToActiveCampaign is #342: the handler resolves the active
+// campaign and passes its id down, so the store's UPDATE matches (id, campaign_id)
+// and a cross-campaign write is refused server-side.
+func TestUpdateNode_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "old"}}
+	client := crudClient(t, store)
+
+	if _, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: id.String(), Name: "New"})); err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+	if store.updateNodeCampaign != activeID {
+		t.Errorf("UpdateNode scoped to %s, want active %s", store.updateNodeCampaign, activeID)
+	}
+}
+
+// TestDeleteNode_ScopesToActiveCampaign is #342: the delete is scoped to the
+// resolved active campaign, so another campaign's Node is never removable.
+func TestDeleteNode_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "gone soon"}}
+	client := crudClient(t, store)
+
+	if _, err := client.DeleteNode(context.Background(),
+		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	if store.deleteNodeCampaign != activeID {
+		t.Errorf("DeleteNode scoped to %s, want active %s", store.deleteNodeCampaign, activeID)
+	}
+}
+
+// TestDeleteNode_NoActiveCampaignIsNotFound is #342: without an active campaign the
+// scoped delete cannot resolve an owner and returns CodeNotFound.
+func TestDeleteNode_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.DeleteNode(context.Background(),
+		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
 func TestSearchNodes_EmptyQueryIsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()

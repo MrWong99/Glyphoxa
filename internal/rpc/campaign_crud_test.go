@@ -81,6 +81,11 @@ type fakeCampaignStore struct {
 	updateErr error
 	deleteErr error
 	nextColor int
+	// updateAgentCampaign/deleteAgentCampaign record the campaign id the agent
+	// mutations were scoped to (#342), so a unit test can assert the handler passed
+	// the resolved active campaign down to storage.
+	updateAgentCampaign uuid.UUID
+	deleteAgentCampaign uuid.UUID
 
 	created []storage.NewAgent
 
@@ -92,6 +97,11 @@ type fakeCampaignStore struct {
 	nodeListErr   error
 	nodeUpdateErr error
 	nodeDeleteErr error
+	// updateNodeCampaign/deleteNodeCampaign record the campaign id the KG-Node
+	// mutations were scoped to (#342), so a unit test can assert the handler passed
+	// the resolved active campaign down to storage.
+	updateNodeCampaign uuid.UUID
+	deleteNodeCampaign uuid.UUID
 
 	// KG Edge state (#132): edgesCreated records CreateEdge inputs; edgesOut/edgesIn
 	// back NodeEdges; setAgentCalls records SetNodeAgent inputs; setAgentNode is the
@@ -135,6 +145,11 @@ type fakeCampaignStore struct {
 	charListErr       error
 	charUpdateErr     error
 	charDeleteErr     error
+	// charUpdateCampaign/charDeleteCampaign record the campaign id the Character
+	// mutations were scoped to (#342): the handler resolves the active campaign and
+	// passes it down, so another campaign's Character is never mutable.
+	charUpdateCampaign uuid.UUID
+	charDeleteCampaign uuid.UUID
 }
 
 // setAgentCall records one SetNodeAgent invocation for assertions.
@@ -290,6 +305,7 @@ func (f *fakeCampaignStore) CreateAgent(_ context.Context, a storage.NewAgent) (
 }
 
 func (f *fakeCampaignStore) UpdateAgent(_ context.Context, u storage.AgentUpdate) (storage.Agent, error) {
+	f.updateAgentCampaign = u.CampaignID
 	if f.updateErr != nil {
 		return storage.Agent{}, f.updateErr
 	}
@@ -307,7 +323,8 @@ func (f *fakeCampaignStore) UpdateAgent(_ context.Context, u storage.AgentUpdate
 	return a, nil
 }
 
-func (f *fakeCampaignStore) DeleteAgent(_ context.Context, id uuid.UUID) error {
+func (f *fakeCampaignStore) DeleteAgent(_ context.Context, campaignID, id uuid.UUID) error {
+	f.deleteAgentCampaign = campaignID
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -341,6 +358,7 @@ func (f *fakeCampaignStore) ListNodes(_ context.Context, campaignID uuid.UUID) (
 }
 
 func (f *fakeCampaignStore) UpdateNode(_ context.Context, u storage.KGNodeUpdate) (storage.KGNode, error) {
+	f.updateNodeCampaign = u.CampaignID
 	if f.nodeUpdateErr != nil {
 		return storage.KGNode{}, f.nodeUpdateErr
 	}
@@ -355,7 +373,8 @@ func (f *fakeCampaignStore) UpdateNode(_ context.Context, u storage.KGNodeUpdate
 	return storage.KGNode{}, storage.ErrNotFound
 }
 
-func (f *fakeCampaignStore) DeleteNode(_ context.Context, id uuid.UUID) error {
+func (f *fakeCampaignStore) DeleteNode(_ context.Context, campaignID, id uuid.UUID) error {
+	f.deleteNodeCampaign = campaignID
 	if f.nodeDeleteErr != nil {
 		return f.nodeDeleteErr
 	}
@@ -944,5 +963,62 @@ func TestDeleteAgent_HappyPath(t *testing.T) {
 	}
 	if _, ok := store.agents[id]; ok {
 		t.Error("agent was not removed from the store")
+	}
+}
+
+// TestUpdateAgent_ScopesToActiveCampaign is #342: the handler resolves the active
+// campaign and passes its id down, so the store's UPDATE matches (id, campaign_id)
+// and a cross-campaign write is refused server-side.
+func TestUpdateAgent_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	id := uuid.New()
+	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old"}
+	client := crudClient(t, store)
+
+	if _, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "New"})); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+	if store.updateAgentCampaign != activeID {
+		t.Errorf("UpdateAgent scoped to %s, want active %s", store.updateAgentCampaign, activeID)
+	}
+}
+
+// TestDeleteAgent_ScopesToActiveCampaign is #342: the delete is scoped to the
+// resolved active campaign, so another campaign's Agent is never removable.
+func TestDeleteAgent_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	id := uuid.New()
+	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Doomed"}
+	client := crudClient(t, store)
+
+	if _, err := client.DeleteAgent(context.Background(),
+		connect.NewRequest(&managementv1.DeleteAgentRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+	if store.deleteAgentCampaign != activeID {
+		t.Errorf("DeleteAgent scoped to %s, want active %s", store.deleteAgentCampaign, activeID)
+	}
+}
+
+// TestDeleteAgent_NoActiveCampaignIsNotFound is #342: with no active campaign the
+// scoped delete cannot resolve an owner and the handler returns CodeNotFound
+// rather than deleting by bare id.
+func TestDeleteAgent_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.DeleteAgent(context.Background(),
+		connect.NewRequest(&managementv1.DeleteAgentRequest{Id: uuid.New().String()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
 	}
 }

@@ -45,10 +45,13 @@ type NewCharacter struct {
 
 // CharacterUpdate is the input to UpdateCharacter — a full-field save of the
 // editor fields. DiscordUserID is included so an operator can rebind a Character
-// to a different Discord User (it stays NOT NULL). CampaignID is not here: a
-// Character never moves between Campaigns; the row is addressed by ID alone.
+// to a different Discord User (it stays NOT NULL). CampaignID is the owning
+// Campaign the write is scoped to (#342): the UPDATE matches (id, campaign_id),
+// so a row in another Campaign is invisible and yields ErrNotFound — a Character
+// never moves between Campaigns, and no operator can mutate one they do not own.
 type CharacterUpdate struct {
 	ID            uuid.UUID
+	CampaignID    uuid.UUID
 	Name          string
 	Aliases       []string
 	DiscordUserID string
@@ -90,9 +93,12 @@ func (s *Store) CreateCharacter(ctx context.Context, n NewCharacter) (uuid.UUID,
 }
 
 // UpdateCharacter saves a Character's editor fields (name/aliases/discord_user_id)
-// and returns the updated row, stamping updated_at = now(). Rebinding
-// discord_user_id is a normal field write; a collision with another Character's
-// (campaign, discord_user_id) yields ErrConflict. A missing id yields ErrNotFound.
+// and returns the updated row, stamping updated_at = now(). The write is scoped to
+// (id, campaign_id) (#342), so a Character in another Campaign matches no row and
+// yields ErrNotFound — a cross-campaign mutation is refused server-side without a
+// separate ownership SELECT. Rebinding discord_user_id is a normal field write; a
+// collision with another Character's (campaign, discord_user_id) yields ErrConflict.
+// A missing id yields ErrNotFound.
 func (s *Store) UpdateCharacter(ctx context.Context, u CharacterUpdate) (Character, error) {
 	aliases := u.Aliases
 	if aliases == nil {
@@ -104,9 +110,9 @@ func (s *Store) UpdateCharacter(ctx context.Context, u CharacterUpdate) (Charact
 		    aliases = $3,
 		    discord_user_id = $4,
 		    updated_at = now()
-		  WHERE id = $1
+		  WHERE id = $1 AND campaign_id = $5
 		 RETURNING `+characterColumns,
-		u.ID, u.Name, aliases, u.DiscordUserID)
+		u.ID, u.Name, aliases, u.DiscordUserID, u.CampaignID)
 	updated, err := scanCharacter(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Character{}, ErrNotFound
@@ -120,10 +126,13 @@ func (s *Store) UpdateCharacter(ctx context.Context, u CharacterUpdate) (Charact
 	return updated, nil
 }
 
-// DeleteCharacter removes a Character by id. A missing id yields ErrNotFound so
-// the RPC can distinguish "gone" from "never existed".
-func (s *Store) DeleteCharacter(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM character WHERE id = $1`, id)
+// DeleteCharacter removes a Character by id, scoped to its owning Campaign (#342):
+// the DELETE matches (id, campaign_id), so a Character in another Campaign is not
+// deleted and yields ErrNotFound — a cross-campaign delete is refused server-side.
+// A missing id likewise yields ErrNotFound so the RPC can distinguish "gone" from
+// "never existed".
+func (s *Store) DeleteCharacter(ctx context.Context, campaignID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM character WHERE id = $1 AND campaign_id = $2`, id, campaignID)
 	if err != nil {
 		return fmt.Errorf("storage: delete character %s: %w", id, err)
 	}

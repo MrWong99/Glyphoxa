@@ -219,10 +219,14 @@ func (s *Store) CreateAgent(ctx context.Context, a NewAgent) (uuid.UUID, error) 
 
 // AgentUpdate is the input to UpdateAgent. It carries the editor-editable fields
 // only — the Campaign screen edits name/title/persona/voice/address-only/aliases;
-// agent_role, campaign_id and speaker_color are immutable here. A Butler's
+// agent_role and speaker_color are immutable here. CampaignID is the owning
+// Campaign the write is scoped to (#342): the UPDATE matches (id, campaign_id), so
+// an Agent in another Campaign is invisible and yields ErrNotFound — cross-campaign
+// mutation is refused, and an Agent never moves between Campaigns. A Butler's
 // address_only is force-kept true regardless of AddressOnly (ADR-0009 / ADR-0024).
 type AgentUpdate struct {
 	ID                    uuid.UUID
+	CampaignID            uuid.UUID
 	Name                  string
 	Title                 string
 	Persona               string
@@ -257,10 +261,11 @@ func (s *Store) UpdateAgent(ctx context.Context, a AgentUpdate) (Agent, error) {
 		    address_only = CASE WHEN agent_role = 'butler' THEN true ELSE $8 END,
 		    aliases = $9,
 		    updated_at = now()
-		  WHERE id = $1
+		  WHERE id = $1 AND campaign_id = $10
 		 RETURNING `+agentColumns,
 		a.ID, a.Name, a.Title, a.Persona, voice,
-		a.VoiceProviderConfigID, a.LLMProviderConfigID, a.AddressOnly, aliases)
+		a.VoiceProviderConfigID, a.LLMProviderConfigID, a.AddressOnly, aliases,
+		a.CampaignID)
 	updated, err := scanAgent(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Agent{}, ErrNotFound
@@ -271,23 +276,26 @@ func (s *Store) UpdateAgent(ctx context.Context, a AgentUpdate) (Agent, error) {
 	return updated, nil
 }
 
-// DeleteAgent removes a Character NPC by id. Deleting a Butler is rejected with
-// ErrButlerUndeletable (ADR-0009): the guarded DELETE leaves a Butler row
-// untouched, and the wrapping CTE reports whether the id existed and whether it
-// was a Butler in one atomic round-trip — so a missing id yields ErrNotFound and
-// a Butler yields ErrButlerUndeletable, distinct from "deleted nothing".
-func (s *Store) DeleteAgent(ctx context.Context, id uuid.UUID) error {
+// DeleteAgent removes a Character NPC by id, scoped to its owning Campaign (#342):
+// every clause matches (id, campaign_id), so an Agent in another Campaign is
+// invisible — it neither exists nor deletes — and yields ErrNotFound, refusing a
+// cross-campaign delete. Deleting a Butler is rejected with ErrButlerUndeletable
+// (ADR-0009): the guarded DELETE leaves a Butler row untouched, and the wrapping
+// CTE reports whether the id existed in the Campaign and whether it was a Butler in
+// one atomic round-trip — so a missing id yields ErrNotFound and a Butler yields
+// ErrButlerUndeletable, distinct from "deleted nothing".
+func (s *Store) DeleteAgent(ctx context.Context, campaignID, id uuid.UUID) error {
 	var existed, isButler bool
 	err := s.db.QueryRow(ctx,
 		`WITH found AS (
-		     SELECT agent_role FROM agents WHERE id = $1
+		     SELECT agent_role FROM agents WHERE id = $1 AND campaign_id = $2
 		 ), del AS (
-		     DELETE FROM agents WHERE id = $1 AND agent_role <> 'butler' RETURNING 1
+		     DELETE FROM agents WHERE id = $1 AND campaign_id = $2 AND agent_role <> 'butler' RETURNING 1
 		 )
 		 SELECT
 		     EXISTS (SELECT 1 FROM found),
 		     COALESCE((SELECT agent_role = 'butler' FROM found), false)`,
-		id).Scan(&existed, &isButler)
+		id, campaignID).Scan(&existed, &isButler)
 	if err != nil {
 		return fmt.Errorf("storage: delete agent %s: %w", id, err)
 	}

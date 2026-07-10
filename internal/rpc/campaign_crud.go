@@ -151,6 +151,7 @@ func (s *CampaignServer) UpdateAgent(
 	m := req.Msg
 	updated, err := s.store.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:          id,
+		CampaignID:  c.ID,
 		Name:        m.GetName(),
 		Title:       m.GetTitle(),
 		Persona:     m.GetPersona(),
@@ -179,7 +180,20 @@ func (s *CampaignServer) DeleteAgent(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
 
-	switch err := s.store.DeleteAgent(ctx, id); {
+	// Resolve the active campaign and scope the delete to it (#342): the store's
+	// DELETE matches (id, campaign_id), so an Agent in another campaign is never
+	// removable through this session — it reads back as CodeNotFound, and the Butler
+	// guard still fires for the active campaign's own Butler.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("DeleteAgent: get active campaign failed", "agent_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	switch err := s.store.DeleteAgent(ctx, c.ID, id); {
 	case err == nil:
 		return connect.NewResponse(&managementv1.DeleteAgentResponse{}), nil
 	case errors.Is(err, storage.ErrButlerUndeletable):

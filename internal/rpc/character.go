@@ -119,8 +119,21 @@ func (s *CampaignServer) UpdateCharacter(
 		return nil, err
 	}
 
+	// Resolve the active campaign and scope the write to it (#342): the store's
+	// UPDATE matches (id, campaign_id), so a Character in another campaign is never
+	// mutable through this operator's session — it reads back as CodeNotFound.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("UpdateCharacter: get active campaign failed", "character_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
 	updated, err := s.store.UpdateCharacter(ctx, storage.CharacterUpdate{
 		ID:            id,
+		CampaignID:    c.ID,
 		Name:          name,
 		Aliases:       m.GetAliases(),
 		DiscordUserID: discordUserID,
@@ -154,15 +167,23 @@ func (s *CampaignServer) DeleteCharacter(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid character id"))
 	}
 
-	switch err := s.store.DeleteCharacter(ctx, id); {
+	// Resolve the active campaign and scope the delete to it (#342): the store's
+	// DELETE matches (id, campaign_id), so another campaign's Character is never
+	// removable through this session — it reads back as CodeNotFound.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("DeleteCharacter: get active campaign failed", "character_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	switch err := s.store.DeleteCharacter(ctx, c.ID, id); {
 	case err == nil:
 		// The deleted mapping's Discord User now falls back to guild name / generic
-		// label: drop the active campaign's cached resolutions (#281). The delete is
-		// by raw id, so we scope invalidation to the campaign in view (best-effort —
-		// the 5min TTL self-heals if resolution misses).
-		if c, cerr := s.activeCampaign(ctx); cerr == nil {
-			s.invalidateSpeakers(c.ID)
-		}
+		// label: drop the active campaign's cached resolutions (#281).
+		s.invalidateSpeakers(c.ID)
 		return connect.NewResponse(&managementv1.DeleteCharacterResponse{}), nil
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("character not found"))

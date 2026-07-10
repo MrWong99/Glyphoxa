@@ -96,7 +96,7 @@ func (fakeReader) CreateAgent(context.Context, storage.NewAgent) (uuid.UUID, err
 func (fakeReader) UpdateAgent(context.Context, storage.AgentUpdate) (storage.Agent, error) {
 	return storage.Agent{}, storage.ErrNotFound
 }
-func (fakeReader) DeleteAgent(context.Context, uuid.UUID) error {
+func (fakeReader) DeleteAgent(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
 func (fakeReader) CreateNode(context.Context, storage.NewKGNode) (storage.KGNode, error) {
@@ -108,7 +108,7 @@ func (fakeReader) ListNodes(context.Context, uuid.UUID) ([]storage.KGNode, error
 func (fakeReader) UpdateNode(context.Context, storage.KGNodeUpdate) (storage.KGNode, error) {
 	return storage.KGNode{}, nil
 }
-func (fakeReader) DeleteNode(context.Context, uuid.UUID) error {
+func (fakeReader) DeleteNode(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
 func (fakeReader) CreateEdge(context.Context, storage.NewKGEdge) (storage.KGEdge, error) {
@@ -144,7 +144,7 @@ func (fakeReader) CreateCharacter(context.Context, storage.NewCharacter) (uuid.U
 func (fakeReader) UpdateCharacter(context.Context, storage.CharacterUpdate) (storage.Character, error) {
 	return storage.Character{}, nil
 }
-func (fakeReader) DeleteCharacter(context.Context, uuid.UUID) error {
+func (fakeReader) DeleteCharacter(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
 

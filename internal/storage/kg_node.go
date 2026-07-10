@@ -86,18 +86,23 @@ func (s *Store) CreateNode(ctx context.Context, n NewKGNode) (KGNode, error) {
 }
 
 // KGNodeUpdate is the input to UpdateNode — the Knowledge panel's editor fields
-// (#129). It carries no Type (node_type is immutable, ADR-0008) and no CampaignID
-// (a Node never moves between campaigns); the row is addressed by ID alone.
+// (#129). It carries no Type (node_type is immutable, ADR-0008). CampaignID is the
+// owning Campaign the write is scoped to (#342): the UPDATE matches (id,
+// campaign_id), so a Node in another Campaign is invisible and yields ErrNotFound —
+// a Node never moves between campaigns, and cross-campaign mutation is refused.
 type KGNodeUpdate struct {
-	ID        uuid.UUID
-	Name      string
-	Body      string
-	GMPrivate bool
+	ID         uuid.UUID
+	CampaignID uuid.UUID
+	Name       string
+	Body       string
+	GMPrivate  bool
 }
 
 // UpdateNode saves a Knowledge Graph Node's editor fields (name/body/gm_private)
 // and returns the updated row, stamping updated_at = now(). node_type is never
-// touched (immutable, ADR-0008). A missing id yields ErrNotFound.
+// touched (immutable, ADR-0008). The write is scoped to (id, campaign_id) (#342),
+// so a Node in another Campaign matches no row and yields ErrNotFound — a
+// cross-campaign mutation is refused server-side. A missing id yields ErrNotFound.
 func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE kg_node SET
@@ -105,9 +110,9 @@ func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) 
 		    body = $3,
 		    gm_private = $4,
 		    updated_at = now()
-		  WHERE id = $1
+		  WHERE id = $1 AND campaign_id = $5
 		 RETURNING `+kgNodeColumns,
-		u.ID, u.Name, u.Body, u.GMPrivate)
+		u.ID, u.Name, u.Body, u.GMPrivate, u.CampaignID)
 	updated, err := scanKGNode(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return KGNode{}, ErrNotFound
@@ -118,10 +123,13 @@ func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) 
 	return updated, nil
 }
 
-// DeleteNode removes a Knowledge Graph Node by id. A missing id yields
-// ErrNotFound so the RPC can distinguish "gone" from "never existed".
-func (s *Store) DeleteNode(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM kg_node WHERE id = $1`, id)
+// DeleteNode removes a Knowledge Graph Node by id, scoped to its owning Campaign
+// (#342): the DELETE matches (id, campaign_id), so a Node in another Campaign is
+// not deleted and yields ErrNotFound — a cross-campaign delete is refused. A
+// missing id likewise yields ErrNotFound so the RPC can distinguish "gone" from
+// "never existed".
+func (s *Store) DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM kg_node WHERE id = $1 AND campaign_id = $2`, id, campaignID)
 	if err != nil {
 		return fmt.Errorf("storage: delete kg node %s: %w", id, err)
 	}
