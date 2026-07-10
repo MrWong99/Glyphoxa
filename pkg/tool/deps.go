@@ -24,6 +24,62 @@ type Deps struct {
 	// KG backs kg_query. nil ⇒ the Tool is registered but its Execute reports it
 	// is unavailable.
 	KG KGReader
+	// KGW backs remember_knowledge (#300, ADR-0052). nil ⇒ the Tool is registered
+	// but its Execute reports it is unavailable in this mode (the grant-editor RPC
+	// and voice bench build a zero Deps).
+	KGW KGWriter
+}
+
+// ProposedWrite is the versioned, storage-free payload one remember_knowledge
+// call proposes to the Knowledge Graph (#300, ADR-0052). It is a tagged union
+// over Kind ("fact", "edge", "node"); the adapter marshals it to the
+// knowledge_proposal.proposed_write jsonb verbatim, so the field set and json
+// tags ARE the on-disk contract. V is the schema version (always 1) so a future
+// shape change is detectable. Fields not part of a Kind stay zero and omitempty
+// keeps them out of the jsonb.
+//
+// Per ADR-0052 a proposal is the ONLY effect of the Tool — nothing touches
+// kg_node/kg_edge until the GM approves in PR-b's review surface. A speculative
+// draft (ADR-0053 ensemble fan-out) that is later discarded may still leave a
+// proposal row; that is ADR-0052-consistent (the NPC heard the fact) and the GM
+// review is the safety net.
+type ProposedWrite struct {
+	V        int    `json:"v"`
+	Kind     string `json:"kind"`
+	NodeID   string `json:"node_id,omitempty"`
+	Subject  string `json:"subject,omitempty"`
+	Fact     string `json:"fact,omitempty"`
+	Relation string `json:"relation,omitempty"`
+	Target   string `json:"target,omitempty"`
+	NodeType string `json:"node_type,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Body     string `json:"body,omitempty"`
+}
+
+// KGNodeRef is a storage-free handle to an Agent's own linked Node (ADR-0008
+// NPC-Node↔Agent link): its id (the anchor a Character NPC's own_node proposals
+// attach to) and its display Name (the subject the handler stamps over whatever
+// the LLM supplied). Kept storage-free so pkg/tool never sees a storage type.
+type KGNodeRef struct {
+	ID   string
+	Name string
+}
+
+// KGWriter is the narrow write seam remember_knowledge needs (#300, ADR-0052).
+// It is deliberately not part of [KGReader]: writing is a distinct authority.
+// *knowledge.Adapter satisfies it; a nil KGW on [Deps] reports unavailable at
+// Execute.
+//
+//   - OwnNode resolves the caller's own linked Node for own_node-scoped
+//     proposals. The agentID is the turn ctx caller ([CallerID]), never the LLM
+//     args. ok=false means the Agent has no linked wiki entry — the handler
+//     refuses rather than proposing against a wrong or absent Node.
+//   - CreateProposal records the proposal row (status pending). It is the ONLY
+//     side effect; per ADR-0052 barge semantics the adapter writes it under a
+//     cancel-immune context so a barged turn's proposal is never rolled back.
+type KGWriter interface {
+	OwnNode(ctx context.Context, agentID string) (KGNodeRef, bool, error)
+	CreateProposal(ctx context.Context, agentID string, w ProposedWrite) error
 }
 
 // TranscriptHit is one persisted transcript Line the knowledge adapter surfaces

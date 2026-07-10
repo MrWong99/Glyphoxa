@@ -14,7 +14,7 @@ import (
 // live session runs.
 func TestBuiltinRegistryRegistersKnowledgeTools(t *testing.T) {
 	reg := BuiltinRegistry(Deps{})
-	want := []string{"dice", "kg_query", "transcript_search"} // Tools() is Name-sorted
+	want := []string{"dice", "kg_query", "remember_knowledge", "transcript_search"} // Tools() is Name-sorted
 	got := reg.Tools()
 	if len(got) != len(want) {
 		t.Fatalf("registered %d tools, want %d: %+v", len(got), len(want), got)
