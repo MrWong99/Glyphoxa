@@ -112,6 +112,78 @@ func TestWAVClip_SingleRun20msCadence(t *testing.T) {
 	assertRegion(t, got, 0, 9600, 0)
 }
 
+func TestWAVClip_GapOver100msStartsNewRun(t *testing.T) {
+	base := time.Unix(3000, 0)
+	snap := Snapshot{From: base, To: base.Add(time.Second)}
+	// Frame A at 100ms; frame B after a 150ms gap (>100ms) → new run laid at its
+	// OWN wall-clock offset (350ms), not at cadence from A.
+	a := base.Add(100 * time.Millisecond)
+	b := a.Add(150 * time.Millisecond) // 250ms
+	snap.Lanes = []LaneSnapshot{{
+		LaneID: "spk",
+		Frames: []Frame{
+			{Opus: pcm(constN(100, 1000)...), At: a},
+			{Opus: pcm(constN(100, 2000)...), At: b},
+		},
+	}}
+
+	got := samplesOf(t, mustClip(t, snap, Options{Decoder: identityFactory}))
+
+	assertRegion(t, got, 4800, 100, 1000)  // 100ms → sample 4800
+	assertRegion(t, got, 12000, 100, 2000) // 250ms → sample 12000 (own offset, not cadence)
+	// Gap between the two runs is silence.
+	assertRegion(t, got, 4900, 7100, 0)
+}
+
+func TestWAVClip_MisorderedArrivalDeterministic(t *testing.T) {
+	base := time.Unix(4000, 0)
+	start := base.Add(100 * time.Millisecond)
+	f0 := Frame{Opus: pcm(constN(100, 1000)...), At: start}
+	f1 := Frame{Opus: pcm(constN(100, 2000)...), At: start.Add(20 * time.Millisecond)}
+	f2 := Frame{Opus: pcm(constN(100, 3000)...), At: start.Add(40 * time.Millisecond)}
+
+	ordered := Snapshot{From: base, To: base.Add(time.Second),
+		Lanes: []LaneSnapshot{{LaneID: "spk", Frames: []Frame{f0, f1, f2}}}}
+	shuffled := Snapshot{From: base, To: base.Add(time.Second),
+		Lanes: []LaneSnapshot{{LaneID: "spk", Frames: []Frame{f2, f0, f1}}}}
+
+	a := mustClip(t, ordered, Options{Decoder: identityFactory})
+	b := mustClip(t, shuffled, Options{Decoder: identityFactory})
+
+	if !bytes.Equal(a, b) {
+		t.Fatalf("mis-ordered input produced different bytes; alignment not deterministic")
+	}
+	// And the run is laid in At order regardless of input order.
+	got := samplesOf(t, a)
+	assertRegion(t, got, 4800, 100, 1000)
+	assertRegion(t, got, 4800+960, 100, 2000)
+	assertRegion(t, got, 4800+2*960, 100, 3000)
+}
+
+func TestWAVClip_FullScaleCollisionClamps(t *testing.T) {
+	base := time.Unix(5000, 0)
+	at := base.Add(100 * time.Millisecond)
+	snap := Snapshot{From: base, To: base.Add(time.Second), Lanes: []LaneSnapshot{
+		{LaneID: "a", Frames: []Frame{{Opus: pcm(constN(100, 32767)...), At: at}}},
+		{LaneID: "b", Frames: []Frame{{Opus: pcm(constN(100, 32767)...), At: at}}},
+	}}
+
+	got := samplesOf(t, mustClip(t, snap, Options{Decoder: identityFactory}))
+	// 32767 + 32767 = 65534; naive int16 sum wraps to -2. int32 accumulate +
+	// clamp must yield 32767, never a negative wraparound.
+	assertRegion(t, got, 4800, 100, 32767)
+
+	// Symmetric negative full-scale collision clamps to -32768.
+	base2 := time.Unix(5100, 0)
+	at2 := base2.Add(100 * time.Millisecond)
+	snapNeg := Snapshot{From: base2, To: base2.Add(time.Second), Lanes: []LaneSnapshot{
+		{LaneID: "a", Frames: []Frame{{Opus: pcm(constN(100, -32768)...), At: at2}}},
+		{LaneID: "b", Frames: []Frame{{Opus: pcm(constN(100, -32768)...), At: at2}}},
+	}}
+	gotNeg := samplesOf(t, mustClip(t, snapNeg, Options{Decoder: identityFactory}))
+	assertRegion(t, gotNeg, 4800, 100, -32768)
+}
+
 func TestWAVClip_HeaderBytewise(t *testing.T) {
 	base := time.Unix(1000, 0)
 	// 1 second window at 48 kHz mono = 48000 samples = 96000 data bytes.
