@@ -279,9 +279,14 @@ type Interaction struct {
 	opts    optionSource
 	resp    responder
 	// deferred is set once Defer succeeds: after it, Reply/ReplyEphemeral route
-	// through Followup, because the interaction is already acknowledged and a
-	// fresh CreateMessage would be a Discord 40060 ("already acknowledged").
+	// through the post-Defer path, because the interaction is already acknowledged
+	// and a fresh CreateMessage would be a Discord 40060 ("already acknowledged").
 	deferred bool
+	// originalConsumed is set once the deferred "thinking…" placeholder has been
+	// resolved by the first post-Defer reply. It drives the registry-wide routing rule
+	// (#335): the FIRST post-Defer reply edits the placeholder, every later one is a
+	// fresh Followup.
+	originalConsumed bool
 	// onDefer is installed by dispatch to stop the first-response watchdog when
 	// the handler Defers; nil when the Interaction is invoked outside dispatch.
 	onDefer func()
@@ -319,14 +324,37 @@ func (ic *Interaction) Reply(content string) error { return ic.reply(content, fa
 func (ic *Interaction) ReplyEphemeral(content string) error { return ic.reply(content, true) }
 
 // reply routes a message to the correct Discord response call: a fresh
-// CreateMessage before a Defer, a Followup after (a post-ACK CreateMessage is a
-// 40060). This makes both a handler's domain-error reply and the Registry's
+// CreateMessage before a Defer, the post-Defer path after (a post-ACK CreateMessage
+// is a 40060). This makes both a handler's domain-error reply and the Registry's
 // generic-error reply reach the user after a Defer.
 func (ic *Interaction) reply(content string, ephemeral bool) error {
 	if ic.deferred {
-		return ic.resp.followup(content, ephemeral)
+		return ic.sendPostDefer(content, ephemeral)
 	}
 	return ic.resp.reply(content, ephemeral)
+}
+
+// sendPostDefer is the registry-wide post-Defer routing rule (#335). Discord
+// DEPRECATED the shim where the first CreateFollowupMessage after a deferred
+// response implicitly edited the "thinking…" placeholder; a followup now always
+// creates a fresh message, leaving the placeholder dangling. So the FIRST post-Defer
+// reply resolves the placeholder via EditOriginal (its visibility fixed to the
+// Defer's), and every later one is a real Followup honoring its own flag. Owned here
+// at the Interaction level so every command — not just recap's public path — routes
+// identically.
+func (ic *Interaction) sendPostDefer(content string, ephemeral bool) error {
+	if !ic.originalConsumed {
+		// Mark consumed only AFTER the edit succeeds: if Discord 5xxs the edit the
+		// placeholder is still unresolved, so the retry (the dispatch generic-error
+		// ReplyEphemeral) must edit again — not route to a followup that would leave the
+		// "thinking…" placeholder dangling forever.
+		if err := ic.resp.editOriginal(content); err != nil {
+			return err
+		}
+		ic.originalConsumed = true
+		return nil
+	}
+	return ic.resp.followup(content, ephemeral)
 }
 
 // Defer acknowledges the interaction with a "thinking…" placeholder, buying a
@@ -344,24 +372,17 @@ func (ic *Interaction) Defer(ephemeral bool) error {
 	return nil
 }
 
-// Followup sends a message after a Defer. Per Discord's documented behavior, the
-// FIRST followup after a DEFERRED response actually EDITS the original deferred
-// placeholder (a new message is not created and the ephemeral flag is IGNORED — the
-// defer's visibility is preserved); only subsequent followups create fresh messages
-// honoring their own flags. A handler that wants a PUBLIC reply after an ephemeral
-// Defer must therefore EditOriginal first (to consume the placeholder) and then
-// Followup the public content.
+// Followup sends a message after a Defer. It obeys the registry-wide post-Defer rule
+// (#335): the FIRST post-Defer message resolves the deferred placeholder via
+// EditOriginal (its visibility fixed to the Defer's), and later ones create fresh
+// messages honoring their own flag. So a handler no longer has to EditOriginal by
+// hand before a public Followup — it just replies, and the first reply is the
+// placeholder edit. Called before a Defer it falls back to a plain followup.
 func (ic *Interaction) Followup(content string, ephemeral bool) error {
+	if ic.deferred {
+		return ic.sendPostDefer(content, ephemeral)
+	}
 	return ic.resp.followup(content, ephemeral)
-}
-
-// EditOriginal resolves the deferred "thinking…" placeholder by editing the original
-// interaction response in place. Its visibility is fixed to the Defer's (Discord
-// ignores an ephemeral flag on the original-response edit), so it is used to CONSUME
-// an ephemeral placeholder with a short note before sending PUBLIC Followups — which
-// then create real messages honoring their public flag. Only meaningful after Defer.
-func (ic *Interaction) EditOriginal(content string) error {
-	return ic.resp.editOriginal(content)
 }
 
 // Autocomplete is the handler's view of one autocomplete interaction.
