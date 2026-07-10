@@ -288,6 +288,57 @@ func TestMatcher_MaxTargetsCap(t *testing.T) {
 	}
 }
 
+// TestMatcher_TargetMatchFrom_ButlerGateExcludesNonGM pins the matcher-side
+// Butler GM-gate (S6, ADR-0024 amendment): with a ButlerGMGate configured, a
+// Butler-naming utterance from a non-GM (or empty) SpeakerID reaches nobody, while
+// the GM's identical utterance routes to the Butler. The gate fails closed on an
+// empty SpeakerID.
+func TestMatcher_TargetMatchFrom_ButlerGateExcludesNonGM(t *testing.T) {
+	const gm = "gm-111"
+	m := address.NewMatcher(address.Config{
+		Language:     "en",
+		ButlerGMGate: func(speakerID string) bool { return speakerID == gm },
+	}, butler, bart)
+
+	assertIDs(t, m.TargetMatchFrom("player-999", "Glyphoxa, roll a d6"))
+	assertIDs(t, m.TargetMatchFrom("", "Glyphoxa, roll a d6"))
+	assertIDs(t, m.TargetMatchFrom(gm, "Glyphoxa, roll a d6"), "butler")
+}
+
+// TestMatcher_TargetMatchFrom_ExcludedButlerFreesCoNamedSlot is the #256 reason
+// the gate must move matcher-side: an excluded Butler must be dropped BEFORE the
+// MaxTargets cap so it never shadows a co-named Character NPC into routing
+// nowhere. A non-GM naming both the Butler and Bart addresses Bart, not nobody.
+func TestMatcher_TargetMatchFrom_ExcludedButlerFreesCoNamedSlot(t *testing.T) {
+	m := address.NewMatcher(address.Config{
+		Language:     "en",
+		ButlerGMGate: func(string) bool { return false }, // nobody is the GM
+	}, butler, bart)
+
+	assertIDs(t, m.TargetMatchFrom("player", "Glyphoxa and Bart, hello there"), "npc-bart")
+}
+
+// TestMatcher_TargetMatchFrom_CharacterRoutingUnaffected pins AC3-adjacent: the
+// gate touches only Butler-role candidates. Character routing is byte-identical
+// regardless of the speaker.
+func TestMatcher_TargetMatchFrom_CharacterRoutingUnaffected(t *testing.T) {
+	m := address.NewMatcher(address.Config{
+		Language:     "en",
+		ButlerGMGate: func(string) bool { return false },
+	}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatchFrom("anyone", "Bart, pour me a drink"), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("anyone", "Goblin, what are you plotting?"), "npc-goblin")
+}
+
+// TestMatcher_TargetMatchFrom_NilGateAddressesButler pins the rollout default: no
+// ButlerGMGate means the Butler answers any speaker's explicit address (the
+// pre-#280 behavior), so TargetMatchFrom matches TargetMatch.
+func TestMatcher_TargetMatchFrom_NilGateAddressesButler(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
+	assertIDs(t, m.TargetMatchFrom("anyone", "Glyphoxa, give me a recap"), "butler")
+}
+
 // TestMatcher_AddAgent proves an Agent added after construction is addressable:
 // before the Add naming the Goblin routes to nobody (two other NPCs keep the
 // lone-NPC fallback inert), after it the new NPC is reached by name.

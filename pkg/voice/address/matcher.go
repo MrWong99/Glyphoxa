@@ -74,6 +74,18 @@ type Config struct {
 	// positive N caps at N; a negative value lifts the cap entirely, restoring
 	// the full Ensemble Turn set (ADR-0025).
 	MaxTargets int
+	// ButlerGMGate reports whether a SpeakerID may voice-address the Butler
+	// (ADR-0024 GM-only rule; #280 identity, ADR-0050 allowlist membership). When
+	// non-nil it arms the matcher-side Butler eligibility drop: on
+	// [Matcher.TargetMatchFrom], a Butler-role candidate is removed from the
+	// scored set BEFORE scoring, the MaxTargets cap, and lastAddressed whenever the
+	// speaker fails the gate (an empty SpeakerID fails closed). This is the #256
+	// relocation of the former detector-level drop
+	// ([orchestrator.WithButlerGMGate]): pre-cap the Butler can no longer shadow a
+	// co-named NPC into a lost slot nor black-hole the next unnamed continuation.
+	// Nil leaves the Butler addressable by any speaker (the rollout default, and
+	// byte-identical to the pre-gate [Matcher.TargetMatch] path).
+	ButlerGMGate func(speakerID string) bool
 	// RecencyWindow bounds how long mentioned words and interruptions stay
 	// "recent". Default 30s.
 	RecencyWindow time.Duration
@@ -133,6 +145,10 @@ type Matcher struct {
 	window     time.Duration
 	maxWords   int
 	clock      func() time.Time
+	// butlerGate is Config.ButlerGMGate: the matcher-side Butler eligibility gate
+	// consulted by TargetMatchFrom (#256). Nil means the Butler is addressable by
+	// any speaker (rollout default), so TargetMatchFrom matches TargetMatch.
+	butlerGate func(speakerID string) bool
 
 	mu sync.Mutex
 	// index is rebuilt by Add/Remove in lockstep with agents, and TargetMatch
@@ -222,6 +238,7 @@ func NewMatcher(cfg Config, agents ...Agent) *Matcher {
 		window:        window,
 		maxWords:      maxWords,
 		clock:         clock,
+		butlerGate:    cfg.ButlerGMGate,
 		agents:        agents,
 		lastAddressed: map[string]bool{},
 		interruptions: map[string]time.Time{},
@@ -389,8 +406,33 @@ func (m *Matcher) reindexLocked() {
 }
 
 // TargetMatch scores text against every Agent and returns the addressed set,
-// highest total first. It implements the orchestrator's TargetMatcher.
+// highest total first. It implements the orchestrator's TargetMatcher. It applies
+// no Butler GM-gate: the Butler is addressable by any speaker on this path (the
+// gate rides the SpeakerID-aware [Matcher.TargetMatchFrom] instead).
 func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
+	return m.match(text, false)
+}
+
+// TargetMatchFrom is the SpeakerID-aware routing entry (#256): identical to
+// [Matcher.TargetMatch] except it applies the [Config.ButlerGMGate] Butler
+// eligibility drop. When a ButlerGMGate is configured and speakerID fails it (or
+// is empty — fail closed), every Butler-role candidate is excluded from the scored
+// set BEFORE scoring, the MaxTargets cap, and lastAddressed — so a non-GM naming
+// the Butler neither shadows a co-named NPC's slot nor black-holes the next
+// unnamed continuation (the ADR-0024 amendment / #256 blocker). With no gate
+// configured it behaves exactly like TargetMatch, so the Butler answers any
+// speaker (the rollout default). It satisfies the orchestrator's
+// SpeakerAwareMatcher seam.
+func (m *Matcher) TargetMatchFrom(speakerID, text string) []voiceevent.AddressRouted {
+	excludeButler := m.butlerGate != nil && (speakerID == "" || !m.butlerGate(speakerID))
+	return m.match(text, excludeButler)
+}
+
+// match is the shared scoring core behind TargetMatch and TargetMatchFrom.
+// excludeButler drops every Butler-role candidate before scoring (the #256
+// pre-cap Butler GM-gate), so an excluded Butler never scores, never consumes a
+// MaxTargets slot, and is never recorded as lastAddressed.
+func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRouted {
 	now := m.clock()
 	words := tokenize(text)
 
@@ -434,6 +476,14 @@ func (m *Matcher) TargetMatch(text string) []voiceevent.AddressRouted {
 	}
 	var hits []scored
 	for _, a := range m.agents {
+		// Butler GM-gate (#256): a Butler-role candidate the speaker may not
+		// address is dropped here — before scoring, the cap, and lastAddressed — so
+		// it can neither shadow a co-named NPC's MaxTargets slot nor be recorded as
+		// last-addressed. This is the matcher-side relocation of the former
+		// detector-level drop (ADR-0024 amendment).
+		if excludeButler && a.Target.AgentRole == voiceevent.AgentRoleButler {
+			continue
+		}
 		// AddressOnly agents are reachable only by an explicit name match; no
 		// ambient heuristic may route to them (CONTEXT.md "Address-Only"). A muted
 		// Agent is name-gated the same way (#225): it stays matchable by name but
