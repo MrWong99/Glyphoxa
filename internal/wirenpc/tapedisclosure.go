@@ -3,13 +3,27 @@ package wirenpc
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
+
+// TapeConsentStore is the durable consent surface behind the buttons (#306): a row
+// per (Campaign, Speaker) is the source of truth for consent. *storage.Store
+// satisfies it. It embeds the read the tape reseeds from.
+type TapeConsentStore interface {
+	TapeConsentReader
+	UpsertTapeConsent(ctx context.Context, campaignID uuid.UUID, discordUserID string) error
+	DeleteTapeConsent(ctx context.Context, campaignID uuid.UUID, discordUserID string) error
+}
 
 // Tape consent button custom-id scheme (#306, ADR-0051). The disclosure message
 // wirenpc posts carries a Consent and a Revoke button; each button's custom id
@@ -86,4 +100,79 @@ var postTapeDisclosure = func(ctx context.Context, client *bot.Client, channel s
 		return fmt.Errorf("wirenpc: post tape disclosure: %w", err)
 	}
 	return nil
+}
+
+// Consent reply text (#306). Centralised here so both the all-mode presence
+// handler and the voice-mode listener reply identically.
+const (
+	tapeConsentGrantedReply = "You're now included in Session Highlights for this campaign. You can press **Revoke** any time to opt out."
+	tapeConsentRevokedReply = "You've opted out of Session Highlights. Your audio won't be recorded, and anything already buffered is discarded."
+	tapeConsentFailedReply  = "Sorry — could not update your choice. Please try again."
+)
+
+// ApplyTapeConsent is the transport-agnostic core behind a consent button press
+// (#306, ADR-0051), shared by the all-mode presence handler and the voice-mode
+// client listener so both topologies behave identically. It parses the custom id,
+// writes (or deletes) the Speaker's durable consent row, then publishes
+// [voiceevent.TapeConsentChanged] on bus so the live tape reconciles — the DB write
+// happens BEFORE the event (the MuteChanged ordering precedent), so a reactor that
+// re-reads storage on the event always sees the change.
+//
+// ok is false for a custom id that is not a tape-consent button (the caller ignores
+// it). A storage failure returns ok=true (the button WAS ours) with an apologetic
+// reply and publishes nothing — the durable state did not change, so neither must
+// the live tape.
+func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, bus *voiceevent.Bus, now func() time.Time, customID, userID string) (reply string, ok bool) {
+	campaignID, granted, ok := ParseTapeConsentCustomID(customID)
+	if !ok {
+		return "", false
+	}
+	if now == nil {
+		now = time.Now
+	}
+
+	if granted {
+		if err := store.UpsertTapeConsent(ctx, campaignID, userID); err != nil {
+			return tapeConsentFailedReply, true
+		}
+	} else {
+		if err := store.DeleteTapeConsent(ctx, campaignID, userID); err != nil {
+			return tapeConsentFailedReply, true
+		}
+	}
+
+	if bus != nil {
+		bus.Publish(voiceevent.TapeConsentChanged{
+			At:         now(),
+			CampaignID: campaignID.String(),
+			SpeakerID:  userID,
+			Granted:    granted,
+		})
+	}
+	if granted {
+		return tapeConsentGrantedReply, true
+	}
+	return tapeConsentRevokedReply, true
+}
+
+// tapeConsentListener builds the component-interaction listener the STANDALONE
+// voice-mode client carries (#306, finding 5): with no boot-owned presence in that
+// topology, the per-cycle client itself must answer the disclosure's buttons, or
+// every press fails "interaction failed". It applies the consent change (write +
+// publish on the same per-cycle bus the tape subscribes to) and replies ephemerally.
+// A non-tape component is ignored. A nil store disables it (returns nil).
+func tapeConsentListener(store TapeConsentStore, bus *voiceevent.Bus, log *slog.Logger) func(*events.ComponentInteractionCreate) {
+	if store == nil {
+		return nil
+	}
+	return func(e *events.ComponentInteractionCreate) {
+		reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, e.Data.CustomID(), e.User().ID.String())
+		if !ok {
+			return
+		}
+		msg := discord.MessageCreate{Content: reply, Flags: discord.MessageFlagEphemeral}
+		if err := e.CreateMessage(msg); err != nil && log != nil {
+			log.Warn("wirenpc: reply to tape consent button", "err", err)
+		}
+	}
 }

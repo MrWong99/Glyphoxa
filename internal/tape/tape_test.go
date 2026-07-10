@@ -160,6 +160,73 @@ func TestAppendAgentAlwaysOn(t *testing.T) {
 	}
 }
 
+// TestReconcileConsentIsAuthoritative pins that ReconcileConsent replaces the
+// whole consent set and clears the buffered audio of any Speaker no longer in it,
+// while keeping the survivors and agent audio (#306, ADR-0051): the reseed the
+// live wiring drives from the durable rows.
+func TestReconcileConsentIsAuthoritative(t *testing.T) {
+	tp := New(Window, []string{"alice", "bob"}, nil)
+	defer tp.Close()
+
+	tp.AppendInbound("alice", []byte{0x01}, base)
+	tp.AppendInbound("bob", []byte{0x02}, base)
+	tp.AppendAgent([]byte{0x03}, base)
+	drainedSnapshot(t, tp, base.Add(-time.Second), base.Add(time.Second)) // ensure captured
+
+	// Durable truth is now: only alice consents. Reconcile to it.
+	tp.ReconcileConsent([]string{"alice"})
+
+	snap := tp.Snapshot(base.Add(-time.Second), base.Add(time.Second))
+	lanes := map[string]int{}
+	for _, l := range snap.Lanes {
+		lanes[l.LaneID] = len(l.Frames)
+	}
+	if _, ok := lanes["bob"]; ok {
+		t.Fatalf("bob's ring not cleared by reconcile: %+v", snap.Lanes)
+	}
+	if lanes["alice"] != 1 {
+		t.Fatalf("alice dropped by reconcile: %+v", snap.Lanes)
+	}
+	if lanes[AgentLaneID] != 1 {
+		t.Fatalf("agent audio dropped by reconcile: %+v", snap.Lanes)
+	}
+
+	// bob is no longer consented -> future frames dropped; alice still captured.
+	tp.AppendInbound("bob", []byte{0x04}, base.Add(20*time.Millisecond))
+	tp.AppendInbound("alice", []byte{0x05}, base.Add(20*time.Millisecond))
+	snap = drainedSnapshot(t, tp, base.Add(-time.Second), base.Add(time.Second))
+	for _, l := range snap.Lanes {
+		if l.LaneID == "bob" {
+			t.Fatalf("bob recaptured after reconcile-out: %+v", l)
+		}
+	}
+}
+
+// TestAppendRingDropsStragglerAfterRevoke pins finding 3's guard: the owner
+// re-checks consent inside appendRing, so a frame that was consented at enqueue
+// but whose Speaker lost consent before it is applied never enters the ring — even
+// bypassing the enqueue-time gate (white-box: call the owner path directly).
+func TestAppendRingDropsStragglerAfterRevoke(t *testing.T) {
+	tp := New(Window, []string{"alice"}, nil)
+	defer tp.Close()
+
+	// Simulate the race: consent revoked (set no longer has alice), but a straggler
+	// frame reaches the owner's appendRing. It must be dropped, not stored.
+	tp.ReconcileConsent(nil) // nobody consented
+	rings := map[string]*ring{}
+	tp.warnedLanes = map[string]struct{}{}
+	tp.appendRing(rings, "alice", Frame{Opus: []byte{0x01}, At: base})
+	if _, ok := rings["alice"]; ok {
+		t.Fatalf("straggler frame for revoked speaker entered the ring")
+	}
+
+	// Agent lane is never consent-gated: its straggler is always kept.
+	tp.appendRing(rings, AgentLaneID, Frame{Opus: []byte{0x02}, At: base})
+	if _, ok := rings[AgentLaneID]; !ok {
+		t.Fatalf("agent frame dropped by consent re-check")
+	}
+}
+
 func TestSnapshotConsistentUnderConcurrentAppends(t *testing.T) {
 	tp := New(Window, []string{"alice", "bob"}, nil)
 	defer tp.Close()

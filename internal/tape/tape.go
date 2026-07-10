@@ -103,6 +103,11 @@ type Tape struct {
 	done    chan struct{} // closed by the owner when it has exited
 	once    sync.Once
 	closed  atomic.Bool
+
+	// warnedLanes records lane ids already warned about at the maxLanes cap, so the
+	// warning fires once per over-cap lane rather than once per dropped frame (50/s
+	// per speaker). Owner-goroutine-only, so it needs no lock.
+	warnedLanes map[string]struct{}
 }
 
 // laneFrame is one append: a frame plus the lane it belongs to.
@@ -111,12 +116,18 @@ type laneFrame struct {
 	frame Frame
 }
 
-// ctrlMsg is one control request to the owner: a snapshot (snap != nil) or a lane
-// clear on consent revoke (revoke). Exactly one applies.
+// ctrlMsg is one control request to the owner: a snapshot (snap != nil), a lane
+// clear on consent revoke (revoke), or an authoritative consent reconcile
+// (reconcile). Exactly one applies.
 type ctrlMsg struct {
 	snap       *snapReq
 	revoke     bool
 	revokeLane string
+	// reconcile, with allowed set, drops every non-agent lane whose id is not in
+	// allowed — clearing the buffered audio of any Speaker who lost consent since
+	// the last reconcile (the authoritative store-backed reseed, #306).
+	reconcile bool
+	allowed   map[string]struct{}
 }
 
 type snapReq struct {
@@ -230,6 +241,31 @@ func (t *Tape) SetConsent(userID string, granted bool) {
 	}
 }
 
+// ReconcileConsent replaces the consent set with exactly consented (agent audio is
+// always captured regardless) and clears the buffered audio of any Speaker who is
+// no longer in the set. It is the authoritative reseed the live wiring drives from
+// the durable consent rows (#306, ADR-0051): applied at each Voice Session cycle
+// start and on every consent-change event, so a consent grant/revoke that landed
+// while nothing was subscribed (a reconnect gap) — or two racing events that
+// published out of order — always converges the tape to the persisted truth,
+// exactly as the mute wiring re-reads its authoritative view.
+func (t *Tape) ReconcileConsent(consented []string) {
+	set := make(map[string]struct{}, len(consented))
+	for _, id := range consented {
+		set[id] = struct{}{}
+	}
+	t.consentMu.Lock()
+	t.consent.Store(set)
+	t.consentMu.Unlock()
+
+	// Clear any buffered audio for Speakers no longer consented. Delivered on the
+	// owner-drained ctrl channel; guarded by done so Close can't strand it.
+	select {
+	case t.ctrl <- ctrlMsg{reconcile: true, allowed: set}:
+	case <-t.done:
+	}
+}
+
 // Snapshot returns a consistent copy of every lane's frames over [from, to],
 // serviced by the owner goroutine so it never races an append. After Close it
 // returns an empty snapshot for the range.
@@ -268,6 +304,7 @@ func (t *Tape) Close() {
 func (t *Tape) run() {
 	defer close(t.done)
 	rings := make(map[string]*ring)
+	t.warnedLanes = make(map[string]struct{})
 	for {
 		select {
 		case <-t.stop:
@@ -286,6 +323,15 @@ func (t *Tape) run() {
 				c.snap.resp <- buildSnapshot(rings, c.snap.from, c.snap.to)
 			case c.revoke:
 				delete(rings, c.revokeLane)
+			case c.reconcile:
+				for lane := range rings {
+					if lane == AgentLaneID {
+						continue
+					}
+					if _, ok := c.allowed[lane]; !ok {
+						delete(rings, lane)
+					}
+				}
 			}
 		}
 	}
@@ -307,11 +353,27 @@ func (t *Tape) drainAppends(rings map[string]*ring) {
 
 // appendRing routes one frame into its lane's ring, allocating the ring lazily and
 // refusing new lanes past maxLanes.
+//
+// It re-checks consent for non-agent lanes against the current set before storing
+// (ADR-0051): AppendInbound already gates at enqueue, but a revoke can land between
+// that check and this apply — the appender loaded a stale "consented" set, then
+// consent was revoked and the lane cleared, and only now does the buffered frame
+// arrive. Re-reading here (one atomic load, on the owner goroutine) drops that
+// straggler so a revoked Speaker's audio can never re-enter the ring.
 func (t *Tape) appendRing(rings map[string]*ring, lane string, f Frame) {
+	if lane != AgentLaneID {
+		set, _ := t.consent.Load().(map[string]struct{})
+		if _, ok := set[lane]; !ok {
+			return // consent revoked between enqueue and apply — drop the straggler
+		}
+	}
 	r := rings[lane]
 	if r == nil {
 		if len(rings) >= maxLanes {
-			t.log.Warn("tape: lane cap reached, dropping frame", "lane", lane, "max", maxLanes)
+			if _, warned := t.warnedLanes[lane]; !warned {
+				t.warnedLanes[lane] = struct{}{}
+				t.log.Warn("tape: lane cap reached, dropping frames for lane", "lane", lane, "max", maxLanes)
+			}
 			return
 		}
 		r = newRing(t.capFrames)
