@@ -30,6 +30,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
+	"github.com/MrWong99/Glyphoxa/internal/speaker"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/transcript"
@@ -444,11 +445,26 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		}
 	}
 
+	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
+	// Character/GM display name for the relay + chunk prefix. It reads Characters
+	// from the store and, for an unmapped speaker, falls back to the Discord guild
+	// display name via the standing presence (web-only replicas have no presence, so
+	// the namer stays a true nil interface — no guild fallback, generic label). GM
+	// is the operator allowlist (ADR-0050/0041). Shared by the relay, chunker, and
+	// the Character CRUD invalidation hook.
+	var speakerNamer speaker.MemberNamer
+	if pres != nil {
+		speakerNamer = pres
+	}
+	speakerResolver := speaker.NewResolver(store, speakerNamer,
+		auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS")), log)
+
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
 	// process bus once and reads the active session from the manager (Snapshot).
 	// The store backs incremental line persistence + replay-on-reload (#74,
 	// ADR-0040); the manager finalizes the relay's writer queue on Stop (below).
 	relay := transcript.NewRelay(eventBus, mgr, store, log)
+	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
 	// Back-wire the finalizer so Stop drains the relay's writer queue and records
 	// the authoritative line_count (#74). Done after the relay exists because the
 	// relay needs the manager (Snapshot), so the manager is built first.
@@ -462,6 +478,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// line grain (ADR-0040). Voice-standalone mode does not chunk (same posture as
 	// line persistence).
 	chunker := transcript.NewChunker(eventBus, mgr, store, metrics, log, transcript.ChunkerConfig{})
+	chunker.SetResolver(speakerResolver) // #281: resolved name as each human line's chunk prefix
 	mgr.SetChunkFlusher(chunker)
 	// Seed the backlog gauge from the DB at boot so it reads the true count before
 	// the first chunk is written (idempotent Set-from-COUNT, ADR-0032). A read
@@ -549,7 +566,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.VoiceChannelMembers(ctx, channelID)
 		}
 	}
-	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, recapEngine, presenceRefresh, memberLister)
+	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -610,7 +627,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
+func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -646,6 +663,10 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	if memberLister != nil {
 		campaignSrv.SetMemberLister(memberLister)
 	}
+	// A Character mutation invalidates the campaign's cached speaker resolutions so
+	// the live relay re-resolves future lines with the new mapping (#281, ADR-0039
+	// in-proc direct-method invalidation).
+	campaignSrv.SetSpeakerInvalidator(speakerResolver)
 	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
