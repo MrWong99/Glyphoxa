@@ -170,6 +170,26 @@ type AddressRouted struct {
 // EventName implements [Event].
 func (AddressRouted) EventName() string { return "address.routed" }
 
+// SpeakRequested marks a GM-puppeteered direct-speech request: the `/say <text>
+// as:<agent>` slash command (ADR-0010, #295) asks an Agent to speak Text verbatim,
+// bypassing Address Detection and the LLM Replier entirely (ADR-0024 — /say is the
+// explicit-target path, so it must NOT publish [AddressRouted], which would trigger
+// the LLM Replier). It is the seam between the session Manager (which validates the
+// active session + agent and publishes this) and the orchestrator's DirectSpeech
+// reactor (which takes the barge-in floor and dispatches Text to TTS in the Agent's
+// Voice). Target names the Agent whose Voice speaks; TurnID is minted at publish so
+// the resulting [TTSInvoked] / [FirstAudio] / [FirstOpus] and the transcript line
+// projection correlate exactly as an LLM turn's do (A3, ADR-0012/0040).
+type SpeakRequested struct {
+	At     time.Time
+	TurnID string
+	Target AddressTarget
+	Text   string
+}
+
+// EventName implements [Event].
+func (SpeakRequested) EventName() string { return "speak.requested" }
+
 // TTSInvoked marks the dispatch of one sentence to the TTS stage.
 //
 // Per ADR-0021's TTS cassette policy the observable contract for TTS is "the

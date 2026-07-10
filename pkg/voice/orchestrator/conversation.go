@@ -48,6 +48,13 @@ type Conversation struct {
 	// set, Register installs it on the replier, which refuses a route whose new turn
 	// the gate denies (the spend soft cap) beside the mute pre-check.
 	gate TurnGate
+
+	// voiceOf is the /say direct-speech voice lookup ([WithDirectSpeech], #295): nil
+	// = feature off. When set, Register binds a [DirectSpeech] reactor on
+	// SpeakRequested, sharing the barge-in floor (so a barge cancels a /say) and the
+	// turn gate. Deliberately independent of the mute view (GM puppeteering bypasses
+	// mute).
+	voiceOf VoiceLookup
 }
 
 // Option configures a [Conversation] at construction.
@@ -147,6 +154,18 @@ func WithLaneStreamingSTT(f func(speakerID string) *StreamManager, maxLanes int)
 	}
 }
 
+// WithDirectSpeech enables the GM /say direct-speech path (#295, ADR-0010): a
+// [DirectSpeech] reactor renders a [voiceevent.SpeakRequested] to TTS in the Agent's
+// Voice, looked up via voiceOf. It requires a non-nil TTS stage; Register panics
+// otherwise. The reactor shares the barge-in floor built for [WithReply] (so a human
+// barge cancels a /say) and honors [WithTurnGate], but deliberately bypasses the
+// mute view — /say is a GM override. A nil voiceOf is the feature-off default. It is
+// independent of [WithReply]: /say publishes SpeakRequested, never AddressRouted, so
+// it never wakes the LLM Replier (ADR-0024).
+func WithDirectSpeech(voiceOf VoiceLookup) Option {
+	return func(c *Conversation) { c.voiceOf = voiceOf }
+}
+
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
 // the reactors fire inside bus callbacks (currently the replier's TTS dispatch).
 // Without it such failures are dropped silently.
@@ -228,6 +247,20 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 			}
 		}
 		reactors = append(reactors, replier)
+	}
+	// GM /say direct speech (#295): a DirectSpeech reactor on SpeakRequested, sharing
+	// the barge-in floor (built above for the reply path, so a barge cancels a /say)
+	// and the turn gate. Bound AFTER the replier so a SpeakRequested and an
+	// AddressRouted never contend — they are distinct events on distinct turns. It
+	// requires a TTS stage; nil voiceOf is the feature-off default.
+	if c.voiceOf != nil {
+		if c.tts == nil {
+			panic("orchestrator.Conversation.Register: WithDirectSpeech was set but no TTS stage was provided")
+		}
+		ds := NewDirectSpeech(c.tts, c.voiceOf, c.onError)
+		ds.floor = c.floor // shared with the barge path (nil when barge-in is off)
+		ds.gate = c.gate
+		reactors = append(reactors, ds)
 	}
 	return Bind(ctx, c.bus, reactors...)
 }
