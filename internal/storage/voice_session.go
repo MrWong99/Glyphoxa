@@ -41,6 +41,28 @@ func (s *Store) CreateVoiceSession(ctx context.Context, campaignID uuid.UUID) (V
 	return v, nil
 }
 
+// ImportVoiceSession inserts a historical Voice Session from a Campaign Bundle
+// (#292, ADR-0053): unlike [CreateVoiceSession], which mints a fresh 'running'
+// row with started_at=now(), this writes the bundle's started_at, ended_at,
+// status, line_count and end_reason VERBATIM and returns the freshly minted id.
+// The caller (bundle.Import) guarantees a terminal status (a non-terminal one is
+// coerced to 'ended' upstream) and a non-nil ended_at, so no live loop ever owns
+// an imported row. end_reason is written NULL when nil. It runs inside the import
+// transaction, so a later failure rolls the row back with the rest.
+func (s *Store) ImportVoiceSession(ctx context.Context, v VoiceSession) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO voice_sessions
+		   (campaign_id, started_at, ended_at, status, line_count, end_reason)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id`,
+		v.CampaignID, v.StartedAt, v.EndedAt, v.Status, v.LineCount, v.EndReason).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("storage: import voice session for campaign %s: %w", v.CampaignID, err)
+	}
+	return id, nil
+}
+
 // CloseVoiceSession closes a running Voice Session with an explicit terminal
 // status and end_reason: it sets ended_at=now(), status, the final line_count, and
 // end_reason (NULL when endReason is nil), returning the updated row. A missing id
