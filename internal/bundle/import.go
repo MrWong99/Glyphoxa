@@ -13,8 +13,8 @@ import (
 // agent ref key to the minted (or, for the Butler, the trigger-created) Agent id;
 // part 1 fills it and part 2 (#292) consumes it IN-FUNCTION to remap a Chunk's
 // participated_agent_ids. The int counts feed the ServeImport JSON response.
-// DroppedParticipantRefs counts unmappable chunk participant refs (part 2 only);
-// it is always zero here.
+// DroppedParticipantRefs counts chunk participant refs that mapped to no imported
+// Agent and were dropped (not fatal).
 type ImportResult struct {
 	CampaignID uuid.UUID
 	Name       string
@@ -53,10 +53,13 @@ type ImportResult struct {
 // per bundle grant. With no Butler in the bundle the trigger defaults stand. The
 // Butler's address_only stays pinned true by the storage layer (ADR-0024).
 //
-// History (Voice Sessions + Transcript Lines/Chunks) is tolerated but UNTOUCHED
-// in part 1: a bundle carrying a History section imports its domain grains fine
-// and leaves Sessions/Lines/Chunks at zero. Part 2 (#292) fills them in the same
-// transaction.
+// History (Voice Sessions + Transcript Lines/Chunks) is imported in the SAME
+// transaction (#292): each Voice Session's status is coerced terminal, its Lines
+// keep their line_id/seq replay keys verbatim (ADR-0040), and its Chunks land
+// with embedding NULL so the destination's embedworker regenerates them
+// (ADR-0011) — a chunk's participated refs are remapped through AgentIDs and an
+// unmappable one is dropped and counted. A bundle with no History section imports
+// exactly as part 1 did (zero history counts).
 func Import(ctx context.Context, st *storage.Store, tenantID uuid.UUID, b *Bundle) (ImportResult, error) {
 	if err := CheckVersion(b.FormatVersion); err != nil {
 		return ImportResult{}, fmt.Errorf("bundle has format_version %d; this build supports %d: %w",
@@ -184,10 +187,113 @@ func importInTx(ctx context.Context, tx *storage.Store, tenantID uuid.UUID, b *B
 		res.Characters++
 	}
 
-	// History is part 2 (#292): its presence is tolerated, its rows are left for
-	// the next slice. Counts stay zero here.
+	if err := importHistory(ctx, tx, campaignID, b, res); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// importHistory ingests the flag-gated transcript payload (#292, ADR-0053 §1/§3)
+// in the SAME transaction as the domain grains (ADR-0049): per Voice Session an
+// [storage.ImportVoiceSession] (status coerced terminal, ended_at defaulted to
+// started_at), then each Transcript Line UPSERTed with its line_id/seq VERBATIM
+// (ADR-0040 replay keys — never re-derived), then each Transcript Chunk INSERTed
+// with embedding NULL by construction so the destination's embedworker
+// regenerates it (ADR-0011 — this NEVER writes a vector or model). A chunk's
+// participated_agent_ids are remapped through res.AgentIDs; an unmappable ref is
+// DROPPED and counted in DroppedParticipantRefs (not fatal — a foreign agent
+// simply carries no local knowledge), while speaker snowflakes travel verbatim
+// (ADR-0053 §6). A nil History section is a no-op: counts stay zero (part-1 parity).
+func importHistory(ctx context.Context, tx *storage.Store, campaignID uuid.UUID, b *Bundle, res *ImportResult) error {
+	if b.Campaign.History == nil {
+		return nil
+	}
+	for i := range b.Campaign.History.Sessions {
+		s := &b.Campaign.History.Sessions[i]
+		endedAt := s.EndedAt
+		if endedAt == nil {
+			// A terminal session always has an ended_at; a bundle missing one (a
+			// coerced non-terminal row) defaults it to started_at so no imported row
+			// looks live to GetLatestVoiceSession or the reconciler.
+			started := s.StartedAt
+			endedAt = &started
+		}
+		sessionID, err := tx.ImportVoiceSession(ctx, storage.VoiceSession{
+			CampaignID: campaignID,
+			StartedAt:  s.StartedAt,
+			EndedAt:    endedAt,
+			Status:     coerceTerminalStatus(s.Status),
+			LineCount:  s.LineCount,
+			EndReason:  s.EndReason,
+		})
+		if err != nil {
+			return fmt.Errorf("bundle: import: session %q: %w", s.ID, err)
+		}
+		res.Sessions++
+
+		for j := range s.Lines {
+			l := &s.Lines[j]
+			if err := tx.UpsertTranscriptLine(ctx, storage.TranscriptLine{
+				VoiceSessionID:       sessionID,
+				CampaignID:           campaignID,
+				LineID:               l.LineID,
+				Seq:                  l.Seq,
+				Who:                  l.Who,
+				Tag:                  l.Tag,
+				Kind:                 l.Kind,
+				TS:                   l.TS,
+				Text:                 l.Text,
+				SpeakerDiscordUserID: l.SpeakerDiscordUserID,
+			}); err != nil {
+				return fmt.Errorf("bundle: import: session %q line %q: %w", s.ID, l.LineID, err)
+			}
+			res.Lines++
+		}
+
+		for j := range s.Chunks {
+			c := &s.Chunks[j]
+			participated := make([]uuid.UUID, 0, len(c.ParticipatedAgentIDs))
+			for _, ref := range c.ParticipatedAgentIDs {
+				agentID, ok := res.AgentIDs[ref]
+				if !ok {
+					// A participant that maps to no imported Agent (e.g. an Agent deleted
+					// before export, or a cross-campaign artifact) is dropped, not fatal —
+					// it just means no local NPC claims that chunk's knowledge.
+					res.DroppedParticipantRefs++
+					continue
+				}
+				participated = append(participated, agentID)
+			}
+			// embedding stays NULL and embedding_model '' by construction (ADR-0011):
+			// InsertTranscriptChunk never writes a vector, so the destination
+			// embedworker regenerates them. The backlog gauge is not refreshed here —
+			// the worker polls the DB on its own schedule.
+			if _, err := tx.InsertTranscriptChunk(ctx, storage.TranscriptChunk{
+				CampaignID:            campaignID,
+				VoiceSessionID:        sessionID,
+				Content:               c.Content,
+				SpeakerDiscordUserIDs: c.SpeakerDiscordUserIDs,
+				ParticipatedAgentIDs:  participated,
+				StartedAt:             c.StartedAt,
+			}); err != nil {
+				return fmt.Errorf("bundle: import: session %q chunk: %w", s.ID, err)
+			}
+			res.Chunks++
+		}
+	}
+	return nil
+}
+
+// coerceTerminalStatus maps an imported Voice Session status to a terminal one: a
+// 'failed' row keeps its status (a distinct terminal state, ADR-0053 §6 verbatim
+// spirit), anything else — including a stale 'running' from a crashed source —
+// becomes 'ended', so no imported row is ever revivable or owned by a live loop.
+func coerceTerminalStatus(status string) storage.VoiceSessionStatus {
+	if storage.VoiceSessionStatus(status) == storage.VoiceSessionFailed {
+		return storage.VoiceSessionFailed
+	}
+	return storage.VoiceSessionEnded
 }
 
 // mergeButler UPDATEs the trigger-created Butler from the bundle's Butler and
