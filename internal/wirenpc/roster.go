@@ -1,6 +1,7 @@
 package wirenpc
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 
@@ -37,6 +38,12 @@ type Roster struct {
 	// names under (#199); set from rosterDeps at construction.
 	language string
 
+	// butlerGate is the Butler GM-address predicate (#299): it flows into the
+	// Matcher's Config.ButlerGMGate so a non-GM naming the Butler is dropped
+	// matcher-side (pre-cap, #256). Nil leaves the Butler addressable by any
+	// speaker (the rollout default when no operator allowlist is configured).
+	butlerGate func(speakerID string) bool
+
 	// replierFor builds the [agent.Replier] for one NPC. Production binds it to a
 	// shared tool-engine (so N NPCs share one Groq client); tests inject scripted
 	// engines through it. Always non-nil after [newRoster].
@@ -70,6 +77,9 @@ type rosterDeps struct {
 	// phonetic encoder (#199): the loaded campaign's language column on the DB
 	// path, "" on the env-only path.
 	language string
+	// butlerGate is the Butler GM-address predicate threaded into the Matcher's
+	// Config.ButlerGMGate (#299/#256). Nil = the Butler answers any speaker.
+	butlerGate func(speakerID string) bool
 }
 
 // newRoster builds an empty Roster wired to deps. It holds no NPCs yet — the
@@ -83,6 +93,7 @@ func newRoster(deps rosterDeps) *Roster {
 		cast:       agent.NewCast(),
 		replierFor: deps.replierFor,
 		language:   matcherLanguage(deps.language),
+		butlerGate: deps.butlerGate,
 		specs:      map[string]npcSpec{},
 	}
 }
@@ -134,7 +145,7 @@ func (r *Roster) AddNPC(spec npcSpec) {
 		// First NPC: build the Matcher around it. Single-target by default
 		// (Config.MaxTargets unset ⇒ 1): naming two NPCs fires one turn on the
 		// top-scored, the safe one-floor default (ADR-0025 deferred).
-		r.matcher = address.NewMatcher(address.Config{Language: r.language}, matcherAgent(spec))
+		r.matcher = address.NewMatcher(address.Config{Language: r.language, ButlerGMGate: r.butlerGate}, matcherAgent(spec))
 	} else {
 		r.matcher.Add(matcherAgent(spec))
 	}
@@ -238,10 +249,24 @@ func (r *Roster) setMutedLocked(agentID string, muted bool) {
 // scope by the addressed AgentID / active Campaign per turn. A nil memory/facts
 // disables that slot (the prompt stays byte-identical). language is the Campaign
 // Language selecting the Matcher's phonetic encoder (#199).
-func rosterDepsForLive(engineFor func(npcSpec) agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller, facts agent.FactsRecaller, language string) rosterDeps {
+// gmSpeaker is the Butler GM-address predicate (#299): it becomes the Matcher's
+// Config.ButlerGMGate so a non-GM naming the Butler is dropped matcher-side (#256).
+// textPoster is the Butler's text-delivery channel (#297 decision 2): it is set as
+// the [agent.Config.TextSink] on butler-role specs ONLY, so a long Butler answer
+// posts to the channel chat while Character NPCs keep the pure-TTS path. Both are
+// nil on the env-only / standalone paths, reproducing the pre-#299 behavior.
+func rosterDepsForLive(engineFor func(npcSpec) agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller, facts agent.FactsRecaller, language string, gmSpeaker func(speakerID string) bool, textPoster func(ctx context.Context, text string) error) rosterDeps {
 	return rosterDeps{
-		language: language,
+		language:   language,
+		butlerGate: gmSpeaker,
 		replierFor: func(spec npcSpec) *agent.Replier {
+			// TextSink is the Butler's text-delivery seam and is wired on butler-role
+			// specs only (#299): a nil TextSink keeps a Character NPC byte-identical to
+			// the pre-#299 streaming path.
+			var textSink func(ctx context.Context, text string) error
+			if spec.role == voiceevent.AgentRoleButler {
+				textSink = textPoster
+			}
 			return agent.NewReplier(agent.Config{
 				Persona: agent.Persona{
 					AgentID:  spec.agentID,
@@ -253,6 +278,7 @@ func rosterDepsForLive(engineFor func(npcSpec) agent.Engine, synth tts.Synthesiz
 				HistoryTurns: historyTurns,
 				Memory:       memory,
 				Facts:        facts,
+				TextSink:     textSink,
 				OnError: func(err error) {
 					log.Warn("agent reply failed", "npc", spec.name, "err", err)
 				},
