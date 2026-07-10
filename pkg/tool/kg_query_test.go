@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeKG is a scripted KGReader recording which scope method ran and with what
@@ -155,5 +156,49 @@ func TestKGQueryEmpty(t *testing.T) {
 	}
 	if out != "no matching knowledge" {
 		t.Errorf("empty = %q", out)
+	}
+}
+
+// TestKGQueryMultibyteFactRenders pins the reviewer's finding: a multibyte-heavy
+// (CJK) fact must render (truncated) rather than collapse to "no matching
+// knowledge". A byte-counted budget on the first block blew past 2000 before
+// anything was written; the budget is counted in runes and the first block is
+// always emitted.
+func TestKGQueryMultibyteFactRenders(t *testing.T) {
+	body := strings.Repeat("我", 800) // 800 CJK runes = 2400 bytes > 2000-byte budget
+	src := &fakeKG{searchFacts: []KGFact{{Name: "龍", Type: "NPC", Body: body}}}
+	out, err := NewKGQuery(src).Execute(context.Background(), json.RawMessage(`{"query":"dragon"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out == "no matching knowledge" {
+		t.Fatal("a CJK-heavy match rendered as 'none' — budget must count runes, not bytes")
+	}
+	if !strings.Contains(out, "### 龍 (NPC)") {
+		t.Errorf("fact header missing: %q", out[:min(60, len(out))])
+	}
+	if utf8.RuneCountInString(out) > MaxToolResultChars {
+		t.Errorf("result %d runes exceeds budget %d", utf8.RuneCountInString(out), MaxToolResultChars)
+	}
+}
+
+// TestFilterByQueryUnicodeTerms pins finding #3: query tokenizing is Unicode-aware
+// so German umlaut and CJK queries filter instead of dumping the whole
+// neighbourhood.
+func TestKGQueryOwnNodeUnicodeQueryFilters(t *testing.T) {
+	src := &fakeKG{ownFacts: []KGFact{
+		{Name: "Würfel des Schicksals", Type: "Item", Body: "ein magischer Würfel"},
+		{Name: "Schwert", Type: "Item", Body: "eine Klinge"},
+	}}
+	ctx := WithCaller(context.Background(), "a1")
+	out, err := NewKGQuery(src).Execute(ctx, json.RawMessage(`{"query":"Würfel"}`), json.RawMessage(`{"scope":"own_node"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Würfel des Schicksals") {
+		t.Errorf("umlaut query should match the Würfel fact: %q", out)
+	}
+	if strings.Contains(out, "Schwert") {
+		t.Errorf("umlaut query should NOT dump unrelated facts (ASCII tokenizer bug): %q", out)
 	}
 }

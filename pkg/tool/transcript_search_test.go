@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeTranscript is a scripted TranscriptSearcher: it records the query/limit it
@@ -101,5 +102,27 @@ func TestTranscriptSearchEmpty(t *testing.T) {
 	}
 	if out != "no matching transcript lines" {
 		t.Errorf("empty search = %q", out)
+	}
+}
+
+// TestTranscriptSearchMultibyteBudget pins the reviewer's finding class: a result
+// of multibyte-heavy lines stays within MaxToolResultChars counted in RUNES, and
+// the first line always renders (never collapses to "none").
+func TestTranscriptSearchMultibyteBudget(t *testing.T) {
+	line := strings.Repeat("我", MaxTranscriptLineRunes) // full-width, 3 bytes each
+	hits := make([]TranscriptHit, 10)
+	for i := range hits {
+		hits[i] = TranscriptHit{Who: "話者", Kind: "npc", Text: line}
+	}
+	out, err := NewTranscriptSearch(&fakeTranscript{hits: hits}).Execute(
+		context.Background(), json.RawMessage(`{"query":"x"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out == "no matching transcript lines" {
+		t.Fatal("CJK hits rendered as 'none' — first line must always emit")
+	}
+	if utf8.RuneCountInString(out) > MaxToolResultChars {
+		t.Errorf("result %d runes exceeds budget %d", utf8.RuneCountInString(out), MaxToolResultChars)
 	}
 }

@@ -12,10 +12,12 @@ import (
 )
 
 // fakeStore is a scripted knowledge.Store: it records the campaign/agent it was
-// scoped to and replays fixed rows, so the adapter's session-scoping and
-// gm_private filter are pinned without a DB.
+// scoped to and replays fixed rows. The gm_private EXCLUSION lives in the SQL of
+// SearchPublicNodes (proven against a real DB in the integration test); here the
+// fake stands in for that already-filtered result, so these unit tests pin the
+// adapter's scoping/routing without a DB.
 type fakeStore struct {
-	nodes        []storage.KGNode // SearchNodes result (GM-facing, unfiltered)
+	nodes        []storage.KGNode // SearchPublicNodes result (already gm_private-filtered by SQL)
 	agentNodes   []storage.KGNode // AgentNodeFacts result
 	lines        []storage.TranscriptLine
 	gotNodeCID   uuid.UUID
@@ -24,7 +26,7 @@ type fakeStore struct {
 	agentQueried bool
 }
 
-func (f *fakeStore) SearchNodes(_ context.Context, cid uuid.UUID, _ string, _ int) ([]storage.KGNode, error) {
+func (f *fakeStore) SearchPublicNodes(_ context.Context, cid uuid.UUID, _ string, _ int) ([]storage.KGNode, error) {
 	f.gotNodeCID = cid
 	return f.nodes, nil
 }
@@ -50,14 +52,15 @@ func liveSession(campaignID uuid.UUID) fakeSessions {
 	return fakeSessions{sess: storage.VoiceSession{CampaignID: campaignID}, live: true}
 }
 
-// TestSearchFactsDropsGMPrivate is the load-bearing ADR-0008 pin: SearchNodes is
-// GM-facing (returns gm_private Nodes), so the adapter MUST drop them before they
-// reach an NPC prompt.
-func TestSearchFactsDropsGMPrivate(t *testing.T) {
+// TestSearchFactsUsesPublicSearchScoped pins that SearchFacts routes through the
+// gm_private-EXCLUDING search (SearchPublicNodes), scoped to the active session's
+// Campaign, and maps the rows into facts. The actual gm_private exclusion is a SQL
+// property proven in the integration test (a post-fetch Go filter would starve a
+// public match past the LIMIT — the reviewer's finding).
+func TestSearchFactsUsesPublicSearchScoped(t *testing.T) {
 	cid := uuid.New()
 	store := &fakeStore{nodes: []storage.KGNode{
-		{Name: "Public Duke", Type: storage.KGNodeNPC, Body: "rules openly", GMPrivate: false},
-		{Name: "Secret Cabal", Type: storage.KGNodeFaction, Body: "GM eyes only", GMPrivate: true},
+		{Name: "Public Duke", Type: storage.KGNodeNPC, Body: "rules openly"},
 	}}
 	adapter := knowledge.New(store, liveSession(cid))
 
@@ -66,13 +69,10 @@ func TestSearchFactsDropsGMPrivate(t *testing.T) {
 		t.Fatalf("SearchFacts: %v", err)
 	}
 	if store.gotNodeCID != cid {
-		t.Errorf("SearchNodes scoped to %v, want active session's campaign %v", store.gotNodeCID, cid)
+		t.Errorf("SearchPublicNodes scoped to %v, want active session's campaign %v", store.gotNodeCID, cid)
 	}
-	if len(facts) != 1 || facts[0].Name != "Public Duke" {
-		t.Fatalf("facts = %+v, want only the public Node (gm_private dropped)", facts)
-	}
-	if facts[0].Type != "NPC" {
-		t.Errorf("type label = %q, want NPC", facts[0].Type)
+	if len(facts) != 1 || facts[0].Name != "Public Duke" || facts[0].Type != "NPC" {
+		t.Fatalf("facts = %+v, want the mapped public Duke (NPC)", facts)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // MaxKGFactBodyRunes caps one rendered KG fact's body length, in runes (mirrors
@@ -166,7 +168,7 @@ func (kq *KGQuery) Execute(ctx context.Context, args json.RawMessage, grantConfi
 // caller-scoped).
 func filterByQuery(facts []KGFact, query string) []KGFact {
 	terms := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !isAlnum(r)
+		return !isWordRune(r)
 	})
 	if len(terms) == 0 {
 		return facts
@@ -184,19 +186,27 @@ func filterByQuery(facts []KGFact, query string) []KGFact {
 	return out
 }
 
-func isAlnum(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+// isWordRune reports whether r is part of a query term. It is Unicode-aware
+// (unicode.IsLetter/IsDigit), not ASCII-only: German is the primary live
+// deployment, so "Würfel" must tokenize as one term and "Öl" / CJK queries must
+// not degrade to zero terms (which would dump the whole neighbourhood).
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // renderKGFacts projects facts into "### Name (Type)\nBody" blocks, each body
-// rune-truncated to MaxKGFactBodyRunes, the whole result bounded to
-// MaxToolResultChars with a deterministic prefix-stop. An empty set renders the
-// "none" line.
+// rune-truncated to MaxKGFactBodyRunes and each name to MaxKGNameRunes, the whole
+// result bounded to MaxToolResultChars — counted in RUNES to match the per-item
+// rune caps (a byte count would let a multibyte-heavy fact overrun, or worse blow
+// the whole budget on the FIRST block and render a real match as "none"). The
+// first block is ALWAYS emitted (its capped runes never exceed the budget), then
+// a deterministic prefix-stop drops the rest. An empty set renders "none".
 func renderKGFacts(facts []KGFact) string {
 	if len(facts) == 0 {
 		return "no matching knowledge"
 	}
 	var b strings.Builder
+	runes := 0
 	n := 0
 	for _, f := range facts {
 		head := fmt.Sprintf("### %s (%s)", truncateRunes(f.Name, MaxKGNameRunes), f.Type)
@@ -209,14 +219,13 @@ func renderKGFacts(facts []KGFact) string {
 		if n > 0 {
 			add = "\n\n" + block
 		}
-		if b.Len()+len(add) > MaxToolResultChars {
-			break
+		addRunes := utf8.RuneCountInString(add)
+		if n > 0 && runes+addRunes > MaxToolResultChars {
+			break // budget reached; the first block is always kept.
 		}
 		b.WriteString(add)
+		runes += addRunes
 		n++
-	}
-	if n == 0 {
-		return "no matching knowledge"
 	}
 	return b.String()
 }

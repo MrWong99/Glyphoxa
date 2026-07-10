@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Result budgets shared by the knowledge Tools (#296), mirroring the kgfacts
@@ -134,14 +135,18 @@ func (ts *TranscriptSearch) Execute(ctx context.Context, args json.RawMessage, _
 
 // renderTranscriptHits projects hits into numbered lines "N. [kind] who: text",
 // each line's text rune-truncated to MaxTranscriptLineRunes, the whole result
-// bounded to MaxToolResultChars with a deterministic prefix-stop (a line that
-// would overrun the budget, and every line after it, is dropped rather than the
-// block skip-scanned). An empty set renders the "none" line.
+// bounded to MaxToolResultChars — counted in RUNES to match the per-line rune cap
+// (a byte count would let a multibyte-heavy result overrun the budget) — with a
+// deterministic prefix-stop: a line that would overrun the budget, and every line
+// after it, is dropped rather than the block skip-scanned. The FIRST line is
+// ALWAYS emitted (one line's runes never exceed the budget), so a real match is
+// never rendered as the "none" line. An empty set renders "none".
 func renderTranscriptHits(hits []TranscriptHit) string {
 	if len(hits) == 0 {
 		return "no matching transcript lines"
 	}
 	var b strings.Builder
+	runes := 0
 	n := 0
 	for _, h := range hits {
 		line := fmt.Sprintf("%d. [%s] %s: %s", n+1, h.Kind, h.Who, truncateRunes(h.Text, MaxTranscriptLineRunes))
@@ -149,16 +154,13 @@ func renderTranscriptHits(hits []TranscriptHit) string {
 		if n > 0 {
 			add = "\n" + line
 		}
-		if b.Len()+len(add) > MaxToolResultChars {
-			break
+		addRunes := utf8.RuneCountInString(add)
+		if n > 0 && runes+addRunes > MaxToolResultChars {
+			break // budget reached; the first line is always kept.
 		}
 		b.WriteString(add)
+		runes += addRunes
 		n++
-	}
-	if n == 0 {
-		// The very first line already exceeds the budget: emit its truncated form
-		// alone rather than the "none" line, so the caller still gets a result.
-		return "no matching transcript lines"
 	}
 	return b.String()
 }

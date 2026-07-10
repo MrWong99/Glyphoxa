@@ -100,31 +100,41 @@ func TestAdapter_SearchFactsDropsGMPrivate_RealDB(t *testing.T) {
 	store, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 
-	// A public and a gm_private Node that both match the search term.
+	// FIVE gm_private Nodes that all match the term, plus ONE public match. All six
+	// rank on "duke"; the private ones are inserted LAST so — newest-first within
+	// equal ts_rank — they sort ABOVE the public one. With a LIMIT of 1, a post-fetch
+	// Go filter would fetch only the top private row and return NOTHING, starving the
+	// public match ranked past the limit (the reviewer's finding). The query-level
+	// exclusion (SearchPublicNodes) must still surface the public Node.
 	if _, err := store.CreateNode(ctx, storage.NewKGNode{
 		CampaignID: campaignID, Type: storage.KGNodeNPC, Name: "Duke Aldric", Body: "rules the city openly",
 	}); err != nil {
 		t.Fatalf("create public node: %v", err)
 	}
-	if _, err := store.CreateNode(ctx, storage.NewKGNode{
-		CampaignID: campaignID, Type: storage.KGNodeFaction, Name: "Duke's Shadow Cabal", Body: "GM eyes only", GMPrivate: true,
-	}); err != nil {
-		t.Fatalf("create private node: %v", err)
+	for i := 0; i < 5; i++ {
+		if _, err := store.CreateNode(ctx, storage.NewKGNode{
+			CampaignID: campaignID, Type: storage.KGNodeFaction,
+			Name: "Duke Shadow Cabal", Body: "GM eyes only duke secret", GMPrivate: true,
+		}); err != nil {
+			t.Fatalf("create private node %d: %v", i, err)
+		}
 	}
 
 	adapter := knowledge.New(store, staticSession{sess: storage.VoiceSession{CampaignID: campaignID}, live: true})
 
-	facts, err := adapter.SearchFacts(ctx, "duke", 10)
+	// LIMIT 1 is the discriminating case: the private rows out-rank the public one,
+	// so only a BEFORE-LIMIT exclusion can return the public fact.
+	facts, err := adapter.SearchFacts(ctx, "duke", 1)
 	if err != nil {
 		t.Fatalf("SearchFacts: %v", err)
 	}
+	if len(facts) != 1 || facts[0].Name != "Duke Aldric" {
+		t.Fatalf("facts = %+v, want the public Duke Aldric — private hits above the LIMIT must not starve it", facts)
+	}
 	for _, f := range facts {
-		if f.Name == "Duke's Shadow Cabal" {
+		if f.Name == "Duke Shadow Cabal" {
 			t.Fatalf("gm_private Node leaked through SearchFacts: %+v", facts)
 		}
-	}
-	if len(facts) != 1 || facts[0].Name != "Duke Aldric" {
-		t.Fatalf("facts = %+v, want only the public Duke Aldric", facts)
 	}
 }
 

@@ -36,9 +36,10 @@ var ErrNoActiveSession = errors.New("knowledge: no active voice session")
 // satisfies it. Kept local (not the whole *storage.Store) so the adapter's
 // contract is explicit and unit-fakeable.
 type Store interface {
-	// SearchNodes is the GM-facing KG wiki search — it INCLUDES gm_private Nodes,
-	// so SearchFacts must filter them before they reach a prompt.
-	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+	// SearchPublicNodes is the prompt-facing KG search: gm_private Nodes are
+	// EXCLUDED in the query (before the LIMIT), so a GM-only Node never reaches a
+	// prompt and a public match is not starved by top-ranked private hits (ADR-0008).
+	SearchPublicNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 	// SearchTranscriptLines is the campaign-scoped transcript search (#120).
 	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
 	// AgentNodeFacts is the Agent's own edge-aware neighbourhood, already
@@ -124,27 +125,21 @@ func (a *Adapter) OwnNodeFacts(ctx context.Context, agentID string) ([]tool.KGFa
 }
 
 // SearchFacts implements [tool.KGReader]. It runs the campaign-wide KG search for
-// the Butler's grant, then DROPS every gm_private Node — the load-bearing
-// ADR-0008 filter: storage.SearchNodes is GM-facing and does not filter, so an
-// unfiltered result would leak a GM secret into an NPC's prompt. No session
-// yields ErrNoActiveSession.
+// the Butler's grant over SearchPublicNodes, which EXCLUDES gm_private Nodes in
+// the query itself — the load-bearing ADR-0008 guard. The exclusion must be in
+// the query, not a post-fetch Go filter: filtering after the SQL LIMIT would drop
+// the top-N ranked hits when they are all gm_private and starve a public match
+// ranked just past the limit. No session yields ErrNoActiveSession.
 func (a *Adapter) SearchFacts(ctx context.Context, query string, limit int) ([]tool.KGFact, error) {
 	campaignID, err := a.activeCampaign()
 	if err != nil {
 		return nil, err
 	}
-	nodes, err := a.store.SearchNodes(ctx, campaignID, query, limit)
+	nodes, err := a.store.SearchPublicNodes(ctx, campaignID, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: search facts: %w", err)
 	}
-	public := nodes[:0:0]
-	for _, n := range nodes {
-		if n.GMPrivate {
-			continue // NEVER surface a GM-private Node to a prompt (ADR-0008).
-		}
-		public = append(public, n)
-	}
-	return toFacts(public), nil
+	return toFacts(nodes), nil
 }
 
 // toFacts projects storage Nodes into storage-free [tool.KGFact]s, mapping the
