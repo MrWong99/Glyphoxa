@@ -25,6 +25,20 @@ type TargetMatcher interface {
 	TargetMatch(text string) []voiceevent.AddressRouted
 }
 
+// SpeakerAwareMatcher is the optional SpeakerID-aware extension of
+// [TargetMatcher] (#256): a matcher that implements it also routes an utterance
+// with the speaker's identity, so an identity-gated candidate (the Butler's
+// GM-only voice address, ADR-0024) is filtered inside the matcher — pre-cap,
+// pre-lastAddressed — rather than dropped after the fact by the detector. The
+// scoring [address.Matcher] satisfies it. When a matcher implements it,
+// [AddressDetector.Bind] prefers TargetMatchFrom and threads the
+// [voiceevent.STTFinal] SpeakerID; a plain [TargetMatcher] keeps the text-only
+// path with the detector-level [WithButlerGMGate] drop.
+type SpeakerAwareMatcher interface {
+	TargetMatcher
+	TargetMatchFrom(speakerID, text string) []voiceevent.AddressRouted
+}
+
 // AddressDetector is a [Reactor] that subscribes to [voiceevent.STTFinal]
 // events, asks its [TargetMatcher] which Agent(s) the utterance addresses, and
 // republishes each choice as [voiceevent.AddressRouted] using the shared event
@@ -103,8 +117,20 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	if bus == nil {
 		panic("orchestrator.AddressDetector.Bind: bus must not be nil")
 	}
+	// Prefer the SpeakerID-aware routing call when the matcher supports it (#256):
+	// this lets the matcher apply the Butler GM-gate as a pre-cap eligibility drop
+	// (so an excluded Butler never consumes a slot or lastAddressed). A plain
+	// matcher keeps the text-only TargetMatch path. The detector-level isGM drop
+	// below is retained belt-and-braces either way.
+	sam, speakerAware := d.matcher.(SpeakerAwareMatcher)
 	return voiceevent.On(bus, func(final voiceevent.STTFinal) {
-		for _, routed := range d.matcher.TargetMatch(final.Text) {
+		var routes []voiceevent.AddressRouted
+		if speakerAware {
+			routes = sam.TargetMatchFrom(final.SpeakerID, final.Text)
+		} else {
+			routes = d.matcher.TargetMatch(final.Text)
+		}
+		for _, routed := range routes {
 			// Butler GM-only address gate (ADR-0024): drop a Butler route whose
 			// SpeakerID is not an allowlisted GM (empty fails closed). Fail
 			// closed means the utterance routes nowhere — the matcher is not
