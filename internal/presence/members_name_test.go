@@ -5,7 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 )
 
@@ -14,10 +16,13 @@ func strptr(s string) *string { return &s }
 // newNameTestPresence builds a bare Presence with a configured Guild and an
 // injected member fetch, bypassing the standing gateway so MemberDisplayName is
 // unit-tested without a live Discord client.
-func newNameTestPresence(guildID string, fetch func(ctx context.Context, gid, uid snowflake.ID) (*discord.Member, error)) *Presence {
+func newNameTestPresence(guildID string, fetch func(ctx context.Context, r rest.Rest, gid, uid snowflake.ID) (*discord.Member, error)) *Presence {
 	p := &Presence{}
 	p.guildID.Store(guildID)
 	p.fetchMember = fetch
+	// A non-nil standing client so MemberDisplayName's single client borrow
+	// succeeds; its Rest is handed to the injected fetch, which ignores it.
+	p.client.Store(&bot.Client{})
 	return p
 }
 
@@ -48,7 +53,7 @@ func TestMemberDisplayNamePrecedence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newNameTestPresence("222222222222222222", func(_ context.Context, _, _ snowflake.ID) (*discord.Member, error) {
+			p := newNameTestPresence("222222222222222222", func(_ context.Context, _ rest.Rest, _, _ snowflake.ID) (*discord.Member, error) {
 				return tc.member, nil
 			})
 			got, err := p.MemberDisplayName(context.Background(), user)
@@ -64,7 +69,7 @@ func TestMemberDisplayNamePrecedence(t *testing.T) {
 
 func TestMemberDisplayNameFetchErrorPropagates(t *testing.T) {
 	sentinel := errors.New("discord 5xx")
-	p := newNameTestPresence("222222222222222222", func(_ context.Context, _, _ snowflake.ID) (*discord.Member, error) {
+	p := newNameTestPresence("222222222222222222", func(_ context.Context, _ rest.Rest, _, _ snowflake.ID) (*discord.Member, error) {
 		return nil, sentinel
 	})
 	if _, err := p.MemberDisplayName(context.Background(), "111111111111111111"); !errors.Is(err, sentinel) {
@@ -73,7 +78,7 @@ func TestMemberDisplayNameFetchErrorPropagates(t *testing.T) {
 }
 
 func TestMemberDisplayNameNoGuild(t *testing.T) {
-	p := newNameTestPresence("", func(_ context.Context, _, _ snowflake.ID) (*discord.Member, error) {
+	p := newNameTestPresence("", func(_ context.Context, _ rest.Rest, _, _ snowflake.ID) (*discord.Member, error) {
 		t.Fatal("fetch must not run without a configured Guild")
 		return nil, nil
 	})

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 )
 
@@ -27,8 +26,17 @@ type voiceOccupant struct {
 // VoiceChannelMembers lists the Discord Users currently in channelID, read from
 // the standing gateway's voice-state cache — populated by the GuildVoiceStates
 // intent the Bot already carries (see defaultClientBuilder), NOT the privileged
-// GuildMembers intent. Each occupant's display name and avatar come from a REST
-// GetMember, bounded by the channel's occupants; the Bot's own user is skipped.
+// GuildMembers intent. Each occupant's display name and avatar come from
+// p.fetchMember — the SAME injected REST-GetMember seam MemberDisplayName
+// (members_name.go) uses, rather than a second one, so this is unit-tested
+// (members_test.go, newMembersTestPresence) without a live gateway by injecting
+// fetchMember and populating a real in-memory disgo cache directly. The Bot's own
+// user is skipped.
+//
+// The standing REST client is borrowed ONCE up front (p.Client()) and that same
+// rest.Rest is handed to every fetchMember call, so a mid-loop Close/token-rebuild
+// can't flip later members into ErrNoClient and silently blank the picker — the
+// fan-out runs against the snapshot the caller started with.
 //
 // The cache iteration (VoiceStateCache().All()) holds the grouped cache's RLock
 // for the whole loop, so we must NOT do REST inside it: a slow/rate-limited
@@ -63,7 +71,7 @@ func (p *Presence) VoiceChannelMembers(ctx context.Context, channelID snowflake.
 
 	members := make([]Member, 0, len(occupants))
 	for _, o := range occupants {
-		m, err := client.Rest.GetMember(o.guildID, o.userID, rest.WithCtx(ctx))
+		m, err := p.fetchMember(ctx, client.Rest, o.guildID, o.userID)
 		if err != nil {
 			// One member failing (rate limit, gone) must not blank the whole picker;
 			// skip it and keep the rest.
