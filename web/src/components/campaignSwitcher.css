@@ -209,11 +209,22 @@
   color: var(--text-muted);
 }
 
+/* Create/edit form view (#338): a comfortably wider panel than the compact list,
+ * clamped so it never overflows a narrow viewport (keeps the #88 mobile layout
+ * intact). min-width:0 overrides the list panel's 280px floor for the clamp. */
+.gx-campaign-switcher__panel--form {
+  min-width: 0;
+  width: min(440px, calc(100vw - var(--spacing-lg)));
+  max-width: none;
+}
+
 .gx-campaign-switcher__create {
-  padding: var(--spacing-sm);
+  /* Generous padding so the form breathes, matching other dialog interiors — the
+   * old spacing-sm (8px) hugged the fields to the panel edges (#338). */
+  padding: var(--spacing-lg);
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-sm);
+  gap: var(--spacing-md);
 }
 .gx-campaign-switcher__create-head {
   font-family: var(--font-display);

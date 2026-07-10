@@ -171,7 +171,15 @@ export function CampaignSwitcher() {
       </button>
 
       {open && (
-        <div className="gx-select__content gx-campaign-switcher__panel">
+        <div
+          className={
+            // The create/edit views host a full form (Name + two-up System/Language
+            // + actions); the narrow list panel cramps it, so those views widen the
+            // panel and add breathing padding (#338).
+            "gx-select__content gx-campaign-switcher__panel" +
+            (panel === "create" || panel === "edit" ? " gx-campaign-switcher__panel--form" : "")
+          }
+        >
           {panel === "create" ? (
             <div className="gx-campaign-switcher__create">
               <div className="gx-campaign-switcher__create-head">New campaign</div>

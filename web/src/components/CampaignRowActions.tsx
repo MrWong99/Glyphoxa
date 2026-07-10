@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -27,12 +28,77 @@ import "./campaignRowActions.css";
 
 type CampaignRow = { id: string; name: string; archived: boolean };
 
+// MenuPos anchors the portalled menu to the trigger in the viewport. right/left
+// pin its horizontal edge to the trigger's right edge; the menu opens below by
+// default and flips above when it would overflow the viewport bottom (#338).
+type MenuPos = { top: number; right: number; flipUp: boolean };
+
+// A conservative menu-height estimate for the flip decision, taken before the
+// menu has laid out. The tallest variant (archived: Unarchive + Delete…) is ~2
+// rows plus padding; overestimating only flips slightly earlier, which is safe.
+const MENU_HEIGHT_ESTIMATE = 96;
+
 export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
   const queryClient = useQueryClient();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [pos, setPos] = useState<MenuPos | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  usePopoverDismiss(wrapRef, menuOpen, () => setMenuOpen(false));
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  // The menu portals to document.body to escape the switcher list's overflow, so
+  // it lives outside wrapRef — menuRef is passed as the extra "inside" element so
+  // clicking a menu item doesn't read as an outside click (#338).
+  usePopoverDismiss(wrapRef, menuOpen, () => setMenuOpen(false), menuRef);
+
+  // Anchor the portalled menu to the trigger each time it opens: right-align its
+  // edge to the trigger's, drop below, and flip above near the viewport bottom so
+  // a row low in the list can't push the menu off-screen (#338). useLayoutEffect
+  // so the position is set before paint — no first-frame flash at (0,0).
+  useLayoutEffect(() => {
+    if (!menuOpen) return;
+    const anchor = triggerRef.current;
+    if (!anchor) return;
+    const measure = () => {
+      const rect = anchor.getBoundingClientRect();
+      const flipUp = rect.bottom + MENU_HEIGHT_ESTIMATE > window.innerHeight;
+      setPos({
+        top: flipUp ? rect.top - 2 : rect.bottom + 2,
+        // clientWidth (not innerWidth) excludes a vertical scrollbar, so the
+        // right-anchored menu doesn't drift under one.
+        right: document.documentElement.clientWidth - rect.right,
+        flipUp,
+      });
+    };
+    measure();
+    // A fixed menu can't follow its anchor when the switcher list (or the page)
+    // scrolls — the anchor would slide out of the list's 320px clip while the menu
+    // floats over unrelated UI (#338). Close on scroll rather than chase it; a
+    // resize just re-anchors.
+    const close = () => setMenuOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [menuOpen]);
+
+  // The menu portals to document.body, at the END of the tab order — Tab from the
+  // trigger would skip it entirely. Move focus into the first enabled item on
+  // open, and restore it to the trigger on close (including Escape), so the menu
+  // is keyboard-reachable and dismissal returns the caret where it started (#338).
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (menuOpen) {
+      menuRef.current
+        ?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')
+        ?.focus();
+    } else if (wasOpen.current) {
+      triggerRef.current?.focus();
+    }
+    wasOpen.current = menuOpen;
+  }, [menuOpen]);
 
   // Invalidate the campaign list across every include_archived input (the key is
   // omitted so React Query matches all listCampaigns entries by prefix), plus the
@@ -75,6 +141,7 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
   return (
     <div className="gx-campaign-row-actions" ref={wrapRef}>
       <button
+        ref={triggerRef}
         type="button"
         className="gx-campaign-row-actions__trigger"
         aria-haspopup="menu"
@@ -90,44 +157,61 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
         <MoreHorizontal size={15} />
       </button>
 
-      {menuOpen && (
-        <div className="gx-select__content gx-campaign-row-actions__menu" role="menu">
-          {campaign.archived ? (
-            <>
+      {menuOpen &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="gx-select__content gx-campaign-row-actions__menu"
+            role="menu"
+            style={
+              pos
+                ? {
+                    top: pos.top,
+                    right: pos.right,
+                    // Anchor the flipped menu by its bottom edge so it grows
+                    // upward from the trigger rather than overlapping it.
+                    transform: pos.flipUp ? "translateY(-100%)" : undefined,
+                  }
+                : undefined
+            }
+          >
+            {campaign.archived ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gx-select__item"
+                  disabled={unarchive.isPending}
+                  onClick={() => unarchive.mutate({ id: campaign.id })}
+                >
+                  <ArchiveRestore size={14} /> Unarchive
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gx-select__item gx-select__item--danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setConfirmOpen(true);
+                  }}
+                >
+                  <Trash2 size={14} /> Delete…
+                </button>
+              </>
+            ) : (
               <button
                 type="button"
                 role="menuitem"
                 className="gx-select__item"
-                disabled={unarchive.isPending}
-                onClick={() => unarchive.mutate({ id: campaign.id })}
+                disabled={archive.isPending}
+                onClick={() => archive.mutate({ id: campaign.id })}
               >
-                <ArchiveRestore size={14} /> Unarchive
+                <Archive size={14} /> Archive
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="gx-select__item gx-select__item--danger"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setConfirmOpen(true);
-                }}
-              >
-                <Trash2 size={14} /> Delete…
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              role="menuitem"
-              className="gx-select__item"
-              disabled={archive.isPending}
-              onClick={() => archive.mutate({ id: campaign.id })}
-            >
-              <Archive size={14} /> Archive
-            </button>
-          )}
-        </div>
-      )}
+            )}
+          </div>,
+          document.body,
+        )}
 
       <ConfirmDialog
         open={confirmOpen}
