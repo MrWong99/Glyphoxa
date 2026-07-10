@@ -333,6 +333,23 @@ type MuteChanged struct {
 // EventName implements [Event].
 func (MuteChanged) EventName() string { return "mute.changed" }
 
+// TapeConsentChanged marks a change to one Speaker's rollover-tape consent (#306,
+// ADR-0051) in the live Voice Session. The presence layer publishes it AFTER
+// persisting the consent row (the [MuteChanged] ordering precedent: the durable
+// state is written before the event), and the wirenpc wiring reacts by calling
+// tape.SetConsent — arming or clearing that Speaker's lane. Granted=true means the
+// Speaker just consented (their audio may now be captured); Granted=false is a
+// revoke (future capture stops and their existing ring is cleared).
+type TapeConsentChanged struct {
+	At         time.Time
+	CampaignID string
+	SpeakerID  string
+	Granted    bool
+}
+
+// EventName implements [Event].
+func (TapeConsentChanged) EventName() string { return "tape.consent_changed" }
+
 // SpendCapLevel names which per-session spend cap a [SpendCapReached] announces
 // (#130, ADR-0046): the soft cap (refuse new turns) or the hard cap (end the
 // session). It is a bounded enum, DISTINCT from the [TurnEndReason] a refused turn
