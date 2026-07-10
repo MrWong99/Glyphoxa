@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -31,8 +32,9 @@ type fakeEnsemble struct {
 	speakPause     chan struct{}       // if set, Speak blocks after dispatching sentence[0]
 	spokeCh        chan string         // agentID pushed when Speak returns (optional)
 
-	mu    sync.Mutex
-	spoke []string
+	mu        sync.Mutex
+	spoke     []string
+	delivered map[string]string // agentID -> text Speak committed (deliver-then-commit)
 }
 
 func (s *fakeEnsemble) Draft(ctx context.Context, e voiceevent.AddressRouted) (string, error) {
@@ -76,7 +78,13 @@ func (s *fakeEnsemble) Speak(ctx context.Context, e voiceevent.AddressRouted, dr
 	var delivered strings.Builder
 	for i, snt := range sentences {
 		if err := dispatch(orchestrator.Reply{Sentence: snt, Voice: tts.Voice{VoiceID: id, Name: id}}); err != nil {
-			return delivered.String(), nil // barge: stop the drain, delivered-only
+			// Mirror the real SpeakDraft (ADR-0012, #362): a start-error
+			// (ErrNotDelivered) skips this sentence but keeps draining later ones under
+			// a live turn; any other error (a barge/mute cancel) stops the drain.
+			if errors.Is(err, orchestrator.ErrNotDelivered) {
+				continue
+			}
+			return s.recordDelivered(id, delivered.String()), nil // barge: stop the drain, delivered-only
 		}
 		if delivered.Len() > 0 {
 			delivered.WriteByte(' ')
@@ -86,11 +94,29 @@ func (s *fakeEnsemble) Speak(ctx context.Context, e voiceevent.AddressRouted, dr
 			select {
 			case <-s.speakPause:
 			case <-ctx.Done():
-				return delivered.String(), nil
+				return s.recordDelivered(id, delivered.String()), nil
 			}
 		}
 	}
-	return delivered.String(), nil
+	return s.recordDelivered(id, delivered.String()), nil
+}
+
+// recordDelivered stores what Speak committed for id (the deliver-then-commit
+// result) so a test can assert an all-synth-failed Lead commits nothing (#362).
+func (s *fakeEnsemble) recordDelivered(id, text string) string {
+	s.mu.Lock()
+	if s.delivered == nil {
+		s.delivered = map[string]string{}
+	}
+	s.delivered[id] = text
+	s.mu.Unlock()
+	return text
+}
+
+func (s *fakeEnsemble) deliveredFor(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.delivered[id]
 }
 
 func (s *fakeEnsemble) spokeIDs() []string {
@@ -392,6 +418,45 @@ func TestReplier_Ensemble_AllDraftsEmptyEndsProviderError(t *testing.T) {
 	if floor.Active() {
 		t.Fatal("the floor must be released after an all-empty ensemble")
 	}
+}
+
+// TestEnsemble_LeadAllSynthFailed_CommitsNothing pins the ensemble residual
+// (#362): when EVERY one of the Lead's sentences start-fails synthesis under a
+// live turn, the Lead commits NOTHING — each start-error now returns
+// ErrNotDelivered, so Speak skips the sentence rather than committing an
+// undelivered line (the old behavior, where an all-synth-failed Lead still
+// committed its text, is gone). The turn ends tts_error.
+func TestEnsemble_LeadAllSynthFailed_CommitsNothing(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	// Every sentence the Lead dispatches start-fails synthesis.
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom-a": true, "boom-b": true}})
+	spk := &fakeEnsemble{
+		draft:          map[string]string{bartTarget.AgentID: "boom-a" /* goblin empty → skipped */},
+		gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: closedGate()},
+		speakSentences: map[string][]string{bartTarget.AgentID: {"boom-a", "boom-b"}},
+		spokeCh:        make(chan string, 2),
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error {
+		return nil
+	}, nil)
+	replier.SetFloor(floor)
+	replier.SetEnsemble(spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T362", Text: "Bart, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	select {
+	case <-spk.spokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the Lead never spoke")
+	}
+	if got := spk.deliveredFor(bartTarget.AgentID); got != "" {
+		t.Fatalf("Lead committed %q, want nothing (every sentence start-failed → ErrNotDelivered)", got)
+	}
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "T362" && e.Reason == voiceevent.TurnEndTTSError
+	}, "turn.ended tts_error for an all-synth-failed Lead")
 }
 
 // TestReplier_Ensemble_BothCandidatesMuted_NeverTakesFloor pins the mute pre-filter

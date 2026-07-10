@@ -634,6 +634,172 @@ func TestDispatchStream_TurnCutMidDrain_ReportsUndelivered(t *testing.T) {
 	}
 }
 
+// TestDispatchStream_StartError_ReturnsNotDelivered pins the streaming-path
+// residual (#362): a TTS start-error under a LIVE turn ctx must surface to the
+// producer as [orchestrator.ErrNotDelivered] — NOT a nil return that would let
+// the producer commit an undelivered sentence (ADR-0012). The turn stays alive:
+// a LATER sentence's dispatch returns nil, and the turn ends tts_error.
+func TestDispatchStream_StartError_ReturnsNotDelivered(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+
+	errs := make(chan error, 2)
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		errs <- dispatch(orchestrator.Reply{Sentence: "boom"}) // start-fails under live ctx
+		errs <- dispatch(orchestrator.Reply{Sentence: "ok"})   // turn still alive
+		return nil
+	}
+	// Sync (no-floor) path publishes TurnEnded on the bus goroutine.
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tnd"})
+
+	first := <-errs
+	if !errors.Is(first, orchestrator.ErrNotDelivered) {
+		t.Fatalf("first dispatch err = %v, want ErrNotDelivered (start-error under live ctx)", first)
+	}
+	if second := <-errs; second != nil {
+		t.Fatalf("second dispatch err = %v, want nil (turn alive after a start-error)", second)
+	}
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool { return e.TurnID == "tnd" && e.Reason == voiceevent.TurnEndTTSError },
+		"turn.ended (tts_error) after a start-error that leaked no ErrNotDelivered",
+	)
+}
+
+// TestDispatchStream_LeakedNotDelivered_NotProviderError pins the defensive
+// classification (#362): if a producer LEAKS ErrNotDelivered as its own return
+// (returning the dispatch error up), the turn must still end tts_error, never
+// provider_error — the sentinel already forced ttsFailed, and misclassifying it
+// as a provider failure would mis-attribute the death.
+func TestDispatchStream_LeakedNotDelivered_NotProviderError(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		return dispatch(orchestrator.Reply{Sentence: "boom"}) // leaks ErrNotDelivered up
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tleak"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool {
+			return e.TurnID == "tleak" && e.Reason == voiceevent.TurnEndTTSError
+		},
+		"turn.ended (tts_error) for a leaked ErrNotDelivered — not provider_error",
+	)
+	for _, ev := range h.Events() {
+		if e, ok := ev.(voiceevent.TurnEnded); ok && e.TurnID == "tleak" && e.Reason == voiceevent.TurnEndProviderError {
+			t.Fatal("leaked ErrNotDelivered misclassified as provider_error")
+		}
+	}
+}
+
+// TestDispatchAll_Batch_OnDeliveredFiresPerDeliveredReply pins the batch
+// commit-on-delivery hook (#362): a clean turn with three canned Replies, each
+// carrying an OnDelivered hook, fires all three hooks exactly once and in order —
+// the per-Reply granularity the batch path now commits at.
+func TestDispatchAll_Batch_OnDeliveredFiresPerDeliveredReply(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{}) // all succeed
+	var fired []string
+	mk := func(s string) orchestrator.Reply {
+		return orchestrator.Reply{Sentence: s, OnDelivered: func() { fired = append(fired, s) }}
+	}
+	reply := func(context.Context, voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{mk("one"), mk("two"), mk("three")}
+	}
+	replier := orchestrator.NewReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tbatch"})
+
+	if want := []string{"one", "two", "three"}; !equalStrs(fired, want) {
+		t.Fatalf("OnDelivered fired = %v, want %v (all three, in order)", fired, want)
+	}
+}
+
+// TestDispatchAll_Batch_CutMidDrain_DeliveredPrefixOnly pins that a batch turn
+// cut mid-drain commits only the delivered prefix (#362, ADR-0012): a fake TTS
+// cancels the turn during reply 2's drain, so hook 1 fired, hooks 2 and 3 did
+// not, and the loop stopped.
+func TestDispatchAll_Batch_CutMidDrain_DeliveredPrefixOnly(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	// cutOn cancels the turn ctx DURING the named sentence's Synthesize (mid-drain),
+	// modelling a barge landing after Synthesize is accepted but before the last
+	// frame is forwarded — the vendor call succeeds so Dispatch returns nil.
+	ttsStage := orchestrator.NewTTS(h.Bus, cutSynth{floor: floor, cutOn: "two"})
+	var mu sync.Mutex
+	var fired []string
+	mk := func(s string) orchestrator.Reply {
+		return orchestrator.Reply{Sentence: s, Voice: tts.Voice{VoiceID: "v", Name: "n"}, OnDelivered: func() {
+			mu.Lock()
+			fired = append(fired, s)
+			mu.Unlock()
+		}}
+	}
+	reply := func(context.Context, voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{mk("one"), mk("two"), mk("three")}
+	}
+	replier := orchestrator.NewReplier(ttsStage, reply, nil)
+	replier.SetFloor(floor)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{
+		TurnID: "tcutbatch",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+
+	// A cut turn publishes no TurnEnded (ctx cancelled → no reason), so sync on the
+	// floor goroutine releasing the floor before reading the recorded hooks.
+	deadline := time.Now().Add(2 * time.Second)
+	for floor.Active() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	mu.Lock()
+	got := append([]string(nil), fired...)
+	mu.Unlock()
+	if want := []string{"one"}; !equalStrs(got, want) {
+		t.Fatalf("OnDelivered fired = %v, want %v (only the delivered prefix before the cut)", got, want)
+	}
+}
+
+// equalStrs reports slice equality for the OnDelivered-order assertions.
+func equalStrs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// cutSynth cancels the active turn (floor.Yield) DURING the named sentence's
+// Synthesize, then returns an already-closed channel — the vendor call itself
+// succeeds (Dispatch returns nil) but the tail audio is cut, so the sentence was
+// NOT delivered (the batch deliver-then-commit re-check must catch it).
+type cutSynth struct {
+	floor *orchestrator.Floor
+	cutOn string
+}
+
+func (s cutSynth) Synthesize(_ context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	if req.Sentence == s.cutOn {
+		s.floor.Yield()
+	}
+	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch, nil
+}
+
+func (cutSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
 // selectiveSynth is a [tts.Synthesizer] that fails Synthesize for sentences in
 // failOn and otherwise returns an already-closed audio channel.
 type selectiveSynth struct {

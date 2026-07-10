@@ -323,11 +323,17 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 		return nil
 	}
 
-	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleAssistant, Text: reply})
-	r.mu.Unlock()
-
-	return []orchestrator.Reply{{Sentence: reply, Voice: r.cfg.Persona.Voice}}
+	// Deliver-then-commit (#362, ADR-0012): the assistant turn is NOT appended
+	// eagerly. It is committed only when the dispatch site delivers the sentence and
+	// invokes OnDelivered — so a batch turn barged before any audio leaves no phantom
+	// assistant message (zero delivered → not logged). The user message stays
+	// committed eagerly (parity with streamTurn/SpeakDraft). The Agent batch emits ONE
+	// Reply (the whole reply), so a barge mid-drain commits nothing.
+	return []orchestrator.Reply{{
+		Sentence:    reply,
+		Voice:       r.cfg.Persona.Voice,
+		OnDelivered: func() { r.commitSpoken(reply) },
+	}}
 }
 
 // Draft produces the Agent's would-be reply text for one utterance WITHOUT
@@ -396,6 +402,12 @@ func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispat
 	// sentence joins the spoken builder only once dispatch returns nil.
 	emit := func(sentence string) error {
 		if e := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); e != nil {
+			// A start-error under a live turn (#362): skip this sentence's commit but
+			// keep draining later ones (return nil — the sentinel must never land in
+			// dispErr). Any other error (a barge cancel) stops the drain.
+			if errors.Is(e, orchestrator.ErrNotDelivered) {
+				return nil
+			}
 			return e
 		}
 		if spoken.Len() > 0 {
@@ -582,6 +594,14 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	// the spoken builder — the room never heard it.
 	emit := func(sentence string) error {
 		if err := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); err != nil {
+			// A start-error under a live turn (#362): this sentence was NOT delivered,
+			// so skip the commit — but the turn is alive, so keep generating (return
+			// nil, do not stop the producer). The resulting history gap (sentence N
+			// skipped, N+1 committed) is INTENDED: it is exactly what the room heard
+			// (ADR-0012). Any other error (a barge/mute cancel) stops generation.
+			if errors.Is(err, orchestrator.ErrNotDelivered) {
+				return nil
+			}
 			return err
 		}
 		if spoken.Len() > 0 {
@@ -644,6 +664,12 @@ func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, disp
 	// was delivered. A turn cancelled before the reply drained delivered nothing,
 	// so it must leave no assistant message.
 	if err := dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice}); err != nil {
+		// A start-error under a live turn (#362): nothing delivered, so commit nothing —
+		// and SWALLOW the sentinel (return nil). Returning it would misclassify the turn
+		// as provider_error in dispatchStream; the reactor already recorded tts_error.
+		if errors.Is(err, orchestrator.ErrNotDelivered) {
+			return nil
+		}
 		return err
 	}
 	r.commitSpoken(reply)

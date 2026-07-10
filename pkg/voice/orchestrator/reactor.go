@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -819,12 +820,29 @@ func (s *Segmenter) transcribe(job transcribeJob) error {
 	return s.stt.Transcribe(ctx, job.seg)
 }
 
+// ErrNotDelivered is the dispatch-callback signal (#362, ADR-0012) for a TTS
+// start-error under a LIVE turn ctx: the sentence was NOT delivered (its audio
+// never started), so the producer must NOT commit it — but the turn is still
+// alive, so the producer keeps going with later sentences. It is distinct from a
+// ctx.Err() (barge/mute) return, which cuts the turn and STOPS the producer. The
+// orchestrator owns this sentinel because it owns the dispatch contract.
+var ErrNotDelivered = errors.New("orchestrator: sentence not delivered")
+
 // Reply is one thing an addressed Agent should say: a single sentence and the
 // Voice to render it with. A [ReplyFunc] returns zero or more Replies per
 // routing decision.
 type Reply struct {
 	Sentence string
 	Voice    tts.Voice
+
+	// OnDelivered, when non-nil, is invoked EXACTLY ONCE by the dispatch site iff
+	// this Reply is delivered — the ADR-0012 commit point: [TTS.Dispatch] returned
+	// nil AND the post-drain ctx is still live. It is the producer's per-Reply
+	// commit hook (deliver-then-commit at the granularity of the Replies the
+	// [ReplyFunc] already returns). A start-error (ErrNotDelivered) or a mid-drain
+	// cut leaves it uninvoked, so an undelivered sentence is never committed. Nil is
+	// a no-op — a Reply with no history to commit.
+	OnDelivered func()
 }
 
 // ReplyFunc decides what an addressed Agent says in response to one
@@ -855,12 +873,17 @@ type ReplyFunc func(ctx context.Context, e voiceevent.AddressRouted) []Reply
 // that sentence is synthesized (the serial, one-at-a-time contract the
 // [PlaybackPump] depends on).
 //
-// dispatch's return is the deliver-then-commit signal (ADR-0012): a nil return
-// means the sentence was fully synthesized under a live turn ctx — delivered, so
-// the producer may commit it to history. It returns ctx.Err() if the turn was
-// cancelled BEFORE or DURING the sentence's drain (a mid-stream barge/mute cuts
-// the sentence's tail audio before its last frame is forwarded — not delivered),
-// so the producer stops generating AND does not commit that undelivered sentence.
+// dispatch's return is the deliver-then-commit signal (ADR-0012), in THREE
+// classes (#362):
+//   - nil → delivered: the sentence was fully synthesized under a live turn ctx,
+//     so the producer may commit it to history.
+//   - errors.Is(err, [ErrNotDelivered]) → a TTS start-error under a LIVE ctx: the
+//     sentence was NOT delivered (do NOT commit it), but the turn is still alive,
+//     so the producer KEEPS GOING with later sentences.
+//   - any other err (a ctx.Err()) → the turn was cut BEFORE or DURING the
+//     sentence's drain (a mid-stream barge/mute cuts the tail audio before its last
+//     frame is forwarded — not delivered): the producer STOPS generating AND does
+//     not commit that undelivered sentence.
 //
 // ctx is the per-turn context (the barge-in floor's, under [WithBargeIn]); the
 // producer must thread it into its LLM call so a cancel tears generation down.
@@ -1080,10 +1103,24 @@ func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) v
 				r.onError(err)
 			}
 			// A synth failure on one sentence is non-fatal to the turn, but record
-			// it as the turn-end reason if no later sentence recovers with audio.
+			// it as the turn-end reason if no later sentence recovers with audio. The
+			// hook is NOT invoked — a start-errored sentence was never delivered.
 			if ctx.Err() == nil {
 				reason = voiceevent.TurnEndTTSError
 			}
+			continue
+		}
+		// Deliver-then-commit re-check (#362, ADR-0012, mirrors dispatchStream):
+		// Dispatch returns nil even when a barge/mute cut the turn DURING this Reply's
+		// drain. Re-check the ctx: if it went cancelled, this Reply was NOT delivered —
+		// stop the loop and leave its hook UNINVOKED (the delivered prefix's hooks
+		// already fired).
+		if ctx.Err() != nil {
+			return ""
+		}
+		// Delivered: fire this Reply's per-Reply commit hook (nil = no-op).
+		if rep.OnDelivered != nil {
+			rep.OnDelivered()
 		}
 	}
 	return reason
@@ -1113,20 +1150,34 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			// Start-error under a LIVE ctx (#362): the sentence never produced audio,
+			// so it was NOT delivered. Signal ErrNotDelivered — NOT nil, which would let
+			// the producer commit an undelivered sentence (ADR-0012) — while the turn
+			// stays alive so the producer keeps going with later sentences.
 			ttsFailed = true
-			return nil
+			return ErrNotDelivered
 		}
 		// Deliver-then-commit re-check (ADR-0012): Dispatch returns nil even when a
-		// barge/mute cancelled the turn DURING the drain — the vendor call succeeded
-		// but the sentence's tail audio was cut before its last frame was forwarded,
-		// so it was NOT delivered. Report the cancel so the producer does not commit
-		// this undelivered sentence.
+		// barge/mute cancelled the turn DURING the drain. The forward boundary is
+		// unobservable here, so a cancel-during-drain is AMBIGUOUS — treated as
+		// undelivered (accepted under-report bias: history may omit a sentence the room
+		// fully heard, but never includes one it did not). Report the cancel so the
+		// producer does not commit this sentence.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Delivered: fire the producer's per-Reply commit hook at the ADR-0012 commit
+		// point (Dispatch nil AND post-drain ctx live). Nil hook is a no-op.
+		if rep.OnDelivered != nil {
+			rep.OnDelivered()
+		}
 		return nil
 	}
-	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil {
+	// A producer that leaks ErrNotDelivered as its own return (returning the dispatch
+	// signal up) must NOT be misclassified as a provider failure: ttsFailed is already
+	// set, so the tts_error branch below owns the reason. Only a genuine producer error
+	// under a live ctx is provider_error.
+	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil && !errors.Is(err, ErrNotDelivered) {
 		if r.onError != nil {
 			r.onError(err)
 		}
