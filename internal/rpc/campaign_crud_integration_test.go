@@ -20,7 +20,66 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
+
+// TestUpdateAgent_CrossCampaign_Integration is #356: the load-bearing GetAgent
+// pre-read (kept for voice preservation) is scoped to the active campaign. With a
+// live Voice Session pinning the active campaign to A, an operator cannot update —
+// or read the voice of — campaign B's NPC by id: UpdateAgent is CodeNotFound
+// before any write, and B's NPC is left byte-for-byte untouched.
+func TestUpdateAgent_CrossCampaign_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, campaignA := seedStore(t, dsn)
+	ctx := context.Background()
+
+	a, err := store.GetActiveCampaign(ctx) // == A, carries the tenant id
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	campaignB, err := store.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: a.TenantID, Name: "Other Table", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	npcBID, err := store.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaignB, Role: storage.AgentRoleCharacter, Name: "Bandit", Persona: "Lurks.",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent B: %v", err)
+	}
+	before, err := store.GetAgent(ctx, npcBID)
+	if err != nil {
+		t.Fatalf("GetAgent B before: %v", err)
+	}
+
+	// Pin the active campaign to A via a live Voice Session, then mount the server.
+	srv := rpc.NewCampaignServer(store)
+	srv.SetSessions(liveMgr(campaignA))
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, s.URL, connect.WithProtoJSON())
+
+	_, err = client.UpdateAgent(ctx, connect.NewRequest(&managementv1.UpdateAgentRequest{
+		Id: npcBID.String(), Name: "Hijacked", Persona: "Rewritten.",
+	}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("cross-campaign UpdateAgent code = %v, want NotFound", got)
+	}
+
+	// B's NPC is unchanged — no cross-campaign write landed.
+	after, err := store.GetAgent(ctx, npcBID)
+	if err != nil {
+		t.Fatalf("GetAgent B after: %v", err)
+	}
+	if after.Name != before.Name || after.Persona != before.Persona {
+		t.Errorf("cross-campaign UpdateAgent mutated B's NPC: before %q/%q, after %q/%q",
+			before.Name, before.Persona, after.Name, after.Persona)
+	}
+}
 
 func TestCampaignCRUD_Integration(t *testing.T) {
 	dsn := startPostgres(t)

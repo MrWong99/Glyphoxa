@@ -887,7 +887,8 @@ func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
-	store.campaign = storage.Campaign{ID: uuid.New(), Language: "de"}
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID, Language: "de"}
 	id := uuid.New()
 
 	tuned := ttseleven.DefaultVoice("v1", "en")
@@ -896,7 +897,7 @@ func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VoiceToJSON: %v", err)
 	}
-	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old", Voice: blob}
+	store.agents[id] = storage.Agent{ID: id, CampaignID: campID, Role: storage.AgentRoleCharacter, Name: "Old", Voice: blob}
 	client := crudClient(t, store)
 
 	// Same id: the persisted bytes must be byte-identical afterward.
@@ -919,6 +920,42 @@ func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	}
 	if after.VoiceID != "v2" || after.ProviderID != ttseleven.ProviderID || len(after.Settings) == 0 {
 		t.Errorf("voice change dropped tuning: %+v", after)
+	}
+}
+
+// TestUpdateAgent_CrossCampaignPreReadIsNotFound is #356: the load-bearing
+// pre-read (GetAgent, kept for voice preservation) must not leak across
+// campaigns. An operator whose active campaign is A cannot update — or read the
+// voice of — an Agent that belongs to campaign B by id: the pre-read is scoped to
+// the active campaign, so a mismatch is CodeNotFound before any write, with the
+// same ErrNotFound discipline as the scoped store UPDATE (#353).
+func TestUpdateAgent_CrossCampaignPreReadIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	// The Agent exists, but in ANOTHER campaign, with a tuned voice that must not leak.
+	foreignAgent := uuid.New()
+	tuned, err := storage.VoiceToJSON(ttseleven.DefaultVoice("secret", "en"))
+	if err != nil {
+		t.Fatalf("VoiceToJSON: %v", err)
+	}
+	store.agents[foreignAgent] = storage.Agent{
+		ID: foreignAgent, CampaignID: uuid.New(), Role: storage.AgentRoleCharacter, Voice: tuned,
+	}
+	client := crudClient(t, store)
+
+	resp, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: foreignAgent.String(), Name: "Hijack"}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (cross-campaign agent)", got)
+	}
+	if resp != nil {
+		t.Error("cross-campaign UpdateAgent must not return an agent payload")
+	}
+	// No write reached the store scoped to the active campaign.
+	if store.updateAgentCampaign == activeID {
+		t.Error("cross-campaign UpdateAgent leaked a write to the active campaign")
 	}
 }
 
@@ -982,7 +1019,7 @@ func TestUpdateAgent_ScopesToActiveCampaign(t *testing.T) {
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	id := uuid.New()
-	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old"}
+	store.agents[id] = storage.Agent{ID: id, CampaignID: activeID, Role: storage.AgentRoleCharacter, Name: "Old"}
 	client := crudClient(t, store)
 
 	if _, err := client.UpdateAgent(context.Background(),
