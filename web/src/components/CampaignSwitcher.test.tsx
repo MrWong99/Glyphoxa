@@ -436,6 +436,31 @@ describe("CampaignSwitcher", () => {
     await waitFor(() => expect(calls.archiveCampaign).toBe(1));
   });
 
+  it("fires a row-menu action through the real mousedown→click sequence without the panel dismissing the portalled menu", async () => {
+    // The menu portals to document.body, OUTSIDE the switcher panel's wrapRef. In a
+    // real browser a click is mousedown→mouseup→click: the panel's own
+    // usePopoverDismiss sees that mousedown as "outside", closes the panel, and
+    // unmounts the portal before mouseup — so onClick never fires (#338 review).
+    // fireEvent.click alone (the test above) can't catch this; the mousedown must
+    // be dispatched separately.
+    const calls: Record<string, number> = {};
+    renderSwitcher(
+      mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a", calls }),
+    );
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    const list = await screen.findByRole("group", { name: /campaigns/i });
+    const row = (await within(list).findByText("Alpha Quest")).closest("li")!;
+
+    fireEvent.click(within(row).getByRole("button", { name: /Campaign actions/i }));
+    const item = await screen.findByRole("menuitem", { name: /^Archive$/ });
+    fireEvent.mouseDown(item);
+    // The panel (and thus the portalled menu) must survive the mousedown.
+    expect(screen.getByRole("group", { name: /campaigns/i })).toBeInTheDocument();
+    fireEvent.click(item);
+    await waitFor(() => expect(calls.archiveCampaign).toBe(1));
+  });
+
   it("deletes an archived campaign THROUGH the open panel without the dismiss hook tearing it down mid-flow", async () => {
     const calls: Record<string, number> = {};
     renderSwitcher(

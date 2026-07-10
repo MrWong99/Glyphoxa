@@ -13,6 +13,18 @@ function radixModalOpen(): boolean {
   return document.querySelector('[role="alertdialog"], [role="dialog"]') !== null;
 }
 
+// pointerInPortalledMenu reports whether a mousedown landed inside an open
+// role="menu" surface. Such a menu (the campaign row-actions menu, #338) portals
+// to document.body — OUTSIDE every popover's anchor ref, including the switcher
+// PANEL that hosts the menu's own trigger. Without this, the panel's dismiss reads
+// the mousedown on a menu item as "outside", closes the panel, and unmounts the
+// portalled menu before mouseup — so the item's click never fires. Same trap
+// radixModalOpen guards for dialogs (#269), generalized to menus: any popover
+// defers to an open menu, whichever anchor it belongs to.
+function pointerInPortalledMenu(target: Node): boolean {
+  return target instanceof Element && target.closest('[role="menu"]') !== null;
+}
+
 // usePopoverDismiss closes a lightweight (non-Radix) popover the way a native
 // select would: a mousedown outside the anchor element or an Escape keypress
 // calls onClose. Extracted from the Combobox popover (#88 slice 2) when the
@@ -46,6 +58,7 @@ export function usePopoverDismiss(
       if (radixModalOpen()) return;
       const target = e.target as Node;
       if (extraRef?.current?.contains(target)) return; // inside the portalled surface
+      if (pointerInPortalledMenu(target)) return; // an open menu owns its own dismissal
       if (ref.current && !ref.current.contains(target)) onCloseRef.current();
     };
     const onKey = (e: KeyboardEvent) => {

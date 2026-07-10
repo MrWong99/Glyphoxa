@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
@@ -64,18 +64,40 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
       const flipUp = rect.bottom + MENU_HEIGHT_ESTIMATE > window.innerHeight;
       setPos({
         top: flipUp ? rect.top - 2 : rect.bottom + 2,
-        right: window.innerWidth - rect.right,
+        // clientWidth (not innerWidth) excludes a vertical scrollbar, so the
+        // right-anchored menu doesn't drift under one.
+        right: document.documentElement.clientWidth - rect.right,
         flipUp,
       });
     };
     measure();
-    // Keep the menu pinned if the viewport scrolls or resizes while it's open.
-    window.addEventListener("scroll", measure, true);
+    // A fixed menu can't follow its anchor when the switcher list (or the page)
+    // scrolls — the anchor would slide out of the list's 320px clip while the menu
+    // floats over unrelated UI (#338). Close on scroll rather than chase it; a
+    // resize just re-anchors.
+    const close = () => setMenuOpen(false);
+    window.addEventListener("scroll", close, true);
     window.addEventListener("resize", measure);
     return () => {
-      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("scroll", close, true);
       window.removeEventListener("resize", measure);
     };
+  }, [menuOpen]);
+
+  // The menu portals to document.body, at the END of the tab order — Tab from the
+  // trigger would skip it entirely. Move focus into the first enabled item on
+  // open, and restore it to the trigger on close (including Escape), so the menu
+  // is keyboard-reachable and dismissal returns the caret where it started (#338).
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (menuOpen) {
+      menuRef.current
+        ?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')
+        ?.focus();
+    } else if (wasOpen.current) {
+      triggerRef.current?.focus();
+    }
+    wasOpen.current = menuOpen;
   }, [menuOpen]);
 
   // Invalidate the campaign list across every include_archived input (the key is
@@ -141,7 +163,6 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
             ref={menuRef}
             className="gx-select__content gx-campaign-row-actions__menu"
             role="menu"
-            data-flip-up={pos?.flipUp || undefined}
             style={
               pos
                 ? {
@@ -154,40 +175,40 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
                 : undefined
             }
           >
-          {campaign.archived ? (
-            <>
+            {campaign.archived ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gx-select__item"
+                  disabled={unarchive.isPending}
+                  onClick={() => unarchive.mutate({ id: campaign.id })}
+                >
+                  <ArchiveRestore size={14} /> Unarchive
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gx-select__item gx-select__item--danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setConfirmOpen(true);
+                  }}
+                >
+                  <Trash2 size={14} /> Delete…
+                </button>
+              </>
+            ) : (
               <button
                 type="button"
                 role="menuitem"
                 className="gx-select__item"
-                disabled={unarchive.isPending}
-                onClick={() => unarchive.mutate({ id: campaign.id })}
+                disabled={archive.isPending}
+                onClick={() => archive.mutate({ id: campaign.id })}
               >
-                <ArchiveRestore size={14} /> Unarchive
+                <Archive size={14} /> Archive
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="gx-select__item gx-select__item--danger"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setConfirmOpen(true);
-                }}
-              >
-                <Trash2 size={14} /> Delete…
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              role="menuitem"
-              className="gx-select__item"
-              disabled={archive.isPending}
-              onClick={() => archive.mutate({ id: campaign.id })}
-            >
-              <Archive size={14} /> Archive
-            </button>
-          )}
+            )}
           </div>,
           document.body,
         )}
