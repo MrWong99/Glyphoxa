@@ -58,15 +58,15 @@ type campaignStore interface {
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
 	CreateAgent(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
 	UpdateAgent(ctx context.Context, a storage.AgentUpdate) (storage.Agent, error)
-	DeleteAgent(ctx context.Context, id uuid.UUID) error
+	DeleteAgent(ctx context.Context, campaignID, id uuid.UUID) error
 	CreateNode(ctx context.Context, n storage.NewKGNode) (storage.KGNode, error)
 	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 	UpdateNode(ctx context.Context, u storage.KGNodeUpdate) (storage.KGNode, error)
-	DeleteNode(ctx context.Context, id uuid.UUID) error
+	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
 	CreateEdge(ctx context.Context, e storage.NewKGEdge) (storage.KGEdge, error)
-	DeleteEdge(ctx context.Context, id uuid.UUID) error
+	DeleteEdge(ctx context.Context, campaignID, id uuid.UUID) error
 	NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
-	SetNodeAgent(ctx context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
+	SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
 	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
 	UpsertToolGrant(ctx context.Context, g storage.NewToolGrant) error
@@ -78,7 +78,7 @@ type campaignStore interface {
 	ListCharacters(ctx context.Context, campaignID uuid.UUID) ([]storage.Character, error)
 	CreateCharacter(ctx context.Context, c storage.NewCharacter) (uuid.UUID, error)
 	UpdateCharacter(ctx context.Context, c storage.CharacterUpdate) (storage.Character, error)
-	DeleteCharacter(ctx context.Context, id uuid.UUID) error
+	DeleteCharacter(ctx context.Context, campaignID, id uuid.UUID) error
 }
 
 // CampaignServer implements managementv1connect.CampaignServiceHandler over a

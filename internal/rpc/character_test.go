@@ -35,6 +35,7 @@ func (f *fakeCampaignStore) CreateCharacter(_ context.Context, c storage.NewChar
 }
 
 func (f *fakeCampaignStore) UpdateCharacter(_ context.Context, u storage.CharacterUpdate) (storage.Character, error) {
+	f.charUpdateCampaign = u.CampaignID
 	if f.charUpdateErr != nil {
 		return storage.Character{}, f.charUpdateErr
 	}
@@ -49,7 +50,8 @@ func (f *fakeCampaignStore) UpdateCharacter(_ context.Context, u storage.Charact
 	return storage.Character{}, storage.ErrNotFound
 }
 
-func (f *fakeCampaignStore) DeleteCharacter(_ context.Context, id uuid.UUID) error {
+func (f *fakeCampaignStore) DeleteCharacter(_ context.Context, campaignID, id uuid.UUID) error {
+	f.charDeleteCampaign = campaignID
 	if f.charDeleteErr != nil {
 		return f.charDeleteErr
 	}
@@ -298,6 +300,24 @@ func TestUpdateCharacter_NonSnowflakeIsInvalidArgument(t *testing.T) {
 	}
 }
 
+// TestUpdateCharacter_NoActiveCampaignIsNotFound is #342: UpdateCharacter gained
+// active-campaign resolution to scope the write; with no active campaign it returns
+// CodeNotFound rather than mutating by bare id.
+func TestUpdateCharacter_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.UpdateCharacter(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCharacterRequest{
+			Id: uuid.NewString(), Name: "New", DiscordUserId: "111111111111111111",
+		}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
 // --- DeleteCharacter ---
 
 func TestDeleteCharacter_Removes(t *testing.T) {
@@ -331,6 +351,66 @@ func TestDeleteCharacter_InvalidIdIsInvalidArgument(t *testing.T) {
 func TestDeleteCharacter_UnknownIdIsNotFound(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
+	client := crudClient(t, store)
+
+	_, err := client.DeleteCharacter(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCharacterRequest{Id: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
+// TestUpdateCharacter_ScopesToActiveCampaign is #342: the handler resolves the
+// active campaign and passes its id down, so the store's UPDATE matches (id,
+// campaign_id) and a cross-campaign write is refused server-side.
+func TestUpdateCharacter_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	id := uuid.New()
+	store.characters = []storage.Character{
+		{ID: id, CampaignID: activeID, Name: "Old", DiscordUserID: "111111111111111111"},
+	}
+	client := crudClient(t, store)
+
+	if _, err := client.UpdateCharacter(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCharacterRequest{
+			Id: id.String(), Name: "New", DiscordUserId: "111111111111111111",
+		})); err != nil {
+		t.Fatalf("UpdateCharacter: %v", err)
+	}
+	if store.charUpdateCampaign != activeID {
+		t.Errorf("UpdateCharacter scoped to %s, want active %s", store.charUpdateCampaign, activeID)
+	}
+}
+
+// TestDeleteCharacter_ScopesToActiveCampaign is #342: the delete is scoped to the
+// resolved active campaign, so another campaign's Character is never removable.
+func TestDeleteCharacter_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	id := uuid.New()
+	store.characters = []storage.Character{{ID: id, CampaignID: activeID, Name: "Doomed", DiscordUserID: "1"}}
+	client := crudClient(t, store)
+
+	if _, err := client.DeleteCharacter(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCharacterRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteCharacter: %v", err)
+	}
+	if store.charDeleteCampaign != activeID {
+		t.Errorf("DeleteCharacter scoped to %s, want active %s", store.charDeleteCampaign, activeID)
+	}
+}
+
+// TestDeleteCharacter_NoActiveCampaignIsNotFound is #342: without an active
+// campaign the scoped delete cannot resolve an owner and returns CodeNotFound.
+func TestDeleteCharacter_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
 	client := crudClient(t, store)
 
 	_, err := client.DeleteCharacter(context.Background(),

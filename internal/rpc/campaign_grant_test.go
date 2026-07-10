@@ -96,6 +96,47 @@ func TestToolGrant_GhostAgentNotFound(t *testing.T) {
 	}
 }
 
+// TestUpdateToolGrant_CrossCampaignIsNotFound is #342: an operator whose active
+// campaign is A cannot grant/revoke Tools on an Agent that belongs to campaign B —
+// the write path requires the Agent to be in the active campaign, so a mismatch is
+// CodeNotFound and nothing is written.
+func TestUpdateToolGrant_CrossCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	// The Agent exists, but in ANOTHER campaign.
+	foreignAgent := uuid.New()
+	store.agents[foreignAgent] = storage.Agent{ID: foreignAgent, CampaignID: uuid.New()}
+	client := crudClient(t, store)
+
+	_, err := client.UpdateToolGrant(context.Background(),
+		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
+			AgentId: foreignAgent.String(), ToolName: "dice", Granted: true,
+		}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (cross-campaign agent)", got)
+	}
+}
+
+// TestUpdateToolGrant_NoActiveCampaignIsNotFound is #342: without an active
+// campaign the grant write cannot resolve an owning campaign and is CodeNotFound.
+func TestUpdateToolGrant_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	agentID := registerAgent(store)
+	client := crudClient(t, store)
+
+	_, err := client.UpdateToolGrant(context.Background(),
+		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
+			AgentId: agentID.String(), ToolName: "dice", Granted: true,
+		}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (no active campaign)", got)
+	}
+}
+
 func TestListToolGrants_InvalidAgentID(t *testing.T) {
 	t.Parallel()
 	client := crudClient(t, newFakeStore())

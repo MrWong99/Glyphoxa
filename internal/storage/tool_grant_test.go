@@ -125,7 +125,7 @@ func TestToolGrantRoundTrip(t *testing.T) {
 
 	// Deleting the Agent cascades its grants away (ON DELETE CASCADE) — no
 	// explicit cleanup code.
-	if err := st.DeleteAgent(ctx, charID); err != nil {
+	if err := st.DeleteAgent(ctx, campaignID, charID); err != nil {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 	cascaded, err := st.ListToolGrants(ctx, charID)

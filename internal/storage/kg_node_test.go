@@ -91,7 +91,7 @@ func TestKGNodeUpdate(t *testing.T) {
 	}
 
 	updated, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
-		ID: created.ID, Name: "Old Barrow", Body: "A very haunted mound.", GMPrivate: true,
+		ID: created.ID, CampaignID: campaignID, Name: "Old Barrow", Body: "A very haunted mound.", GMPrivate: true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateNode: %v", err)
@@ -118,7 +118,7 @@ func TestKGNodeUpdate(t *testing.T) {
 		t.Errorf("update did not persist across reload: %+v", nodes)
 	}
 
-	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: uuid.New(), Name: "ghost"}); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: uuid.New(), CampaignID: campaignID, Name: "ghost"}); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("UpdateNode missing id err = %v, want ErrNotFound", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestKGNodeDelete(t *testing.T) {
 		t.Fatalf("CreateNode: %v", err)
 	}
 
-	if err := st.DeleteNode(ctx, created.ID); err != nil {
+	if err := st.DeleteNode(ctx, campaignID, created.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
 	nodes, err := st.ListNodes(ctx, campaignID)
@@ -149,10 +149,10 @@ func TestKGNodeDelete(t *testing.T) {
 		t.Errorf("node not deleted: %+v", nodes)
 	}
 
-	if err := st.DeleteNode(ctx, created.ID); !errors.Is(err, storage.ErrNotFound) {
+	if err := st.DeleteNode(ctx, campaignID, created.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("second DeleteNode err = %v, want ErrNotFound", err)
 	}
-	if err := st.DeleteNode(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+	if err := st.DeleteNode(ctx, campaignID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("DeleteNode unknown id err = %v, want ErrNotFound", err)
 	}
 }
@@ -181,12 +181,12 @@ func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 
 	// Edit both: flip the Faction to gm_private, leave the Location public.
 	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
-		ID: loc.ID, Name: "Old Harbor", Body: "Ships used to dock here.",
+		ID: loc.ID, CampaignID: campaignID, Name: "Old Harbor", Body: "Ships used to dock here.",
 	}); err != nil {
 		t.Fatalf("UpdateNode location: %v", err)
 	}
 	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
-		ID: fac.ID, Name: "Dockers Guild", Body: "A secret cabal.", GMPrivate: true,
+		ID: fac.ID, CampaignID: campaignID, Name: "Dockers Guild", Body: "A secret cabal.", GMPrivate: true,
 	}); err != nil {
 		t.Fatalf("UpdateNode faction: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 	}
 
 	// Delete the Location; only the (private) Faction remains.
-	if err := st.DeleteNode(ctx, loc.ID); err != nil {
+	if err := st.DeleteNode(ctx, campaignID, loc.ID); err != nil {
 		t.Fatalf("DeleteNode location: %v", err)
 	}
 	all, err := st.ListNodes(ctx, campaignID)
@@ -220,5 +220,49 @@ func TestKGNodeCreateEditDeleteAcrossTypes(t *testing.T) {
 	}
 	if len(all) != 1 || all[0].ID != fac.ID || !all[0].GMPrivate {
 		t.Errorf("after delete want only the private Faction, got %+v", all)
+	}
+}
+
+// TestKGNodeMutationsAreCampaignScoped is #342: UpdateNode/DeleteNode match
+// (id, campaign_id), so passing another Campaign's id refuses the mutation with
+// ErrNotFound and leaves the Node untouched.
+func TestKGNodeMutationsAreCampaignScoped(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	var campaignB uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name) VALUES ($1, 'Other Table') RETURNING id`,
+		tenantID).Scan(&campaignB); err != nil {
+		t.Fatalf("insert campaign B: %v", err)
+	}
+
+	node, err := st.CreateNode(ctx, storage.NewKGNode{
+		CampaignID: campaignA, Type: storage.KGNodeLocation, Name: "Barrow", Body: "A haunted mound.",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode A: %v", err)
+	}
+
+	// Update scoped to campaign B must refuse and change nothing.
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{
+		ID: node.ID, CampaignID: campaignB, Name: "Hijacked",
+	}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign UpdateNode = %v, want ErrNotFound", err)
+	}
+	// Delete scoped to campaign B must refuse and leave the row.
+	if err := st.DeleteNode(ctx, campaignB, node.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign DeleteNode = %v, want ErrNotFound", err)
+	}
+
+	// The Node is intact under campaign A with its original name.
+	got, err := st.ListNodes(ctx, campaignA)
+	if err != nil {
+		t.Fatalf("ListNodes A: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != node.ID || got[0].Name != "Barrow" {
+		t.Errorf("cross-campaign mutation leaked through: %+v", got)
 	}
 }

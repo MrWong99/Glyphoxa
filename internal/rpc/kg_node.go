@@ -102,11 +102,24 @@ func (s *CampaignServer) UpdateNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
+	// Resolve the active campaign and scope the write to it (#342): the store's
+	// UPDATE matches (id, campaign_id), so a Node in another campaign is never
+	// mutable through this session — it reads back as CodeNotFound.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("UpdateNode: get active campaign failed", "node_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
 	updated, err := s.store.UpdateNode(ctx, storage.KGNodeUpdate{
-		ID:        id,
-		Name:      strings.TrimSpace(m.GetName()),
-		Body:      m.GetBody(),
-		GMPrivate: m.GetGmPrivate(),
+		ID:         id,
+		CampaignID: c.ID,
+		Name:       strings.TrimSpace(m.GetName()),
+		Body:       m.GetBody(),
+		GMPrivate:  m.GetGmPrivate(),
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -129,7 +142,19 @@ func (s *CampaignServer) DeleteNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid node id"))
 	}
 
-	switch err := s.store.DeleteNode(ctx, id); {
+	// Resolve the active campaign and scope the delete to it (#342): the store's
+	// DELETE matches (id, campaign_id), so a Node in another campaign is never
+	// removable through this session — it reads back as CodeNotFound.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("DeleteNode: get active campaign failed", "node_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	switch err := s.store.DeleteNode(ctx, c.ID, id); {
 	case err == nil:
 		return connect.NewResponse(&managementv1.DeleteNodeResponse{}), nil
 	case errors.Is(err, storage.ErrNotFound):

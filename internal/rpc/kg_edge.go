@@ -78,7 +78,18 @@ func (s *CampaignServer) DeleteEdge(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid edge id"))
 	}
-	switch err := s.store.DeleteEdge(ctx, id); {
+	// Resolve the active campaign and scope the delete to it (#342): the store's
+	// DELETE matches (id, campaign_id), so an Edge in another campaign is never
+	// removable through this session — it reads back as CodeNotFound.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("DeleteEdge: get active campaign failed", "edge_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	switch err := s.store.DeleteEdge(ctx, c.ID, id); {
 	case err == nil:
 		return connect.NewResponse(&managementv1.DeleteEdgeResponse{}), nil
 	case errors.Is(err, storage.ErrNotFound):
@@ -134,7 +145,21 @@ func (s *CampaignServer) SetNodeAgent(
 		agentID = uuid.NullUUID{UUID: parsed, Valid: true}
 	}
 
-	updated, err := s.store.SetNodeAgent(ctx, nodeID, agentID)
+	// Resolve the active campaign and scope both the link and the unlink to it
+	// (#342): the store matches the Node's campaign_id against the active campaign,
+	// so another campaign's Node is never re-voiced nor unlinked through this
+	// session — and a link's Agent must also belong to the active campaign. A
+	// cross-campaign Node/Agent reads back as CodeNotFound.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("SetNodeAgent: get active campaign failed", "node_id", nodeID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	updated, err := s.store.SetNodeAgent(ctx, c.ID, nodeID, agentID)
 	switch {
 	case err == nil:
 		return connect.NewResponse(&managementv1.SetNodeAgentResponse{Node: toProtoNode(updated)}), nil

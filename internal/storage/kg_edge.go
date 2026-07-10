@@ -210,9 +210,12 @@ func mapEdgeWriteErr(op string, err error) error {
 	return fmt.Errorf("storage: %s: %w", op, err)
 }
 
-// DeleteEdge removes a typed Edge by id. A missing id yields ErrNotFound.
-func (s *Store) DeleteEdge(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM kg_edge WHERE id = $1`, id)
+// DeleteEdge removes a typed Edge by id, scoped to its owning Campaign (#342): the
+// DELETE matches (id, campaign_id), so an Edge in another Campaign is not deleted
+// and yields ErrNotFound — a cross-campaign delete is refused server-side. A
+// missing id likewise yields ErrNotFound.
+func (s *Store) DeleteEdge(ctx context.Context, campaignID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM kg_edge WHERE id = $1 AND campaign_id = $2`, id, campaignID)
 	if err != nil {
 		return fmt.Errorf("storage: delete kg edge %s: %w", id, err)
 	}
@@ -261,18 +264,21 @@ func (s *Store) NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, inco
 }
 
 // SetNodeAgent links or unlinks a Node's Character NPC Agent (the "voiced by"
-// link, ADR-0008 amendment). A valid agentID links: a single UPDATE guards the
-// same-Campaign invariant race-free by matching the Node's campaign_id against the
-// Agent's in one statement — a missing or cross-campaign Agent matches no row and
-// yields ErrNotFound; a non-NPC Node trips the DB CHECK (ErrInvalidEdge); an Agent
-// already linked to another Node trips the UNIQUE index (ErrConflict). An invalid
-// agentID unlinks (agent_id = NULL). A missing Node yields ErrNotFound.
-func (s *Store) SetNodeAgent(ctx context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (KGNode, error) {
+// link, ADR-0008 amendment). Both paths are scoped to the owning Campaign (#342):
+// every UPDATE matches the Node's campaign_id against the caller's campaignID, so a
+// Node in another Campaign is invisible and yields ErrNotFound — a cross-campaign
+// link or unlink is refused server-side. A valid agentID links: the single UPDATE
+// also matches the Node's campaign against the Agent's in one statement, so a
+// missing or cross-campaign Agent matches no row and yields ErrNotFound; a non-NPC
+// Node trips the DB CHECK (ErrInvalidEdge); an Agent already linked to another Node
+// trips the UNIQUE index (ErrConflict). An invalid agentID unlinks (agent_id =
+// NULL). A missing Node yields ErrNotFound.
+func (s *Store) SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (KGNode, error) {
 	if !agentID.Valid {
 		row := s.db.QueryRow(ctx,
 			`UPDATE kg_node SET agent_id = NULL, updated_at = now()
-			  WHERE id = $1
-			 RETURNING `+kgNodeColumns, nodeID)
+			  WHERE id = $1 AND campaign_id = $2
+			 RETURNING `+kgNodeColumns, nodeID, campaignID)
 		n, err := scanKGNode(row)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return KGNode{}, ErrNotFound
@@ -286,12 +292,13 @@ func (s *Store) SetNodeAgent(ctx context.Context, nodeID uuid.UUID, agentID uuid
 	row := s.db.QueryRow(ctx,
 		`UPDATE kg_node SET agent_id = $2, updated_at = now()
 		  WHERE id = $1
+		    AND campaign_id = $3
 		    AND campaign_id = (SELECT campaign_id FROM agents WHERE id = $2)
-		 RETURNING `+kgNodeColumns, nodeID, agentID.UUID)
+		 RETURNING `+kgNodeColumns, nodeID, agentID.UUID, campaignID)
 	n, err := scanKGNode(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// No row matched: the Node is missing, or the Agent is missing / in another
-		// Campaign (the subquery yielded no matching campaign_id).
+		// No row matched: the Node is missing / in another Campaign, or the Agent is
+		// missing / in another Campaign (the subquery yielded no matching campaign_id).
 		return KGNode{}, ErrNotFound
 	}
 	if err != nil {

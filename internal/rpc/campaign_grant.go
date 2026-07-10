@@ -72,10 +72,20 @@ func (s *CampaignServer) UpdateToolGrant(
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown tool"))
 	}
-	// Pre-check the Agent exists so granting for a deleted Agent (stale second
-	// tab) is CodeNotFound, not a tool_agent_grant FK violation surfaced as a 500
-	// (issue #215) — mirrors the sibling UpdateAgent/DeleteAgent mapping.
-	if err := s.requireAgent(ctx, agentID); err != nil {
+	// Resolve the active campaign and require the Agent to belong to it (#342): a
+	// Tool Grant write is keyed on agent_id alone, so without this an operator on
+	// campaign A could grant/revoke Tools on campaign B's Agent (incl. B's Butler).
+	// The scoped check refuses a cross-campaign target as CodeNotFound before any
+	// write — and still maps a deleted Agent to CodeNotFound (issue #215).
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("UpdateToolGrant: get active campaign failed", "agent_id", agentID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if err := s.requireAgentInCampaign(ctx, c.ID, agentID); err != nil {
 		return nil, err
 	}
 
@@ -130,6 +140,28 @@ func (s *CampaignServer) requireAgent(ctx context.Context, agentID uuid.UUID) er
 		}
 		slog.Default().Error("tool grant: agent lookup failed", "agent_id", agentID, "err", err)
 		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	return nil
+}
+
+// requireAgentInCampaign is requireAgent scoped to an owning Campaign (#342): the
+// Agent must both exist AND belong to campaignID, else CodeNotFound. Agents never
+// move between Campaigns (campaign_id is immutable), so the read-then-compare is
+// race-free — it verifies ownership before a Tool Grant mutation keyed on agent_id
+// alone can reach another campaign's Agent. Any other lookup failure is
+// CodeInternal.
+func (s *CampaignServer) requireAgentInCampaign(ctx context.Context, campaignID, agentID uuid.UUID) error {
+	a, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
+		}
+		slog.Default().Error("tool grant: agent lookup failed", "agent_id", agentID, "err", err)
+		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if a.CampaignID != campaignID {
+		// The Agent is in another Campaign — invisible to this operator's session.
+		return connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 	return nil
 }

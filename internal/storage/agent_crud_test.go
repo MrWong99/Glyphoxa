@@ -57,6 +57,7 @@ func TestCreateUpdateDeleteCharacterAgent(t *testing.T) {
 	// Update the editable fields.
 	updated, err := st.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:          id,
+		CampaignID:  campaignID,
 		Name:        "Bartholomew",
 		Title:       "Keeper of the Stonehill Inn",
 		Persona:     "Now eloquent and grandiose.",
@@ -87,7 +88,7 @@ func TestCreateUpdateDeleteCharacterAgent(t *testing.T) {
 	}
 
 	// Delete it; it must then be gone.
-	if err := st.DeleteAgent(ctx, id); err != nil {
+	if err := st.DeleteAgent(ctx, campaignID, id); err != nil {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 	if _, err := st.GetAgent(ctx, id); !errors.Is(err, storage.ErrNotFound) {
@@ -109,7 +110,7 @@ func TestDeleteButlerRejected(t *testing.T) {
 		t.Fatalf("GetButler: %v", err)
 	}
 
-	err = st.DeleteAgent(ctx, butler.ID)
+	err = st.DeleteAgent(ctx, campaignID, butler.ID)
 	if !errors.Is(err, storage.ErrButlerUndeletable) {
 		t.Fatalf("DeleteAgent(butler) = %v, want ErrButlerUndeletable", err)
 	}
@@ -136,6 +137,7 @@ func TestUpdateButlerKeepsAddressOnly(t *testing.T) {
 
 	updated, err := st.UpdateAgent(ctx, storage.AgentUpdate{
 		ID:          butler.ID,
+		CampaignID:  campaignID,
 		Name:        "Glyphoxa the Wise",
 		Title:       "Game Master's Familiar",
 		Persona:     "A patient arcane butler.",
@@ -202,14 +204,73 @@ func TestCreateAgentAssignsStableSpeakerColors(t *testing.T) {
 // mutating store ops (the RPC maps it to CodeNotFound).
 func TestDeleteAndUpdateAgentNotFound(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, _ := seedCampaign(t, dsn)
+	pool, _, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	if err := st.DeleteAgent(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+	if err := st.DeleteAgent(ctx, campaignID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("DeleteAgent(random) = %v, want ErrNotFound", err)
 	}
-	if _, err := st.UpdateAgent(ctx, storage.AgentUpdate{ID: uuid.New(), Name: "Nobody"}); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.UpdateAgent(ctx, storage.AgentUpdate{ID: uuid.New(), CampaignID: campaignID, Name: "Nobody"}); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("UpdateAgent(random) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestAgentMutationsAreCampaignScoped is #342: UpdateAgent/DeleteAgent match
+// (id, campaign_id), so passing another Campaign's id refuses the mutation with
+// ErrNotFound and leaves the Agent — and the other Campaign's Butler — untouched.
+func TestAgentMutationsAreCampaignScoped(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	var campaignB uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name) VALUES ($1, 'Other Table') RETURNING id`,
+		tenantID).Scan(&campaignB); err != nil {
+		t.Fatalf("insert campaign B: %v", err)
+	}
+
+	// A Character in campaign A.
+	id, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaignA, Role: storage.AgentRoleCharacter, Name: "Aravel",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent A: %v", err)
+	}
+
+	// Updating it scoped to campaign B must refuse (ErrNotFound) and change nothing.
+	if _, err := st.UpdateAgent(ctx, storage.AgentUpdate{
+		ID: id, CampaignID: campaignB, Name: "Hijacked",
+	}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign UpdateAgent = %v, want ErrNotFound", err)
+	}
+	// Deleting it scoped to campaign B must refuse (ErrNotFound) and leave the row.
+	if err := st.DeleteAgent(ctx, campaignB, id); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign DeleteAgent = %v, want ErrNotFound", err)
+	}
+
+	// The Agent is intact: still in campaign A with its original name.
+	got, err := st.GetAgent(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAgent after refused cross-campaign mutations: %v", err)
+	}
+	if got.Name != "Aravel" || got.CampaignID != campaignA {
+		t.Errorf("cross-campaign mutation leaked through: %+v", got)
+	}
+
+	// Campaign B's own Butler is undeletable AND unreachable from campaign A: a
+	// delete of B's Butler scoped to A is a plain ErrNotFound (never a butler-guard
+	// leak), and B's Butler survives.
+	butlerB, err := st.GetButler(ctx, campaignB)
+	if err != nil {
+		t.Fatalf("GetButler B: %v", err)
+	}
+	if err := st.DeleteAgent(ctx, campaignA, butlerB.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign DeleteAgent(butlerB scoped to A) = %v, want ErrNotFound", err)
+	}
+	if _, err := st.GetButler(ctx, campaignB); err != nil {
+		t.Fatalf("campaign B Butler gone after a cross-campaign delete attempt: %v", err)
 	}
 }
