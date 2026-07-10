@@ -3,8 +3,13 @@ package mixdown
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 )
 
 // identityDecoder treats each frame's Opus payload as raw little-endian int16
@@ -182,6 +187,124 @@ func TestWAVClip_FullScaleCollisionClamps(t *testing.T) {
 	}}
 	gotNeg := samplesOf(t, mustClip(t, snapNeg, Options{Decoder: identityFactory}))
 	assertRegion(t, gotNeg, 4800, 100, -32768)
+}
+
+// sine renders n samples of a sine wave at freq Hz, amplitude amp, 48 kHz.
+func sine(n int, freq float64, amp int16) []int16 {
+	s := make([]int16, n)
+	for i := range s {
+		s[i] = int16(float64(amp) * math.Sin(2*math.Pi*freq*float64(i)/float64(outRate48k)))
+	}
+	return s
+}
+
+// laneFromRun frames a continuous PCM stream into 20ms (960-sample) frames
+// forming one contiguous run starting at offset.
+func laneFromRun(id string, from time.Time, offset time.Duration, samples []int16) LaneSnapshot {
+	var frames []Frame
+	start := from.Add(offset)
+	for i := 0; i < len(samples); i += 960 {
+		end := i + 960
+		if end > len(samples) {
+			end = len(samples)
+		}
+		frames = append(frames, Frame{
+			Opus: pcm(samples[i:end]...),
+			At:   start.Add(time.Duration(i/960) * 20 * time.Millisecond),
+		})
+	}
+	return LaneSnapshot{LaneID: id, Frames: frames}
+}
+
+func TestWAVClip_ThreeVoicesMixedAligned(t *testing.T) {
+	base := time.Unix(6000, 0)
+	const n = 9600 // 200ms of audio
+	v0 := sine(n, 220, 8000)
+	v1 := sine(n, 440, 8000)
+	v2 := sine(n, 660, 8000)
+	off := 100 * time.Millisecond
+	snap := Snapshot{From: base, To: base.Add(time.Second), Lanes: []LaneSnapshot{
+		laneFromRun("a", base, off, v0),
+		laneFromRun("b", base, off, v1),
+		laneFromRun("c", base, off, v2),
+	}}
+
+	got := samplesOf(t, mustClip(t, snap, Options{Decoder: identityFactory}))
+
+	startSample := 4800 // 100ms @ 48k
+	for i := 0; i < n; i++ {
+		want := clamp16(int32(v0[i]) + int32(v1[i]) + int32(v2[i]))
+		if g := got[startSample+i]; g != want {
+			t.Fatalf("mixed sample %d = %d, want %d (sum of three voices)", i, g, want)
+		}
+	}
+	// All three voices are actually present: a lane's energy shows up.
+	if allZero(got[startSample : startSample+n]) {
+		t.Fatal("mixed region is silent")
+	}
+}
+
+func allZero(s []int16) bool {
+	for _, v := range s {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestWAVClip_ResampleTo24k(t *testing.T) {
+	base := time.Unix(7000, 0)
+	snap := Snapshot{From: base, To: base.Add(time.Second), Lanes: []LaneSnapshot{
+		// A long constant-value run centred in the window; downsampling a constant
+		// leaves the constant, so its value survives the resampler.
+		laneFromRun("a", base, 200*time.Millisecond, constN(9600, 5000)),
+	}}
+
+	clip := mustClip(t, snap, Options{SampleRate: 24000, Decoder: identityFactory})
+
+	if got := binary.LittleEndian.Uint32(clip[24:28]); got != 24000 {
+		t.Errorf("header SampleRate = %d, want 24000", got)
+	}
+	got := samplesOf(t, clip)
+	// Output length = (To-From) at 24 kHz = 24000 samples.
+	if len(got) != 24000 {
+		t.Fatalf("clip length = %d samples, want 24000", len(got))
+	}
+	// The constant run maps to [200ms,400ms) at 24k = samples 4800..9600.
+	// Sample the middle where the resampler has fully settled on the constant.
+	assertRegion(t, got, 5200, 3000, 5000)
+}
+
+// TestWAVClip_ThreeVoiceArtifact writes a real 3-voice clip to t.TempDir for
+// manual listening (`go test -run Artifact` then play the file) and asserts a
+// full-length clip stays under the blob size cap (ADR-0051 / ADR-0048).
+func TestWAVClip_ThreeVoiceArtifact(t *testing.T) {
+	base := time.Unix(10000, 0)
+	// A full 120s window (the tape's retention) so the size assertion is real.
+	snap := Snapshot{From: base, To: base.Add(120 * time.Second)}
+	// Three voices, each a 2s run at a distinct pitch and start, overlapping.
+	snap.Lanes = []LaneSnapshot{
+		laneFromRun("bard", base, 1*time.Second, sine(96000, 330, 9000)),
+		laneFromRun("rogue", base, 2*time.Second, sine(96000, 440, 9000)),
+		laneFromRun("mage", base, 2500*time.Millisecond, sine(96000, 550, 9000)),
+	}
+
+	clip := mustClip(t, snap, Options{Decoder: identityFactory})
+
+	if int64(len(clip)) > blob.MaxSize {
+		t.Fatalf("clip %d bytes exceeds blob cap %d (ADR-0051)", len(clip), blob.MaxSize)
+	}
+	// Expected full length: 120s @ 48k mono 16-bit + 44-byte header.
+	if want := 44 + 120*48000*2; len(clip) != want {
+		t.Fatalf("clip length = %d, want %d", len(clip), want)
+	}
+
+	path := filepath.Join(t.TempDir(), "three_voices.wav")
+	if err := os.WriteFile(path, clip, 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	t.Logf("3-voice WAV artifact: %s (%d bytes)", path, len(clip))
 }
 
 func TestWAVClip_HeaderBytewise(t *testing.T) {
