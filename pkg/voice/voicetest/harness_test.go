@@ -2,6 +2,7 @@ package voicetest_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
@@ -69,6 +70,22 @@ func TestHarness_Events_ReturnsObservedEventsInOrder(t *testing.T) {
 			t.Errorf("event[%d] name = %q, want vad.speech_start", i, e.EventName())
 		}
 	}
+}
+
+func TestHarness_WaitEvent_SeesEventPublishedAfterDelay(t *testing.T) {
+	t.Parallel()
+	h := voicetest.New(t)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		h.Bus.Publish(voiceevent.VADSpeechStart{Probability: 0.91})
+	}()
+
+	voicetest.WaitEvent(t, h,
+		2*time.Second,
+		func(e voiceevent.VADSpeechStart) bool { return e.Probability > 0.8 },
+		"VADSpeechStart with Probability > 0.8 published asynchronously",
+	)
 }
 
 func TestHarness_AssertOrder_PassesOnSubsequence(t *testing.T) {

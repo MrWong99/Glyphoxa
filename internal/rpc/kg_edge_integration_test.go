@@ -22,6 +22,58 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
+// TestListNodeEdges_CrossCampaign_Integration is #356: the KG read is scoped. With
+// a live Voice Session pinning the active campaign to A, an operator must not be
+// able to READ campaign B's Node incident edges by id — ListNodeEdges is
+// CodeNotFound, leaking neither B's edges nor its joined endpoint names nor an
+// existence oracle, even though B's Node has a real incident Edge.
+func TestListNodeEdges_CrossCampaign_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, campaignA := seedStore(t, dsn)
+	ctx := context.Background()
+
+	a, err := store.GetActiveCampaign(ctx) // == A, carries the tenant id
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	campaignB, err := store.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: a.TenantID, Name: "Other Table", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	// B's Node with a real incident Edge (so an unscoped read would return data).
+	bChar, err := store.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignB, Type: storage.KGNodeCharacter, Name: "Secret Aldric"})
+	if err != nil {
+		t.Fatalf("CreateNode B char: %v", err)
+	}
+	bLoc, err := store.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignB, Type: storage.KGNodeLocation, Name: "Secret Keep"})
+	if err != nil {
+		t.Fatalf("CreateNode B loc: %v", err)
+	}
+	if _, err := store.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignB, FromNodeID: bChar.ID, ToNodeID: bLoc.ID, Type: storage.KGEdgeResidesIn,
+	}); err != nil {
+		t.Fatalf("CreateEdge B: %v", err)
+	}
+
+	// Pin the active campaign to A via a live Voice Session, then mount the server.
+	server := rpc.NewCampaignServer(store)
+	server.SetSessions(liveMgr(campaignA))
+	mux := http.NewServeMux()
+	mux.Handle(server.Handler())
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	_, err = client.ListNodeEdges(ctx, connect.NewRequest(&managementv1.ListNodeEdgesRequest{
+		NodeId: bChar.ID.String(),
+	}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("cross-campaign ListNodeEdges code = %v, want NotFound", got)
+	}
+}
+
 func TestKGEdge_Integration(t *testing.T) {
 	dsn := startPostgres(t)
 	store, campaignID := seedStore(t, dsn)

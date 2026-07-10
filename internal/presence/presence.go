@@ -98,7 +98,7 @@ func New(store Store, cipher *crypto.Cipher, reg *Registry, envToken string, log
 		log:      log,
 	}
 	p.guildID.Store("")
-	p.build = defaultClientBuilder(reg, log)
+	p.build = defaultClientBuilder(reg, log, p.invalidate)
 	p.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	p.register = restRegister
 	p.closeClient = func(client *bot.Client) { client.Close(context.Background()) }
@@ -225,6 +225,33 @@ func (p *Presence) ClientProvider() wirenpc.ClientProvider {
 	}
 }
 
+// invalidate drops a standing client whose gateway died unexpectedly (#246). The
+// prod builder wires it as the disgo gateway CloseHandlerFunc, which disgo fires
+// ONLY on an unexpected non-reconnectable death (a mid-session close 4004 after
+// the Bot token is revoked, a disallowed-intents close, or an exhausted
+// reconnect) — never on our own client.Close, so a deliberate token-change
+// rebuild does not trip it. Without this the corpse stays in p.client, every
+// Voice Session cycle borrows it via ClientProvider, and the reconnect loop
+// backs off on non-classifiable errors forever instead of ending the session
+// failed (ADR-0043).
+//
+// It runs on disgo's event goroutine, so it must NOT take p.mu (Ensure holds it
+// across seconds of gateway+REST I/O). A CompareAndSwap clears the client only
+// when dead is still the standing one: a token change may have already replaced
+// it, and a late death of a superseded client must not nil the fresh one. The
+// winner closes the corpse to release its REST/voice resources; the next
+// ClientProvider re-runs Ensure, whose OpenGateway surfaces the wrapped 4004 to
+// classifyFatal so the session ends failed with an invalid_bot_token reason.
+func (p *Presence) invalidate(dead *bot.Client, cause error) {
+	if dead == nil {
+		return
+	}
+	if p.client.CompareAndSwap(dead, nil) {
+		p.log.Warn("presence: standing gateway died; invalidating standing client", "err", cause)
+		p.closeClient(dead)
+	}
+}
+
 // Close tears down the standing client. Called after the voice Manager's
 // shutdown so a live session releases the shared client first.
 func (p *Presence) Close() {
@@ -240,16 +267,28 @@ func (p *Presence) Close() {
 // disgo client with the SAME options the per-session voice wiring used (so a
 // shared-client Voice Session keeps its DAVE encryption and voice-state intents,
 // ADR-0006) plus the interaction listeners and async event delivery.
-func defaultClientBuilder(reg *Registry, log *slog.Logger) ClientBuilder {
+func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error)) ClientBuilder {
 	return func(token string) (*bot.Client, error) {
-		return disgo.New(token,
+		// client is captured by the close handler below; disgo.New assigns it
+		// before any gateway open, so it is non-nil by the time a close can fire.
+		var client *bot.Client
+		var err error
+		client, err = disgo.New(token,
 			bot.WithLogger(log),
 			bot.WithDefaultGateway(),
 			// Guilds + GuildVoiceStates are the minimum for the voice join path
-			// (see wirenpc.connectAndServe); DAVE is wired at construction.
-			bot.WithGatewayConfigOpts(gateway.WithIntents(
-				gateway.IntentGuilds|gateway.IntentGuildVoiceStates,
-			)),
+			// (see wirenpc.connectAndServe); DAVE is wired at construction. The
+			// close handler drops this client from the presence when its gateway
+			// dies unexpectedly (#246) — disgo calls it only on a non-reconnectable
+			// close or an exhausted reconnect, not on our own Close.
+			bot.WithGatewayConfigOpts(
+				gateway.WithIntents(
+					gateway.IntentGuilds|gateway.IntentGuildVoiceStates,
+				),
+				gateway.WithCloseHandler(func(_ gateway.Gateway, cerr error, _ bool) {
+					onDead(client, cerr)
+				}),
+			),
 			gxvoice.DaveOption(),
 			bot.WithEventListenerFunc(reg.HandleCommand),
 			bot.WithEventListenerFunc(reg.HandleAutocomplete),
@@ -257,6 +296,7 @@ func defaultClientBuilder(reg *Registry, log *slog.Logger) ClientBuilder {
 			// the gateway read goroutine and starves voice events (ADR-0010).
 			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
 		)
+		return client, err
 	}
 }
 
