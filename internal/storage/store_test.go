@@ -314,3 +314,44 @@ func TestGetActiveCampaignEmpty(t *testing.T) {
 		t.Fatalf("GetActiveCampaign on empty DB: got %v, want ErrNotFound", err)
 	}
 }
+
+// TestInTx_FlattensOnTxBoundStore proves the #291 amendment: calling InTx on a
+// Store already bound to a transaction runs the fn in that AMBIENT transaction
+// (no error, no nested Begin), so a method that uses InTx internally (CreateEdge)
+// composes inside a larger import transaction. Inner atomicity is the outer tx's:
+// an error after an inner-InTx write rolls the whole outer tx back.
+func TestInTx_FlattensOnTxBoundStore(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, _ := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	sentinel := errors.New("boom")
+
+	// The outer InTx runs a nested InTx (flatten) that writes a campaign, then
+	// fails. The whole thing must roll back — the campaign must not persist.
+	err := st.InTx(ctx, func(tx *storage.Store) error {
+		var innerID uuid.UUID
+		if err := tx.InTx(ctx, func(tx2 *storage.Store) error {
+			id, err := tx2.CreateCampaign(ctx, storage.NewCampaign{
+				TenantID: tenantID, Name: "Flatten Probe", System: "dnd5e", Language: "en",
+			})
+			innerID = id
+			return err
+		}); err != nil {
+			return err
+		}
+		if innerID == uuid.Nil {
+			t.Fatal("inner InTx did not run / returned nil id")
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("outer InTx err = %v, want sentinel", err)
+	}
+
+	// The flattened inner write must have been discarded by the outer rollback.
+	if _, err := st.FindCampaignByName(ctx, tenantID, "Flatten Probe"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("flattened write survived rollback: %v", err)
+	}
+}
