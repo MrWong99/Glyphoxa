@@ -43,6 +43,25 @@ func migrateSeedDB(t *testing.T) *storage.Store {
 	return storage.New(pool)
 }
 
+// unsetSecret removes $GLYPHOXA_SECRET for the duration of one test and restores
+// the prior value on cleanup — the bundle seed path must work with no secret set,
+// but the unset must not leak into other package tests (t.Setenv can only SET, not
+// unset, so we save/restore by hand).
+func unsetSecret(t *testing.T) {
+	t.Helper()
+	prev, had := os.LookupEnv("GLYPHOXA_SECRET")
+	if err := os.Unsetenv("GLYPHOXA_SECRET"); err != nil {
+		t.Fatalf("unset GLYPHOXA_SECRET: %v", err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv("GLYPHOXA_SECRET", prev)
+		} else {
+			_ = os.Unsetenv("GLYPHOXA_SECRET")
+		}
+	})
+}
+
 // TestRunSeedBundle_FreshDB is TEST 3: `seed -bundle demo.glyphoxa.json` against a
 // fresh DB mints the "Glyphoxa" Tenant and imports the demo campaign — two agents
 // (Butler + Bart), the KG, and the player character — with NO $GLYPHOXA_SECRET set
@@ -50,7 +69,7 @@ func migrateSeedDB(t *testing.T) *storage.Store {
 func TestRunSeedBundle_FreshDB(t *testing.T) {
 	ctx := context.Background()
 	st := migrateSeedDB(t)
-	os.Unsetenv("GLYPHOXA_SECRET")
+	unsetSecret(t)
 
 	if err := RunSeed(ctx, slog.Default(), []string{"-bundle", demoBundlePath}); err != nil {
 		t.Fatalf("seed -bundle: %v", err)
@@ -114,7 +133,7 @@ func TestRunSeedBundle_FreshDB(t *testing.T) {
 func TestRunSeedBundle_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	st := migrateSeedDB(t)
-	os.Unsetenv("GLYPHOXA_SECRET")
+	unsetSecret(t)
 
 	for i := 0; i < 2; i++ {
 		if err := RunSeed(ctx, slog.Default(), []string{"-bundle", demoBundlePath}); err != nil {

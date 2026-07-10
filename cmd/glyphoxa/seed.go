@@ -46,7 +46,19 @@ func RunSeed(ctx context.Context, log *slog.Logger, args []string) error {
 		return err
 	}
 
-	if *bundlePath != "" {
+	// Distinguish flag-absent (legacy demo-NPC seed) from flag-present-but-empty
+	// (`-bundle ""`, a mistake): the empty-string default alone can't tell them
+	// apart, so consult fs.Visit for whether -bundle was actually given.
+	bundleSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "bundle" {
+			bundleSet = true
+		}
+	})
+	if bundleSet {
+		if *bundlePath == "" {
+			return fmt.Errorf("seed: -bundle requires a bundle file path (got empty)")
+		}
 		return runSeedBundle(ctx, log, *bundlePath)
 	}
 	return runSeedLegacy(ctx, log)

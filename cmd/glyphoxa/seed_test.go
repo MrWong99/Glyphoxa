@@ -18,6 +18,16 @@ func TestRunSeed_BundleMissingFile(t *testing.T) {
 	}
 }
 
+// TestRunSeed_BundleEmptyPath errors on an explicit empty `-bundle ""` rather
+// than silently falling through to the legacy demo-NPC seed — a flag given with
+// no value is a mistake, not a request for the legacy path.
+func TestRunSeed_BundleEmptyPath(t *testing.T) {
+	err := RunSeed(context.Background(), slog.Default(), []string{"-bundle", ""})
+	if err == nil || !strings.Contains(err.Error(), "-bundle") {
+		t.Fatalf("empty -bundle: err=%v, want a -bundle complaint (not legacy fallthrough)", err)
+	}
+}
+
 // TestRunSeed_UnknownFlag rejects an unknown flag rather than silently falling
 // through to the legacy demo-NPC path.
 func TestRunSeed_UnknownFlag(t *testing.T) {

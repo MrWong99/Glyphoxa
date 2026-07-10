@@ -209,6 +209,22 @@ run_glyphoxa() {
 		-v "$TESTDATA_DIR/demo.glyphoxa.json:/demo.glyphoxa.json:ro" \
 		"$IMAGE" "$@"
 }
+# run_step runs the image capturing its COMBINED output; on failure it echoes that
+# output (indented) so a CI failure here is diagnosable instead of a bare non-zero
+# exit swallowed by >/dev/null. Returns the command's own status for the caller's
+# if/else so set -e never aborts the section mid-way.
+run_step() {
+	local label="$1"
+	shift
+	local out rc
+	if out="$(run_glyphoxa "$@" 2>&1)"; then
+		return 0
+	fi
+	rc=$?
+	note "$label output (exit $rc):"
+	printf '%s\n' "$out" | sed 's/^/      /'
+	return "$rc"
+}
 
 if ! docker network create "$SMOKE_NET" >/dev/null 2>&1; then
 	bad "could not create scoped docker network $SMOKE_NET"
@@ -228,12 +244,12 @@ else
 	if [ "$ready" -ne 1 ]; then
 		bad 'throwaway Postgres never became ready'
 	else
-		if run_glyphoxa migrate up >/dev/null 2>&1; then
+		if run_step 'migrate up' migrate up; then
 			ok 'migrate up succeeded'
 		else
 			bad 'migrate up failed'
 		fi
-		if run_glyphoxa seed -bundle /demo.glyphoxa.json >/dev/null 2>&1; then
+		if run_step 'seed -bundle' seed -bundle /demo.glyphoxa.json; then
 			ok 'seed -bundle succeeded'
 		else
 			bad 'seed -bundle failed'
@@ -252,7 +268,7 @@ else
 		fi
 		# Idempotence (ADR-0053 §4): re-running the seed hits the name precheck and
 		# skips, so the campaign count must stay at 1 (no always-mint duplicate).
-		if run_glyphoxa seed -bundle /demo.glyphoxa.json >/dev/null 2>&1; then
+		if run_step 're-run seed -bundle' seed -bundle /demo.glyphoxa.json; then
 			ok 're-run seed -bundle exited 0'
 		else
 			bad 're-run seed -bundle failed'
