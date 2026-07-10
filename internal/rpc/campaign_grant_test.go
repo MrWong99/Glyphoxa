@@ -26,33 +26,50 @@ func registerAgent(store *fakeCampaignStore) uuid.UUID {
 }
 
 // TestListToolGrants_CatalogWithState is the AC1 bar over the handler: the list
-// shows EVERY built-in Tool (dice today) with the Agent's current grant state.
-// An ungranted Agent sees dice present-but-off; granting flips it on. Because the
-// catalog is the built-in Registry, an Agent with no rows still lists dice.
+// shows EVERY built-in Tool with the Agent's current grant state. The catalog is
+// the built-in Registry (Name-sorted): dice + the two knowledge Tools kg_query
+// and transcript_search (#296). An ungranted Agent sees them present-but-off;
+// granting flips one on. kg_query advertises scope support (own_node vs
+// campaign, ADR-0029) so the grant editor renders its scope UI; dice and
+// transcript_search do not.
 func TestListToolGrants_CatalogWithState(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()
 	agentID := registerAgent(store)
 	client := crudClient(t, store)
 
-	// No grant rows: dice is listed but not granted, and advertises no scope.
+	// No grant rows: every built-in is listed but not granted.
 	resp, err := client.ListToolGrants(context.Background(),
 		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: agentID.String()}))
 	if err != nil {
 		t.Fatalf("ListToolGrants: %v", err)
 	}
 	grants := resp.Msg.GetGrants()
-	if len(grants) != 1 || grants[0].GetToolName() != "dice" {
-		t.Fatalf("catalog = %+v, want exactly [dice]", grants)
+	wantNames := []string{"dice", "kg_query", "transcript_search"} // Name-sorted catalog
+	if len(grants) != len(wantNames) {
+		t.Fatalf("catalog = %+v, want %v", grants, wantNames)
 	}
-	if grants[0].GetGranted() {
-		t.Error("dice should be ungranted for a fresh Agent")
+	scopeByName := map[string]bool{}
+	for i, g := range grants {
+		if g.GetToolName() != wantNames[i] {
+			t.Errorf("catalog[%d] = %q, want %q", i, g.GetToolName(), wantNames[i])
+		}
+		if g.GetGranted() {
+			t.Errorf("%s should be ungranted for a fresh Agent", g.GetToolName())
+		}
+		if g.GetDescription() == "" {
+			t.Errorf("%s entry should carry the Tool description as hint text", g.GetToolName())
+		}
+		scopeByName[g.GetToolName()] = g.GetSupportsScope()
 	}
-	if grants[0].GetSupportsScope() {
+	if !scopeByName["kg_query"] {
+		t.Error("kg_query must advertise scope support (ADR-0029 own_node vs campaign)")
+	}
+	if scopeByName["dice"] {
 		t.Error("dice must not advertise scope support")
 	}
-	if grants[0].GetDescription() == "" {
-		t.Error("dice entry should carry the Tool description as hint text")
+	if scopeByName["transcript_search"] {
+		t.Error("transcript_search must not advertise scope support (campaign-scoped for all)")
 	}
 
 	// Grant dice, then it lists as granted.

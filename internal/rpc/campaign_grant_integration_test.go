@@ -253,7 +253,7 @@ func hydratedDeclarations(t *testing.T, store *storage.Store, agentID uuid.UUID)
 		t.Fatalf("hydrate: ListToolGrants(%s): %v", agentID, err)
 	}
 	grants := storage.GrantsFromRows(rows)
-	decls := tool.NewGrantSet(tool.BuiltinRegistry(), grants...).Declarations()
+	decls := tool.NewGrantSet(tool.BuiltinRegistry(tool.Deps{}), grants...).Declarations()
 	names := make([]string, len(decls))
 	for i, d := range decls {
 		names[i] = d.Name
