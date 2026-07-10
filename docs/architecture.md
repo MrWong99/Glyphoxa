@@ -602,6 +602,29 @@ otherwise the adapter's own ENV variable is used. DB-as-sole-source is the state
 end-state. Without `$GLYPHOXA_SECRET` the web tier still boots and reads — only
 *saving* a key fails, loudly (`CodeFailedPrecondition`).
 
+### 6.6 Blob storage seam
+
+Binary payloads — Epic 8 Highlight clips and generated images, later ADR-0011
+audio extracts and export bundles — live behind a small streaming `Store`
+interface in `internal/blob` (ADR-0048): `Put`/`Get`/`Delete`, keyed by the
+tenant-scoped path `t/<tenant_id>/<owner-kind>/<owner-id>/<name>`. The package
+owns both key construction (`Key`) and validation (`ValidateKey`); the tenant
+prefix is mandatory and the backend derives `tenant_id` from the key, so a
+prefix-less key never reaches SQL.
+
+**All ADR-0034 deployment shapes store blobs in Postgres** (`blob` table, bytea,
+`00021_blob.sql`). The Helm shape runs voice and web as separate Deployments with
+no shared filesystem, but every shape already shares Postgres — so a Voice
+Instance writes and a Web Instance serves with zero new configuration, in
+compose, systemd, and Helm alike. A **32 MiB per-blob cap** (a code constant,
+`blob.MaxSize`) enforced at `Put` keeps a bytea backend honest; anything larger
+forces the backend conversation. **S3-compatible storage is the documented growth
+path** behind the same seam — a local-filesystem backend is deliberately not
+built (the Helm split can't reach it without RWX volumes). Deletion goes through
+the seam, not FK cascade: a deterministic `Key()` plus `Delete` is the mechanism
+owning rows use, which survives the backend swap; the owner-side wiring and
+retention semantics are Epic 8 / ADR-0051.
+
 ---
 
 ## 7. Observability and spend
@@ -713,7 +736,7 @@ the architecture question is already answered.
 |-----|----------|-------------------|
 | [0025](adr/0025-ensemble-turns-speculative-lead-reaction.md) | Ensemble Turns: speculative Lead + Cross-talk Reaction | Deferred by [0038](adr/0038-multi-npc-single-target-default-programmatic-roster.md). `MaxTargets` reaches the multi-target set; the turn-taking layer is not built. |
 | [0030](adr/0030-tool-side-effects-deferred-to-turn-commit.md) | Side-effecting Tool intents flush at turn-commit | Not built. `pkg/tool/loop.go` hard-refuses non-read-only Tools. |
-| [0048](adr/0048-blob-storage-seam-postgres-v1.md) | a blob-storage seam package, Postgres bytea backend | No blob package exists; nothing binary is persisted. |
+| [0048](adr/0048-blob-storage-seam-postgres-v1.md) | a blob-storage seam package, Postgres bytea backend | **Shipped** (§6.6): `internal/blob` seam + Postgres bytea backend (`00021_blob.sql`), 32 MiB cap. No consumer wires it yet — owner-side Delete + retention are Epic 8 / ADR-0051. |
 | [0049](adr/0049-background-job-runner.md) | One DB-backed job runner over a job table | No job table exists. `internal/embedworker` stays a bespoke poll loop, as the ADR allows. |
 | [0050](adr/0050-per-speaker-utterance-segmentation.md) | N Speaker Lanes; `SpeakerID` on voice events | No `SpeakerID` anywhere. Human speech is still one anonymous lane (§2.6). |
 | [0051](adr/0051-rollover-tape-consent-retention.md) | Consent-gated 120 s Rollover Tape; Highlights | No audio is persisted. Blocks on 0048 + 0050. |
