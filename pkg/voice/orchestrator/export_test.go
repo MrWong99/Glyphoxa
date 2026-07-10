@@ -25,6 +25,16 @@ func (r *Replier) SetMutes(v MuteView) { r.mutes = v }
 // Conversation.Register from [WithTurnGate].
 func (r *Replier) SetGate(g TurnGate) { r.gate = g }
 
+// SetFloor installs the shared barge-in floor on the DirectSpeech reactor for the
+// /say wiring tests (external test package, #295). Production wiring sets it inside
+// Conversation.Register from the same floor the barge path uses.
+func (d *DirectSpeech) SetFloor(floor *Floor) { d.floor = floor }
+
+// SetGate installs the live turn gate on the DirectSpeech reactor for the spend-cap
+// tests (external test package, #295/#130). Production wiring sets it inside
+// Conversation.Register from [WithTurnGate].
+func (d *DirectSpeech) SetGate(g TurnGate) { d.gate = g }
+
 // SetErrorHandler installs onError on the segmenter for the off-loop STT error
 // tests (external test package). Production wiring sets it inside
 // Conversation.Register from [WithErrorHandler].

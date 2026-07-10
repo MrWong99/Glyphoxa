@@ -152,6 +152,22 @@ func (r *Roster) RemoveNPC(agentID string) {
 	r.cast.Remove(agentID) // Cast is independently concurrency-safe; outside r.mu
 }
 
+// Voice returns the TTS Voice of the held NPC with agentID, reporting ok=false when
+// the Roster never held it (or it was removed). It is the /say direct-speech voice
+// lookup (#295, orchestrator.VoiceLookup): the DirectSpeech reactor renders a GM
+// SpeakRequested in the addressed Agent's Voice, and a miss ends the turn rather
+// than voicing a zero Voice. Concurrency-safe: reads the specs map under r.mu, the
+// same lock AddNPC/RemoveNPC mutate it under.
+func (r *Roster) Voice(agentID string) (tts.Voice, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	spec, ok := r.specs[agentID]
+	if !ok {
+		return tts.Voice{}, false
+	}
+	return spec.voice, true
+}
+
 // SetMuted toggles one NPC's mute in the live scene (#211, #225). It is
 // deliberately MATCHER-ONLY and NEVER touches the Cast, so the NPC keeps its SAME
 // [agent.Replier] — and its ADR-0012 delivered-only history — across a mute,

@@ -1099,6 +1099,13 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// once the session's estimated spend crosses the soft cap. A nil gate is the
 		// feature-off default (no caps configured), so this option is unconditional.
 		orchestrator.WithTurnGate(gate),
+		// GM /say direct speech (#295, ADR-0010): a DirectSpeech reactor renders a
+		// SpeakRequested (the /say slash command) to TTS in the addressed NPC's Voice,
+		// looked up from THIS roster. It shares the barge-in floor (so a human barge
+		// cancels a /say) and the spend gate, but bypasses mute (GM puppeteering). The
+		// session Manager publishes SpeakRequested; the lookup is always wired so /say
+		// works whenever a session is live.
+		orchestrator.WithDirectSpeech(roster.Voice),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).

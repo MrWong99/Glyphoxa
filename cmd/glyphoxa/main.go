@@ -486,6 +486,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
 			presence.MuteCommand(mgr, store),
 			presence.MuteAllCommand(mgr),
+			// /say <text> as:<agent> (#295, ADR-0010): GM puppeteering. The Manager is the
+			// SayControl (its SayAs publishes SpeakRequested on the shared bus, which the
+			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the
+			// voiced roster for the resolver + autocomplete.
+			presence.SayCommand(mgr, store),
 		)
 		// Bring the presence up at boot (AC: the commands appear with no Voice
 		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
