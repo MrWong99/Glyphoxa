@@ -100,8 +100,10 @@ func runFixture(t *testing.T, prov llm.Provider) []Trigger {
 	d.now = clk.now
 	d.handled = make(chan struct{}, 1)
 	d.start(bus)
-	defer d.Close()
 	publishFixture(t, d, bus, dragonFixture())
+	// Close flushes any Tail-delayed snapshot cut (the trigger rides that cut), so
+	// read the sink AFTER Close, not before.
+	d.Close()
 	return sink.all()
 }
 
@@ -115,13 +117,18 @@ func TestDragonFixtureCassette(t *testing.T) {
 		t.Fatalf("trigger count = %d, want exactly 1", len(trigs))
 	}
 	tr := trigs[0]
-	// Confirmed on the 18th final (index 17): At = base + 34s.
-	wantAt := fixtureBase.Add(34 * time.Second)
-	if !tr.At.Equal(wantAt) {
-		t.Errorf("trigger At = %v, want %v (the confirming final)", tr.At, wantAt)
+	// The point of the highlight is the natural-twenty line (fixture index 9, At =
+	// base + 18s). Confirmation lags it, so assert the moment's OWN utterance is
+	// covered by the clip range — content coverage, not the mechanical At±Lead/Tail
+	// formula. Anchored on the confirming final it would fall outside; anchored on
+	// the first high window it is inside.
+	natTwentyAt := fixtureBase.Add(18 * time.Second)
+	if tr.From.After(natTwentyAt) || tr.To.Before(natTwentyAt) {
+		t.Errorf("clip range (%v, %v) does not cover the natural-twenty moment at %v", tr.From, tr.To, natTwentyAt)
 	}
-	if !tr.From.Equal(wantAt.Add(-15*time.Second)) || !tr.To.Equal(wantAt.Add(5*time.Second)) {
-		t.Errorf("range = (%v,%v), want (At-15s, At+5s)", tr.From, tr.To)
+	// And the anchor precedes the confirming final (the lag bug would put At = base+34s).
+	if !tr.At.Before(fixtureBase.Add(34 * time.Second)) {
+		t.Errorf("trigger At = %v anchored on the confirming final; want the first high window (earlier)", tr.At)
 	}
 	if tr.Score < 8.0 {
 		t.Errorf("Score = %v, want >= Bar 8.0", tr.Score)

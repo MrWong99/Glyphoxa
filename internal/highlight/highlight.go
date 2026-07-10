@@ -15,13 +15,19 @@
 // LLM classifier to score the recent transcript window (0–10), with a per-lane
 // RMS-energy / zero-crossing audio summary folded into the prompt. A score at or
 // above Bar for ConfirmWindows consecutive classifications promotes the moment to
-// a [Trigger] — a time range plus caption material and a verbatim tape [Snapshot]
-// cut AT trigger time — handed to the [Sink] (#308's persistence pipeline). A
-// Cooldown suppresses back-to-back triggers and a per-session MaxCandidates cap
-// stops classifying once enough moments are found. Spend is metered on the
-// [observe.StageRecorder] the session Manager already tees into its spend meter
-// (ADR-0046); the [orchestrator.TurnGate] is checked before every classify and a
-// denied gate disarms the detector silently — a Highlight never ends a session.
+// a [Trigger] — a time range plus caption material and a tape [Snapshot] cut Tail
+// seconds after the moment confirms (so the reaction audio exists in the ring) —
+// handed to the [Sink] (#308's persistence pipeline). A Cooldown suppresses
+// back-to-back triggers and a per-session MaxCandidates cap stops classifying once
+// enough moments are found. Spend is metered on the [observe.StageRecorder] the
+// session Manager already tees into its spend meter (ADR-0046); the
+// [orchestrator.TurnGate] is checked before every classify and a denied gate
+// disarms the detector silently — a Highlight never ends a session. Like the
+// replier's pre-Take gate this is a pre-check: a classify already cleared by
+// AllowTurn can still push estimated spend a marginal amount past the soft cap
+// before the meter observes it (the gate is a boolean, not a reservation). That
+// slack is inherent to the pinned pre-check posture, bounded by one classify's
+// cost, and closes on the next classify, which sees the crossed cap and disarms.
 //
 // The detector is per-session state: construct it per wirenpc Voice Session cycle
 // with [NewDetector] and defer [Detector.Close] (a leak is a #44-class bug).

@@ -141,6 +141,20 @@ func buildDetector(t *testing.T, bus *voiceevent.Bus, prov llm.Provider, snap Sn
 	return d, clk, classified
 }
 
+// waitForTriggers polls the sink until it holds n triggers, or fails on timeout.
+func waitForTriggers(t *testing.T, sink *fakeSink, n int) []Trigger {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := sink.all(); len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d triggers (have %d)", n, len(sink.all()))
+	return nil
+}
+
 // awaitClassifications drains n classification notifications or fails on timeout.
 func awaitClassifications(t *testing.T, ch <-chan classification, n int) {
 	t.Helper()
@@ -263,22 +277,22 @@ func TestConfirmWindowsProducesOneTrigger(t *testing.T) {
 	sink := &fakeSink{}
 	snap := func(from, to time.Time) tape.Snapshot { return tape.Snapshot{From: from, To: to} }
 	d, clk, classified := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
-		ClassifyEvery: 6, Bar: 8.0, ConfirmWindows: 2, Cooldown: time.Hour,
+		ClassifyEvery: 6, Bar: 8.0, ConfirmWindows: 2, Cooldown: time.Hour, Tail: 40 * time.Millisecond,
 	})
 
-	// One classify (>=Bar) — not yet confirmed.
+	// One classify (>=Bar) — not yet confirmed, so no cut is scheduled.
 	publishFinals(t, d, bus, clk, "A", 6)
 	awaitClassifications(t, classified, 1)
 	if n := len(sink.all()); n != 0 {
 		t.Fatalf("trigger after 1 confirming window, want 0 (need 2), got %d", n)
 	}
 
-	// Second consecutive classify (>=Bar) confirms → exactly one trigger.
+	// Second consecutive classify (>=Bar) confirms → exactly one trigger (delivered
+	// on the Tail-delayed cut).
 	publishFinals(t, d, bus, clk, "A", 6)
-	awaitClassifications(t, classified, 1)
-	time.Sleep(50 * time.Millisecond)
-	if n := len(sink.all()); n != 1 {
-		t.Fatalf("trigger count = %d, want exactly 1", n)
+	trigs := waitForTriggers(t, sink, 1)
+	if len(trigs) != 1 {
+		t.Fatalf("trigger count = %d, want exactly 1", len(trigs))
 	}
 }
 
@@ -289,25 +303,21 @@ func TestCooldownThenRearm(t *testing.T) {
 	prov := &fakeProvider{respJSON: func(int) string { return scoreJSON(9.0) }}
 	sink := &fakeSink{}
 	snap := func(from, to time.Time) tape.Snapshot { return tape.Snapshot{From: from, To: to} }
-	d, clk, classified := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
-		ClassifyEvery: 2, Bar: 8.0, ConfirmWindows: 2, Cooldown: 120 * time.Second,
+	d, clk, _ := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
+		ClassifyEvery: 2, Bar: 8.0, ConfirmWindows: 2, Cooldown: 120 * time.Second, Tail: 40 * time.Millisecond,
 	})
 
 	// Two classifies confirm the first trigger.
 	publishFinals(t, d, bus, clk, "A", 4)
-	awaitClassifications(t, classified, 2)
-	time.Sleep(50 * time.Millisecond)
-	if n := len(sink.all()); n != 1 {
-		t.Fatalf("first trigger count = %d, want 1", n)
-	}
+	waitForTriggers(t, sink, 1)
+	callsAfterFirst := prov.callCount()
 
-	// Within the cooldown, further high windows are suppressed (classify is skipped,
-	// so no notification arrives).
+	// Within the cooldown, further high windows are suppressed: classify is skipped
+	// entirely (no new provider call, no new cut).
 	publishFinals(t, d, bus, clk, "A", 4)
-	select {
-	case <-classified:
-		t.Fatal("classified within cooldown, want suppression")
-	case <-time.After(150 * time.Millisecond):
+	time.Sleep(120 * time.Millisecond)
+	if got := prov.callCount(); got != callsAfterFirst {
+		t.Fatalf("classify calls during cooldown = %d, want unchanged %d (suppressed)", got, callsAfterFirst)
 	}
 	if n := len(sink.all()); n != 1 {
 		t.Fatalf("trigger count during cooldown = %d, want still 1", n)
@@ -316,11 +326,7 @@ func TestCooldownThenRearm(t *testing.T) {
 	// Advance past the cooldown and rearm: two more confirming windows → a 2nd trigger.
 	clk.advance(121 * time.Second)
 	publishFinals(t, d, bus, clk, "A", 4)
-	awaitClassifications(t, classified, 2)
-	time.Sleep(50 * time.Millisecond)
-	if n := len(sink.all()); n != 2 {
-		t.Fatalf("trigger count after rearm = %d, want 2", n)
-	}
+	waitForTriggers(t, sink, 2)
 }
 
 // TestMaxCandidatesCap (TEST 5): once MaxCandidates triggers have fired, the
@@ -330,26 +336,19 @@ func TestMaxCandidatesCap(t *testing.T) {
 	prov := &fakeProvider{respJSON: func(int) string { return scoreJSON(9.0) }}
 	sink := &fakeSink{}
 	snap := func(from, to time.Time) tape.Snapshot { return tape.Snapshot{From: from, To: to} }
-	d, clk, classified := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
+	d, clk, _ := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
 		ClassifyEvery: 2, Bar: 8.0, ConfirmWindows: 1, Cooldown: time.Nanosecond, MaxCandidates: 1,
+		Tail: 40 * time.Millisecond,
 	})
 
 	// First confirming window → first (and only allowed) trigger.
 	publishFinals(t, d, bus, clk, "A", 2)
-	awaitClassifications(t, classified, 1)
-	time.Sleep(50 * time.Millisecond)
-	if n := len(sink.all()); n != 1 {
-		t.Fatalf("trigger count = %d, want 1", n)
-	}
+	waitForTriggers(t, sink, 1)
 	callsAtCap := prov.callCount()
 
 	// Cap reached: further finals must NOT classify (no spend past the cap).
 	publishFinals(t, d, bus, clk, "A", 20)
-	select {
-	case <-classified:
-		t.Fatal("classified after MaxCandidates reached")
-	case <-time.After(150 * time.Millisecond):
-	}
+	time.Sleep(120 * time.Millisecond)
 	if got := prov.callCount(); got != callsAtCap {
 		t.Errorf("classify calls after cap = %d, want unchanged %d", got, callsAtCap)
 	}
@@ -368,17 +367,14 @@ func TestTriggerShape(t *testing.T) {
 		gotFrom, gotTo = from, to
 		return tape.Snapshot{From: from, To: to, Lanes: []tape.LaneSnapshot{{LaneID: "A"}}}
 	}
-	d, clk, classified := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
+	d, clk, _ := buildDetector(t, bus, prov, snap, sink, allowGate{}, Config{
 		ClassifyEvery: 2, Bar: 8.0, ConfirmWindows: 1, Cooldown: time.Hour,
-		Lead: 15 * time.Second, Tail: 5 * time.Second,
+		Lead: 15 * time.Second, Tail: 100 * time.Millisecond,
 	})
 
 	at := clk.now()
 	publishFinals(t, d, bus, clk, "A", 2)
-	awaitClassifications(t, classified, 1)
-	time.Sleep(50 * time.Millisecond)
-
-	trigs := sink.all()
+	trigs := waitForTriggers(t, sink, 1)
 	if len(trigs) != 1 {
 		t.Fatalf("trigger count = %d, want 1", len(trigs))
 	}
@@ -386,7 +382,7 @@ func TestTriggerShape(t *testing.T) {
 	if !tr.From.Equal(at.Add(-15 * time.Second)) {
 		t.Errorf("From = %v, want %v", tr.From, at.Add(-15*time.Second))
 	}
-	if !tr.To.Equal(at.Add(5 * time.Second)) {
+	if !tr.To.Equal(at.Add(100 * time.Millisecond)) {
 		t.Errorf("To = %v, want %v", tr.To, at.Add(5*time.Second))
 	}
 	if !gotFrom.Equal(tr.From) || !gotTo.Equal(tr.To) {
@@ -455,5 +451,53 @@ func TestUsageMetered(t *testing.T) {
 	}
 	if in != 123 || out != 45 {
 		t.Errorf("usage = (%d,%d), want (123,45)", in, out)
+	}
+}
+
+// TestTailDelayedCutCapturesReactionAudio proves the snapshot cut is delayed by
+// Tail so audio that arrives AFTER the moment confirms — the reaction — is in the
+// emitted clip. It uses a REAL tape behind SnapshotFunc (not an echo fake): an
+// agent frame appended within the Tail window, after the trigger fires, must land
+// in the Snapshot. Cutting at confirm time would miss it entirely.
+func TestTailDelayedCutCapturesReactionAudio(t *testing.T) {
+	bus := voiceevent.NewBus()
+	prov := &fakeProvider{respJSON: func(int) string { return scoreJSON(9.0) }}
+	sink := &fakeSink{}
+	tp := tape.New(tape.Window, nil, nil) // agent lane is always captured
+	defer tp.Close()
+
+	base := time.Now()
+	clk := &testClock{t: base}
+	d := newDetector(prov, "", tp.Snapshot, sink, allowGate{}, nil, nil, Config{
+		ClassifyEvery: 1, Bar: 8.0, ConfirmWindows: 1, Cooldown: time.Hour,
+		Lead: time.Second, Tail: 400 * time.Millisecond,
+	})
+	d.now = clk.now
+	d.handled = make(chan struct{}, 1)
+	d.start(bus)
+	t.Cleanup(d.Close)
+
+	// One high final confirms immediately and schedules a cut for base+Tail.
+	bus.Publish(voiceevent.STTFinal{At: base, Text: "I strike the killing blow!", SpeakerID: "A"})
+	select {
+	case <-d.handled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("final not handled")
+	}
+
+	// AFTER the trigger is scheduled, the reaction audio arrives on the agent lane,
+	// stamped inside the Tail window. The delayed cut must include it.
+	tp.AppendAgent([]byte{0x01, 0x02, 0x03}, base.Add(150*time.Millisecond))
+
+	trigs := waitForTriggers(t, sink, 1)
+	tr := trigs[0]
+	var agentFrames int
+	for _, lane := range tr.Snapshot.Lanes {
+		if lane.LaneID == tape.AgentLaneID {
+			agentFrames = len(lane.Frames)
+		}
+	}
+	if agentFrames == 0 {
+		t.Fatalf("post-trigger reaction frame missing from the clip; snapshot lanes = %+v", tr.Snapshot.Lanes)
 	}
 }

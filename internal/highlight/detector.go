@@ -62,6 +62,9 @@ type Detector struct {
 	cancel context.CancelFunc
 	unsub  func()
 	done   chan struct{}
+	// wg tracks the deferred snapshot-cut goroutines (one per trigger): Close waits
+	// on it so a pending Tail-delayed cut is flushed, never leaked (#44-class).
+	wg sync.WaitGroup
 
 	signal   chan struct{}     // 1-slot wake for a pending final (latest-wins)
 	features chan frameFeature // buffered PCM feature mailbox (drop-oldest under load)
@@ -85,9 +88,15 @@ type workerState struct {
 	feat                featureState
 	finalsSinceClassify int
 	consecutiveHigh     int
-	candidateCount      int
-	lastTriggerAt       time.Time
-	disarmed            bool
+	// firstHighAt is the At of the final that opened the current at-or-above-Bar
+	// streak (the consecutiveHigh 0→1 transition). Confirmation lags the moment by
+	// up to ConfirmWindows×ClassifyEvery finals, so anchoring the clip on the
+	// CONFIRMING final would push the moment's build-up (and often the beat itself)
+	// out of [From, To]; anchoring on the FIRST high window keeps the moment centred.
+	firstHighAt    time.Time
+	candidateCount int
+	lastTriggerAt  time.Time
+	disarmed       bool
 }
 
 // NewDetector builds the detector wired to the process bus (STTFinal), the LLM
@@ -144,6 +153,10 @@ func (d *Detector) Close() {
 	d.unsub()
 	d.cancel()
 	<-d.done
+	// Flush any Tail-delayed snapshot cut: cancelling the ctx makes each pending cut
+	// fire immediately (best-effort, so a session-end highlight is not lost) rather
+	// than waiting out its Tail timer.
+	d.wg.Wait()
 }
 
 // PCMTap returns the tap wired via wire.WithPCMTap: it summarizes each decoded PCM
@@ -218,7 +231,12 @@ func (d *Detector) worker() {
 // ClassifyEvery processed finals.
 func (d *Detector) handleFinal(w *workerState, e voiceevent.STTFinal) {
 	defer d.notifyHandled()
-	w.appendLine(e)
+	// An empty / whitespace-only final carries no new transcript signal (a VAD blip,
+	// a dropped recognition). It does NOT count toward the cadence: otherwise a run
+	// of blank finals would fire a PAID classify over an unchanged window.
+	if !w.appendLine(e) {
+		return
+	}
 	w.finalsSinceClassify++
 	if w.finalsSinceClassify < d.cfg.ClassifyEvery {
 		return
@@ -238,16 +256,20 @@ func (d *Detector) notifyHandled() {
 	}
 }
 
-// appendLine adds a final to the window, dropping the oldest past windowCap.
-func (w *workerState) appendLine(e voiceevent.STTFinal) {
+// appendLine adds a final to the window, dropping the oldest past windowCap. It
+// reports whether the final carried content (a non-empty trimmed text) — an
+// empty/whitespace final is ignored and reported false so the caller does not count
+// it toward the classify cadence.
+func (w *workerState) appendLine(e voiceevent.STTFinal) bool {
 	text := strings.TrimSpace(e.Text)
 	if text == "" {
-		return
+		return false
 	}
 	w.window = append(w.window, finalLine{speaker: e.SpeakerID, text: text, at: e.At})
 	if len(w.window) > windowCap {
 		w.window = w.window[len(w.window)-windowCap:]
 	}
+	return true
 }
 
 // classify runs one classifier pass, honoring the cap, cooldown, and spend gate,
@@ -284,22 +306,35 @@ func (d *Detector) classify(w *workerState, e voiceevent.STTFinal) {
 	d.notifyClassified(cls)
 
 	if cls.score >= d.cfg.Bar {
+		if w.consecutiveHigh == 0 {
+			// Open the streak: remember THIS final's time — the first evidence of the
+			// moment — as the clip anchor (see workerState.firstHighAt).
+			w.firstHighAt = e.At
+			if w.firstHighAt.IsZero() {
+				w.firstHighAt = now
+			}
+		}
 		w.consecutiveHigh++
 	} else {
 		w.consecutiveHigh = 0
+		w.firstHighAt = time.Time{}
 	}
 	if w.consecutiveHigh < d.cfg.ConfirmWindows {
 		return
 	}
-	d.emit(w, e, cls, now)
+	d.emit(w, w.firstHighAt, cls, now)
 	w.consecutiveHigh = 0
+	w.firstHighAt = time.Time{}
 	w.candidateCount++
 	w.lastTriggerAt = now
 }
 
-// emit cuts the tape snapshot AT trigger time and hands the trigger to the sink.
-func (d *Detector) emit(w *workerState, e voiceevent.STTFinal, cls classification, now time.Time) {
-	at := e.At
+// emit builds the trigger anchored on the moment's first-evidence time and cuts the
+// tape snapshot after Tail so the reaction audio actually exists in the ring when
+// the cut happens. The caption fields and speaker set are captured NOW (the window
+// rolls); only the Snapshot is filled at cut time.
+func (d *Detector) emit(w *workerState, anchor time.Time, cls classification, now time.Time) {
+	at := anchor
 	if at.IsZero() {
 		at = now
 	}
@@ -310,15 +345,11 @@ func (d *Detector) emit(w *workerState, e voiceevent.STTFinal, cls classificatio
 	if lo := now.Add(-tape.Window); from.Before(lo) {
 		from = lo
 	}
-	var snap tape.Snapshot
-	if d.snap != nil {
-		snap = d.snap(from, to)
-	}
 	excerpt := cls.excerpt
 	if excerpt == "" {
 		excerpt = w.recentText()
 	}
-	d.sink.HandleTrigger(Trigger{
+	trig := Trigger{
 		At:         at,
 		From:       from,
 		To:         to,
@@ -326,8 +357,32 @@ func (d *Detector) emit(w *workerState, e voiceevent.STTFinal, cls classificatio
 		SpeakerIDs: w.speakerIDs(),
 		Excerpt:    excerpt,
 		Reason:     cls.reason,
-		Snapshot:   snap,
-	})
+	}
+	d.scheduleCut(from, to, trig)
+}
+
+// scheduleCut waits out the Tail on a goroutine, then cuts the tape snapshot for
+// [from, to] and hands the completed trigger to the sink. The Tail delay is what
+// makes the reaction audio real: To = anchor + Tail is in the future when the
+// moment confirms, so cutting immediately would end every clip in Tail seconds of
+// silence — the 120s ring makes the short wait safe. Close cancels the ctx, which
+// fires the cut at once (best-effort) so a session-end highlight is not lost, and
+// waits on the WaitGroup so the goroutine never leaks.
+func (d *Detector) scheduleCut(from, to time.Time, trig Trigger) {
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		timer := time.NewTimer(d.cfg.Tail)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-d.ctx.Done():
+		}
+		if d.snap != nil {
+			trig.Snapshot = d.snap(from, to)
+		}
+		d.sink.HandleTrigger(trig)
+	}()
 }
 
 // runClassifier drives one provider completion, meters its token usage on the
