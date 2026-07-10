@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the database/sql "pgx" driver for the goose-backed schema check
 
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -417,6 +418,16 @@ type Config struct {
 	// consent-button listener (all mode's presence owns its own). Set by RunFromDB
 	// alongside Tape; nil when the campaign is not armed.
 	TapeConsent TapeConsentStore
+
+	// Highlights, when non-nil, is the Session Highlights trigger sink (#307/#308,
+	// ADR-0051): connectAndServe builds the moment detector ONLY when both Tape and
+	// Highlights are set (a detector with no tape to cut clips from is pointless) and
+	// wires its PCM tap into the inbound pipeline. The detector watches STTFinal, runs
+	// the #305 classifier over the recent transcript window, and hands promoted
+	// [highlight.Trigger]s to this sink. nil (default) = highlights off, so the loop
+	// is byte-identical. The detector is per Voice Session cycle; connectAndServe
+	// owns its Close.
+	Highlights highlight.Sink
 
 	// GMSpeaker reports whether a Discord SpeakerID belongs to a Game Master —
 	// operator-allowlist membership per ADR-0050/ADR-0041, the deterministic GM
@@ -856,9 +867,22 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// runs at the VAD frame geometry (vadSampleRate/vadFrameMs) so silero endpoints
 	// ~vadMinSilenceFrames*vadFrameMs (= 384 ms) after the speaker stops — the
 	// natural cadence the bargeConfirm/floorCoalesce windows already account for.
+	// Session Highlights detector (#307, ADR-0051): built ONLY when the campaign is
+	// armed (Tape set) AND a highlight sink is wired. It subscribes to STTFinal off
+	// the bus and consumes the decoded-PCM tap; both are non-blocking (ADR-0020). A
+	// nil detector (highlights off, or provider build failed) adds no option and no
+	// bus subscriber, so the loop is byte-identical. Per-cycle state: Close on exit
+	// (a leak is a #44-class bug).
+	detector := buildHighlightDetector(cfg, bus, log)
+	if detector != nil {
+		defer detector.Close()
+	}
+
 	// tapeInboundOptions adds the inbound (consented Speaker) tape tap when armed
-	// (#306); nil tape → no option → byte-identical inbound loop.
+	// (#306); nil tape → no option → byte-identical inbound loop. highlightPCMOptions
+	// adds the detector's decoded-PCM tap (#307) when the detector is built.
 	pipeOpts := append([]wire.Option{wire.WithSilenceClock(vadSampleRate, vadFrameMs)}, tapeInboundOptions(cfg.Tape)...)
+	pipeOpts = append(pipeOpts, highlightPCMOptions(detector)...)
 	pipe := wire.NewPipeline(conv, cdc, log, cfg.Guild, cfg.Metrics, pipeOpts...)
 	return pipe.Run(cycleCtx, sess)
 }
@@ -1047,6 +1071,52 @@ func tapePumpOptions(t *tape.Tape) []wire.PumpOption {
 			t.AppendAgent(opus, time.Now())
 		}),
 	}
+}
+
+// buildHighlightDetector constructs the Session Highlights moment detector (#307)
+// for this Voice Session cycle, or returns nil when highlights are off. It is armed
+// ONLY when both the rollover tape (the clip source) and a trigger sink are wired —
+// a detector with nothing to cut clips from, or nowhere to hand triggers, is inert
+// by construction. It reuses the recap/wirenpc BYOK chain (llmbuild.New keyed off
+// cfg.llmProviderID + cfg.keys.llm) for the classifier provider, snapshots via the
+// tape, gates on the session spend gate, and meters on the shared StageRecorder the
+// Manager already tees into the spend meter (ADR-0046). A provider-build failure is
+// logged and degrades to no detector — a Highlight is best-effort and must never
+// fail the session.
+func buildHighlightDetector(cfg Config, bus *voiceevent.Bus, log *slog.Logger) *highlight.Detector {
+	if cfg.Tape == nil || cfg.Highlights == nil {
+		return nil
+	}
+	provider, err := newLLM(cfg.llmProviderID, cfg.keys.llm)
+	if err != nil {
+		log.Warn("highlight detector: build classifier provider; highlights disabled this session", "err", err)
+		return nil
+	}
+	model := ""
+	if len(cfg.npcs) > 0 {
+		model = cfg.npcs[0].model
+	}
+	return highlight.NewDetector(
+		bus,
+		provider,
+		model,
+		cfg.Tape.Snapshot,
+		cfg.Highlights,
+		cfg.Gate,
+		cfg.StageMetrics,
+		log,
+		highlight.Config{ProviderLabel: llmProviderLabel(cfg.llmProviderID)},
+	)
+}
+
+// highlightPCMOptions wires the detector's decoded-PCM tap into the inbound
+// pipeline (#307). A nil detector returns nothing (byte-identical loop). The tap is
+// non-blocking (drops under load), so it adds no audio-loop latency (ADR-0020).
+func highlightPCMOptions(d *highlight.Detector) []wire.Option {
+	if d == nil {
+		return nil
+	}
+	return []wire.Option{wire.WithPCMTap(d.PCMTap())}
 }
 
 // TapeConsentReader is the authoritative consent read the tape reseeds from (#306):
