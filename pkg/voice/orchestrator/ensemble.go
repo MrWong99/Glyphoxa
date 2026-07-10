@@ -34,6 +34,30 @@ type EnsembleSpeaker interface {
 	Speak(ctx context.Context, e voiceevent.AddressRouted, draft string, dispatch func(Reply) error) (delivered string, err error)
 }
 
+// CrossTalker is the Cross-talk Reaction extension of [EnsembleSpeaker] (ADR-0025,
+// #302): after an Ensemble Turn's Lead speaks, the coordinator feeds the Lead's
+// delivered text to at most one other addressed Agent as Cross-talk, and that Agent
+// generates a Reaction — a short affirmation, a longer disagreement, or a decline.
+// The coordinator discovers this capability by a type assertion on the wired
+// [EnsembleSpeaker] (r.ensemble.(CrossTalker)); a speaker that does not implement it
+// runs the Lead-only Ensemble Turn of #301 unchanged.
+//
+// React PURELY produces the reacting Agent's would-be Reaction text: like
+// [EnsembleSpeaker.Draft] it writes no history, synthesizes no TTS, and commits
+// nothing, so a reaction that is never spoken (a decline, or a barge before it
+// plays) commits nothing (ADR-0012). "" means the Agent declines to react. It honors
+// ctx — a barge tearing the ensemble down cancels the in-flight reaction generation.
+// leadName/leadText are the Lead's display name and its delivered line.
+//
+// SpeakReaction renders an already-generated Reaction as the reacting Agent's own
+// sub-turn: serial per-sentence dispatch committing ONLY the delivered text
+// (ADR-0012), returning the delivered text. It commits the SAME composite user
+// message React reasoned over so the recorded turn and the prompt never drift.
+type CrossTalker interface {
+	React(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText string) (string, error)
+	SpeakReaction(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText, reaction string, dispatch func(Reply) error) (delivered string, err error)
+}
+
 // handleEnsemble runs one [voiceevent.EnsembleRouted] decision set as ONE
 // floor-holding Ensemble Turn (ADR-0025/0027, #301). It mirrors the single-route
 // reactor's gates (mute pre-filter, spend cap, floor Take with its coalesce fold,
@@ -151,12 +175,17 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// publishes its own TurnEnded).
 	var lead draftResult
 	won := false
-	for remaining := len(targets); remaining > 0 && !won; {
+	// pending counts the draft results not yet consumed. It carries past the race so
+	// the reactor pick below knows how many results can STILL arrive on the channel —
+	// keying the pick on the targets slice instead would wait on results the race loop
+	// already drained (errored/empty candidates it skipped), wedging the turn forever.
+	pending := len(targets)
+	for pending > 0 && !won {
 		select {
 		case <-turnCtx.Done():
 			return // a barge/supersede tore the whole unit down mid-race
 		case res := <-results:
-			remaining--
+			pending--
 			if res.err == nil && res.text != "" {
 				lead = res
 				won = true
@@ -179,11 +208,71 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	}
 
 	// Elect the Lead: announce it (so the transcript relay attributes the turn's
-	// line to the winner), retarget the floor onto it (so a mute cut / coalesce keys
-	// on whoever actually speaks), and cancel the losing drafts.
+	// line to the winner) and retarget the floor onto it (so a mute cut / coalesce
+	// keys on whoever actually speaks).
 	bus.Publish(voiceevent.EnsembleLead{At: time.Now(), TurnID: e.TurnID, Target: lead.target})
 	r.floor.SetHolderAgent(e.TurnID, lead.target.AgentID)
+
+	// Cross-talk Reaction phase (#302, ADR-0025): if the wired speaker can cross-talk
+	// and at least one addressed Agent remains besides the Lead, elect exactly ONE
+	// reactor and generate its Reaction DURING the Lead's playback. Without a
+	// [CrossTalker] — or with no other candidate — this is the Lead-only Ensemble Turn
+	// of #301, unchanged.
+	rt, canReact := r.ensemble.(CrossTalker)
+	remaining := targetsExcept(targets, lead.target.AgentID)
+
+	var (
+		reactor    voiceevent.AddressTarget
+		hasReactor bool
+	)
+	if canReact && len(remaining) > 0 {
+		if len(remaining) == 1 {
+			// Exactly one other Agent: it is the reactor. Its speculative draft is
+			// discarded (it regenerates a Reaction), so we never wait for that draft —
+			// a hung/gated loser must not stall the pick.
+			reactor = remaining[0]
+			hasReactor = true
+		} else {
+			// 3+ addressed: the FASTEST remaining draft to ARRIVE names the reactor
+			// (ADR-0025 — its speculative draft is discarded, it regenerates a
+			// Reaction). Only pending (not-yet-consumed) results can still arrive; the
+			// race loop already drained the empty/errored candidates it skipped, so we
+			// bound the wait by pending to avoid blocking on a result that will never
+			// come. Empty/errored arrivals are skipped here too — a candidate with
+			// nothing to draft is not made the reactor. A barge tears the unit down.
+			for pending > 0 && !hasReactor {
+				select {
+				case <-turnCtx.Done():
+					cancelDrafts()
+					return
+				case res := <-results:
+					pending--
+					if res.err == nil && res.text != "" {
+						reactor = res.target
+						hasReactor = true
+					}
+				}
+			}
+		}
+	}
+	// The speculative drafts are done being raced (winner elected, reactor picked):
+	// cancel them all. React runs under turnCtx (NOT draftCtx), so this never cancels
+	// the reaction generation launched below.
 	cancelDrafts()
+
+	// Launch the reactor's React NOW so it generates and pre-renders TEXT while the
+	// Lead's audio plays (ADR-0025), landing on a BUFFERED channel so the goroutine
+	// never blocks if the unit is torn down before we read it.
+	var reactCh chan reactionResult
+	if hasReactor {
+		reactCh = make(chan reactionResult, 1)
+		go func() {
+			text, err := rt.React(turnCtx, voiceevent.AddressRouted{
+				At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
+			}, lead.target.Name, lead.text)
+			reactCh <- reactionResult{text: text, err: err}
+		}()
+	}
 
 	// Speak the Lead's draft under turnCtx. The dispatch closure mirrors
 	// dispatchStream's deliver-then-commit (ADR-0012): a synth failure is non-fatal
@@ -213,8 +302,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		return nil
 	}
 	// Speak commits the delivered text to the Lead's own history and stops the drain
-	// on a barge; the coordinator needs neither return here — the turn-end reason is
-	// carried by ttsFailed (below) or the barge's own TurnEnded.
+	// on a barge.
 	_, _ = r.ensemble.Speak(turnCtx, voiceevent.AddressRouted{
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: lead.target,
 	}, lead.text, dispatch)
@@ -224,4 +312,111 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	if ttsFailed && turnCtx.Err() == nil {
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTTSError})
 	}
+
+	// The Reaction plays only when there is a reactor, the unit is still live (a barge
+	// anywhere above tears it down and a queued Reaction after a barge is FORBIDDEN,
+	// ADR-0027), and the Lead is AUDIBLY on the wire ([Floor.Speaking] — its FirstOpus
+	// fired). Gating on audible delivery, not committed text, is load-bearing: an
+	// all-synthesis-failed Lead still commits its (undelivered) text but produced no
+	// audio and no FirstOpus, so the floor never armed — a Reaction played then would
+	// be UNBARGEABLE (its own FirstOpus{rID} can't arm a floor whose holder turn is the
+	// Lead's) and would speak AFTER the Lead's TurnEnded{tts_error}. Floor.Speaking
+	// true ⟺ FirstOpus(lead) fired ⟺ the barge is armed through the gap and the
+	// Reaction (ADR-0027).
+	if !hasReactor || turnCtx.Err() != nil || !r.floor.Speaking() {
+		return
+	}
+	r.speakReaction(turnCtx, rt, bus, e, reactor, lead.target.Name, lead.text, reactCh)
+}
+
+// reactionResult is the outcome of a reactor's [CrossTalker.React] (#302): the
+// would-be Reaction text ("" = decline / error) carried from the generation
+// goroutine to [Replier.speakReaction].
+type reactionResult struct {
+	text string
+	err  error
+}
+
+// speakReaction is the Cross-talk Reaction sub-turn (#302, ADR-0025): it waits for
+// the reactor's generated Reaction (already in flight during the Lead's playback),
+// and — when non-empty and the unit is still live — mints a FRESH sub-turn id,
+// announces [voiceevent.EnsembleReaction], and speaks the Reaction under that id.
+// A decline (empty reaction) or a barge that fired before the Reaction dispatched
+// leaves no event and no line. A barge DURING the Reaction's playback tears it down
+// and ends the sub-turn with a barge [voiceevent.TurnEnded] carrying the reaction's
+// own id — the Lead's already-delivered line stays committed. leadName/leadText are
+// the Lead's display name and delivered draft, fed to the reactor as Cross-talk.
+func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *voiceevent.Bus, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, leadName, leadText string, wait <-chan reactionResult) {
+	var reaction string
+	select {
+	case <-turnCtx.Done():
+		return // a barge tore the unit down while the Reaction generated
+	case res := <-wait:
+		reaction = res.text // a React error surfaces as "" — treated as a decline
+	}
+	if reaction == "" || turnCtx.Err() != nil {
+		return // the reactor declined, or a barge landed the instant it finished
+	}
+
+	// A distinct sub-turn: a FRESH id so the reaction's TTSInvoked / FirstOpus /
+	// TurnEnded correlate independently and land on their own transcript line, linked
+	// back to the Lead via LeadTurnID. Published immediately before the first dispatch.
+	rID := voiceevent.NewTurnID()
+	rctx := voiceevent.WithTurnID(turnCtx, rID)
+	bus.Publish(voiceevent.EnsembleReaction{At: time.Now(), TurnID: rID, LeadTurnID: e.TurnID, Target: reactor})
+
+	var dispatched bool
+	dispatch := func(rep Reply) error {
+		if err := turnCtx.Err(); err != nil {
+			return err
+		}
+		dispatched = true
+		if err := r.tts.Dispatch(rctx, rep.Sentence, rep.Voice); err != nil {
+			if r.onError != nil {
+				r.onError(err)
+			}
+			if turnCtx.Err() != nil {
+				return turnCtx.Err()
+			}
+			return nil // a synth failure is non-fatal; keep draining the Reaction
+		}
+		if err := turnCtx.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
+	_, _ = rt.SpeakReaction(rctx, voiceevent.AddressRouted{
+		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
+	}, leadName, leadText, reaction, dispatch)
+
+	// A barge cutting the Reaction mid-playback ends this sub-turn under its OWN id
+	// (the Lead's delivered line is untouched). Only when the Reaction actually began
+	// dispatching — a barge before the first sentence played nothing to interrupt.
+	//
+	// INTENTIONAL two TurnEnded on a reaction barge: the [BargeIn] that yielded the
+	// floor also publishes TurnEnded{lead-turn, barge} (the floor's holder turn is the
+	// Lead's throughout the one-unit floor, ADR-0027), and we add TurnEnded{rID, barge}
+	// for the reaction sub-turn. Both are correct floor-unit semantics: the barge tore
+	// down the whole unit, and each of the unit's transcript lines (the Lead's under the
+	// original TurnID, the reaction's under rID) is marked ended so a late sentence can
+	// clobber neither. The Lead's line — cleanly completed before the barge — keeps its
+	// delivered text; the relay treats a TurnEnded after a line is delivered as a normal
+	// interruption, not a re-count.
+	if dispatched && turnCtx.Err() != nil {
+		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndBarge})
+	}
+}
+
+// targetsExcept returns the targets whose AgentID is not agentID, preserving order
+// on a fresh slice — the addressed candidates that remain after the Lead is elected,
+// from which the Cross-talk reactor is chosen (#302).
+func targetsExcept(targets []voiceevent.AddressTarget, agentID string) []voiceevent.AddressTarget {
+	out := make([]voiceevent.AddressTarget, 0, len(targets))
+	for _, t := range targets {
+		if t.AgentID == agentID {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }

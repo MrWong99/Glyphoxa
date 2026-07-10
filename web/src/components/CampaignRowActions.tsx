@@ -3,10 +3,11 @@ import { createPortal } from "react-dom";
 import { useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Archive, ArchiveRestore, MoreHorizontal, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Download, MoreHorizontal, Trash2 } from "lucide-react";
 
 import { CampaignService } from "@gen/glyphoxa/management/v1/management_pb";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
+import { fetchCampaignExport, downloadBlob } from "@/lib/download";
 import { usePopoverDismiss } from "@/components/ui/usePopoverDismiss";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
@@ -34,14 +35,16 @@ type CampaignRow = { id: string; name: string; archived: boolean };
 type MenuPos = { top: number; right: number; flipUp: boolean };
 
 // A conservative menu-height estimate for the flip decision, taken before the
-// menu has laid out. The tallest variant (archived: Unarchive + Delete…) is ~2
-// rows plus padding; overestimating only flips slightly earlier, which is safe.
-const MENU_HEIGHT_ESTIMATE = 96;
+// menu has laid out. Every variant now leads with Export, so the tallest
+// (archived: Export + Unarchive + Delete…) is ~3 rows plus padding;
+// overestimating only flips slightly earlier, which is safe.
+const MENU_HEIGHT_ESTIMATE = 128;
 
 export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
   const queryClient = useQueryClient();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [pos, setPos] = useState<MenuPos | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -113,6 +116,24 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
     void invalidateActiveCampaignScopedQueries(queryClient);
   };
 
+  // Export streams the campaign's bundle over the plain-net/http endpoint (not a
+  // Connect RPC — bundles are gzip, ADR-0015/0053) and saves it via a transient
+  // download anchor. Available on EVERY row, archived included: a bundle is a
+  // backup, and an archived campaign is exactly what an operator wants to snapshot
+  // before a hard delete. A failure toasts and never triggers a download.
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      const { blob, filename } = await fetchCampaignExport(campaign.id);
+      downloadBlob(blob, filename);
+      setMenuOpen(false);
+    } catch (err) {
+      toast.error(`Couldn't export campaign: ${(err as Error).message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const archive = useMutation(CampaignService.method.archiveCampaign, {
     onSuccess: () => {
       setMenuOpen(false);
@@ -175,6 +196,15 @@ export function CampaignRowActions({ campaign }: { campaign: CampaignRow }) {
                 : undefined
             }
           >
+            <button
+              type="button"
+              role="menuitem"
+              className="gx-select__item"
+              disabled={exporting}
+              onClick={() => void runExport()}
+            >
+              <Download size={14} /> {exporting ? "Exporting…" : "Export"}
+            </button>
             {campaign.archived ? (
               <>
                 <button

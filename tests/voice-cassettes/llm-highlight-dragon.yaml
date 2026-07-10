@@ -1,0 +1,11 @@
+exchanges:
+    - prompt_hash: 2f23785acf34abcd1b197772e7fab1ae74d1ec9bc5a2e4fdfdbb6e9ead467557
+      text: '{"score": 2.0, "excerpt": "the party explores the corridor", "reason": "routine exploration"}'
+      stop_reason: end_turn
+    - prompt_hash: 6f8e4b4b8a7892d06b6d366ec0af26c06a793355a4a16b5737eae4ff29eff276
+      text: '{"score": 9.5, "excerpt": "I rolled a natural twenty! A critical hit on the dragon!", "reason": "a critical hit felling the dragon"}'
+      stop_reason: end_turn
+    - prompt_hash: 9cb391db079b7ef21ae9d9b4611e75816362f0ef206de46faa6014932d58fe7f
+      text: '{"score": 9.5, "excerpt": "I rolled a natural twenty! A critical hit on the dragon!", "reason": "a critical hit felling the dragon"}'
+      stop_reason: end_turn
+notes: 'Hand-authored highlight classifier fixture (#307): mundane corridor + one natural-twenty dragon kill. Not a live recording; responses are the fixture''s scoring rule.'

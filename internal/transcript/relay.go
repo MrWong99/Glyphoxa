@@ -359,6 +359,15 @@ func (r *Relay) project(e voiceevent.Event) {
 		// they leave no line.
 		t := r.turn(ev.TurnID)
 		t.target = ev.Target
+	case voiceevent.EnsembleReaction:
+		// An Ensemble Turn's Cross-talk Reaction (#302, ADR-0025): the reactor speaks
+		// under its OWN fresh sub-turn id (ev.TurnID), so — like EnsembleLead — record
+		// WHO reacts, keyed on that id, so the reaction's coalescing TTSInvoked line
+		// lands as a SEPARATE line (a:<rID>, the reactor's name + NPC pill) beneath the
+		// Lead's rather than coalescing into it. A declined Reaction publishes no
+		// EnsembleReaction and no TTSInvoked, so it leaves no line.
+		t := r.turn(ev.TurnID)
+		t.target = ev.Target
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
 		t := r.turn(ev.TurnID)

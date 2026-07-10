@@ -356,3 +356,82 @@ func TestEndVoiceSessionNotFound(t *testing.T) {
 		t.Errorf("GetVoiceSession(random) = %v, want ErrNotFound", err)
 	}
 }
+
+// TestImportVoiceSession is #292 TEST 1: the Campaign Bundle importer inserts a
+// historical Voice Session with EXPLICIT started_at/ended_at/status/line_count/
+// end_reason (unlike CreateVoiceSession, which defaults status='running' and
+// started_at=now()) and returns a freshly minted id. The caller (bundle.Import)
+// guarantees a terminal status; ImportVoiceSession writes the fields verbatim.
+func TestImportVoiceSession(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	started := time.Date(2026, 6, 1, 20, 0, 0, 0, time.UTC)
+	ended := started.Add(90 * time.Minute)
+	reason := "orphaned: reconciled at startup"
+	id, err := st.ImportVoiceSession(ctx, storage.VoiceSession{
+		CampaignID: campaignID,
+		StartedAt:  started,
+		EndedAt:    &ended,
+		Status:     storage.VoiceSessionEnded,
+		LineCount:  42,
+		EndReason:  &reason,
+	})
+	if err != nil {
+		t.Fatalf("ImportVoiceSession: %v", err)
+	}
+	if id == uuid.Nil {
+		t.Fatal("ImportVoiceSession returned nil id")
+	}
+
+	got, err := st.GetVoiceSession(ctx, id)
+	if err != nil {
+		t.Fatalf("GetVoiceSession: %v", err)
+	}
+	if !got.StartedAt.Equal(started) {
+		t.Errorf("started_at = %v, want %v", got.StartedAt, started)
+	}
+	if got.EndedAt == nil || !got.EndedAt.Equal(ended) {
+		t.Errorf("ended_at = %v, want %v", got.EndedAt, ended)
+	}
+	if got.Status != storage.VoiceSessionEnded {
+		t.Errorf("status = %q, want ended", got.Status)
+	}
+	if got.LineCount != 42 {
+		t.Errorf("line_count = %d, want 42", got.LineCount)
+	}
+	if got.EndReason == nil || *got.EndReason != reason {
+		t.Errorf("end_reason = %v, want %q", got.EndReason, reason)
+	}
+}
+
+// TestImportVoiceSessionNilEndReason proves a NULL end_reason (the clean-end
+// case) round-trips as nil, not "".
+func TestImportVoiceSessionNilEndReason(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	started := time.Date(2026, 6, 2, 20, 0, 0, 0, time.UTC)
+	ended := started.Add(time.Hour)
+	id, err := st.ImportVoiceSession(ctx, storage.VoiceSession{
+		CampaignID: campaignID,
+		StartedAt:  started,
+		EndedAt:    &ended,
+		Status:     storage.VoiceSessionEnded,
+		LineCount:  0,
+	})
+	if err != nil {
+		t.Fatalf("ImportVoiceSession: %v", err)
+	}
+	got, err := st.GetVoiceSession(ctx, id)
+	if err != nil {
+		t.Fatalf("GetVoiceSession: %v", err)
+	}
+	if got.EndReason != nil {
+		t.Errorf("end_reason = %q, want nil", *got.EndReason)
+	}
+}
