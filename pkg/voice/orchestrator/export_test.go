@@ -25,6 +25,11 @@ func (r *Replier) SetMutes(v MuteView) { r.mutes = v }
 // Conversation.Register from [WithTurnGate].
 func (r *Replier) SetGate(g TurnGate) { r.gate = g }
 
+// Floor exposes the Conversation's barge-in floor built inside Register, so a test
+// can assert the production wiring actually shares ONE floor across the replier and
+// the DirectSpeech reactor (#295). nil before Register, or when barge-in is off.
+func (c *Conversation) Floor() *Floor { return c.floor }
+
 // SetFloor installs the shared barge-in floor on the DirectSpeech reactor for the
 // /say wiring tests (external test package, #295). Production wiring sets it inside
 // Conversation.Register from the same floor the barge path uses.

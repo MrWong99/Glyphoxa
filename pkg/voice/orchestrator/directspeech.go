@@ -34,6 +34,19 @@ type VoiceLookup func(agentID string) (tts.Voice, bool)
 //     full first-audio latency; accepted for v1.0 (a puppeted line is short).
 //
 // The spend gate is still honored (a session past its soft cap refuses new turns).
+//
+// Known residuals (per plan #295, accepted for v1.0):
+//   - The /say line does NOT enter the target NPC's [Replier] conversation history:
+//     it never runs the Agent loop, so the NPC will not "remember" a puppeted line
+//     on its next LLM turn. The GM is voicing the NPC, not teaching it.
+//   - Silent-success drops: the GM's slash reply acks BEFORE this reactor runs (the
+//     handler does not Defer), so the three no-audio outcomes here — a voiceOf miss,
+//     a spend-cap refusal, and a floor coalesce-fold — end the turn quietly after the
+//     ack. The coalesce fold matters because [Floor.Take]'s window keys on the target
+//     agent id ONLY and the floor is SHARED with the [Replier]: a /say as Bart landing
+//     within the coalesce window of Bart's own in-flight LLM turn is folded into that
+//     turn and never spoken. Rare (a GM /say racing the NPC's own reply); a TurnEnded
+//     records it for the metrics subscriber.
 type DirectSpeech struct {
 	tts     *TTS
 	voiceOf VoiceLookup
@@ -102,9 +115,14 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 
 		// Barge-in: take the shared floor and run the turn on its own goroutine so the
 		// inbound loop keeps feeding VAD during playback, and a barge yielding the floor
-		// cancels floorCtx (unwinding TTS + playback). The take carries the target so a
-		// coalesce window only folds same-target re-takes (harmless for /say, which
-		// never over-splits — this just keeps the take/release pairing honest).
+		// cancels floorCtx (unwinding TTS + playback). The take carries the target agent
+		// id, which is what [Floor.Take]'s coalesce window keys on (holderAgent only) —
+		// and the floor is SHARED with the [Replier]. So a /say as Bart landing inside
+		// the coalesce window of Bart's own in-flight LLM turn is folded into that turn
+		// and NOT spoken: a silent-success drop after the GM's ack (see the type doc's
+		// residuals). We honor the fold rather than supersede — publishing a TurnEnded
+		// so the metrics subscriber records the dropped segment — because superseding
+		// would cancel the NPC's live LLM reply mid-sentence, a worse outcome.
 		floorCtx, release, coalesced := d.floor.Take(turnCtx, e.Target.AgentID)
 		if coalesced {
 			release()

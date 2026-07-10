@@ -209,6 +209,88 @@ func TestDirectSpeech_MuteBypassed(t *testing.T) {
 	}
 }
 
+// TestDirectSpeech_RegisterSharesBargeFloor pins the PRODUCTION wiring (#295): the
+// DirectSpeech reactor built inside Conversation.Register takes the SAME floor the
+// barge path uses, so /say runs off the publisher goroutine (an async turn — never
+// blocking the Discord interaction handler for the whole synthesis) AND a real floor
+// Yield (the barge reactor's exact mechanism, ADR-0027) cancels it. If the
+// `ds.floor = c.floor` wiring regresses to nil, the floor is never taken (Active()
+// false) and dispatch runs synchronously — this test fails on both counts.
+func TestDirectSpeech_RegisterSharesBargeFloor(t *testing.T) {
+	h := voicetest.New(t)
+	synth := &recordSynth{block: make(chan struct{})}
+	vadStage := orchestrator.NewVAD(h.Bus, &scriptedVAD{})
+	sttStage := orchestrator.NewSTT(h.Bus, &recordingRecognizer{})
+	ttsStage := orchestrator.NewTTS(h.Bus, synth)
+
+	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
+		orchestrator.WithBargeInCoalesce(50*time.Millisecond, 0),
+		orchestrator.WithDirectSpeech(voiceOf("bart", bartVoice())),
+	)
+	t.Cleanup(conv.Register(t.Context()))
+
+	// Publish on a goroutine so a REGRESSION (nil floor → synchronous dispatch on the
+	// publisher goroutine, blocked in the synth) cannot hang the test body: with the
+	// floor wired, Publish returns at once while the turn runs on the floor goroutine.
+	published := make(chan struct{})
+	go func() {
+		h.Bus.Publish(voiceevent.SpeakRequested{At: time.Now(), TurnID: "Ts", Target: sayTarget("bart", "Bart"), Text: "A long puppeted line…"})
+		close(published)
+	}()
+	select {
+	case <-published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish(SpeakRequested) blocked — dispatch is synchronous, so the floor was not taken (Discord handler would block on synthesis)")
+	}
+
+	waitFor(t, func() bool { return len(synth.requests()) == 1 }) // dispatch in flight on the floor
+
+	floor := conv.Floor()
+	if floor == nil || !floor.Active() {
+		t.Fatal("the /say turn did not take the shared barge floor — ds.floor is not wired to c.floor")
+	}
+	turnID, yielded := floor.Yield() // the barge reactor's exact mechanism
+	if !yielded || turnID != "Ts" {
+		t.Fatalf("floor.Yield() = (%q, %v), want the /say turn (\"Ts\", true) — proving /say holds the shared floor", turnID, yielded)
+	}
+
+	synth.mu.Lock()
+	ctx := synth.ctxs[0]
+	synth.mu.Unlock()
+	waitFor(t, func() bool { return ctx.Err() != nil }) // barge cancelled the synth ctx
+}
+
+// TestDirectSpeech_RegisterWiresGate pins the production spend-gate wiring (#295):
+// the DirectSpeech reactor built inside Register honors WithTurnGate. If the
+// `ds.gate = c.gate` wiring regresses, a spend-capped /say would still dispatch —
+// this test (no dispatch, spend_cap TurnEnded) fails.
+func TestDirectSpeech_RegisterWiresGate(t *testing.T) {
+	h := voicetest.New(t)
+	synth := &recordSynth{}
+	vadStage := orchestrator.NewVAD(h.Bus, &scriptedVAD{})
+	sttStage := orchestrator.NewSTT(h.Bus, &recordingRecognizer{})
+	ttsStage := orchestrator.NewTTS(h.Bus, synth)
+
+	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
+		orchestrator.WithBargeInCoalesce(50*time.Millisecond, 0),
+		orchestrator.WithTurnGate(denyGate{}),
+		orchestrator.WithDirectSpeech(voiceOf("bart", bartVoice())),
+	)
+	t.Cleanup(conv.Register(t.Context()))
+
+	h.Bus.Publish(voiceevent.SpeakRequested{At: time.Now(), TurnID: "Ts", Target: sayTarget("bart", "Bart"), Text: "Blocked."})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool { return e.TurnID == "Ts" && e.Reason == voiceevent.TurnEndSpendCap },
+		"turn.ended (spend_cap) from the Register-wired gate",
+	)
+	if len(synth.requests()) != 0 {
+		t.Fatalf("a spend-capped /say dispatched %d times — the gate is not wired into Register", len(synth.requests()))
+	}
+}
+
 // denyGate is a TurnGate that always refuses a new turn (the crossed soft cap).
 type denyGate struct{}
 
