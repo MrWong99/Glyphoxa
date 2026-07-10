@@ -1,0 +1,85 @@
+{
+  "format_version": 1,
+  "exported_at": "2026-07-10T00:00:00Z",
+  "campaign": {
+    "name": "The Prancing Pony",
+    "system": "dnd5e",
+    "language": "en",
+    "agents": [
+      {
+        "id": "butler",
+        "role": "butler",
+        "name": "Glyphoxa",
+        "title": "Master of Ceremonies",
+        "persona": "You are Glyphoxa, the campaign's ever-present butler. You keep the table running: you answer rules questions, roll dice when asked, and never break the fiction of the Prancing Pony's common room. Stay concise and gracious.",
+        "aliases": ["butler", "glyphoxa"],
+        "grants": [
+          { "tool_name": "dice" }
+        ]
+      },
+      {
+        "id": "bart",
+        "role": "character",
+        "name": "Bart",
+        "persona": "You are Bart, the gruff but warm-hearted innkeeper of the Prancing Pony.\nYou speak in short, vivid sentences with a tavern-keeper's cadence. You know the\nlocal rumors, the regulars, and the price of a room. Stay in character; never\nmention being an AI.",
+        "voice": {
+          "ProviderID": "elevenlabs",
+          "VoiceID": "JBFqnCBsd6RMkjVDRZzb",
+          "Name": "Bart",
+          "Language": "en",
+          "Settings": {
+            "model_id": "eleven_v3",
+            "output_format": "pcm_48000",
+            "voice_settings": {
+              "stability": 0.5,
+              "similarity_boost": 0.75,
+              "use_speaker_boost": true
+            }
+          }
+        },
+        "aliases": ["innkeeper", "barkeep"],
+        "grants": [
+          { "tool_name": "dice" }
+        ]
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n_bart",
+        "type": "npc",
+        "name": "Bart",
+        "body": "The innkeeper of the Prancing Pony. Gruff, warm-hearted, knows every rumor in Bree.",
+        "agent_id": "bart"
+      },
+      {
+        "id": "n_pony",
+        "type": "location",
+        "name": "The Prancing Pony",
+        "body": "A crossroads inn: low beams, a roaring hearth, and travelers from every road."
+      },
+      {
+        "id": "n_bree",
+        "type": "location",
+        "name": "Bree",
+        "body": "A walled market town where the great roads meet."
+      },
+      {
+        "id": "n_watch",
+        "type": "faction",
+        "name": "The Bree Watch",
+        "body": "The town's volunteer guard, keeping the gates and the peace."
+      }
+    ],
+    "edges": [
+      { "from": "n_pony", "to": "n_bree", "type": "resides_in" },
+      { "from": "n_bart", "to": "n_watch", "type": "member_of" }
+    ],
+    "characters": [
+      {
+        "name": "Aria Longstride",
+        "aliases": ["Aria"],
+        "discord_user_id": "100000000000000001"
+      }
+    ]
+  }
+}

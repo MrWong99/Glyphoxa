@@ -357,6 +357,26 @@ func (s *Store) FindTenantByName(ctx context.Context, name string) (Tenant, erro
 	return t, nil
 }
 
+// FirstTenant returns the earliest-created Tenant, or ErrNotFound when the DB
+// holds none. The `glyphoxa seed -bundle` path uses it to land a bundle beside
+// an already-provisioned Tenant instead of minting a duplicate one (ADR-0053):
+// the ordering is deterministic (created_at then id) so a multi-tenant DB always
+// resolves the same Tenant.
+func (s *Store) FirstTenant(ctx context.Context) (Tenant, error) {
+	var t Tenant
+	err := s.db.QueryRow(ctx,
+		`SELECT id, name, created_at, updated_at
+		   FROM tenant ORDER BY created_at, id LIMIT 1`).
+		Scan(&t.ID, &t.Name, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tenant{}, ErrNotFound
+	}
+	if err != nil {
+		return Tenant{}, fmt.Errorf("storage: first tenant: %w", err)
+	}
+	return t, nil
+}
+
 // FindCampaignByName returns the Tenant's Campaign with the given name, or
 // ErrNotFound. It returns the full row rather than just the ID so a caller
 // wiring a Voice Session gets the Campaign Language (the matcher's phonetic
