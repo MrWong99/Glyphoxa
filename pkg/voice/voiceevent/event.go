@@ -210,6 +210,32 @@ type EnsembleLead struct {
 // EventName implements [Event].
 func (EnsembleLead) EventName() string { return "ensemble.lead" }
 
+// EnsembleReaction marks the Cross-talk Reaction phase of an Ensemble Turn (ADR-0025,
+// #302): after the Lead delivered at least one sentence, the coordinator fed the
+// Lead's text to one other addressed Agent as Cross-talk, and that Agent produced a
+// non-empty Reaction it is about to speak. It is published ONLY when the reaction is
+// non-empty (a decline publishes nothing), immediately before the reaction's first
+// sentence dispatches, so the transcript relay attributes the reaction's line to the
+// reacting Agent.
+//
+// Unlike the Lead — which speaks under the ensemble's ORIGINAL TurnID — the Reaction
+// is a distinct sub-turn: TurnID is a FRESH [NewTurnID] (so its [TTSInvoked] /
+// [FirstOpus] / TurnEnded correlate as an independent turn and land on their own
+// transcript line), and LeadTurnID links back to the Lead's turn it reacted to. The
+// Reaction is independently barge-able: a human barge during its playback ends it
+// with a TurnEnded carrying THIS TurnID, while the Lead's already-delivered line
+// stays committed. Depth is capped at 1 — a Reaction never triggers a further
+// Reaction (ADR-0025).
+type EnsembleReaction struct {
+	At         time.Time
+	TurnID     string // FRESH NewTurnID for the reaction sub-turn
+	LeadTurnID string // the Lead's (ensemble original) TurnID this reacts to
+	Target     AddressTarget
+}
+
+// EventName implements [Event].
+func (EnsembleReaction) EventName() string { return "ensemble.reaction" }
+
 // SpeakRequested marks a GM-puppeteered direct-speech request: the `/say <text>
 // as:<agent>` slash command (ADR-0010, #295) asks an Agent to speak Text verbatim,
 // bypassing Address Detection and the LLM Replier entirely (ADR-0024 — /say is the

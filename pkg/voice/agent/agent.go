@@ -432,6 +432,92 @@ func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispat
 	return spoken.String(), dispErr
 }
 
+// crossTalkSilence is the sentinel a Cross-talk Reaction emits to DECLINE speaking
+// (ADR-0025, #302): the Reaction prompt permits an explicit "stay silent" output to
+// avoid hollow "yeah, what he said" filler. A reply equal to it (or empty) means the
+// Agent reacts with nothing — no event, no dispatch, no commit (ADR-0012).
+const crossTalkSilence = "[SILENCE]"
+
+// crossTalkInstruction is the system-prompt addendum for a Cross-talk Reaction turn
+// (ADR-0025): it frames the just-heard Lead line as cross-talk this Agent may react
+// to, and permits the [crossTalkSilence] decline. It is appended to the Agent's own
+// system prompt ONLY on the React path, so a normal turn's prompt is unchanged.
+const crossTalkInstruction = "Another character has just spoken in the conversation, quoted below. " +
+	"React briefly in your own voice — a short agreement, a pointed disagreement, or an aside — " +
+	"but only if you have something worth adding. If you would just echo them or have nothing to add, " +
+	"reply with exactly " + crossTalkSilence + " and nothing else."
+
+// crossTalkUserText composes the user message for a Cross-talk Reaction (ADR-0025,
+// #302): the original utterance, then the Lead's delivered line attributed to it. It
+// is the SINGLE composition site — [Replier.React] feeds it to the LLM as the turn's
+// user message AND [Replier.SpeakReaction] commits the SAME text to history, so the
+// reacting Agent's recorded turn and the prompt it reasoned over never drift.
+func crossTalkUserText(userText, leadName, leadText string) string {
+	return userText + "\n\n" + leadName + ` says: "` + leadText + `"`
+}
+
+// React produces this Agent's would-be Cross-talk Reaction to the Lead's delivered
+// line WITHOUT mutating any state — the speculative half of the Reaction phase of an
+// Ensemble Turn (ADR-0025, #302). Like [Replier.Draft] it reads Hot Context on a
+// history SNAPSHOT (so a reaction that is never spoken commits nothing, ADR-0012),
+// but its user message is the composite [crossTalkUserText] and its system prompt
+// carries the [crossTalkInstruction] permitting the decline sentinel. An empty
+// completion OR the [crossTalkSilence] sentinel returns "", nil — the Agent declines
+// to react. It honors ctx (bounded by [Config.TurnTimeout]) so a barge tearing the
+// whole ensemble down unwinds an in-flight reaction generation.
+func (r *Replier) React(ctx context.Context, userText, leadName, leadText string) (string, error) {
+	ctx, cancel := r.withTurnTimeout(ctx)
+	defer cancel()
+
+	// Snapshot + append the composite user message on the COPY (purity, as Draft).
+	r.mu.Lock()
+	history := append(make([]llm.Message, 0, len(r.history)+1), r.history...)
+	r.mu.Unlock()
+	history = append(history, llm.Message{Role: llm.RoleUser, Text: crossTalkUserText(userText, leadName, leadText)})
+	history = trimHistory(history, r.cfg.HistoryTurns)
+
+	// Recall keys on the raw utterance (the memory the Agent brings to the moment),
+	// not the composite — the cross-talk line is context, not a new topic.
+	mem := r.recall(ctx, userText)
+	facts := r.facts(ctx)
+
+	msgs := make([]llm.Message, 0, len(history)+1)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Text: r.systemPrompt(mem, facts) + "\n\n" + crossTalkInstruction})
+	msgs = append(msgs, history...)
+
+	reply, err := r.engine.Generate(ctx, msgs)
+	if err != nil {
+		return "", err
+	}
+	reply = strings.TrimSpace(reply)
+	if isSilenceSentinel(reply) {
+		return "", nil // the Reactor declined (ADR-0025 zero-delivered)
+	}
+	return reply, nil
+}
+
+// isSilenceSentinel reports whether reply is a Cross-talk decline: empty, or nothing
+// but the [crossTalkSilence] token (#302 hardening). Live models emit case/punctuation
+// variants — "[silence]", "[SILENCE].", `"[silence]."` — so the match is
+// case-insensitive over the reply stripped of surrounding whitespace, quotes, and
+// trailing punctuation. A reply that merely MENTIONS the token amid other words is a
+// real reply, not a decline (a contains-ONLY check, not a substring check).
+func isSilenceSentinel(reply string) bool {
+	trimmed := strings.Trim(strings.TrimSpace(reply), " \t\n\"'.,!?")
+	return trimmed == "" || strings.EqualFold(trimmed, crossTalkSilence)
+}
+
+// SpeakReaction speaks an already-generated Cross-talk Reaction (from a prior
+// [Replier.React]) as this Agent's own sub-turn (ADR-0025, #302). It reuses
+// [Replier.SpeakDraft] with the SAME composite user text React reasoned over
+// ([crossTalkUserText]) so the committed user message and the prompt never drift,
+// and delivers the reaction under deliver-then-commit (ADR-0012). It returns the
+// delivered text; a ctx-cancel (a barge cutting the reaction mid-playback) commits
+// only the sentences spoken before the cut.
+func (r *Replier) SpeakReaction(ctx context.Context, userText, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
+	return r.SpeakDraft(ctx, crossTalkUserText(userText, leadName, leadText), reaction, dispatch)
+}
+
 // ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop
 // in streaming mode (B1): it dispatches each sentence of the reply to TTS the
 // moment it is ready, so first audio begins after the first sentence rather than

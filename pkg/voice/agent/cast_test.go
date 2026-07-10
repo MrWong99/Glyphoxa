@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -218,7 +219,78 @@ func TestCast_ConcurrentAddRemoveDispatch(t *testing.T) {
 var (
 	_ orchestrator.StreamReplyFunc = agent.NewCast().ReplyStream()
 	_ orchestrator.ReplyFunc       = agent.NewCast().Reply()
+	_ orchestrator.CrossTalker     = agent.NewCast()
 )
+
+// TestCast_React_RoutesByAgentID pins the CrossTalker.React half (#302): a React
+// for agent B produces B's would-be Cross-talk Reaction (via B's Replier), and an
+// unknown Agent yields "", nil — the "no one reacts" signal the coordinator treats
+// as a decline.
+func TestCast_React_RoutesByAgentID(t *testing.T) {
+	a := castReplier("a", &fakeStreamEngine{deltas: []string{"unused"}})
+	b := castReplier("b", &fakeStreamEngine{deltas: []string{"I disagree."}})
+	cast := agent.NewCast(a, b)
+
+	reaction, err := cast.React(context.Background(), routed("b", "what do you two think?"), "A", "The bridge is out.")
+	if err != nil {
+		t.Fatalf("React: %v", err)
+	}
+	if reaction != "I disagree." {
+		t.Fatalf("reaction = %q, want B's cross-talk reply", reaction)
+	}
+
+	// Unknown Agent: no member reacts, "" nil (not an error).
+	got, err := cast.React(context.Background(), routed("zzz", "x"), "A", "y")
+	if err != nil || got != "" {
+		t.Fatalf("React(unknown) = (%q, %v), want (\"\", nil)", got, err)
+	}
+}
+
+// TestCast_SpeakReaction_CommitsCompositeAndDelivered pins the CrossTalker.SpeakReaction
+// half (#302, ADR-0012): SpeakReaction dispatches the reaction in B's Voice and
+// commits to B's history the SAME composite user message React reasoned over (the
+// utterance + the Lead's cross-talk line) plus the delivered assistant text. An
+// unknown Agent dispatches nothing and commits nothing.
+func TestCast_SpeakReaction_CommitsCompositeAndDelivered(t *testing.T) {
+	b := castReplier("b", &fakeStreamEngine{deltas: []string{"unused"}})
+	cast := agent.NewCast(b)
+
+	var got []orchestrator.Reply
+	delivered, err := cast.SpeakReaction(context.Background(), routed("b", "what do you two think?"), "A", "The bridge is out.", "I disagree. Strongly.", func(rep orchestrator.Reply) error {
+		got = append(got, rep)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SpeakReaction: %v", err)
+	}
+	if delivered != "I disagree. Strongly." {
+		t.Fatalf("delivered = %q, want the reaction text", delivered)
+	}
+	if len(got) != 2 || got[0].Voice.VoiceID != "b" {
+		t.Fatalf("dispatched = %+v, want two sentences in b's voice", got)
+	}
+
+	hist := b.HistorySnapshot()
+	if len(hist) != 2 {
+		t.Fatalf("history len = %d, want 2 (composite user + delivered assistant)", len(hist))
+	}
+	if !strings.Contains(hist[0].Text, "what do you two think?") || !strings.Contains(hist[0].Text, `A says: "The bridge is out."`) {
+		t.Fatalf("committed user msg = %q, want the composite cross-talk text", hist[0].Text)
+	}
+	if hist[1].Text != "I disagree. Strongly." {
+		t.Fatalf("committed assistant = %q, want the delivered reaction", hist[1].Text)
+	}
+
+	// Unknown Agent: nothing dispatched, "" nil.
+	got = nil
+	delivered, err = cast.SpeakReaction(context.Background(), routed("zzz", "x"), "A", "y", "hi", func(rep orchestrator.Reply) error {
+		got = append(got, rep)
+		return nil
+	})
+	if err != nil || delivered != "" || len(got) != 0 {
+		t.Fatalf("SpeakReaction(unknown) = (%q, %v) dispatched %d, want (\"\", nil) and no dispatch", delivered, err, len(got))
+	}
+}
 
 // TestCast_Draft_RoutesByAgentID pins the EnsembleSpeaker.Draft half (#301): a
 // Draft for agent B produces B's would-be text (via B's Replier), and an unknown
