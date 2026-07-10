@@ -625,6 +625,77 @@ func TestMatcherAgent_ButlerRoleAndAddressOnly(t *testing.T) {
 	}
 }
 
+// TestRoster_ButlerVoiceEndToEnd is the #299 pipeline pin over the real Matcher +
+// Cast + TTS: a GM naming the Butler with a short answer gets it SPOKEN in the
+// Butler's Voice (AC1's spoken path), a NON-GM naming the Butler is dropped
+// matcher-side (GM gate), and a Character NPC named by anyone is undisturbed
+// (AC3). Long Butler answers post as text via the TextSink instead of speaking.
+func TestRoster_ButlerVoiceEndToEnd(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	const gm = "gm-1"
+	var posted []string
+	poster := func(_ context.Context, text string) error { posted = append(posted, text); return nil }
+
+	butlerVoice := tts.Voice{ProviderID: "test", VoiceID: "glyphoxa", Name: "Glyphoxa"}
+	repliers := map[string]*agent.Replier{
+		"npc-bart": replierFor(specFor("npc-bart", "Bart", ""), "What'll it be?", synth),
+	}
+	newButler := func(line string) *agent.Replier {
+		return agent.NewReplier(agent.Config{
+			Persona:     agent.Persona{AgentID: "glyphoxa", Markdown: "You are Glyphoxa.", Voice: butlerVoice},
+			Engine:      scriptEngine{line: line},
+			Synthesizer: synth,
+			TextSink:    poster,
+		})
+	}
+
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier {
+			if s.agentID == "glyphoxa" {
+				return repliers["glyphoxa"]
+			}
+			return repliers[s.agentID]
+		},
+		butlerGate: func(id string) bool { return id == gm },
+	}
+	repliers["glyphoxa"] = newButler("Two sixes. Total nine.")
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: voiceevent.AgentRoleButler, addressOnly: true, voice: butlerVoice})
+
+	ttsStage := orchestrator.NewTTS(bus, synth)
+	detector := orchestrator.NewAddressDetector(r.matcher)
+	streamRep := orchestrator.NewStreamReplier(ttsStage, r.cast.ReplyStream(), nil)
+	t.Cleanup(orchestrator.Bind(context.Background(), bus, detector, streamRep))
+
+	pubFrom := func(speaker, text string) {
+		bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: text, SpeakerID: speaker})
+	}
+
+	// GM addresses the Butler with a short answer → spoken in the Butler's Voice.
+	pubFrom(gm, "Glyphoxa, roll two d6")
+	if got := synth.spokenBy("glyphoxa"); len(got) == 0 {
+		t.Fatalf("GM 'Glyphoxa, roll two d6' produced no spoken Butler answer; spoke=%+v posted=%v", synth.spoke, posted)
+	}
+	if len(posted) != 0 {
+		t.Errorf("short Butler answer was posted as text %v, want spoken", posted)
+	}
+
+	// A NON-GM naming the Butler is dropped matcher-side: no new Butler speech.
+	spokenBefore := len(synth.spokenBy("glyphoxa"))
+	pubFrom("player-9", "Glyphoxa, roll two d6")
+	if got := len(synth.spokenBy("glyphoxa")); got != spokenBefore {
+		t.Errorf("non-GM Butler address produced %d Butler lines, want %d (GM gate)", got, spokenBefore)
+	}
+
+	// A Character NPC named by anyone is undisturbed (AC3).
+	pubFrom("player-9", "Bart, a room please")
+	if got := synth.spokenBy("npc-bart"); len(got) == 0 {
+		t.Error("Character NPC did not answer when named by a non-GM (AC3 regression)")
+	}
+}
+
 // TestRoster_ButlerExcludedFromFallback is the AC3 pin at the Roster level: in a
 // scene of one Character NPC + the Address-Only Butler, an unnamed utterance
 // reaches the Character via the sole-NPC fallback (the Butler is not counted),

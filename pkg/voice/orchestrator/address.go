@@ -79,9 +79,12 @@ type DetectorOption func(*AddressDetector)
 // orchestration concern kept out of the pure text matcher (ADR-0024): the
 // matcher still scores only transcript text and never sees the SpeakerID.
 //
-// LATENT (Epic 7, #256): this detector-level drop runs after the matcher
-// committed slot/lastAddressed state; must move matcher-side before the Butler
-// joins the live roster.
+// Belt-and-braces since #299: with the Butler on the live roster, the primary
+// GM-gate moved matcher-side as a pre-cap eligibility drop (ADR-0024 amendment,
+// [SpeakerAwareMatcher] / address.Matcher.TargetMatchFrom) so an excluded Butler
+// never consumes a MaxTargets slot nor becomes lastAddressed. This detector-level
+// drop is retained as a redundant safety net for any [TargetMatcher] that is NOT
+// SpeakerID-aware (e.g. the whole-word matcher, cassette fakes).
 func WithButlerGMGate(isGM func(speakerID string) bool) DetectorOption {
 	return func(d *AddressDetector) { d.isGM = isGM }
 }
