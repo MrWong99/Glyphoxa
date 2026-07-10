@@ -112,8 +112,15 @@ type Segmenter struct {
 	sweepCalls  int
 	sweepEvery  int // reap-sweep cadence in Process calls; [laneReapSweepEvery] in prod
 
-	mu  sync.Mutex
-	bus *voiceevent.Bus
+	mu sync.Mutex
+	// closed is the terminal teardown flag (same defect class as the #157 Manager
+	// closed flag). Bind's returned cancel sets it FIRST under mu; laneFor and
+	// dispatchTranscription check it. Once set, a still-running Process (an audio loop
+	// that has not yet stopped) can no longer resurrect a reaped lane — its frames
+	// funnel to the default lane — so every factory-built lane's ONNX session is closed
+	// exactly once by teardown and none leaks (#343).
+	closed bool
+	bus    *voiceevent.Bus
 	// ctx is the context handed to STT.Transcribe when a segment flushes and to each
 	// per-lane stream's maintainer. It is the conversation's lifetime context,
 	// captured at Bind and cleared by the returned cancel; storing it lets Process
@@ -346,6 +353,10 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 			closeVAD     func()
 		}
 		s.mu.Lock()
+		// Flip the terminal flag FIRST (mirrors #157: Shutdown sets closed before it
+		// unwinds), so a Process racing this teardown sees closed in laneFor and cannot
+		// re-open a lane we are about to close — no resurrection, no leaked ONNX session.
+		s.closed = true
 		tds := make([]teardown, 0, len(s.lanes))
 		for id, ln := range s.lanes {
 			tds = append(tds, teardown{streamCancel: ln.streamCancel, closeVAD: ln.closeVAD})
@@ -515,8 +526,10 @@ func (s *Segmenter) laneFor(sp string) (*lane, error) {
 	defer s.mu.Unlock()
 	// A speaker whose factory already failed once is degraded for the session: skip
 	// the retry AND the repeat onError (finding 3 — the factory was retried and
-	// onError fired ~31×/s before this).
-	if sp == "" || s.laneVADFactory == nil || s.degraded[sp] {
+	// onError fired ~31×/s before this). Once teardown has flipped closed, funnel to
+	// the default lane too — a stopping audio loop must not resurrect a reaped lane and
+	// leak a fresh ONNX session teardown will never close (#343).
+	if sp == "" || s.laneVADFactory == nil || s.degraded[sp] || s.closed {
 		return s.lanes[""], nil
 	}
 	if ln, ok := s.lanes[sp]; ok {
@@ -664,6 +677,11 @@ func (s *Segmenter) dispatchTranscription(ctx context.Context, seg []audio.Frame
 	}
 	s.mu.Lock()
 	jobs := s.jobs
+	if s.closed {
+		// Teardown has begun (it closes the jobs channel outside the lock): never send
+		// on it (#343, same closed-flag guard as #157) — fall to the inline transcribe.
+		jobs = nil
+	}
 	s.mu.Unlock()
 	if jobs == nil {
 		// Not bound (or already torn down): transcribe inline so a late flush still

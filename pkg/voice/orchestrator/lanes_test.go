@@ -550,15 +550,30 @@ func TestSegmenter_FlushDrainsAllLanes(t *testing.T) {
 	}
 }
 
-// TestSegmenter_TeardownRaceWithFeed is finding 6: Bind's teardown runs concurrently
-// with an audio loop still calling Feed. Lane cancel/close funcs are captured and
-// nulled UNDER mu (and the lane dropped) in both teardown and reap, so no lane is
-// double-closed and no field is touched unlocked. Run under `go test -race`.
+// TestSegmenter_TeardownRaceWithFeed is finding 6 + #343: Bind's teardown runs
+// concurrently with an audio loop still calling Feed. Lane cancel/close funcs are
+// captured and nulled UNDER mu (and the lane dropped) in both teardown and reap, so no
+// lane is double-closed and no field is touched unlocked. Beyond the data-race, the
+// teardown must set a terminal `closed` flag FIRST (same defect class as the fixed #157
+// Manager closed flag): once teardown has begun, a still-running Feed must NOT resurrect
+// a reaped lane — laneFor sees closed and funnels to the default lane, so every
+// factory-built lane's ONNX session is closed exactly once (creates == closes) and no
+// non-default lane survives (LaneCount == 1). Run under `go test -race`.
 func TestSegmenter_TeardownRaceWithFeed(t *testing.T) {
 	bus := voiceevent.NewBus()
 	rec := &recordingRecognizer{}
-	closes := 0
-	factory, _ := laneVADFactory(bus, &closes, nil)
+
+	// Count factory-built VADs created vs closed: a resurrected lane created AFTER
+	// teardown would never be closed (leaked ONNX inferencer), so creates > closes.
+	var cmu sync.Mutex
+	creates, closes := 0, 0
+	factory := orchestrator.LaneVADFactory(func() (*orchestrator.VAD, func(), error) {
+		cmu.Lock()
+		creates++
+		cmu.Unlock()
+		v := orchestrator.NewVAD(bus, &contentVAD{})
+		return v, func() { cmu.Lock(); closes++; cmu.Unlock() }, nil
+	})
 	seg := orchestrator.NewSegmenter(orchestrator.NewVAD(bus, &contentVAD{}), orchestrator.NewSTT(bus, rec))
 	seg.SetLaneVADFactory(factory)
 	cancel := seg.Bind(t.Context(), bus)
@@ -569,7 +584,8 @@ func TestSegmenter_TeardownRaceWithFeed(t *testing.T) {
 		defer wg.Done()
 		// Voiced-only frames keep every lane listening (no flush → no jobs send that
 		// could race the teardown's close(jobs)); the point is the concurrent lane
-		// map + close-func access, which must stay mu-guarded.
+		// map + close-func access, which must stay mu-guarded, AND that Feed does not
+		// re-open a lane once teardown has flipped `closed`.
 		for i := 0; i < 500; i++ {
 			_ = seg.Process(laneFrame(t, "A", 100))
 			_ = seg.Process(laneFrame(t, "B", 200))
@@ -578,4 +594,14 @@ func TestSegmenter_TeardownRaceWithFeed(t *testing.T) {
 	time.Sleep(time.Millisecond) // let the loop open the lanes
 	cancel()                     // teardown while Feed is still running
 	wg.Wait()
+
+	if got := seg.LaneCount(); got != 1 {
+		t.Errorf("lane count after teardown = %d, want 1 (a still-running Feed resurrected a reaped lane)", got)
+	}
+	cmu.Lock()
+	gotCreates, gotCloses := creates, closes
+	cmu.Unlock()
+	if gotCreates != gotCloses {
+		t.Errorf("lane VADs created = %d but closed = %d — a resurrected lane leaked its ONNX session", gotCreates, gotCloses)
+	}
 }
