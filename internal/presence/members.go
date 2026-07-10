@@ -33,6 +33,11 @@ type voiceOccupant struct {
 // fetchMember and populating a real in-memory disgo cache directly. The Bot's own
 // user is skipped.
 //
+// The standing REST client is borrowed ONCE up front (p.Client()) and that same
+// rest.Rest is handed to every fetchMember call, so a mid-loop Close/token-rebuild
+// can't flip later members into ErrNoClient and silently blank the picker — the
+// fan-out runs against the snapshot the caller started with.
+//
 // The cache iteration (VoiceStateCache().All()) holds the grouped cache's RLock
 // for the whole loop, so we must NOT do REST inside it: a slow/rate-limited
 // GetMember would hold the read lock while the gateway's VoiceStateUpdate write
@@ -66,7 +71,7 @@ func (p *Presence) VoiceChannelMembers(ctx context.Context, channelID snowflake.
 
 	members := make([]Member, 0, len(occupants))
 	for _, o := range occupants {
-		m, err := p.fetchMember(ctx, o.guildID, o.userID)
+		m, err := p.fetchMember(ctx, client.Rest, o.guildID, o.userID)
 		if err != nil {
 			// One member failing (rate limit, gone) must not blank the whole picker;
 			// skip it and keep the rest.
