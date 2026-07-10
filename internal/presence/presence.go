@@ -292,6 +292,9 @@ func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot
 			gxvoice.DaveOption(),
 			bot.WithEventListenerFunc(reg.HandleCommand),
 			bot.WithEventListenerFunc(reg.HandleAutocomplete),
+			// Message-component (button) interactions: the rollover-tape consent
+			// buttons (#306) and any future component surface fan out from here.
+			bot.WithEventListenerFunc(reg.HandleComponent),
 			// Deliver events asynchronously so an interaction handler never runs on
 			// the gateway read goroutine and starves voice events (ADR-0010).
 			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),

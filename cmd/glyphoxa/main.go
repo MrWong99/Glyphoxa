@@ -429,6 +429,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		})
 		reg = presence.NewRegistry(gate, log)
 		reg.Register(presence.RollCommand(tool.NewDice()))
+		// Rollover-tape consent buttons (#306, ADR-0051): the disclosure message's
+		// Consent/Revoke buttons write the presser's consent row and publish
+		// TapeConsentChanged on the SAME process-wide bus the session Manager uses, so
+		// a live tape arms or clears that Speaker's lane.
+		reg.RegisterComponentHandler(presence.NewConsentButtons(store, eventBus, log).HandleComponent)
 		pres = presence.New(store, cipher, reg, cfg.Token, log)
 		// The voice loop borrows this one client instead of dialing its own per
 		// session; set BEFORE the Manager copies cfg into its base config. Note:
