@@ -83,8 +83,14 @@ func TestImportMinimalCampaign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants: %v", err)
 	}
-	if len(grants) != 1 || grants[0].ToolName != "dice" {
-		t.Fatalf("trigger butler grants = %+v, want single dice", grants)
+	wantNames := []string{"dice", "kg_query", "transcript_search"}
+	if len(grants) != len(wantNames) {
+		t.Fatalf("trigger butler grants = %+v, want %v", grants, wantNames)
+	}
+	for i, name := range wantNames {
+		if grants[i].ToolName != name {
+			t.Fatalf("trigger butler grants = %+v, want %v", grants, wantNames)
+		}
 	}
 }
 
