@@ -17,18 +17,20 @@ type recordedReply struct {
 }
 
 // fakeResponder records reply/defer/followup calls instead of hitting Discord. It
-// models Discord's documented interaction-response behavior so tests catch a
-// visibility regression: after a Defer, the FIRST post-defer message (an implicit
-// followup, or an explicit editOriginal) EDITS the original placeholder and its
-// visibility is forced to the Defer's (the ephemeral flag is ignored on the
-// original-response edit); only subsequent followups create fresh messages honoring
-// their own flag. Every post-defer message is recorded in followups in order, each
-// with its EFFECTIVE visibility.
+// models Discord's CURRENT interaction-response behavior so tests catch a visibility
+// regression. Discord DEPRECATED the first-followup-edits shim (#335): a followup
+// after a Defer no longer implicitly edits the "thinking…" placeholder — it ALWAYS
+// creates a fresh message honoring its own ephemeral flag, leaving the placeholder
+// dangling. The ONLY way to resolve the deferred placeholder is now editOriginal,
+// which edits it in place at the Defer's fixed visibility (the ephemeral flag is
+// ignored on the original-response edit). The dispatch layer therefore routes the
+// FIRST post-Defer reply through editOriginal and later ones through followup. Every
+// post-defer message is recorded in followups in order, each with its EFFECTIVE
+// visibility, so a test asserts both the placeholder edit and the real followups.
 type fakeResponder struct {
-	replies          []recordedReply
-	followups        []recordedReply
-	deferred         *bool
-	originalConsumed bool
+	replies   []recordedReply
+	followups []recordedReply
+	deferred  *bool
 }
 
 func (f *fakeResponder) reply(content string, ephemeral bool) error {
@@ -42,23 +44,18 @@ func (f *fakeResponder) deferResponse(ephemeral bool) error {
 }
 
 func (f *fakeResponder) followup(content string, ephemeral bool) error {
-	eff := ephemeral
-	if f.deferred != nil && !f.originalConsumed {
-		// First post-defer message edits the original placeholder: the flag is ignored
-		// and the defer's visibility is preserved.
-		eff = *f.deferred
-		f.originalConsumed = true
-	}
-	f.followups = append(f.followups, recordedReply{content, eff})
+	// Post-deprecation: a followup is always a fresh message honoring its own flag; it
+	// does NOT edit the placeholder.
+	f.followups = append(f.followups, recordedReply{content, ephemeral})
 	return nil
 }
 
 func (f *fakeResponder) editOriginal(content string) error {
+	// Editing the original response keeps the Defer's visibility regardless of any flag.
 	vis := true
 	if f.deferred != nil {
 		vis = *f.deferred
 	}
-	f.originalConsumed = true
 	f.followups = append(f.followups, recordedReply{content, vis})
 	return nil
 }
@@ -219,6 +216,46 @@ func TestDispatchHandlerErrorRepliesGeneric(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(resp.replies[0].content), "went wrong") {
 		t.Errorf("handler-error reply = %q, want a generic failure message", resp.replies[0].content)
+	}
+}
+
+// TestDispatchFirstPostDeferReplyEditsOriginal pins issue #335: Discord deprecated the
+// first-followup-edits shim, so the dispatch layer must route the FIRST post-Defer
+// reply through EditOriginal (consuming the "thinking…" placeholder at the Defer's
+// fixed visibility) and only LATER replies through CreateFollowupMessage (fresh
+// messages honoring their own flag). It is a registry-wide routing rule, not a
+// per-command one: a plain handler that Defers ephemerally and then Replies PUBLICLY
+// twice must land its first reply as an ephemeral placeholder edit and its second as a
+// real public followup.
+func TestDispatchFirstPostDeferReplyEditsOriginal(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	reg.Register(Command{Path: "multi", Handle: func(_ context.Context, ic *Interaction) error {
+		if err := ic.Defer(true); err != nil { // ephemeral placeholder
+			return err
+		}
+		if err := ic.Reply("first"); err != nil { // public content
+			return err
+		}
+		return ic.Reply("second") // public content
+	}})
+
+	resp := &fakeResponder{}
+	reg.dispatch(context.Background(), "multi", &Interaction{guildID: testGuild, userID: strangerID, resp: resp})
+
+	if len(resp.replies) != 0 {
+		t.Fatalf("post-Defer must not CreateMessage; replies = %+v", resp.replies)
+	}
+	if len(resp.followups) != 2 {
+		t.Fatalf("want 2 post-Defer messages (a placeholder edit + a followup), got %+v", resp.followups)
+	}
+	// The FIRST reply consumes the placeholder via EditOriginal: visibility is forced to
+	// the Defer's (ephemeral), NOT the reply's public flag.
+	if resp.followups[0].content != "first" || !resp.followups[0].ephemeral {
+		t.Errorf("first post-Defer message = %+v, want an EditOriginal of \"first\" at the Defer's ephemeral visibility", resp.followups[0])
+	}
+	// The SECOND reply is a real followup honoring its own public flag.
+	if resp.followups[1].content != "second" || resp.followups[1].ephemeral {
+		t.Errorf("second post-Defer message = %+v, want a public CreateFollowupMessage of \"second\"", resp.followups[1])
 	}
 }
 
