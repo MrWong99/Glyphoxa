@@ -45,9 +45,14 @@ func TestSecretsExclusionProperty(t *testing.T) {
 
 	// Distinctive marker bytes seeded into the secret tables. The base64 form of
 	// the ciphertext is checked too, since JSON encoding of []byte is base64.
-	const providerMarker = "SUPERSECRETCIPHERTEXT-ab12-marker"
+	// Markers are deliberately NON-hex / NON-digit so they can never collide with
+	// a random UUID's hex runs or a numeric field elsewhere in the plaintext (a
+	// 4-hex last4 like "ab12" would spuriously match ~0.3%/run against the ~8 UUID
+	// strings a bundle carries — this test runs on EVERY PR).
+	const providerMarker = "SUPERSECRETCIPHERTEXT-zqxw-marker"
 	const deployMarker = "DEPLOYMENTBOTTOKENCIPHERTEXT-marker"
-	const last4 = "ab12"
+	const providerLast4 = "zqxw"
+	const deployLast4 = "wqzx"
 
 	provCipher, err := cipher.Seal([]byte(providerMarker))
 	if err != nil {
@@ -59,7 +64,7 @@ func TestSecretsExclusionProperty(t *testing.T) {
 		Provider:              "openai",
 		Model:                 "gpt-4o",
 		CredentialsCiphertext: provCipher,
-		CredentialsLast4:      last4,
+		CredentialsLast4:      providerLast4,
 	}); err != nil {
 		t.Fatalf("CreateProviderConfig: %v", err)
 	}
@@ -67,7 +72,7 @@ func TestSecretsExclusionProperty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal deploy: %v", err)
 	}
-	if _, err := st.SaveDiscordBotToken(ctx, tenant.ID, deployCipher, "9999"); err != nil {
+	if _, err := st.SaveDiscordBotToken(ctx, tenant.ID, deployCipher, deployLast4); err != nil {
 		t.Fatalf("SaveDiscordBotToken: %v", err)
 	}
 
@@ -95,7 +100,8 @@ func TestSecretsExclusionProperty(t *testing.T) {
 		[]byte(base64.StdEncoding.EncodeToString(deployCipher)),
 		[]byte(providerMarker),
 		[]byte(deployMarker),
-		[]byte(last4),
+		[]byte(providerLast4),
+		[]byte(deployLast4),
 		[]byte("ciphertext"),
 		[]byte("last4"),
 		[]byte("credentials"),

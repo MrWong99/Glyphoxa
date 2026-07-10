@@ -288,6 +288,69 @@ func TestExportVoiceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestExportHistorySkipsSessionlessChunk pins the contract that a Transcript
+// Chunk with a NULL voice_session_id (the ADR-0011 nullable SEAM — reads back as
+// uuid.Nil) is skipped from the history payload rather than orphaned under a nil
+// map key. The FK forbids a non-null non-existent session, so a raw NULL insert
+// is the only way to reach the guard; no storage writer produces it.
+func TestExportHistorySkipsSessionlessChunk(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	if err := wirenpc.SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+	st := storage.New(pool)
+	tenant, err := st.FindTenantByName(ctx, wirenpc.SeedTenantName)
+	if err != nil {
+		t.Fatalf("FindTenantByName: %v", err)
+	}
+	campaign, err := st.FindCampaignByName(ctx, tenant.ID, wirenpc.SeedCampaignName)
+	if err != nil {
+		t.Fatalf("FindCampaignByName: %v", err)
+	}
+	cid := campaign.ID
+
+	vs, err := st.CreateVoiceSession(ctx, cid)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	base := time.Now().UTC()
+	if _, err := st.InsertTranscriptChunk(ctx, storage.TranscriptChunk{
+		CampaignID: cid, VoiceSessionID: vs.ID, Content: "bound", StartedAt: base,
+	}); err != nil {
+		t.Fatalf("InsertTranscriptChunk bound: %v", err)
+	}
+	// Raw NULL voice_session_id insert — unreachable through the storage writer,
+	// which always binds a session; the FK only forbids a non-null orphan.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO transcript_chunk
+		   (campaign_id, voice_session_id, content, speaker_discord_user_ids, participated_agent_ids, started_at)
+		 VALUES ($1, NULL, $2, '{}', '{}', $3)`,
+		cid, "orphan", base); err != nil {
+		t.Fatalf("raw null-session chunk insert: %v", err)
+	}
+
+	b, err := bundle.Export(ctx, st, cid, bundle.ExportOptions{IncludeHistory: true})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if b.Campaign.History == nil || len(b.Campaign.History.Sessions) != 1 {
+		t.Fatalf("history sessions = %+v, want 1", b.Campaign.History)
+	}
+	var total int
+	for _, s := range b.Campaign.History.Sessions {
+		for _, c := range s.Chunks {
+			total++
+			if c.Content == "orphan" {
+				t.Errorf("sessionless chunk leaked into history")
+			}
+		}
+	}
+	if total != 1 {
+		t.Errorf("exported chunks = %d, want 1 (orphan skipped)", total)
+	}
+}
+
 func hasGrant(gs []bundle.Grant, tool string) bool {
 	for _, g := range gs {
 		if g.ToolName == tool {

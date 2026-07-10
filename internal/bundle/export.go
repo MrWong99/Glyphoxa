@@ -194,6 +194,14 @@ func exportHistory(ctx context.Context, st *storage.Store, campaignID uuid.UUID)
 	}
 	chunksBySession := make(map[uuid.UUID][]Chunk, len(sessions))
 	for _, c := range chunks {
+		// voice_session_id is a nullable column (ADR-0011 SEAM): a chunk not bound to
+		// a Voice Session (uuid.Nil) has no Session to nest under, so it is skipped
+		// from the history payload rather than orphaned under a nil map key. Every
+		// chunk the live pipeline writes carries a session, so this is a defensive
+		// guard, not the normal path.
+		if c.VoiceSessionID == uuid.Nil {
+			continue
+		}
 		participated := make([]string, 0, len(c.ParticipatedAgentIDs))
 		for _, id := range c.ParticipatedAgentIDs {
 			participated = append(participated, id.String())
