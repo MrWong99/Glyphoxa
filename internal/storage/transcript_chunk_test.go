@@ -4,6 +4,7 @@ package storage_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,115 @@ func TestTranscriptChunkPersistence(t *testing.T) {
 	}
 	if chunkRows != 2 {
 		t.Errorf("chunk rows for session = %d, want 2 (both grains persist under one session)", chunkRows)
+	}
+}
+
+// TestListTranscriptChunks is #288: the Campaign Bundle exporter's chunk read. It
+// returns a Campaign's chunks ordered (created_at, id) with embedding_model always
+// populated; with includeVectors=false every Embedding is "" (the default
+// vector-stripping export, ADR-0053 d3); with includeVectors=true an embedded row
+// carries pgvector text form "[...]" while a NULL-embedding row stays ""; and it is
+// Campaign-scoped (#342) so a second Campaign's chunks never leak.
+func TestListTranscriptChunks(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignA)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+	startedAt := time.Date(2026, 7, 5, 18, 0, 1, 0, time.UTC)
+
+	// Two chunks in A; embed only the first.
+	id1, err := st.InsertTranscriptChunk(ctx, storage.TranscriptChunk{
+		CampaignID: campaignA, VoiceSessionID: vs.ID, Content: "first", StartedAt: startedAt,
+	})
+	if err != nil {
+		t.Fatalf("InsertTranscriptChunk 1: %v", err)
+	}
+	id2, err := st.InsertTranscriptChunk(ctx, storage.TranscriptChunk{
+		CampaignID: campaignA, VoiceSessionID: vs.ID, Content: "second", StartedAt: startedAt,
+	})
+	if err != nil {
+		t.Fatalf("InsertTranscriptChunk 2: %v", err)
+	}
+	vec := make([]float32, 768)
+	vec[0] = 0.25
+	if err := st.SetChunkEmbedding(ctx, id1, vec, "nomic-embed-text"); err != nil {
+		t.Fatalf("SetChunkEmbedding: %v", err)
+	}
+
+	// includeVectors=false: ordered rows, every Embedding "", model stamped on id1.
+	chunks, err := st.ListTranscriptChunks(ctx, campaignA, false)
+	if err != nil {
+		t.Fatalf("ListTranscriptChunks false: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("ListTranscriptChunks false = %d, want 2", len(chunks))
+	}
+	if chunks[0].ID != id1 || chunks[1].ID != id2 {
+		t.Errorf("order = [%s %s], want [%s %s] (created_at, id)", chunks[0].ID, chunks[1].ID, id1, id2)
+	}
+	for i, c := range chunks {
+		if c.Embedding != "" {
+			t.Errorf("chunk[%d].Embedding = %q, want \"\" (vectors stripped when includeVectors=false)", i, c.Embedding)
+		}
+		if c.CampaignID != campaignA {
+			t.Errorf("chunk[%d].CampaignID = %s, want %s", i, c.CampaignID, campaignA)
+		}
+	}
+	if chunks[0].EmbeddingModel != "nomic-embed-text" {
+		t.Errorf("chunk[0].EmbeddingModel = %q, want nomic-embed-text (always selected)", chunks[0].EmbeddingModel)
+	}
+	if chunks[1].EmbeddingModel != "" {
+		t.Errorf("chunk[1].EmbeddingModel = %q, want \"\" (never embedded)", chunks[1].EmbeddingModel)
+	}
+
+	// includeVectors=true: id1 carries its "[...]" vector text; id2 (NULL) stays "".
+	withVec, err := st.ListTranscriptChunks(ctx, campaignA, true)
+	if err != nil {
+		t.Fatalf("ListTranscriptChunks true: %v", err)
+	}
+	if len(withVec) != 2 {
+		t.Fatalf("ListTranscriptChunks true = %d, want 2", len(withVec))
+	}
+	if !strings.HasPrefix(withVec[0].Embedding, "[") || !strings.HasSuffix(withVec[0].Embedding, "]") {
+		t.Errorf("embedded chunk Embedding = %q, want pgvector text form \"[...]\"", withVec[0].Embedding)
+	}
+	if withVec[1].Embedding != "" {
+		t.Errorf("NULL-embedding chunk Embedding = %q, want \"\"", withVec[1].Embedding)
+	}
+
+	// Campaign-scoped: a second Campaign's chunk never leaks into A's list.
+	campaignB, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID, Name: "Other", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	vsB, err := st.CreateVoiceSession(ctx, campaignB)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession B: %v", err)
+	}
+	if _, err := st.InsertTranscriptChunk(ctx, storage.TranscriptChunk{
+		CampaignID: campaignB, VoiceSessionID: vsB.ID, Content: "b-chunk", StartedAt: startedAt,
+	}); err != nil {
+		t.Fatalf("InsertTranscriptChunk B: %v", err)
+	}
+	aAgain, err := st.ListTranscriptChunks(ctx, campaignA, false)
+	if err != nil {
+		t.Fatalf("ListTranscriptChunks A again: %v", err)
+	}
+	if len(aAgain) != 2 {
+		t.Errorf("ListTranscriptChunks A = %d, want 2 (no B leakage)", len(aAgain))
+	}
+	bChunks, err := st.ListTranscriptChunks(ctx, campaignB, false)
+	if err != nil {
+		t.Fatalf("ListTranscriptChunks B: %v", err)
+	}
+	if len(bChunks) != 1 {
+		t.Errorf("ListTranscriptChunks B = %d, want 1", len(bChunks))
 	}
 }

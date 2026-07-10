@@ -210,6 +210,37 @@ func mapEdgeWriteErr(op string, err error) error {
 	return fmt.Errorf("storage: %s: %w", op, err)
 }
 
+// ListEdges returns every Edge in a Campaign ordered (created_at, id) — the
+// deterministic read the Campaign Bundle exporter serialises (#288, ADR-0053).
+// It is Campaign-scoped (#342): only rows whose campaign_id matches are returned,
+// so no Edge leaks across Campaigns. An empty Campaign yields an empty slice, not
+// an error. Export is a rare admin read, so this reuses the (campaign_id) filter
+// without a dedicated index (ADR-0053 decision).
+func (s *Store) ListEdges(ctx context.Context, campaignID uuid.UUID) ([]KGEdge, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+kgEdgeColumns+`
+		   FROM kg_edge
+		  WHERE campaign_id = $1
+		  ORDER BY created_at, id`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list kg edges for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []KGEdge
+	for rows.Next() {
+		e, err := scanKGEdge(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan kg edge: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list kg edges for campaign %s: %w", campaignID, err)
+	}
+	return out, nil
+}
+
 // DeleteEdge removes a typed Edge by id, scoped to its owning Campaign (#342): the
 // DELETE matches (id, campaign_id), so an Edge in another Campaign is not deleted
 // and yields ErrNotFound — a cross-campaign delete is refused server-side. A
