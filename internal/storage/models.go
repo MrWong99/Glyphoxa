@@ -64,9 +64,13 @@ type Campaign struct {
 	// ArchivedAt is when the campaign was archived (#269), or nil when active.
 	// Archived campaigns are excluded from ListCampaigns, the /glyphoxa use
 	// autocomplete, and the GetActiveCampaign most-recent fallback, and cannot back
-	// a Voice Session. Appended LAST in campaignColumns/scanCampaign (column-order
-	// coupling), so any new column follows it in both places.
+	// a Voice Session.
 	ArchivedAt *time.Time
+	// TapeArmed is the GM opt-in that arms the rollover tape for this Campaign's
+	// Voice Sessions (#306, ADR-0051; default false, capture hard-disabled without
+	// it). Appended LAST in campaignColumns/scanCampaign (column-order coupling), so
+	// any new column follows it in both places.
+	TapeArmed bool
 }
 
 // ProviderConfig is a Tenant-scoped, encrypted BYOK credential record binding a

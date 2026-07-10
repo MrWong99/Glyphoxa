@@ -27,7 +27,7 @@ func TestAcquireClientSharedBorrows(t *testing.T) {
 	sentinel := &bot.Client{}
 	cfg := Config{Client: func(context.Context) (*bot.Client, error) { return sentinel, nil }}
 
-	client, owned, err := acquireClient(context.Background(), cfg, discard())
+	client, owned, err := acquireClient(context.Background(), cfg, nil, discard())
 	if err != nil {
 		t.Fatalf("acquireClient(shared) err = %v", err)
 	}
@@ -48,7 +48,7 @@ func TestAcquireClientSharedProviderError(t *testing.T) {
 	boom := errors.New("no token yet")
 	cfg := Config{Client: func(context.Context) (*bot.Client, error) { return nil, boom }}
 
-	if _, _, err := acquireClient(context.Background(), cfg, discard()); !errors.Is(err, boom) {
+	if _, _, err := acquireClient(context.Background(), cfg, nil, discard()); !errors.Is(err, boom) {
 		t.Fatalf("acquireClient(shared error) = %v, want it to wrap %v", err, boom)
 	}
 }
@@ -65,7 +65,7 @@ func TestAcquireClientOwnedUsesConstructor(t *testing.T) {
 	}
 	defer func() { newDiscordClient = orig }()
 
-	_, _, err := acquireClient(context.Background(), Config{Token: "x"}, discard())
+	_, _, err := acquireClient(context.Background(), Config{Token: "x"}, nil, discard())
 	if called != 1 {
 		t.Errorf("owned-path constructor calls = %d, want 1", called)
 	}

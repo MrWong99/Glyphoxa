@@ -65,13 +65,13 @@ func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 
 const campaignColumns = `
 	id, tenant_id, gm_member_id, name, system, language,
-	created_at, updated_at, archived_at`
+	created_at, updated_at, archived_at, tape_armed`
 
 func scanCampaign(row pgx.Row) (Campaign, error) {
 	var c Campaign
 	err := row.Scan(
 		&c.ID, &c.TenantID, &c.GMMemberID, &c.Name, &c.System, &c.Language,
-		&c.CreatedAt, &c.UpdatedAt, &c.ArchivedAt,
+		&c.CreatedAt, &c.UpdatedAt, &c.ArchivedAt, &c.TapeArmed,
 	)
 	return c, err
 }
