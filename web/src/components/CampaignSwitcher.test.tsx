@@ -622,6 +622,15 @@ describe("CampaignSwitcher", () => {
     expect(screen.queryByRole("button", { name: /campaign settings/i })).not.toBeInTheDocument();
   });
 
+  it("offers an Import campaign action in the manage-view footer (#294)", async () => {
+    renderSwitcher(mockBackend({ campaigns: [{ id: "a", name: "Alpha Quest" }], activeId: "a" }));
+    await screen.findByText("Alpha Quest");
+    openPanel();
+    await screen.findByRole("group", { name: /campaigns/i });
+    // The bundle-import affordance sits in the list footer beside New campaign.
+    expect(await screen.findByRole("button", { name: /import campaign/i })).toBeInTheDocument();
+  });
+
   it("disables the settings action when no active campaign resolves (#268)", async () => {
     // Campaigns exist but resolution FAILS (non-NotFound): the list still opens,
     // and the settings button renders — but disabled, since there is no resolved

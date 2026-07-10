@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
@@ -14,6 +14,21 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { CampaignRowActions } from "./CampaignRowActions";
+
+// Export runs through the plain-fetch bundle helpers; mock them so the row's
+// Export flow is observable without a real network/download pipeline.
+vi.mock("@/lib/download", () => ({
+  fetchCampaignExport: vi.fn(),
+  downloadBlob: vi.fn(),
+}));
+import { fetchCampaignExport, downloadBlob } from "@/lib/download";
+const mockFetchExport = vi.mocked(fetchCampaignExport);
+const mockDownloadBlob = vi.mocked(downloadBlob);
+
+beforeEach(() => {
+  mockFetchExport.mockReset();
+  mockDownloadBlob.mockReset();
+});
 
 // A minimal Connect backend recording each lifecycle call so the tests assert the
 // right RPC fired. ListCampaigns is served so the post-mutation invalidation has a
@@ -120,7 +135,8 @@ describe("CampaignRowActions", () => {
     renderActions({ id: "a", name: "Alpha Quest", archived: false });
     const trigger = screen.getByRole("button", { name: /Campaign actions/i });
     fireEvent.click(trigger);
-    expect(screen.getByRole("menuitem", { name: /^Archive$/ })).toHaveFocus();
+    // Export now leads the menu, so it's the first enabled item focus lands on.
+    expect(screen.getByRole("menuitem", { name: /Export/ })).toHaveFocus();
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -152,5 +168,36 @@ describe("CampaignRowActions", () => {
     expect(confirm).toBeEnabled();
     fireEvent.click(confirm);
     await waitFor(() => expect(calls.deleteCampaign).toBe(1));
+  });
+
+  it("offers Export on an active row and downloads the fetched bundle", async () => {
+    mockFetchExport.mockResolvedValue({
+      blob: new Blob(["gz"]),
+      filename: "Alpha Quest.glyphoxa.json.gz",
+    });
+    renderActions({ id: "a", name: "Alpha Quest", archived: false });
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Export/ }));
+
+    await waitFor(() => expect(mockFetchExport).toHaveBeenCalledWith("a"));
+    await waitFor(() =>
+      expect(mockDownloadBlob).toHaveBeenCalledWith(expect.any(Blob), "Alpha Quest.glyphoxa.json.gz"),
+    );
+  });
+
+  it("offers Export on an archived row too (bundles are a backup)", () => {
+    renderActions({ id: "z", name: "Zombie Vault", archived: true });
+    openMenu();
+    expect(screen.getByRole("menuitem", { name: /Export/ })).toBeInTheDocument();
+  });
+
+  it("surfaces an export failure and does not download", async () => {
+    mockFetchExport.mockRejectedValue(new Error("export exploded"));
+    renderActions({ id: "a", name: "Alpha Quest", archived: false });
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Export/ }));
+
+    await waitFor(() => expect(mockFetchExport).toHaveBeenCalled());
+    expect(mockDownloadBlob).not.toHaveBeenCalled();
   });
 });
