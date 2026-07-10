@@ -222,17 +222,26 @@ func TestImportRoundTrip(t *testing.T) {
 	if len(nodes) != 2 {
 		t.Fatalf("node count = %d, want 2", len(nodes))
 	}
-	var linked bool
+	var npcNode, locNode storage.KGNode
 	for _, n := range nodes {
-		if n.Type == storage.KGNodeNPC {
+		switch n.Type {
+		case storage.KGNodeNPC:
+			npcNode = n
 			if !n.AgentID.Valid || n.AgentID.UUID != dstBart.ID {
 				t.Errorf("npc node agent link = %v, want remapped Bart %v", n.AgentID, dstBart.ID)
 			}
-			linked = true
+			if n.Name != "Barliman" || !n.GMPrivate {
+				t.Errorf("npc node name/gm_private not round-tripped: %+v", n)
+			}
+		case storage.KGNodeLocation:
+			locNode = n
+			if n.Name != "The Prancing Pony" || n.Body != "A cozy inn." {
+				t.Errorf("location node name/body not round-tripped: %+v", n)
+			}
 		}
 	}
-	if !linked {
-		t.Error("no npc node with remapped agent link")
+	if npcNode.ID == uuid.Nil || locNode.ID == uuid.Nil {
+		t.Fatal("round-trip lost the npc or location node")
 	}
 
 	edges, err := dst.ListEdges(ctx, res.CampaignID)
@@ -240,15 +249,25 @@ func TestImportRoundTrip(t *testing.T) {
 		t.Fatalf("ListEdges: %v", err)
 	}
 	if len(edges) != 1 {
-		t.Errorf("edge count = %d, want 1", len(edges))
+		t.Fatalf("edge count = %d, want 1", len(edges))
+	}
+	// Edge content: the resides_in edge points npc -> location, direction preserved,
+	// endpoints remapped to the fresh node ids.
+	e := edges[0]
+	if e.Type != storage.KGEdgeResidesIn || e.FromNodeID != npcNode.ID || e.ToNodeID != locNode.ID {
+		t.Errorf("edge = %+v, want resides_in npc(%s)->loc(%s)", e, npcNode.ID, locNode.ID)
 	}
 
 	chars, err := dst.ListCharacters(ctx, res.CampaignID)
 	if err != nil {
 		t.Fatalf("ListCharacters: %v", err)
 	}
-	if len(chars) != 1 || chars[0].DiscordUserID != "123456789" {
-		t.Fatalf("characters = %+v, want Frodo with verbatim discord id", chars)
+	if len(chars) != 1 {
+		t.Fatalf("character count = %d, want 1", len(chars))
+	}
+	if chars[0].Name != "Frodo" || chars[0].DiscordUserID != "123456789" ||
+		len(chars[0].Aliases) != 1 || chars[0].Aliases[0] != "Mr. Underhill" {
+		t.Fatalf("character not round-tripped: %+v", chars[0])
 	}
 }
 
@@ -295,6 +314,82 @@ func TestImportMidBundleFailureRollsBack(t *testing.T) {
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Doomed Import"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("failed import left a campaign behind: %v", err)
+	}
+}
+
+// TestImportRejectsSecondButler proves a bundle carrying TWO Butlers is refused
+// (rollback), never last-wins: a Campaign has exactly one Butler (types.go), so a
+// second would silently overwrite the first's fields/grants and inflate the
+// reported Agents count above what the DB holds.
+func TestImportRejectsSecondButler(t *testing.T) {
+	ctx := context.Background()
+	st, tid := freshTenant(t)
+
+	b := &bundle.Bundle{
+		FormatVersion: bundle.FormatVersion,
+		Campaign: bundle.Campaign{
+			Name: "Two Butlers", System: "dnd5e", Language: "en",
+			Agents: []bundle.Agent{
+				{ID: "b1", Role: "butler", Name: "Alfred"},
+				{ID: "b2", Role: "butler", Name: "Jeeves"},
+			},
+		},
+	}
+	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+		t.Fatal("Import with two butlers succeeded; want error")
+	}
+	if _, err := st.FindCampaignByName(ctx, tid, "Two Butlers"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("rejected two-butler import left a campaign: %v", err)
+	}
+}
+
+// TestImportRejectsDuplicateNodeRef proves two nodes sharing a ref key abort the
+// import (rollback): a silent clobber of the remap map would bind edges/links to
+// the wrong node.
+func TestImportRejectsDuplicateNodeRef(t *testing.T) {
+	ctx := context.Background()
+	st, tid := freshTenant(t)
+
+	b := &bundle.Bundle{
+		FormatVersion: bundle.FormatVersion,
+		Campaign: bundle.Campaign{
+			Name: "Dup Node", System: "dnd5e", Language: "en",
+			Nodes: []bundle.Node{
+				{ID: "n1", Type: "location", Name: "First"},
+				{ID: "n1", Type: "location", Name: "Second"},
+			},
+		},
+	}
+	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+		t.Fatal("Import with duplicate node ref succeeded; want error")
+	}
+	if _, err := st.FindCampaignByName(ctx, tid, "Dup Node"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("rejected dup-node import left a campaign: %v", err)
+	}
+}
+
+// TestImportRejectsDuplicateAgentRef proves two Character Agents sharing a ref key
+// abort the import (rollback): a clobbered agent remap would link a node to the
+// wrong Agent.
+func TestImportRejectsDuplicateAgentRef(t *testing.T) {
+	ctx := context.Background()
+	st, tid := freshTenant(t)
+
+	b := &bundle.Bundle{
+		FormatVersion: bundle.FormatVersion,
+		Campaign: bundle.Campaign{
+			Name: "Dup Agent", System: "dnd5e", Language: "en",
+			Agents: []bundle.Agent{
+				{ID: "a1", Role: "character", Name: "Bart"},
+				{ID: "a1", Role: "character", Name: "Barty"},
+			},
+		},
+	}
+	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+		t.Fatal("Import with duplicate agent ref succeeded; want error")
+	}
+	if _, err := st.FindCampaignByName(ctx, tid, "Dup Agent"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("rejected dup-agent import left a campaign: %v", err)
 	}
 }
 

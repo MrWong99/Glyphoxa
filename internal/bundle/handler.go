@@ -121,13 +121,10 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 
 	b, err := Decode(file)
 	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "bundle exceeds maximum upload size", http.StatusRequestEntityTooLarge)
-			return
-		}
-		// Decode already wraps ErrNewerFormat/ErrUnsupportedFormat with a message
-		// naming both versions; a plain parse failure is an opaque bad request.
+		// The size cap surfaces at FormFile above (it reads the multipart body), so
+		// Decode never sees a MaxBytesError. Decode already wraps
+		// ErrNewerFormat/ErrUnsupportedFormat with a message naming both versions;
+		// a plain parse failure is an opaque bad request.
 		writeImportError(w, http.StatusBadRequest, importErrorMessage(err))
 		return
 	}

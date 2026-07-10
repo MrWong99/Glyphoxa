@@ -93,9 +93,20 @@ func importInTx(ctx context.Context, tx *storage.Store, tenantID uuid.UUID, b *B
 	}
 	res.CampaignID = campaignID
 
+	butlerSeen := false
 	for i := range b.Campaign.Agents {
 		a := &b.Campaign.Agents[i]
+		if _, dup := res.AgentIDs[a.ID]; dup {
+			return fmt.Errorf("bundle: import: duplicate agent ref %q", a.ID)
+		}
 		if a.Role == string(storage.AgentRoleButler) {
+			if butlerSeen {
+				// A Campaign has exactly one Butler (ADR-0009, types.go): a second in
+				// the bundle would last-wins-overwrite the first and lie in the counts,
+				// so it is a hard error that rolls the import back.
+				return fmt.Errorf("bundle: import: more than one butler in bundle")
+			}
+			butlerSeen = true
 			if err := mergeButler(ctx, tx, campaignID, a, res); err != nil {
 				return err
 			}
@@ -109,6 +120,11 @@ func importInTx(ctx context.Context, tx *storage.Store, tenantID uuid.UUID, b *B
 	nodeIDs := make(map[string]uuid.UUID, len(b.Campaign.Nodes))
 	for i := range b.Campaign.Nodes {
 		n := &b.Campaign.Nodes[i]
+		if _, dup := nodeIDs[n.ID]; dup {
+			// Two nodes sharing a ref key would clobber the remap, binding edges/links
+			// to the wrong node — same all-or-nothing discipline as an unknown ref.
+			return fmt.Errorf("bundle: import: duplicate node ref %q", n.ID)
+		}
 		created, err := tx.CreateNode(ctx, storage.NewKGNode{
 			CampaignID: campaignID,
 			Type:       storage.KGNodeType(n.Type),
