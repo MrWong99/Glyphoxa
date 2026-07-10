@@ -121,6 +121,8 @@ type Chunker struct {
 	window   time.Duration
 	maxUtt   int
 
+	resolver SpeakerResolver // resolves SpeakerID → name for the line prefix (#281); nil = generic label
+
 	mu               sync.Mutex
 	activeID         string // current session id; "" at process start
 	activeUUID       uuid.UUID
@@ -180,6 +182,16 @@ func NewChunker(bus *voiceevent.Bus, sessions Sessions, store ChunkStore, gauge 
 	return c
 }
 
+// SetResolver wires the speaker resolver (#281) after construction, so existing
+// NewChunker call sites stay byte-identical (nil resolver = generic prefix). Called
+// once at boot before the chunker folds any event; guarded by c.mu so it is safe
+// against the subscribed bus callback.
+func (c *Chunker) SetResolver(res SpeakerResolver) {
+	c.mu.Lock()
+	c.resolver = res
+	c.mu.Unlock()
+}
+
 // project is the bus callback: it attributes the event to the active session
 // (rolling over on a session change, one Snapshot per event like the relay) and
 // folds it into the open chunk. It must not block (the bus delivers
@@ -229,14 +241,32 @@ func (c *Chunker) rollover(vs storage.VoiceSession) {
 	c.turns = map[string]*chunkTurn{}
 }
 
-// appendHuman folds one human utterance (one STTFinal, anonymous lane ADR-0039)
-// into the open chunk and re-checks the close conditions.
+// appendHuman folds one human utterance (one STTFinal, attributed to its Speaker
+// Lane via SpeakerID since #278/ADR-0050) into the open chunk and re-checks the
+// close conditions. The line prefix resolves to the speaker's Character/guild name
+// when available (#281), else the generic "Player / DM".
 func (c *Chunker) appendHuman(ev voiceevent.STTFinal) {
 	oc := c.ensureOpen(ev.At)
-	oc.entries = append(oc.entries, &chunkLine{text: "Player / DM: " + ev.Text})
+	oc.entries = append(oc.entries, &chunkLine{text: c.humanPrefix(ev.SpeakerID) + ": " + ev.Text})
 	c.recordSpeaker(oc, ev.SpeakerID)
 	oc.count++
 	c.afterAppend(oc)
+}
+
+// humanPrefix is the "Who" prefix for a human chunk line (#281): the resolved
+// Character (or guild) name when available, else the generic "Player / DM". It is
+// cache-only (Lookup never blocks) and applies to NEW chunk content only —
+// persisted chunks are immutable (ADR-0011). The relay warms the resolver on
+// VADSpeechStart, so this shared cache is usually populated by the time a line
+// folds. GM lane routing is a live-view concern; chunk content just uses names.
+func (c *Chunker) humanPrefix(speakerID string) string {
+	if c.resolver == nil || speakerID == "" {
+		return "Player / DM"
+	}
+	if name := c.resolver.Lookup(c.activeCampaignID, speakerID).Name; name != "" {
+		return name
+	}
+	return "Player / DM"
 }
 
 // recordSpeaker adds a human utterance's Speaker Lane snowflake to the chunk's

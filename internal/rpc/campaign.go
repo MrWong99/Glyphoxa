@@ -99,6 +99,18 @@ type CampaignServer struct {
 	// returns an empty list so the UI falls back to free-text snowflake entry. Set
 	// once at boot before serving, so no lock is needed.
 	memberLister voiceMemberLister
+	// speakerInv drops a campaign's cached speaker→name resolutions after a Character
+	// mutation (#281, ADR-0039 in-proc direct-method invalidation), so the live relay
+	// re-resolves future lines with the new mapping. Nil disables (feature off / no
+	// live resolver); set once at boot before serving.
+	speakerInv SpeakerInvalidator
+}
+
+// SpeakerInvalidator drops a campaign's cached speaker→name resolutions. The live
+// *speaker.Resolver satisfies it; the Character CRUD handlers call it on
+// create/update/delete so a rebind takes effect on the next projected line (#281).
+type SpeakerInvalidator interface {
+	InvalidateCampaign(campaignID uuid.UUID)
 }
 
 // NewCampaignServer wraps a campaignStore (e.g. *storage.Store) in a
@@ -122,6 +134,21 @@ func (s *CampaignServer) SetSessions(src activeSessionSource) {
 	s.liveCampaign = func() (uuid.UUID, bool) {
 		vs, active := src.Snapshot()
 		return vs.CampaignID, active
+	}
+}
+
+// SetSpeakerInvalidator wires the live speaker resolver's campaign invalidation
+// (#281). Called once at boot before serving, so no lock is needed; nil-safe at the
+// call sites (invalidateSpeakers). A nil resolver leaves the hook off.
+func (s *CampaignServer) SetSpeakerInvalidator(inv SpeakerInvalidator) {
+	s.speakerInv = inv
+}
+
+// invalidateSpeakers drops a campaign's cached speaker resolutions after a
+// Character mutation, if a resolver is wired (#281). Nil-safe.
+func (s *CampaignServer) invalidateSpeakers(campaignID uuid.UUID) {
+	if s.speakerInv != nil {
+		s.speakerInv.InvalidateCampaign(campaignID)
 	}
 }
 

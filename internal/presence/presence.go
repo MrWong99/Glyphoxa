@@ -68,6 +68,9 @@ type Presence struct {
 	open        func(ctx context.Context, client *bot.Client) error
 	register    commandRegistrar
 	closeClient func(client *bot.Client)
+	// fetchMember resolves one guild member via the standing client's REST; injected
+	// so MemberDisplayName (#281) is unit-tested without a live gateway.
+	fetchMember func(ctx context.Context, guildID, userID snowflake.ID) (*discord.Member, error)
 
 	// mu serializes Ensure/Close so builds and registrations never overlap; token
 	// is Ensure-local state guarded by it. The read-hot client and guildID are
@@ -99,6 +102,7 @@ func New(store Store, cipher *crypto.Cipher, reg *Registry, envToken string, log
 	p.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	p.register = restRegister
 	p.closeClient = func(client *bot.Client) { client.Close(context.Background()) }
+	p.fetchMember = p.restGetMember
 	return p
 }
 

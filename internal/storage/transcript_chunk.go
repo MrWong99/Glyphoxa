@@ -28,7 +28,7 @@ type TranscriptChunk struct {
 	CampaignID            uuid.UUID
 	VoiceSessionID        uuid.UUID   // column nullable; the writer always sets it
 	Content               string      // the chunk's utterances joined "\n"
-	SpeakerDiscordUserIDs []string    // empty in v1.0: anonymous STT lane (ADR-0039)
+	SpeakerDiscordUserIDs []string    // distinct Speaker Lane snowflakes in the chunk (populated since #278/ADR-0050); empty only when all utterances were unattributed
 	ParticipatedAgentIDs  []uuid.UUID // Agents that spoke in the chunk (NPC-knowledge filter)
 	EmbeddingModel        string      // '' until the backfill worker embeds the row (#116)
 	StartedAt             time.Time

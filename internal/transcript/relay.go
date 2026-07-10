@@ -1,8 +1,9 @@
 // Package transcript is the SSE relay (ADR-0014 Hop-B): it bridges the
 // in-process voiceevent.Bus to the browser's live Session screen. It subscribes
 // to the bus ONCE at startup, projects the voice pipeline's events into
-// human-readable transcript lines (ADR-0020 taxonomy, ADR-0039 anonymous human
-// lane), keeps a per-session ~500-event ring buffer for Last-Event-ID replay,
+// human-readable transcript lines (ADR-0020 taxonomy; humans attributed to their
+// Speaker Lane via SpeakerID since ADR-0050, resolved to Character/GM names by
+// #281), keeps a per-session ~500-event ring buffer for Last-Event-ID replay,
 // and serves two endpoints: a Server-Sent-Events live tail and a JSON snapshot.
 //
 // There is no DB write here: line persistence is issue #74. The buffer is the
@@ -20,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/speaker"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -42,9 +44,10 @@ const (
 	listenLabel = "Listening to the table…"
 )
 
-// Kind classifies a transcript line's speaker. Per ADR-0039 the live projection
-// only ever emits player/npc/butler — raw STT has no speaker id, so all humans
-// share the anonymous "player" lane; gm is reserved for future SpeakerID work.
+// Kind classifies a transcript line's speaker. Humans resolve to player or gm from
+// their Speaker Lane's SpeakerID (#281, ADR-0050): a GM-allowlisted snowflake lands
+// in the gm lane, everyone else in player; an unattributed or resolver-off line
+// stays in the anonymous player lane. Agent replies map to npc/butler.
 type Kind string
 
 const (
@@ -56,9 +59,9 @@ const (
 
 // kindFor maps a speaker role to its transcript Kind. role is the
 // AddressTarget.AgentRole ("butler"/"character") for an Agent reply, or one of
-// the human pseudo-roles "gm"/"player" for human STT. The live projection only
-// passes "player" for humans (ADR-0039); "gm" is reserved for future SpeakerID
-// work, so an explicit gm input still maps to gm.
+// the human pseudo-roles "gm"/"player" for human STT. Human lines derive their
+// Kind directly in resolveHuman (#281); this helper serves the Agent-reply path
+// and still maps an explicit "gm"/"player" input for completeness.
 func kindFor(role string) Kind {
 	switch role {
 	case "butler":
@@ -96,10 +99,11 @@ type Line struct {
 	TS   time.Time `json:"ts"`
 	Text string    `json:"text"`
 	// SpeakerID is the Discord snowflake of the human who spoke this Line (#278,
-	// ADR-0050), threaded from STTFinal for persistence + later attribution (#281).
-	// Empty for an unattributed utterance or an Agent reply; the omitempty keeps the
-	// live-view wire byte-identical for the anonymous path. RENDERING is untouched —
-	// who/Kind still reflect the anonymous lane until #281 consumes this.
+	// ADR-0050), threaded from STTFinal for persistence + attribution (#281). Empty
+	// for an unattributed utterance or an Agent reply; the omitempty keeps the
+	// live-view wire byte-identical for the anonymous path. Who/Kind are resolved
+	// from this snowflake at persist time (#281) — a display snapshot, never
+	// re-resolved on replay.
 	SpeakerID string `json:"speaker_id,omitempty"`
 }
 
@@ -172,6 +176,17 @@ type Sessions interface {
 	Snapshot() (storage.VoiceSession, bool)
 }
 
+// SpeakerResolver resolves a Speaker Lane snowflake to a display name + GM flag
+// for the live projection (#281). *speaker.Resolver satisfies it. Warm is the
+// non-blocking async fill the relay calls on VADSpeechStart (~1.7s before STTFinal,
+// so the name is cached by lookup time); Lookup is the cache-only read the
+// synchronous STTFinal branch uses — it NEVER blocks (the bus callback must not).
+// nil disables resolution, keeping the anonymous "Player / DM" lane byte-identical.
+type SpeakerResolver interface {
+	Warm(campaignID uuid.UUID, speakerID string)
+	Lookup(campaignID uuid.UUID, speakerID string) speaker.Resolution
+}
+
 // LineStore is the narrow persistence surface the relay needs (#74, ADR-0040):
 // an incremental UPSERT of each projected Line, a list for replay-on-reload, and
 // the authoritative count for the Stop summary. *storage.Store satisfies it;
@@ -198,7 +213,8 @@ type turn struct {
 // all take the same lock.
 type Relay struct {
 	sessions Sessions
-	store    LineStore // persists projected lines (#74); nil disables persistence
+	store    LineStore       // persists projected lines (#74); nil disables persistence
+	resolver SpeakerResolver // resolves SpeakerID → name/GM (#281); nil = anonymous lane
 	log      *slog.Logger
 
 	mu       sync.Mutex
@@ -264,6 +280,16 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 	return r
 }
 
+// SetResolver wires the speaker resolver (#281) after construction, so the many
+// existing NewRelay call sites stay byte-identical (nil resolver = anonymous lane).
+// Called once at boot before the relay serves any event; guarded by r.mu so it is
+// safe against the subscribed bus callback.
+func (r *Relay) SetResolver(res SpeakerResolver) {
+	r.mu.Lock()
+	r.resolver = res
+	r.mu.Unlock()
+}
+
 // project is the bus callback: it attributes the event to the active session,
 // rolling the buffer over on a session change, and folds the event into the
 // transcript. It must not block (the bus delivers synchronously): all sends to
@@ -286,23 +312,32 @@ func (r *Relay) project(e voiceevent.Event) {
 
 	switch ev := e.(type) {
 	case voiceevent.VADSpeechStart:
-		// A human opened their mouth: clear any stale "<NPC> is speaking…" the
+		// A human opened their mouth: warm the speaker resolver NOW (#281) so the
+		// name is cached by the time STTFinal projects the line (~1.7s later, off the
+		// bus). Warm never blocks. Then clear any stale "<NPC> is speaking…" the
 		// moment speech starts (it fires BEFORE STTFinal), instead of waiting for
 		// the next finalized line. Live-validated — a clean turn emits no
 		// TurnEnded, so without this the last agent line keeps the label through
 		// the following silence. Also correct for a barge (human over the Agent).
+		if r.resolver != nil && ev.SpeakerID != "" {
+			r.resolver.Warm(r.activeCampaignID, ev.SpeakerID)
+		}
 		r.setTyping(r.liveTyping())
 	case voiceevent.STTFinal:
-		// A human utterance — one line per STTFinal in the anonymous lane
-		// (ADR-0039: raw STT carries no speaker id).
+		// A human utterance — one line per STTFinal. who/Kind resolve from the
+		// Speaker Lane's snowflake (#281): a mapped Character or guild display name
+		// with the GM lane for allowlisted speakers, falling back to the
+		// byte-identical anonymous "Player / DM" / KindPlayer label when the resolver
+		// is off, the speaker is unattributed, or the name is unresolved.
 		r.humanSeq++
+		who, kind := r.resolveHuman(ev.SpeakerID)
 		r.emitLine(Line{
 			ID:        "u:" + strconv.FormatUint(r.humanSeq, 10),
-			Who:       "Player / DM",
-			Kind:      KindPlayer,
+			Who:       who,
+			Kind:      kind,
 			TS:        ev.At,
 			Text:      ev.Text,
-			SpeakerID: ev.SpeakerID, // #278: thread the Speaker Lane's snowflake through; rendering unchanged
+			SpeakerID: ev.SpeakerID, // #278: thread the Speaker Lane's snowflake through for persistence
 		})
 	case voiceevent.AddressRouted:
 		// Records WHO answers this turn; no line yet (no text).
@@ -579,6 +614,28 @@ func (r *Relay) Frames(id string, afterSeq uint64) []Frame {
 		}
 	}
 	return out
+}
+
+// resolveHuman maps a human utterance's SpeakerID to its rendered who + Kind
+// (#281). With no resolver or an empty SpeakerID it is the pre-#281 anonymous lane
+// exactly ("Player / DM", KindPlayer). Otherwise a cache-only Lookup supplies the
+// name (Character > guild display > "") and the GM flag: an allowlisted speaker
+// lands in the KindGM lane even when unmapped (name falls back to the generic
+// label), and a resolved name replaces the generic label. Caller holds r.mu.
+func (r *Relay) resolveHuman(speakerID string) (string, Kind) {
+	if r.resolver == nil || speakerID == "" {
+		return "Player / DM", KindPlayer
+	}
+	res := r.resolver.Lookup(r.activeCampaignID, speakerID)
+	kind := KindPlayer
+	if res.GM {
+		kind = KindGM
+	}
+	who := "Player / DM"
+	if res.Name != "" {
+		who = res.Name
+	}
+	return who, kind
 }
 
 // nameOr returns name, or def when name is empty.

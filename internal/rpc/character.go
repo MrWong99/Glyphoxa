@@ -86,6 +86,9 @@ func (s *CampaignServer) CreateCharacter(
 		slog.Default().Error("CreateCharacter: store create failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
+	// A new speaker→Character mapping: drop the campaign's cached resolutions so the
+	// live relay attributes this Discord User's next line to the new Character (#281).
+	s.invalidateSpeakers(c.ID)
 	return connect.NewResponse(&managementv1.CreateCharacterResponse{
 		Character: &managementv1.Character{
 			Id:            id.String(),
@@ -133,6 +136,9 @@ func (s *CampaignServer) UpdateCharacter(
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
 	}
+	// A rebind or rename changes how this Discord User resolves: drop the campaign's
+	// cached resolutions so the next projected line reflects it (#281).
+	s.invalidateSpeakers(updated.CampaignID)
 	return connect.NewResponse(&managementv1.UpdateCharacterResponse{Character: toProtoCharacter(updated)}), nil
 }
 
@@ -150,6 +156,13 @@ func (s *CampaignServer) DeleteCharacter(
 
 	switch err := s.store.DeleteCharacter(ctx, id); {
 	case err == nil:
+		// The deleted mapping's Discord User now falls back to guild name / generic
+		// label: drop the active campaign's cached resolutions (#281). The delete is
+		// by raw id, so we scope invalidation to the campaign in view (best-effort —
+		// the 5min TTL self-heals if resolution misses).
+		if c, cerr := s.activeCampaign(ctx); cerr == nil {
+			s.invalidateSpeakers(c.ID)
+		}
 		return connect.NewResponse(&managementv1.DeleteCharacterResponse{}), nil
 	case errors.Is(err, storage.ErrNotFound):
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("character not found"))
