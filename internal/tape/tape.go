@@ -86,25 +86,34 @@ type Tape struct {
 	consent   atomic.Value
 	consentMu sync.Mutex
 
-	// mailbox is the single ordered channel to the owner goroutine, carrying both
-	// append frames and control requests (snapshot, revoke). One channel keeps a
-	// Snapshot FIFO-ordered after the appends that precede it — the "request/response
-	// over the same mailbox" contract — so a snapshot always observes prior frames.
-	// Appends use a drop-oldest policy (never blocking the audio loop); control
-	// messages block-send guarded by done and are never dropped.
-	mailbox chan tapeMsg
+	// appends is the frame mailbox to the owner goroutine. It carries ONLY appends,
+	// so the drop-oldest policy (a full mailbox pops its oldest frame to make room —
+	// the pkg/voice inboundDispatcher.send idiom, run by the appending goroutine) can
+	// never discard a control request. Never blocks the audio loop.
+	//
+	// ctrl is a SEPARATE channel for control requests (snapshot, revoke), drained
+	// ONLY by the owner and never dropped. Keeping control off the frame mailbox is
+	// what fixes the deadlock: with one shared channel an appender's drop-oldest pop
+	// could evict a Snapshot request, stranding its caller forever. Ordering (a
+	// Snapshot must observe the appends that precede it) is preserved by the owner
+	// draining every pending frame from appends BEFORE it services a control request.
+	appends chan laneFrame
+	ctrl    chan ctrlMsg
 	stop    chan struct{} // closed by Close to stop the owner
 	done    chan struct{} // closed by the owner when it has exited
 	once    sync.Once
 	closed  atomic.Bool
 }
 
-// tapeMsg is one message to the owner: an append (isAppend), a snapshot request
-// (snap != nil), or a lane clear on consent revoke (revoke). Exactly one applies.
-type tapeMsg struct {
-	isAppend   bool
-	lane       string
-	frame      Frame
+// laneFrame is one append: a frame plus the lane it belongs to.
+type laneFrame struct {
+	lane  string
+	frame Frame
+}
+
+// ctrlMsg is one control request to the owner: a snapshot (snap != nil) or a lane
+// clear on consent revoke (revoke). Exactly one applies.
+type ctrlMsg struct {
 	snap       *snapReq
 	revoke     bool
 	revokeLane string
@@ -129,7 +138,8 @@ func New(window time.Duration, consented []string, log *slog.Logger) *Tape {
 	t := &Tape{
 		capFrames: capFrames,
 		log:       log,
-		mailbox:   make(chan tapeMsg, mailboxCap),
+		appends:   make(chan laneFrame, mailboxCap),
+		ctrl:      make(chan ctrlMsg),
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
@@ -169,29 +179,22 @@ func (t *Tape) enqueue(lane string, f Frame) {
 	if t.closed.Load() {
 		return
 	}
-	m := tapeMsg{isAppend: true, lane: lane, frame: f}
+	m := laneFrame{lane: lane, frame: f}
 	select {
-	case t.mailbox <- m:
+	case t.appends <- m:
 		return
 	default:
 	}
-	// Mailbox full: drop the oldest queued frame to make room. If the oldest is a
-	// control message (a rare snapshot/revoke behind 512 backlogged frames), do NOT
-	// drop it — re-queue it and drop the incoming append instead, so a Snapshot is
-	// never lost (which would strand its caller).
+	// Mailbox full: drop the oldest queued frame to make room, then retry. The
+	// appends channel carries ONLY frames, so the popped item is always a frame —
+	// this can never evict a control request (that hazard is why control lives on a
+	// separate channel).
 	select {
-	case old := <-t.mailbox:
-		if !old.isAppend {
-			select {
-			case t.mailbox <- old:
-			default:
-			}
-			return
-		}
+	case <-t.appends:
 	default:
 	}
 	select {
-	case t.mailbox <- m:
+	case t.appends <- m:
 	default:
 	}
 }
@@ -216,10 +219,12 @@ func (t *Tape) SetConsent(userID string, granted bool) {
 	t.consentMu.Unlock()
 
 	if !granted {
-		// Clear any already-captured audio for the revoked Speaker. Ordered after
-		// prior appends on the same mailbox; guarded by done so Close can't strand it.
+		// Clear any already-captured audio for the revoked Speaker. Delivered on the
+		// owner-drained ctrl channel (never dropped); guarded by done so Close can't
+		// strand it. The owner drains pending appends before applying it, so a frame
+		// enqueued before this revoke is captured-then-cleared, never orphaned.
 		select {
-		case t.mailbox <- tapeMsg{revoke: true, revokeLane: userID}:
+		case t.ctrl <- ctrlMsg{revoke: true, revokeLane: userID}:
 		case <-t.done:
 		}
 	}
@@ -231,7 +236,7 @@ func (t *Tape) SetConsent(userID string, granted bool) {
 func (t *Tape) Snapshot(from, to time.Time) Snapshot {
 	req := &snapReq{from: from, to: to, resp: make(chan Snapshot, 1)}
 	select {
-	case t.mailbox <- tapeMsg{snap: req}:
+	case t.ctrl <- ctrlMsg{snap: req}:
 	case <-t.done:
 		return Snapshot{From: from, To: to}
 	}
@@ -252,9 +257,14 @@ func (t *Tape) Close() {
 }
 
 // run is the single owner goroutine: it owns every per-lane ring, so no ring ever
-// needs a lock. It drains the append mailbox and services control requests
+// needs a lock. It drains the frame mailbox and services control requests
 // (snapshot, revoke) until Close. The stop arm is checked first on every wakeup so
 // Close is prompt and a Snapshot blocked mid-flight unblocks via the done channel.
+//
+// Before servicing any control request it drains every pending frame from the
+// mailbox, so a Snapshot always observes the appends enqueued before it (the
+// ordering the caller expects) and never blocks appends: the snapshot reply rides
+// a buffered response channel, so the owner returns to draining at once.
 func (t *Tape) run() {
 	defer close(t.done)
 	rings := make(map[string]*ring)
@@ -267,15 +277,30 @@ func (t *Tape) run() {
 		select {
 		case <-t.stop:
 			return
-		case m := <-t.mailbox:
+		case lf := <-t.appends:
+			t.appendRing(rings, lf.lane, lf.frame)
+		case c := <-t.ctrl:
+			t.drainAppends(rings)
 			switch {
-			case m.isAppend:
-				t.appendRing(rings, m.lane, m.frame)
-			case m.snap != nil:
-				m.snap.resp <- buildSnapshot(rings, m.snap.from, m.snap.to)
-			case m.revoke:
-				delete(rings, m.revokeLane)
+			case c.snap != nil:
+				c.snap.resp <- buildSnapshot(rings, c.snap.from, c.snap.to)
+			case c.revoke:
+				delete(rings, c.revokeLane)
 			}
+		}
+	}
+}
+
+// drainAppends applies every frame currently queued in the mailbox to its ring,
+// non-blocking. The owner calls it before each control request so a Snapshot
+// observes all prior appends and a revoke clears after them.
+func (t *Tape) drainAppends(rings map[string]*ring) {
+	for {
+		select {
+		case lf := <-t.appends:
+			t.appendRing(rings, lf.lane, lf.frame)
+		default:
+			return
 		}
 	}
 }
