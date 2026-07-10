@@ -223,12 +223,16 @@ func TestHighlight_ListSessionsNeedingCandidatePurge(t *testing.T) {
 		t.Fatalf("end promotedOnly: %v", err)
 	}
 
-	ids, err := st.ListSessionsNeedingCandidatePurge(ctx, purgeKind)
+	got, err := st.ListSessionsNeedingCandidatePurge(ctx, purgeKind)
 	if err != nil {
 		t.Fatalf("list sessions needing purge: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != orphan.ID {
-		t.Fatalf("want only the orphan session %s, got %v", orphan.ID, ids)
+	if len(got) != 1 || got[0].VoiceSessionID != orphan.ID {
+		t.Fatalf("want only the orphan session %s, got %+v", orphan.ID, got)
+	}
+	// ended_at is returned so the boot sweep anchors the 7-day horizon at session end.
+	if got[0].EndedAt.IsZero() {
+		t.Fatalf("orphan candidate carries no ended_at: %+v", got[0])
 	}
 }
 

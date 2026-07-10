@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // fakePurgeStore records candidate keys and delete calls; order of blob-vs-row is
@@ -123,39 +125,49 @@ func TestPurge_ListErrorPropagates(t *testing.T) {
 // fakeScheduleStore returns the sessions the boot sweep should schedule a purge
 // for, recording the purge kind the sweep asked with.
 type fakeScheduleStore struct {
-	ids     []uuid.UUID
-	gotKind string
-	listErr error
+	candidates []storage.SessionPurgeCandidate
+	gotKind    string
+	listErr    error
 }
 
-func (f *fakeScheduleStore) ListSessionsNeedingCandidatePurge(_ context.Context, purgeKind string) ([]uuid.UUID, error) {
+func (f *fakeScheduleStore) ListSessionsNeedingCandidatePurge(_ context.Context, purgeKind string) ([]storage.SessionPurgeCandidate, error) {
 	f.gotKind = purgeKind
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.ids, nil
+	return f.candidates, nil
+}
+
+// enqueued records one backstop purge enqueue (session + scheduled horizon).
+type enqueued struct {
+	session  uuid.UUID
+	kind     string
+	runAfter time.Time
 }
 
 // recordingEnqueuer records every purge enqueue the boot sweep makes.
 type recordingEnqueuer struct {
-	mu       sync.Mutex
-	sessions []uuid.UUID
-	kinds    []string
+	mu  sync.Mutex
+	all []enqueued
 }
 
-func (r *recordingEnqueuer) Enqueue(_ context.Context, kind string, payload any, _ time.Time) error {
+func (r *recordingEnqueuer) Enqueue(_ context.Context, kind string, payload any, runAfter time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.kinds = append(r.kinds, kind)
+	e := enqueued{kind: kind, runAfter: runAfter}
 	if p, ok := payload.(purgePayload); ok {
-		r.sessions = append(r.sessions, p.VoiceSessionID)
+		e.session = p.VoiceSessionID
 	}
+	r.all = append(r.all, e)
 	return nil
 }
 
 func TestSweepMissingCandidatePurges_EnqueuesForOrphans(t *testing.T) {
 	s1, s2 := uuid.New(), uuid.New()
-	store := &fakeScheduleStore{ids: []uuid.UUID{s1, s2}}
+	store := &fakeScheduleStore{candidates: []storage.SessionPurgeCandidate{
+		{VoiceSessionID: s1, EndedAt: time.Now()},
+		{VoiceSessionID: s2, EndedAt: time.Now()},
+	}}
 	enq := &recordingEnqueuer{}
 
 	if err := SweepMissingCandidatePurges(context.Background(), store, enq, testLog()); err != nil {
@@ -164,13 +176,49 @@ func TestSweepMissingCandidatePurges_EnqueuesForOrphans(t *testing.T) {
 	if store.gotKind != JobKindPurgeCandidates {
 		t.Fatalf("sweep asked with wrong kind: %q", store.gotKind)
 	}
-	if len(enq.sessions) != 2 || enq.sessions[0] != s1 || enq.sessions[1] != s2 {
-		t.Fatalf("backstop purges not enqueued per orphan: %v", enq.sessions)
+	if len(enq.all) != 2 || enq.all[0].session != s1 || enq.all[1].session != s2 {
+		t.Fatalf("backstop purges not enqueued per orphan: %v", enq.all)
 	}
-	for _, k := range enq.kinds {
-		if k != JobKindPurgeCandidates {
-			t.Fatalf("enqueued wrong job kind: %q", k)
+	for _, e := range enq.all {
+		if e.kind != JobKindPurgeCandidates {
+			t.Fatalf("enqueued wrong job kind: %q", e.kind)
 		}
+	}
+}
+
+// TestSweepMissingCandidatePurges_AnchorsHorizonAtSessionEnd pins ADR-0051's 7-day
+// safety window to session END, not boot time: a session that ended 8 days ago is
+// past-due (run_after ≈ now), and one that ended a day ago keeps its remaining
+// window (run_after ≈ ended_at + 7d).
+func TestSweepMissingCandidatePurges_AnchorsHorizonAtSessionEnd(t *testing.T) {
+	pastDue := uuid.New()
+	recent := uuid.New()
+	pastEnded := time.Now().Add(-8 * 24 * time.Hour) // ended > 7d ago → past-due
+	recentEnded := time.Now().Add(-24 * time.Hour)   // ended 1d ago → ~6d left
+	store := &fakeScheduleStore{candidates: []storage.SessionPurgeCandidate{
+		{VoiceSessionID: pastDue, EndedAt: pastEnded},
+		{VoiceSessionID: recent, EndedAt: recentEnded},
+	}}
+	enq := &recordingEnqueuer{}
+
+	before := time.Now()
+	if err := SweepMissingCandidatePurges(context.Background(), store, enq, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	after := time.Now()
+
+	byID := map[uuid.UUID]time.Time{}
+	for _, e := range enq.all {
+		byID[e.session] = e.runAfter
+	}
+	// Past-due: floored at now (runs immediately), NOT ended_at+7d (which would be ~1d ago).
+	if ra := byID[pastDue]; ra.Before(before) || ra.After(after) {
+		t.Fatalf("past-due horizon = %v, want ~now [%v,%v]", ra, before, after)
+	}
+	// Recent: anchored at ended_at + 7d, well in the future — NOT now+7d.
+	wantRecent := recentEnded.Add(purgeDelay)
+	if ra := byID[recent]; ra.Sub(wantRecent).Abs() > time.Second {
+		t.Fatalf("recent horizon = %v, want ended_at+7d ≈ %v", ra, wantRecent)
 	}
 }
 
@@ -180,8 +228,8 @@ func TestSweepMissingCandidatePurges_NoOrphansNoEnqueue(t *testing.T) {
 	if err := SweepMissingCandidatePurges(context.Background(), store, enq, testLog()); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if len(enq.sessions) != 0 {
-		t.Fatalf("no orphans should enqueue nothing, got %v", enq.sessions)
+	if len(enq.all) != 0 {
+		t.Fatalf("no orphans should enqueue nothing, got %v", enq.all)
 	}
 }
 

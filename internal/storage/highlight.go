@@ -208,18 +208,28 @@ func (s *Store) DeleteSessionCandidates(ctx context.Context, voiceSessionID uuid
 	return int(tag.RowsAffected()), nil
 }
 
-// ListSessionsNeedingCandidatePurge returns the ids of ENDED Voice Sessions that
-// still hold at least one 'candidate' highlight but have NO purge job of the given
-// kind in a live state (pending/running/done) — the sessions whose 7-day purge was
-// never scheduled because a crash landed between the session ending and the Saver's
-// Finalize enqueue (#308, ADR-0051). It is the input to the boot-time backstop
-// sweep. A job is matched on its payload's voice_session_id (the purge payload's
-// only field); 'dead' jobs are treated as absent so a permanently-failed purge is
-// re-scheduled. Session-scoped, carries no tenant (the sweep is process-wide,
-// ADR-0049).
-func (s *Store) ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind string) ([]uuid.UUID, error) {
+// SessionPurgeCandidate is an ended Voice Session the boot backstop must schedule a
+// candidate purge for: its id plus the ended_at the 7-day horizon anchors to
+// (ADR-0051), so a session that ended long ago is purged immediately rather than
+// 7 days after boot.
+type SessionPurgeCandidate struct {
+	VoiceSessionID uuid.UUID
+	EndedAt        time.Time
+}
+
+// ListSessionsNeedingCandidatePurge returns the ENDED Voice Sessions (id + ended_at)
+// that still hold at least one 'candidate' highlight but have NO purge job of the
+// given kind in a live state (pending/running/done) — the sessions whose 7-day purge
+// was never scheduled because a crash landed between the session ending and the
+// Saver's Finalize enqueue (#308, ADR-0051). It is the input to the boot-time
+// backstop sweep. ended_at is returned so the sweep anchors the horizon at session
+// END (ended_at+7d), not boot time. A job is matched on its payload's
+// voice_session_id (the purge payload's only field); 'dead' jobs are treated as
+// absent so a permanently-failed purge is re-scheduled. Session-scoped, carries no
+// tenant (the sweep is process-wide, ADR-0049).
+func (s *Store) ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind string) ([]SessionPurgeCandidate, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT DISTINCT h.voice_session_id
+		`SELECT DISTINCT h.voice_session_id, vs.ended_at
 		   FROM highlight h
 		   JOIN voice_sessions vs ON vs.id = h.voice_session_id
 		  WHERE h.status = 'candidate'
@@ -235,13 +245,13 @@ func (s *Store) ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind
 	}
 	defer rows.Close()
 
-	var out []uuid.UUID
+	var out []SessionPurgeCandidate
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var c SessionPurgeCandidate
+		if err := rows.Scan(&c.VoiceSessionID, &c.EndedAt); err != nil {
 			return nil, fmt.Errorf("storage: scan session needing purge: %w", err)
 		}
-		out = append(out, id)
+		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("storage: list sessions needing candidate purge: %w", err)

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/blob"
+	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // JobKindPurgeCandidates is the background-job kind that drops a Voice Session's
@@ -84,10 +85,10 @@ type PurgeStore interface {
 }
 
 // PurgeScheduleStore is the storage surface the boot-time purge backstop needs:
-// the ended Voice Sessions that still hold candidate highlights but have no purge
-// job scheduled. *storage.Store satisfies it.
+// the ended Voice Sessions (id + ended_at) that still hold candidate highlights but
+// have no purge job scheduled. *storage.Store satisfies it.
 type PurgeScheduleStore interface {
-	ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind string) ([]uuid.UUID, error)
+	ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind string) ([]storage.SessionPurgeCandidate, error)
 }
 
 // SweepMissingCandidatePurges is the boot-time retention backstop (ADR-0051, the
@@ -95,7 +96,11 @@ type PurgeScheduleStore interface {
 // crash between a session ending and Finalize scheduling its purge would strand
 // that session's candidate highlights forever (their 7-day horizon never enqueued).
 // At boot — before serving — this finds every ended session with candidates and NO
-// pending/running/done purge job and enqueues one, 7 days out. It complements, not
+// pending/running/done purge job and enqueues one. The horizon anchors at session
+// END (ended_at + 7d), NOT boot time, so ADR-0051's 7-day safety purge is honored
+// regardless of when the crash-restart lands: a session that ended 8 days ago is
+// past-due and purges immediately (a now-floor keeps run_after from going negative),
+// while one that ended yesterday keeps its remaining ~6 days. It complements, not
 // replaces, Finalize's per-session scheduling. A per-session enqueue failure logs
 // and the sweep continues (the next boot retries), so one bad row never stalls the
 // rest; a store-list failure is returned (a boot-time diagnostic).
@@ -103,19 +108,26 @@ func SweepMissingCandidatePurges(ctx context.Context, store PurgeScheduleStore, 
 	if log == nil {
 		log = slog.Default()
 	}
-	ids, err := store.ListSessionsNeedingCandidatePurge(ctx, JobKindPurgeCandidates)
+	candidates, err := store.ListSessionsNeedingCandidatePurge(ctx, JobKindPurgeCandidates)
 	if err != nil {
 		return fmt.Errorf("highlight purge sweep: list sessions needing purge: %w", err)
 	}
-	for _, id := range ids {
-		payload := purgePayload{VoiceSessionID: id}
-		if err := enqueue.Enqueue(ctx, JobKindPurgeCandidates, payload, time.Now().Add(purgeDelay)); err != nil {
-			log.Error("highlight purge sweep: enqueue backstop purge", "err", err, "voice_session", id)
+	now := time.Now()
+	for _, c := range candidates {
+		// Anchor at session end: ended_at + 7d, floored at now so a long-past session
+		// purges immediately rather than 7 days after this boot (ADR-0051).
+		runAfter := c.EndedAt.Add(purgeDelay)
+		if runAfter.Before(now) {
+			runAfter = now
+		}
+		payload := purgePayload{VoiceSessionID: c.VoiceSessionID}
+		if err := enqueue.Enqueue(ctx, JobKindPurgeCandidates, payload, runAfter); err != nil {
+			log.Error("highlight purge sweep: enqueue backstop purge", "err", err, "voice_session", c.VoiceSessionID)
 			continue
 		}
 	}
-	if len(ids) > 0 {
-		log.Warn("scheduled backstop candidate purge for orphaned ended sessions", "count", len(ids))
+	if len(candidates) > 0 {
+		log.Warn("scheduled backstop candidate purge for orphaned ended sessions", "count", len(candidates))
 	}
 	return nil
 }
