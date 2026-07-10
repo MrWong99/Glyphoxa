@@ -9,8 +9,10 @@ import type { Interceptor } from "@connectrpc/connect";
 // adds the double-submit header.
 
 // readCookie returns a cookie value by name, or null. Used to mirror the
-// non-HttpOnly glyphoxa_csrf cookie into the request header.
-function readCookie(name: string): string | null {
+// non-HttpOnly glyphoxa_csrf cookie into the request header — both by the Connect
+// CSRF interceptor below and by the plain-fetch bundle upload (download.ts, #294),
+// which speaks the same double-submit protocol (ADR-0016).
+export function readCookie(name: string): string | null {
   const match = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   return match ? decodeURIComponent(match[1]) : null;
 }

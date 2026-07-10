@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/Badge";
 import { CampaignRowActions } from "./CampaignRowActions";
 import { CreateCampaignForm, useCreateCampaign } from "./CreateCampaignForm";
 import { CampaignSettingsForm } from "./CampaignSettingsForm";
+import { ImportCampaignButton } from "./ImportCampaignButton";
 
 import "./campaignSwitcher.css";
 
@@ -261,6 +262,12 @@ export function CampaignSwitcher() {
               <button type="button" className="gx-campaign-switcher__new" onClick={enterCreate}>
                 <Plus size={15} /> New campaign
               </button>
+
+              {/* Restore a campaign from an exported bundle (#294). It mints a new
+                  campaign and, on an explicit "Switch", runs the same
+                  SetActiveCampaign path a normal switch does — so it closes the
+                  panel on success. */}
+              <ImportCampaignButton onSwitched={close} />
 
               {/* Edit the resolved Active Campaign's name / System / Language
                   (#268). Disabled until a campaign resolves — there is nothing to
