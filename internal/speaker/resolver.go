@@ -145,10 +145,14 @@ func (r *Resolver) fill(k key, gen uint64) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.inflight, k)
 	if r.gen[k.campaign] != gen {
-		return // invalidated mid-fill; discard the now-stale result
+		// Invalidated mid-fill: the generation was bumped (and this key's marker
+		// cleared) after this fill started. A later Warm may have installed a fresh
+		// marker for the new generation — do NOT delete it, or dedup breaks and a
+		// duplicate fill spawns. Discard this now-stale result and leave the map.
+		return
 	}
+	delete(r.inflight, k)
 	r.cache[k] = entry{name: name, expires: r.now().Add(ttl)}
 }
 

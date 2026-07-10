@@ -266,6 +266,59 @@ func TestResolverWarmDedupesConcurrentFills(t *testing.T) {
 	}
 }
 
+// TestResolverStaleFillKeepsFreshInflightMarker guards the dedup race: a fill
+// dispatched on the old generation must not delete the in-flight marker of a
+// fresh fill dispatched after an InvalidateCampaign bumped the generation.
+//
+//	Warm(k) → fill A (gen 0) blocks
+//	InvalidateCampaign → gen 1, inflight cleared
+//	Warm(k) → fill B (gen 1) sets a fresh marker   (simulated directly)
+//	fill A completes → gen check rejects its result; it must NOT delete B's marker
+//	third Warm(k) while B runs → must dedup (no fill C spawned)
+func TestResolverStaleFillKeepsFreshInflightMarker(t *testing.T) {
+	campaign := uuid.New()
+	gate := make(chan struct{})
+	chars := &fakeChars{
+		byKey: map[string]storage.Character{
+			campaign.String() + "/" + kiraUser: {Name: "Kira", CampaignID: campaign, DiscordUserID: kiraUser},
+		},
+		gate: gate,
+	}
+	r := newTestResolver(t, chars, &fakeNamer{}, "")
+	k := key{campaign: campaign, speaker: kiraUser}
+
+	// Fill A is dispatched on generation 0 and parks in the gated lookup — it
+	// cannot reach its fill tail until the test closes the gate below.
+	r.Warm(campaign, kiraUser)
+
+	// A rebind invalidates the campaign (gen → 1, inflight cleared); a fresh Warm
+	// would then start fill B on gen 1. Simulate B's fresh in-flight marker
+	// directly so fill A is the only tracked goroutine (deterministic wg.Wait).
+	r.InvalidateCampaign(campaign)
+	r.mu.Lock()
+	r.inflight[k] = struct{}{}
+	r.mu.Unlock()
+
+	// Release fill A and wait for it (and only it) to finish its fill tail.
+	close(gate)
+	r.wg.Wait()
+
+	r.mu.Lock()
+	_, marker := r.inflight[k]
+	r.mu.Unlock()
+	if !marker {
+		t.Fatal("stale fill A (gen 0) deleted fill B's fresh (gen 1) inflight marker")
+	}
+
+	// With B still in flight, a third Warm for the same key must dedup: no fill C.
+	before := chars.callCount()
+	r.Warm(campaign, kiraUser)
+	r.wg.Wait()
+	if got := chars.callCount(); got != before {
+		t.Fatalf("third Warm spawned fill C: lookups %d → %d, want no new fill while B in flight", before, got)
+	}
+}
+
 func TestResolverLookupNeverDoesIO(t *testing.T) {
 	campaign := uuid.New()
 	chars := &fakeChars{byKey: map[string]storage.Character{}}
