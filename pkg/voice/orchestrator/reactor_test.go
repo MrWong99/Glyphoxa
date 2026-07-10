@@ -582,6 +582,58 @@ func TestReplier_FloorCleanTurnPublishesNoTurnEnded(t *testing.T) {
 	}
 }
 
+// yieldSynth cancels the active turn (floor.Yield) DURING Synthesize, then hands
+// back an already-closed audio channel — modelling a sentence whose tail audio is
+// cut mid-drain by a barge/mute that lands after Synthesize was accepted but
+// before the last frame is forwarded. The vendor call itself succeeded, so
+// TTS.Dispatch returns nil; the sentence was nonetheless NOT delivered.
+type yieldSynth struct{ floor *orchestrator.Floor }
+
+func (s yieldSynth) Synthesize(_ context.Context, _ tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	s.floor.Yield() // cancel the turn ctx mid-sentence
+	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch, nil
+}
+
+func (yieldSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestDispatchStream_TurnCutMidDrain_ReportsUndelivered pins the reactor half of
+// deliver-then-commit (ADR-0012): when a turn is cancelled mid-sentence-drain, the
+// dispatch callback handed to the streaming producer must report a non-nil error,
+// so the producer does NOT commit that sentence (its tail was never forwarded).
+// A nil Dispatch return is not enough — the turn ctx may have gone cancelled
+// during the drain, which the dispatch closure must re-check.
+func TestDispatchStream_TurnCutMidDrain_ReportsUndelivered(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	ttsStage := orchestrator.NewTTS(h.Bus, yieldSynth{floor: floor})
+
+	dispErr := make(chan error, 1)
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		err := dispatch(orchestrator.Reply{Sentence: "First."})
+		dispErr <- err
+		return err
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	replier.SetFloor(floor)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{
+		TurnID: "tcut",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+
+	select {
+	case err := <-dispErr:
+		if err == nil {
+			t.Fatal("dispatch returned nil for a sentence whose tail audio was cut mid-drain — the producer would commit an undelivered sentence (ADR-0012)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the streaming producer never ran")
+	}
+}
+
 // selectiveSynth is a [tts.Synthesizer] that fails Synthesize for sentences in
 // failOn and otherwise returns an already-closed audio channel.
 type selectiveSynth struct {

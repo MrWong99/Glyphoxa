@@ -511,6 +511,62 @@ func TestReplyStream_BargeMidStream_CommitsOnlySpoken(t *testing.T) {
 	}
 }
 
+// TestReplyStream_DispatchRejected_NotCommitted pins deliver-then-commit at the
+// emit seam (ADR-0012): a sentence is committed to history only if its dispatch
+// returned nil (delivered). When dispatch rejects sentence #2 (a turn cancelled
+// between the two select-ready branches), only the delivered sentence #1 lands
+// in the committed assistant turn — not the rejected one.
+func TestReplyStream_DispatchRejected_NotCommitted(t *testing.T) {
+	eng := &fakeStreamEngine{deltas: []string{"First. ", "Second. "}}
+	r := streamReplier(t, eng)
+
+	var n int
+	err := r.ReplyStream()(context.Background(), routed("bart", "go"), func(orchestrator.Reply) error {
+		n++
+		if n == 1 {
+			return nil // delivered
+		}
+		return context.Canceled // turn cancelled mid-drain: #2 never delivered
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReplyStream err = %v, want context.Canceled", err)
+	}
+	hist := r.HistorySnapshot()
+	assistant := hist[len(hist)-1]
+	if string(assistant.Role) != "assistant" || strings.TrimSpace(assistant.Text) != "First." {
+		t.Fatalf("committed assistant turn = {%s %q}, want only the delivered sentence \"First.\"", assistant.Role, assistant.Text)
+	}
+}
+
+// batchEngine is a non-streaming [agent.Engine]: it implements Generate but NOT
+// GenerateStream, so ReplyStream falls back to fallbackTurn (the single-completion
+// path).
+type batchEngine struct{ reply string }
+
+func (e batchEngine) Generate(context.Context, []llm.Message) (string, error) {
+	return e.reply, nil
+}
+
+// TestReplyStream_FallbackCancelled_CommitsNothing pins deliver-then-commit on the
+// non-streaming fallback path: if dispatch of the single reply is rejected (the
+// turn was cancelled), nothing was delivered, so NO assistant message is committed
+// (ADR-0012 zero-delivered rule).
+func TestReplyStream_FallbackCancelled_CommitsNothing(t *testing.T) {
+	r := streamReplier(t, batchEngine{reply: "The whole answer."})
+
+	err := r.ReplyStream()(context.Background(), routed("bart", "go"), func(orchestrator.Reply) error {
+		return context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReplyStream err = %v, want context.Canceled", err)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("committed assistant turn %q, want none (nothing delivered)", m.Text)
+		}
+	}
+}
+
 // delayStreamEngine streams sentences with a fixed delay BEFORE each one,
 // modelling the LLM taking perSentence to produce each sentence. Its Generate
 // (the batch path) blocks for ALL sentences before returning, so a batch reply
