@@ -112,6 +112,9 @@ func (s *CampaignServer) UpdateCampaign(
 		Name:     name,
 		System:   m.GetSystem(),
 		Language: m.GetLanguage(),
+		// tape_armed is `optional` on the wire: forward the pointer as-is so a
+		// request that omits it leaves the current opt-in unchanged (ADR-0051).
+		TapeArmed: m.TapeArmed,
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {

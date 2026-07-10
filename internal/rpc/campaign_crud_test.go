@@ -237,6 +237,9 @@ func (f *fakeCampaignStore) UpdateCampaign(_ context.Context, c storage.Campaign
 	existing.Name = c.Name
 	existing.System = c.System
 	existing.Language = c.Language
+	if c.TapeArmed != nil { // optional: nil leaves it unchanged (COALESCE semantics)
+		existing.TapeArmed = *c.TapeArmed
+	}
 	f.campaignsByID[c.ID] = existing
 	return existing, nil
 }

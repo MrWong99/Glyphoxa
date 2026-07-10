@@ -197,6 +197,7 @@ func toProtoCampaign(c storage.Campaign) *managementv1.Campaign {
 		Language:  c.Language,
 		CreatedAt: timestamppb.New(c.CreatedAt),
 		UpdatedAt: timestamppb.New(c.UpdatedAt),
+		TapeArmed: c.TapeArmed,
 	}
 	// archived_at is left unset (nil) for an active campaign so the wire "unset =
 	// active" contract holds; set only when the campaign is archived (#269).
