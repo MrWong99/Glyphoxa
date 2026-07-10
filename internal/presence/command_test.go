@@ -2,6 +2,7 @@ package presence
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,29 +11,49 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 )
 
+// replyKind names the responder method a recorded message came through, so a test can
+// assert HOW a message was delivered (a placeholder edit vs a fresh followup) directly,
+// not only via its visibility side-effect — a dangling "thinking…" placeholder is then
+// observable as "the first post-Defer message was a followup, not an edit" (#335).
+type replyKind string
+
+const (
+	kindReply    replyKind = "reply"    // a pre-Defer CreateMessage
+	kindEdit     replyKind = "edit"     // an EditOriginal of the deferred placeholder
+	kindFollowup replyKind = "followup" // a fresh CreateFollowupMessage
+)
+
 // recordedReply captures one responder call for assertions.
 type recordedReply struct {
 	content   string
 	ephemeral bool
+	kind      replyKind
 }
 
 // fakeResponder records reply/defer/followup calls instead of hitting Discord. It
-// models Discord's documented interaction-response behavior so tests catch a
-// visibility regression: after a Defer, the FIRST post-defer message (an implicit
-// followup, or an explicit editOriginal) EDITS the original placeholder and its
-// visibility is forced to the Defer's (the ephemeral flag is ignored on the
-// original-response edit); only subsequent followups create fresh messages honoring
-// their own flag. Every post-defer message is recorded in followups in order, each
-// with its EFFECTIVE visibility.
+// models Discord's CURRENT interaction-response behavior so tests catch a visibility
+// regression. Discord DEPRECATED the first-followup-edits shim (#335): a followup
+// after a Defer no longer implicitly edits the "thinking…" placeholder — it ALWAYS
+// creates a fresh message honoring its own ephemeral flag, leaving the placeholder
+// dangling. The ONLY way to resolve the deferred placeholder is now editOriginal,
+// which edits it in place at the Defer's fixed visibility (the ephemeral flag is
+// ignored on the original-response edit). The dispatch layer therefore routes the
+// FIRST post-Defer reply through editOriginal and later ones through followup. Every
+// post-defer message is recorded in followups in order, each with its EFFECTIVE
+// visibility, so a test asserts both the placeholder edit and the real followups.
 type fakeResponder struct {
-	replies          []recordedReply
-	followups        []recordedReply
-	deferred         *bool
-	originalConsumed bool
+	replies   []recordedReply
+	followups []recordedReply
+	deferred  *bool
+	// editErrs is a queue of errors returned by successive editOriginal calls (a nil
+	// entry, or an exhausted queue, is a success). It models a Discord 5xx on the
+	// original-response edit so the retry-on-failed-edit path (#335) has coverage: a
+	// failed edit records nothing and must NOT consume the placeholder.
+	editErrs []error
 }
 
 func (f *fakeResponder) reply(content string, ephemeral bool) error {
-	f.replies = append(f.replies, recordedReply{content, ephemeral})
+	f.replies = append(f.replies, recordedReply{content, ephemeral, kindReply})
 	return nil
 }
 
@@ -42,24 +63,27 @@ func (f *fakeResponder) deferResponse(ephemeral bool) error {
 }
 
 func (f *fakeResponder) followup(content string, ephemeral bool) error {
-	eff := ephemeral
-	if f.deferred != nil && !f.originalConsumed {
-		// First post-defer message edits the original placeholder: the flag is ignored
-		// and the defer's visibility is preserved.
-		eff = *f.deferred
-		f.originalConsumed = true
-	}
-	f.followups = append(f.followups, recordedReply{content, eff})
+	// Post-deprecation: a followup is always a fresh message honoring its own flag; it
+	// does NOT edit the placeholder.
+	f.followups = append(f.followups, recordedReply{content, ephemeral, kindFollowup})
 	return nil
 }
 
 func (f *fakeResponder) editOriginal(content string) error {
+	if len(f.editErrs) > 0 {
+		err := f.editErrs[0]
+		f.editErrs = f.editErrs[1:]
+		if err != nil {
+			// A failed edit records nothing: the placeholder is still unresolved.
+			return err
+		}
+	}
+	// Editing the original response keeps the Defer's visibility regardless of any flag.
 	vis := true
 	if f.deferred != nil {
 		vis = *f.deferred
 	}
-	f.originalConsumed = true
-	f.followups = append(f.followups, recordedReply{content, vis})
+	f.followups = append(f.followups, recordedReply{content, vis, kindEdit})
 	return nil
 }
 
@@ -219,6 +243,84 @@ func TestDispatchHandlerErrorRepliesGeneric(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(resp.replies[0].content), "went wrong") {
 		t.Errorf("handler-error reply = %q, want a generic failure message", resp.replies[0].content)
+	}
+}
+
+// TestDispatchFirstPostDeferReplyEditsOriginal pins issue #335: Discord deprecated the
+// first-followup-edits shim, so the dispatch layer must route the FIRST post-Defer
+// reply through EditOriginal (consuming the "thinking…" placeholder at the Defer's
+// fixed visibility) and only LATER replies through CreateFollowupMessage (fresh
+// messages honoring their own flag). It is a registry-wide routing rule, not a
+// per-command one: a plain handler that Defers ephemerally and then Replies PUBLICLY
+// twice must land its first reply as an ephemeral placeholder edit and its second as a
+// real public followup.
+func TestDispatchFirstPostDeferReplyEditsOriginal(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	reg.Register(Command{Path: "multi", Handle: func(_ context.Context, ic *Interaction) error {
+		if err := ic.Defer(true); err != nil { // ephemeral placeholder
+			return err
+		}
+		if err := ic.Reply("first"); err != nil { // public content
+			return err
+		}
+		return ic.Reply("second") // public content
+	}})
+
+	resp := &fakeResponder{}
+	reg.dispatch(context.Background(), "multi", &Interaction{guildID: testGuild, userID: strangerID, resp: resp})
+
+	if len(resp.replies) != 0 {
+		t.Fatalf("post-Defer must not CreateMessage; replies = %+v", resp.replies)
+	}
+	if len(resp.followups) != 2 {
+		t.Fatalf("want 2 post-Defer messages (a placeholder edit + a followup), got %+v", resp.followups)
+	}
+	// The FIRST reply consumes the placeholder via EditOriginal: delivered as an edit
+	// (no dangling placeholder), visibility forced to the Defer's (ephemeral), NOT the
+	// reply's public flag.
+	if resp.followups[0].content != "first" || !resp.followups[0].ephemeral || resp.followups[0].kind != kindEdit {
+		t.Errorf("first post-Defer message = %+v, want a kindEdit of \"first\" at the Defer's ephemeral visibility", resp.followups[0])
+	}
+	// The SECOND reply is a real followup honoring its own public flag.
+	if resp.followups[1].content != "second" || resp.followups[1].ephemeral || resp.followups[1].kind != kindFollowup {
+		t.Errorf("second post-Defer message = %+v, want a public kindFollowup of \"second\"", resp.followups[1])
+	}
+}
+
+// TestDispatchFailedEditOriginalRetriesOnNextReply pins the retry-on-failed-edit
+// contract (#335): the placeholder is marked consumed ONLY after EditOriginal
+// succeeds. When Discord 5xxs the first edit, the handler's error propagates and the
+// dispatch generic-error ReplyEphemeral must edit AGAIN (a second kindEdit), not fall
+// through to a followup that would strand the "thinking…" placeholder forever. A
+// mark-before-edit regression would route the retry to a followup and fail this.
+func TestDispatchFailedEditOriginalRetriesOnNextReply(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	reg.Register(Command{Path: "flaky", Handle: func(_ context.Context, ic *Interaction) error {
+		if err := ic.Defer(true); err != nil {
+			return err
+		}
+		return ic.Reply("body") // first edit attempt — Discord 5xxs it
+	}})
+
+	// One queued edit error: the first editOriginal fails, the retry succeeds.
+	resp := &fakeResponder{editErrs: []error{errors.New("discord 500")}}
+	reg.dispatch(context.Background(), "flaky", &Interaction{guildID: testGuild, userID: strangerID, resp: resp})
+
+	if len(resp.replies) != 0 {
+		t.Fatalf("post-Defer must not CreateMessage; replies = %+v", resp.replies)
+	}
+	if len(resp.followups) != 1 {
+		t.Fatalf("want exactly one recorded message (the successful retry edit), got %+v", resp.followups)
+	}
+	got := resp.followups[0]
+	if got.kind != kindEdit {
+		t.Errorf("retry after a failed edit = %s, want kindEdit (placeholder consumed on retry, not stranded via followup)", got.kind)
+	}
+	if !got.ephemeral {
+		t.Errorf("retry edit visibility = public, want the Defer's ephemeral")
+	}
+	if !strings.Contains(strings.ToLower(got.content), "went wrong") {
+		t.Errorf("retry content = %q, want the generic dispatch error reply", got.content)
 	}
 }
 

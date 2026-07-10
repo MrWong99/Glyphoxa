@@ -13,7 +13,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 )
 
 // fakeOAuthStore is an in-memory auth.OAuthStore recording what seedDevSession
@@ -145,6 +147,82 @@ func TestRequireWebEnv(t *testing.T) {
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("empty-env error %q does not name %s", err, want)
+		}
+	}
+}
+
+// TestDefaultMode pins ADR-0005 / ADR-0034: `glyphoxa` with no -mode flag boots
+// `all` (the self-host default), while an explicit -mode still wins. The default
+// flows through flag parsing exactly as main() registers it, so a regression of
+// the constant back to `voice` fails here (issue #282, AC3 first half).
+func TestDefaultMode(t *testing.T) {
+	if defaultMode != "all" {
+		t.Fatalf("defaultMode = %q, want %q (ADR-0005/0034 self-host default)", defaultMode, "all")
+	}
+}
+
+// TestVoiceEntryRequiresTarget drives the REAL voice entry path (runVoice) to
+// pin AC3's second half: the default flip to `all` must not relax voice mode's
+// -guild/-channel requirement. With a token present but a missing guild/channel,
+// runVoice returns the target error before any DB/network work; with both
+// present it proceeds PAST that gate and fails later for a different reason (no
+// DB configured) — proving the gate itself passed, not the whole boot.
+func TestVoiceEntryRequiresTarget(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	metrics := observe.NewPrometheusRecorder()
+	t.Setenv("DISCORD_BOT_TOKEN", "test-token")
+	// Force the no-DB early return for the both-present case so runVoice never
+	// dials Postgres or the network from this unit test.
+	t.Setenv("GLYPHOXA_DATABASE_URL", "")
+	t.Setenv("DATABASE_URL", "")
+
+	const targetMsg = "-guild and -channel are required"
+	cases := []struct {
+		name           string
+		guild, channel string
+		wantTargetErr  bool
+	}{
+		{"missing both", "", "", true},
+		{"missing channel", "g", "", true},
+		{"missing guild", "", "c", true},
+		{"both present", "g", "c", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// metricsAddr "" keeps runVoice off any listener; the target gate is
+			// reached before that anyway.
+			err := runVoice(log, wirenpc.Config{Guild: c.guild, Channel: c.channel}, false, metrics, "")
+			targetErr := err != nil && strings.Contains(err.Error(), targetMsg)
+			if c.wantTargetErr && !targetErr {
+				t.Errorf("runVoice(guild=%q, channel=%q) err = %v, want the %q target error", c.guild, c.channel, err, targetMsg)
+			}
+			if !c.wantTargetErr && targetErr {
+				t.Errorf("runVoice(guild=%q, channel=%q) returned the target error despite both flags set: %v", c.guild, c.channel, err)
+			}
+		})
+	}
+}
+
+// TestRequireVoiceTarget pins the target-flag predicate directly: voice mode
+// demands BOTH -guild and -channel. Each missing half is an error; both present
+// passes.
+func TestRequireVoiceTarget(t *testing.T) {
+	cases := []struct {
+		guild, channel string
+		wantErr        bool
+	}{
+		{"g", "c", false},
+		{"", "c", true},
+		{"g", "", true},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		err := requireVoiceTarget(wirenpc.Config{Guild: c.guild, Channel: c.channel})
+		if c.wantErr && err == nil {
+			t.Errorf("requireVoiceTarget(guild=%q, channel=%q) = nil, want an error", c.guild, c.channel)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("requireVoiceTarget(guild=%q, channel=%q) = %v, want nil", c.guild, c.channel, err)
 		}
 	}
 }

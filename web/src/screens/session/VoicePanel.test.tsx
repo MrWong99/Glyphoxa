@@ -59,7 +59,10 @@ function panelTransport(opts: { active: boolean; muted?: string[] }) {
         return create(SetAgentMuteResponseSchema, { mutedAgentIds: muted });
       },
       setAllMute: (req) => {
-        muted = req.muted ? ROSTER.map((a) => a.id) : [];
+        // Mirrors the server contract: mute-all narrows to the VOICED Character NPCs
+        // — the Address-Only Butler is never voiced, so it never enters the muted set
+        // (ADR-0009, internal/session voicedAgents).
+        muted = req.muted ? ROSTER.filter((a) => a.role !== "butler").map((a) => a.id) : [];
         return create(SetAllMuteResponseSchema, { mutedAgentIds: muted });
       },
     });
@@ -102,7 +105,9 @@ describe("VoicePanel (#211)", () => {
     expect(screen.getByText("Butler")).toBeInTheDocument();
     expect(screen.getByText("Bart")).toBeInTheDocument();
     expect(screen.getByText("Greta")).toBeInTheDocument();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("3 of 3 voicing");
+    // The count is over the VOICEABLE Character NPCs only; the Address-Only Butler
+    // is never voiced, so it is not in the denominator (2, not 3).
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 2 voicing");
   });
 
   it("disables every control when no Voice Session is live", async () => {
@@ -112,7 +117,7 @@ describe("VoicePanel (#211)", () => {
     // Mute-all + every per-Agent toggle disabled; count reads 0 while idle.
     expect(screen.getByRole("button", { name: /unmute all/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /mute bart/i })).toBeDisabled();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 3 voicing");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 voicing");
   });
 
   it("mutes an Agent on click, dimming its row and dropping the count", async () => {
@@ -126,9 +131,20 @@ describe("VoicePanel (#211)", () => {
     await waitFor(() => expect(bartRow()).toHaveAttribute("data-muted"));
     expect(within(bartRow()).getByText("Muted")).toBeInTheDocument();
     // The mutation patched the shared cache, so the count reflects the mute.
-    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 3 voicing"));
+    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 voicing"));
     // The toggle now offers to unmute Bart.
     expect(screen.getByRole("button", { name: /unmute bart/i })).toBeInTheDocument();
+  });
+
+  it("renders the Address-Only Butler row with no mute toggle", async () => {
+    renderPanel({ active: true });
+    await screen.findByText("Butler");
+    const butlerRow = screen.getByText("Butler").closest('[data-testid="voice-row"]') as HTMLElement;
+    // The Butler is never voiced, so its row carries neither a Mute nor an Unmute
+    // control (no swallowed CodeNotFound) and reads as address-only, not "voicing".
+    expect(within(butlerRow).queryByRole("button")).toBeNull();
+    expect(within(butlerRow).getByText(/address-only/i)).toBeInTheDocument();
+    expect(within(butlerRow).queryByText("Voicing")).toBeNull();
   });
 
   it("flips the mute-all button label between Mute all and Unmute all", async () => {
@@ -141,7 +157,7 @@ describe("VoicePanel (#211)", () => {
 
     // Now everyone is muted → Unmute all.
     expect(await screen.findByRole("button", { name: /unmute all/i })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 3 voicing"));
+    await waitFor(() => expect(screen.getByTestId("voicing-count")).toHaveTextContent("0 of 2 voicing"));
   });
 
   it("flips a row from an SSE mute frame without a reload (AC5)", async () => {
@@ -162,6 +178,6 @@ describe("VoicePanel (#211)", () => {
 
     await waitFor(() => expect(bartRow()).toHaveAttribute("data-muted"));
     expect(within(bartRow()).getByText("Muted")).toBeInTheDocument();
-    expect(screen.getByTestId("voicing-count")).toHaveTextContent("2 of 3 voicing");
+    expect(screen.getByTestId("voicing-count")).toHaveTextContent("1 of 2 voicing");
   });
 });

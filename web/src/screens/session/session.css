@@ -8,7 +8,13 @@
  * rail — that stacks on a narrow viewport. */
 .gx-session {
   padding: var(--spacing-xl);
-  max-width: var(--content-lg);
+  /* (#338) content-lg (928px) minus the 308px Voice panel left the transcript a
+   * ~580px center column with wide empty gutters on large monitors. Widen the
+   * shell to content-xl (1152px) — the Campaign screen's reference — so the
+   * transcript column grows to ~800px. The max-width still centers, and the
+   * <=900px stack rule below is untouched, so the mobile/drawer layout (#88) is
+   * unaffected. */
+  max-width: var(--content-xl);
   margin: 0 auto;
   display: flex;
   align-items: flex-start;

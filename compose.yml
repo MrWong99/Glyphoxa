@@ -1,0 +1,70 @@
+# Glyphoxa — self-host on-ramp (ADR-0034, issue #282).
+#
+# The zero-to-running path: `docker compose up --build` stands up a pgvector
+# Postgres and the single Glyphoxa image in the default `-mode all` (web + the
+# in-process voice loop). `all` mode auto-applies the embedded migrations at
+# startup under the advisory lock (ADR-0031), so there is NO separate migrate
+# step — the app reaches the login screen against a migrated DB on its own.
+#
+# BEFORE the first build (gen/ is gitignored and the SPA bundle is context-fed,
+# ADR-0034), on the host:
+#   cp .env.example .env && $EDITOR .env   # fill GLYPHOXA_SECRET, DISCORD_OAUTH_*, GLYPHOXA_OPERATOR_IDS
+#   make proto                             # buf generate → gen/ (needed in the build context)
+#   (cd web && npm ci && npm run build)    # Vite bundle → internal/spa/dist (else a blank placeholder page)
+#   docker compose up --build
+# Then open http://127.0.0.1:8080 and sign in with Discord.
+#
+# Secrets come from `.env` (shell-format `export NAME='value'`, gitignored) via
+# env_file — Compose strips the `export` prefix and quotes. The DB connection is
+# set in `environment` (which overrides env_file), so it points at the `postgres`
+# service here rather than the 127.0.0.1 DSN a local `.env` uses.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: glyphoxa
+      POSTGRES_USER: glyphoxa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-glyphoxa}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app depends_on this being healthy; all-mode auto-migrate then opens
+      # the DB knowing Postgres already accepts connections.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  glyphoxa:
+    build:
+      context: .
+    # The image's default CMD is `-mode all` (Dockerfile) — the self-host default
+    # (ADR-0005/0034). Override the whole command to run another Mode, e.g.
+    #   command: ["-mode", "voice", "-guild", "...", "-channel", "..."]
+    env_file:
+      # Provider keys + the OAuth/allowlist secrets. Copy .env.example → .env and
+      # fill it in first. GLYPHOXA_DATABASE_URL from .env is intentionally
+      # overridden below (it points at 127.0.0.1 for a bare-metal run).
+      - .env
+    environment:
+      # Point the app at the in-compose Postgres service (overrides the .env DSN).
+      # NOTE: POSTGRES_PASSWORD is spliced RAW into this URL, so a value
+      # containing '@', ':', '/', or '?' would corrupt it — keep the password
+      # URL-safe (alphanumerics), or URL-encode it here if you must use those.
+      # GLYPHOXA_LOG_FORMAT + the provider/OAuth/allowlist vars come from .env
+      # (env_file above); nothing else needs overriding here.
+      GLYPHOXA_DATABASE_URL: postgres://glyphoxa:${POSTGRES_PASSWORD:-glyphoxa}@postgres:5432/glyphoxa?sslmode=disable
+    ports:
+      # Loopback-only by default; matches the DISCORD_OAUTH_REDIRECT_URL default
+      # (http://127.0.0.1:8080/...). Change the host side to expose it on a LAN,
+      # and update the OAuth redirect to match.
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

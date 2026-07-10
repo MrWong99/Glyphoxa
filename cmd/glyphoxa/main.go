@@ -41,6 +41,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
+// defaultMode is the process Mode when no -mode flag is given. Per ADR-0005 and
+// ADR-0034 the self-host default is `all` (web + in-process voice) with startup
+// auto-migrate: the operator's whole story is "point it at Postgres + provider
+// keys, start it." An explicit -mode voice|web still overrides it (issue #282).
+const defaultMode = "all"
+
 func main() {
 	// The Prometheus adapter is built first so its DAVE-decrypt counter hook can
 	// feed the slog filter: A1 suppresses the benign disgo noise from the console
@@ -58,10 +64,10 @@ func main() {
 
 	// `migrate` and `seed` are subcommands with their own argument grammar,
 	// dispatched before flag parsing. `voice`, `web`, and `all` are the Modes
-	// (ADR-0005); the broader root-command surface still belongs to the
-	// control-plane task (#6). NOTE: ADR-0005's eventual default Mode is `all`,
-	// but the binary defaults `-mode` to `voice` for the MVP slices and migrates
-	// the default to `all` with #6 — a recorded choice, not silent drift.
+	// (ADR-0005). The default Mode is now `all` (ADR-0005/ADR-0034 self-host
+	// target, issue #282): a bare `glyphoxa` boots web + the in-process voice
+	// loop with startup auto-migrate. An explicit -mode voice|web still wins, and
+	// voice mode continues to demand -guild/-channel (requireVoiceTarget).
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "migrate":
@@ -79,7 +85,7 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "voice", "process mode: voice|web|all")
+	mode := flag.String("mode", defaultMode, "process mode: voice|web|all")
 	var cfg wirenpc.Config
 	flag.StringVar(&cfg.Guild, "guild", "", "Discord guild (server) snowflake ID")
 	flag.StringVar(&cfg.Channel, "channel", "", "Discord voice channel snowflake ID")
@@ -134,8 +140,8 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	if cfg.Token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set")
 	}
-	if cfg.Guild == "" || cfg.Channel == "" {
-		return fmt.Errorf("-guild and -channel are required for voice mode")
+	if err := requireVoiceTarget(cfg); err != nil {
+		return err
 	}
 	cfg.Logger = log
 	// Inject the recorder into the pipeline; without this the live Manager + stage
@@ -214,6 +220,38 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	return wirenpc.RunFromDB(ctx, cfg, pool, cipher)
 }
 
+// ensureSchemaReady runs the boot schema preflight for the web/all entrypoint
+// (ADR-0031). In `all` Mode (withVoice) it auto-applies the embedded migrations
+// under the advisory lock — the self-host "start it and go" story (ADR-0034). A
+// web-only replica (withVoice false) never migrates: it only verifies the schema
+// is current and returns the actionable `migrate up` error if behind, so N web
+// replicas can never race the migration and a behind DB fails the boot loudly
+// instead of surfacing raw "relation does not exist" at first query.
+func ensureSchemaReady(ctx context.Context, dsn string, withVoice bool) error {
+	if withVoice {
+		return autoMigrate(ctx, dsn)
+	}
+	// Web-only: verify, never migrate. The wrap keeps a stable checkpoint marker
+	// while preserving the storage layer's verbatim actionable `migrate up`
+	// message via %w.
+	if err := wirenpc.EnsureSchemaCurrent(ctx, dsn); err != nil {
+		return fmt.Errorf("schema preflight: %w", err)
+	}
+	return nil
+}
+
+// requireVoiceTarget enforces that explicit voice mode names BOTH a Discord
+// guild and a voice channel (issue #282, AC3): the default Mode flipped to `all`,
+// but a standalone voice node still has no way to pick a channel on its own, so
+// -guild and -channel remain mandatory. `all` mode sources them per-session from
+// the saved deployment config instead and never calls this.
+func requireVoiceTarget(cfg wirenpc.Config) error {
+	if cfg.Guild == "" || cfg.Channel == "" {
+		return fmt.Errorf("-guild and -channel are required for voice mode")
+	}
+	return nil
+}
+
 // standaloneCampaignResolver is the narrow store surface the standalone voice
 // node's Active-Campaign resolution reads (#323): the single operator's durable
 // /glyphoxa use selection, and the most-recently-created campaign fallback.
@@ -280,6 +318,18 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Boot schema preflight (ADR-0031/ADR-0034): the self-host default `all` Mode
+	// applies pending migrations at boot under the advisory lock, so a bare
+	// `glyphoxa -mode all` — what `docker compose up` and `systemctl start` run —
+	// reaches a current schema with no manual `migrate up` step (issue #282). A
+	// web-only replica does NOT auto-migrate: it verifies the schema is current and
+	// fails fast with an actionable message if behind, so N web replicas never race
+	// the migration — the migrate hook / all-Mode owns it. Runs BEFORE the boot
+	// sweep + any query below, which all need the schema present.
+	if err := ensureSchemaReady(ctx, dsn, withVoice); err != nil {
+		return fmt.Errorf("web: %w", err)
+	}
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

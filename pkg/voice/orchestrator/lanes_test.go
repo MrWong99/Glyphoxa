@@ -1,6 +1,7 @@
 package orchestrator_test
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -550,32 +552,180 @@ func TestSegmenter_FlushDrainsAllLanes(t *testing.T) {
 	}
 }
 
-// TestSegmenter_TeardownRaceWithFeed is finding 6: Bind's teardown runs concurrently
-// with an audio loop still calling Feed. Lane cancel/close funcs are captured and
-// nulled UNDER mu (and the lane dropped) in both teardown and reap, so no lane is
-// double-closed and no field is touched unlocked. Run under `go test -race`.
+// TestSegmenter_TeardownRaceWithFeed is finding 6 + #343: Bind's teardown runs
+// concurrently with an audio loop still calling Feed. Lane cancel/close funcs are
+// captured and nulled UNDER mu (and the lane dropped) in both teardown and reap, so no
+// lane is double-closed and no field is touched unlocked. Beyond the data-race, the
+// teardown must set a terminal `closed` flag FIRST (same defect class as the fixed #157
+// Manager closed flag): once teardown has begun, a still-running Feed must NOT resurrect
+// a reaped lane — laneFor sees closed and funnels to the default lane, so every
+// factory-built lane's ONNX session is closed exactly once (creates == closes) and no
+// non-default lane survives (LaneCount == 1). Run under `go test -race`.
 func TestSegmenter_TeardownRaceWithFeed(t *testing.T) {
 	bus := voiceevent.NewBus()
 	rec := &recordingRecognizer{}
+
+	// Count factory-built VADs created vs closed: a resurrected lane created AFTER
+	// teardown would never be closed (leaked ONNX inferencer), so creates > closes.
+	var cmu sync.Mutex
+	creates, closes := 0, 0
+	factory := orchestrator.LaneVADFactory(func() (*orchestrator.VAD, func(), error) {
+		cmu.Lock()
+		creates++
+		cmu.Unlock()
+		v := orchestrator.NewVAD(bus, &contentVAD{})
+		return v, func() { cmu.Lock(); closes++; cmu.Unlock() }, nil
+	})
+	seg := orchestrator.NewSegmenter(orchestrator.NewVAD(bus, &contentVAD{}), orchestrator.NewSTT(bus, rec))
+	seg.SetLaneVADFactory(factory)
+	cancel := seg.Bind(t.Context(), bus)
+
+	// The ONE audio loop drives every Process call (Process is single-caller by
+	// contract — two goroutines driving a lane VAD would be a spurious data race, not
+	// #343). Determinism without a second caller: the loop closes `opened` once both
+	// lanes exist and it is mid-flight (so cancel is guaranteed to race a running Feed),
+	// then, once `torn` signals teardown has been requested, it runs a FIXED batch of
+	// post-teardown Feeds — guaranteed to exercise resurrection, unlike a bare Sleep
+	// that can lose to the loop finishing first (false green on the old code).
+	opened := make(chan struct{})
+	torn := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Voiced-only frames keep every lane listening (no flush → no jobs send here);
+		// the point is the concurrent lane map + close-func access, which must stay
+		// mu-guarded, AND that Feed does not re-open a lane once teardown flipped closed.
+		for i := 0; ; i++ {
+			if i == 250 {
+				close(opened)
+			}
+			_ = seg.Process(laneFrame(t, "A", 100))
+			_ = seg.Process(laneFrame(t, "B", 200))
+			select {
+			case <-torn:
+				// Teardown requested: do a fixed batch of GUARANTEED post-teardown Feeds,
+				// which must funnel to the default lane and open no new lane, then stop.
+				for j := 0; j < 100; j++ {
+					_ = seg.Process(laneFrame(t, "A", 100))
+					_ = seg.Process(laneFrame(t, "B", 200))
+				}
+				return
+			default:
+			}
+		}
+	}()
+	<-opened
+	cancel()    // teardown while Feed is still running (concurrent map/close-func access)
+	close(torn) // release the loop into its guaranteed post-teardown batch
+	wg.Wait()
+
+	if got := seg.LaneCount(); got != 1 {
+		t.Errorf("lane count after teardown = %d, want 1 (a Feed after teardown resurrected a reaped lane)", got)
+	}
+	cmu.Lock()
+	gotCreates, gotCloses := creates, closes
+	cmu.Unlock()
+	if gotCreates != gotCloses {
+		t.Errorf("lane VADs created = %d but closed = %d — a resurrected lane leaked its ONNX session", gotCreates, gotCloses)
+	}
+}
+
+// gateRecognizer blocks the transcription worker inside Transcribe until the test
+// cancels the bind ctx. With the worker stalled, a flooding feeder fills the buffered
+// jobs channel and then PARKS on its send — so a live `jobs <- job` is deterministically
+// in flight when teardown runs (the exact state that makes #343 residual 2 observable).
+// It closes `entered` on the first call so the test knows the worker is stalled; every
+// later call (the queue draining after ctx cancel) returns at once.
+type gateRecognizer struct {
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (r *gateRecognizer) Transcribe(ctx context.Context, _ []audio.Frame) (stt.Transcript, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-ctx.Done()
+	return stt.Transcript{}, ctx.Err()
+}
+
+// TestSegmenter_TeardownRaceWithFlush is #343 residual 2: a Feed that FLUSHES (an
+// unvoiced frame ends an utterance → dispatchTranscription enqueues a job) runs
+// concurrently with Bind's teardown. A dispatch reads the live jobs channel under mu,
+// unlocks, then sends OUTSIDE the lock; if teardown closes the channel in that window the
+// send panics ("send on closed channel"). The gate recognizer stalls the worker so the
+// feeder is DETERMINISTICALLY parked on a send when teardown runs: on the broken guard
+// the parked send panics on close(jobs); the pending-senders barrier (senders WaitGroup
+// drained before close) instead lets that send finish first. Releasing the bind ctx then
+// drains the queue, so the barrier completes rather than deadlocking. Run under `-race`.
+func TestSegmenter_TeardownRaceWithFlush(t *testing.T) {
+	bus := voiceevent.NewBus()
+	rec := &gateRecognizer{entered: make(chan struct{})}
 	closes := 0
 	factory, _ := laneVADFactory(bus, &closes, nil)
 	seg := orchestrator.NewSegmenter(orchestrator.NewVAD(bus, &contentVAD{}), orchestrator.NewSTT(bus, rec))
 	seg.SetLaneVADFactory(factory)
-	cancel := seg.Bind(t.Context(), bus)
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	cancel := seg.Bind(ctx, bus)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// Voiced-only frames keep every lane listening (no flush → no jobs send that
-		// could race the teardown's close(jobs)); the point is the concurrent lane
-		// map + close-func access, which must stay mu-guarded.
-		for i := 0; i < 500; i++ {
+		// voiced then unvoiced per iteration: the unvoiced frame ends the utterance and
+		// drives dispatchTranscription → a jobs send. The worker is stalled, so after the
+		// buffered queue (64 deep) fills this send parks — live when teardown closes it.
+		for i := 0; i < 200; i++ {
 			_ = seg.Process(laneFrame(t, "A", 100))
-			_ = seg.Process(laneFrame(t, "B", 200))
+			_ = seg.Process(laneFrame(t, "A", 0))
 		}
 	}()
-	time.Sleep(time.Millisecond) // let the loop open the lanes
-	cancel()                     // teardown while Feed is still running
+
+	<-rec.entered                     // the worker is stalled on the first job
+	time.Sleep(20 * time.Millisecond) // the feeder floods, fills the queue, and parks on a send
+
+	teardownDone := make(chan struct{})
+	go func() {
+		defer close(teardownDone)
+		cancel() // broken guard: close(jobs) panics the parked send; barrier: waits it out
+	}()
+	time.Sleep(20 * time.Millisecond) // let teardown reach close(jobs) / the senders barrier
+	ctxCancel()                       // release the worker → queue drains → the parked send completes
 	wg.Wait()
+	<-teardownDone
+}
+
+// TestSegmenter_ReBindOpensLanesAgain is #343 finding 3: Bind's teardown flips the
+// terminal `closed` flag, so Bind must CLEAR it (alongside the fresh jobs/ctx/bus) or a
+// re-Bound Segmenter is silently crippled — every frame funnels to the default lane and
+// STT runs inline on the audio loop. After a full Bind → teardown → Bind cycle a new
+// speaker must still open its own Speaker Lane.
+func TestSegmenter_ReBindOpensLanesAgain(t *testing.T) {
+	bus := voiceevent.NewBus()
+	var finals []voiceevent.STTFinal
+	voiceevent.On(bus, func(e voiceevent.STTFinal) { finals = append(finals, e) })
+	rec := &recordingRecognizer{}
+	closes := 0
+	factory, _ := laneVADFactory(bus, &closes, nil)
+	seg := orchestrator.NewSegmenter(orchestrator.NewVAD(bus, &contentVAD{}), orchestrator.NewSTT(bus, rec))
+	seg.SetLaneVADFactory(factory)
+
+	// First lifetime: bind then tear all the way down (flips closed).
+	cancel := seg.Bind(t.Context(), bus)
+	cancel()
+
+	// Second lifetime: a re-Bound segmenter must behave like a fresh one.
+	t.Cleanup(seg.Bind(t.Context(), bus))
+	processFrames(t, seg, laneFrame(t, "A", 100), laneFrame(t, "A", 0))
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if got := seg.LaneCount(); got != 2 {
+		t.Errorf("lane count after re-Bind = %d, want 2 (default + A) — closed was not reset, so A funneled to default", got)
+	}
+	if len(finals) != 1 || finals[0].SpeakerID != "A" {
+		t.Errorf("STTFinals = %+v, want one attributed to A (re-Bound segmenter opened A's lane)", finals)
+	}
 }

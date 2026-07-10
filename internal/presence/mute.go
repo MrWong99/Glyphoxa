@@ -23,7 +23,9 @@ type SessionMuter interface {
 
 // AgentLister is the Active Campaign roster read the mute autocomplete + resolver
 // need (#211): the Butler + Character NPCs, from the agents table (not the voiced
-// wirenpc Roster, which is unreachable here). *storage.Store satisfies it.
+// wirenpc Roster, which is unreachable here). *storage.Store satisfies it. The
+// mute surface narrows this to the voiced Character NPCs (see voiced): the
+// Address-Only Butler is listed here but is never offered as a mute target.
 type AgentLister interface {
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 }
@@ -33,8 +35,10 @@ type AgentLister interface {
 const maxAutocompleteChoices = 25
 
 // MuteCommand builds /glyphoxa mute <npc> (#211, ADR-0010 GM-only): it mutes one
-// Agent of the Active Campaign in the live Voice Session. The option is named
-// `npc` for table-facing familiarity but accepts ANY Agent (the Butler included).
+// voiced Agent of the Active Campaign in the live Voice Session. The option is
+// named `npc` for table-facing familiarity; its autocomplete + resolver offer the
+// voiced Character NPCs only — the Address-Only Butler (never voiced,
+// ADR-0009/ADR-0024) is excluded, since muting it would silence nothing.
 // Its autocomplete offers each Agent (Name shown, Agent UUID as the value); the
 // handler resolves a picked UUID against the roster, or a typed free-text name
 // (then aliases, case-insensitive), and replies with a clear ephemeral error on
@@ -65,7 +69,7 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			_, focused := ac.Focused()
 			prefix := strings.ToLower(strings.TrimSpace(focused))
 			choices := make([]discord.AutocompleteChoice, 0, len(roster))
-			for _, a := range roster {
+			for _, a := range voiced(roster) {
 				if prefix != "" && !strings.HasPrefix(strings.ToLower(a.Name), prefix) {
 					continue
 				}
@@ -86,7 +90,7 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 			if err != nil {
 				return fmt.Errorf("presence: list agents for mute: %w", err) // unexpected → generic reply
 			}
-			agent, found, ambiguous := resolveAgent(roster, input)
+			agent, found, ambiguous := resolveAgent(voiced(roster), input)
 			if ambiguous {
 				return ic.ReplyEphemeral(fmt.Sprintf("%q matches more than one Agent — pick one from the list.", strings.TrimSpace(input)))
 			}
@@ -106,8 +110,9 @@ func MuteCommand(mgr SessionMuter, agents AgentLister) Command {
 }
 
 // MuteAllCommand builds /glyphoxa muteall (#211, ADR-0010 GM-only): it mutes every
-// Agent of the Active Campaign in the live Voice Session, refused ephemerally when
-// no Voice Session is active. Un-muting everyone is the web panel's job.
+// voiced Agent of the Active Campaign (the Character NPCs; the Address-Only Butler
+// is excluded) in the live Voice Session, refused ephemerally when no Voice
+// Session is active. Un-muting everyone is the web panel's job.
 func MuteAllCommand(mgr SessionMuter) Command {
 	return Command{
 		Path:        "glyphoxa muteall",
@@ -167,4 +172,20 @@ func resolveAgent(roster []storage.Agent, input string) (agent storage.Agent, fo
 	default:
 		return storage.Agent{}, false, true
 	}
+}
+
+// voiced drops the Address-Only Butler from a campaign roster, leaving the Agents
+// a GM can actually mute. The Butler (agent_role='butler', ADR-0009/ADR-0024) is
+// never in the voiced Cast, so muting it would be an inert control — it is neither
+// offered by the autocomplete nor resolvable by name/UUID here. The manager
+// rejects it too (see session.SetAgentMute); this just keeps the /glyphoxa surface
+// from ever presenting a mute target that does nothing.
+func voiced(agents []storage.Agent) []storage.Agent {
+	out := make([]storage.Agent, 0, len(agents))
+	for _, a := range agents {
+		if a.Role != storage.AgentRoleButler {
+			out = append(out, a)
+		}
+	}
+	return out
 }

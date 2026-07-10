@@ -53,14 +53,16 @@ func TestRunWebPreflightWiring(t *testing.T) {
 	}
 }
 
-// TestRunWebSessionSweepWiring pins the #184 boot-time revocation sweep into
-// runWeb: with a fully-configured gate and an unreachable database, the boot
-// must fail INSIDE the sweep (it is the first DB touch — the pool dials
-// lazily), proving the wiring exists; deleting the sweep block would surface a
-// different error. Dev mode must skip the sweep entirely (its first DB touch is
-// the dev-session seed instead). DB-free: the DSN points at a closed loopback
-// port.
-func TestRunWebSessionSweepWiring(t *testing.T) {
+// TestRunWebSchemaPreflightWiring pins the ADR-0031/ADR-0034 schema preflight
+// into runWeb as the FIRST DB touch of a web/all boot (issue #282, finding #1).
+// A web-only replica (withVoice=false) must verify the schema BEFORE the #184
+// session sweep, so a behind/unreachable DB fails fast at the preflight with the
+// actionable message rather than surfacing a raw "relation does not exist" from
+// a later query. With a fully-configured gate and an unreachable database the
+// boot fails at "schema preflight"; deleting the preflight block would push the
+// first error into the sweep instead. DB-free: the DSN points at a closed
+// loopback port.
+func TestRunWebSchemaPreflightWiring(t *testing.T) {
 	t.Setenv("DISCORD_OAUTH_CLIENT_ID", "cid")
 	t.Setenv("DISCORD_OAUTH_CLIENT_SECRET", "secret")
 	t.Setenv("DISCORD_OAUTH_REDIRECT_URL", "https://x/cb")
@@ -74,14 +76,18 @@ func TestRunWebSessionSweepWiring(t *testing.T) {
 
 	err := runWeb(log, wirenpc.Config{}, metrics, "127.0.0.1:0", "", false)
 	if err == nil {
-		t.Fatal("runWeb with an unreachable DB returned nil, want the sweep error")
+		t.Fatal("runWeb with an unreachable DB returned nil, want the schema-preflight error")
 	}
-	if !strings.Contains(err.Error(), "revoke sessions outside the operator allowlist") {
-		t.Errorf("boot error = %q, want it to fail inside the #184 session sweep", err)
+	if !strings.Contains(err.Error(), "schema preflight") {
+		t.Errorf("boot error = %q, want it to fail at the schema preflight (the first DB touch, before the #184 sweep)", err)
+	}
+	// The preflight is a strict fail-fast: the sweep must NOT have run yet.
+	if strings.Contains(err.Error(), "revoke sessions outside the operator allowlist") {
+		t.Errorf("boot error = %q reached the #184 sweep; the schema preflight must fail first", err)
 	}
 
-	// Dev mode has no allowlist: the sweep is skipped and the first DB touch is
-	// the dev-session seed.
+	// Dev mode still runs the preflight (the throwaway DB needs a schema too); the
+	// point is only that the boot never reaches the allowlist sweep.
 	t.Setenv("GLYPHOXA_DEV_MODE", "1")
 	err = runWeb(log, wirenpc.Config{}, metrics, "127.0.0.1:0", "", false)
 	if err == nil {

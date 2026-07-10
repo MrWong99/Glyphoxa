@@ -101,6 +101,40 @@ describe("CampaignRowActions", () => {
     await waitFor(() => expect(calls.unarchiveCampaign).toBe(1));
   });
 
+  it("renders the open menu outside the row wrapper so the scrollable list can't clip it", () => {
+    // The row sits inside .gx-campaign-switcher__list (overflow-y:auto), so an
+    // in-flow absolute menu gets clipped near the bottom of the list (#338). The
+    // menu must portal out of the anchor's subtree to escape that overflow.
+    renderActions({ id: "a", name: "Alpha Quest", archived: true });
+    openMenu();
+    const menu = screen.getByRole("menu");
+    const wrapper = document.querySelector(".gx-campaign-row-actions");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.contains(menu)).toBe(false);
+  });
+
+  it("moves focus into the menu on open and back to the trigger on close (#338)", () => {
+    // Portalled to document.body, the menu sits at the end of the tab order, so
+    // Tab from the trigger would skip it. Focus must land on the first item on
+    // open and return to the trigger on dismissal.
+    renderActions({ id: "a", name: "Alpha Quest", archived: false });
+    const trigger = screen.getByRole("button", { name: /Campaign actions/i });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menuitem", { name: /^Archive$/ })).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("closes when the surrounding list scrolls so it can't float over unrelated UI (#338)", () => {
+    renderActions({ id: "a", name: "Alpha Quest", archived: false });
+    openMenu();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.scroll(window);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("delete requires the re-typed campaign name before it fires", async () => {
     const calls: Record<string, number> = {};
     renderActions({ id: "a", name: "Lost Mine", archived: true }, calls);

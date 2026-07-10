@@ -257,8 +257,9 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 		if err := butler.SpeakAsButler(ctx, text); err != nil {
 			return fmt.Errorf("presence: voice recap via butler: %w", err)
 		}
-		// The confirmation matches the ephemeral placeholder, so a plain Followup (which
-		// edits the placeholder in place) is exactly right.
+		// The confirmation is GM-only, matching the ephemeral placeholder. As the first
+		// post-Defer reply it lands as the placeholder edit (registry-wide rule, #335) at
+		// the Defer's ephemeral visibility — exactly right.
 		return ic.Followup("Recap voiced in the voice channel.", true)
 	}
 
@@ -270,13 +271,13 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 	parts := splitFollowups(body, discordMessageLimit)
 
 	if publicReply {
-		// The placeholder is ephemeral (we always Defer ephemerally). A Followup posted
-		// straight away would EDIT that placeholder — Discord IGNORES the ephemeral flag
-		// on the original-response edit, so the recap would land ephemeral and the
-		// channel would see nothing. Consume the placeholder FIRST with a short ephemeral
-		// note; THEN each Followup creates a real PUBLIC message honoring its flag
-		// (finding 1, per Discord's receiving-and-responding docs).
-		if err := ic.EditOriginal("Recap posted below."); err != nil {
+		// The placeholder is ephemeral (we always Defer ephemerally) and a public recap
+		// must not land in it — Discord fixes the original-response edit to the Defer's
+		// visibility, so the channel would see nothing. Consume the placeholder FIRST
+		// with a short GM-only note, THEN post the recap as real PUBLIC followups. The
+		// registry-wide post-Defer rule (#335) makes the first reply the placeholder edit
+		// on its own, so this is a plain ReplyEphemeral — no manual EditOriginal.
+		if err := ic.ReplyEphemeral("Recap posted below."); err != nil {
 			return err
 		}
 		for _, part := range parts {
@@ -287,8 +288,9 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 		return nil
 	}
 
-	// Ephemeral delivery: the placeholder is already ephemeral, so the first Followup
-	// edits it (same visibility) and the rest are ephemeral messages — all GM-only.
+	// Ephemeral delivery: the placeholder is already ephemeral, so the first post-Defer
+	// message resolves it via EditOriginal (registry-wide rule, #335) and the rest are
+	// ephemeral followups — all GM-only, same visibility.
 	for _, part := range parts {
 		if err := ic.Followup(part, true); err != nil {
 			return err
