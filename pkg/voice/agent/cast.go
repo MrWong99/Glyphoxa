@@ -129,3 +129,28 @@ func (c *Cast) Speak(ctx context.Context, e voiceevent.AddressRouted, draft stri
 	}
 	return r.SpeakDraft(ctx, e.Text, draft, dispatch)
 }
+
+// React implements [orchestrator.CrossTalker]: it produces the addressed Agent's
+// would-be Cross-talk Reaction to the Lead's delivered line WITHOUT mutating
+// anything (the speculative half of the Reaction phase, ADR-0025/#302), by
+// delegating to that member's [Replier.React]. An unknown (or removed) Agent yields
+// "", nil — the "no one reacts" signal the coordinator reads as a decline.
+func (c *Cast) React(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText string) (string, error) {
+	r := c.lookup(e.Target.AgentID)
+	if r == nil {
+		return "", nil // no Agent reacts for this route
+	}
+	return r.React(ctx, e.Text, leadName, leadText)
+}
+
+// SpeakReaction implements [orchestrator.CrossTalker]: it speaks the addressed
+// Agent's pre-generated Reaction as its own sub-turn (committing the delivered text
+// to that member's history, ADR-0012), by delegating to [Replier.SpeakReaction]. An
+// unknown Agent dispatches nothing and returns "", nil.
+func (c *Cast) SpeakReaction(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (string, error) {
+	r := c.lookup(e.Target.AgentID)
+	if r == nil {
+		return "", nil // no Agent reacts for this route
+	}
+	return r.SpeakReaction(ctx, e.Text, leadName, leadText, reaction, dispatch)
+}
