@@ -213,3 +213,68 @@ func TestSweepExpiredJobs(t *testing.T) {
 		t.Error("belowMax dead, want left retryable")
 	}
 }
+
+// TestTerminalWritesFencedByClaimGeneration proves the claim-generation fence: a
+// stale worker A (lease expired) whose job was reclaimed and completed by worker B
+// cannot flip the terminal state back. A's late CompleteJob/RetryJob/MarkJobDead —
+// carrying A's attempts snapshot — match no row (ErrNotFound) and leave the job
+// exactly as B left it, so a done/dead job never silently re-runs (ADR-0049).
+func TestTerminalWritesFencedByClaimGeneration(t *testing.T) {
+	st := migrateForJobs(t)
+	ctx := context.Background()
+
+	id, err := st.EnqueueJob(ctx, "test.echo", []byte(`{}`), 5)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	// Worker A claims (attempts=1) with a tiny lease, then stalls.
+	jobA, err := st.ClaimJob(ctx, []string{"test.echo"}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("A ClaimJob: %v", err)
+	}
+
+	// Lease expires; worker B reclaims (attempts=2) and completes it.
+	var jobB storage.Job
+	eventually(t, 2*time.Second, func() error {
+		j, e := st.ClaimJob(ctx, []string{"test.echo"}, time.Minute)
+		if e != nil {
+			return e
+		}
+		jobB = j
+		return nil
+	})
+	if jobB.Attempts != 2 {
+		t.Fatalf("B attempts = %d, want 2", jobB.Attempts)
+	}
+	if err := st.CompleteJob(ctx, id, jobB.Attempts); err != nil {
+		t.Fatalf("B CompleteJob: %v", err)
+	}
+
+	// Worker A now finishes and issues its late terminal writes with attempts=1.
+	// Every one is fenced out (ErrNotFound) — a superseded claim, not applied.
+	if err := st.CompleteJob(ctx, id, jobA.Attempts); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("stale CompleteJob = %v, want ErrNotFound (fenced)", err)
+	}
+	if err := st.RetryJob(ctx, id, jobA.Attempts, "late boom", time.Now()); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("stale RetryJob = %v, want ErrNotFound (fenced)", err)
+	}
+	if err := st.MarkJobDead(ctx, id, jobA.Attempts, "late dead"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("stale MarkJobDead = %v, want ErrNotFound (fenced)", err)
+	}
+
+	// The job is exactly as B left it: done, attempts=2, and NOT re-runnable.
+	final, err := st.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob final: %v", err)
+	}
+	if final.Status != storage.JobDone {
+		t.Errorf("final status = %q, want done (A's stale writes must not flip it)", final.Status)
+	}
+	if final.Attempts != 2 {
+		t.Errorf("final attempts = %d, want 2", final.Attempts)
+	}
+	if _, err := st.ClaimJob(ctx, []string{"test.echo"}, time.Minute); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("job re-claimable after stale writes = %v, want ErrNotFound (no re-run)", err)
+	}
+}

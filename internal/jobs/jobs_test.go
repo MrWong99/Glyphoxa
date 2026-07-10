@@ -21,12 +21,14 @@ func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 
 type retryCall struct {
 	id        uuid.UUID
+	attempts  int
 	lastError string
 	runAfter  time.Time
 }
 
 type deadCall struct {
 	id        uuid.UUID
+	attempts  int
 	lastError string
 }
 
@@ -37,6 +39,10 @@ type fakeStore struct {
 	claimQueue []storage.Job
 	lastLease  time.Duration
 	backlog    map[string]int
+
+	// terminalErr, when set, is returned by every terminal write — used to simulate
+	// a superseded/stale claim (storage.ErrNotFound), which must count no metric.
+	terminalErr error
 
 	claims    int
 	sweeps    int
@@ -58,24 +64,33 @@ func (f *fakeStore) ClaimJob(_ context.Context, _ []string, lease time.Duration)
 	return j, nil
 }
 
-func (f *fakeStore) CompleteJob(_ context.Context, id uuid.UUID) error {
+func (f *fakeStore) CompleteJob(_ context.Context, id uuid.UUID, _ int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.terminalErr != nil {
+		return f.terminalErr
+	}
 	f.completed = append(f.completed, id)
 	return nil
 }
 
-func (f *fakeStore) RetryJob(_ context.Context, id uuid.UUID, lastError string, runAfter time.Time) error {
+func (f *fakeStore) RetryJob(_ context.Context, id uuid.UUID, attempts int, lastError string, runAfter time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.retried = append(f.retried, retryCall{id, lastError, runAfter})
+	if f.terminalErr != nil {
+		return f.terminalErr
+	}
+	f.retried = append(f.retried, retryCall{id, attempts, lastError, runAfter})
 	return nil
 }
 
-func (f *fakeStore) MarkJobDead(_ context.Context, id uuid.UUID, lastError string) error {
+func (f *fakeStore) MarkJobDead(_ context.Context, id uuid.UUID, attempts int, lastError string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.dead = append(f.dead, deadCall{id, lastError})
+	if f.terminalErr != nil {
+		return f.terminalErr
+	}
+	f.dead = append(f.dead, deadCall{id, attempts, lastError})
 	return nil
 }
 
@@ -253,6 +268,30 @@ func TestRunOneFailureAtMaxDeadLetters(t *testing.T) {
 	}
 	if len(metrics.outcomes) != 1 || metrics.outcomes[0].outcome != outcomeDead {
 		t.Errorf("outcomes = %v, want one dead", metrics.outcomes)
+	}
+}
+
+// --- superseded claim: a stale terminal write counts no metric ---
+
+func TestRunOneSupersededCompleteCountsNoOutcome(t *testing.T) {
+	store := &fakeStore{terminalErr: storage.ErrNotFound} // reclaimed by a newer lease
+	metrics := newFakeMetrics()
+	r := New(store, metrics, testLog(), Config{})
+	r.Register("test.echo", func(context.Context, json.RawMessage) error { return nil })
+
+	r.runOne(context.Background(), testJob("test.echo", 1, 5, `{}`))
+
+	if len(store.completed) != 0 {
+		t.Errorf("completed = %v, want none recorded (write fenced out)", store.completed)
+	}
+	for _, o := range metrics.outcomes {
+		if o.outcome == outcomeDone {
+			t.Errorf("recorded a done outcome for a superseded claim: %v", metrics.outcomes)
+		}
+	}
+	// Duration is still observed (the handler did run); only the outcome is skipped.
+	if len(metrics.durations) != 1 {
+		t.Errorf("durations = %v, want the handler execution still timed", metrics.durations)
 	}
 }
 

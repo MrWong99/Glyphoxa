@@ -140,54 +140,57 @@ func (s *Store) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
 	return j, nil
 }
 
-// CompleteJob marks a job done and clears its lease. A missing id yields ErrNotFound.
-func (s *Store) CompleteJob(ctx context.Context, id uuid.UUID) error {
-	return s.updateJobStatus(ctx,
-		`UPDATE job SET status = 'done', leased_until = NULL, updated_at = now() WHERE id = $1`,
-		"complete", id)
+// The three terminal writes are fenced by the claim generation (status='running'
+// AND attempts=$n, where n is the claimed Job's attempts) — optimistic
+// concurrency against a stale worker. If worker A claims (attempts=1), stalls past
+// its lease, and worker B reclaims (attempts=2) and completes/dead-letters the
+// job, A's late write matches no row and is a no-op (ErrNotFound) rather than
+// flipping a terminal state back to pending and letting a done/dead job re-run
+// (ADR-0049: "never silently retried forever"). The runner threads the claimed
+// attempts through and treats ErrNotFound here as a superseded claim, not a fault.
+
+// CompleteJob marks the caller's claimed generation of a job done and clears its
+// lease. attempts is the claimed Job's attempts (the claim generation). A missing
+// id OR a superseded claim (a newer lease bumped attempts) yields ErrNotFound.
+func (s *Store) CompleteJob(ctx context.Context, id uuid.UUID, attempts int) error {
+	return s.fencedJobWrite(ctx, "complete", id, attempts,
+		`UPDATE job
+		    SET status = 'done', leased_until = NULL, updated_at = now()
+		  WHERE id = $1 AND status = 'running' AND attempts = $2`,
+		id, attempts)
 }
 
-// RetryJob returns a job to pending with a recorded last_error and a future
-// run_after (the backoff delay), clearing its lease so it is re-claimable once
-// run_after arrives. A missing id yields ErrNotFound.
-func (s *Store) RetryJob(ctx context.Context, id uuid.UUID, lastError string, runAfter time.Time) error {
-	tag, err := s.db.Exec(ctx,
+// RetryJob returns the caller's claimed generation of a job to pending with a
+// recorded last_error and a future run_after (the backoff delay), clearing its
+// lease so it is re-claimable once run_after arrives. attempts is the claim
+// generation. A missing id OR a superseded claim yields ErrNotFound.
+func (s *Store) RetryJob(ctx context.Context, id uuid.UUID, attempts int, lastError string, runAfter time.Time) error {
+	return s.fencedJobWrite(ctx, "retry", id, attempts,
 		`UPDATE job
 		    SET status = 'pending', last_error = $2, run_after = $3,
 		        leased_until = NULL, updated_at = now()
-		  WHERE id = $1`,
-		id, lastError, runAfter)
-	if err != nil {
-		return fmt.Errorf("storage: retry job %s: %w", id, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+		  WHERE id = $1 AND status = 'running' AND attempts = $4`,
+		id, lastError, runAfter, attempts)
 }
 
-// MarkJobDead moves a job to the dead-letter state with a recorded last_error and
-// a cleared lease — visible, never silently retried again. A missing id yields
-// ErrNotFound.
-func (s *Store) MarkJobDead(ctx context.Context, id uuid.UUID, lastError string) error {
-	tag, err := s.db.Exec(ctx,
+// MarkJobDead moves the caller's claimed generation of a job to the dead-letter
+// state with a recorded last_error and a cleared lease — visible, never silently
+// retried again. attempts is the claim generation. A missing id OR a superseded
+// claim yields ErrNotFound.
+func (s *Store) MarkJobDead(ctx context.Context, id uuid.UUID, attempts int, lastError string) error {
+	return s.fencedJobWrite(ctx, "mark dead", id, attempts,
 		`UPDATE job
 		    SET status = 'dead', last_error = $2, leased_until = NULL, updated_at = now()
-		  WHERE id = $1`,
-		id, lastError)
-	if err != nil {
-		return fmt.Errorf("storage: mark job dead %s: %w", id, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+		  WHERE id = $1 AND status = 'running' AND attempts = $3`,
+		id, lastError, attempts)
 }
 
-func (s *Store) updateJobStatus(ctx context.Context, sql, verb string, id uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, sql, id)
+// fencedJobWrite runs a generation-fenced terminal UPDATE and maps a zero-row
+// result (missing id or superseded claim) to ErrNotFound.
+func (s *Store) fencedJobWrite(ctx context.Context, verb string, id uuid.UUID, attempts int, sql string, args ...any) error {
+	tag, err := s.db.Exec(ctx, sql, args...)
 	if err != nil {
-		return fmt.Errorf("storage: %s job %s: %w", verb, id, err)
+		return fmt.Errorf("storage: %s job %s (attempt %d): %w", verb, id, attempts, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

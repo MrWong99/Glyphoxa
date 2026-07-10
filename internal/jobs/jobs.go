@@ -24,6 +24,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -45,9 +46,9 @@ type HandlerFunc func(ctx context.Context, payload json.RawMessage) error
 // and tests fake it.
 type Store interface {
 	ClaimJob(ctx context.Context, kinds []string, lease time.Duration) (storage.Job, error)
-	CompleteJob(ctx context.Context, id uuid.UUID) error
-	RetryJob(ctx context.Context, id uuid.UUID, lastError string, runAfter time.Time) error
-	MarkJobDead(ctx context.Context, id uuid.UUID, lastError string) error
+	CompleteJob(ctx context.Context, id uuid.UUID, attempts int) error
+	RetryJob(ctx context.Context, id uuid.UUID, attempts int, lastError string, runAfter time.Time) error
+	MarkJobDead(ctx context.Context, id uuid.UUID, attempts int, lastError string) error
 	SweepExpiredJobs(ctx context.Context, kinds []string) (int, error)
 	CountJobBacklog(ctx context.Context, kinds []string) (map[string]int, error)
 }
@@ -78,6 +79,11 @@ const (
 	// backoff shape (ADR-0049): base doubles per attempt up to a cap, plus jitter.
 	backoffBase = 30 * time.Second
 	backoffCap  = 30 * time.Minute
+
+	// drainCheckpoint bounds how many claims a single drain runs before it re-sweeps
+	// and republishes the backlog gauges — so a sustained enqueue stream can't leave
+	// the metrics stale for the whole drain (a long drain is otherwise silent).
+	drainCheckpoint = 10
 )
 
 // Config tunes the runner. Zero values take the defaults.
@@ -164,27 +170,40 @@ func (r *Runner) Run(ctx context.Context) {
 }
 
 // pass runs one full cycle: sweep dead-letter leftovers, drain every runnable job,
-// then refresh the backlog gauges.
+// then refresh the backlog gauges. During a long drain it re-sweeps and
+// republishes the gauges every drainCheckpoint claims so a sustained enqueue
+// stream doesn't leave metrics stale until the drain finishes.
 func (r *Runner) pass(ctx context.Context) {
-	if n, err := r.store.SweepExpiredJobs(ctx, r.kinds); err != nil {
-		r.log.Warn("job runner: sweep expired jobs failed", "err", err)
-	} else if n > 0 {
-		r.log.Info("job runner: dead-lettered expired jobs", "count", n)
-	}
+	r.sweep(ctx)
 
 	// Drain: claim and run until the queue reports nothing runnable (or errors).
+	processed := 0
 	for ctx.Err() == nil {
 		job, err := r.store.ClaimJob(ctx, r.kinds, r.cfg.Lease)
 		if err != nil {
-			if err != storage.ErrNotFound {
+			if !errors.Is(err, storage.ErrNotFound) {
 				r.log.Warn("job runner: claim failed", "err", err)
 			}
 			break // ErrNotFound = drained; any other error = back off to next poll
 		}
 		r.runOne(ctx, job)
+
+		if processed++; processed%drainCheckpoint == 0 {
+			r.sweep(ctx)
+			r.refreshBacklog(ctx)
+		}
 	}
 
 	r.refreshBacklog(ctx)
+}
+
+// sweep dead-letters exhausted-and-expired leftovers, logging any error non-fatally.
+func (r *Runner) sweep(ctx context.Context) {
+	if n, err := r.store.SweepExpiredJobs(ctx, r.kinds); err != nil {
+		r.log.Warn("job runner: sweep expired jobs failed", "err", err)
+	} else if n > 0 {
+		r.log.Info("job runner: dead-lettered expired jobs", "count", n)
+	}
 }
 
 // refreshBacklog Sets each registered kind's backlog gauge from a COUNT (never
@@ -227,8 +246,7 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 	}
 
 	if err == nil {
-		if cerr := r.store.CompleteJob(ctx, job.ID); cerr != nil {
-			r.log.Warn("job runner: complete failed; job will be reclaimed on lease expiry", "job_id", job.ID, "err", cerr)
+		if !r.terminalWrite(job, "complete", r.store.CompleteJob(ctx, job.ID, job.Attempts)) {
 			return
 		}
 		if r.metrics != nil {
@@ -245,8 +263,7 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 	}
 
 	runAfter := time.Now().Add(backoff(job.Attempts))
-	if rerr := r.store.RetryJob(ctx, job.ID, err.Error(), runAfter); rerr != nil {
-		r.log.Warn("job runner: retry write failed; job will be reclaimed on lease expiry", "job_id", job.ID, "err", rerr)
+	if !r.terminalWrite(job, "retry", r.store.RetryJob(ctx, job.ID, job.Attempts, err.Error(), runAfter)) {
 		return
 	}
 	if r.metrics != nil {
@@ -255,12 +272,32 @@ func (r *Runner) runOne(ctx context.Context, job storage.Job) {
 }
 
 func (r *Runner) markDead(ctx context.Context, job storage.Job, lastError string) {
-	if derr := r.store.MarkJobDead(ctx, job.ID, lastError); derr != nil {
-		r.log.Warn("job runner: mark-dead write failed", "job_id", job.ID, "err", derr)
+	if !r.terminalWrite(job, "mark-dead", r.store.MarkJobDead(ctx, job.ID, job.Attempts, lastError)) {
 		return
 	}
 	if r.metrics != nil {
 		r.metrics.JobOutcome(job.Kind, outcomeDead)
+	}
+}
+
+// terminalWrite reports whether a fenced terminal write (complete/retry/mark-dead)
+// took effect. ErrNotFound means the claim was superseded by a newer lease (a
+// stale worker whose lease expired and was reclaimed): the winning worker already
+// recorded the outcome, so this is expected — log at debug and count NOTHING (no
+// outcome metric). A different error is a real DB fault: warn; the job is
+// reclaimed on lease expiry. Only a nil error is a genuine, countable transition.
+func (r *Runner) terminalWrite(job storage.Job, verb string, err error) bool {
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, storage.ErrNotFound):
+		r.log.Debug("job runner: "+verb+" skipped; claim superseded by a newer lease",
+			"kind", job.Kind, "job_id", job.ID, "attempts", job.Attempts)
+		return false
+	default:
+		r.log.Warn("job runner: "+verb+" write failed; job reclaimed on lease expiry",
+			"job_id", job.ID, "err", err)
+		return false
 	}
 }
 
