@@ -73,16 +73,26 @@ func Decode(r io.Reader) (*Bundle, error) {
 		return nil, ErrTooLarge
 	}
 
+	// Lenient version pre-pass: a newer bundle adds fields this build does not
+	// know, so the strict decode below would reject it with a cryptic
+	// unknown-field error. Gate on the version FIRST (ADR-0053 §7: refuse newer
+	// with a clear error) before the strict full decode.
+	var ver struct {
+		FormatVersion int `json:"format_version"`
+	}
+	if err := json.Unmarshal(data, &ver); err != nil {
+		return nil, err
+	}
+	if err := CheckVersion(ver.FormatVersion); err != nil {
+		return nil, fmt.Errorf("bundle has format_version %d; this build supports %d: %w",
+			ver.FormatVersion, FormatVersion, err)
+	}
+
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var b Bundle
 	if err := dec.Decode(&b); err != nil {
 		return nil, err
-	}
-
-	if err := CheckVersion(b.FormatVersion); err != nil {
-		return nil, fmt.Errorf("bundle has format_version %d; this build supports %d: %w",
-			b.FormatVersion, FormatVersion, err)
 	}
 	return &b, nil
 }

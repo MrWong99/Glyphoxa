@@ -131,6 +131,21 @@ func TestDecodeNewerVersionMessage(t *testing.T) {
 	}
 }
 
+func TestDecodeNewerVersionWithNewFieldStillRefused(t *testing.T) {
+	// A real v2 bundle adds fields unknown to this v1 build. The version gate
+	// must fire BEFORE strict unknown-field decoding, so an old build tells the
+	// operator "format is newer", not a cryptic unknown-field error.
+	raw := []byte(`{"format_version":2,"exported_at":"2026-07-10T20:00:00Z","new_v2_section":{"x":1},"campaign":{"name":"x","system":"y","language":"de","agents":[]}}`)
+	_, err := Decode(bytes.NewReader(raw))
+	if !errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("want ErrNewerFormat, got %v", err)
+	}
+	msg := err.Error()
+	if !bytes.Contains([]byte(msg), []byte("2")) || !bytes.Contains([]byte(msg), []byte("1")) {
+		t.Fatalf("message must mention both versions, got %q", msg)
+	}
+}
+
 func TestDecodeOlderVersionUnsupported(t *testing.T) {
 	raw := []byte(`{"format_version":0,"exported_at":"2026-07-10T20:00:00Z","campaign":{"name":"x","system":"y","language":"de","agents":[]}}`)
 	_, err := Decode(bytes.NewReader(raw))
@@ -147,6 +162,19 @@ func TestDecodeRejectsUnknownField(t *testing.T) {
 	}
 	if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) || errors.Is(err, ErrTooLarge) {
 		t.Fatalf("unexpected sentinel for unknown field: %v", err)
+	}
+}
+
+func TestDecodeRejectsNestedUnknownField(t *testing.T) {
+	// Secrets would hide inside a nested object (e.g. an agent's provider
+	// binding). DisallowUnknownFields must reject at any depth, not just top level.
+	raw := []byte(`{"format_version":1,"exported_at":"2026-07-10T20:00:00Z","campaign":{"name":"x","system":"y","language":"de","agents":[{"id":"a1","role":"npc","name":"Bob","voice_provider_config_id":"secret"}]}}`)
+	_, err := Decode(bytes.NewReader(raw))
+	if err == nil {
+		t.Fatal("expected nested unknown-field rejection")
+	}
+	if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) || errors.Is(err, ErrTooLarge) {
+		t.Fatalf("unexpected sentinel for nested unknown field: %v", err)
 	}
 }
 
