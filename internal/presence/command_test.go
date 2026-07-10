@@ -10,10 +10,23 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 )
 
+// replyKind names the responder method a recorded message came through, so a test can
+// assert HOW a message was delivered (a placeholder edit vs a fresh followup) directly,
+// not only via its visibility side-effect — a dangling "thinking…" placeholder is then
+// observable as "the first post-Defer message was a followup, not an edit" (#335).
+type replyKind string
+
+const (
+	kindReply    replyKind = "reply"    // a pre-Defer CreateMessage
+	kindEdit     replyKind = "edit"     // an EditOriginal of the deferred placeholder
+	kindFollowup replyKind = "followup" // a fresh CreateFollowupMessage
+)
+
 // recordedReply captures one responder call for assertions.
 type recordedReply struct {
 	content   string
 	ephemeral bool
+	kind      replyKind
 }
 
 // fakeResponder records reply/defer/followup calls instead of hitting Discord. It
@@ -34,7 +47,7 @@ type fakeResponder struct {
 }
 
 func (f *fakeResponder) reply(content string, ephemeral bool) error {
-	f.replies = append(f.replies, recordedReply{content, ephemeral})
+	f.replies = append(f.replies, recordedReply{content, ephemeral, kindReply})
 	return nil
 }
 
@@ -46,7 +59,7 @@ func (f *fakeResponder) deferResponse(ephemeral bool) error {
 func (f *fakeResponder) followup(content string, ephemeral bool) error {
 	// Post-deprecation: a followup is always a fresh message honoring its own flag; it
 	// does NOT edit the placeholder.
-	f.followups = append(f.followups, recordedReply{content, ephemeral})
+	f.followups = append(f.followups, recordedReply{content, ephemeral, kindFollowup})
 	return nil
 }
 
@@ -56,7 +69,7 @@ func (f *fakeResponder) editOriginal(content string) error {
 	if f.deferred != nil {
 		vis = *f.deferred
 	}
-	f.followups = append(f.followups, recordedReply{content, vis})
+	f.followups = append(f.followups, recordedReply{content, vis, kindEdit})
 	return nil
 }
 
@@ -248,14 +261,15 @@ func TestDispatchFirstPostDeferReplyEditsOriginal(t *testing.T) {
 	if len(resp.followups) != 2 {
 		t.Fatalf("want 2 post-Defer messages (a placeholder edit + a followup), got %+v", resp.followups)
 	}
-	// The FIRST reply consumes the placeholder via EditOriginal: visibility is forced to
-	// the Defer's (ephemeral), NOT the reply's public flag.
-	if resp.followups[0].content != "first" || !resp.followups[0].ephemeral {
-		t.Errorf("first post-Defer message = %+v, want an EditOriginal of \"first\" at the Defer's ephemeral visibility", resp.followups[0])
+	// The FIRST reply consumes the placeholder via EditOriginal: delivered as an edit
+	// (no dangling placeholder), visibility forced to the Defer's (ephemeral), NOT the
+	// reply's public flag.
+	if resp.followups[0].content != "first" || !resp.followups[0].ephemeral || resp.followups[0].kind != kindEdit {
+		t.Errorf("first post-Defer message = %+v, want a kindEdit of \"first\" at the Defer's ephemeral visibility", resp.followups[0])
 	}
 	// The SECOND reply is a real followup honoring its own public flag.
-	if resp.followups[1].content != "second" || resp.followups[1].ephemeral {
-		t.Errorf("second post-Defer message = %+v, want a public CreateFollowupMessage of \"second\"", resp.followups[1])
+	if resp.followups[1].content != "second" || resp.followups[1].ephemeral || resp.followups[1].kind != kindFollowup {
+		t.Errorf("second post-Defer message = %+v, want a public kindFollowup of \"second\"", resp.followups[1])
 	}
 }
 

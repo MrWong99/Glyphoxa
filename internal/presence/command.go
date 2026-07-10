@@ -283,9 +283,9 @@ type Interaction struct {
 	// and a fresh CreateMessage would be a Discord 40060 ("already acknowledged").
 	deferred bool
 	// originalConsumed is set once the deferred "thinking…" placeholder has been
-	// resolved (by the first post-Defer reply, or an explicit EditOriginal). It
-	// drives the registry-wide routing rule (#335): the FIRST post-Defer reply edits
-	// the placeholder, every later one is a fresh Followup.
+	// resolved by the first post-Defer reply. It drives the registry-wide routing rule
+	// (#335): the FIRST post-Defer reply edits the placeholder, every later one is a
+	// fresh Followup.
 	originalConsumed bool
 	// onDefer is installed by dispatch to stop the first-response watchdog when
 	// the handler Defers; nil when the Interaction is invoked outside dispatch.
@@ -344,8 +344,15 @@ func (ic *Interaction) reply(content string, ephemeral bool) error {
 // identically.
 func (ic *Interaction) sendPostDefer(content string, ephemeral bool) error {
 	if !ic.originalConsumed {
+		// Mark consumed only AFTER the edit succeeds: if Discord 5xxs the edit the
+		// placeholder is still unresolved, so the retry (the dispatch generic-error
+		// ReplyEphemeral) must edit again — not route to a followup that would leave the
+		// "thinking…" placeholder dangling forever.
+		if err := ic.resp.editOriginal(content); err != nil {
+			return err
+		}
 		ic.originalConsumed = true
-		return ic.resp.editOriginal(content)
+		return nil
 	}
 	return ic.resp.followup(content, ephemeral)
 }
@@ -376,17 +383,6 @@ func (ic *Interaction) Followup(content string, ephemeral bool) error {
 		return ic.sendPostDefer(content, ephemeral)
 	}
 	return ic.resp.followup(content, ephemeral)
-}
-
-// EditOriginal resolves the deferred "thinking…" placeholder by editing the original
-// interaction response in place. Its visibility is fixed to the Defer's (Discord
-// ignores an ephemeral flag on the original-response edit). Handlers rarely need it
-// now that the first post-Defer reply auto-consumes the placeholder (#335); it stays
-// for a handler that wants to explicitly resolve the placeholder with custom content.
-// It marks the placeholder consumed so later replies route to Followup.
-func (ic *Interaction) EditOriginal(content string) error {
-	ic.originalConsumed = true
-	return ic.resp.editOriginal(content)
 }
 
 // Autocomplete is the handler's view of one autocomplete interaction.

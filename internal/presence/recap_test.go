@@ -354,13 +354,16 @@ func assertPublicDelivery(t *testing.T, resp *fakeResponder) string {
 	if len(resp.followups) < 2 {
 		t.Fatalf("public delivery must consume the placeholder THEN post public followups; got %+v", resp.followups)
 	}
-	if !resp.followups[0].ephemeral {
-		t.Errorf("the placeholder-consuming edit must be ephemeral (no public dangle); got public %q", resp.followups[0].content)
+	if !resp.followups[0].ephemeral || resp.followups[0].kind != kindEdit {
+		t.Errorf("the placeholder-consuming message must be an ephemeral EditOriginal (no public dangle); got %+v", resp.followups[0])
 	}
 	var b strings.Builder
 	for _, f := range resp.followups[1:] {
 		if f.ephemeral {
 			t.Errorf("recap body must be delivered PUBLIC, but a body message is ephemeral: %q", f.content)
+		}
+		if f.kind != kindFollowup {
+			t.Errorf("recap body must be a real followup, not a placeholder edit: %+v", f)
 		}
 		b.WriteString(f.content)
 	}
