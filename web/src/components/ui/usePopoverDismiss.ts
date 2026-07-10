@@ -23,6 +23,13 @@ export function usePopoverDismiss(
   ref: RefObject<HTMLElement | null>,
   open: boolean,
   onClose: () => void,
+  // extraRef, when set, is a SECOND element treated as "inside" for outside-click
+  // dismissal — for a popover whose surface is portalled out of the anchor's
+  // subtree (e.g. the campaign row-actions menu, #338, which escapes the switcher
+  // list's overflow via a portal). A mousedown inside the portalled surface is no
+  // longer "inside the anchor", so without this it would read as an outside click
+  // and close the menu out from under its own item click.
+  extraRef?: RefObject<HTMLElement | null>,
 ) {
   // The latest onClose rides a ref so the document listeners — attached once per
   // open — never call a stale closure, and re-renders don't churn listeners.
@@ -37,7 +44,9 @@ export function usePopoverDismiss(
       // A Radix dialog spawned from inside this popover portals outside the anchor;
       // let it own dismissal rather than closing the popover out from under it.
       if (radixModalOpen()) return;
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+      const target = e.target as Node;
+      if (extraRef?.current?.contains(target)) return; // inside the portalled surface
+      if (ref.current && !ref.current.contains(target)) onCloseRef.current();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -51,5 +60,5 @@ export function usePopoverDismiss(
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, ref]);
+  }, [open, ref, extraRef]);
 }

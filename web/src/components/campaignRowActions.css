@@ -29,11 +29,13 @@
   box-shadow: var(--focus-ring);
 }
 
+/* Portalled out of the switcher list (#338) so its overflow:auto can't clip it.
+ * Position is driven inline from the trigger's viewport rect (top/right, plus a
+ * translateY(-100%) when flipped above); only the fixed anchoring + surface live
+ * here. */
 .gx-campaign-row-actions__menu {
-  position: absolute;
-  top: calc(100% + 2px);
-  right: 0;
-  z-index: 20;
+  position: fixed;
+  z-index: 40;
   min-width: 160px;
   display: flex;
   flex-direction: column;

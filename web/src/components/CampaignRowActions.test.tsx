@@ -101,6 +101,18 @@ describe("CampaignRowActions", () => {
     await waitFor(() => expect(calls.unarchiveCampaign).toBe(1));
   });
 
+  it("renders the open menu outside the row wrapper so the scrollable list can't clip it", () => {
+    // The row sits inside .gx-campaign-switcher__list (overflow-y:auto), so an
+    // in-flow absolute menu gets clipped near the bottom of the list (#338). The
+    // menu must portal out of the anchor's subtree to escape that overflow.
+    renderActions({ id: "a", name: "Alpha Quest", archived: true });
+    openMenu();
+    const menu = screen.getByRole("menu");
+    const wrapper = document.querySelector(".gx-campaign-row-actions");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.contains(menu)).toBe(false);
+  });
+
   it("delete requires the re-typed campaign name before it fires", async () => {
     const calls: Record<string, number> = {};
     renderActions({ id: "a", name: "Lost Mine", archived: true }, calls);
