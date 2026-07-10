@@ -20,7 +20,20 @@ import (
 	"sort"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec/dsp"
+)
+
+// The rollover-tape snapshot types (#306, internal/tape) are the mixdown input.
+// Aliased here so this package's API and tests read in mixdown terms while
+// staying the exact types the tape produces.
+type (
+	// Frame is one ~20ms Opus payload stamped with its wall-clock time.
+	Frame = tape.Frame
+	// LaneSnapshot is one lane's frames, sorted ascending by At.
+	LaneSnapshot = tape.LaneSnapshot
+	// Snapshot is a consistent per-lane copy over a time range.
+	Snapshot = tape.Snapshot
 )
 
 // ErrDecoderUnavailable is returned when [WAVClip] needs a decoder but none was
