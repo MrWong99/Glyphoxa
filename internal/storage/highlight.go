@@ -208,6 +208,47 @@ func (s *Store) DeleteSessionCandidates(ctx context.Context, voiceSessionID uuid
 	return int(tag.RowsAffected()), nil
 }
 
+// ListSessionsNeedingCandidatePurge returns the ids of ENDED Voice Sessions that
+// still hold at least one 'candidate' highlight but have NO purge job of the given
+// kind in a live state (pending/running/done) — the sessions whose 7-day purge was
+// never scheduled because a crash landed between the session ending and the Saver's
+// Finalize enqueue (#308, ADR-0051). It is the input to the boot-time backstop
+// sweep. A job is matched on its payload's voice_session_id (the purge payload's
+// only field); 'dead' jobs are treated as absent so a permanently-failed purge is
+// re-scheduled. Session-scoped, carries no tenant (the sweep is process-wide,
+// ADR-0049).
+func (s *Store) ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind string) ([]uuid.UUID, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT DISTINCT h.voice_session_id
+		   FROM highlight h
+		   JOIN voice_sessions vs ON vs.id = h.voice_session_id
+		  WHERE h.status = 'candidate'
+		    AND vs.ended_at IS NOT NULL
+		    AND NOT EXISTS (
+		          SELECT 1 FROM job j
+		           WHERE j.kind = $1
+		             AND j.status IN ('pending','running','done')
+		             AND j.payload->>'voice_session_id' = h.voice_session_id::text
+		        )`, purgeKind)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list sessions needing candidate purge: %w", err)
+	}
+	defer rows.Close()
+
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("storage: scan session needing purge: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list sessions needing candidate purge: %w", err)
+	}
+	return out, nil
+}
+
 // ListCampaignHighlightClipKeys returns the clip_key of EVERY highlight
 // (candidate and promoted) in a Campaign — the blob keys a campaign hard-delete
 // sweeps through the seam BEFORE the row cascade removes them (ADR-0048). No

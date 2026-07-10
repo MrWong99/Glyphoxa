@@ -182,6 +182,56 @@ func TestHighlight_SessionCandidateSweep(t *testing.T) {
 	}
 }
 
+// TestHighlight_ListSessionsNeedingCandidatePurge is the boot-backstop query
+// (#308, ADR-0051): an ENDED session with candidates and NO live purge job is
+// listed; a session that already has a pending purge job is NOT; a still-RUNNING
+// session is NOT; a session whose only highlights are promoted is NOT.
+func TestHighlight_ListSessionsNeedingCandidatePurge(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	const purgeKind = "highlight.purge_candidates"
+
+	// Orphan: ended, has a candidate, no purge job → must be listed.
+	orphan, _ := st.CreateVoiceSession(ctx, campaignID)
+	seedHighlight(t, st, tenantID, orphan.ID, campaignID, storage.HighlightCandidate)
+	if _, err := st.EndVoiceSession(ctx, orphan.ID, 0); err != nil {
+		t.Fatalf("end orphan: %v", err)
+	}
+
+	// Already scheduled: ended, has a candidate, but a pending purge job exists → NOT listed.
+	scheduled, _ := st.CreateVoiceSession(ctx, campaignID)
+	seedHighlight(t, st, tenantID, scheduled.ID, campaignID, storage.HighlightCandidate)
+	if _, err := st.EndVoiceSession(ctx, scheduled.ID, 0); err != nil {
+		t.Fatalf("end scheduled: %v", err)
+	}
+	payload := []byte(`{"voice_session_id":"` + scheduled.ID.String() + `"}`)
+	if _, err := st.EnqueueJob(ctx, purgeKind, payload, 0); err != nil {
+		t.Fatalf("enqueue existing purge: %v", err)
+	}
+
+	// Running: has a candidate but not ended → NOT listed (Finalize will schedule it).
+	running, _ := st.CreateVoiceSession(ctx, campaignID)
+	seedHighlight(t, st, tenantID, running.ID, campaignID, storage.HighlightCandidate)
+
+	// Promoted-only: ended but its only highlight is promoted (kept) → NOT listed.
+	promotedOnly, _ := st.CreateVoiceSession(ctx, campaignID)
+	seedHighlight(t, st, tenantID, promotedOnly.ID, campaignID, storage.HighlightPromoted)
+	if _, err := st.EndVoiceSession(ctx, promotedOnly.ID, 0); err != nil {
+		t.Fatalf("end promotedOnly: %v", err)
+	}
+
+	ids, err := st.ListSessionsNeedingCandidatePurge(ctx, purgeKind)
+	if err != nil {
+		t.Fatalf("list sessions needing purge: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != orphan.ID {
+		t.Fatalf("want only the orphan session %s, got %v", orphan.ID, ids)
+	}
+}
+
 func TestHighlight_CampaignClipKeySweep(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, campaignID := seedCampaign(t, dsn)

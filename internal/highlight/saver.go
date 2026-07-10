@@ -3,6 +3,7 @@ package highlight
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -129,13 +130,20 @@ func (s *Saver) HandleTrigger(t Trigger) {
 	}
 }
 
+// enqueueTimeout bounds the purge-schedule Enqueue when the caller's ctx has
+// already expired during the drain — the purge horizon must still be recorded, so
+// it runs on a fresh short budget rather than an already-dead context.
+const enqueueTimeout = 5 * time.Second
+
 // Finalize drains the bound session's worker (a flush barrier: it closes the
 // mailbox and waits for the worker to finish every queued trigger), then
 // schedules the 7-day candidate purge job and unbinds. The Manager calls it at
 // EVERY loop exit beside transcript.Finalize (Stop, self-exit, Shutdown), so a
 // session's candidates always get a purge horizon. Idle (no bound session) is a
-// no-op. A ctx timeout during the drain returns the error (the Manager logs it)
-// and the purge is NOT scheduled — the boot sweep is the backstop.
+// no-op. A ctx timeout during the drain is returned (the Manager logs it) but the
+// purge is STILL scheduled off the captured session id — a drain timeout must not
+// lose the purge horizon (that would strand candidates until the boot sweep, which
+// is a backstop, not the primary path).
 func (s *Saver) Finalize(ctx context.Context) error {
 	s.mu.Lock()
 	ss := s.sess
@@ -148,19 +156,29 @@ func (s *Saver) Finalize(ctx context.Context) error {
 	// Flush barrier: no more sends can happen (sess is nil, HandleTrigger drops),
 	// so closing the mailbox lets the worker drain every buffered trigger and exit.
 	close(ss.queue)
+	var drainErr error
 	select {
 	case <-ss.done:
 	case <-ctx.Done():
-		return ctx.Err()
+		drainErr = ctx.Err()
 	}
 
-	// Schedule the candidate purge 7 days out (ADR-0051). At-least-once + idempotent
-	// (ADR-0049): the handler blob-deletes then row-deletes remaining candidates.
-	payload := purgePayload{VoiceSessionID: ss.voiceSessionID}
-	if err := s.enqueue.Enqueue(ctx, JobKindPurgeCandidates, payload, time.Now().Add(purgeDelay)); err != nil {
-		return err
+	// Schedule the candidate purge 7 days out (ADR-0051) REGARDLESS of the drain
+	// outcome — ss captured the session id before the unbind, so a drain timeout can
+	// still record the horizon. At-least-once + idempotent (ADR-0049): the handler
+	// blob-deletes then row-deletes remaining candidates. If the drain timed out, the
+	// caller's ctx is dead, so enqueue on a fresh short budget.
+	enqCtx := ctx
+	if drainErr != nil {
+		var cancel context.CancelFunc
+		enqCtx, cancel = context.WithTimeout(context.Background(), enqueueTimeout)
+		defer cancel()
 	}
-	return nil
+	payload := purgePayload{VoiceSessionID: ss.voiceSessionID}
+	if err := s.enqueue.Enqueue(enqCtx, JobKindPurgeCandidates, payload, time.Now().Add(purgeDelay)); err != nil {
+		return errors.Join(drainErr, err)
+	}
+	return drainErr
 }
 
 // worker is the per-session goroutine: it serially saves each queued trigger and
@@ -214,6 +232,13 @@ func (s *Saver) save(ss *saverSession, t Trigger) {
 	}
 	if err := s.store.CreateHighlight(ctx, h); err != nil {
 		s.log.Error("highlight saver: create highlight row", "err", err, "voice_session", ss.voiceSessionID)
+		// Compensate the orphaned clip (ADR-0048): the blob is stored but no row will
+		// ever reference it, so drop it through the seam. A compensation failure only
+		// logs — the row create already failed, and a lingering blob is the lesser evil
+		// than crashing the worker (the campaign-delete sweep is the last-resort cleanup).
+		if derr := s.blobs.Delete(ctx, key); derr != nil {
+			s.log.Error("highlight saver: compensate orphan clip", "err", derr, "voice_session", ss.voiceSessionID, "key", key)
+		}
 		return
 	}
 	s.log.Info("highlight saved", "voice_session", ss.voiceSessionID, "highlight", highlightID, "score", t.Score)

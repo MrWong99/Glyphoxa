@@ -599,7 +599,19 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// each clip through the blob seam FIRST, then the rows. Registered in web AND all
 	// mode (the sweep needs only the DB + blob backend, not the voice loop).
 	jobRunner.Register(highlight.JobKindPurgeCandidates, highlight.PurgeHandler(store, blobStore, log))
+	// Session Highlight campaign-clip sweep (#308, ADR-0048/0049): drops a hard-deleted
+	// Campaign's clip blobs, enqueued in the delete's own transaction (idempotent).
+	jobRunner.Register(highlight.JobKindSweepCampaignClips, highlight.CampaignSweepHandler(blobStore, log))
 	go jobRunner.Run(ctx)
+
+	// Boot-time retention backstop (#308, ADR-0051, the ReconcileOrphans/#184 spirit):
+	// a crash between a session ending and the Saver scheduling its 7-day candidate
+	// purge would strand those candidates. At boot, enqueue a purge for every ended
+	// session that has candidates but no live purge job. Loud-but-non-fatal: a failure
+	// logs and boot continues (the next boot retries).
+	if err := highlight.SweepMissingCandidatePurges(ctx, store, jobEnqueuer{store}, log); err != nil {
+		log.Warn("highlight purge backstop sweep failed at boot", "err", err)
+	}
 
 	// Resolve the process embeddings provider ONCE and share it across the two
 	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
@@ -870,7 +882,10 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated by
 	// auth.RequireSession. Tenant-scoped row load + blob.Get + http.ServeContent
 	// (Range → scrub).
-	clipServer := highlight.NewClipServer(store, blobStore, log)
+	// The clip route scopes to the Active Campaign server-side (#308), sharing the
+	// SessionServer's read-side resolution so a foreign-campaign clip id is 404 just
+	// like the Highlight RPCs.
+	clipServer := highlight.NewClipServer(store, blobStore, sessionSrv.ResolveActiveCampaign, log)
 
 	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
 	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip

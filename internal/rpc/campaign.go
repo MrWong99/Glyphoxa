@@ -53,6 +53,11 @@ type campaignStore interface {
 	ArchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	UnarchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	DeleteCampaign(ctx context.Context, id uuid.UUID) error
+	// DeleteCampaignWithJob hard-deletes AND enqueues a follow-up job atomically
+	// (#308): the campaign hard delete uses it to schedule the Highlight-clip blob
+	// sweep in the delete's own transaction, so the sweep exists iff the delete
+	// committed (no orphan sweep of a surviving campaign, no lost sweep on a crash).
+	DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)

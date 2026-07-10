@@ -482,6 +482,16 @@ func (s *SessionServer) GenerateRecap(
 	}), nil
 }
 
+// ResolveActiveCampaign exposes the SessionServer's read-side Active-Campaign
+// resolution (searchCampaign: live Voice Session first, else the profile-first
+// durable selection) for out-of-band HTTP surfaces that share the posture — the
+// Highlight clip byte stream (#308), a plain net/http mount that is not a Connect
+// method and so cannot reach searchCampaign directly. ok is false when neither
+// resolves (never-run state).
+func (s *SessionServer) ResolveActiveCampaign(ctx context.Context) (uuid.UUID, bool, error) {
+	return s.searchCampaign(ctx)
+}
+
 // searchCampaign resolves the campaign the web transcript search scopes to: the
 // live Voice Session's campaign first (the same in-process truth GetSession uses,
 // so search scopes to exactly the transcript on screen), otherwise the

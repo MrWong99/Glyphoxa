@@ -44,10 +44,11 @@ func (f *fakeHighlightStore) count() int {
 // fakeBlobs is an in-memory blob.Store. put can be gated on a channel to hold the
 // worker; putErr forces a Put failure.
 type fakeBlobs struct {
-	mu     sync.Mutex
-	data   map[string][]byte
-	gate   chan struct{} // if non-nil, Put blocks until a receive
-	putErr error
+	mu        sync.Mutex
+	data      map[string][]byte
+	gate      chan struct{} // if non-nil, Put blocks until a receive
+	putErr    error
+	deleteErr error // if set, Delete returns it (blob-backend failure)
 }
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{data: map[string][]byte{}} }
@@ -79,6 +80,9 @@ func (f *fakeBlobs) Get(_ context.Context, key string) (io.ReadCloser, blob.Meta
 func (f *fakeBlobs) Delete(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.data, key)
 	return nil
 }
@@ -188,6 +192,33 @@ func TestSaver_Finalize_SchedulesPurge(t *testing.T) {
 	}
 }
 
+func TestSaver_Finalize_DrainTimeoutStillEnqueues(t *testing.T) {
+	saver, _, blobs, enq := newTestSaver(t)
+	blobs.gate = make(chan struct{}) // hold the worker inside Put so the drain can't finish
+	defer close(blobs.gate)          // release on test exit so the worker goroutine can reap
+
+	vsID := uuid.New()
+	saver.Begin(vsID, uuid.New(), uuid.New())
+	saver.HandleTrigger(newTrigger()) // the worker will block on the gated Put
+
+	// A ctx that is already effectively expired: the drain times out.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err := saver.Finalize(ctx)
+	if err == nil {
+		t.Fatalf("want a drain-timeout error, got nil")
+	}
+	// Drain timing out must NOT lose the purge horizon: the purge is still scheduled
+	// off the captured session id (the boot sweep is a backstop, not the only path).
+	if enq.calls != 1 || enq.kind != JobKindPurgeCandidates {
+		t.Fatalf("drain timeout skipped purge scheduling: calls=%d kind=%q", enq.calls, enq.kind)
+	}
+	p, ok := enq.payload.(purgePayload)
+	if !ok || p.VoiceSessionID != vsID {
+		t.Fatalf("purge payload wrong after drain timeout: %#v", enq.payload)
+	}
+}
+
 func TestSaver_Finalize_IdleNoop(t *testing.T) {
 	saver, _, _, enq := newTestSaver(t)
 	if err := saver.Finalize(context.Background()); err != nil {
@@ -233,16 +264,22 @@ func TestSaver_HandleTrigger_NonBlockingDropsWhenFull(t *testing.T) {
 }
 
 func TestSaver_WorkerFailureSurvives(t *testing.T) {
-	saver, store, _, _ := newTestSaver(t)
+	saver, store, blobs, _ := newTestSaver(t)
 	store.failNext = true // first CreateHighlight fails
 
 	saver.Begin(uuid.New(), uuid.New(), uuid.New())
-	saver.HandleTrigger(newTrigger()) // fails at CreateHighlight
+	saver.HandleTrigger(newTrigger()) // Put ok, then CreateHighlight fails
 	saver.HandleTrigger(newTrigger()) // must still be processed
 	if err := saver.Finalize(context.Background()); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	if store.count() != 1 {
 		t.Fatalf("worker did not survive a failed save: got %d rows", store.count())
+	}
+	// The failed save's clip must be compensated away (ADR-0048): a blob.Put that
+	// succeeds followed by a CreateHighlight that fails leaves NO orphan blob, so only
+	// the one successfully-rowed clip remains.
+	if blobs.keys() != 1 {
+		t.Fatalf("orphan clip not cleaned after row-create failure: %d clips left", blobs.keys())
 	}
 }

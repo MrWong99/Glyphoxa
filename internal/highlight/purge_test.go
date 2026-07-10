@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -116,6 +117,131 @@ func TestPurge_ListErrorPropagates(t *testing.T) {
 	h := PurgeHandler(store, newFakeBlobs(), testLog())
 	if err := h(context.Background(), payloadFor(uuid.New())); err == nil {
 		t.Fatal("want error when list fails")
+	}
+}
+
+// fakeScheduleStore returns the sessions the boot sweep should schedule a purge
+// for, recording the purge kind the sweep asked with.
+type fakeScheduleStore struct {
+	ids     []uuid.UUID
+	gotKind string
+	listErr error
+}
+
+func (f *fakeScheduleStore) ListSessionsNeedingCandidatePurge(_ context.Context, purgeKind string) ([]uuid.UUID, error) {
+	f.gotKind = purgeKind
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.ids, nil
+}
+
+// recordingEnqueuer records every purge enqueue the boot sweep makes.
+type recordingEnqueuer struct {
+	mu       sync.Mutex
+	sessions []uuid.UUID
+	kinds    []string
+}
+
+func (r *recordingEnqueuer) Enqueue(_ context.Context, kind string, payload any, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.kinds = append(r.kinds, kind)
+	if p, ok := payload.(purgePayload); ok {
+		r.sessions = append(r.sessions, p.VoiceSessionID)
+	}
+	return nil
+}
+
+func TestSweepMissingCandidatePurges_EnqueuesForOrphans(t *testing.T) {
+	s1, s2 := uuid.New(), uuid.New()
+	store := &fakeScheduleStore{ids: []uuid.UUID{s1, s2}}
+	enq := &recordingEnqueuer{}
+
+	if err := SweepMissingCandidatePurges(context.Background(), store, enq, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if store.gotKind != JobKindPurgeCandidates {
+		t.Fatalf("sweep asked with wrong kind: %q", store.gotKind)
+	}
+	if len(enq.sessions) != 2 || enq.sessions[0] != s1 || enq.sessions[1] != s2 {
+		t.Fatalf("backstop purges not enqueued per orphan: %v", enq.sessions)
+	}
+	for _, k := range enq.kinds {
+		if k != JobKindPurgeCandidates {
+			t.Fatalf("enqueued wrong job kind: %q", k)
+		}
+	}
+}
+
+func TestSweepMissingCandidatePurges_NoOrphansNoEnqueue(t *testing.T) {
+	store := &fakeScheduleStore{}
+	enq := &recordingEnqueuer{}
+	if err := SweepMissingCandidatePurges(context.Background(), store, enq, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(enq.sessions) != 0 {
+		t.Fatalf("no orphans should enqueue nothing, got %v", enq.sessions)
+	}
+}
+
+func TestSweepMissingCandidatePurges_ListErrorReturned(t *testing.T) {
+	store := &fakeScheduleStore{listErr: errors.New("db down")}
+	if err := SweepMissingCandidatePurges(context.Background(), store, &recordingEnqueuer{}, testLog()); err == nil {
+		t.Fatal("want error when the session list fails")
+	}
+}
+
+func TestPurge_RowDeleteErrorPropagates(t *testing.T) {
+	store := &fakePurgeStore{keys: []string{"k1"}, events: &[]string{}, deleteErr: errors.New("row delete boom")}
+	blobs := newFakeBlobs()
+	blobs.data["k1"] = []byte("a")
+	h := PurgeHandler(store, blobs, testLog())
+	if err := h(context.Background(), payloadFor(uuid.New())); err == nil {
+		t.Fatal("want error when the row delete fails")
+	}
+}
+
+func TestPurge_BlobDeleteErrorPropagates(t *testing.T) {
+	store := &fakePurgeStore{keys: []string{"k1"}, events: &[]string{}}
+	blobs := newFakeBlobs()
+	blobs.data["k1"] = []byte("a")
+	blobs.deleteErr = errors.New("blob backend down")
+	h := PurgeHandler(store, blobs, testLog())
+	if err := h(context.Background(), payloadFor(uuid.New())); err == nil {
+		t.Fatal("want error when the blob delete fails")
+	}
+	// Blob-first: the row delete must NOT have run after the blob delete failed.
+	if store.deleted {
+		t.Fatal("rows deleted despite a failed blob delete (blob-first violated)")
+	}
+}
+
+func TestCampaignSweep_DeletesCarriedKeys(t *testing.T) {
+	blobs := newFakeBlobs()
+	blobs.data["k1"] = []byte("a")
+	blobs.data["k2"] = []byte("b")
+	payload, err := MarshalCampaignSweep([]string{"k1", "k2"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	h := CampaignSweepHandler(blobs, testLog())
+	if err := h(context.Background(), payload); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if blobs.keys() != 0 {
+		t.Fatalf("carried clips not swept: %d left", blobs.keys())
+	}
+}
+
+func TestCampaignSweep_IdempotentOnMissingKeys(t *testing.T) {
+	blobs := newFakeBlobs() // no data: every key is already absent
+	payload, _ := MarshalCampaignSweep([]string{"gone-1", "gone-2"})
+	h := CampaignSweepHandler(blobs, testLog())
+	// Absent keys delete cleanly (blob.Delete absent-key = nil), so a re-run of a
+	// partially-or-fully completed sweep succeeds.
+	if err := h(context.Background(), payload); err != nil {
+		t.Fatalf("sweep over missing keys should be a no-op, got %v", err)
 	}
 }
 

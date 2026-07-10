@@ -77,6 +77,9 @@ func (fakeReader) UnarchiveCampaign(context.Context, uuid.UUID) (storage.Campaig
 func (fakeReader) DeleteCampaign(context.Context, uuid.UUID) error {
 	return nil
 }
+func (fakeReader) DeleteCampaignWithJob(context.Context, uuid.UUID, string, []byte) error {
+	return nil
+}
 
 // The roster + CRUD half of campaignStore is unused by the GetActiveCampaign
 // tests; stub it so fakeReader still satisfies the widened interface. The CRUD

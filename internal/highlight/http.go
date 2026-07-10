@@ -21,6 +21,13 @@ type ClipStore interface {
 	GetHighlight(ctx context.Context, tenantID, id uuid.UUID) (storage.Highlight, error)
 }
 
+// CampaignResolver resolves the request's Active Campaign server-side (#308): the
+// live Voice Session's campaign first, else the operator's profile-first durable
+// selection. ok is false when neither resolves (a never-run state). The web tier
+// wires *rpc.SessionServer.ResolveActiveCampaign; nil disables campaign scoping
+// (tenant-only, e.g. a voice-standalone build with no web resolver).
+type CampaignResolver func(ctx context.Context) (uuid.UUID, bool, error)
+
 // ClipServer serves a Highlight's audio clip over plain HTTP (#308/#309): GET
 // /api/v1/highlights/{id}/clip, mounted behind auth.RequireSession beside the SSE
 // relay (ADR-0015 — a byte stream, not a Connect unary). It loads the row
@@ -28,17 +35,19 @@ type ClipStore interface {
 // it with http.ServeContent so the browser <audio> scrubber's Range requests
 // resolve to partial content.
 type ClipServer struct {
-	store ClipStore
-	blobs blob.Store
-	log   *slog.Logger
+	store   ClipStore
+	blobs   blob.Store
+	resolve CampaignResolver
+	log     *slog.Logger
 }
 
-// NewClipServer wraps the highlight store + blob seam in a ClipServer.
-func NewClipServer(store ClipStore, blobs blob.Store, log *slog.Logger) *ClipServer {
+// NewClipServer wraps the highlight store + blob seam + Active-Campaign resolver in
+// a ClipServer. A nil resolver disables campaign scoping (tenant-only).
+func NewClipServer(store ClipStore, blobs blob.Store, resolve CampaignResolver, log *slog.Logger) *ClipServer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &ClipServer{store: store, blobs: blobs, log: log}
+	return &ClipServer{store: store, blobs: blobs, resolve: resolve, log: log}
 }
 
 // ServeClip streams one Highlight's clip. The auth.RequireSession wrapper has
@@ -68,6 +77,22 @@ func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
 		c.log.Error("highlight clip: load row", "err", err, "highlight", id)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	// Active-Campaign scoping (#308): a clip whose highlight belongs to another
+	// campaign than the resolved Active Campaign is 404 — existence never leaked, the
+	// same posture the Highlight RPCs adopt. A nil resolver leaves scoping tenant-only.
+	if c.resolve != nil {
+		campaignID, ok, rerr := c.resolve(req.Context())
+		if rerr != nil {
+			c.log.Error("highlight clip: resolve active campaign", "err", rerr, "highlight", id)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok || h.CampaignID != campaignID {
+			http.NotFound(w, req)
+			return
+		}
 	}
 
 	rc, _, err := c.blobs.Get(req.Context(), h.ClipKey)

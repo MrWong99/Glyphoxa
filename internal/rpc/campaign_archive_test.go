@@ -2,6 +2,7 @@ package rpc_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -184,6 +186,57 @@ func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
 	}
 	if len(sweeper.deleted) != 2 || sweeper.deleted[0] != "k1" || sweeper.deleted[1] != "k2" {
 		t.Fatalf("clips not swept: %v", sweeper.deleted)
+	}
+}
+
+// TestDeleteCampaign_EnqueuesDurableClipSweep: a hard delete enqueues the durable
+// blob-sweep job carrying the listed clip keys, in the delete's own transaction
+// (#308, ADR-0049) — the backstop that survives a crash after the row cascade.
+func TestDeleteCampaign_EnqueuesDurableClipSweep(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	id := uuid.New()
+	sweeper := &fakeClipSweeper{keys: []string{"k1", "k2"}}
+	srv := rpc.NewCampaignServer(store)
+	srv.SetHighlightClipSweeper(sweeper)
+
+	if _, err := srv.DeleteCampaign(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteCampaign: %v", err)
+	}
+	if store.deleteJobKind != highlight.JobKindSweepCampaignClips {
+		t.Fatalf("durable sweep job not enqueued: kind=%q", store.deleteJobKind)
+	}
+	// The payload must carry exactly the listed clip keys.
+	var p struct {
+		ClipKeys []string `json:"clip_keys"`
+	}
+	if err := json.Unmarshal(store.deleteJobPayload, &p); err != nil {
+		t.Fatalf("sweep payload not JSON: %v", err)
+	}
+	if len(p.ClipKeys) != 2 || p.ClipKeys[0] != "k1" || p.ClipKeys[1] != "k2" {
+		t.Fatalf("sweep payload keys = %v, want [k1 k2]", p.ClipKeys)
+	}
+}
+
+// TestDeleteCampaign_NoClipsNoJob: a campaign with no highlight clips takes the
+// plain delete path (no sweep job to enqueue).
+func TestDeleteCampaign_NoClipsNoJob(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	sweeper := &fakeClipSweeper{} // no keys
+	srv := rpc.NewCampaignServer(store)
+	srv.SetHighlightClipSweeper(sweeper)
+
+	if _, err := srv.DeleteCampaign(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()})); err != nil {
+		t.Fatalf("DeleteCampaign: %v", err)
+	}
+	if store.deleteJobKind != "" {
+		t.Fatalf("no-clip delete should enqueue no job, got kind=%q", store.deleteJobKind)
+	}
+	if len(store.deleteCalls) != 1 {
+		t.Fatalf("campaign not deleted: %+v", store.deleteCalls)
 	}
 }
 
