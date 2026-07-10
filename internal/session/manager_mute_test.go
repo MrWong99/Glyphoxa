@@ -78,6 +78,35 @@ func TestSetAgentMute_ForeignAgentRejected(t *testing.T) {
 	}
 }
 
+// TestSetAgentMute_ButlerRejected pins the Address-Only Butler exclusion
+// (ADR-0009/ADR-0024): the auto-created Butler is a real Agent of the Active
+// Campaign (present in ListAgents) but is never voiced, so muting it is refused
+// ErrAgentNotInCampaign and records NO phantom id — MutedAgentIDs stays empty, so
+// GetSession's reload truth never shows the Butler as muted. The voiced Character
+// NPC alongside it stays muteable.
+func TestSetAgentMute_ButlerRejected(t *testing.T) {
+	store := newFakeStore()
+	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Butler"}
+	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
+	store.agents = []storage.Agent{butler, bart}
+	mgr, _ := muteManager(t, store)
+	startMuteSession(t, mgr)
+
+	if _, err := mgr.SetAgentMute(context.Background(), butler.ID.String(), true); err != session.ErrAgentNotInCampaign {
+		t.Fatalf("muting the Butler = %v, want ErrAgentNotInCampaign", err)
+	}
+	if mgr.Muted(butler.ID.String()) {
+		t.Fatal("a rejected Butler mute must not enter the mute set")
+	}
+	if got := mgr.MutedAgentIDs(); len(got) != 0 {
+		t.Fatalf("MutedAgentIDs after rejected Butler mute = %v, want none (no phantom id)", got)
+	}
+	// The voiced Character NPC is still muteable.
+	if _, err := mgr.SetAgentMute(context.Background(), bart.ID.String(), true); err != nil {
+		t.Fatalf("muting a voiced Character = %v, want success", err)
+	}
+}
+
 // TestSetAgentMute_PublishesOncePerActualChange pins the idempotent publish (test
 // 8): a mute publishes exactly one MuteChanged; a redundant re-mute publishes
 // none; an unmute publishes one. The set + the returned sorted ids track each.
@@ -189,10 +218,12 @@ func TestStartResetsMuteSet(t *testing.T) {
 	}
 }
 
-// TestSetAllMute_MutesAndClearsEveryAgent pins muteall (test 8): SetAllMute(true)
-// mutes every Agent of the Active Campaign (Butler + NPCs) with one MuteChanged
-// each; SetAllMute(false) clears them.
-func TestSetAllMute_MutesAndClearsEveryAgent(t *testing.T) {
+// TestSetAllMute_MutesEveryVoicedAgent pins muteall (test 8): SetAllMute(true)
+// mutes every VOICED Agent of the Active Campaign — the Character NPCs — with one
+// MuteChanged each, and EXCLUDES the Address-Only Butler (never voiced,
+// ADR-0009/ADR-0024), which therefore never enters the mute set. SetAllMute(false)
+// clears the voiced Agents.
+func TestSetAllMute_MutesEveryVoicedAgent(t *testing.T) {
 	store := newFakeStore()
 	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Butler"}
 	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
@@ -214,14 +245,17 @@ func TestSetAllMute_MutesAndClearsEveryAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetAllMute(true): %v", err)
 	}
-	if len(ids) != 2 {
-		t.Fatalf("muted ids after mute-all = %v, want 2 (Butler + Bart)", ids)
+	if len(ids) != 1 || ids[0] != bart.ID.String() {
+		t.Fatalf("muted ids after mute-all = %v, want [%s] (Bart only; Butler excluded)", ids, bart.ID)
 	}
-	if !mgr.Muted(butler.ID.String()) || !mgr.Muted(bart.ID.String()) {
-		t.Fatal("mute-all must mute every Agent including the Butler")
+	if mgr.Muted(butler.ID.String()) {
+		t.Fatal("mute-all must NOT mute the Address-Only Butler")
 	}
-	if eventCount() != 2 {
-		t.Fatalf("mute-all published %d events, want 2 (one per Agent)", eventCount())
+	if !mgr.Muted(bart.ID.String()) {
+		t.Fatal("mute-all must mute the voiced Character NPC Bart")
+	}
+	if eventCount() != 1 {
+		t.Fatalf("mute-all published %d events, want 1 (one per voiced Agent)", eventCount())
 	}
 
 	mu.Lock()
@@ -234,8 +268,8 @@ func TestSetAllMute_MutesAndClearsEveryAgent(t *testing.T) {
 	if len(ids) != 0 {
 		t.Fatalf("muted ids after unmute-all = %v, want none", ids)
 	}
-	if eventCount() != 2 {
-		t.Fatalf("unmute-all published %d events, want 2", eventCount())
+	if eventCount() != 1 {
+		t.Fatalf("unmute-all published %d events, want 1", eventCount())
 	}
 }
 
