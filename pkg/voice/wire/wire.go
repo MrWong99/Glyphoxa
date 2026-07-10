@@ -93,6 +93,31 @@ type Pipeline struct {
 	silence   audio.Frame
 	silenceOn bool
 	newClock  func() silenceClock
+
+	// inboundTap, when set, is called with every non-silence inbound Opus frame
+	// just before it is decoded (the rollover tape's inbound capture point, #306);
+	// pcmTap, when set, is called with every decoded PCM frame (Speaker()-stamped,
+	// the highlight detector's feature source, #307). Both are nil by default —
+	// no tap wired means byte-identical existing behaviour — and both MUST return
+	// promptly: they run inline on the audio loop and any block adds latency
+	// (ADR-0020/0026).
+	inboundTap func(f gxvoice.Frame)
+	pcmTap     func(f audio.Frame)
+}
+
+// WithInboundTap installs a tap called with every non-silence inbound Opus frame
+// before it is decoded (the rollover tape's capture point, #306). The tap MUST
+// NOT block — it runs inline on the audio loop. Without this option the loop is
+// unchanged.
+func WithInboundTap(tap func(f gxvoice.Frame)) Option {
+	return func(p *Pipeline) { p.inboundTap = tap }
+}
+
+// WithPCMTap installs a tap called with every decoded PCM frame, Speaker()-stamped
+// as the codec produced it (#307's audio-feature source). The tap MUST NOT block.
+// Without this option the loop is unchanged.
+func WithPCMTap(tap func(f audio.Frame)) Option {
+	return func(p *Pipeline) { p.pcmTap = tap }
 }
 
 // silenceClock paces synthesized PCM silence into the VAD so trailing silence
@@ -289,6 +314,12 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 			if clk != nil {
 				clk.reset()
 			}
+			// Rollover tape capture (#306): every non-silence inbound frame, before
+			// decode, with its Opus payload + UserID intact. Nil unless armed; must
+			// not block.
+			if p.inboundTap != nil {
+				p.inboundTap(frame)
+			}
 			pcm, err := p.codec.DecodeInbound(frame)
 			if err != nil {
 				// A codec-less build can never decode anything: fail fast so it
@@ -307,6 +338,11 @@ func (p *Pipeline) run(ctx context.Context, inbound <-chan gxvoice.Frame) error 
 				continue
 			}
 			for _, f := range pcm {
+				// Decoded-PCM tap (#307): Speaker()-stamped frames for the highlight
+				// detector's audio features. Nil unless wired; must not block.
+				if p.pcmTap != nil {
+					p.pcmTap(f)
+				}
 				if err := p.conv.Feed(f); err != nil {
 					// Also a benign per-packet event on a healthy call (A1): Debug.
 					p.log.Debug("feed frame", "err", err)

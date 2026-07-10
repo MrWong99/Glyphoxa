@@ -70,7 +70,7 @@ func PlaySentence(ctx context.Context, sess *gxvoice.Session, codec Codec, chunk
 // fake player and no live connection. It publishes no FirstOpus (nil bus); the
 // live pump uses [playSentenceBus].
 func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk) error {
-	return playSentenceBus(ctx, p, codec, chunks, nil)
+	return playSentenceBus(ctx, p, codec, chunks, nil, nil)
 }
 
 // playSentenceBus is playSentence with an optional bus: when non-nil, the
@@ -78,8 +78,10 @@ func playSentence(ctx context.Context, p sessionPlayer, codec Codec, chunks <-ch
 // [voiceevent.FirstOpus] for the turn (task #7, the audible-on-wire SLO end). The
 // turn's correlation id is recovered from ctx ([voiceevent.TurnIDFrom]), which
 // the tee installs and threads through HandleSentence → the play job. A nil bus
-// or a ctx with no turn id leaves the Source unwrapped.
-func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk, bus *voiceevent.Bus) error {
+// or a ctx with no turn id leaves the Source unwrapped. outboundTap, when non-nil,
+// receives every Opus frame pulled to the wire (#306's agent-speech capture); it
+// must not block.
+func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <-chan tts.AudioChunk, bus *voiceevent.Bus, outboundTap func(opus []byte)) error {
 	if chunks == nil {
 		return fmt.Errorf("wire.PlaySentence: chunks must not be nil")
 	}
@@ -94,8 +96,10 @@ func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <
 		return fmt.Errorf("wire.PlaySentence: build playback source: %w", err)
 	}
 
-	// Wrap so the first frame on the wire stamps FirstOpus for this turn (no-op
-	// when bus is nil or the ctx carries no turn id).
+	// Wrap so every frame pulled to the wire is copied to the rollover tape (#306),
+	// then so the first frame stamps FirstOpus for this turn. Both are no-ops when
+	// their dependency (tap / bus+turn id) is absent.
+	src = newTappedSource(src, outboundTap)
 	src = newFirstOpusSource(src, bus, voiceevent.TurnIDFrom(ctx))
 
 	pb, err := p.Play(ctx, src)
