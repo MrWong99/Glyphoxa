@@ -256,6 +256,15 @@ jobs:
           go build -tags "opus nolibopusfile" ./...
           go vet -tags "opus nolibopusfile" ./...
 
+      # The opus-tagged unit tests (real libopus codec round-trip, PlaybackSource
+      # concurrency) are deterministic and keyless (ADR-0021) but CGO-gated behind
+      # `//go:build opus`, so the default no-CGO PR gate never compiles them. Run
+      # them HERE — separate from build+vet for concern clarity (#374). `-race`
+      # because codec/PlaybackSource pulls cross-goroutine. Targeted at the two
+      # packages that own opus-gated tests (mixdown decode, wire codec).
+      - name: Test (opus tags)
+        run: go test -race -tags "opus nolibopusfile" ./internal/mixdown/... ./pkg/voice/wire/...
+
       # The cassette-tier latency benchmark (Epic C): real silero VAD + codec,
       # cassettes for the network providers — keyless (no secrets, ADR-0021) but
       # CGO, so it runs HERE, not in the default no-CGO gate (ADR-0033 addendum).
