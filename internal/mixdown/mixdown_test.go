@@ -3,6 +3,7 @@ package mixdown
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -305,6 +306,41 @@ func TestWAVClip_ThreeVoiceArtifact(t *testing.T) {
 		t.Fatalf("write artifact: %v", err)
 	}
 	t.Logf("3-voice WAV artifact: %s (%d bytes)", path, len(clip))
+}
+
+func TestWAVClip_OversizeWindowErrors(t *testing.T) {
+	base := time.Unix(11000, 0)
+	// blob.MaxSize is 32 MiB; a mono 48k 16-bit clip hits it at ~349s. A window
+	// far past that must fail up front with ErrClipTooLarge, not allocate.
+	snap := Snapshot{From: base, To: base.Add(600 * time.Second)}
+	_, err := WAVClip(snap, Options{Decoder: identityFactory})
+	if !errors.Is(err, ErrClipTooLarge) {
+		t.Fatalf("err = %v, want ErrClipTooLarge", err)
+	}
+}
+
+func TestWAVClip_SubMillisGapStartsNewRun(t *testing.T) {
+	base := time.Unix(3500, 0)
+	snap := Snapshot{From: base, To: base.Add(time.Second)}
+	// Frame A at 100ms; frame B after a 100.5ms gap (>100ms) → NEW run at its own
+	// wall-clock offset (200.5ms), not laid at cadence. Whole-ms truncation would
+	// misclassify this as the SAME run (100.5ms → 100ms ≤ 100ms).
+	a := base.Add(100 * time.Millisecond)
+	b := a.Add(100500 * time.Microsecond) // +100.5ms → 200.5ms
+	snap.Lanes = []LaneSnapshot{{
+		LaneID: "spk",
+		Frames: []Frame{
+			{Opus: pcm(constN(100, 1000)...), At: a},
+			{Opus: pcm(constN(100, 2000)...), At: b},
+		},
+	}}
+
+	got := samplesOf(t, mustClip(t, snap, Options{Decoder: identityFactory}))
+
+	assertRegion(t, got, 4800, 100, 1000) // 100ms → sample 4800
+	// 200.5ms → sample 9624 (own offset). Cadence-slot bug would place at 5760.
+	assertRegion(t, got, 9624, 100, 2000)
+	assertRegion(t, got, 5760, 100, 0) // NOT laid at frame A's cadence slot
 }
 
 func TestWAVClip_HeaderBytewise(t *testing.T) {

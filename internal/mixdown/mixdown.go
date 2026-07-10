@@ -20,6 +20,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire/codec/dsp"
 )
@@ -40,6 +41,12 @@ type (
 // injected and the build lacks the real one (no `-tags opus`).
 var ErrDecoderUnavailable = errors.New("mixdown: opus decoder unavailable (build with -tags opus or inject Options.Decoder)")
 
+// ErrClipTooLarge is returned when the window (snap.To-snap.From at the output
+// rate) would encode to more than [blob.MaxSize] bytes — the clip could not be
+// stored (ADR-0048 / ADR-0051 32 MiB cap). Guarded up front so an oversize
+// request fails cheaply instead of allocating a giant buffer first.
+var ErrClipTooLarge = errors.New("mixdown: clip would exceed blob.MaxSize")
+
 // decodeRate is the sample rate the decoder emits and the internal mix runs at.
 // libopus decodes Discord Opus to 48 kHz mono; the output is resampled from
 // here to Options.SampleRate.
@@ -51,8 +58,10 @@ const frameSamples = decodeRate * 20 / 1000 // 960
 
 // runGap is the maximum gap between consecutive frames in a lane that still
 // counts as one contiguous run. A larger gap starts a new run at its own
-// wall-clock offset. (Discord stops sending frames during silence.)
-const runGapMillis = 100
+// wall-clock offset. (Discord stops sending frames during silence.) Compared as
+// a time.Duration — NOT truncated to whole ms — so a 100.5ms gap correctly
+// starts a new run rather than folding into the previous run's cadence.
+const runGap = 100 * time.Millisecond
 
 // Decoder decodes one Opus frame to mono 48 kHz int16 PCM. It is stateful (an
 // Opus decoder tracks inter-frame state), so one Decoder serves exactly one
@@ -83,6 +92,11 @@ type Options struct {
 // accumulation + clamp to int16 so overlapping speakers never wrap around.
 // Gaps render as silence. The clip's length is exactly (snap.To - snap.From) at
 // the output rate.
+//
+// A decoder error mid-run fails the WHOLE clip (returns the error, no partial
+// bytes) — the mix is all-or-nothing and deterministic. If the requested window
+// would encode to more than [blob.MaxSize], it returns [ErrClipTooLarge] before
+// allocating anything.
 func WAVClip(snap Snapshot, opts Options) ([]byte, error) {
 	outRate := opts.SampleRate
 	if outRate <= 0 {
@@ -91,6 +105,11 @@ func WAVClip(snap Snapshot, opts Options) ([]byte, error) {
 	factory := opts.Decoder
 	if factory == nil {
 		factory = defaultDecoderFactory
+	}
+
+	// Guard the blob cap up front: WAV is 44 header bytes + 2 bytes/sample.
+	if int64(44+samplesFor(snap, outRate)*2) > blob.MaxSize {
+		return nil, ErrClipTooLarge
 	}
 
 	// Internal mix buffer at the decode rate.
@@ -148,7 +167,7 @@ func mixLane(accum []int32, lane LaneSnapshot, from time.Time, factory DecoderFa
 		if derr != nil {
 			return derr
 		}
-		if i == 0 || f.At.Sub(frames[i-1].At).Milliseconds() > runGapMillis {
+		if i == 0 || f.At.Sub(frames[i-1].At) > runGap {
 			runStart = offsetSamples(from, f.At, decodeRate)
 			k = 0
 		}
