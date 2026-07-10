@@ -173,6 +173,100 @@ fi
 assert_spa
 
 # ---------------------------------------------------------------------------
+# 6. `glyphoxa seed -bundle` against a real Postgres (#293): the canonical demo
+#    bundle (scripts/testdata/demo.glyphoxa.json) imports cleanly and
+#    idempotently, so the self-host "seed a playable campaign" story actually
+#    works end-to-end through the shipped image. Unlike the DB-less checks above
+#    this needs a database, so it stands up a throwaway pgvector Postgres on a
+#    SCOPED docker network (NOT --network none — the seed container must reach
+#    the DB by name) and runs the image against it. Assertions go through
+#    `docker exec … psql` so the host needs no psql client. All state is torn
+#    down by a trap on exit.
+# ---------------------------------------------------------------------------
+printf '[6] seed -bundle imports the demo bundle idempotently against Postgres\n'
+
+SMOKE_NET="glyphoxa-smoke-net-$$"
+PG_NAME="glyphoxa-smoke-pg-$$"
+PG_IMAGE="pgvector/pgvector:pg17"
+DB_URL="postgres://glyphoxa:glyphoxa@${PG_NAME}:5432/glyphoxa?sslmode=disable"
+TESTDATA_DIR="$(cd "$(dirname "$0")/testdata" && pwd)"
+
+seed_cleanup() {
+	docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
+	docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+}
+trap seed_cleanup EXIT
+
+# psql_count runs a scalar COUNT query inside the DB container and trims whitespace.
+psql_count() {
+	docker exec "$PG_NAME" psql -U glyphoxa -d glyphoxa -tAc "$1" 2>/dev/null | tr -d '[:space:]'
+}
+# run_glyphoxa runs the image on the scoped network with the DSN env and the demo
+# bundle bind-mounted read-only at /demo.glyphoxa.json.
+run_glyphoxa() {
+	docker run --rm --network "$SMOKE_NET" \
+		-e GLYPHOXA_DATABASE_URL="$DB_URL" \
+		-v "$TESTDATA_DIR/demo.glyphoxa.json:/demo.glyphoxa.json:ro" \
+		"$IMAGE" "$@"
+}
+
+if ! docker network create "$SMOKE_NET" >/dev/null 2>&1; then
+	bad "could not create scoped docker network $SMOKE_NET"
+elif ! docker run -d --name "$PG_NAME" --network "$SMOKE_NET" \
+	-e POSTGRES_USER=glyphoxa -e POSTGRES_PASSWORD=glyphoxa -e POSTGRES_DB=glyphoxa \
+	"$PG_IMAGE" >/dev/null 2>&1; then
+	bad "could not start throwaway Postgres ($PG_IMAGE)"
+else
+	ready=0
+	for _ in $(seq 1 30); do
+		if docker exec "$PG_NAME" pg_isready -U glyphoxa -d glyphoxa >/dev/null 2>&1; then
+			ready=1
+			break
+		fi
+		sleep 1
+	done
+	if [ "$ready" -ne 1 ]; then
+		bad 'throwaway Postgres never became ready'
+	else
+		if run_glyphoxa migrate up >/dev/null 2>&1; then
+			ok 'migrate up succeeded'
+		else
+			bad 'migrate up failed'
+		fi
+		if run_glyphoxa seed -bundle /demo.glyphoxa.json >/dev/null 2>&1; then
+			ok 'seed -bundle succeeded'
+		else
+			bad 'seed -bundle failed'
+		fi
+		camp="$(psql_count 'SELECT count(*) FROM campaign;')"
+		agents="$(psql_count 'SELECT count(*) FROM agents;')"
+		if [ "$camp" = "1" ]; then
+			ok 'exactly one campaign after seed'
+		else
+			bad "campaign count = ${camp:-<none>}, want 1"
+		fi
+		if [ "$agents" = "2" ]; then
+			ok 'exactly two agents (Butler + Bart)'
+		else
+			bad "agent count = ${agents:-<none>}, want 2"
+		fi
+		# Idempotence (ADR-0053 §4): re-running the seed hits the name precheck and
+		# skips, so the campaign count must stay at 1 (no always-mint duplicate).
+		if run_glyphoxa seed -bundle /demo.glyphoxa.json >/dev/null 2>&1; then
+			ok 're-run seed -bundle exited 0'
+		else
+			bad 're-run seed -bundle failed'
+		fi
+		camp2="$(psql_count 'SELECT count(*) FROM campaign;')"
+		if [ "$camp2" = "1" ]; then
+			ok 'still one campaign after re-run (idempotent)'
+		else
+			bad "campaign count after re-run = ${camp2:-<none>}, want 1"
+		fi
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary.
 # ---------------------------------------------------------------------------
 summary
