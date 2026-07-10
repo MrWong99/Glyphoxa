@@ -179,7 +179,7 @@ func linkAgent(t *testing.T, st *storage.Store, campID, npcID uuid.UUID, name st
 	if err != nil {
 		t.Fatalf("CreateAgent %q: %v", name, err)
 	}
-	if _, err := st.SetNodeAgent(context.Background(), npcID,
+	if _, err := st.SetNodeAgent(context.Background(), campID, npcID,
 		uuid.NullUUID{UUID: agentID, Valid: true}); err != nil {
 		t.Fatalf("SetNodeAgent %q: %v", name, err)
 	}

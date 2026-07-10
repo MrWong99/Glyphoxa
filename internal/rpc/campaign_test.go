@@ -114,13 +114,13 @@ func (fakeReader) DeleteNode(context.Context, uuid.UUID, uuid.UUID) error {
 func (fakeReader) CreateEdge(context.Context, storage.NewKGEdge) (storage.KGEdge, error) {
 	return storage.KGEdge{}, nil
 }
-func (fakeReader) DeleteEdge(context.Context, uuid.UUID) error {
+func (fakeReader) DeleteEdge(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
 func (fakeReader) NodeEdges(context.Context, uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
 	return nil, nil, nil
 }
-func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.NullUUID) (storage.KGNode, error) {
+func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.UUID, uuid.NullUUID) (storage.KGNode, error) {
 	return storage.KGNode{}, nil
 }
 func (fakeReader) SearchNodes(context.Context, uuid.UUID, string, int) ([]storage.KGNode, error) {

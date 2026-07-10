@@ -158,6 +158,39 @@ func TestDeleteEdge_NotFoundIsNotFound(t *testing.T) {
 	}
 }
 
+// TestDeleteEdge_ScopesToActiveCampaign is #342: the delete is scoped to the
+// resolved active campaign, so another campaign's Edge is never removable.
+func TestDeleteEdge_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	client := crudClient(t, store)
+
+	if _, err := client.DeleteEdge(context.Background(),
+		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: uuid.NewString()})); err != nil {
+		t.Fatalf("DeleteEdge: %v", err)
+	}
+	if store.deleteEdgeCampaign != activeID {
+		t.Errorf("DeleteEdge scoped to %s, want active %s", store.deleteEdgeCampaign, activeID)
+	}
+}
+
+// TestDeleteEdge_NoActiveCampaignIsNotFound is #342: without an active campaign the
+// scoped delete cannot resolve an owner and returns CodeNotFound.
+func TestDeleteEdge_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.DeleteEdge(context.Background(),
+		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
 // TestListNodeEdges_SplitsAndJoins is the AC's incident-edge list: outgoing and
 // incoming are returned as SEPARATE lists (strictly directional), each carrying
 // the server-joined endpoint name + type so the UI needs no N+1.
@@ -311,6 +344,43 @@ func TestSetNodeAgent_StorageErrorsMapToCodes(t *testing.T) {
 				t.Errorf("code = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSetNodeAgent_ScopesToActiveCampaign is #342: the handler resolves the active
+// campaign and passes its id down, so the store matches the Node's campaign against
+// it — a cross-campaign link/unlink is refused server-side.
+func TestSetNodeAgent_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	node := uuid.New()
+	agent := uuid.New()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	store.setAgentNode = storage.KGNode{ID: node, Type: storage.KGNodeNPC, Name: "Bart"}
+	client := crudClient(t, store)
+
+	if _, err := client.SetNodeAgent(context.Background(),
+		connect.NewRequest(&managementv1.SetNodeAgentRequest{NodeId: node.String(), AgentId: agent.String()})); err != nil {
+		t.Fatalf("SetNodeAgent: %v", err)
+	}
+	if store.setAgentCampaign != activeID {
+		t.Errorf("SetNodeAgent scoped to %s, want active %s", store.setAgentCampaign, activeID)
+	}
+}
+
+// TestSetNodeAgent_NoActiveCampaignIsNotFound is #342: without an active campaign
+// the scoped link/unlink cannot resolve an owner and returns CodeNotFound.
+func TestSetNodeAgent_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.SetNodeAgent(context.Background(),
+		connect.NewRequest(&managementv1.SetNodeAgentRequest{NodeId: uuid.NewString(), AgentId: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
 	}
 }
 

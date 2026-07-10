@@ -46,8 +46,14 @@ func TestKGEdge_Integration(t *testing.T) {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 
+	// Pin the active campaign to the seeded one for the whole test: it later
+	// creates a SECOND campaign (the cross-campaign endpoint check), which would
+	// otherwise become the most-recent → active and (correctly, #342) scope the
+	// edge delete away from the seeded campaign the edge lives in.
+	server := rpc.NewCampaignServer(store)
+	server.SetSessions(liveMgr(campaignID))
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
+	mux.Handle(server.Handler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(

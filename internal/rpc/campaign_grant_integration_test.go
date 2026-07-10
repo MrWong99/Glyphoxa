@@ -153,6 +153,71 @@ func TestToolGrants_GhostAgent_Integration(t *testing.T) {
 	}
 }
 
+// TestToolGrants_CrossCampaign_Integration is #342: an operator whose active
+// campaign is A must not be able to grant or revoke Tools on campaign B's Agent
+// (incl. B's Butler). With a live Voice Session pinning the active campaign to A,
+// UpdateToolGrant against B's Butler is CodeNotFound in BOTH directions (grant and
+// revoke), and B's seeded grant rows are left untouched.
+func TestToolGrants_CrossCampaign_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, campaignA := seedStore(t, dsn) // A + its auto-Butler (seeded dice grant)
+	ctx := context.Background()
+
+	// A second campaign B under the same tenant, with its own auto-Butler.
+	a, err := store.GetActiveCampaign(ctx) // == A, carries the tenant id
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	campaignB, err := store.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: a.TenantID, Name: "Other Table", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	butlerB, err := store.GetButler(ctx, campaignB)
+	if err != nil {
+		t.Fatalf("GetButler B: %v", err)
+	}
+
+	// Pin the active campaign to A via a live Voice Session, then mount the server.
+	srv := rpc.NewCampaignServer(store)
+	srv.SetSessions(liveMgr(campaignA))
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, s.URL, connect.WithProtoJSON())
+
+	before, err := store.ListToolGrants(ctx, butlerB.ID)
+	if err != nil {
+		t.Fatalf("ListToolGrants(butlerB) before: %v", err)
+	}
+
+	// Revoke B's Butler dice while active on A → refused.
+	_, err = client.UpdateToolGrant(ctx, connect.NewRequest(&managementv1.UpdateToolGrantRequest{
+		AgentId: butlerB.ID.String(), ToolName: "dice", Granted: false,
+	}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("cross-campaign UpdateToolGrant(revoke) code = %v, want NotFound", got)
+	}
+	// Grant-with-config on B's Butler while active on A → refused.
+	_, err = client.UpdateToolGrant(ctx, connect.NewRequest(&managementv1.UpdateToolGrantRequest{
+		AgentId: butlerB.ID.String(), ToolName: "dice", Granted: true, Config: `{"scope":"all"}`,
+	}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("cross-campaign UpdateToolGrant(grant) code = %v, want NotFound", got)
+	}
+
+	// B's Butler grants are byte-for-byte unchanged — no cross-campaign write landed.
+	after, err := store.ListToolGrants(ctx, butlerB.ID)
+	if err != nil {
+		t.Fatalf("ListToolGrants(butlerB) after: %v", err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("cross-campaign grant write leaked: before %d rows, after %d", len(before), len(after))
+	}
+}
+
 // listGrants is a small helper that lists an Agent's grant states or fails the test.
 func listGrants(t *testing.T, client managementv1connect.CampaignServiceClient, agentID string) []*managementv1.ToolGrant {
 	t.Helper()

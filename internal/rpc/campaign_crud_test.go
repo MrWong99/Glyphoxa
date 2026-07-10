@@ -116,6 +116,11 @@ type fakeCampaignStore struct {
 	setAgentCalls []setAgentCall
 	setAgentNode  storage.KGNode
 	setAgentErr   error
+	// deleteEdgeCampaign/setAgentCampaign record the campaign id the Edge-delete /
+	// voiced-by link were scoped to (#342), so a unit test can assert the handler
+	// passed the resolved active campaign down.
+	deleteEdgeCampaign uuid.UUID
+	setAgentCampaign   uuid.UUID
 
 	// KG Node search state (#131): searchResults is returned verbatim so the
 	// handler's 1:1 rank-order mapping is asserted; searchQuery/searchLimit/searchCalls
@@ -401,7 +406,8 @@ func (f *fakeCampaignStore) CreateEdge(_ context.Context, e storage.NewKGEdge) (
 	}, nil
 }
 
-func (f *fakeCampaignStore) DeleteEdge(_ context.Context, _ uuid.UUID) error {
+func (f *fakeCampaignStore) DeleteEdge(_ context.Context, campaignID, _ uuid.UUID) error {
+	f.deleteEdgeCampaign = campaignID
 	return f.edgeDeleteErr
 }
 
@@ -409,7 +415,8 @@ func (f *fakeCampaignStore) NodeEdges(_ context.Context, _ uuid.UUID) ([]storage
 	return f.edgesOut, f.edgesIn, f.nodeEdgesErr
 }
 
-func (f *fakeCampaignStore) SetNodeAgent(_ context.Context, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error) {
+func (f *fakeCampaignStore) SetNodeAgent(_ context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error) {
+	f.setAgentCampaign = campaignID
 	if f.setAgentErr != nil {
 		return storage.KGNode{}, f.setAgentErr
 	}

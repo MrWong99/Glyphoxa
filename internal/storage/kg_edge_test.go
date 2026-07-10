@@ -144,10 +144,10 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	}
 
 	// DeleteEdge removes the outgoing edge; a repeat is ErrNotFound.
-	if err := st.DeleteEdge(ctx, out.ID); err != nil {
+	if err := st.DeleteEdge(ctx, campaignID, out.ID); err != nil {
 		t.Fatalf("DeleteEdge: %v", err)
 	}
-	if err := st.DeleteEdge(ctx, out.ID); !errors.Is(err, storage.ErrNotFound) {
+	if err := st.DeleteEdge(ctx, campaignID, out.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("second DeleteEdge err = %v, want ErrNotFound", err)
 	}
 	outgoing, incoming, err = st.NodeEdges(ctx, aldric.ID)
@@ -193,7 +193,7 @@ func TestSetNodeAgent(t *testing.T) {
 	}
 
 	// Link the NPC Node to the Agent.
-	linked, err := st.SetNodeAgent(ctx, npc.ID, uuid.NullUUID{UUID: agentID, Valid: true})
+	linked, err := st.SetNodeAgent(ctx, campaignID, npc.ID, uuid.NullUUID{UUID: agentID, Valid: true})
 	if err != nil {
 		t.Fatalf("SetNodeAgent link: %v", err)
 	}
@@ -202,18 +202,18 @@ func TestSetNodeAgent(t *testing.T) {
 	}
 
 	// A non-NPC Node cannot carry the link (DB CHECK).
-	if _, err := st.SetNodeAgent(ctx, loc.ID, uuid.NullUUID{UUID: agentID, Valid: true}); !errors.Is(err, storage.ErrInvalidEdge) {
+	if _, err := st.SetNodeAgent(ctx, campaignID, loc.ID, uuid.NullUUID{UUID: agentID, Valid: true}); !errors.Is(err, storage.ErrInvalidEdge) {
 		t.Errorf("link on non-NPC node err = %v, want ErrInvalidEdge", err)
 	}
 
 	// A second NPC Node claiming the same Agent trips the UNIQUE index.
 	npc2 := mkNode(t, st, campaignID, storage.KGNodeNPC, "Bart's Twin")
-	if _, err := st.SetNodeAgent(ctx, npc2.ID, uuid.NullUUID{UUID: agentID, Valid: true}); !errors.Is(err, storage.ErrConflict) {
+	if _, err := st.SetNodeAgent(ctx, campaignID, npc2.ID, uuid.NullUUID{UUID: agentID, Valid: true}); !errors.Is(err, storage.ErrConflict) {
 		t.Errorf("second link to same agent err = %v, want ErrConflict", err)
 	}
 
 	// Unlink.
-	unlinked, err := st.SetNodeAgent(ctx, npc.ID, uuid.NullUUID{})
+	unlinked, err := st.SetNodeAgent(ctx, campaignID, npc.ID, uuid.NullUUID{})
 	if err != nil {
 		t.Fatalf("SetNodeAgent unlink: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestSetNodeAgent(t *testing.T) {
 	}
 
 	// Relink, then delete the Agent: the link is SET NULL, the Node survives.
-	if _, err := st.SetNodeAgent(ctx, npc.ID, uuid.NullUUID{UUID: agentID, Valid: true}); err != nil {
+	if _, err := st.SetNodeAgent(ctx, campaignID, npc.ID, uuid.NullUUID{UUID: agentID, Valid: true}); err != nil {
 		t.Fatalf("SetNodeAgent relink: %v", err)
 	}
 	if err := st.DeleteAgent(ctx, campaignID, agentID); err != nil {
@@ -239,7 +239,7 @@ func TestSetNodeAgent(t *testing.T) {
 	}
 
 	// A missing Agent → ErrNotFound.
-	if _, err := st.SetNodeAgent(ctx, npc.ID, uuid.NullUUID{UUID: uuid.New(), Valid: true}); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.SetNodeAgent(ctx, campaignID, npc.ID, uuid.NullUUID{UUID: uuid.New(), Valid: true}); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("link to missing agent err = %v, want ErrNotFound", err)
 	}
 
@@ -256,7 +256,104 @@ func TestSetNodeAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAgent foreign: %v", err)
 	}
-	if _, err := st.SetNodeAgent(ctx, npc.ID, uuid.NullUUID{UUID: foreignAgent, Valid: true}); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.SetNodeAgent(ctx, campaignID, npc.ID, uuid.NullUUID{UUID: foreignAgent, Valid: true}); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("link to cross-campaign agent err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteEdgeIsCampaignScoped is #342: DeleteEdge matches (id, campaign_id), so
+// passing another Campaign's id refuses the delete with ErrNotFound and leaves the
+// Edge; the owning Campaign then deletes it.
+func TestDeleteEdgeIsCampaignScoped(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	var campaignB uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name) VALUES ($1, 'Other Table') RETURNING id`,
+		tenantID).Scan(&campaignB); err != nil {
+		t.Fatalf("insert campaign B: %v", err)
+	}
+
+	from := mkNode(t, st, campaignA, storage.KGNodeCharacter, "Aldric")
+	to := mkNode(t, st, campaignA, storage.KGNodeLocation, "Barrow")
+	edge, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignA, FromNodeID: from.ID, ToNodeID: to.ID, Type: storage.KGEdgeResidesIn,
+	})
+	if err != nil {
+		t.Fatalf("CreateEdge: %v", err)
+	}
+
+	// Delete scoped to campaign B must refuse and leave the Edge.
+	if err := st.DeleteEdge(ctx, campaignB, edge.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign DeleteEdge = %v, want ErrNotFound", err)
+	}
+	// The Edge is intact: the owning Campaign deletes it.
+	if err := st.DeleteEdge(ctx, campaignA, edge.ID); err != nil {
+		t.Fatalf("owner DeleteEdge after refused cross-campaign delete: %v", err)
+	}
+}
+
+// TestSetNodeAgentIsCampaignScoped is #342: both the link and the unlink match the
+// Node's campaign_id against the caller's campaign, so passing another Campaign's
+// id refuses either with ErrNotFound and leaves the voiced-by link untouched.
+func TestSetNodeAgentIsCampaignScoped(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	var campaignB uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO campaign (tenant_id, name) VALUES ($1, 'Other Table') RETURNING id`,
+		tenantID).Scan(&campaignB); err != nil {
+		t.Fatalf("insert campaign B: %v", err)
+	}
+
+	npc := mkNode(t, st, campaignA, storage.KGNodeNPC, "Bart the Innkeeper")
+	agentA, err := st.CreateAgent(ctx, storage.NewAgent{
+		CampaignID: campaignA, Role: storage.AgentRoleCharacter, Name: "Bart",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Cross-campaign LINK refused: the Node is in A, the caller scopes to B.
+	if _, err := st.SetNodeAgent(ctx, campaignB, npc.ID, uuid.NullUUID{UUID: agentA, Valid: true}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign SetNodeAgent link = %v, want ErrNotFound", err)
+	}
+
+	// Legit link under the owning Campaign.
+	linked, err := st.SetNodeAgent(ctx, campaignA, npc.ID, uuid.NullUUID{UUID: agentA, Valid: true})
+	if err != nil {
+		t.Fatalf("owner SetNodeAgent link: %v", err)
+	}
+	if !linked.AgentID.Valid || linked.AgentID.UUID != agentA {
+		t.Fatalf("link not persisted: %+v", linked.AgentID)
+	}
+
+	// Cross-campaign UNLINK refused: the Node is in A, the caller scopes to B.
+	if _, err := st.SetNodeAgent(ctx, campaignB, npc.ID, uuid.NullUUID{}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign SetNodeAgent unlink = %v, want ErrNotFound", err)
+	}
+
+	// The link survived the refused cross-campaign unlink.
+	nodes, err := st.ListNodes(ctx, campaignA)
+	if err != nil {
+		t.Fatalf("ListNodes A: %v", err)
+	}
+	var found bool
+	for _, n := range nodes {
+		if n.ID == npc.ID {
+			found = true
+			if !n.AgentID.Valid || n.AgentID.UUID != agentA {
+				t.Errorf("cross-campaign unlink leaked through: %+v", n.AgentID)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("npc node vanished")
 	}
 }

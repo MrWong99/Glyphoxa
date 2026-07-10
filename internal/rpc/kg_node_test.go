@@ -260,6 +260,22 @@ func TestUpdateNode_NotFoundIsNotFound(t *testing.T) {
 	}
 }
 
+// TestUpdateNode_NoActiveCampaignIsNotFound is #342: UpdateNode gained
+// active-campaign resolution to scope the write; with no active campaign it returns
+// CodeNotFound rather than mutating by bare id.
+func TestUpdateNode_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.UpdateNode(context.Background(),
+		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: uuid.NewString(), Name: "x"}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
 func TestUpdateNode_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
 	store := newFakeStore()

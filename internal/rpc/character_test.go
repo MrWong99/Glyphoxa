@@ -300,6 +300,24 @@ func TestUpdateCharacter_NonSnowflakeIsInvalidArgument(t *testing.T) {
 	}
 }
 
+// TestUpdateCharacter_NoActiveCampaignIsNotFound is #342: UpdateCharacter gained
+// active-campaign resolution to scope the write; with no active campaign it returns
+// CodeNotFound rather than mutating by bare id.
+func TestUpdateCharacter_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.UpdateCharacter(context.Background(),
+		connect.NewRequest(&managementv1.UpdateCharacterRequest{
+			Id: uuid.NewString(), Name: "New", DiscordUserId: "111111111111111111",
+		}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", got)
+	}
+}
+
 // --- DeleteCharacter ---
 
 func TestDeleteCharacter_Removes(t *testing.T) {
