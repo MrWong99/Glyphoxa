@@ -21,6 +21,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
@@ -78,6 +79,12 @@ func main() {
 			return
 		case "seed":
 			if err := RunSeed(context.Background(), log, os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "export":
+			if err := RunExport(context.Background(), os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -765,6 +772,13 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// RPC (#274) and the /glyphoxa recap slash command (#273) share one instance.
 	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, recapEngine, log).Handler(stack.HandlerOptions()...)
 
+	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
+	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
+	// download does not fit Connect's message model. Operator-only via
+	// auth.RequireSession, the same gate the relay reads (ADR-0041). #291 adds the
+	// POST import mount here next.
+	bundleHandler := &bundle.Handler{Store: store, Log: log}
+
 	return []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
@@ -778,6 +792,8 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 		// validates the glyphoxa_session cookie the EventSource/fetch send.
 		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
+		// Campaign bundle export (#290): streamed gzip download, operator-gated.
+		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
 		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
 		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}
