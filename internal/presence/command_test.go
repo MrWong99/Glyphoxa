@@ -2,6 +2,7 @@ package presence
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -44,6 +45,11 @@ type fakeResponder struct {
 	replies   []recordedReply
 	followups []recordedReply
 	deferred  *bool
+	// editErrs is a queue of errors returned by successive editOriginal calls (a nil
+	// entry, or an exhausted queue, is a success). It models a Discord 5xx on the
+	// original-response edit so the retry-on-failed-edit path (#335) has coverage: a
+	// failed edit records nothing and must NOT consume the placeholder.
+	editErrs []error
 }
 
 func (f *fakeResponder) reply(content string, ephemeral bool) error {
@@ -64,6 +70,14 @@ func (f *fakeResponder) followup(content string, ephemeral bool) error {
 }
 
 func (f *fakeResponder) editOriginal(content string) error {
+	if len(f.editErrs) > 0 {
+		err := f.editErrs[0]
+		f.editErrs = f.editErrs[1:]
+		if err != nil {
+			// A failed edit records nothing: the placeholder is still unresolved.
+			return err
+		}
+	}
 	// Editing the original response keeps the Defer's visibility regardless of any flag.
 	vis := true
 	if f.deferred != nil {
@@ -270,6 +284,43 @@ func TestDispatchFirstPostDeferReplyEditsOriginal(t *testing.T) {
 	// The SECOND reply is a real followup honoring its own public flag.
 	if resp.followups[1].content != "second" || resp.followups[1].ephemeral || resp.followups[1].kind != kindFollowup {
 		t.Errorf("second post-Defer message = %+v, want a public kindFollowup of \"second\"", resp.followups[1])
+	}
+}
+
+// TestDispatchFailedEditOriginalRetriesOnNextReply pins the retry-on-failed-edit
+// contract (#335): the placeholder is marked consumed ONLY after EditOriginal
+// succeeds. When Discord 5xxs the first edit, the handler's error propagates and the
+// dispatch generic-error ReplyEphemeral must edit AGAIN (a second kindEdit), not fall
+// through to a followup that would strand the "thinking…" placeholder forever. A
+// mark-before-edit regression would route the retry to a followup and fail this.
+func TestDispatchFailedEditOriginalRetriesOnNextReply(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	reg.Register(Command{Path: "flaky", Handle: func(_ context.Context, ic *Interaction) error {
+		if err := ic.Defer(true); err != nil {
+			return err
+		}
+		return ic.Reply("body") // first edit attempt — Discord 5xxs it
+	}})
+
+	// One queued edit error: the first editOriginal fails, the retry succeeds.
+	resp := &fakeResponder{editErrs: []error{errors.New("discord 500")}}
+	reg.dispatch(context.Background(), "flaky", &Interaction{guildID: testGuild, userID: strangerID, resp: resp})
+
+	if len(resp.replies) != 0 {
+		t.Fatalf("post-Defer must not CreateMessage; replies = %+v", resp.replies)
+	}
+	if len(resp.followups) != 1 {
+		t.Fatalf("want exactly one recorded message (the successful retry edit), got %+v", resp.followups)
+	}
+	got := resp.followups[0]
+	if got.kind != kindEdit {
+		t.Errorf("retry after a failed edit = %s, want kindEdit (placeholder consumed on retry, not stranded via followup)", got.kind)
+	}
+	if !got.ephemeral {
+		t.Errorf("retry edit visibility = public, want the Defer's ephemeral")
+	}
+	if !strings.Contains(strings.ToLower(got.content), "went wrong") {
+		t.Errorf("retry content = %q, want the generic dispatch error reply", got.content)
 	}
 }
 
