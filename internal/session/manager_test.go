@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -509,6 +510,72 @@ func TestStopFinalizesTranscriptCount(t *testing.T) {
 	}
 	if id, called := fin.seen(); called != 1 || id != vs.ID {
 		t.Errorf("finalize seen id=%s called=%d, want id=%s called=1", id, called, vs.ID)
+	}
+}
+
+// spyHighlighter records Begin/Finalize so a test can assert the Manager binds
+// and unbinds the Session Highlights pipeline at Start/loop-exit (#308).
+type spyHighlighter struct {
+	mu         sync.Mutex
+	beginArgs  [3]uuid.UUID
+	beginCalls int
+	finalizes  int
+}
+
+func (s *spyHighlighter) HandleTrigger(highlight.Trigger) {}
+
+func (s *spyHighlighter) Begin(voiceSessionID, campaignID, tenantID uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beginArgs = [3]uuid.UUID{voiceSessionID, campaignID, tenantID}
+	s.beginCalls++
+}
+
+func (s *spyHighlighter) Finalize(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finalizes++
+	return nil
+}
+
+func (s *spyHighlighter) seen() (begins, finals int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.beginCalls, s.finalizes
+}
+
+// TestManagerBeginsAndFinalizesHighlights is #308's Manager slice: Start binds the
+// Highlights pipeline to the session's owning ids, and loop exit finalizes it
+// (nothing dangles) — the SAME lifecycle transcript.Finalize gets.
+func TestManagerBeginsAndFinalizesHighlights(t *testing.T) {
+	store := newFakeStore()
+	runner := newBlockingRunner()
+	mgr := newManager(t, store, runner.run, true)
+	spy := &spyHighlighter{}
+	mgr.SetHighlights(spy)
+
+	tenantID, campaignID := uuid.New(), uuid.New()
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop runner never started")
+	}
+	if begins, _ := spy.seen(); begins != 1 {
+		t.Fatalf("Begin called %d times, want 1", begins)
+	}
+	if spy.beginArgs != [3]uuid.UUID{vs.ID, campaignID, tenantID} {
+		t.Fatalf("Begin args = %v, want session/campaign/tenant %v/%v/%v", spy.beginArgs, vs.ID, campaignID, tenantID)
+	}
+
+	if _, err := mgr.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if begins, finals := spy.seen(); begins != 1 || finals != 1 {
+		t.Fatalf("after Stop: begins=%d finals=%d, want 1/1", begins, finals)
 	}
 }
 

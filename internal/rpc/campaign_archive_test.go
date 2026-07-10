@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -142,6 +143,67 @@ func TestDeleteCampaign_HappyPath(t *testing.T) {
 	}
 	if len(store.deleteCalls) != 1 || store.deleteCalls[0] != id {
 		t.Errorf("delete calls = %+v, want [%s]", store.deleteCalls, id)
+	}
+}
+
+// fakeClipSweeper records the highlight-clip sweep a campaign hard delete runs.
+type fakeClipSweeper struct {
+	keys    []string
+	deleted []string
+	listErr error
+}
+
+func (f *fakeClipSweeper) CampaignClipKeys(context.Context, uuid.UUID) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.keys, nil
+}
+
+func (f *fakeClipSweeper) DeleteClip(_ context.Context, key string) error {
+	f.deleted = append(f.deleted, key)
+	return nil
+}
+
+// TestDeleteCampaign_SweepsHighlightClips: a successful hard delete drops every
+// highlight clip through the blob seam (#308, ADR-0048).
+func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	id := uuid.New()
+	sweeper := &fakeClipSweeper{keys: []string{"k1", "k2"}}
+	srv := rpc.NewCampaignServer(store)
+	srv.SetHighlightClipSweeper(sweeper)
+
+	if _, err := srv.DeleteCampaign(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
+		t.Fatalf("DeleteCampaign: %v", err)
+	}
+	if len(store.deleteCalls) != 1 {
+		t.Fatalf("campaign not deleted: %+v", store.deleteCalls)
+	}
+	if len(sweeper.deleted) != 2 || sweeper.deleted[0] != "k1" || sweeper.deleted[1] != "k2" {
+		t.Fatalf("clips not swept: %v", sweeper.deleted)
+	}
+}
+
+// TestDeleteCampaign_RefusedKeepsClips: a refused delete (not archived) must NOT
+// drop any clips (the campaign is still live).
+func TestDeleteCampaign_RefusedKeepsClips(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.deleteCampaignErr = storage.ErrNotArchived
+	sweeper := &fakeClipSweeper{keys: []string{"k1"}}
+	srv := rpc.NewCampaignServer(store)
+	srv.SetHighlightClipSweeper(sweeper)
+
+	_, err := srv.DeleteCampaign(context.Background(),
+		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("want FailedPrecondition, got %v", err)
+	}
+	if len(sweeper.deleted) != 0 {
+		t.Fatalf("refused delete swept clips: %v", sweeper.deleted)
 	}
 }
 

@@ -92,6 +92,13 @@ type SessionServer struct {
 	store    SessionStore
 	recapper RecapEngine
 	log      *slog.Logger
+
+	// highlights + blobs back the Session Highlights RPCs (#308); wired via
+	// SetHighlights after construction so the many existing call sites keep their
+	// signature. Nil (unwired, e.g. keyless tests) makes the Highlight RPCs report
+	// CodeUnimplemented rather than panic.
+	highlights HighlightStore
+	blobs      highlightBlobs
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)

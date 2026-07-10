@@ -110,6 +110,20 @@ func (s *CampaignServer) DeleteCampaign(
 		return nil, err
 	}
 
+	// Capture the campaign's Highlight clip keys BEFORE the delete — the row cascade
+	// removes the highlight rows, after which they can't be listed (#308, ADR-0048).
+	// The blobs themselves are dropped only AFTER the delete succeeds, so a refused
+	// delete (not archived / not found) never orphans a live campaign's clips.
+	var clipKeys []string
+	if s.clips != nil {
+		keys, err := s.clips.CampaignClipKeys(ctx, id)
+		if err != nil {
+			slog.Default().Error("DeleteCampaign: list highlight clip keys failed", "campaign_id", id, "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		clipKeys = keys
+	}
+
 	if err := s.store.DeleteCampaign(ctx, id); err != nil {
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
@@ -119,6 +133,15 @@ func (s *CampaignServer) DeleteCampaign(
 		default:
 			slog.Default().Error("DeleteCampaign: store delete failed", "campaign_id", id, "err", err)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+	}
+
+	// The rows are gone (cascade); drop their clips through the seam. Best-effort:
+	// a blob-delete failure here leaves an orphan blob but the campaign is already
+	// deleted, so it logs rather than failing the RPC (idempotent Delete anyway).
+	for _, k := range clipKeys {
+		if err := s.clips.DeleteClip(ctx, k); err != nil {
+			slog.Default().Warn("DeleteCampaign: highlight clip left orphaned", "campaign_id", id, "key", k, "err", err)
 		}
 	}
 	return connect.NewResponse(&managementv1.DeleteCampaignResponse{}), nil
