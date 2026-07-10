@@ -853,9 +853,14 @@ type ReplyFunc func(ctx context.Context, e voiceevent.AddressRouted) []Reply
 // sentence reaches TTS (and audio begins) before the whole completion is
 // generated. dispatch sends one sentence through the TTS stage and blocks until
 // that sentence is synthesized (the serial, one-at-a-time contract the
-// [PlaybackPump] depends on); it returns ctx.Err() if the turn was cancelled, so
-// the producer can stop generating and emitting pending sentences (a mid-stream
-// barge-in now cancels generation itself, not just post-hoc dispatch).
+// [PlaybackPump] depends on).
+//
+// dispatch's return is the deliver-then-commit signal (ADR-0012): a nil return
+// means the sentence was fully synthesized under a live turn ctx — delivered, so
+// the producer may commit it to history. It returns ctx.Err() if the turn was
+// cancelled BEFORE or DURING the sentence's drain (a mid-stream barge/mute cuts
+// the sentence's tail audio before its last frame is forwarded — not delivered),
+// so the producer stops generating AND does not commit that undelivered sentence.
 //
 // ctx is the per-turn context (the barge-in floor's, under [WithBargeIn]); the
 // producer must thread it into its LLM call so a cancel tears generation down.
@@ -1080,6 +1085,15 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 				return ctx.Err()
 			}
 			ttsFailed = true
+			return nil
+		}
+		// Deliver-then-commit re-check (ADR-0012): Dispatch returns nil even when a
+		// barge/mute cancelled the turn DURING the drain — the vendor call succeeded
+		// but the sentence's tail audio was cut before its last frame was forwarded,
+		// so it was NOT delivered. Report the cancel so the producer does not commit
+		// this undelivered sentence.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		return nil
 	}

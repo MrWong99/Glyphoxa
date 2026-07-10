@@ -387,12 +387,20 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	var spoken strings.Builder // what actually reached the pump — the history commit
 	voice := r.cfg.Persona.Voice
 
+	// Deliver-then-commit (ADR-0012): dispatch FIRST; a sentence joins the
+	// history commit only once dispatch returns nil, i.e. it was fully
+	// synthesized under a live turn ctx. A dispatch rejected because the turn was
+	// cancelled between the two select-ready branches (mute/barge) must NOT reach
+	// the spoken builder — the room never heard it.
 	emit := func(sentence string) error {
+		if err := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); err != nil {
+			return err
+		}
 		if spoken.Len() > 0 {
 			spoken.WriteByte(' ')
 		}
 		spoken.WriteString(sentence)
-		return dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice})
+		return nil
 	}
 
 	onText := func(delta string) error {
@@ -444,8 +452,14 @@ func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, disp
 	if reply == "" {
 		return nil
 	}
+	// Deliver-then-commit (ADR-0012): dispatch FIRST, commit only once the reply
+	// was delivered. A turn cancelled before the reply drained delivered nothing,
+	// so it must leave no assistant message.
+	if err := dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice}); err != nil {
+		return err
+	}
 	r.commitSpoken(reply)
-	return dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice})
+	return nil
 }
 
 // HistorySnapshot returns a copy of the running conversation history (the recent

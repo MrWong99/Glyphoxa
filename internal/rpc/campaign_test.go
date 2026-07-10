@@ -117,7 +117,7 @@ func (fakeReader) CreateEdge(context.Context, storage.NewKGEdge) (storage.KGEdge
 func (fakeReader) DeleteEdge(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
-func (fakeReader) NodeEdges(context.Context, uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
+func (fakeReader) NodeEdges(context.Context, uuid.UUID, uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
 	return nil, nil, nil
 }
 func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.UUID, uuid.NullUUID) (storage.KGNode, error) {

@@ -244,6 +244,58 @@ func (s *Store) searchChunks(ctx context.Context, campaignID uuid.UUID, agentID 
 	return out, nil
 }
 
+// ExportChunk is one Transcript Chunk plus its embedding rendered as pgvector's
+// text form ("[...]") for the Campaign Bundle exporter (#288, ADR-0053). Embedding
+// is "" when the row's vector is NULL or when the caller excluded vectors — the
+// default export strips embeddings (ADR-0053 d3), so the destination re-embeds.
+type ExportChunk struct {
+	TranscriptChunk
+	Embedding string
+}
+
+// ListTranscriptChunks returns every Transcript Chunk in a Campaign ordered
+// (created_at, id) — the deterministic read the Campaign Bundle exporter serialises
+// (#288, ADR-0053). It is Campaign-scoped (#342): only matching campaign_id rows
+// are returned, so no Chunk leaks across Campaigns. embedding_model is always
+// selected; the vector is included as its ::text form only when includeVectors is
+// true, else "" (COALESCE handles NULL either way). The exporter passes false
+// (ADR-0053 d3 strips vectors); the flag exists for the backup/migration path.
+// Vectors stay text-form so storage keeps no pgvector-go dependency.
+func (s *Store) ListTranscriptChunks(ctx context.Context, campaignID uuid.UUID, includeVectors bool) ([]ExportChunk, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+transcriptChunkColumns+`,
+		        CASE WHEN $2 THEN COALESCE(embedding::text, '') ELSE '' END AS embedding_text
+		   FROM transcript_chunk
+		  WHERE campaign_id = $1
+		  ORDER BY created_at, id`, campaignID, includeVectors)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list transcript chunks for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []ExportChunk
+	for rows.Next() {
+		var (
+			e    ExportChunk
+			vsID uuid.NullUUID // column nullable (ADR-0011 SEAM); may be NULL
+		)
+		if err := rows.Scan(
+			&e.ID, &e.CampaignID, &vsID, &e.Content,
+			&e.SpeakerDiscordUserIDs, &e.ParticipatedAgentIDs,
+			&e.EmbeddingModel, &e.StartedAt, &e.CreatedAt,
+			&e.Embedding,
+		); err != nil {
+			return nil, fmt.Errorf("storage: scan export chunk: %w", err)
+		}
+		e.VoiceSessionID = vsID.UUID // uuid.Nil when NULL
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list transcript chunks for campaign %s: %w", campaignID, err)
+	}
+	return out, nil
+}
+
 // GetEmbeddingsProviderConfig returns the most-recently-updated 'embeddings'
 // Provider Config, or ErrNotFound when none is bound. Process-wide (no tenant
 // filter), mirroring GetActiveCampaign's single-operator posture (ADR-0039): the

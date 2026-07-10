@@ -102,7 +102,11 @@ func (s *CampaignServer) DeleteEdge(
 
 // ListNodeEdges returns a Node's incident Edges split into outgoing and incoming
 // lists, each with joined endpoint name/type. An unparsable id is
-// CodeInvalidArgument; a storage failure is CodeInternal.
+// CodeInvalidArgument. The read is scoped to the active campaign (#356): a Node in
+// another campaign — or a missing Node — is CodeNotFound before any edge data (or
+// joined endpoint name, incl. gm_private ones) is returned, leaking neither the
+// KG nor an existence oracle. No active campaign is CodeNotFound; a storage
+// failure is CodeInternal.
 func (s *CampaignServer) ListNodeEdges(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListNodeEdgesRequest],
@@ -111,8 +115,19 @@ func (s *CampaignServer) ListNodeEdges(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid node id"))
 	}
-	outgoing, incoming, err := s.store.NodeEdges(ctx, nodeID)
+	c, err := s.activeCampaign(ctx)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("ListNodeEdges: get active campaign failed", "node_id", nodeID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	outgoing, incoming, err := s.store.NodeEdges(ctx, c.ID, nodeID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("node not found"))
+		}
 		slog.Default().Error("ListNodeEdges: store read failed", "node_id", nodeID, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
