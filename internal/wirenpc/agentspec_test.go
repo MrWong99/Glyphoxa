@@ -123,8 +123,8 @@ func TestSeedThenLoadEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSeededNPCs: %v", err)
 	}
-	if len(specs) != 1 {
-		t.Fatalf("demo seed loaded %d Character NPCs, want 1", len(specs))
+	if len(specs) != 2 {
+		t.Fatalf("demo seed loaded %d specs, want 2 (Bart + auto-Butler, #299)", len(specs))
 	}
 	loaded := specs[0]
 	want := hardcodedNPC()
@@ -230,8 +230,8 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSeededNPCs: %v", err)
 	}
-	if len(specs) != 2 {
-		t.Fatalf("loadSeededNPCs returned %d NPCs, want 2 (Bart + Mira)", len(specs))
+	if len(specs) != 3 {
+		t.Fatalf("loadSeededNPCs returned %d specs, want 3 (Bart + Mira + auto-Butler, #299)", len(specs))
 	}
 
 	// The two NPCs must assemble into a Roster that routes each by name to its own
@@ -258,6 +258,58 @@ func TestLoadSeededNPCs_LoadsAllCharacterAgents(t *testing.T) {
 			t.Errorf("naming %q routed to AgentID %q, want %q", name, got, byName[name])
 		}
 	}
+}
+
+// TestLoadCampaignRoster_AppendsButlerLast is the #299 load bar: the auto-created
+// Butler joins the voiced roster as the LAST spec — role butler, Address-Only, its
+// dice grant hydrated — while the primary (first) Character stays first and
+// unchanged. Before #299 loadCampaignRoster ignored the Butler entirely.
+func TestLoadCampaignRoster_AppendsButlerLast(t *testing.T) {
+	pool := startDB(t)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := SeedNPC(ctx, pool, testCipher(t), nil); err != nil {
+		t.Fatalf("SeedNPC: %v", err)
+	}
+
+	specs, primary, _, err := loadSeededNPCs(ctx, st)
+	if err != nil {
+		t.Fatalf("loadSeededNPCs: %v", err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("loaded %d specs, want 2 (Bart + Butler)", len(specs))
+	}
+	if specs[0].name != "Bart" {
+		t.Errorf("first spec name = %q, want Bart (primary Character stays first)", specs[0].name)
+	}
+	if primary.Agent.Name != "Bart" {
+		t.Errorf("primary = %q, want Bart", primary.Agent.Name)
+	}
+
+	butler := specs[len(specs)-1]
+	if butler.role != voiceevent.AgentRoleButler {
+		t.Errorf("last spec role = %q, want butler", butler.role)
+	}
+	if butler.name != "Glyphoxa" {
+		t.Errorf("butler name = %q, want Glyphoxa", butler.name)
+	}
+	if !butler.addressOnly {
+		t.Error("butler spec must be Address-Only")
+	}
+	if !hasGrant(butler.grants, "dice") {
+		t.Errorf("butler grants = %+v, want dice hydrated", butler.grants)
+	}
+}
+
+// hasGrant reports whether grants holds a grant for toolName.
+func hasGrant(grants []tool.Grant, toolName string) bool {
+	for _, g := range grants {
+		if g.ToolName == toolName {
+			return true
+		}
+	}
+	return false
 }
 
 // TestCampaignLanguageDrivesMatcherPhonetics (#199): the loaded campaign's
@@ -426,8 +478,8 @@ func TestLoadSeededNPCs_HydratesToolGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSeededNPCs: %v", err)
 	}
-	if len(specs) != 1 {
-		t.Fatalf("loaded %d NPCs, want 1", len(specs))
+	if len(specs) != 2 {
+		t.Fatalf("loaded %d specs, want 2 (Character + auto-Butler, #299)", len(specs))
 	}
 	bart := specs[0]
 
@@ -572,8 +624,8 @@ func TestLoadSeededNPCs_ModelFromBoundLLMConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSeededNPCs: %v", err)
 	}
-	if len(specs) != 1 {
-		t.Fatalf("loaded %d NPCs, want 1", len(specs))
+	if len(specs) != 2 {
+		t.Fatalf("loaded %d specs, want 2 (Character + auto-Butler, #299)", len(specs))
 	}
 	if specs[0].model != want {
 		t.Errorf("spec.model = %q, want %q (configured model must thread through)", specs[0].model, want)
@@ -670,8 +722,8 @@ func TestLoadSeededNPCs_NoLLMConfigYieldsEmptyModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSeededNPCs: %v", err)
 	}
-	if len(specs) != 1 {
-		t.Fatalf("loaded %d NPCs, want 1", len(specs))
+	if len(specs) != 2 {
+		t.Fatalf("loaded %d specs, want 2 (Character + auto-Butler, #299)", len(specs))
 	}
 	if specs[0].model != "" {
 		t.Errorf("spec.model = %q, want empty (no config → adapter default)", specs[0].model)
@@ -831,8 +883,8 @@ func TestLoadCampaignNPCs_FreshDBNoSeed(t *testing.T) {
 	if loadedCampaign.ID != campID {
 		t.Errorf("loaded campaign ID = %s, want %s", loadedCampaign.ID, campID)
 	}
-	if len(specs) != 1 || specs[0].name != "Wren" {
-		t.Errorf("loaded roster = %+v, want the single Character NPC Wren", specs)
+	if len(specs) != 2 || specs[0].name != "Wren" {
+		t.Errorf("loaded roster = %+v, want [Wren, auto-Butler] (#299)", specs)
 	}
 }
 

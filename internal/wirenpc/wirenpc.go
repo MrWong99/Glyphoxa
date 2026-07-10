@@ -497,10 +497,19 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 // is always the silent-NPC condition.
 func logVoiceGaps(log *slog.Logger, npcs []npcSpec) {
 	for _, npc := range npcs {
-		if npc.voice.VoiceID == "" {
-			log.Error("NPC has no synthesizable voice (empty VoiceID); it will be silent",
-				"npc", npc.name, "agentID", npc.agentID)
+		if npc.voice.VoiceID != "" {
+			continue
 		}
+		// The Butler is a legitimately text-only Agent (#299): a voiceless Butler
+		// answers via its TextSink into the channel chat, so an empty VoiceID is
+		// expected, not the silent-NPC failure. Surface it at INFO, not ERROR.
+		if npc.role == voiceevent.AgentRoleButler {
+			log.Info("Butler has no voice configured; it will answer as text only",
+				"npc", npc.name, "agentID", npc.agentID)
+			continue
+		}
+		log.Error("NPC has no synthesizable voice (empty VoiceID); it will be silent",
+			"npc", npc.name, "agentID", npc.agentID)
 	}
 }
 
