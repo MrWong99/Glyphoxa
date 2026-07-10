@@ -104,6 +104,39 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	}
 }
 
+// TestJobRunnerMetrics pins the background-job-runner series (#286, ADR-0049):
+// the three families expose their exact glyphoxa_jobs_* / glyphoxa_job_* names
+// and kind/outcome labels, and SetJobBacklog is a Set (idempotent) not an Inc —
+// two Sets to 4 then 2 leave the gauge at 2.
+func TestJobRunnerMetrics(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.JobOutcome("highlight.enrich", "done")
+	rec.JobOutcome("highlight.enrich", "retry")
+	rec.JobOutcome("highlight.enrich", "dead")
+	rec.JobDuration("highlight.enrich", 2*time.Second)
+
+	// Set-not-Inc: a re-Set from a fresh COUNT overwrites, never accumulates.
+	rec.SetJobBacklog("highlight.enrich", 4)
+	rec.SetJobBacklog("highlight.enrich", 2)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		`glyphoxa_jobs_total{kind="highlight.enrich",outcome="done"} 1`,
+		`glyphoxa_jobs_total{kind="highlight.enrich",outcome="retry"} 1`,
+		`glyphoxa_jobs_total{kind="highlight.enrich",outcome="dead"} 1`,
+		`glyphoxa_job_duration_seconds_bucket{kind="highlight.enrich",le="5"} 1`,
+		`glyphoxa_job_duration_seconds_count{kind="highlight.enrich"} 1`,
+		`glyphoxa_jobs_backlog{kind="highlight.enrich"} 2`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+}
+
 // TestWiredHistogramsAndProviderCounters is the #125 AC pin: after one real
 // observation on each previously-reserved instrument, every one of the six
 // histogram families exposes a non-empty series, the STT and TTS provider-call /

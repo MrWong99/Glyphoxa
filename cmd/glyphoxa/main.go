@@ -22,6 +22,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
+	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
@@ -488,6 +489,18 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	} else {
 		metrics.SetEmbeddingBacklog(n)
 	}
+
+	// Background job runner (#286, ADR-0049): one DB-backed generic runner over the
+	// `job` table, safe across web/all replicas by construction (the claim is a
+	// FOR UPDATE SKIP LOCKED, ADR-0039). It runs in web AND all mode (the
+	// embedworker precedent), not standalone voice, and rides the process signal
+	// ctx so SIGTERM stops it. No production kind is registered yet — Epic 8
+	// Highlight enrichment is the first consumer (ADR-0049); embedworker stays
+	// bespoke and recap/import stay synchronous RPCs. With an empty registry the
+	// runner idles without touching the DB.
+	jobRunner := jobs.New(store, metrics, log, jobs.Config{})
+	// Job-kind handlers register here; none exist yet.
+	go jobRunner.Run(ctx)
 
 	// Resolve the process embeddings provider ONCE and share it across the two
 	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding

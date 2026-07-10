@@ -97,7 +97,21 @@ type PrometheusRecorder struct {
 	// (timeout/DB error). Process-level (like embedding_backlog), bounded 3-value
 	// outcome label (ADR-0032).
 	kgFacts *prometheus.CounterVec // outcome
+
+	// background jobs (#286, ADR-0049/0032): the generic job runner's per-kind
+	// backlog gauge (Set-from-COUNT), terminal-outcome counter and handler-duration
+	// histogram. kind is bounded by the handler registry, so it is a safe label; a
+	// job's id/tenant/error are NEVER labels (ADR-0032). Process-level (namespace
+	// only, no voice subsystem), like embedding_backlog.
+	jobsBacklog *prometheus.GaugeVec     // kind
+	jobsTotal   *prometheus.CounterVec   // kind, outcome
+	jobDuration *prometheus.HistogramVec // kind
 }
+
+// jobDurationBuckets size the background-job handler-duration histogram (#286):
+// job work spans sub-second bookkeeping to minutes-long media enrichment, so the
+// bins run 0.1s..120s — wider and coarser than the voice SLO buckets.
+var jobDurationBuckets = []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120}
 
 // FactsOutcome is the bounded outcome label on the KG-fact-read counter
 // (glyphoxa_kg_facts_total, #126). Exactly three values reach a series (ADR-0032):
@@ -232,6 +246,25 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		Help:      "NPC Hot Context KG-fact reads by outcome (#126): facts injected (ok), none to inject (empty), or degraded.",
 	}, []string{"outcome"})
 
+	// Background job runner series (#286, ADR-0049): namespace-only (no voice
+	// subsystem), kind bounded by the handler registry (ADR-0032).
+	r.jobsBacklog = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "jobs_backlog",
+		Help:      "Runnable background jobs awaiting a worker, per kind (Set-from-COUNT).",
+	}, []string{"kind"})
+	r.jobsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "jobs_total",
+		Help:      "Background jobs by kind and terminal outcome (done, retry, dead).",
+	}, []string{"kind", "outcome"})
+	r.jobDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "job_duration_seconds",
+		Help:      "Background job handler execution time, per kind (success or failure).",
+		Buckets:   jobDurationBuckets,
+	}, []string{"kind"})
+
 	reg.MustRegister(
 		r.framesDropped, r.undecodable, r.daveDecryptErrs, r.sessions,
 		r.playbackTotal, r.bargeCancels,
@@ -239,6 +272,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
 		r.memoryRecall, r.kgFacts,
+		r.jobsBacklog, r.jobsTotal, r.jobDuration,
 		r.llmTokens, r.ttsCharacters, r.sttAudioSeconds,
 		// Standard runtime collectors so /metrics also reports process/Go health.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -354,6 +388,28 @@ func (r *PrometheusRecorder) KGFacts(o FactsOutcome) {
 // the DB rather than resuming a drifted in-memory delta.
 func (r *PrometheusRecorder) SetEmbeddingBacklog(n int) {
 	r.embeddingBacklog.Set(float64(n))
+}
+
+// --- background job runner (jobs.Metrics, #286/ADR-0049) ---
+
+// JobOutcome counts one background job's terminal outcome by kind (done, retry,
+// dead). kind is bounded by the runner's handler registry; a job's id/error are
+// never labels (ADR-0032).
+func (r *PrometheusRecorder) JobOutcome(kind, outcome string) {
+	r.jobsTotal.WithLabelValues(kind, outcome).Inc()
+}
+
+// JobDuration observes one background job handler execution's wall time by kind,
+// recorded for both successes and failures.
+func (r *PrometheusRecorder) JobDuration(kind string, d time.Duration) {
+	r.jobDuration.WithLabelValues(kind).Observe(d.Seconds())
+}
+
+// SetJobBacklog publishes the current count of runnable jobs for a kind. Callers
+// Set from a COUNT(*) — never Inc/Dec — so the gauge stays idempotent across
+// runner replicas and restarts (ADR-0032), mirroring SetEmbeddingBacklog.
+func (r *PrometheusRecorder) SetJobBacklog(kind string, n int) {
+	r.jobsBacklog.WithLabelValues(kind).Set(float64(n))
 }
 
 // Static assertions that the one adapter satisfies both contracts. The
