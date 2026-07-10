@@ -229,7 +229,28 @@ func (s *Store) DeleteEdge(ctx context.Context, campaignID, id uuid.UUID) error 
 // (from_node_id = nodeID) and incoming (to_node_id = nodeID) — each joined to both
 // endpoints' name/type so the Campaign screen renders without an N+1. One query
 // fetches both directions (ordered created_at, id); the split is done in Go.
-func (s *Store) NodeEdges(ctx context.Context, nodeID uuid.UUID) (outgoing, incoming []KGEdgeWithNodes, err error) {
+//
+// The read is scoped to the owning Campaign (#356): the anchor Node must belong to
+// campaignID, else ErrNotFound — a Node in another Campaign is invisible, leaking
+// neither its edges nor its joined endpoint names (incl. gm_private ones) nor an
+// existence oracle. A truly-missing Node id is the same ErrNotFound. Same
+// no-oracle discipline as the cross-campaign DeleteEdge/SetNodeAgent refusals.
+func (s *Store) NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (outgoing, incoming []KGEdgeWithNodes, err error) {
+	// Confirm the anchor Node belongs to this Campaign before returning any edge
+	// data — this is what turns a cross-campaign (or missing) Node into ErrNotFound
+	// instead of a silently-empty list that would still confirm the id parses.
+	var exists bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM kg_node WHERE id = $1 AND campaign_id = $2)`,
+		nodeID, campaignID).Scan(&exists); err != nil {
+		return nil, nil, fmt.Errorf("storage: node edges %s: anchor lookup: %w", nodeID, err)
+	}
+	if !exists {
+		return nil, nil, ErrNotFound
+	}
+
+	// Edges are same-campaign by construction (CreateEdge enforces it), so filtering
+	// the anchor by campaign above is sufficient; the WHERE below stays direction-only.
 	rows, err := s.db.Query(ctx,
 		`SELECT e.id, e.campaign_id, e.from_node_id, e.to_node_id, e.edge_type, e.created_at,
 		        fn.name, fn.node_type, tn.name, tn.node_type

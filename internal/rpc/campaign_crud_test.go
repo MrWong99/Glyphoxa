@@ -113,9 +113,12 @@ type fakeCampaignStore struct {
 	edgesOut      []storage.KGEdgeWithNodes
 	edgesIn       []storage.KGEdgeWithNodes
 	nodeEdgesErr  error
-	setAgentCalls []setAgentCall
-	setAgentNode  storage.KGNode
-	setAgentErr   error
+	// nodeEdgesCampaign records the campaign id ListNodeEdges resolved (#356), so a
+	// unit test can assert the read was scoped to the active campaign.
+	nodeEdgesCampaign uuid.UUID
+	setAgentCalls     []setAgentCall
+	setAgentNode      storage.KGNode
+	setAgentErr       error
 	// deleteEdgeCampaign/setAgentCampaign record the campaign id the Edge-delete /
 	// voiced-by link were scoped to (#342), so a unit test can assert the handler
 	// passed the resolved active campaign down.
@@ -411,7 +414,8 @@ func (f *fakeCampaignStore) DeleteEdge(_ context.Context, campaignID, _ uuid.UUI
 	return f.edgeDeleteErr
 }
 
-func (f *fakeCampaignStore) NodeEdges(_ context.Context, _ uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
+func (f *fakeCampaignStore) NodeEdges(_ context.Context, campaignID, _ uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
+	f.nodeEdgesCampaign = campaignID
 	return f.edgesOut, f.edgesIn, f.nodeEdgesErr
 }
 
@@ -953,9 +957,11 @@ func TestUpdateAgent_CrossCampaignPreReadIsNotFound(t *testing.T) {
 	if resp != nil {
 		t.Error("cross-campaign UpdateAgent must not return an agent payload")
 	}
-	// No write reached the store scoped to the active campaign.
-	if store.updateAgentCampaign == activeID {
-		t.Error("cross-campaign UpdateAgent leaked a write to the active campaign")
+	// No write reached the store at all — updateAgentCampaign stays its zero value
+	// (the fake's UpdateAgent never ran). A regression writing with CampaignID=nil
+	// or the foreign id would also be caught (must be exactly uuid.Nil).
+	if store.updateAgentCampaign != uuid.Nil {
+		t.Errorf("cross-campaign UpdateAgent leaked a write scoped to %s, want no write", store.updateAgentCampaign)
 	}
 }
 

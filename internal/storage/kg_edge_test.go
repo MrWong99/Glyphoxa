@@ -126,7 +126,7 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 		t.Fatalf("CreateEdge incoming: %v", err)
 	}
 
-	outgoing, incoming, err := st.NodeEdges(ctx, aldric.ID)
+	outgoing, incoming, err := st.NodeEdges(ctx, campaignID, aldric.ID)
 	if err != nil {
 		t.Fatalf("NodeEdges: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	if err := st.DeleteEdge(ctx, campaignID, out.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("second DeleteEdge err = %v, want ErrNotFound", err)
 	}
-	outgoing, incoming, err = st.NodeEdges(ctx, aldric.ID)
+	outgoing, incoming, err = st.NodeEdges(ctx, campaignID, aldric.ID)
 	if err != nil {
 		t.Fatalf("NodeEdges after delete: %v", err)
 	}
@@ -162,12 +162,50 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	if err := st.DeleteNode(ctx, campaignID, aldric.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
-	outC, inC, err := st.NodeEdges(ctx, cyra.ID)
+	outC, inC, err := st.NodeEdges(ctx, campaignID, cyra.ID)
 	if err != nil {
 		t.Fatalf("NodeEdges cyra: %v", err)
 	}
 	if len(outC) != 0 || len(inC) != 0 {
 		t.Errorf("deleting a Node did not cascade its edges: %d out / %d in", len(outC), len(inC))
+	}
+}
+
+// TestNodeEdgesCrossCampaignRefused is #356: NodeEdges is campaign-scoped. A Node
+// that belongs to another Campaign is invisible — asking for its incident Edges
+// yields ErrNotFound (no edge data, no joined endpoint names, no existence oracle),
+// exactly the same discipline as the cross-campaign DeleteEdge/SetNodeAgent refusals.
+// A missing Node id is indistinguishable (also ErrNotFound).
+func TestNodeEdgesCrossCampaignRefused(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A second campaign B in the same tenant, owning a Node with a real incident Edge.
+	campaignB, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID, Name: "Other", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	bChar := mkNode(t, st, campaignB, storage.KGNodeCharacter, "Secret Aldric")
+	bLoc := mkNode(t, st, campaignB, storage.KGNodeLocation, "Secret Keep")
+	if _, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignB, FromNodeID: bChar.ID, ToNodeID: bLoc.ID, Type: storage.KGEdgeResidesIn,
+	}); err != nil {
+		t.Fatalf("CreateEdge B: %v", err)
+	}
+
+	// Reading B's node while scoped to campaign A must leak nothing.
+	_, _, err = st.NodeEdges(ctx, campaignID, bChar.ID)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign NodeEdges err = %v, want ErrNotFound", err)
+	}
+
+	// A truly-missing node id is the same ErrNotFound (no oracle).
+	if _, _, err := st.NodeEdges(ctx, campaignID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("missing-node NodeEdges err = %v, want ErrNotFound", err)
 	}
 }
 
