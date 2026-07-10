@@ -228,6 +228,13 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	if c.reply != nil && c.replyStream != nil {
 		panic("orchestrator.Conversation.Register: WithReply and WithReplyStream are mutually exclusive")
 	}
+	// Ensemble Turn speaker (#301, ADR-0025) REQUIRES the barge-in floor — an ensemble
+	// is one floor-holding unit. Validate UNCONDITIONALLY (before the reply-strategy
+	// branch), so WithEnsemble without barge-in is a loud wiring error even when no
+	// reply strategy is set, not a silent no-op.
+	if c.ensemble != nil && !c.bargeEnabled {
+		panic("orchestrator.Conversation.Register: WithEnsemble requires WithBargeIn or WithBargeInCoalesce")
+	}
 	if c.reply != nil || c.replyStream != nil {
 		if c.tts == nil {
 			panic("orchestrator.Conversation.Register: a reply strategy was set but no TTS stage was provided")
@@ -247,12 +254,8 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		// is the feature-off default.
 		replier.gate = c.gate
 		// Ensemble Turn speaker (#301, ADR-0025): the replier runs a multi-Agent
-		// EnsembleRouted as a speculative fan-out + Lead race. It REQUIRES the barge-in
-		// floor — an ensemble is one floor-holding unit — so refuse the wiring without
-		// it (mirrors the fail-fast constructors).
-		if c.ensemble != nil && !c.bargeEnabled {
-			panic("orchestrator.Conversation.Register: WithEnsemble requires WithBargeIn or WithBargeInCoalesce")
-		}
+		// EnsembleRouted as a speculative fan-out + Lead race. The barge-in requirement
+		// is validated above (unconditionally); here just install it.
 		replier.ensemble = c.ensemble
 		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn

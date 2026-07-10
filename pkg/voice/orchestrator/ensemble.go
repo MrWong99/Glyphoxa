@@ -75,7 +75,11 @@ func (r *Replier) handleEnsemble(ctx context.Context, bus *voiceevent.Bus, e voi
 	// Take the floor under the coalesce anchor Targets[0] (the top-scored). The
 	// anchor names one candidate until the race elects the Lead and retargets the
 	// floor ([Floor.SetHolderAgent]) — an accepted window (a VAD-split re-take
-	// naming another candidate supersedes until then, RISK in the #301 plan).
+	// naming another candidate supersedes until then, RISK in the #301 plan). In the
+	// SAME pre-election window a per-Agent mute cut ([Floor.YieldAgent]) of the anchor
+	// Targets[0] cancels turnCtx and tears the WHOLE ensemble down (the race loop's
+	// turnCtx.Done() branch returns) — correct: the ensemble is one floor-holding unit
+	// (ADR-0027), and muting the current holder cuts the unit just as a barge would.
 	turnCtx, release, coalesced := r.floor.Take(ctx, targets[0].AgentID)
 	if coalesced {
 		release() // no-op on the floor, keeps the take/release pairing honest
@@ -163,6 +167,14 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		if turnCtx.Err() == nil {
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndProviderError})
 		}
+		return
+	}
+	// Race the cancel: when a barge fires the same instant the winner's result lands,
+	// both the buffered result and turnCtx.Done() are ready and the select above may
+	// have picked the result. Re-check before electing so we never publish
+	// EnsembleLead after a TurnEnded{barge} — nor let SpeakDraft commit a user message
+	// for a turn nothing spoke in.
+	if turnCtx.Err() != nil {
 		return
 	}
 

@@ -19,9 +19,10 @@ import (
 // replay-speed dependence (ADR-0021). Speak dispatches the draft (optionally split
 // across a pause gate so a barge can land mid-turn) and records which Agents spoke.
 type fakeEnsemble struct {
-	draft    map[string]string        // agentID -> draft text Draft returns
-	draftErr map[string]error         // agentID -> Draft error (optional)
-	gate     map[string]chan struct{} // agentID -> Draft release gate; nil/absent = immediate
+	draft     map[string]string        // agentID -> draft text Draft returns
+	draftErr  map[string]error         // agentID -> Draft error (optional)
+	gate      map[string]chan struct{} // agentID -> Draft release gate; nil/absent = immediate
+	ignoreCtx map[string]bool          // agentID -> Draft waits ONLY on the gate (returns success even if ctx already cancelled), modelling a Draft that completed the same instant the turn was cancelled
 
 	started   chan string // agentID pushed when a Draft begins (optional)
 	cancelled chan string // agentID pushed when a Draft's ctx was cancelled (optional)
@@ -40,13 +41,17 @@ func (s *fakeEnsemble) Draft(ctx context.Context, e voiceevent.AddressRouted) (s
 		s.started <- id
 	}
 	if g := s.gate[id]; g != nil {
-		select {
-		case <-g:
-		case <-ctx.Done():
-			if s.cancelled != nil {
-				s.cancelled <- id
+		if s.ignoreCtx[id] {
+			<-g // wait only on the gate: this Draft "already finished" when the turn was cut
+		} else {
+			select {
+			case <-g:
+			case <-ctx.Done():
+				if s.cancelled != nil {
+					s.cancelled <- id
+				}
+				return "", ctx.Err()
 			}
-			return "", ctx.Err()
 		}
 	}
 	if err := s.draftErr[id]; err != nil {
@@ -114,17 +119,18 @@ func ensembleReplier(h *voicetest.Harness, floor *orchestrator.Floor, spk orches
 	return replier
 }
 
-// TestReplier_Ensemble_FastestDraftLeadsAndSpeaks pins the Lead race (ADR-0025,
-// #301): with two candidates, the one whose Draft completes first (gate-pinned)
-// becomes the Lead — it is announced via EnsembleLead and is the only Agent that
-// speaks (exactly its TTSInvoked, one line). The slow candidate never speaks. No
-// sleeps: Mira's gate is never released, so Bart always wins.
+// TestReplier_Ensemble_FastestDraftLeadsAndSpeaks pins the Lead race skips
+// non-answers (ADR-0025, #301): Bart has a real draft, Goblin says nothing (""), so
+// Bart is elected Lead — announced via EnsembleLead and the only Agent that speaks
+// (exactly its TTSInvoked, one line). The speed-beats-score property (a slower
+// Targets[1] still winning over a hung Targets[0]) is pinned separately in
+// TestReplier_Ensemble_SlowerLowerScoredCandidateStillLeads.
 func TestReplier_Ensemble_FastestDraftLeadsAndSpeaks(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	spk := &fakeEnsemble{
-		draft:   map[string]string{bartTarget.AgentID: "Bart speaks."},
-		gate:    map[string]chan struct{}{bartTarget.AgentID: closedGate() /* mira: none released */},
+		draft:   map[string]string{bartTarget.AgentID: "Bart speaks." /* goblin: no entry → empty draft, skipped */},
+		gate:    map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: closedGate()},
 		spokeCh: make(chan string, 2),
 	}
 	replier := ensembleReplier(h, floor, spk)
@@ -146,12 +152,121 @@ func TestReplier_Ensemble_FastestDraftLeadsAndSpeaks(t *testing.T) {
 		return e.TurnID == "T7" && e.Target.AgentID == bartTarget.AgentID
 	}, "ensemble.lead → Bart")
 	if got := spk.spokeIDs(); len(got) != 1 || got[0] != bartTarget.AgentID {
-		t.Fatalf("spoke = %v, want only Bart (the slow candidate must not speak)", got)
+		t.Fatalf("spoke = %v, want only Bart (the empty-draft candidate must not speak)", got)
 	}
 	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
 	voicetest.AssertEvent(t, h, func(e voiceevent.TTSInvoked) bool { return e.Sentence == "Bart speaks." && e.TurnID == "T7" }, "one tts.invoked for Bart's line")
 	// Clean turn: no TurnEnded of any reason.
 	voicetest.AssertNoEvent[voiceevent.TurnEnded](t, h)
+}
+
+// TestReplier_Ensemble_SlowerLowerScoredCandidateStillLeads is the AC1 headline
+// (ADR-0025, #301): the FIRST complete non-empty draft wins the floor REGARDLESS of
+// score order. Targets[0] (the top-scored coalesce anchor, Bart) is gated FOREVER;
+// the lower-scored Targets[1] (Goblin) completes → Goblin is elected Lead and is the
+// one that speaks. A coordinator that skipped the race and just waited on Targets[0]
+// would deadlock here.
+func TestReplier_Ensemble_SlowerLowerScoredCandidateStillLeads(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fakeEnsemble{
+		draft: map[string]string{bartTarget.AgentID: "Bart (too slow).", goblinTarget.AgentID: "Goblin wins."},
+		gate: map[string]chan struct{}{
+			bartTarget.AgentID:   make(chan struct{}), // Targets[0]: NEVER released (hung)
+			goblinTarget.AgentID: closedGate(),        // Targets[1]: completes immediately
+		},
+		cancelled: make(chan string, 2),
+		spokeCh:   make(chan string, 2),
+	}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-race", Text: "Bart, Goblin — go!", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	select {
+	case who := <-spk.spokeCh:
+		if who != goblinTarget.AgentID {
+			t.Fatalf("Speak ran for %q, want the faster lower-scored Goblin (Targets[1])", who)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the ensemble never elected the faster candidate (did the coordinator wait on Targets[0]?)")
+	}
+
+	voicetest.AssertEvent(t, h, func(e voiceevent.EnsembleLead) bool {
+		return e.TurnID == "T-race" && e.Target.AgentID == goblinTarget.AgentID
+	}, "ensemble.lead → Goblin (Targets[1], first complete draft)")
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+	voicetest.AssertEvent(t, h, func(e voiceevent.TTSInvoked) bool { return e.Sentence == "Goblin wins." && e.TurnID == "T-race" }, "Goblin's line on the wire")
+	if got := spk.spokeIDs(); len(got) != 1 || got[0] != goblinTarget.AgentID {
+		t.Fatalf("spoke = %v, want only Goblin", got)
+	}
+	// The hung Targets[0] draft was cancelled by the election (leak-proof).
+	select {
+	case who := <-spk.cancelled:
+		if who != bartTarget.AgentID {
+			t.Fatalf("cancelled draft = %q, want the hung Bart", who)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hung Targets[0] draft was never cancelled after the election")
+	}
+}
+
+// TestReplier_Ensemble_WinAfterCancelElectsNoLead pins the race-closure re-check
+// (#301): if a candidate's draft completes the SAME instant the turn is cancelled
+// (buffered result AND turnCtx.Done() both ready), no Lead may be elected — otherwise
+// EnsembleLead would publish after a TurnEnded and SpeakDraft would commit a user
+// message for a turn nothing spoke in. The winner's Draft ignores ctx (it "already
+// finished"); the turn is cancelled BEFORE its gate opens, so its success lands
+// post-cancel.
+func TestReplier_Ensemble_WinAfterCancelElectsNoLead(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	bartGate := make(chan struct{})
+	spk := &fakeEnsemble{
+		draft:     map[string]string{bartTarget.AgentID: "Bart speaks." /* goblin: empty, skipped */},
+		gate:      map[string]chan struct{}{bartTarget.AgentID: bartGate},
+		ignoreCtx: map[string]bool{bartTarget.AgentID: true},
+		started:   make(chan string, 2),
+		spokeCh:   make(chan string, 2),
+	}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tc", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	// Wait until Bart's draft is in flight (blocked on its gate).
+	waitStarted(t, spk, bartTarget.AgentID)
+	// Cancel the turn (a barge/mute would do this via the floor), THEN let Bart's
+	// draft complete successfully — its winning result now arrives post-cancel.
+	floor.Yield()
+	close(bartGate)
+
+	// The re-check must swallow the post-cancel win: no Lead, nobody speaks.
+	select {
+	case <-time.After(300 * time.Millisecond):
+	case who := <-spk.spokeCh:
+		t.Fatalf("a cancelled ensemble must not elect a Lead; %q spoke", who)
+	}
+	voicetest.AssertNoEvent[voiceevent.EnsembleLead](t, h)
+	if len(spk.spokeIDs()) != 0 {
+		t.Fatalf("nobody may speak after a cancel; spoke = %v", spk.spokeIDs())
+	}
+}
+
+// waitStarted drains the fake's started channel until agentID's Draft has begun.
+func waitStarted(t *testing.T, s *fakeEnsemble, agentID string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case id := <-s.started:
+			if id == agentID {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("Draft for %q never started", agentID)
+		}
+	}
 }
 
 // TestReplier_Ensemble_LoserDraftDiscarded pins ADR-0012's zero-commit rule at the
@@ -391,4 +506,77 @@ func TestConversation_WithEnsemble_WithoutBargePanics(t *testing.T) {
 		}
 	}()
 	conv.Register(t.Context())
+}
+
+// countMute is a MuteView that reports NOT muted for the first flipAfter Muted
+// calls, then muted — so the pre-Take mute filter passes every candidate but the
+// post-Take re-filter (the race-closure) sees them all muted.
+type countMute struct {
+	mu        sync.Mutex
+	calls     int
+	flipAfter int
+}
+
+func (m *countMute) Muted(string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return m.calls > m.flipAfter
+}
+
+// TestReplier_Ensemble_SingleMutedOfTwo_DegradesToSurvivor pins the mute pre-filter
+// collapsing an ensemble to a single route (#211, #301): with one of two candidates
+// muted, only the survivor remains, so the turn degrades to the plain single-route
+// path for that survivor — no Lead race, no EnsembleLead.
+func TestReplier_Ensemble_SingleMutedOfTwo_DegradesToSurvivor(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+	var routedFor string
+	replier := orchestrator.NewStreamReplier(ttsStage, func(_ context.Context, e voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		routedFor = e.Target.AgentID
+		return dispatch(orchestrator.Reply{Sentence: "hi"})
+	}, nil)
+	replier.SetFloor(floor)
+	replier.SetEnsemble(&fakeEnsemble{}) // ensemble wired, but only one candidate survives the mute
+	replier.SetMutes(muteSet{bartTarget.AgentID: true})
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tsm", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool { return e.TurnID == "Tsm" }, "single-route dispatch for the surviving candidate")
+	if routedFor != goblinTarget.AgentID {
+		t.Fatalf("degrade routed to %q, want the un-muted survivor Goblin", routedFor)
+	}
+	voicetest.AssertEventCount[voiceevent.EnsembleLead](t, h, 0)
+}
+
+// TestReplier_Ensemble_PostTakeMuteReFilter_EndsMute pins the race-closure
+// (#211, #301): the mute view can flip to muted between the pre-Take filter and the
+// Take. When the post-Take re-filter finds every candidate muted, the floor is
+// released and the turn ends with the mute reason — before any draft runs.
+func TestReplier_Ensemble_PostTakeMuteReFilter_EndsMute(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fakeEnsemble{
+		draft:   map[string]string{bartTarget.AgentID: "x", goblinTarget.AgentID: "y"},
+		started: make(chan string, 2),
+	}
+	replier := ensembleReplier(h, floor, spk)
+	// flipAfter 2: the two pre-Take checks pass, the two post-Take checks report muted.
+	replier.SetMutes(&countMute{flipAfter: 2})
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tpm", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.AssertEvent(t, h, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "Tpm" && e.Reason == voiceevent.TurnEndMute
+	}, "turn.ended mute from the post-Take re-filter")
+	if floor.Active() {
+		t.Fatal("the floor must be released when the post-Take re-filter mutes every candidate")
+	}
+	voicetest.AssertEventCount[voiceevent.EnsembleLead](t, h, 0)
+	if len(spk.spokeIDs()) != 0 {
+		t.Fatal("no candidate may draft/speak after the post-Take mute re-filter")
+	}
 }

@@ -199,6 +199,11 @@ func (s *StageSubscriber) onEnsembleRouted(e voiceevent.EnsembleRouted) {
 		t = &turnState{}
 		s.turns[e.TurnID] = t
 	}
+	// TODO(#301): the role label uses Targets[0].AgentRole (the top-scored coalesce
+	// anchor), which may not match the eventually-elected Lead's AgentRole. It is a
+	// metrics label only (ADR-0032 §2.1 — never a per-turn identity), and an
+	// ensemble's candidates share the character role in practice, so the approximation
+	// is harmless; revisit if a mixed-role ensemble (Butler + Character) ever ships.
 	t.role = normalizeRole(e.Targets[0].AgentRole)
 	t.roleKnown = true
 	t.routedAt = e.At
