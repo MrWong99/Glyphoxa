@@ -539,3 +539,26 @@ func TestStageSubscriberEndToEndPrometheus(t *testing.T) {
 		}
 	}
 }
+
+// TestStageSubscriberEnsembleRoutedStageMark pins #301: an EnsembleRouted stage-marks
+// the turn exactly like an AddressRouted — the role comes from Targets[0] and the
+// address_detect span is recorded, so the Lead's FirstOpus (under the same TurnID)
+// pairs against it.
+func TestStageSubscriberEnsembleRoutedStageMark(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	bus.Publish(voiceevent.STTFinal{At: base.Add(700 * time.Millisecond), TurnID: "E", SpeechEndAt: base})
+	bus.Publish(voiceevent.EnsembleRouted{At: base.Add(750 * time.Millisecond), TurnID: "E", Targets: []voiceevent.AddressTarget{
+		{AgentRole: "character"}, {AgentRole: "character"},
+	}})
+	bus.Publish(voiceevent.FirstOpus{At: base.Add(1600 * time.Millisecond), TurnID: "E"})
+
+	if len(rec.addressDetect) != 1 || rec.addressDetect[0] != 50*time.Millisecond {
+		t.Fatalf("address_detect = %v, want [50ms] from the EnsembleRouted mark", rec.addressDetect)
+	}
+	if len(rec.responseLat) != 1 || rec.responseLat[0].label != "character" || rec.responseLat[0].d != 1600*time.Millisecond {
+		t.Fatalf("response_latency = %+v, want one [character 1.6s] anchored on the ensemble mark", rec.responseLat)
+	}
+}

@@ -351,6 +351,14 @@ func (r *Relay) project(e voiceevent.Event) {
 		// (ADR-0012/0040).
 		t := r.turn(ev.TurnID)
 		t.target = ev.Target
+	case voiceevent.EnsembleLead:
+		// An Ensemble Turn's elected Lead (#301, ADR-0025): the Lead speaks under the
+		// ensemble's original TurnID, so — like AddressRouted — record WHO answers so
+		// the coalescing TTSInvoked line is attributed to the Lead (a:<turn>, its name +
+		// NPC pill). The losing candidates publish no EnsembleLead and no TTSInvoked, so
+		// they leave no line.
+		t := r.turn(ev.TurnID)
+		t.target = ev.Target
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
 		t := r.turn(ev.TurnID)

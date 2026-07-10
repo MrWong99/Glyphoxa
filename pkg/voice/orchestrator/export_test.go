@@ -40,6 +40,11 @@ func (d *DirectSpeech) SetFloor(floor *Floor) { d.floor = floor }
 // Conversation.Register from [WithTurnGate].
 func (d *DirectSpeech) SetGate(g TurnGate) { d.gate = g }
 
+// SetEnsemble installs the Ensemble Turn speaker on the replier for the ensemble
+// coordinator tests (external test package, #301). Production wiring sets
+// r.ensemble inside Conversation.Register from [WithEnsemble].
+func (r *Replier) SetEnsemble(s EnsembleSpeaker) { r.ensemble = s }
+
 // SetErrorHandler installs onError on the segmenter for the off-loop STT error
 // tests (external test package). Production wiring sets it inside
 // Conversation.Register from [WithErrorHandler].

@@ -139,11 +139,14 @@ func TestAddressDetector_PublishesDecisionVerbatim(t *testing.T) {
 	)
 }
 
-// TestAddressDetector_PublishesEveryDecision pins the multi-target half of the
-// TargetMatcher contract: when one utterance addresses several Agents the
-// matcher returns several decisions and the detector publishes each of them,
-// not just the first.
-func TestAddressDetector_PublishesEveryDecision(t *testing.T) {
+// TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted pins the
+// multi-target half of the TargetMatcher contract under the Ensemble Turn design
+// (ADR-0025, #301): when the matcher returns several decisions the detector makes
+// the set ATOMIC — ONE address.ensemble carrying every target in the matcher's
+// order — rather than N independent address.routed. This REWRITES the former
+// TestAddressDetector_PublishesEveryDecision (which asserted N address.routed): the
+// #301 contract supersedes it, since an Ensemble Turn is one floor-holding unit.
+func TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted(t *testing.T) {
 	h := voicetest.New(t)
 	m := matchFunc(func(text string) []voiceevent.AddressRouted {
 		return []voiceevent.AddressRouted{
@@ -154,16 +157,16 @@ func TestAddressDetector_PublishesEveryDecision(t *testing.T) {
 	d := orchestrator.NewAddressDetector(m)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start fighting."})
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start fighting.", TurnID: "T-m"})
 
-	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 2)
+	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 1)
+	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 0)
 	voicetest.AssertEvent(t, h,
-		func(e voiceevent.AddressRouted) bool { return e.Target == bartTarget },
-		"address.routed → Bart",
-	)
-	voicetest.AssertEvent(t, h,
-		func(e voiceevent.AddressRouted) bool { return e.Target == goblinTarget },
-		"address.routed → Goblin",
+		func(e voiceevent.EnsembleRouted) bool {
+			return len(e.Targets) == 2 && e.Targets[0] == bartTarget && e.Targets[1] == goblinTarget &&
+				e.TurnID == "T-m" && e.Text == "Bart and the Goblin start fighting."
+		},
+		"address.ensemble carrying both targets in matcher order",
 	)
 }
 

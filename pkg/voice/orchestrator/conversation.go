@@ -55,6 +55,13 @@ type Conversation struct {
 	// turn gate. Deliberately independent of the mute view (GM puppeteering bypasses
 	// mute).
 	voiceOf VoiceLookup
+
+	// ensemble is the Ensemble Turn speaker ([WithEnsemble], #301): nil = feature
+	// off. When set, Register installs it on the replier, which runs a
+	// [voiceevent.EnsembleRouted] as a speculative fan-out + Lead race (ADR-0025).
+	// It REQUIRES barge-in (an ensemble is one floor-holding unit); Register panics
+	// if set without [WithBargeIn]/[WithBargeInCoalesce].
+	ensemble EnsembleSpeaker
 }
 
 // Option configures a [Conversation] at construction.
@@ -166,6 +173,20 @@ func WithDirectSpeech(voiceOf VoiceLookup) Option {
 	return func(c *Conversation) { c.voiceOf = voiceOf }
 }
 
+// WithEnsemble enables Ensemble Turns (ADR-0025, #301): when one utterance
+// addresses two or more Agents the detector publishes a [voiceevent.EnsembleRouted],
+// and the replier fans the candidates out into parallel speculative Drafts, races
+// them, and lets the first complete non-empty draft (the Lead) take the floor and
+// speak — the losers' drafts are discarded (Reactions are #302). It REQUIRES
+// barge-in ([WithBargeIn]/[WithBargeInCoalesce]) — the whole ensemble is ONE
+// floor-holding unit, so a single barge tears the unit down (ADR-0027); Register
+// panics if the speaker is set without it. A nil speaker is the feature-off default,
+// where an EnsembleRouted degrades to the top-scored single route. The production
+// speaker is agent.Cast (which also drives [WithReplyStream]).
+func WithEnsemble(s EnsembleSpeaker) Option {
+	return func(c *Conversation) { c.ensemble = s }
+}
+
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
 // the reactors fire inside bus callbacks (currently the replier's TTS dispatch).
 // Without it such failures are dropped silently.
@@ -225,6 +246,14 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		// estimated spend crosses the soft cap. Independent of barge-in and mute; nil
 		// is the feature-off default.
 		replier.gate = c.gate
+		// Ensemble Turn speaker (#301, ADR-0025): the replier runs a multi-Agent
+		// EnsembleRouted as a speculative fan-out + Lead race. It REQUIRES the barge-in
+		// floor — an ensemble is one floor-holding unit — so refuse the wiring without
+		// it (mirrors the fail-fast constructors).
+		if c.ensemble != nil && !c.bargeEnabled {
+			panic("orchestrator.Conversation.Register: WithEnsemble requires WithBargeIn or WithBargeInCoalesce")
+		}
+		replier.ensemble = c.ensemble
 		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the

@@ -104,6 +104,12 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 		panic("orchestrator.AddressDetector.Bind: bus must not be nil")
 	}
 	return voiceevent.On(bus, func(final voiceevent.STTFinal) {
+		// Collect the GM-gate SURVIVORS first, then decide the atomicity of the set
+		// (ADR-0025, #301): one survivor publishes a plain [voiceevent.AddressRouted]
+		// (byte-identical to the pre-ensemble path, the MaxTargets=1 default); two or
+		// more publish ONE [voiceevent.EnsembleRouted] so the turn-taking layer runs
+		// the set as a single floor-holding Ensemble Turn; zero publishes nothing.
+		var survivors []voiceevent.AddressRouted
 		for _, routed := range d.matcher.TargetMatch(final.Text) {
 			// Butler GM-only address gate (ADR-0024): drop a Butler route whose
 			// SpeakerID is not an allowlisted GM (empty fails closed). Fail
@@ -116,7 +122,27 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 			// Carry the turn correlation id (A3) from the utterance onto each
 			// routing decision it produced; the matcher does not know about it.
 			routed.TurnID = final.TurnID
-			bus.Publish(routed)
+			survivors = append(survivors, routed)
+		}
+		switch len(survivors) {
+		case 0:
+			return
+		case 1:
+			// Single-target: byte-identical to the pre-ensemble path.
+			bus.Publish(survivors[0])
+		default:
+			// Two or more: ONE atomic EnsembleRouted carrying the matcher's
+			// score-sorted target set (Targets[0] is the top-scored coalesce anchor).
+			targets := make([]voiceevent.AddressTarget, len(survivors))
+			for i, s := range survivors {
+				targets[i] = s.Target
+			}
+			bus.Publish(voiceevent.EnsembleRouted{
+				At:      survivors[0].At,
+				Text:    final.Text,
+				TurnID:  final.TurnID,
+				Targets: targets,
+			})
 		}
 	})
 }
