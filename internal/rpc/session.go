@@ -258,10 +258,11 @@ func (s *SessionServer) StopSession(
 	}), nil
 }
 
-// SetAgentMute mutes or unmutes one Agent of the Active Campaign in the live
-// Voice Session (#211). It refuses when no session is active
-// (CodeFailedPrecondition) and rejects an agent_id that is not an Agent of the
-// active session's campaign — or an unparsable id — with CodeNotFound. The
+// SetAgentMute mutes or unmutes one voiced Agent of the Active Campaign in the
+// live Voice Session (#211). It refuses when no session is active
+// (CodeFailedPrecondition) and rejects an agent_id that is not a voiced Agent of
+// the active session's campaign — a foreign agent, an unparsable id, or the
+// Address-Only Butler (never voiced, ADR-0009/ADR-0024) — with CodeNotFound. The
 // Manager validates campaign membership atomically against the SAME session it
 // writes, so a session swap can't slip a foreign agent into the new session's set.
 func (s *SessionServer) SetAgentMute(
@@ -286,8 +287,9 @@ func (s *SessionServer) SetAgentMute(
 	return connect.NewResponse(&managementv1.SetAgentMuteResponse{MutedAgentIds: ids}), nil
 }
 
-// SetAllMute mutes or unmutes every Agent of the Active Campaign in the live Voice
-// Session (#211). It refuses when no session is active (CodeFailedPrecondition).
+// SetAllMute mutes or unmutes every voiced Agent of the Active Campaign (the
+// Character NPCs; the Address-Only Butler is excluded) in the live Voice Session
+// (#211). It refuses when no session is active (CodeFailedPrecondition).
 func (s *SessionServer) SetAllMute(
 	ctx context.Context,
 	req *connect.Request[managementv1.SetAllMuteRequest],

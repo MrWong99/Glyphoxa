@@ -200,6 +200,53 @@ func TestMuteCommand_Autocomplete(t *testing.T) {
 	}
 }
 
+// TestMuteCommand_ExcludesButler pins the Address-Only Butler exclusion
+// (ADR-0009/ADR-0024): the Butler is returned by ListAgents but is never offered
+// by the autocomplete, nor resolvable by name or UUID, so a GM cannot pick an
+// inert mute target. Only the voiced Character NPC is offered and mutable.
+func TestMuteCommand_ExcludesButler(t *testing.T) {
+	butler := storage.Agent{ID: uuid.New(), Name: "Alfred", Role: storage.AgentRoleButler}
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart", Role: storage.AgentRoleCharacter}
+	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
+	cmd := MuteCommand(mgr, &fakeLister{agents: []storage.Agent{butler, bart}})
+
+	// Autocomplete offers only the voiced Character, not the Butler.
+	choices, err := cmd.Autocomplete(context.Background(), muteAC(""))
+	if err != nil {
+		t.Fatalf("Autocomplete: %v", err)
+	}
+	if len(choices) != 1 || choices[0].ChoiceName() != "Bart" {
+		t.Fatalf("autocomplete choices = %v, want only [Bart] (Butler excluded)", choices)
+	}
+
+	// Resolving the Butler by name is refused and mutes nothing.
+	resp := &fakeResponder{}
+	if err := cmd.Handle(context.Background(), muteIC(resp, "Alfred")); err != nil {
+		t.Fatalf("Handle by name: %v", err)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral || !strings.Contains(resp.replies[0].content, "Alfred") {
+		t.Fatalf("Butler-by-name reply = %+v, want an ephemeral naming the input", resp.replies)
+	}
+
+	// Even the Butler's UUID (an autocomplete-picked value) resolves to nothing.
+	resp2 := &fakeResponder{}
+	if err := cmd.Handle(context.Background(), muteIC(resp2, butler.ID.String())); err != nil {
+		t.Fatalf("Handle by UUID: %v", err)
+	}
+	if len(mgr.agentCalls) != 0 {
+		t.Fatalf("resolving the Butler muted %v, want nothing", mgr.agentCalls)
+	}
+
+	// The voiced Character NPC is still muteable.
+	resp3 := &fakeResponder{}
+	if err := cmd.Handle(context.Background(), muteIC(resp3, "Bart")); err != nil {
+		t.Fatalf("Handle Bart: %v", err)
+	}
+	if len(mgr.agentCalls) != 1 || mgr.agentCalls[0].id != bart.ID.String() {
+		t.Fatalf("mute calls = %+v, want one for Bart", mgr.agentCalls)
+	}
+}
+
 // TestMuteCommand_AutocompleteCapsAt25 pins the Discord 25-choice limit.
 func TestMuteCommand_AutocompleteCapsAt25(t *testing.T) {
 	agents := make([]storage.Agent, 30)

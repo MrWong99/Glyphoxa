@@ -60,9 +60,11 @@ var (
 	// misconfig), not an opaque Internal.
 	ErrDiscordTokenUndecryptable = errors.New("session: saved Discord bot token could not be decrypted")
 	// ErrAgentNotInCampaign is returned by SetAgentMute when the target agent_id is
-	// not an Agent of the active session's Campaign (#211) — validated atomically
-	// against the SAME session the mute writes to, so a session swap can't sneak a
-	// foreign agent into the new session's mute set. Mapped to CodeNotFound.
+	// not a VOICED Agent of the active session's Campaign (#211) — a foreign agent,
+	// an unknown id, or the Address-Only Butler, which is never voiced and so cannot
+	// be muted (ADR-0009/ADR-0024). Validated atomically against the SAME session the
+	// mute writes to, so a session swap can't sneak a foreign agent into the new
+	// session's mute set. Mapped to CodeNotFound.
 	ErrAgentNotInCampaign = errors.New("session: no such Agent in the Active Campaign")
 )
 
@@ -78,8 +80,10 @@ type Store interface {
 	// One write preserves the #143 end-write atomicity.
 	CloseVoiceSession(ctx context.Context, id uuid.UUID, status storage.VoiceSessionStatus, lineCount int, endReason *string) (storage.VoiceSession, error)
 	ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error)
-	// ListAgents returns the Active Campaign's roster (Butler + Character NPCs) so
-	// mute-all (#211) can target EVERY Agent, not just the voiced wirenpc Roster.
+	// ListAgents returns the Active Campaign's full roster (Butler + Character
+	// NPCs). The mute subsystem (#211) narrows it to the voiced Character NPCs via
+	// voicedAgents — the Address-Only Butler (never voiced, ADR-0009/ADR-0024) is
+	// not a mute target.
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	// GetTenantSpendCaps returns the Tenant's soft/hard spend caps (#130, ADR-0046),
 	// snapshot at Start to build the session's spend meter. ErrNotFound (no tenant
@@ -605,10 +609,12 @@ func (m *Manager) MutedAgentIDs() []string {
 	return mutedIDsLocked(m.active.muted)
 }
 
-// SetAgentMute mutes or unmutes one Agent in the live session, returning the
-// resulting sorted muted-id set (#211). It refuses when idle (ErrNoActiveSession,
-// AC4) and rejects an agentID that is not an Agent of the active session's
-// Campaign with ErrAgentNotInCampaign.
+// SetAgentMute mutes or unmutes one voiced Agent in the live session, returning
+// the resulting sorted muted-id set (#211). It refuses when idle
+// (ErrNoActiveSession, AC4) and rejects an agentID that is not a VOICED Agent of
+// the active session's Campaign — a foreign agent, an unknown id, or the
+// Address-Only Butler (never voiced, ADR-0009/ADR-0024) — with
+// ErrAgentNotInCampaign.
 //
 // Validation and the write are SESSION-ATOMIC (mirrors SetAllMute): the active
 // session is captured, its Campaign is listed with m.mu released (the store read
@@ -631,7 +637,7 @@ func (m *Manager) SetAgentMute(ctx context.Context, agentID string, muted bool) 
 	if err != nil {
 		return nil, fmt.Errorf("session: list agents for mute: %w", err)
 	}
-	if !agentInList(agents, agentID) {
+	if !agentInList(voicedAgents(agents), agentID) {
 		return nil, ErrAgentNotInCampaign
 	}
 
@@ -656,8 +662,9 @@ func (m *Manager) SetAgentMute(ctx context.Context, agentID string, muted bool) 
 	return ids, nil
 }
 
-// SetAllMute mutes or unmutes EVERY Agent of the Active Campaign (Butler +
-// Character NPCs, from store.ListAgents — not just the voiced wirenpc Roster),
+// SetAllMute mutes or unmutes every VOICED Agent of the Active Campaign (the
+// Character NPCs from store.ListAgents, minus the Address-Only Butler, which is
+// never voiced — ADR-0009/ADR-0024, and not just the voiced wirenpc Roster),
 // returning the resulting sorted muted-id set (#211). It refuses when idle
 // (ErrNoActiveSession). The campaign is captured under m.mu, the roster is listed
 // with m.mu released (the store read may block), then the set is re-locked and
@@ -691,7 +698,7 @@ func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) 
 		return nil, ErrNoActiveSession
 	}
 	changes := make([]voiceevent.MuteChanged, 0, len(agents))
-	for _, a := range agents {
+	for _, a := range voicedAgents(agents) {
 		id := a.ID.String()
 		if applyMuteLocked(m.active.muted, id, muted) {
 			changes = append(changes, voiceevent.MuteChanged{AgentID: id, Muted: muted})
@@ -719,6 +726,25 @@ func agentInList(agents []storage.Agent, agentID string) bool {
 		}
 	}
 	return false
+}
+
+// voicedAgents returns only the Agents the mute subsystem can act on — the voiced
+// Character NPCs. The auto-created Butler (agent_role='butler') is Address-Only:
+// it never enters the voiced wirenpc Roster/Matcher (ADR-0009, ADR-0024), so a
+// mute on it could only record a phantom id that silences nothing. Filtering it
+// here is the single chokepoint both SetAgentMute (which then rejects the Butler
+// with ErrAgentNotInCampaign) and SetAllMute (which then skips it) share, so the
+// live mute set is exactly the set of voiced Agents — and GetSession's reload
+// truth (muted_agent_ids) never lists the Butler.
+func voicedAgents(agents []storage.Agent) []storage.Agent {
+	out := make([]storage.Agent, 0, len(agents))
+	for _, a := range agents {
+		if a.Role == storage.AgentRoleButler {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // applyMuteLocked sets or clears agentID in the mute set, reporting whether the
