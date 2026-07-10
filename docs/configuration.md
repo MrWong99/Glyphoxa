@@ -18,8 +18,18 @@ The binary runs one Mode at a time via `-mode` (ADR-0005):
 | `web` | Web app + admin API | DB, all three `DISCORD_OAUTH_*`, `GLYPHOXA_OPERATOR_IDS` |
 | `all` | `web` + the in-process voice loop | everything for `web` and `voice` |
 
-The MVP binary defaults `-mode` to `voice`. The OAuth + allowlist gate below
-applies to **`web` and `all`** only; `voice` Mode is unaffected.
+The binary defaults `-mode` to **`all`** (ADR-0005/ADR-0034, the self-host
+target): a bare `glyphoxa` boots the web tier plus the in-process voice loop and
+**auto-applies the embedded migrations at startup** under the advisory lock
+(ADR-0031) — no manual `migrate up` step. An explicit `-mode voice`/`-mode web`
+still overrides it; `voice` mode continues to demand `-guild`/`-channel`, and a
+web-only replica assumes a current schema (it does **not** auto-migrate, so N
+replicas never race). The OAuth + allowlist gate below applies to **`web` and
+`all`** only; `voice` Mode is unaffected.
+
+The fastest way to a running instance is **Docker Compose** (§9) or the
+**systemd** unit (§10), both below. The step-by-step build-from-source runbook
+(§1–§8) follows.
 
 ## 1. Prerequisites
 
@@ -169,6 +179,89 @@ OAuth, your first real login takes that Tenant (with everything configured in
 dev mode) over from the dev Operator. (This replaces the old manual
 DB-session-insert dev flow; the superseded `GLYPHOXA_OPEN_TENANT_CREATION` flag
 from ADR-0016 plays no role here.)
+
+## 9. Zero-to-running with Docker Compose
+
+`compose.yml` at the repo root stands up a pgvector Postgres and the Glyphoxa
+image in the default `-mode all`. Because `all` mode auto-migrates at startup,
+`docker compose up` reaches the login screen against a migrated DB with **no
+separate migrate step**.
+
+The image is **context-fed** (ADR-0034): the gitignored `gen/` proto stubs and
+the Vite SPA bundle are produced on the host and shipped into the build context,
+not generated inside `docker build`. So on a fresh checkout, before the first
+build:
+
+```sh
+cp .env.example .env
+$EDITOR .env        # GLYPHOXA_SECRET, DISCORD_OAUTH_*, GLYPHOXA_OPERATOR_IDS (§5–§6)
+make proto                        # buf generate → gen/  (must exist in the build context)
+(cd web && npm ci && npm run build)   # Vite bundle → internal/spa/dist (else a blank page)
+docker compose up --build
+```
+
+Then open `http://127.0.0.1:8080` and **Sign in with Discord**.
+
+- **Secrets** load from `.env` via the service's `env_file`. Compose strips the
+  shell `export ` prefix and quotes, so the same `.env` the source build sources
+  works unchanged. The `GLYPHOXA_DATABASE_URL` is overridden in the compose
+  `environment:` to point at the in-compose `postgres` service (the `.env` DSN
+  targets `127.0.0.1` for a bare-metal run).
+- **Postgres data** persists in the named `pgdata` volume across `up`/`down`.
+  The DB password defaults to `glyphoxa`; set `POSTGRES_PASSWORD` in the shell
+  (or the compose interpolation `.env`) to change it — it feeds both the DB and
+  the app DSN.
+- The app port publishes on `127.0.0.1:8080` (loopback), matching the default
+  OAuth redirect. To reach it from a LAN, change the host side of the `ports:`
+  mapping and update `DISCORD_OAUTH_REDIRECT_URL` to match.
+- **Smoke steps:** `docker compose up --build` → wait for the app log line that
+  the web tier is listening → `curl -fsS http://127.0.0.1:8080/` returns the SPA
+  → the browser reaches the login screen. `docker compose down -v` tears it down
+  and drops the volume.
+
+## 10. Self-host with systemd
+
+For a bare-metal host, `deploy/glyphoxa.service` runs the binary in `-mode all`
+as a non-root user with startup auto-migrate — the full "point it at Postgres +
+keys, `systemctl start`" story (ADR-0034).
+
+```sh
+# 1. Install the binary (build from source per §3, or copy it out of the image).
+sudo install -m 0755 bin/glyphoxa /usr/local/bin/glyphoxa
+
+# 2. Create the non-root service user.
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin glyphoxa
+
+# 3. Write /etc/glyphoxa/env in systemd EnvironmentFile format: KEY=VALUE, one
+#    per line, NO `export`, NO surrounding quotes (this is NOT the shell .env).
+sudo install -d -m 0755 /etc/glyphoxa
+sudo tee /etc/glyphoxa/env >/dev/null <<'EOF'
+GLYPHOXA_DATABASE_URL=postgres://glyphoxa:CHANGE_ME@127.0.0.1:5432/glyphoxa?sslmode=disable
+GLYPHOXA_SECRET=CHANGE_ME_base64_32_bytes
+DISCORD_BOT_TOKEN=CHANGE_ME
+DISCORD_OAUTH_CLIENT_ID=CHANGE_ME
+DISCORD_OAUTH_CLIENT_SECRET=CHANGE_ME
+DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
+GLYPHOXA_OPERATOR_IDS=000000000000000000
+EOF
+sudo chmod 0600 /etc/glyphoxa/env    # holds secrets
+
+# 4. Install and start the unit.
+sudo install -m 0644 deploy/glyphoxa.service /etc/systemd/system/glyphoxa.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now glyphoxa
+
+# 5. Smoke check.
+systemctl status glyphoxa            # want: active (running)
+journalctl -u glyphoxa -n 50         # migrations applied + web tier listening
+curl -fsS http://127.0.0.1:8080/     # SPA served → login screen reachable
+```
+
+Validate the unit file itself (no host state needed) with
+`systemd-analyze verify deploy/glyphoxa.service`. The unit is hardened
+(`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp`); if you
+run the voice loop, set `GLYPHOXA_ONNX_LIB` in the env file to a preinstalled
+ONNX Runtime so the Silero VAD never fetches one at start.
 
 ## Environment variable reference
 

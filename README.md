@@ -30,25 +30,44 @@ sessions). Written in Go for native concurrency and a streaming voice pipeline.
 ## Modes
 
 One binary, `cmd/glyphoxa`, runs one **Mode** at a time via `-mode`
-([ADR-0005](docs/adr/0005-single-binary-modes-no-audio-rpc.md)). The shipped
-default is `voice`.
+([ADR-0005](docs/adr/0005-single-binary-modes-no-audio-rpc.md)). The default is
+`all` — the self-host target ([ADR-0034](docs/adr/0034-deployment-artifacts.md)).
 
 | Mode | What it runs |
 |------|--------------|
-| `voice` (default) | A **Voice Instance**: the Discord Bot + the voice pipeline for one Guild/channel. No web API, no Slash Commands. |
-| `web` | A **Web Instance**: the operator console + Connect RPC API. Opens no Discord gateway, so it registers no Slash Commands. |
-| `all` | Both in one process: the web tier that also owns the standing Discord presence (Slash Commands) and drives the voice loop in-process. |
+| `all` (default) | Both halves in one process: the web tier that also owns the standing Discord presence (Slash Commands) and drives the voice loop in-process. Auto-applies migrations at startup. |
+| `web` | A **Web Instance**: the operator console + Connect RPC API. Opens no Discord gateway, so it registers no Slash Commands. Assumes a current schema (no auto-migrate). |
+| `voice` | A **Voice Instance**: the Discord Bot + the voice pipeline for one Guild/channel (requires `-guild`/`-channel`). No web API, no Slash Commands. |
 
 `all` is the only Mode with the whole product in it. See
 [docs/architecture.md §1](docs/architecture.md) for the process topology and the
-`voice`-vs-`all` default rationale.
+default-Mode rationale.
 
 ## 🚀 Quick Start (self-host)
 
 Glyphoxa self-hosts as a single **Operator**-owned deployment. The full runbook —
 every environment variable, the Discord OAuth app, and the operator allowlist —
 is [docs/configuration.md](docs/configuration.md); the game-running walkthrough is
-[docs/quickstart-gm.md](docs/quickstart-gm.md). The short path:
+[docs/quickstart-gm.md](docs/quickstart-gm.md).
+
+### Fastest: Docker Compose
+
+`compose.yml` stands up a pgvector Postgres + the Glyphoxa image in `-mode all`,
+which auto-migrates at startup — so this reaches the login screen against a
+migrated DB with no separate migrate step ([ADR-0034](docs/adr/0034-deployment-artifacts.md)):
+
+```sh
+cp .env.example .env              # fill GLYPHOXA_SECRET + DISCORD_OAUTH_* + GLYPHOXA_OPERATOR_IDS (docs/configuration.md §5–§6)
+make proto                        # gen/ is context-fed into the image build
+(cd web && npm ci && npm run build)   # SPA bundle → internal/spa/dist (else a blank page)
+docker compose up --build
+```
+
+Then open `http://127.0.0.1:8080` and sign in with Discord. For a bare-metal
+box, `deploy/glyphoxa.service` runs the same `-mode all` under systemd
+(docs/configuration.md §10).
+
+### Build from source
 
 ### Prerequisites
 
@@ -72,10 +91,14 @@ make proto                        # buf generate → gen/
 (cd web && npm ci && npm run build)   # Vite bundle → internal/spa/dist
 make build                        # → bin/glyphoxa
 
-./bin/glyphoxa migrate up         # apply the schema (every Mode assumes it is current)
+./bin/glyphoxa migrate up         # apply the schema (seed + explicit -mode web assume it is current)
 ./bin/glyphoxa seed               # seed the demo Tenant/Campaign/NPC (idempotent)
-./bin/glyphoxa -mode all          # serve the console + drive the voice loop
+./bin/glyphoxa                    # -mode all is the default: serve the console + drive the voice loop
 ```
+
+The default `-mode all` auto-applies migrations at startup, so a bare
+`./bin/glyphoxa` needs no `migrate up` of its own — the explicit `migrate up`
+above is only so `seed` (and an explicit `-mode web`) have a current schema.
 
 Then open `http://127.0.0.1:8080` and sign in with Discord. The OAuth app and the
 mandatory operator allowlist are set up in [docs/configuration.md](docs/configuration.md)

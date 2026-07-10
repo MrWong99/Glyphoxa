@@ -37,12 +37,12 @@ The binary runs one **Mode** at a time ([ADR-0005](adr/0005-single-binary-modes-
 `voice` (Discord voice loop), `web` (console + admin API), or `all` (both, in one
 process — audio never crosses a process boundary).
 
-**A GM wants `all`.** `web` alone serves the console but registers no **Slash
-Commands** and cannot join voice. Note that the shipped binary's `-mode` flag
-*defaults to `voice`*, so pass it explicitly:
+**A GM wants `all`** — and it is the default, so a bare `glyphoxa` runs it (and
+auto-applies migrations at startup). `web` alone serves the console but registers
+no **Slash Commands** and cannot join voice.
 
 ```sh
-./bin/glyphoxa -mode all
+./bin/glyphoxa            # -mode all is the default
 ```
 
 ### Schema and demo data

@@ -1,0 +1,64 @@
+# Glyphoxa self-host systemd unit (ADR-0034, issue #282).
+#
+# Runs the single binary in the default `-mode all` (web + the in-process voice
+# loop). `all` mode auto-applies the embedded migrations at startup under the
+# advisory lock (ADR-0031), so there is NO separate migrate unit — "point it at
+# a Postgres URL + provider keys, `systemctl start`" is the whole story.
+#
+# Install (see docs/configuration.md §9 for the full runbook):
+#   1. Build the binary (make proto && (cd web && npm run build) && make build)
+#      or copy it out of the container image, to /usr/local/bin/glyphoxa.
+#   2. Create the non-root user:  useradd --system --no-create-home --shell /usr/sbin/nologin glyphoxa
+#   3. Write /etc/glyphoxa/env in systemd EnvironmentFile format — KEY=VALUE, one
+#      per line, NO `export`, NO surrounding quotes (this is NOT the shell-format
+#      .env). Chmod it 0600, owned by root, since it holds secrets. Minimum:
+#        GLYPHOXA_DATABASE_URL=postgres://glyphoxa:...@127.0.0.1:5432/glyphoxa?sslmode=disable
+#        GLYPHOXA_SECRET=...          # openssl rand -base64 32
+#        DISCORD_BOT_TOKEN=...
+#        DISCORD_OAUTH_CLIENT_ID=...
+#        DISCORD_OAUTH_CLIENT_SECRET=...
+#        DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
+#        GLYPHOXA_OPERATOR_IDS=000000000000000000
+#   4. Install this file to /etc/systemd/system/glyphoxa.service, then:
+#        systemctl daemon-reload && systemctl enable --now glyphoxa
+#        systemctl status glyphoxa   # smoke check: active (running)
+
+[Unit]
+Description=Glyphoxa self-host (web + in-process voice, -mode all)
+Documentation=https://github.com/MrWong99/Glyphoxa
+# Wait for the network to be up; if Postgres runs on this host, also order after
+# it (harmless if postgresql.service is absent).
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=glyphoxa
+Group=glyphoxa
+
+# Config + secrets. systemd EnvironmentFile is KEY=VALUE (no `export`); see the
+# install notes above. Prefix with '-' so a missing file is a clear ExecStart
+# failure (fatal boot preflight naming the missing var) rather than a unit-load
+# error.
+EnvironmentFile=-/etc/glyphoxa/env
+
+ExecStart=/usr/local/bin/glyphoxa -mode all
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening -------------------------------------------------------------
+# The app needs no write access to the system: config comes from the env file.
+# ProtectSystem=full keeps /usr, /boot, /etc read-only while leaving /var
+# writable (the Silero VAD may cache a downloaded ONNX runtime there unless
+# GLYPHOXA_ONNX_LIB points at a preinstalled lib).
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
