@@ -53,6 +53,10 @@ func TestReplier_React_DeclineSentinel(t *testing.T) {
 		{"sentinel", "[SILENCE]"},
 		{"sentinel-padded", "  [SILENCE]\n"},
 		{"empty", ""},
+		{"lowercase", "[silence]"},
+		{"trailing-period", "[SILENCE]."},
+		{"quoted-punct", `"[silence]."`},
+		{"mixed-case-bang", "  [Silence]!  "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prov := &fakeProvider{reply: tc.reply}
@@ -73,5 +77,25 @@ func TestReplier_React_DeclineSentinel(t *testing.T) {
 				t.Fatal("a declined Reaction must commit nothing to history")
 			}
 		})
+	}
+}
+
+// TestReplier_React_SentinelSubstringIsNotDecline pins that the decline is a
+// contains-ONLY-sentinel check (#302 hardening): a real reply that merely mentions the
+// token is spoken, not swallowed.
+func TestReplier_React_SentinelSubstringIsNotDecline(t *testing.T) {
+	prov := &fakeProvider{reply: "[SILENCE] would be rude, so I will answer."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "mira", Markdown: "You are Mira.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+	})
+
+	reaction, err := r.React(t.Context(), "Bart, Mira?", "Bart", "The bridge is out.")
+	if err != nil {
+		t.Fatalf("React errored: %v", err)
+	}
+	if reaction != "[SILENCE] would be rude, so I will answer." {
+		t.Fatalf("reaction = %q, want the full reply (a reply that only mentions the sentinel is not a decline)", reaction)
 	}
 }

@@ -490,10 +490,21 @@ func (r *Replier) React(ctx context.Context, userText, leadName, leadText string
 		return "", err
 	}
 	reply = strings.TrimSpace(reply)
-	if reply == "" || reply == crossTalkSilence {
+	if isSilenceSentinel(reply) {
 		return "", nil // the Reactor declined (ADR-0025 zero-delivered)
 	}
 	return reply, nil
+}
+
+// isSilenceSentinel reports whether reply is a Cross-talk decline: empty, or nothing
+// but the [crossTalkSilence] token (#302 hardening). Live models emit case/punctuation
+// variants — "[silence]", "[SILENCE].", `"[silence]."` — so the match is
+// case-insensitive over the reply stripped of surrounding whitespace, quotes, and
+// trailing punctuation. A reply that merely MENTIONS the token amid other words is a
+// real reply, not a decline (a contains-ONLY check, not a substring check).
+func isSilenceSentinel(reply string) bool {
+	trimmed := strings.Trim(strings.TrimSpace(reply), " \t\n\"'.,!?")
+	return trimmed == "" || strings.EqualFold(trimmed, crossTalkSilence)
 }
 
 // SpeakReaction speaks an already-generated Cross-talk Reaction (from a prior

@@ -116,6 +116,9 @@ func TestReplier_Ensemble_ReactionFollowsLead(t *testing.T) {
 	}
 	replier := ensembleReplier(h, floor, spk)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	// BargeIn drives FirstOpus → Floor.MarkSpeaking (production always wires barge with
+	// an ensemble), so the Lead's FirstOpus below actually arms the floor.
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Te", Text: "Bart, Goblin — thoughts?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
 
@@ -124,6 +127,9 @@ func TestReplier_Ensemble_ReactionFollowsLead(t *testing.T) {
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
 		return e.TurnID == "Te" && e.Sentence == "Bart leads."
 	}, "the Lead's sentence is on the wire")
+	// Arm the floor with the Lead's FirstOpus (as the wire would) — a Reaction plays
+	// only once the Lead is audible, keeping the whole unit barge-able.
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Te"})
 	select {
 	case who := <-spk.reactStarted:
 		if who != goblinTarget.AgentID {
@@ -265,6 +271,7 @@ func TestReplier_Ensemble_BargeDuringReactionEndsSubTurn(t *testing.T) {
 			draft:          map[string]string{bartTarget.AgentID: "Bart done."},
 			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
 			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart done."}},
+			speakPause:     make(chan struct{}), // pause so the floor is armed before the reaction gate
 			spokeCh:        make(chan string, 2),
 		},
 		react:          map[string]string{goblinTarget.AgentID: "React one. React two."},
@@ -279,11 +286,13 @@ func TestReplier_Ensemble_BargeDuringReactionEndsSubTurn(t *testing.T) {
 	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tr", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
 
 	// The Lead delivered its sentence; arm the floor with its FirstOpus (as the wire
-	// would), so the unit stays barge-able through the gap and the Reaction.
+	// would), so the unit stays barge-able through the gap and the Reaction. Release the
+	// paused Lead only after the floor is armed.
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
 		return e.TurnID == "Tr" && e.Sentence == "Bart done."
 	}, "the Lead's sentence is on the wire")
 	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tr"})
+	close(spk.speakPause)
 
 	// The Reaction begins under its fresh sub-turn id and pauses after sentence 1.
 	var rID string
@@ -302,6 +311,13 @@ func TestReplier_Ensemble_BargeDuringReactionEndsSubTurn(t *testing.T) {
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
 		return e.TurnID == rID && e.Reason == voiceevent.TurnEndBarge
 	}, "turn.ended barge for the reaction sub-turn")
+	// INTENTIONAL: the barge ALSO ends the Lead's turn under the ensemble's original
+	// TurnID (the floor's holder turn throughout the one-unit floor, ADR-0027). Both
+	// TurnEnded are correct floor-unit semantics; the Lead's already-delivered line
+	// stays committed (the relay treats a post-delivery TurnEnded as an interruption).
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "Tr" && e.Reason == voiceevent.TurnEndBarge
+	}, "turn.ended barge for the Lead's turn (the floor unit)")
 
 	select {
 	case <-spk.reactSpokeCh:
@@ -341,6 +357,7 @@ func TestReplier_Ensemble_ThreeTargets_FastestRemainingReacts(t *testing.T) {
 	}
 	replier := ensembleReplier(h, floor, spk)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T3", Text: "Bart, Goblin, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget, miraTarget}})
 
@@ -348,6 +365,8 @@ func TestReplier_Ensemble_ThreeTargets_FastestRemainingReacts(t *testing.T) {
 		return e.TurnID == "T3" && e.Target.AgentID == bartTarget.AgentID
 	}, "Bart elected Lead")
 
+	// Arm the floor with the Lead's FirstOpus so the Reaction may play (barge-able).
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T3"})
 	// Release Goblin so it is the fastest remaining draft to arrive — the reactor.
 	close(goblinGate)
 
@@ -393,17 +412,27 @@ func TestReplier_Ensemble_ReactionDepthCappedAtOne(t *testing.T) {
 	floor := orchestrator.NewFloor()
 	spk := &fakeCrossTalk{
 		fakeEnsemble: &fakeEnsemble{
-			draft:   map[string]string{bartTarget.AgentID: "Bart leads."},
-			gate:    map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
-			spokeCh: make(chan string, 2),
+			draft:          map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}), // pause so the test can arm the floor before the reaction gate
+			spokeCh:        make(chan string, 2),
 		},
 		react:        map[string]string{goblinTarget.AgentID: "I have a reaction."},
 		reactSpokeCh: make(chan string, 2),
 	}
 	replier := ensembleReplier(h, floor, spk)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tc", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	// The Lead is audible: arm the floor, then release it so the Reaction plays.
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Tc" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tc"})
+	close(spk.speakPause)
 
 	// Wait for the reaction to actually play out.
 	select {
@@ -453,4 +482,104 @@ func TestReplier_Ensemble_ZeroDeliveredLeadSkipsReaction(t *testing.T) {
 		t.Fatalf("%q spoke a reaction after a zero-delivered Lead; none may play", who)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestReplier_Ensemble_TTSFailedLeadSkipsReaction pins ADR-0027 for the Reaction gate
+// (#302): a Lead whose ONLY sentence fails synthesis produced NO audio and NO
+// FirstOpus, so the floor never armed. Even though its (undelivered) text is committed
+// to history, the Reaction must NOT play — a Reaction after the Lead's
+// TurnEnded{tts_error}, atop an un-armed floor, would be UNBARGEABLE (ADR-0027). The
+// gate keys on Floor.Speaking (audible delivery), not committed text.
+func TestReplier_Ensemble_TTSFailedLeadSkipsReaction(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft:   map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:    map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			spokeCh: make(chan string, 2),
+		},
+		react:        map[string]string{goblinTarget.AgentID: "I react anyway."},
+		reactSpokeCh: make(chan string, 2),
+	}
+	// The Lead's ONLY sentence fails synth (no FirstOpus ever); a bound BargeIn drives
+	// the FirstOpus→MarkSpeaking wiring so this is a faithful "no audio" scenario.
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"Bart leads.": true}})
+	replier := orchestrator.NewStreamReplier(ttsStage, func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error {
+		return nil
+	}, nil)
+	replier.SetFloor(floor)
+	replier.SetEnsemble(spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tf", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "Tf" && e.Reason == voiceevent.TurnEndTTSError
+	}, "the ensemble ended tts_error (the Lead produced no audio)")
+
+	// No Reaction plays atop the un-armed floor, and nothing reacted.
+	select {
+	case who := <-spk.reactSpokeCh:
+		t.Fatalf("%q spoke a reaction after a no-audio Lead; the floor never armed (unbargeable)", who)
+	case <-time.After(200 * time.Millisecond):
+	}
+	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
+	if floor.Speaking() {
+		t.Fatal("floor must not be Speaking after a no-audio Lead")
+	}
+}
+
+// TestReplier_Ensemble_ThreeTargets_FastEmptyDraftsNoWedge pins that the reactor pick
+// never blocks on a result that will never arrive (#302, reviewer finding 1): with 3
+// targets where two finish FAST with empty drafts (consumed by the Lead race before
+// the slow winner lands), the reactor pick must not wait on the drained results
+// channel. The Lead still speaks; the pick keys on OUTSTANDING results, not the
+// remaining-targets slice.
+func TestReplier_Ensemble_ThreeTargets_FastEmptyDraftsNoWedge(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	bartGate := make(chan struct{})
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft: map[string]string{
+				bartTarget.AgentID:   "Bart leads.",
+				goblinTarget.AgentID: "", // fast decline
+				miraTarget.AgentID:   "", // fast decline
+			},
+			gate: map[string]chan struct{}{
+				bartTarget.AgentID:   bartGate,     // slow: finishes AFTER the empties are consumed
+				goblinTarget.AgentID: closedGate(), // instant
+				miraTarget.AgentID:   closedGate(), // instant
+			},
+			started: make(chan string, 4),
+			spokeCh: make(chan string, 2),
+		},
+		react:        map[string]string{},
+		reactSpokeCh: make(chan string, 2),
+	}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tw", Text: "Bart, Goblin, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget, miraTarget}})
+
+	// All three drafts started; the two empties are already buffered/consumed.
+	for i := 0; i < 3; i++ {
+		<-spk.started
+	}
+	// Let the race loop consume both empty results, then let Bart finish.
+	time.Sleep(50 * time.Millisecond)
+	close(bartGate)
+
+	select {
+	case who := <-spk.spokeCh:
+		if who != bartTarget.AgentID {
+			t.Fatalf("spoke = %q, want Bart", who)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WEDGED: the Lead never spoke — reactor pick waited on a drained results channel")
+	}
+	// Both remaining candidates declined their drafts, so no one reacts.
+	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
 }

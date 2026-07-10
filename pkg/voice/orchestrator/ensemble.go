@@ -175,12 +175,17 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// publishes its own TurnEnded).
 	var lead draftResult
 	won := false
-	for remaining := len(targets); remaining > 0 && !won; {
+	// pending counts the draft results not yet consumed. It carries past the race so
+	// the reactor pick below knows how many results can STILL arrive on the channel —
+	// keying the pick on the targets slice instead would wait on results the race loop
+	// already drained (errored/empty candidates it skipped), wedging the turn forever.
+	pending := len(targets)
+	for pending > 0 && !won {
 		select {
 		case <-turnCtx.Done():
 			return // a barge/supersede tore the whole unit down mid-race
 		case res := <-results:
-			remaining--
+			pending--
 			if res.err == nil && res.text != "" {
 				lead = res
 				won = true
@@ -222,20 +227,31 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	)
 	if canReact && len(remaining) > 0 {
 		if len(remaining) == 1 {
+			// Exactly one other Agent: it is the reactor. Its speculative draft is
+			// discarded (it regenerates a Reaction), so we never wait for that draft —
+			// a hung/gated loser must not stall the pick.
 			reactor = remaining[0]
 			hasReactor = true
 		} else {
-			// 3+ addressed: the FASTEST remaining draft to arrive names the reactor
+			// 3+ addressed: the FASTEST remaining draft to ARRIVE names the reactor
 			// (ADR-0025 — its speculative draft is discarded, it regenerates a
-			// Reaction). Bounded by each Draft's own TurnTimeout; a barge during the
-			// wait tears the whole unit down (turnCtx.Done()).
-			select {
-			case <-turnCtx.Done():
-				cancelDrafts()
-				return
-			case res := <-results:
-				reactor = res.target
-				hasReactor = true
+			// Reaction). Only pending (not-yet-consumed) results can still arrive; the
+			// race loop already drained the empty/errored candidates it skipped, so we
+			// bound the wait by pending to avoid blocking on a result that will never
+			// come. Empty/errored arrivals are skipped here too — a candidate with
+			// nothing to draft is not made the reactor. A barge tears the unit down.
+			for pending > 0 && !hasReactor {
+				select {
+				case <-turnCtx.Done():
+					cancelDrafts()
+					return
+				case res := <-results:
+					pending--
+					if res.err == nil && res.text != "" {
+						reactor = res.target
+						hasReactor = true
+					}
+				}
 			}
 		}
 	}
@@ -286,10 +302,8 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		return nil
 	}
 	// Speak commits the delivered text to the Lead's own history and stops the drain
-	// on a barge. Its delivered return gates the Reaction: a Reaction plays ONLY if
-	// the Lead delivered at least one sentence (ADR-0025) — otherwise the ensemble
-	// spoke nothing worth reacting to.
-	delivered, _ := r.ensemble.Speak(turnCtx, voiceevent.AddressRouted{
+	// on a barge.
+	_, _ = r.ensemble.Speak(turnCtx, voiceevent.AddressRouted{
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: lead.target,
 	}, lead.text, dispatch)
 
@@ -299,10 +313,17 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTTSError})
 	}
 
-	// The Reaction plays only when there is a reactor, the Lead actually delivered a
-	// sentence, and the unit is still live (a barge anywhere above tears it down and a
-	// queued Reaction after a barge is FORBIDDEN, ADR-0027).
-	if !hasReactor || delivered == "" || turnCtx.Err() != nil {
+	// The Reaction plays only when there is a reactor, the unit is still live (a barge
+	// anywhere above tears it down and a queued Reaction after a barge is FORBIDDEN,
+	// ADR-0027), and the Lead is AUDIBLY on the wire ([Floor.Speaking] — its FirstOpus
+	// fired). Gating on audible delivery, not committed text, is load-bearing: an
+	// all-synthesis-failed Lead still commits its (undelivered) text but produced no
+	// audio and no FirstOpus, so the floor never armed — a Reaction played then would
+	// be UNBARGEABLE (its own FirstOpus{rID} can't arm a floor whose holder turn is the
+	// Lead's) and would speak AFTER the Lead's TurnEnded{tts_error}. Floor.Speaking
+	// true ⟺ FirstOpus(lead) fired ⟺ the barge is armed through the gap and the
+	// Reaction (ADR-0027).
+	if !hasReactor || turnCtx.Err() != nil || !r.floor.Speaking() {
 		return
 	}
 	r.speakReaction(turnCtx, rt, bus, e, reactor, lead.target.Name, lead.text, reactCh)
@@ -368,9 +389,19 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
 	}, leadName, leadText, reaction, dispatch)
 
-	// A barge cutting the Reaction mid-playback ends this sub-turn under its own id
+	// A barge cutting the Reaction mid-playback ends this sub-turn under its OWN id
 	// (the Lead's delivered line is untouched). Only when the Reaction actually began
 	// dispatching — a barge before the first sentence played nothing to interrupt.
+	//
+	// INTENTIONAL two TurnEnded on a reaction barge: the [BargeIn] that yielded the
+	// floor also publishes TurnEnded{lead-turn, barge} (the floor's holder turn is the
+	// Lead's throughout the one-unit floor, ADR-0027), and we add TurnEnded{rID, barge}
+	// for the reaction sub-turn. Both are correct floor-unit semantics: the barge tore
+	// down the whole unit, and each of the unit's transcript lines (the Lead's under the
+	// original TurnID, the reaction's under rID) is marked ended so a late sentence can
+	// clobber neither. The Lead's line — cleanly completed before the barge — keeps its
+	// delivered text; the relay treats a TurnEnded after a line is delivered as a normal
+	// interruption, not a re-count.
 	if dispatched && turnCtx.Err() != nil {
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndBarge})
 	}

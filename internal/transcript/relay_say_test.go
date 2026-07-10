@@ -142,3 +142,34 @@ func TestProjection_EnsembleReactionDeclineNoLine(t *testing.T) {
 		t.Fatalf("got %d lines, want only the Lead's (a decline leaves no line): %+v", len(v.Lines), v.Lines)
 	}
 }
+
+// TestProjection_EnsembleReactionBargeMarksLineEnded pins #302 (plan test 11, third
+// clause): a barge during the reaction's playback ends its sub-turn (TurnEnded{rID,
+// barge}); the relay marks that turn ended so a LATE reaction sentence — which a barge
+// can deliver after the end — does not clobber the finalized reaction line.
+func TestProjection_EnsembleReactionBargeMarksLineEnded(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+
+	bus.Publish(voiceevent.EnsembleLead{
+		At: at(1), TurnID: "e1",
+		Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I speak first.", Index: 0, TurnID: "e1"})
+	bus.Publish(voiceevent.EnsembleReaction{
+		At: at(3), TurnID: "r1", LeadTurnID: "e1",
+		Target: voiceevent.AddressTarget{AgentID: "goblin", AgentRole: "character", Name: "Goblin"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", Index: 0, TurnID: "r1"})
+	// A barge cuts the reaction: its sub-turn ends.
+	bus.Publish(voiceevent.TurnEnded{At: at(5), TurnID: "r1", Reason: voiceevent.TurnEndBarge})
+	// A late reaction sentence a barge delivered after the end must be dropped.
+	bus.Publish(voiceevent.TTSInvoked{At: at(6), Sentence: " and clobber!", Index: 1, TurnID: "r1"})
+
+	v := r.View(id)
+	if len(v.Lines) != 2 {
+		t.Fatalf("got %d lines, want 2 (Lead + reaction): %+v", len(v.Lines), v.Lines)
+	}
+	if got := v.Lines[1].Text; got != "I disagree." {
+		t.Errorf("reaction line text = %q, want %q (the post-end sentence must not clobber the finalized line)", got, "I disagree.")
+	}
+}
