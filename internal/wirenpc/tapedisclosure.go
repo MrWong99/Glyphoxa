@@ -121,8 +121,9 @@ const (
 // ok is false for a custom id that is not a tape-consent button (the caller ignores
 // it). A storage failure returns ok=true (the button WAS ours) with an apologetic
 // reply and publishes nothing — the durable state did not change, so neither must
-// the live tape.
-func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, bus *voiceevent.Bus, now func() time.Time, customID, userID string) (reply string, ok bool) {
+// the live tape — and is LOGGED here (the presser only sees "try again"; the
+// operator needs the cause). A nil logger discards.
+func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, bus *voiceevent.Bus, now func() time.Time, log *slog.Logger, customID, userID string) (reply string, ok bool) {
 	campaignID, granted, ok := ParseTapeConsentCustomID(customID)
 	if !ok {
 		return "", false
@@ -130,13 +131,18 @@ func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, bus *voiceeve
 	if now == nil {
 		now = time.Now
 	}
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 
 	if granted {
 		if err := store.UpsertTapeConsent(ctx, campaignID, userID); err != nil {
+			log.Error("tape: upsert consent", "campaign", campaignID, "speaker", userID, "err", err)
 			return tapeConsentFailedReply, true
 		}
 	} else {
 		if err := store.DeleteTapeConsent(ctx, campaignID, userID); err != nil {
+			log.Error("tape: delete consent", "campaign", campaignID, "speaker", userID, "err", err)
 			return tapeConsentFailedReply, true
 		}
 	}
@@ -166,7 +172,7 @@ func tapeConsentListener(store TapeConsentStore, bus *voiceevent.Bus, log *slog.
 		return nil
 	}
 	return func(e *events.ComponentInteractionCreate) {
-		reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, e.Data.CustomID(), e.User().ID.String())
+		reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, log, e.Data.CustomID(), e.User().ID.String())
 		if !ok {
 			return
 		}

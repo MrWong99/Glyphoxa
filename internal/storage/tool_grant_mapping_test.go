@@ -59,7 +59,7 @@ func TestGrantsFromRows_PreservesConfig(t *testing.T) {
 // grant RPC's AC4 test asserts through this same function.
 func TestGrantsFromRows_HydratesDeclarations(t *testing.T) {
 	grants := storage.GrantsFromRows([]storage.ToolGrant{{ToolName: "dice"}})
-	decls := tool.NewGrantSet(tool.BuiltinRegistry(), grants...).Declarations()
+	decls := tool.NewGrantSet(tool.BuiltinRegistry(tool.Deps{}), grants...).Declarations()
 	if len(decls) != 1 || decls[0].Name != "dice" {
 		t.Fatalf("declared %+v, want exactly [dice]", decls)
 	}

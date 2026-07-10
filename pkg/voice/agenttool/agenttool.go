@@ -261,6 +261,15 @@ type Engine struct {
 	full  *tool.Loop // every granted Tool declared
 	gated *tool.Loop // grants minus the dice Tool
 
+	// agentID is this Agent's stable identity, stamped onto the turn ctx once per
+	// Generate/GenerateStream via [tool.WithCaller] (S2, #296). A scope-narrowing
+	// Tool handler (kg_query own_node) reads it back with [tool.CallerID] to scope
+	// the read to THIS Agent's neighbourhood — the caller comes from here, never
+	// the LLM's args, so the model cannot widen its scope. "" (a standalone bench
+	// Agent, or a Persona with no persisted id) stamps an empty caller, which an
+	// own-node handler treats as "no neighbourhood" rather than a wider fallback.
+	agentID string
+
 	// language is the gate language the dice keyword set is selected by (#226):
 	// the Campaign Language, subtag-normalized via [gateLanguage] once at
 	// construction ([WithLanguage]), so an arbitrary campaign string is parsed
@@ -347,7 +356,7 @@ func WithLanguage(lang string) EngineOption {
 // otherwise) — they are wiring requirements. maxRounds caps tool-call rounds;
 // zero uses [tool.DefaultMaxRounds]. Pass [WithMetrics] to enable the A3 per-
 // round instrumentation; without it the adapter records nothing.
-func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTokens, maxRounds int, opts ...EngineOption) *Engine {
+func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model string, maxTokens, maxRounds int, opts ...EngineOption) *Engine {
 	cfg := engineConfig{rec: observe.Discard{}}
 	for _, o := range opts {
 		o(&cfg)
@@ -371,6 +380,7 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 	return &Engine{
 		full:     newLoop(grants),
 		gated:    newLoop(grants.Without(diceToolName)),
+		agentID:  agentID,
 		language: cfg.language,
 		rec:      cfg.rec,
 		provName: cfg.provName,
@@ -383,6 +393,9 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, model string, maxTo
 // for this turn and never share state with a concurrent turn (barge-in).
 func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
 	start := time.Now()
+	// Stamp the caller identity once per turn (S2): a scope-narrowing Tool handler
+	// resolves the Agent from ctx, never the LLM args.
+	ctx = tool.WithCaller(ctx, e.agentID)
 	out, err := e.loopFor(messages).Run(withRoundCounter(ctx), toToolMessages(messages))
 	// #125: one full-turn span per Generate, spanning every round, recorded on the
 	// success AND error path so a turn that fails mid-loop is still measured.
@@ -398,6 +411,8 @@ func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, 
 // identically on the streaming production path. Returns the full final text.
 func (e *Engine) GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (string, error) {
 	start := time.Now()
+	// Stamp the caller identity once per turn (S2), identical to Generate.
+	ctx = tool.WithCaller(ctx, e.agentID)
 	out, err := e.loopFor(messages).RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
 	// #125: the streaming production path records the same one-per-turn LLMTurn span
 	// Generate does, on success and error alike.

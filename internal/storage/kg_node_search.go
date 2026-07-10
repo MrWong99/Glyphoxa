@@ -40,14 +40,37 @@ func BuildTSQuery(q string) string {
 // gm_private Nodes are INCLUDED (GM-facing search). An empty BuildTSQuery result
 // yields (nil, nil) — no matches, not an error.
 func (s *Store) SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]KGNode, error) {
+	return s.searchNodes(ctx, campaignID, query, limit, false)
+}
+
+// SearchPublicNodes is SearchNodes with gm_private Nodes EXCLUDED IN THE QUERY —
+// the prompt-facing knowledge search (#296). The exclusion is pushed into the
+// WHERE clause so it applies BEFORE the LIMIT: a post-fetch filter in Go would
+// drop the top-N ranked hits if they were all gm_private and starve a public
+// match ranked N+1. This is the load-bearing ADR-0008 guard for the kg_query
+// Tool — a GM-only Node must never reach an NPC's prompt. Existing GM-facing
+// callers keep SearchNodes (the wiki search shows private Nodes to the GM).
+func (s *Store) SearchPublicNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]KGNode, error) {
+	return s.searchNodes(ctx, campaignID, query, limit, true)
+}
+
+// searchNodes is the shared body of SearchNodes / SearchPublicNodes: publicOnly
+// pushes an `AND NOT gm_private` into the ranked, LIMITed query so the exclusion
+// precedes the LIMIT (never a post-fetch trim). An empty BuildTSQuery result
+// yields (nil, nil).
+func (s *Store) searchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int, publicOnly bool) ([]KGNode, error) {
 	tsq := BuildTSQuery(query)
 	if tsq == "" {
 		return nil, nil
 	}
+	privacy := ""
+	if publicOnly {
+		privacy = " AND NOT gm_private"
+	}
 	rows, err := s.db.Query(ctx,
 		`SELECT `+kgNodeColumns+`
 		   FROM kg_node, to_tsquery('simple', $2) q
-		  WHERE campaign_id = $1 AND fts @@ q
+		  WHERE campaign_id = $1 AND fts @@ q`+privacy+`
 		  ORDER BY ts_rank(fts, q) DESC, updated_at DESC, id
 		  LIMIT $3`, campaignID, tsq, limit)
 	if err != nil {

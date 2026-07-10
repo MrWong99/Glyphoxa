@@ -38,7 +38,7 @@ func NewConsentButtons(store wirenpc.TapeConsentStore, bus *voiceevent.Bus, log 
 // consent change and, for a tape-consent button, replies ephemerally. A non-tape
 // button is ignored (another component handler owns it), never answered here.
 func (c *ConsentButtons) HandleComponent(e *events.ComponentInteractionCreate) {
-	reply, ok := wirenpc.ApplyTapeConsent(context.Background(), c.store, c.bus, time.Now, e.Data.CustomID(), e.User().ID.String())
+	reply, ok := wirenpc.ApplyTapeConsent(context.Background(), c.store, c.bus, time.Now, c.log, e.Data.CustomID(), e.User().ID.String())
 	if !ok {
 		return // not a tape-consent button — leave it for whoever owns it
 	}

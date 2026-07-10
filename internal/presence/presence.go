@@ -68,9 +68,14 @@ type Presence struct {
 	open        func(ctx context.Context, client *bot.Client) error
 	register    commandRegistrar
 	closeClient func(client *bot.Client)
-	// fetchMember resolves one guild member via the standing client's REST; injected
-	// so MemberDisplayName (#281) is unit-tested without a live gateway.
-	fetchMember func(ctx context.Context, guildID, userID snowflake.ID) (*discord.Member, error)
+	// fetchMember resolves one guild member via a REST client the caller has
+	// already borrowed once (via p.Client()) and passes in; injected so
+	// MemberDisplayName (#281) and VoiceChannelMembers (#279) are unit-tested
+	// without a live gateway. Taking the borrowed rest.Rest as a parameter (rather
+	// than re-borrowing p.Client() per call) lets VoiceChannelMembers snapshot the
+	// client ONCE before its fan-out loop: a mid-loop Close/token-rebuild can't
+	// turn the picker silently empty.
+	fetchMember func(ctx context.Context, r rest.Rest, guildID, userID snowflake.ID) (*discord.Member, error)
 
 	// mu serializes Ensure/Close so builds and registrations never overlap; token
 	// is Ensure-local state guarded by it. The read-hot client and guildID are

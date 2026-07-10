@@ -119,7 +119,7 @@ func TestEngine_ToolUseRoundTrip_RunsDiceAndReturnsFinalText(t *testing.T) {
 		{text: "You rolled well, traveler.", stop: "end_turn"},
 	}}
 
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0)
 	got, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleSystem, Text: "You are Bart."},
 		{Role: llm.RoleUser, Text: "Roll a d20 for me."},
@@ -265,7 +265,7 @@ func TestEngine_LLMRoundSpans_IndexAndToolCallPerRound(t *testing.T) {
 		{text: "You rolled well, traveler.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderAnthropic))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
@@ -303,7 +303,7 @@ func TestEngine_LLMRoundSpans_IndexResetsPerTurn(t *testing.T) {
 		{text: "Second answer.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "claude-test", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGemini))
 
 	for i := 0; i < 2; i++ {
@@ -371,7 +371,7 @@ func TestEngine_Generate_RetriesTransientStartError(t *testing.T) {
 		answer:       "Aye, traveler.",
 	}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq),
 		agenttool.WithRetry(instantAgentRetry()))
 
@@ -412,7 +412,7 @@ func TestEngine_Generate_NonRetryableStartErrorFailsFast(t *testing.T) {
 		t.Error("a non-retryable 400 must not sleep")
 		return nil
 	}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq),
 		agenttool.WithRetry(p))
 
@@ -442,7 +442,7 @@ func TestEngine_LLMTurn_OneSpanPerTurnAcrossRounds(t *testing.T) {
 		{text: "You rolled well, traveler.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
@@ -473,7 +473,7 @@ func TestEngine_GenerateStream_RecordsOneLLMTurn(t *testing.T) {
 		{text: "You rolled well, traveler.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 	if _, err := eng.GenerateStream(context.Background(),
@@ -493,7 +493,7 @@ func TestEngine_GenerateStream_RecordsOneLLMTurn(t *testing.T) {
 // just successful ones (otherwise a provider outage silently drops the samples).
 func TestEngine_LLMTurn_RecordsOnError(t *testing.T) {
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(errorEventProvider{}, tool.NewGrantSet(tool.NewRegistry()), "m", 0, 0,
+	eng := agenttool.NewEngine(errorEventProvider{}, tool.NewGrantSet(tool.NewRegistry()), "", "m", 0, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
@@ -516,7 +516,7 @@ func TestEngine_GenerateStream_ForwardsFinalTextAndKeepsMetrics(t *testing.T) {
 		{text: "You rolled well, traveler.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGemini))
 
 	var streamed strings.Builder
@@ -557,7 +557,7 @@ func TestEngine_GenerateStream_ForwardsFinalTextAndKeepsMetrics(t *testing.T) {
 // asserting the single forward equals the full answer for a no-tool turn.)
 func TestEngine_GenerateStream_NoToolTurnStreamsAnswer(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{{text: "Welcome to the inn.", stop: "end_turn"}}}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "claude-test", 256, 0)
 
 	var got strings.Builder
 	full, err := eng.GenerateStream(context.Background(),
@@ -582,7 +582,7 @@ func TestEngine_NoTools_SingleGenerationReturnsText(t *testing.T) {
 	}}
 	emptyGrants := tool.NewGrantSet(tool.NewRegistry())
 
-	eng := agenttool.NewEngine(prov, emptyGrants, "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, emptyGrants, "", "claude-test", 256, 0)
 	got, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleUser, Text: "Hello."},
 	})
@@ -605,7 +605,7 @@ func TestEngine_DiceGate_PlainTurnOffersNoDiceAndIsSingleRound(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{
 		{text: "Ale's a copper, traveler.", stop: "end_turn"},
 	}}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0)
 
 	got, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleSystem, Text: "You are Bart."},
@@ -634,7 +634,7 @@ func TestEngine_DiceGate_KeywordIntentOffersDice(t *testing.T) {
 		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
 		{text: "You steady your nerves.", stop: "end_turn"},
 	}}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0)
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleUser, Text: "Make a saving throw against the poison."},
@@ -655,7 +655,7 @@ func TestEngine_DiceGate_KeywordIntentOffersDice(t *testing.T) {
 // declared on a later plain turn.
 func TestEngine_DiceGate_HistoryDiceDoesNotArmCurrentTurn(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{{text: "Right this way.", stop: "end_turn"}}}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0)
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleUser, Text: "Roll a d20."},                // older turn: had dice intent
@@ -679,7 +679,7 @@ func TestEngine_DiceGate_GermanUtteranceOffersDiceWithLanguage(t *testing.T) {
 		{calls: []llm.ToolCall{{ID: "toolu_1", Name: "dice", Input: json.RawMessage(`{"count":2,"sides":6}`)}}, stop: "tool_use"},
 		{text: "Eine Vier und eine Zwei.", stop: "end_turn"},
 	}}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
 		agenttool.WithLanguage("de-DE"))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
@@ -701,7 +701,7 @@ func TestEngine_DiceGate_GermanUtteranceOffersDiceWithLanguage(t *testing.T) {
 // the gate, so a plain German turn stays a single dice-less round.
 func TestEngine_DiceGate_GermanPlainTurnGatedWithLanguage(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{{text: "Es war einmal…", stop: "end_turn"}}}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0,
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
 		agenttool.WithLanguage("de"))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
@@ -721,7 +721,7 @@ func TestEngine_DiceGate_GermanPlainTurnGatedWithLanguage(t *testing.T) {
 // utterance is gated out — reproducing the live false negative.
 func TestEngine_DiceGate_GermanUtteranceWithoutLanguageStaysEnglish(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{{text: "role-played roll", stop: "end_turn"}}}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0)
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{
 		{Role: llm.RoleUser, Text: "Bart, benutze dein Würfelwerkzeug und würfle zwei sechsseitige Würfel."},
@@ -741,7 +741,7 @@ func TestEngine_AsAgentEngine_DrivesReplier(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{
 		{text: "Aye, two rooms upstairs.", stop: "end_turn"},
 	}}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test", 256, 0)
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "claude-test", 256, 0)
 
 	r := agent.NewReplier(agent.Config{
 		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart."},
@@ -776,7 +776,7 @@ func (truncatingProvider) Complete(context.Context, llm.Request) (<-chan llm.Str
 func TestEngine_TruncatedStream_ReturnsError(t *testing.T) {
 	reg := tool.NewRegistry()
 	grants := tool.NewGrantSet(reg)
-	eng := agenttool.NewEngine(truncatingProvider{}, grants, "m", 0, 0)
+	eng := agenttool.NewEngine(truncatingProvider{}, grants, "", "m", 0, 0)
 
 	_, err := eng.Generate(t.Context(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
 	if err == nil || !strings.Contains(err.Error(), "without done") {
@@ -812,7 +812,7 @@ func TestEngine_StartError_ClassifiesOutcomeLikeStages(t *testing.T) {
 
 	t.Run("barge cancel is canceled, not a fault", func(t *testing.T) {
 		rec := &recordingStage{}
-		eng := agenttool.NewEngine(bargeStartProvider{}, empty, "m", 0, 0,
+		eng := agenttool.NewEngine(bargeStartProvider{}, empty, "", "m", 0, 0,
 			agenttool.WithMetrics(rec, observe.ProviderGroq))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
@@ -842,7 +842,7 @@ func TestEngine_StartError_ClassifiesOutcomeLikeStages(t *testing.T) {
 
 	t.Run("live-ctx start failure is error + fault", func(t *testing.T) {
 		rec := &recordingStage{}
-		eng := agenttool.NewEngine(startErrProvider{}, empty, "m", 0, 0,
+		eng := agenttool.NewEngine(startErrProvider{}, empty, "", "m", 0, 0,
 			agenttool.WithMetrics(rec, observe.ProviderGroq))
 		if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
 			t.Fatal("Generate returned nil on a start failure")
@@ -899,7 +899,7 @@ func (p usageProvider) Complete(context.Context, llm.Request) (<-chan llm.Stream
 func TestEngine_Usage_RecordsProviderReportedTokensAndModel(t *testing.T) {
 	prov := usageProvider{text: "Aye, traveler.", usage: &llm.Usage{InputTokens: 100, OutputTokens: 50}}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "claude-test-model", 256, 0,
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "claude-test-model", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hello."}}); err != nil {
@@ -924,7 +924,7 @@ func TestEngine_Usage_RecordsProviderReportedTokensAndModel(t *testing.T) {
 func TestEngine_Usage_EstimatesWhenProviderReportsNone(t *testing.T) {
 	prov := usageProvider{text: "abcdefghijkl"} // 12 runes, no usage reported
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+	eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGemini))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Hello."}}); err != nil {
@@ -945,7 +945,7 @@ func TestEngine_Usage_EstimatesWhenProviderReportsNone(t *testing.T) {
 // starts (a start error) records NO usage — there was no completion to meter.
 func TestEngine_Usage_StartErrorRecordsNoTokens(t *testing.T) {
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(startErrProvider{}, tool.NewGrantSet(tool.NewRegistry()), "m", 0, 0,
+	eng := agenttool.NewEngine(startErrProvider{}, tool.NewGrantSet(tool.NewRegistry()), "", "m", 0, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}}); err == nil {
@@ -963,7 +963,7 @@ func TestEngine_Usage_BargeRecordsReportedUsageOnlyIfSeen(t *testing.T) {
 	t.Run("usage already seen → recorded", func(t *testing.T) {
 		prov := usageProvider{text: "partial answer", usage: &llm.Usage{InputTokens: 30, OutputTokens: 5}, usageFirst: true}
 		rec := &recordingStage{}
-		eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+		eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
 			agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 		_, err := eng.GenerateStream(context.Background(),
@@ -982,7 +982,7 @@ func TestEngine_Usage_BargeRecordsReportedUsageOnlyIfSeen(t *testing.T) {
 	t.Run("no usage yet → nothing", func(t *testing.T) {
 		prov := usageProvider{text: "partial answer"} // no usage before the barge
 		rec := &recordingStage{}
-		eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "m", 256, 0,
+		eng := agenttool.NewEngine(prov, tool.NewGrantSet(tool.NewRegistry()), "", "m", 256, 0,
 			agenttool.WithMetrics(rec, observe.ProviderGroq))
 
 		_, err := eng.GenerateStream(context.Background(),
@@ -1013,10 +1013,49 @@ func (errorEventProvider) Complete(context.Context, llm.Request) (<-chan llm.Str
 func TestEngine_EventError_PropagatesAsError(t *testing.T) {
 	reg := tool.NewRegistry()
 	grants := tool.NewGrantSet(reg)
-	eng := agenttool.NewEngine(errorEventProvider{}, grants, "m", 0, 0)
+	eng := agenttool.NewEngine(errorEventProvider{}, grants, "", "m", 0, 0)
 
 	_, err := eng.Generate(t.Context(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
 	if err == nil || !strings.Contains(err.Error(), "connection reset") {
 		t.Fatalf("Generate on EventError = %v, want the provider's error", err)
+	}
+}
+
+// callerCaptureTool is a read-only, scope-supporting Tool that records the
+// [tool.CallerID] present in ctx at Execute time. It lets the bridge tests pin
+// that the Engine stamps the Agent identity onto the turn ctx once (S2, #296),
+// so a scope-narrowing handler resolves the caller from ctx, never the args.
+type callerCaptureTool struct{ got *string }
+
+func (callerCaptureTool) Name() string                 { return "capture" }
+func (callerCaptureTool) Description() string          { return "capture caller" }
+func (callerCaptureTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (callerCaptureTool) ReadOnly() bool               { return true }
+func (callerCaptureTool) SupportsScope() bool          { return true }
+func (c callerCaptureTool) Execute(ctx context.Context, _ json.RawMessage, _ any) (string, error) {
+	*c.got = tool.CallerID(ctx)
+	return "ok", nil
+}
+
+// TestEngine_StampsCallerIdentity pins that NewEngine's agentID reaches the Tool
+// handler via ctx: a granted Tool executed inside the loop sees CallerID equal to
+// the Agent id the Engine was built with (S2). This is what keeps an own_node
+// kg_query scoped to the calling NPC and un-widenable by crafted args.
+func TestEngine_StampsCallerIdentity(t *testing.T) {
+	var seen string
+	reg := tool.NewRegistry()
+	reg.MustRegister(callerCaptureTool{got: &seen})
+	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "capture"})
+
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "c1", Name: "capture", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		{text: "done", stop: "end_turn"},
+	}}
+	eng := agenttool.NewEngine(prov, grants, "agent-bart", "m", 0, 0)
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "recall"}}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if seen != "agent-bart" {
+		t.Errorf("handler saw CallerID %q, want the Engine's agentID agent-bart", seen)
 	}
 }

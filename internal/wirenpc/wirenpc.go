@@ -391,6 +391,16 @@ type Config struct {
 	// unchanged.
 	Gate orchestrator.TurnGate
 
+	// ToolDeps injects the built-in knowledge Tools' read sources (S1, #296): the
+	// transcript-search and KG-query retrieval paths the tool-use loop calls. The
+	// web tier builds the internal/knowledge adapter over the process store +
+	// session Manager and sets it on the session Manager's base config; it flows
+	// through connectAndServe → buildConversation → tool.BuiltinRegistry(cfg.ToolDeps),
+	// so a live NPC granted kg_query/transcript_search actually reaches the DB. The
+	// zero value (voice/bench standalone) registers the Tools but reports them
+	// unavailable at Execute — the loop feeds that back and continues, never panics.
+	ToolDeps tool.Deps
+
 	// Tape, when non-nil, is the rollover tape (#306, ADR-0051) this Voice Session
 	// captures into: connectAndServe wires the inbound Opus tap (consented Speaker
 	// audio) and the outbound Opus tap (agent speech, always on) into it, posts the
@@ -671,8 +681,19 @@ func acquireClient(ctx context.Context, cfg Config, bus *voiceevent.Bus, log *sl
 	// disclosure's buttons (#306, finding 5), so THIS per-cycle client must carry
 	// the listener itself — otherwise every Consent/Revoke press fails. The all-mode
 	// shared client (cfg.Client != nil, handled above) gets it from the presence.
+	//
+	// It MUST run off the gateway read goroutine: the handler does a DB upsert, a
+	// publish, an authoritative reconcile (2nd DB round-trip + tape ctrl) and a
+	// Discord REST reply, and stalling the read goroutine on all that misses
+	// heartbeats → reconnect churn (the exact ADR-0010 hazard the presence guards
+	// with async events — see internal/presence). So enable async event delivery
+	// alongside the listener, mirroring defaultClientBuilder. Gated on the listener
+	// so a nil-Tape cycle keeps today's synchronous, listener-free client unchanged.
 	if l := tapeConsentListener(cfg.TapeConsent, bus, log); l != nil {
-		opts = append(opts, bot.WithEventListenerFunc(l))
+		opts = append(opts,
+			bot.WithEventListenerFunc(l),
+			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
+		)
 	}
 	c, err := newDiscordClient(cfg.Token, opts...)
 	if err != nil {
@@ -793,7 +814,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -1052,6 +1073,14 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 	if t == nil {
 		return func() {}
 	}
+	if store == nil {
+		// A wiring bug: the tape is armed but no consent reader was threaded through
+		// (RunFromDB sets both together). Refuse to reconcile against a nil store —
+		// which would panic — and log loudly; the tape keeps its construction-time
+		// seed rather than crashing the session.
+		log.Error("tape: armed but no consent reader wired; live consent changes will not apply", "campaign", campaignID)
+		return func() {}
+	}
 	reconcile := func() {
 		consented, err := store.ListTapeConsent(ctx, campaignID)
 		if err != nil {
@@ -1060,16 +1089,20 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 		}
 		t.ReconcileConsent(consented)
 	}
-	reconcile() // authoritative reseed at cycle start (catches changes during a reconnect gap)
-	return voiceevent.On(bus, func(e voiceevent.TapeConsentChanged) {
+	// Subscribe BEFORE the seed reconcile so an event landing in the seed window is
+	// not lost (the wireMutes precedent): worst case is one extra idempotent
+	// reconcile, never a dropped consent change.
+	unsub := voiceevent.On(bus, func(e voiceevent.TapeConsentChanged) {
 		if e.CampaignID != campaignID.String() {
 			return // a consent press for a different campaign — not ours
 		}
 		reconcile() // re-read the durable truth; ignore the (possibly stale/reordered) payload
 	})
+	reconcile() // authoritative reseed at cycle start (catches changes during a reconnect gap)
+	return unsub
 }
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -1180,7 +1213,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("wirenpc: build LLM provider: %w", err)
 	}
-	reg := tool.BuiltinRegistry()
+	reg := tool.BuiltinRegistry(toolDeps)
 	engineFor := engineFactory(provider, reg, language, stageMetrics, llmProviderLabel(llmProviderID), retryPolicy)
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
@@ -1234,6 +1267,13 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// once the session's estimated spend crosses the soft cap. A nil gate is the
 		// feature-off default (no caps configured), so this option is unconditional.
 		orchestrator.WithTurnGate(gate),
+		// GM /say direct speech (#295, ADR-0010): a DirectSpeech reactor renders a
+		// SpeakRequested (the /say slash command) to TTS in the addressed NPC's Voice,
+		// looked up from THIS roster. It shares the barge-in floor (so a human barge
+		// cancels a /say) and the spend gate, but bypasses mute (GM puppeteering). The
+		// session Manager publishes SpeakRequested; the lookup is always wired so /say
+		// works whenever a session is live.
+		orchestrator.WithDirectSpeech(roster.Voice),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).
@@ -1259,7 +1299,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 // the spend price lookup, so a non-Groq adapter is not mispriced as groq.
 func engineFactory(provider llm.Provider, reg *tool.Registry, language string, stageMetrics observe.StageRecorder, provName observe.Provider, retryPolicy retry.Policy) func(npcSpec) agent.Engine {
 	return func(spec npcSpec) agent.Engine {
-		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.model, 0, 0,
+		return agenttool.NewEngine(provider, tool.NewGrantSet(reg, spec.grants...), spec.agentID, spec.model, 0, 0,
 			// The per-round LLM spans (A3) and the spend price lookup are labelled with
 			// the actual provider (#272). The no-op recorder keeps the keyless path
 			// silent; the live binary / benchmark inject a real one.

@@ -343,6 +343,14 @@ func (r *Relay) project(e voiceevent.Event) {
 		// Records WHO answers this turn; no line yet (no text).
 		t := r.turn(ev.TurnID)
 		t.target = ev.Target
+	case voiceevent.SpeakRequested:
+		// A GM /say (#295): like AddressRouted it records WHO speaks this turn (no line
+		// yet, no text). The Agent's Voice renders the text through the SAME TTSInvoked
+		// path below, so the /say line is assembled and persisted exactly like an LLM
+		// reply (ID "a:<turn>", NPC kind + pill) — no hand-crafted transcript row
+		// (ADR-0012/0040).
+		t := r.turn(ev.TurnID)
+		t.target = ev.Target
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
 		t := r.turn(ev.TurnID)

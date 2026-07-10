@@ -1,8 +1,11 @@
 package wirenpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +41,7 @@ func TestApplyTapeConsent_Grant(t *testing.T) {
 	events := captureConsent(bus)
 	cid := uuid.New()
 
-	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, tapeGrantCustomID(cid), "player-42")
+	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, discardLog(), tapeGrantCustomID(cid), "player-42")
 	if !ok || reply == "" {
 		t.Fatalf("apply = (%q, %v), want a reply and ok", reply, ok)
 	}
@@ -62,7 +65,7 @@ func TestApplyTapeConsent_Revoke(t *testing.T) {
 	bus := voiceevent.NewBus()
 	events := captureConsent(bus)
 
-	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, tapeRevokeCustomID(cid), "player-7")
+	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, discardLog(), tapeRevokeCustomID(cid), "player-7")
 	if !ok || reply == "" {
 		t.Fatalf("apply = (%q, %v), want a reply and ok", reply, ok)
 	}
@@ -84,7 +87,7 @@ func TestApplyTapeConsent_ForeignButtonIgnored(t *testing.T) {
 	bus := voiceevent.NewBus()
 	events := captureConsent(bus)
 
-	if _, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, "gx:mute:agent:123", "p1"); ok {
+	if _, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, discardLog(), "gx:mute:agent:123", "p1"); ok {
 		t.Fatalf("ok = true for a foreign button, want false")
 	}
 	if store.upserts+store.deletes != 0 || len(*events) != 0 {
@@ -100,11 +103,18 @@ func TestApplyTapeConsent_StorageFailurePublishesNothing(t *testing.T) {
 	bus := voiceevent.NewBus()
 	events := captureConsent(bus)
 
-	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, tapeGrantCustomID(uuid.New()), "p9")
+	var logbuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, log, tapeGrantCustomID(uuid.New()), "p9")
 	if !ok || reply != tapeConsentFailedReply {
 		t.Fatalf("apply = (%q, %v), want the failure reply and ok", reply, ok)
 	}
 	if len(*events) != 0 {
 		t.Fatalf("published on storage failure: %+v", *events)
+	}
+	// The operator must be able to diagnose the failure (finding 4): it is logged.
+	if !strings.Contains(logbuf.String(), "consent") {
+		t.Fatalf("storage failure not logged; log = %q", logbuf.String())
 	}
 }

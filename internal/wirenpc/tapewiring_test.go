@@ -104,6 +104,20 @@ func TestTapeWiring_ArmedWiresOptions(t *testing.T) {
 	}
 }
 
+// TestTapeWiring_ArmedTapeNoStoreDoesNotPanic pins finding 3: a wiring bug where
+// the tape is armed but no consent reader was threaded through must not panic at
+// cycle start — it returns an inert unsubscribe (and logs).
+func TestTapeWiring_ArmedTapeNoStoreDoesNotPanic(t *testing.T) {
+	tp := tape.New(tape.Window, []string{"111"}, nil)
+	defer tp.Close()
+	bus := voiceevent.NewBus()
+
+	unsub := wireTapeConsent(context.Background(), bus, tp, uuid.New(), nil, discardLog())
+	// Publishing must not reach a nil-store reconcile.
+	bus.Publish(voiceevent.TapeConsentChanged{CampaignID: uuid.New().String(), SpeakerID: "111", Granted: true})
+	unsub()
+}
+
 // TestTapeWiring_ReseedsAndReconcilesAuthoritatively pins findings 2+4: the consent
 // sub reseeds the tape from the DURABLE store at cycle start (a revoke that landed
 // during a reconnect gap still takes effect), and on each event re-reads the store
