@@ -35,10 +35,21 @@ func (s *CampaignServer) ListToolGrants(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
-	// Pre-check the Agent exists so a stale tab (Agent deleted elsewhere) reads a
-	// clean CodeNotFound instead of a fabricated full-catalog-ungranted list
-	// (issue #215) — the sibling CRUD missing-Agent mapping (campaign_crud.go).
-	if err := s.requireAgent(ctx, agentID); err != nil {
+	// Resolve the active campaign and require the Agent to belong to it (#356): the
+	// list is keyed on agent_id alone, so without this an operator on campaign A
+	// could READ campaign B's Agent grant configs by id. The scoped check refuses a
+	// cross-campaign (or deleted, issue #215) target as CodeNotFound — a clean
+	// missing-Agent instead of a fabricated full-catalog-ungranted list — mirroring
+	// the sibling UpdateToolGrant write guard.
+	c, err := s.activeCampaign(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
+		}
+		slog.Default().Error("ListToolGrants: get active campaign failed", "agent_id", agentID, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if err := s.requireAgentInCampaign(ctx, c.ID, agentID); err != nil {
 		return nil, err
 	}
 
@@ -129,27 +140,13 @@ func (s *CampaignServer) UpdateToolGrant(
 	return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 }
 
-// requireAgent maps a missing Agent to CodeNotFound (any other lookup failure to
-// CodeInternal) so both grant handlers reject a stale-tab agent_id up front
-// rather than persist against — or fabricate a catalog for — an Agent the FK no
-// longer has (issue #215). Identical shape to the sibling CRUD mutations.
-func (s *CampaignServer) requireAgent(ctx context.Context, agentID uuid.UUID) error {
-	if _, err := s.store.GetAgent(ctx, agentID); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
-		}
-		slog.Default().Error("tool grant: agent lookup failed", "agent_id", agentID, "err", err)
-		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
-	return nil
-}
-
-// requireAgentInCampaign is requireAgent scoped to an owning Campaign (#342): the
-// Agent must both exist AND belong to campaignID, else CodeNotFound. Agents never
-// move between Campaigns (campaign_id is immutable), so the read-then-compare is
-// race-free — it verifies ownership before a Tool Grant mutation keyed on agent_id
-// alone can reach another campaign's Agent. Any other lookup failure is
-// CodeInternal.
+// requireAgentInCampaign requires an Agent both to exist AND belong to
+// campaignID, else CodeNotFound (a missing Agent maps the same way, issue #215).
+// Agents never move between Campaigns (campaign_id is immutable), so the
+// read-then-compare is race-free — it verifies ownership before a Tool Grant read
+// or mutation keyed on agent_id alone can reach another campaign's Agent. Any
+// other lookup failure is CodeInternal. Shared by ListToolGrants (#356) and
+// UpdateToolGrant (#342).
 func (s *CampaignServer) requireAgentInCampaign(ctx context.Context, campaignID, agentID uuid.UUID) error {
 	a, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {

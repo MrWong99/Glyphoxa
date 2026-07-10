@@ -137,6 +137,43 @@ func TestUpdateToolGrant_NoActiveCampaignIsNotFound(t *testing.T) {
 	}
 }
 
+// TestListToolGrants_CrossCampaignIsNotFound is #356: a READ is scoped too. An
+// operator whose active campaign is A cannot read the grant config of an Agent
+// that belongs to campaign B by id — the list requires the Agent to be in the
+// active campaign, so a mismatch is CodeNotFound, not a leaked catalog.
+func TestListToolGrants_CrossCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	// The Agent exists, but in ANOTHER campaign.
+	foreignAgent := uuid.New()
+	store.agents[foreignAgent] = storage.Agent{ID: foreignAgent, CampaignID: uuid.New()}
+	client := crudClient(t, store)
+
+	_, err := client.ListToolGrants(context.Background(),
+		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: foreignAgent.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (cross-campaign agent)", got)
+	}
+}
+
+// TestListToolGrants_NoActiveCampaignIsNotFound is #356: without an active
+// campaign the read cannot resolve an owning campaign and is CodeNotFound.
+func TestListToolGrants_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	agentID := registerAgent(store)
+	client := crudClient(t, store)
+
+	_, err := client.ListToolGrants(context.Background(),
+		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: agentID.String()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (no active campaign)", got)
+	}
+}
+
 func TestListToolGrants_InvalidAgentID(t *testing.T) {
 	t.Parallel()
 	client := crudClient(t, newFakeStore())
