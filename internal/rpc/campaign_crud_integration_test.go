@@ -12,6 +12,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -21,6 +22,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
 // TestUpdateAgent_CrossCampaign_Integration is #356: the load-bearing GetAgent
@@ -43,8 +45,13 @@ func TestUpdateAgent_CrossCampaign_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCampaign B: %v", err)
 	}
+	// Seed a tuned voice so the load-bearing vector (voice bytes) is non-trivial.
+	voiceB, err := storage.VoiceToJSON(ttseleven.DefaultVoice("secret-voice", "en"))
+	if err != nil {
+		t.Fatalf("VoiceToJSON: %v", err)
+	}
 	npcBID, err := store.CreateAgent(ctx, storage.NewAgent{
-		CampaignID: campaignB, Role: storage.AgentRoleCharacter, Name: "Bandit", Persona: "Lurks.",
+		CampaignID: campaignB, Role: storage.AgentRoleCharacter, Name: "Bandit", Persona: "Lurks.", Voice: voiceB,
 	})
 	if err != nil {
 		t.Fatalf("CreateAgent B: %v", err)
@@ -70,14 +77,15 @@ func TestUpdateAgent_CrossCampaign_Integration(t *testing.T) {
 		t.Fatalf("cross-campaign UpdateAgent code = %v, want NotFound", got)
 	}
 
-	// B's NPC is unchanged — no cross-campaign write landed.
+	// B's NPC is byte-for-byte unchanged — no cross-campaign write landed. Compare
+	// the WHOLE struct (incl. Voice bytes, the load-bearing vector in this fix), not
+	// just the edited fields.
 	after, err := store.GetAgent(ctx, npcBID)
 	if err != nil {
 		t.Fatalf("GetAgent B after: %v", err)
 	}
-	if after.Name != before.Name || after.Persona != before.Persona {
-		t.Errorf("cross-campaign UpdateAgent mutated B's NPC: before %q/%q, after %q/%q",
-			before.Name, before.Persona, after.Name, after.Persona)
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("cross-campaign UpdateAgent mutated B's NPC:\n before %+v\n after  %+v", before, after)
 	}
 }
 
