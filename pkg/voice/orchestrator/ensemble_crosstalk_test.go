@@ -83,6 +83,21 @@ func (s *fakeCrossTalk) SpeakReaction(ctx context.Context, e voiceevent.AddressR
 	return delivered.String(), nil
 }
 
+// waitFloorFree blocks until floor is released (runEnsemble has fully returned) or
+// fails after 2s. It synchronizes a negative assertion on the whole ensemble turn: a
+// free floor means the coordinator ran its last statement, so the observed-event log
+// is complete.
+func waitFloorFree(t *testing.T, floor *orchestrator.Floor) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for floor.Active() {
+		if time.Now().After(deadline) {
+			t.Fatal("the floor was never released — runEnsemble did not return")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // ttsInvokedInOrder returns the observed [voiceevent.TTSInvoked] events in order.
 func ttsInvokedInOrder(t *testing.T, h *voicetest.Harness) []voiceevent.TTSInvoked {
 	t.Helper()
@@ -177,21 +192,39 @@ func TestReplier_Ensemble_ReactorDeclines(t *testing.T) {
 	floor := orchestrator.NewFloor()
 	spk := &fakeCrossTalk{
 		fakeEnsemble: &fakeEnsemble{
-			draft:   map[string]string{bartTarget.AgentID: "Bart leads."},
-			gate:    map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
-			spokeCh: make(chan string, 2),
+			draft:          map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}), // pause so the floor is armed before the reaction gate — the decline branch must actually run
+			spokeCh:        make(chan string, 2),
 		},
 		react:        map[string]string{ /* goblin: no entry → "" → decline */ },
 		reactSpokeCh: make(chan string, 2),
 	}
 	replier := ensembleReplier(h, floor, spk)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	// Arm the floor exactly as the reaction-playing tests do — otherwise the audible
+	// gate would skip the reaction BEFORE the decline branch runs, passing vacuously.
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
 
 	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Td", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	// The Lead is audible: arm the floor, then release it so the reactor's decline is
+	// actually reached (React returns "" → no event, no line).
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Td" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Td"})
+	close(spk.speakPause)
 
 	<-spk.spokeCh // the Lead's Speak returned
 
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleLead) bool { return e.TurnID == "Td" }, "the Lead was elected")
+	// Wait for runEnsemble to FULLY return — the floor is released only after the
+	// reactor's decline path ran to completion (speakReaction: read React's "" → return).
+	// Without this, the assertions below snapshot BEFORE the coordinator reaches the
+	// decline branch, passing vacuously even if a mutation published EnsembleReaction.
+	waitFloorFree(t, floor)
 	// A declined Reaction publishes nothing and speaks nothing.
 	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
 	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
