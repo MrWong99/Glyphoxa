@@ -233,6 +233,57 @@ func TestListNodeEdges_SplitsAndJoins(t *testing.T) {
 	}
 }
 
+// TestListNodeEdges_ScopesToActiveCampaign is #356: the read resolves the active
+// campaign and passes its id to the store, so the anchor Node's ownership is
+// verified there — another campaign's Node is never listable through this session.
+func TestListNodeEdges_ScopesToActiveCampaign(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	activeID := uuid.New()
+	store.campaign = storage.Campaign{ID: activeID}
+	client := crudClient(t, store)
+
+	if _, err := client.ListNodeEdges(context.Background(),
+		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()})); err != nil {
+		t.Fatalf("ListNodeEdges: %v", err)
+	}
+	if store.nodeEdgesCampaign != activeID {
+		t.Errorf("NodeEdges scoped to %s, want active %s", store.nodeEdgesCampaign, activeID)
+	}
+}
+
+// TestListNodeEdges_CrossCampaignIsNotFound is #356: a Node in another campaign is
+// invisible — the store refuses it as ErrNotFound and the handler surfaces
+// CodeNotFound, never a leaked edge list or an existence oracle.
+func TestListNodeEdges_CrossCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	store.nodeEdgesErr = storage.ErrNotFound // the scoped store refuses a foreign anchor
+	client := crudClient(t, store)
+
+	_, err := client.ListNodeEdges(context.Background(),
+		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (cross-campaign node)", got)
+	}
+}
+
+// TestListNodeEdges_NoActiveCampaignIsNotFound is #356: without an active campaign
+// the read cannot resolve an owning campaign and is CodeNotFound.
+func TestListNodeEdges_NoActiveCampaignIsNotFound(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campErr = storage.ErrNotFound
+	client := crudClient(t, store)
+
+	_, err := client.ListNodeEdges(context.Background(),
+		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound (no active campaign)", got)
+	}
+}
+
 func TestListNodeEdges_InvalidIdIsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	client := crudClient(t, newFakeStore())

@@ -16,6 +16,7 @@ package voicetest
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -87,6 +88,37 @@ func AssertEvent[T voiceevent.Event](t *testing.T, h *Harness, match func(T) boo
 	}
 	t.Fatalf("AssertEvent[%s]: no event matched %q; seen %d events: %v",
 		eventTypeName[T](), desc, len(h.seen), eventNames(h.seen))
+}
+
+// WaitEvent blocks until an observed event of concrete type T satisfies match,
+// or timeout elapses — then fails with the same diagnostics as [AssertEvent]. It
+// polls the observed log every 2ms, so it synchronizes on events published
+// asynchronously (a floor/turn goroutine) without the caller wiring its own
+// subscription. Use it in place of [AssertEvent] whenever the event under test is
+// published from a goroutine the test does not join: AssertEvent reads a snapshot
+// once and races the publisher, WaitEvent does not.
+func WaitEvent[T voiceevent.Event](t *testing.T, h *Harness, timeout time.Duration, match func(T) bool, desc string) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		h.mu.Lock()
+		for _, e := range h.seen {
+			if typed, ok := e.(T); ok && match(typed) {
+				h.mu.Unlock()
+				return
+			}
+		}
+		seen := len(h.seen)
+		names := eventNames(h.seen)
+		h.mu.Unlock()
+
+		if time.Now().After(deadline) {
+			t.Fatalf("WaitEvent[%s]: no event matched %q within %s; seen %d events: %v",
+				eventTypeName[T](), desc, timeout, seen, names)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // AssertEventCount fails the test if the number of observed events of concrete

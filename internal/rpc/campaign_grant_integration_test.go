@@ -218,6 +218,47 @@ func TestToolGrants_CrossCampaign_Integration(t *testing.T) {
 	}
 }
 
+// TestListToolGrants_CrossCampaign_Integration is #356: the READ is scoped too.
+// With a live Voice Session pinning the active campaign to A, an operator must not
+// be able to READ campaign B's Butler grant configs by id — ListToolGrants is
+// CodeNotFound, not a leaked catalog of B's grants.
+func TestListToolGrants_CrossCampaign_Integration(t *testing.T) {
+	dsn := startPostgres(t)
+	store, campaignA := seedStore(t, dsn) // A + its auto-Butler (seeded dice grant)
+	ctx := context.Background()
+
+	a, err := store.GetActiveCampaign(ctx) // == A, carries the tenant id
+	if err != nil {
+		t.Fatalf("GetActiveCampaign: %v", err)
+	}
+	campaignB, err := store.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: a.TenantID, Name: "Other Table", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	butlerB, err := store.GetButler(ctx, campaignB)
+	if err != nil {
+		t.Fatalf("GetButler B: %v", err)
+	}
+
+	// Pin the active campaign to A via a live Voice Session, then mount the server.
+	srv := rpc.NewCampaignServer(store)
+	srv.SetSessions(liveMgr(campaignA))
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, s.URL, connect.WithProtoJSON())
+
+	_, err = client.ListToolGrants(ctx, connect.NewRequest(&managementv1.ListToolGrantsRequest{
+		AgentId: butlerB.ID.String(),
+	}))
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Fatalf("cross-campaign ListToolGrants code = %v, want NotFound", got)
+	}
+}
+
 // listGrants is a small helper that lists an Agent's grant states or fails the test.
 func listGrants(t *testing.T, client managementv1connect.CampaignServiceClient, agentID string) []*managementv1.ToolGrant {
 	t.Helper()

@@ -126,7 +126,7 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 		t.Fatalf("CreateEdge incoming: %v", err)
 	}
 
-	outgoing, incoming, err := st.NodeEdges(ctx, aldric.ID)
+	outgoing, incoming, err := st.NodeEdges(ctx, campaignID, aldric.ID)
 	if err != nil {
 		t.Fatalf("NodeEdges: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	if err := st.DeleteEdge(ctx, campaignID, out.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("second DeleteEdge err = %v, want ErrNotFound", err)
 	}
-	outgoing, incoming, err = st.NodeEdges(ctx, aldric.ID)
+	outgoing, incoming, err = st.NodeEdges(ctx, campaignID, aldric.ID)
 	if err != nil {
 		t.Fatalf("NodeEdges after delete: %v", err)
 	}
@@ -162,12 +162,50 @@ func TestNodeEdgesAndDelete(t *testing.T) {
 	if err := st.DeleteNode(ctx, campaignID, aldric.ID); err != nil {
 		t.Fatalf("DeleteNode: %v", err)
 	}
-	outC, inC, err := st.NodeEdges(ctx, cyra.ID)
+	outC, inC, err := st.NodeEdges(ctx, campaignID, cyra.ID)
 	if err != nil {
 		t.Fatalf("NodeEdges cyra: %v", err)
 	}
 	if len(outC) != 0 || len(inC) != 0 {
 		t.Errorf("deleting a Node did not cascade its edges: %d out / %d in", len(outC), len(inC))
+	}
+}
+
+// TestNodeEdgesCrossCampaignRefused is #356: NodeEdges is campaign-scoped. A Node
+// that belongs to another Campaign is invisible — asking for its incident Edges
+// yields ErrNotFound (no edge data, no joined endpoint names, no existence oracle),
+// exactly the same discipline as the cross-campaign DeleteEdge/SetNodeAgent refusals.
+// A missing Node id is indistinguishable (also ErrNotFound).
+func TestNodeEdgesCrossCampaignRefused(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// A second campaign B in the same tenant, owning a Node with a real incident Edge.
+	campaignB, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID, Name: "Other", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	bChar := mkNode(t, st, campaignB, storage.KGNodeCharacter, "Secret Aldric")
+	bLoc := mkNode(t, st, campaignB, storage.KGNodeLocation, "Secret Keep")
+	if _, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignB, FromNodeID: bChar.ID, ToNodeID: bLoc.ID, Type: storage.KGEdgeResidesIn,
+	}); err != nil {
+		t.Fatalf("CreateEdge B: %v", err)
+	}
+
+	// Reading B's node while scoped to campaign A must leak nothing.
+	_, _, err = st.NodeEdges(ctx, campaignID, bChar.ID)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-campaign NodeEdges err = %v, want ErrNotFound", err)
+	}
+
+	// A truly-missing node id is the same ErrNotFound (no oracle).
+	if _, _, err := st.NodeEdges(ctx, campaignID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("missing-node NodeEdges err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -258,6 +296,98 @@ func TestSetNodeAgent(t *testing.T) {
 	}
 	if _, err := st.SetNodeAgent(ctx, campaignID, npc.ID, uuid.NullUUID{UUID: foreignAgent, Valid: true}); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("link to cross-campaign agent err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestListEdges is #288: ListEdges returns a Campaign's Edges ordered (created_at,
+// id) for the Bundle exporter; an empty Campaign yields an empty slice, not an
+// error; and it is Campaign-scoped (#342) so a second Campaign's Edges never leak.
+func TestListEdges(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// An empty Campaign lists no Edges (empty slice, not error).
+	edges, err := st.ListEdges(ctx, campaignA)
+	if err != nil {
+		t.Fatalf("ListEdges empty: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("ListEdges on empty campaign = %d, want 0", len(edges))
+	}
+
+	// Seed three Edges in A. created_at defaults to now() at insert, so insertion
+	// order is the (created_at, id) order.
+	aldric := mkNode(t, st, campaignA, storage.KGNodeCharacter, "Aldric")
+	barrow := mkNode(t, st, campaignA, storage.KGNodeLocation, "Barrow")
+	cult := mkNode(t, st, campaignA, storage.KGNodeFaction, "The Cult")
+	cyra := mkNode(t, st, campaignA, storage.KGNodeCharacter, "Cyra")
+
+	e1, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignA, FromNodeID: aldric.ID, ToNodeID: barrow.ID, Type: storage.KGEdgeResidesIn,
+	})
+	if err != nil {
+		t.Fatalf("CreateEdge e1: %v", err)
+	}
+	e2, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignA, FromNodeID: aldric.ID, ToNodeID: cult.ID, Type: storage.KGEdgeMemberOf,
+	})
+	if err != nil {
+		t.Fatalf("CreateEdge e2: %v", err)
+	}
+	e3, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignA, FromNodeID: cyra.ID, ToNodeID: aldric.ID, Type: storage.KGEdgeKnows,
+	})
+	if err != nil {
+		t.Fatalf("CreateEdge e3: %v", err)
+	}
+
+	// A second Campaign (same tenant) with its own Edge must never appear in A's list.
+	campaignB, err := st.CreateCampaign(ctx, storage.NewCampaign{
+		TenantID: tenantID, Name: "Other", System: "dnd5e", Language: "en",
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	bFrom := mkNode(t, st, campaignB, storage.KGNodeCharacter, "Foreigner")
+	bTo := mkNode(t, st, campaignB, storage.KGNodeLocation, "Foreign Keep")
+	if _, err := st.CreateEdge(ctx, storage.NewKGEdge{
+		CampaignID: campaignB, FromNodeID: bFrom.ID, ToNodeID: bTo.ID, Type: storage.KGEdgeResidesIn,
+	}); err != nil {
+		t.Fatalf("CreateEdge B: %v", err)
+	}
+
+	edges, err = st.ListEdges(ctx, campaignA)
+	if err != nil {
+		t.Fatalf("ListEdges A: %v", err)
+	}
+	if len(edges) != 3 {
+		t.Fatalf("ListEdges A = %d edges, want 3 (no B leakage)", len(edges))
+	}
+	wantIDs := []uuid.UUID{e1.ID, e2.ID, e3.ID}
+	for i, e := range edges {
+		if e.ID != wantIDs[i] {
+			t.Errorf("edge[%d].ID = %s, want %s (created_at, id order)", i, e.ID, wantIDs[i])
+		}
+		if e.CampaignID != campaignA {
+			t.Errorf("edge[%d].CampaignID = %s, want %s (no cross-campaign leak)", i, e.CampaignID, campaignA)
+		}
+	}
+	// Ordering is non-decreasing on created_at.
+	for i := 1; i < len(edges); i++ {
+		if edges[i].CreatedAt.Before(edges[i-1].CreatedAt) {
+			t.Errorf("edges not ordered by created_at at %d", i)
+		}
+	}
+
+	// B lists exactly its own single Edge.
+	bEdges, err := st.ListEdges(ctx, campaignB)
+	if err != nil {
+		t.Fatalf("ListEdges B: %v", err)
+	}
+	if len(bEdges) != 1 {
+		t.Fatalf("ListEdges B = %d, want 1", len(bEdges))
 	}
 }
 

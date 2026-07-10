@@ -125,17 +125,6 @@ func (s *CampaignServer) UpdateAgent(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid agent id"))
 	}
 
-	// Read the current row so applyVoiceSelection can preserve the persisted voice
-	// tuning the editor never sees (ProviderID/Language/Settings); GetAgent also
-	// gives the authoritative NotFound before the write (#224).
-	existing, err := s.store.GetAgent(ctx, id)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
-		}
-		slog.Default().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
-	}
 	// Resolve the active campaign the SAME live-first way the roster/create paths do
 	// (#222/#229) — its language seeds a first-save voice default (#224). Reusing the
 	// unified resolver avoids a second, divergent campaign-resolution path.
@@ -146,6 +135,25 @@ func (s *CampaignServer) UpdateAgent(
 		}
 		slog.Default().Error("UpdateAgent: get active campaign failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	// Read the current row so applyVoiceSelection can preserve the persisted voice
+	// tuning the editor never sees (ProviderID/Language/Settings); GetAgent also
+	// gives the authoritative NotFound before the write (#224). The pre-read is
+	// SCOPED to the resolved active campaign (#356): an Agent in another campaign
+	// reads back as CodeNotFound before its voice can ever reach the response — the
+	// scoped store UPDATE would refuse it anyway (#353/#342), but the pre-read must
+	// not leak cross-campaign voice tuning in the meantime.
+	existing, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
+		}
+		slog.Default().Error("UpdateAgent: read existing agent failed", "agent_id", id, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if existing.CampaignID != c.ID {
+		// The Agent is in another Campaign — invisible to this operator's session.
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("agent not found"))
 	}
 
 	m := req.Msg
