@@ -189,7 +189,9 @@ separate migrate step**.
 
 The `glyphoxa` service pulls the published `ghcr.io/mrwong99/glyphoxa` image
 (built by `release-image.yml` on each release, ADR-0034), so a machine with
-only Docker needs nothing else — no buf, no Node/npm, no local build:
+only Docker needs nothing else — no buf, no Node/npm, no local build. The image
+is pinned to an explicit version tag (`:v0.2.0`) in `compose.yml`; to upgrade,
+bump that tag to the release you want and re-run `docker compose pull glyphoxa`:
 
 ```sh
 cp .env.example .env

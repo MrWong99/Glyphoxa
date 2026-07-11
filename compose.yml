@@ -44,11 +44,14 @@ services:
     restart: unless-stopped
 
   glyphoxa:
+    # Bump on each release — release-image.yml publishes v<version> to ghcr.
     image: ghcr.io/mrwong99/glyphoxa:v0.2.0
     build:
       # Fallback for `docker compose up --build` from a source checkout — see
-      # the file header. Not used by a plain `docker compose up`, which pulls
-      # `image:` above instead.
+      # the file header. NOTE: `--build` tags the local build with the `image:`
+      # name above, so every later plain `docker compose up` keeps running that
+      # dev-built image (no pull_policy set). Run `docker compose pull glyphoxa`
+      # to restore the published image.
       context: .
     # The image's default CMD is `-mode all` (Dockerfile) — the self-host default
     # (ADR-0005/0034). Override the whole command to run another Mode, e.g.
