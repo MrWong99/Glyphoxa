@@ -403,6 +403,32 @@ func TestRecapVoicedDegradesToPublic(t *testing.T) {
 	}
 }
 
+// TestRecapVoicedButlerErrorDegradesToPublic pins #365 review finding 2: when a
+// wired ButlerVoicer is picked (live session) but SpeakAsButler FAILS — a voiceless
+// Butler (ErrButlerVoiceless), or the session ending during the up-to-120s recap
+// (ErrNoActiveSession) — the finished recap is NOT discarded and the GM is NOT told
+// it was voiced. It degrades to the SAME public-text-with-hint path as an unwired
+// voicer, so the room gets the recap and no phantom "voiced" claim is made.
+func TestRecapVoicedButlerErrorDegradesToPublic(t *testing.T) {
+	c := campaign("Lost Mine")
+	store := recapStore(c, endedSession(c.ID, time.Now(), 12))
+	store.byID = map[uuid.UUID]storage.VoiceSession{}
+	store.fakeSessionStore.byID = map[uuid.UUID]storage.Campaign{c.ID: c}
+	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
+	voicer := &fakeButlerVoicer{err: errors.New("butler has no voice")}
+	live := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: c.ID}}
+
+	resp := dispatchRecap(t, store, live, eng, voicer, map[string]string{"delivery": deliveryVoiced})
+
+	body := assertPublicDelivery(t, resp)
+	if !strings.HasPrefix(body, voicedDegradeHint) {
+		t.Errorf("degraded public body = %q, want the degrade hint prefix", body)
+	}
+	if !strings.Contains(body, "keep fell") {
+		t.Errorf("degraded public body = %q, want it still carrying the recap prose", body)
+	}
+}
+
 // TestRecapOversizedPublicSplits (finding 5c / oversized-public): an over-length
 // PUBLIC recap consumes the placeholder once (ephemeral), then posts MULTIPLE public
 // Followups each ≤2000 runes, in order, never truncated.

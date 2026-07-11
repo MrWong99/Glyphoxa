@@ -23,7 +23,7 @@ import (
 // Voice Session first, else the profile-first durable selection), and a highlight
 // (or session) belonging to ANOTHER campaign is CodeNotFound — existence never
 // leaked, exactly the GenerateRecap "names nothing" posture. PromoteHighlight
-// deliberately does NOT enqueue enrichment; that is #311's hook.
+// enqueues AI image enrichment (#311) on a successful keep.
 
 // errNoSuchHighlight is the single static NotFound every Highlight RPC returns for
 // a foreign-tenant, cross-campaign, unknown, or unparsable id — so a probe can
@@ -190,7 +190,8 @@ func (s *SessionServer) GetHighlight(
 // Active Campaign (#308/#309), returning the updated row. Idempotent on the server.
 // A foreign-tenant, cross-campaign, unknown, or unparsable id is CodeNotFound. The
 // campaign ownership is checked BEFORE the mutation, so another campaign's row is
-// never promoted. It does NOT enqueue enrichment (#311's hook).
+// never promoted. On a successful keep it enqueues AI image enrichment (#311)
+// unless the Highlight is already enriched.
 func (s *SessionServer) PromoteHighlight(
 	ctx context.Context,
 	req *connect.Request[managementv1.PromoteHighlightRequest],
@@ -236,9 +237,10 @@ func (s *SessionServer) PromoteHighlight(
 	// Enqueue AI image enrichment (#311, ADR-0049): a promoted Highlight with no
 	// image yet gets a background generation job. Skipped when already enriched
 	// (an idempotent re-promote never re-spends) or when the enqueuer is unwired.
-	// An enqueue failure is logged only — the promotion succeeded and the boot
-	// backstop / a re-promote can re-trigger enrichment; failing the RPC here would
-	// wrongly report the keep as failed.
+	// An enqueue failure is logged only — the promotion succeeded, and a GM
+	// re-promote re-triggers enrichment (there is NO boot sweep for enrichment;
+	// SweepMissingCandidatePurges covers only the purge job — follow-up issue
+	// planned). Failing the RPC here would wrongly report the keep as failed.
 	if s.enqueue != nil && h.ImageKey == "" {
 		payload, merr := highlight.MarshalEnrichImage(h.ID, tenantID)
 		if merr != nil {
@@ -288,6 +290,17 @@ func (s *SessionServer) DeleteHighlight(
 	}
 	if h.CampaignID != campaignID {
 		return nil, errNoSuchHighlight() // cross-campaign: never delete, never leak existence
+	}
+
+	// KNOWN residual race (follow-up issue planned): an enrichment job can commit
+	// SetHighlightImage between the load above and the blob deletes below, so the
+	// image_key read there is stale-empty and the just-stored image blob is orphaned
+	// (there is no global orphan sweep). Cheap shrink: re-read the row immediately
+	// before the blob deletes to pick up a freshly-committed image_key, closing the
+	// window to the microseconds between this read and the delete. A re-read failure
+	// is non-fatal — fall back to the earlier snapshot and still delete the clip+row.
+	if fresh, rerr := s.highlights.GetHighlight(ctx, tenantID, id); rerr == nil {
+		h.ImageKey = fresh.ImageKey
 	}
 
 	// Blob first (idempotent Delete): a missing clip must not block the row delete.

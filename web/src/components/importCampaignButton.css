@@ -27,3 +27,19 @@
   color: var(--danger, #e5484d);
   font-size: 13px;
 }
+
+/* The success dialog stacks the switch prompt above an optional dropped-refs
+ * caveat. The note is a WARNING, not an error — the import still succeeded. */
+.gx-import-campaign__success {
+  display: block;
+}
+.gx-import-campaign__warning {
+  display: block;
+  margin-top: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--status-warning);
+  background: var(--status-warning-bg);
+  color: var(--status-warning);
+  font-size: 13px;
+}

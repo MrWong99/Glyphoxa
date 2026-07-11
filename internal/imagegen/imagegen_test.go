@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 )
 
@@ -83,11 +85,12 @@ func TestGemini_Generate_RequestShapeAndParse(t *testing.T) {
 	if !strings.HasPrefix(gotCT, "application/json") {
 		t.Errorf("content-type = %q", gotCT)
 	}
-	// generationConfig.responseModalities == ["IMAGE"]
+	// generationConfig.responseModalities == ["TEXT","IMAGE"] (canonical shape;
+	// image-only 400'd on prior models). The parser skips the text part.
 	gc, _ := gotBody["generationConfig"].(map[string]any)
 	mods, _ := gc["responseModalities"].([]any)
-	if len(mods) != 1 || mods[0] != "IMAGE" {
-		t.Errorf("responseModalities = %v", mods)
+	if len(mods) != 2 || mods[0] != "TEXT" || mods[1] != "IMAGE" {
+		t.Errorf("responseModalities = %v, want [TEXT IMAGE]", mods)
 	}
 	// contents[0].parts[0].text == prompt
 	contents, _ := gotBody["contents"].([]any)
@@ -139,6 +142,28 @@ func TestGemini_Generate_NoInlineData(t *testing.T) {
 	gen := imagegen.NewGemini("k", imagegen.WithBaseURL(srv.URL))
 	if _, err := gen.Generate(context.Background(), "x"); err == nil {
 		t.Fatal("want error when no inline image data, got nil")
+	}
+}
+
+func TestGemini_Generate_OversizeIsPermanent(t *testing.T) {
+	// An image decoding past the blob cap must return ErrImageTooLarge (permanent),
+	// so the handler skips it instead of re-billing on every retry.
+	big := make([]byte, blob.MaxSize+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(map[string]any{
+			"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{
+				map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": base64.StdEncoding.EncodeToString(big)}},
+			}}}},
+		})
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	gen := imagegen.NewGemini("k", imagegen.WithBaseURL(srv.URL))
+	_, err := gen.Generate(context.Background(), "x")
+	if !errors.Is(err, imagegen.ErrImageTooLarge) {
+		t.Fatalf("want ErrImageTooLarge, got %v", err)
 	}
 }
 

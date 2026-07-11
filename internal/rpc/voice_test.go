@@ -310,6 +310,7 @@ func TestGetProviderHealth_AllHealthyResolvesBotTag(t *testing.T) {
 	srv := NewVoiceServer(store, cipher, nil)
 	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
 	srv.pingLLM = func(context.Context, string) error { return nil }
+	srv.pingImage = func(context.Context, string) error { return nil }
 	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
 
 	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
@@ -346,6 +347,7 @@ func TestGetProviderHealth_DegradedOnFailures(t *testing.T) {
 	srv := NewVoiceServer(store, cipher, nil)
 	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{err: errors.New("401 unauthorized")} }
 	srv.pingLLM = func(context.Context, string) error { return errors.New("groq down") }
+	srv.pingImage = func(context.Context, string) error { return errors.New("gemini down") }
 	srv.botTag = func(context.Context, string) (string, error) { return "", errors.New("bad token") }
 
 	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))

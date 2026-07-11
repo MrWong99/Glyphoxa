@@ -105,6 +105,13 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		if h.ImageKey != "" {
 			// Already enriched (a re-run of an at-least-once job): stop before any
 			// spend so the same Highlight is never billed twice.
+			//
+			// KNOWN residual race (follow-up issue planned): this guard is
+			// read-then-act, not a lock. Two replicas promoting the same Highlight at
+			// once can both read ImageKey=="" and both Generate — bounded to one extra
+			// image's spend, and the second SetHighlightImage simply overwrites the
+			// first's deterministic key (harmless result, no orphan). The single-Voice
+			// -Session deployment (ADR-0039) makes this near-impossible in practice.
 			return nil
 		}
 
@@ -119,6 +126,14 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		}
 
 		res, err := gen.Generate(ctx, buildImagePrompt(h.Excerpt, h.Reason))
+		if errors.Is(err, imagegen.ErrImageTooLarge) {
+			// PERMANENT: an oversize image can never be stored, and a retry only
+			// re-bills the same generation. Log + return nil — the Highlight stays
+			// intact without media (AC), no dead-letter churn.
+			log.Warn("highlight enrich: generated image exceeds blob cap, leaving highlight without media",
+				"highlight", p.HighlightID)
+			return nil
+		}
 		if err != nil {
 			// Provider error: return it so the runner retries / dead-letters. The row
 			// is untouched — the Highlight keeps its clip and stays imageless (AC).
@@ -144,6 +159,12 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 			return fmt.Errorf("highlight enrich: build image key: %w", err)
 		}
 		if err := blobs.Put(ctx, key, res.ContentType, bytes.NewReader(res.Data), int64(len(res.Data))); err != nil {
+			if errors.Is(err, blob.ErrTooLarge) {
+				// Same PERMANENT posture as an oversize generation: never retryable.
+				log.Warn("highlight enrich: image exceeds blob cap at Put, leaving highlight without media",
+					"highlight", p.HighlightID)
+				return nil
+			}
 			return fmt.Errorf("highlight enrich: store image: %w", err)
 		}
 		if err := store.SetHighlightImage(ctx, p.HighlightID, key, res.ContentType, int64(len(res.Data))); err != nil {
