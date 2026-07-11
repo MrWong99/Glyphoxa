@@ -92,12 +92,14 @@ func (s *fakeCrossTalk) SpeakReaction(ctx context.Context, e voiceevent.AddressR
 	}
 	for i, snt := range sentences {
 		if err := dispatch(orchestrator.Reply{Sentence: snt, Voice: tts.Voice{VoiceID: id, Name: id}}); err != nil {
-			// Mirror SpeakDraft (#362/#375): ErrNotDelivered skips this sentence but keeps
-			// draining; any other error (a barge, or the look-ahead abort) stops the drain.
+			// Three-class dispatch contract (#362, mirrors real SpeakReaction; #375): a
+			// start-error (ErrNotDelivered) skips this sentence but keeps draining; any
+			// other error (a barge cancel, or the look-ahead abort) stops the drain,
+			// delivered-only.
 			if errors.Is(err, orchestrator.ErrNotDelivered) {
 				continue
 			}
-			return delivered.String(), nil // barge/abort: stop the drain, delivered-only
+			return delivered.String(), nil
 		}
 		if delivered.Len() > 0 {
 			delivered.WriteByte(' ')

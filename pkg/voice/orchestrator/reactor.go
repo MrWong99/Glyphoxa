@@ -835,13 +835,19 @@ type Reply struct {
 	Sentence string
 	Voice    tts.Voice
 
-	// OnDelivered, when non-nil, is invoked EXACTLY ONCE by the dispatch site iff
-	// this Reply is delivered — the ADR-0012 commit point: [TTS.Dispatch] returned
-	// nil AND the post-drain ctx is still live. It is the producer's per-Reply
-	// commit hook (deliver-then-commit at the granularity of the Replies the
-	// [ReplyFunc] already returns). A start-error (ErrNotDelivered) or a mid-drain
-	// cut leaves it uninvoked, so an undelivered sentence is never committed. Nil is
-	// a no-op — a Reply with no history to commit.
+	// OnDelivered, when non-nil, is the producer's per-Reply commit hook
+	// (deliver-then-commit at the granularity of the Replies the [ReplyFunc]
+	// returns). The batch [Replier.dispatchAll] and streaming [Replier.dispatchStream]
+	// dispatch sites invoke it EXACTLY ONCE iff this Reply is delivered — the ADR-0012
+	// commit point: [TTS.Dispatch] returned nil AND the post-drain ctx is still live.
+	// A start-error (ErrNotDelivered) or a mid-drain cut leaves it uninvoked, so an
+	// undelivered sentence is never committed. Nil is a no-op.
+	//
+	// SCOPE: only those two dispatch sites honor this hook. The Ensemble Turn dispatch
+	// closures (ensemble.go) do NOT — their producers ([EnsembleSpeaker.Speak] /
+	// [CrossTalker.SpeakReaction]) commit via their own return-value drain and pass
+	// hook-less Replies, so a hook set on an ensemble Reply would be dropped. This is
+	// not a live bug (nothing sets it there); it is a documented boundary.
 	OnDelivered func()
 }
 

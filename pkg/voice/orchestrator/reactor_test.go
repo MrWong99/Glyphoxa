@@ -767,6 +767,55 @@ func TestDispatchAll_Batch_CutMidDrain_DeliveredPrefixOnly(t *testing.T) {
 	}
 }
 
+// TestDispatchStream_OnDeliveredFiresOnDelivery pins that the STREAMING dispatch
+// site also honors the per-Reply commit hook (#362): a streaming producer that
+// sets OnDelivered on a cleanly-delivered sentence has its hook fired exactly once.
+func TestDispatchStream_OnDeliveredFiresOnDelivery(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{}) // succeeds
+	var fired int
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		return dispatch(orchestrator.Reply{Sentence: "hi", OnDelivered: func() { fired++ }})
+	}
+	// Sync (no-floor) streaming path runs on the bus goroutine.
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tstreamhook"})
+
+	if fired != 1 {
+		t.Fatalf("OnDelivered fired %d times on a clean streaming delivery, want 1", fired)
+	}
+}
+
+// TestDispatchAll_Batch_StartError_HookUninvoked_TTSError pins the batch
+// start-error path (#362): a Reply whose synthesis start-fails leaves its
+// OnDelivered hook UNINVOKED (nothing delivered → nothing committed) and the turn
+// ends tts_error.
+func TestDispatchAll_Batch_StartError_HookUninvoked_TTSError(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"boom": true}})
+	var fired bool
+	reply := func(context.Context, voiceevent.AddressRouted) []orchestrator.Reply {
+		return []orchestrator.Reply{{Sentence: "boom", OnDelivered: func() { fired = true }}}
+	}
+	// Sync (no-floor) batch path publishes TurnEnded on the bus goroutine.
+	replier := orchestrator.NewReplier(ttsStage, reply, nil)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "tbatchse"})
+
+	if fired {
+		t.Fatal("OnDelivered fired for a start-errored (undelivered) batch Reply")
+	}
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.TurnEnded) bool {
+			return e.TurnID == "tbatchse" && e.Reason == voiceevent.TurnEndTTSError
+		},
+		"turn.ended (tts_error) for a batch start-error",
+	)
+}
+
 // equalStrs reports slice equality for the OnDelivered-order assertions.
 func equalStrs(a, b []string) bool {
 	if len(a) != len(b) {

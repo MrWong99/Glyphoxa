@@ -147,3 +147,74 @@ func TestReplier_SpeakDraft_CutMidDraftCommitsDeliveredOnly(t *testing.T) {
 		t.Fatalf("history = %+v, want user + assistant committing only the delivered 'First.'", hist)
 	}
 }
+
+// TestReplier_SpeakDraft_StartErrorSkipsSentenceAndContinues pins the real
+// SpeakDraft against the #362 three-class contract: a dispatch returning
+// [orchestrator.ErrNotDelivered] for sentence 1 (a TTS start-error under a live
+// turn) SKIPS that sentence's commit but keeps draining — sentence 2 is
+// delivered and committed. This drives the REAL agent.go:408 continue-on-sentinel
+// (not a fake that reimplements the skip), so flipping it to `return e` goes RED.
+func TestReplier_SpeakDraft_StartErrorSkipsSentenceAndContinues(t *testing.T) {
+	r := draftReplier()
+
+	var got []string
+	dispatch := func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		if rep.Sentence == "First." {
+			return orchestrator.ErrNotDelivered // start-error: NOT delivered, turn alive
+		}
+		return nil // delivered
+	}
+
+	delivered, err := r.SpeakDraft(t.Context(), "Hail, Bart.", "First. Second.", dispatch)
+	if err != nil {
+		t.Fatalf("SpeakDraft errored on a start-error sentinel: %v", err)
+	}
+	// The drain CONTINUED past the start-errored sentence: both were attempted.
+	if len(got) != 2 || got[0] != "First." || got[1] != "Second." {
+		t.Fatalf("dispatched = %v, want both sentences attempted in order (drain continues past start-error)", got)
+	}
+	// Only the delivered sentence is committed — the start-errored one is skipped.
+	if delivered != "Second." {
+		t.Fatalf("delivered = %q, want only the delivered 'Second.' (start-errored 'First.' skipped)", delivered)
+	}
+	hist := r.HistorySnapshot()
+	if len(hist) != 2 || hist[1].Text != "Second." {
+		t.Fatalf("history = %+v, want user + assistant committing only the delivered 'Second.'", hist)
+	}
+}
+
+// TestReplier_SpeakReaction_StartErrorSkipsSentenceAndContinues pins that
+// SpeakReaction inherits the same continue-on-sentinel behaviour (it delegates to
+// SpeakDraft with the composite Cross-talk user text, #302/#362): a start-errored
+// reaction sentence is skipped, the drain continues, and only the delivered
+// sentence commits.
+func TestReplier_SpeakReaction_StartErrorSkipsSentenceAndContinues(t *testing.T) {
+	r := draftReplier()
+
+	var got []string
+	dispatch := func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		if rep.Sentence == "Aye." {
+			return orchestrator.ErrNotDelivered
+		}
+		return nil
+	}
+
+	delivered, err := r.SpeakReaction(t.Context(), "Bart, thoughts?", "Greta", "We ride.", "Aye. Indeed.", dispatch)
+	if err != nil {
+		t.Fatalf("SpeakReaction errored on a start-error sentinel: %v", err)
+	}
+	if len(got) != 2 || got[0] != "Aye." || got[1] != "Indeed." {
+		t.Fatalf("dispatched = %v, want both reaction sentences attempted (drain continues)", got)
+	}
+	if delivered != "Indeed." {
+		t.Fatalf("delivered = %q, want only the delivered 'Indeed.'", delivered)
+	}
+	// The reaction commits the delivered text on the SAME composite user message
+	// React reasoned over.
+	hist := r.HistorySnapshot()
+	if hist[len(hist)-1].Text != "Indeed." {
+		t.Fatalf("committed reaction = %q, want only the delivered 'Indeed.'", hist[len(hist)-1].Text)
+	}
+}
