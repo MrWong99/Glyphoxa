@@ -838,3 +838,21 @@
   gap: var(--spacing-sm);
   flex-wrap: wrap;
 }
+
+.gx-proposal-card__similar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  cursor: pointer;
+}
+
+.gx-proposal-card__similar-btn:hover {
+  color: var(--text);
+}

@@ -139,7 +139,7 @@ func TestApproveFactViaNodeID(t *testing.T) {
 		t.Fatalf("CreateNode: %v", err)
 	}
 	// Give it an embedding so we can prove approval resets it.
-	if err := st.SetNodeEmbedding(ctx, node.ID, unitVec(0), "m"); err != nil {
+	if err := st.SetNodeEmbedding(ctx, node.ID, unitVec(0), "m", node.UpdatedAt); err != nil {
 		t.Fatalf("SetNodeEmbedding: %v", err)
 	}
 
@@ -408,18 +408,98 @@ func TestNodeEmbeddingRoundTrip(t *testing.T) {
 	if n, _ := st.CountUnembeddedNodes(ctx); n != 1 {
 		t.Errorf("initial unembedded count = %d, want 1", n)
 	}
-	if err := st.SetNodeEmbedding(ctx, node.ID, unitVec(3), "m"); err != nil {
+	if err := st.SetNodeEmbedding(ctx, node.ID, unitVec(3), "m", node.UpdatedAt); err != nil {
 		t.Fatalf("SetNodeEmbedding: %v", err)
 	}
 	if n, _ := st.CountUnembeddedNodes(ctx); n != 0 {
 		t.Errorf("after embed count = %d, want 0", n)
 	}
-	// UpdateNode resets the embedding.
-	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: node.ID, CampaignID: campaignID, Name: "N", Body: "b2"}); err != nil {
+	// A gm_private-only toggle (name+body unchanged) must NOT reset the embedding.
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: node.ID, CampaignID: campaignID, Name: "N", Body: "b", GMPrivate: true}); err != nil {
+		t.Fatalf("UpdateNode (gm toggle): %v", err)
+	}
+	if n, _ := st.CountUnembeddedNodes(ctx); n != 0 {
+		t.Errorf("after gm_private toggle count = %d, want 0 (embedding NOT reset — text unchanged)", n)
+	}
+
+	// A text edit (body changed) DOES reset the embedding.
+	if _, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: node.ID, CampaignID: campaignID, Name: "N", Body: "b2", GMPrivate: true}); err != nil {
 		t.Fatalf("UpdateNode: %v", err)
 	}
 	if n, _ := st.CountUnembeddedNodes(ctx); n != 1 {
 		t.Errorf("after edit count = %d, want 1 (embedding reset)", n)
+	}
+}
+
+// TestSetNodeEmbeddingStaleGuard: a SetNodeEmbedding whose updated_at no longer
+// matches the row (a concurrent edit bumped it) writes 0 rows and leaves the row
+// unembedded — the embedworker's next pass re-embeds the fresh text. This closes
+// the mutable-node stale-embedding race (a chunk is immutable; a Node is not).
+func TestSetNodeEmbeddingStaleGuard(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	node, err := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "N", Body: "v1"})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	staleUpdatedAt := node.UpdatedAt
+
+	// A concurrent edit lands (new text, bumped updated_at, embedding NULLed).
+	edited, err := st.UpdateNode(ctx, storage.KGNodeUpdate{ID: node.ID, CampaignID: campaignID, Name: "N", Body: "v2"})
+	if err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+
+	// The worker (which listed v1) writes with the STALE updated_at → 0 rows, row
+	// stays unembedded.
+	if err := st.SetNodeEmbedding(ctx, node.ID, unitVec(0), "m", staleUpdatedAt); err != nil {
+		t.Fatalf("SetNodeEmbedding (stale): %v", err)
+	}
+	if n, _ := st.CountUnembeddedNodes(ctx); n != 1 {
+		t.Errorf("after stale write count = %d, want 1 (stale vector must NOT install)", n)
+	}
+
+	// A write with the CURRENT updated_at succeeds.
+	if err := st.SetNodeEmbedding(ctx, node.ID, unitVec(0), "m", edited.UpdatedAt); err != nil {
+		t.Fatalf("SetNodeEmbedding (current): %v", err)
+	}
+	if n, _ := st.CountUnembeddedNodes(ctx); n != 0 {
+		t.Errorf("after fresh write count = %d, want 0", n)
+	}
+}
+
+// TestApproveFactSubjectDeletedBeforeApprove: a fact proposal whose subject entry
+// is deleted before approval is blocked (the fact never silently vanishes) and the
+// row stays pending — the user-visible half of the applyProposedFact RowsAffected
+// backstop.
+func TestApproveFactSubjectDeletedBeforeApprove(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	butler := seedButlerAgent(t, st, campaignID)
+
+	node, err := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "Rumor", Body: "x"})
+	if err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	id := fileProposal(t, st, campaignID, butler, tool.ProposedWrite{
+		V: 1, Kind: "fact", Subject: "Rumor", Fact: "It grows.",
+	})
+	if err := st.DeleteNode(ctx, campaignID, node.ID); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	err = st.ApproveKnowledgeProposal(ctx, campaignID, id)
+	var blocked *storage.ProposalBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("approve after delete: got %v, want ProposalBlockedError", err)
+	}
+	if !pendingIDs(t, st, campaignID)[id] {
+		t.Error("blocked proposal must stay pending (fact never silently lost)")
 	}
 }
 
@@ -436,10 +516,10 @@ func TestSimilarNodes(t *testing.T) {
 	a, _ := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "A"})
 	b, _ := st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "B"})
 	st.CreateNode(ctx, storage.NewKGNode{CampaignID: campaignID, Type: storage.KGNodeNote, Name: "C"})
-	if err := st.SetNodeEmbedding(ctx, a.ID, unitVec(0), "m"); err != nil {
+	if err := st.SetNodeEmbedding(ctx, a.ID, unitVec(0), "m", a.UpdatedAt); err != nil {
 		t.Fatalf("embed A: %v", err)
 	}
-	if err := st.SetNodeEmbedding(ctx, b.ID, unitVec(1), "m"); err != nil {
+	if err := st.SetNodeEmbedding(ctx, b.ID, unitVec(1), "m", b.UpdatedAt); err != nil {
 		t.Fatalf("embed B: %v", err)
 	}
 
@@ -450,7 +530,7 @@ func TestSimilarNodes(t *testing.T) {
 		t.Fatalf("insert other campaign: %v", err)
 	}
 	on, _ := st.CreateNode(ctx, storage.NewKGNode{CampaignID: other, Type: storage.KGNodeNote, Name: "Other-A"})
-	st.SetNodeEmbedding(ctx, on.ID, unitVec(0), "m")
+	st.SetNodeEmbedding(ctx, on.ID, unitVec(0), "m", on.UpdatedAt)
 
 	got, err := st.SimilarNodes(ctx, campaignID, unitVec(0), 5)
 	if err != nil {

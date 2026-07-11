@@ -15,7 +15,13 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 )
+
+// proposalWriteVersion mirrors the storage/tool ProposedWrite schema version
+// (ADR-0052 "v":1). A row whose version differs is unreadable and listed with an
+// unset write oneof.
+const proposalWriteVersion = 1
 
 // Knowledge Proposal review handlers (#300, ADR-0052) on CampaignServer: the GM
 // review surface for the pending queue an Agent's remember_knowledge call files
@@ -192,10 +198,16 @@ func (s *CampaignServer) similarNodes(ctx context.Context, campaignID uuid.UUID,
 		embedCtx, cancel := context.WithTimeout(ctx, similarEmbedTimeout)
 		defer cancel()
 		vecs, err := s.embedder.Embed(embedCtx, []string{queryText})
-		if err != nil || len(vecs) != 1 {
+		switch {
+		case err != nil || len(vecs) != 1:
 			slog.Default().Warn("ListSimilarKnowledge: embed failed; degrading to fulltext hint",
 				"err", err, "vecs", len(vecs))
-		} else {
+		case len(vecs[0]) != embeddings.Dim:
+			// A wrong-dimension vector would make the ::vector cast in SimilarNodes fail
+			// (CodeInternal). The hint is best-effort — degrade to fulltext instead.
+			slog.Default().Warn("ListSimilarKnowledge: embed returned wrong dimension; degrading to fulltext hint",
+				"want", embeddings.Dim, "got", len(vecs[0]))
+		default:
 			return s.store.SimilarNodes(ctx, campaignID, vecs[0], similarNodesLimit)
 		}
 	}
@@ -236,7 +248,7 @@ func toProtoKnowledgeProposal(p storage.KnowledgeProposal) *managementv1.Knowled
 	}
 
 	var w tool.ProposedWrite
-	if err := json.Unmarshal(p.ProposedWrite, &w); err != nil || w.V != 1 {
+	if err := json.Unmarshal(p.ProposedWrite, &w); err != nil || w.V != proposalWriteVersion {
 		slog.Default().Warn("KnowledgeProposal: unparseable proposed_write; listing with unset write",
 			"proposal_id", p.ID, "err", err)
 		return out // write oneof left unset → UI renders "unreadable — reject"

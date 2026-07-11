@@ -193,14 +193,22 @@ func (tx *Store) applyProposedFact(ctx context.Context, campaignID uuid.UUID, w 
 	if err != nil {
 		return err
 	}
-	if _, err := tx.db.Exec(ctx,
+	tag, err := tx.db.Exec(ctx,
 		`UPDATE kg_node
 		    SET body = CASE WHEN body = '' THEN $2 ELSE body || E'\n\n' || $2 END,
 		        embedding = NULL,
 		        embedding_model = '',
 		        updated_at = now()
-		  WHERE id = $1 AND campaign_id = $3`, anchor, w.Fact, campaignID); err != nil {
+		  WHERE id = $1 AND campaign_id = $3`, anchor, w.Fact, campaignID)
+	if err != nil {
 		return fmt.Errorf("storage: approve fact: append body: %w", err)
+	}
+	// The anchor was resolved earlier in this same tx, but a concurrent DELETE could
+	// land between resolve and UPDATE. 0 rows means the entry is gone: block (tx
+	// rolls back, row stays pending) rather than silently swallow the fact —
+	// consistent with the edge path's dangling-endpoint refusal.
+	if tag.RowsAffected() == 0 {
+		return &ProposalBlockedError{Reason: "the entry this proposal is about no longer exists — reject it"}
 	}
 	return nil
 }

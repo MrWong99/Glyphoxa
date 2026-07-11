@@ -49,8 +49,10 @@ type Store interface {
 	// ListUnembeddedNodes returns up to limit Knowledge Graph Nodes still awaiting
 	// an embedding, oldest first — the node half of the backfill queue (#300).
 	ListUnembeddedNodes(ctx context.Context, limit int) ([]storage.KGNode, error)
-	// SetNodeEmbedding fills one Node's vector and stamps the model.
-	SetNodeEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string) error
+	// SetNodeEmbedding fills one Node's vector and stamps the model, guarded on the
+	// updatedAt the row was LISTED with so a concurrent edit (which bumps updated_at
+	// and NULLs the embedding) is not clobbered by a stale vector (#300).
+	SetNodeEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string, updatedAt time.Time) error
 	// CountUnembeddedNodes reports the remaining NULL-embedding Node backlog (gauge).
 	CountUnembeddedNodes(ctx context.Context) (int, error)
 }
@@ -224,7 +226,10 @@ func (w *Worker) passNodes(ctx context.Context) {
 	}
 
 	for i, n := range nodes {
-		if err := w.store.SetNodeEmbedding(ctx, n.ID, vecs[i], w.model); err != nil {
+		// Guard the write on the listed updated_at: a Node edited/approved since we
+		// listed it (embedding NULLed, updated_at bumped) matches 0 rows and stays in
+		// the backlog for the next pass to re-embed with fresh text (#300).
+		if err := w.store.SetNodeEmbedding(ctx, n.ID, vecs[i], w.model, n.UpdatedAt); err != nil {
 			w.log.Warn("embed backfill: set node embedding failed; this and later nodes retry next pass",
 				"node_id", n.ID, "err", err)
 			return

@@ -64,8 +64,9 @@ export function ProposalsPanel() {
   const proposals = data?.proposals ?? [];
 
   // A review action must refresh the queue AND the wiki list (an approved write
-  // lands a new/edited Node the Knowledge panel shows). Both keys are built
-  // without an input so they prefix-match every cached query.
+  // lands a new/edited Node the Knowledge panel shows) AND any cached node-edges
+  // (an approved edge adds a relationship the relations view / delete-count reads).
+  // Each key is built without an input so it prefix-matches every cached query.
   const invalidateAfterReview = () => {
     void queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
@@ -76,6 +77,12 @@ export function ProposalsPanel() {
     void queryClient.invalidateQueries({
       queryKey: createConnectQueryKey({
         schema: CampaignService.method.listNodes,
+        cardinality: "finite",
+      }),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: createConnectQueryKey({
+        schema: CampaignService.method.listNodeEdges,
         cardinality: "finite",
       }),
     });
@@ -248,10 +255,23 @@ function ProposalWrite({ proposal }: { proposal: KnowledgeProposal }) {
 // subject (the ADR-0011 vector hint) so the GM can merge or reject rather than
 // duplicate. A skeleton shows while loading; "No similar entries." when none.
 function SimilarHint({ proposalId }: { proposalId: string }) {
-  const { data, status } = useQuery(CampaignService.method.listSimilarKnowledge, {
-    proposalId,
-  });
+  // Truly lazy: the similarity RPC embeds the subject (a provider call), so it
+  // fires ONLY after the GM opts in — never on mount for every card (that would
+  // fan N concurrent Embed calls across the whole queue).
+  const [show, setShow] = useState(false);
+  const { data, status } = useQuery(
+    CampaignService.method.listSimilarKnowledge,
+    { proposalId },
+    { enabled: show },
+  );
 
+  if (!show) {
+    return (
+      <button type="button" className="gx-proposal-card__similar-btn" onClick={() => setShow(true)}>
+        <Sparkles size={12} /> Show similar entries
+      </button>
+    );
+  }
   if (status === "pending") {
     return <div className="gx-skeleton gx-proposal-card__similar-skel" data-testid="similar-loading" />;
   }

@@ -104,16 +104,22 @@ type KGNodeUpdate struct {
 // so a Node in another Campaign matches no row and yields ErrNotFound — a
 // cross-campaign mutation is refused server-side. A missing id yields ErrNotFound.
 func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) {
-	// A wiki edit invalidates any existing embedding: reset it to NULL and clear
-	// the model stamp so the row re-enters the embedworker backfill queue (#300,
-	// ADR-0011) and future similarity hints reflect the new text.
+	// A wiki edit that changes the embedded TEXT (name or body) invalidates any
+	// existing embedding: reset it to NULL + clear the model stamp so the row
+	// re-enters the embedworker backfill queue (#300, ADR-0011) and future
+	// similarity hints reflect the new text. A gm_private-only toggle leaves the
+	// embedding intact (the vector is unchanged), avoiding a needless re-embed. The
+	// CASE keys off IS DISTINCT FROM so the decision is made in the same statement
+	// with no extra read.
 	row := s.db.QueryRow(ctx,
 		`UPDATE kg_node SET
+		    embedding = CASE WHEN name IS DISTINCT FROM $2 OR body IS DISTINCT FROM $3
+		                     THEN NULL ELSE embedding END,
+		    embedding_model = CASE WHEN name IS DISTINCT FROM $2 OR body IS DISTINCT FROM $3
+		                           THEN '' ELSE embedding_model END,
 		    name = $2,
 		    body = $3,
 		    gm_private = $4,
-		    embedding = NULL,
-		    embedding_model = '',
 		    updated_at = now()
 		  WHERE id = $1 AND campaign_id = $5
 		 RETURNING `+kgNodeColumns,
@@ -308,11 +314,18 @@ func (s *Store) ListUnembeddedNodes(ctx context.Context, limit int) ([]KGNode, e
 // pgvector-go dependency; the column is vector(768), so a wrong-length vector is
 // rejected by Postgres. Once set, the row leaves the NULL-embedding backlog and
 // becomes returnable by SimilarNodes.
-func (s *Store) SetNodeEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string) error {
+//
+// Unlike a Transcript Chunk, a Node is MUTABLE: a GM edit or a fact-approval can
+// reset the embedding to NULL and bump updated_at WHILE the worker's (up to 60s)
+// Embed call is in flight. Writing the now-stale vector back would install a v1
+// vector on a v2 row and it would never re-embed (embedding IS NOT NULL). So the
+// write is guarded on the updated_at the worker LISTED: a row edited since is not
+// matched (0 rows) and stays NULL for the next pass to re-embed with fresh text.
+func (s *Store) SetNodeEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string, updatedAt time.Time) error {
 	if _, err := s.db.Exec(ctx,
 		`UPDATE kg_node
 		    SET embedding = $2::vector, embedding_model = $3
-		  WHERE id = $1`, id, encodeVector(vec), model); err != nil {
+		  WHERE id = $1 AND updated_at = $4`, id, encodeVector(vec), model, updatedAt); err != nil {
 		return fmt.Errorf("storage: set kg node embedding %s: %w", id, err)
 	}
 	return nil

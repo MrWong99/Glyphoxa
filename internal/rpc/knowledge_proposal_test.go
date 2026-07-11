@@ -14,6 +14,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 )
 
 // --- fakeCampaignStore proposal-review methods (#300) ---
@@ -242,7 +243,7 @@ func TestListSimilarKnowledge_EmbedderPath(t *testing.T) {
 		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"}),
 	}
 	store.similarResults = []storage.KGNode{{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Bart"}}
-	emb := &fakeEmbedder{vec: []float32{0.1, 0.2, 0.3}}
+	emb := &fakeEmbedder{vec: make([]float32, embeddings.Dim)} // correct dimension → vector path
 	client := crudClientWithEmbedder(t, store, emb)
 
 	resp, err := client.ListSimilarKnowledge(context.Background(),
@@ -258,6 +259,31 @@ func TestListSimilarKnowledge_EmbedderPath(t *testing.T) {
 	}
 	if len(emb.texts) != 1 || emb.texts[0] != "Bart: Fears dark" {
 		t.Errorf("embedded texts = %v, want [\"Bart: Fears dark\"]", emb.texts)
+	}
+}
+
+// TestListSimilarKnowledge_WrongDimFallsBackToFTS: an embedder returning a
+// wrong-dimension vector degrades to fulltext rather than failing with CodeInternal
+// on the ::vector cast.
+func TestListSimilarKnowledge_WrongDimFallsBackToFTS(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.campaign = storage.Campaign{ID: uuid.New()}
+	store.getProposal = storage.KnowledgeProposal{
+		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"}),
+	}
+	emb := &fakeEmbedder{vec: []float32{0.1, 0.2, 0.3}} // 3 dims, not embeddings.Dim
+	client := crudClientWithEmbedder(t, store, emb)
+
+	if _, err := client.ListSimilarKnowledge(context.Background(),
+		connect.NewRequest(&managementv1.ListSimilarKnowledgeRequest{ProposalId: uuid.New().String()})); err != nil {
+		t.Fatalf("ListSimilarKnowledge: %v", err)
+	}
+	if store.similarCalls != 0 {
+		t.Errorf("vector path ran with a wrong-dim vector: %d", store.similarCalls)
+	}
+	if store.searchCalls != 1 {
+		t.Errorf("fts fallback not taken: searchCalls=%d, want 1", store.searchCalls)
 	}
 }
 

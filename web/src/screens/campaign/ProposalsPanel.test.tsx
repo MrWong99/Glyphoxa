@@ -66,12 +66,15 @@ function mockTransport(
   let list = [...proposals];
   const approveCalls: ApproveKnowledgeProposalRequest[] = [];
   const rejectCalls: RejectKnowledgeProposalRequest[] = [];
+  const counters = { similarCalls: 0 };
 
   const transport = createRouterTransport(({ service }) => {
     service(CampaignService, {
       listKnowledgeProposals: () => create(ListKnowledgeProposalsResponseSchema, { proposals: list }),
-      listSimilarKnowledge: () =>
-        create(ListSimilarKnowledgeResponseSchema, { nodes: opts.similar ?? [] }),
+      listSimilarKnowledge: () => {
+        counters.similarCalls++;
+        return create(ListSimilarKnowledgeResponseSchema, { nodes: opts.similar ?? [] });
+      },
       approveKnowledgeProposal: (req) => {
         approveCalls.push(req);
         if (opts.approveError) throw opts.approveError;
@@ -85,7 +88,7 @@ function mockTransport(
       },
     });
   });
-  return { transport, approveCalls, rejectCalls };
+  return { transport, approveCalls, rejectCalls, counters };
 }
 
 function renderPanel(
@@ -173,18 +176,25 @@ describe("ProposalsPanel", () => {
     expect(rejectCalls[0].id).toBe("p-fact");
   });
 
-  it("renders the similarity hint's existing entries", async () => {
-    renderPanel([factProposal], {
+  it("only fetches the similarity hint after the GM opts in (lazy, no fan-out)", async () => {
+    const { counters } = renderPanel([factProposal], {
       similar: [create(NodeSchema, { id: "n1", nodeType: NodeType.NPC, name: "Bartholomew" })],
     });
     await screen.findByText("Bart");
+    // Not fired on mount — the RPC embeds a provider call, so it must be opt-in.
+    expect(counters.similarCalls).toBe(0);
+    expect(screen.queryByText("Bartholomew")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /show similar/i }));
     expect(await screen.findByText("Bartholomew")).toBeInTheDocument();
     expect(screen.getByText(/Similar existing entries/i)).toBeInTheDocument();
+    expect(counters.similarCalls).toBe(1);
   });
 
   it("shows 'No similar entries.' when the hint is empty", async () => {
     renderPanel([factProposal], { similar: [] });
     await screen.findByText("Bart");
+    fireEvent.click(screen.getByRole("button", { name: /show similar/i }));
     expect(await screen.findByText(/No similar entries\./i)).toBeInTheDocument();
   });
 });
