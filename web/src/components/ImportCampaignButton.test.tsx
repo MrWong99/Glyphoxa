@@ -37,6 +37,7 @@ const summaryFixture: ImportSummary = {
   sessions: 0,
   lines: 0,
   chunks: 0,
+  droppedParticipantRefs: 0,
 };
 
 // A stateful backend: SetActiveCampaign records the switch; ListCampaigns +
@@ -123,6 +124,44 @@ describe("ImportCampaignButton", () => {
     expect(within(success).getByRole("button", { name: /Switch/ })).toBeInTheDocument();
     // A toast fires too — unmount-proof feedback if the panel closes mid-flow.
     await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith(expect.stringMatching(/The Prancing Pony/)));
+  });
+
+  it("notes dropped participant refs in the success dialog when > 0 (plural)", async () => {
+    mockImport.mockResolvedValue({ ...summaryFixture, droppedParticipantRefs: 2 });
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const success = await screen.findByRole("alertdialog");
+    // Warning note — import still SUCCEEDED, so it's phrased as a caveat, not an error.
+    expect(
+      within(success).getByText(/2 participant references could not be mapped and were dropped/i),
+    ).toBeInTheDocument();
+  });
+
+  it("phrases the dropped-refs note in the singular for exactly one", async () => {
+    mockImport.mockResolvedValue({ ...summaryFixture, droppedParticipantRefs: 1 });
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const success = await screen.findByRole("alertdialog");
+    expect(
+      within(success).getByText(/1 participant reference could not be mapped and was dropped/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows NO dropped-refs note when none were dropped", async () => {
+    mockImport.mockResolvedValue({ ...summaryFixture, droppedParticipantRefs: 0 });
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const success = await screen.findByRole("alertdialog");
+    expect(within(success).queryByText(/could not be mapped/i)).not.toBeInTheDocument();
   });
 
   it("toasts the failure so feedback survives a mid-upload panel dismissal", async () => {

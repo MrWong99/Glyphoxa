@@ -165,9 +165,21 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         }}
         title={summary ? `Imported “${summary.name}”` : ""}
         description={
-          summary
-            ? `“${summary.name}” was imported as a new campaign — switch to it now?`
-            : undefined
+          summary ? (
+            <span className="gx-import-campaign__success">
+              “{summary.name}” was imported as a new campaign — switch to it now?
+              {summary.droppedParticipantRefs > 0 && (
+                // Import SUCCEEDED — some chunk participant refs mapped to no
+                // imported agent/character and were dropped (#381/#388). A caveat,
+                // not an error: warning styling, and the campaign is fully usable.
+                <span className="gx-import-campaign__warning" role="status">
+                  {summary.droppedParticipantRefs === 1
+                    ? "1 participant reference could not be mapped and was dropped."
+                    : `${summary.droppedParticipantRefs} participant references could not be mapped and were dropped.`}
+                </span>
+              )}
+            </span>
+          ) : undefined
         }
         confirmLabel="Switch"
         cancelLabel="Not now"
