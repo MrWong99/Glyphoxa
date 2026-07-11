@@ -66,10 +66,11 @@ type RecapStore interface {
 }
 
 // ButlerVoicer is the decision-6a socket for a truly VOICED recap: speaking the
-// recap prose into the live voice channel as the Butler. NOBODY implements it in
-// this epic — the Butler is address-only and has never been voiced (ADR-0009/0024),
-// so the wiring passes nil and a `voiced` request degrades to public text with a
-// hint. Epic 7 fills this in.
+// recap prose into the live voice channel as the Butler. *session.Manager satisfies
+// it structurally (#365): the now-voiced Butler (ADR-0009 #299) speaks via
+// SpeakAsButler → SayAs, landing the recap as a KindButler transcript line. It is
+// still nil-tolerant — with no wired voicer OR no live session a `voiced` request
+// degrades to public text with a hint (decision 6a).
 type ButlerVoicer interface {
 	SpeakAsButler(ctx context.Context, text string) error
 }
