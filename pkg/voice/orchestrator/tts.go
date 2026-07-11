@@ -123,17 +123,26 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	// distinct, monotonically increasing indices. The index counts dispatch
 	// attempts within the turn, assigned before Synthesize so a start-errored
 	// sentence still consumes its slot and stays visible.
-	s.mu.Lock()
-	index := s.nextIndex
-	s.nextIndex++
-	s.mu.Unlock()
+	// Look-ahead pre-render (#375, F1): a sentence held in the pump's look-ahead lane
+	// must NOT announce itself yet — TTSInvoked at pre-render time would make the relay
+	// persist a line under the reaction's id BEFORE its EnsembleReaction attributes who
+	// spoke (a misattributed "NPC" line) and make the chunker buffer text a barge could
+	// still discard. So skip the publish AND the index reservation here; the coordinator
+	// announces the sentence at release via [TTS.PublishInvoked]. Everything else — retry,
+	// synthesis, drain, char metering (ADR-0045), tts_total — is byte-identical.
+	if !voiceevent.IsPlaybackLookahead(ctx) {
+		s.mu.Lock()
+		index := s.nextIndex
+		s.nextIndex++
+		s.mu.Unlock()
 
-	s.bus.Publish(voiceevent.TTSInvoked{
-		At:       time.Now(),
-		Sentence: sentence,
-		Index:    index,
-		TurnID:   voiceevent.TurnIDFrom(ctx),
-	})
+		s.bus.Publish(voiceevent.TTSInvoked{
+			At:       time.Now(),
+			Sentence: sentence,
+			Index:    index,
+			TurnID:   voiceevent.TurnIDFrom(ctx),
+		})
+	}
 
 	start := time.Now()
 	// Retry a transient START failure (429/5xx/net) with backoff before first audio
@@ -173,7 +182,35 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	// (ADR-0044 amendment, #239 review); the provider-latency signal is tts_ttfb. A
 	// mid-stream barge (ctx cancel closing the channel early) is NOT a provider error
 	// — the vendor call itself succeeded — so it still counts OK, mirroring agenttool.
+	// For a held look-ahead sentence (#375) tts_total ADDITIONALLY spans the lane HOLD
+	// (release-to-playback): its Dispatch does not return until the coordinator releases
+	// it and the pump drains it, so this measures synthesis + hold + paced delivery. That
+	// is acceptable under the ADR-0044 amendment (tts_total is delivery, not TTFB).
 	s.rec.TTSTotal(s.provider, time.Since(start))
 	s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeOK)
 	return nil
+}
+
+// PublishInvoked announces a look-ahead sentence's [voiceevent.TTSInvoked] at the
+// moment it is RELEASED to play (#375, F1), not when it was pre-rendered — so the
+// relay attributes its line only AFTER the reaction's EnsembleReaction names the
+// speaker, and the chunker buffers its text only once it is committed to play. It
+// draws the in-turn Index from the SAME monotonic counter [Dispatch] uses.
+//
+// NOTE: because the look-ahead sentence is dispatched (synthesized) BEFORE the Lead's
+// later sentences but ANNOUNCED here after them, its Index can be numerically greater
+// than a Lead sentence that dispatched later — nothing consumes TTSInvoked ordering by
+// Index within a turn (the relay/chunker coalesce by arrival), so this is accepted.
+func (s *TTS) PublishInvoked(turnID, sentence string) {
+	s.mu.Lock()
+	index := s.nextIndex
+	s.nextIndex++
+	s.mu.Unlock()
+
+	s.bus.Publish(voiceevent.TTSInvoked{
+		At:       time.Now(),
+		Sentence: sentence,
+		Index:    index,
+		TurnID:   turnID,
+	})
 }

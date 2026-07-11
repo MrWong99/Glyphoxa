@@ -853,7 +853,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// TextSink is set on butler-role specs only inside rosterDepsForLive.
 	textPoster := newVoiceChannelPoster(client, channel)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, textPoster)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, textPoster, pump)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -1262,7 +1262,12 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 	return unsub
 }
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, textPoster func(ctx context.Context, text string) error) (*orchestrator.Conversation, *Roster, func(), error) {
+// The playback pump is the production [orchestrator.LookaheadPump] (#375): the same
+// serialized playback path holds and releases the Cross-talk Reaction's pre-rendered
+// first sentence.
+var _ orchestrator.LookaheadPump = (*wire.PlaybackPump)(nil)
+
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, textPoster func(ctx context.Context, text string) error, lookahead orchestrator.LookaheadPump) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -1434,6 +1439,12 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// session Manager publishes SpeakRequested; the lookup is always wired so /say
 		// works whenever a session is live.
 		orchestrator.WithDirectSpeech(roster.Voice),
+		// Pump look-ahead for the Cross-talk Reaction onset gap (#375, ADR-0025): the
+		// playback pump doubles as the [orchestrator.LookaheadPump], so a queued
+		// Reaction's first sentence pre-renders its audio during the Lead's playback.
+		// A nil pump is the feature-off default (TEXT-only pre-render); it only takes
+		// effect alongside an Ensemble speaker, so it is safe to wire unconditionally.
+		orchestrator.WithReactionLookahead(lookahead),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).

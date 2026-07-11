@@ -948,6 +948,14 @@ type Replier struct {
 	// barge-in floor (WithEnsemble panics at Register without it) — the whole
 	// ensemble is ONE floor-holding unit.
 	ensemble EnsembleSpeaker
+
+	// lookahead, when non-nil, is the pump pre-render seam ([WithReactionLookahead],
+	// #375, ADR-0025): the Cross-talk Reaction's first sentence is synthesized during
+	// the Lead's playback and HELD in this pump's look-ahead lane, released at the
+	// Lead's end for a near-zero onset gap (or discarded on a barge). Nil is the
+	// feature-off default — the Reaction pre-renders TEXT only (the #302 legacy
+	// path). Set only via the orchestrator wiring; not part of [NewReplier].
+	lookahead LookaheadPump
 }
 
 // NewReplier wires ttsStage and reply together. Both must be non-nil; passing

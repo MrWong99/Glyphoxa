@@ -403,3 +403,37 @@ func TestTee_NilBusPublishesNothing(t *testing.T) {
 
 // Compile-time assertion: the decorator is a drop-in [tts.Synthesizer].
 var _ tts.Synthesizer = (*wire.TeeSynthesizer)(nil)
+
+// TestTee_LookaheadPublishesNoFirstAudio pins #375: the tee publishes NO FirstAudio
+// for a look-ahead sentence — its delivery-aligned signal is owned by the playback
+// source, not the availability boundary here. Even a consumer that fully drains the
+// play channel (the sentence "available at the pump") must not make the tee emit it.
+func TestTee_LookaheadPublishesNoFirstAudio(t *testing.T) {
+	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000), chunk(2, 24000)}}
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go drainAll(chunks) // consumer fully consumes the play channel
+	})
+
+	bus := voiceevent.NewBus()
+	var mu sync.Mutex
+	var fa int
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		fa++
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	ctx := voiceevent.WithPlaybackLookahead(voiceevent.WithTurnID(context.Background(), "R"))
+	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "held"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	drainAll(out) // run the forward goroutine to completion (both chunks consumed)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if fa != 0 {
+		t.Fatalf("tee published %d FirstAudio for a look-ahead sentence, want 0 (owned by the playback source)", fa)
+	}
+}

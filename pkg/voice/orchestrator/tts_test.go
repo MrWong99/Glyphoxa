@@ -418,3 +418,64 @@ func TestTTS_ConcurrentDispatch_AssignsUniqueIndices(t *testing.T) {
 		}
 	}
 }
+
+// TestTTS_Dispatch_LookaheadSkipsInvoke pins F1 (#375): a Dispatch under a
+// PlaybackLookahead ctx does NOT publish TTSInvoked and does NOT reserve an index —
+// the reaction's first sentence is announced later, at release, via PublishInvoked —
+// but it is still fully synthesized, drained, and character-metered (ADR-0045).
+func TestTTS_Dispatch_LookaheadSkipsInvoke(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	var invoked int
+	voiceevent.On(h.Bus, func(voiceevent.TTSInvoked) { invoked++ })
+
+	synth := &flakySynth{} // succeeds first call, closed channel
+	stage := orchestrator.NewTTS(h.Bus, synth, orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+	ctx := voiceevent.WithPlaybackLookahead(voiceevent.WithTurnID(context.Background(), "R"))
+	if err := stage.Dispatch(ctx, "Aye.", voicetest.LiveElevenLabsVoice()); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if invoked != 0 {
+		t.Fatalf("TTSInvoked published %d times for a look-ahead Dispatch, want 0", invoked)
+	}
+	if synth.calls != 1 {
+		t.Fatalf("Synthesize called %d times, want 1 (still synthesized)", synth.calls)
+	}
+	chars := spy.characters()
+	if len(chars) != 1 || chars[0].chars != 4 {
+		t.Fatalf("TTSCharacters = %+v, want one record of 4 (still metered)", chars)
+	}
+}
+
+// TestTTS_PublishInvoked_MonotonicIndex pins F1 (#375): PublishInvoked emits a
+// TTSInvoked carrying the given turn id + sentence and a monotonically increasing
+// index drawn from the SAME counter Dispatch uses, so a released look-ahead sentence
+// takes a distinct in-turn slot.
+func TestTTS_PublishInvoked_MonotonicIndex(t *testing.T) {
+	h := voicetest.New(t)
+	var got []voiceevent.TTSInvoked
+	voiceevent.On(h.Bus, func(e voiceevent.TTSInvoked) { got = append(got, e) })
+
+	synth := &flakySynth{}
+	stage := orchestrator.NewTTS(h.Bus, synth)
+
+	// A normal dispatch takes index 0; PublishInvoked then takes index 1.
+	if err := stage.Dispatch(voiceevent.WithTurnID(context.Background(), "T"), "First.", voicetest.LiveElevenLabsVoice()); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	stage.PublishInvoked("R", "Reaction.")
+
+	if len(got) != 2 {
+		t.Fatalf("TTSInvoked count = %d, want 2", len(got))
+	}
+	if got[1].TurnID != "R" || got[1].Sentence != "Reaction." {
+		t.Fatalf("PublishInvoked event = %+v, want TurnID=R Sentence=Reaction.", got[1])
+	}
+	if got[1].Index <= got[0].Index {
+		t.Fatalf("PublishInvoked index %d not > Dispatch index %d (must be monotonic)", got[1].Index, got[0].Index)
+	}
+	if got[1].At.IsZero() {
+		t.Fatal("PublishInvoked event has zero At")
+	}
+}

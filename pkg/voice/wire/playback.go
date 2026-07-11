@@ -97,9 +97,15 @@ func playSentenceBus(ctx context.Context, p sessionPlayer, codec Codec, chunks <
 	}
 
 	// Wrap so every frame pulled to the wire is copied to the rollover tape (#306),
-	// then so the first frame stamps FirstOpus for this turn. Both are no-ops when
-	// their dependency (tap / bus+turn id) is absent.
+	// then — for a HELD look-ahead sentence only (#375) — so the first frame stamps its
+	// delivery-aligned FirstAudio, then so the first frame stamps FirstOpus. Order is
+	// load-bearing: the FirstAudio wrapper is INNER, so on the first frame it publishes
+	// before the FirstOpus wrapper on the return path (FirstAudio precedes FirstOpus on
+	// the same frame). Each is a no-op when its dependency is absent (tap / lookahead /
+	// bus+turn id) — and because the drain paths never build or pull a source, a
+	// never-played sentence structurally never publishes FirstAudio.
 	src = newTappedSource(src, outboundTap)
+	src = newFirstAudioSource(src, bus, voiceevent.TurnIDFrom(ctx), voiceevent.IsPlaybackLookahead(ctx))
 	src = newFirstOpusSource(src, bus, voiceevent.TurnIDFrom(ctx))
 
 	pb, err := p.Play(ctx, src)

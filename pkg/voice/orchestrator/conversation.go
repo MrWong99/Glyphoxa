@@ -62,6 +62,28 @@ type Conversation struct {
 	// It REQUIRES barge-in (an ensemble is one floor-holding unit); Register panics
 	// if set without [WithBargeIn]/[WithBargeInCoalesce].
 	ensemble EnsembleSpeaker
+
+	// lookahead is the pump look-ahead seam ([WithReactionLookahead], #375): nil =
+	// feature off (the Cross-talk Reaction pre-renders TEXT only, onset gap = one
+	// cold TTS TTFB — the #302 legacy path). When set, the coordinator pre-renders
+	// the Reaction's first sentence's AUDIO during the Lead's playback and releases
+	// it at the Lead's end for a near-zero onset gap. Set only with an ensemble
+	// speaker; inert without one (only the ensemble path reacts).
+	lookahead LookaheadPump
+}
+
+// LookaheadPump is the pump pre-render seam the Cross-talk Reaction coordinator
+// drives (#375, ADR-0025): a queued Reaction's first sentence is synthesized and
+// HELD in the pump's look-ahead lane during the Lead's playback (keyed by turn id),
+// then either released to play at the Lead's end for a near-zero onset gap, or
+// discarded on a barge/yield (its pre-rendered-but-unplayed audio dropped, ADR-0012/
+// 0027). Both methods are non-blocking latch operations — they never wait for the
+// sentence to be primed — and a keyed discard for an unknown turn is a harmless
+// no-op, so the coordinator can defer it on every exit path. The production
+// implementation is [wire.PlaybackPump].
+type LookaheadPump interface {
+	ReleaseLookahead(turnID string)
+	DiscardLookahead(turnID string)
 }
 
 // Option configures a [Conversation] at construction.
@@ -187,6 +209,19 @@ func WithEnsemble(s EnsembleSpeaker) Option {
 	return func(c *Conversation) { c.ensemble = s }
 }
 
+// WithReactionLookahead enables the pump pre-render / look-ahead seam for the
+// Cross-talk Reaction onset gap (#375, ADR-0025): the coordinator synthesizes the
+// Reaction's first sentence's AUDIO during the Lead's playback and holds it in p's
+// look-ahead lane, releasing it at the Lead's end so the Reaction's onset gap is
+// near-zero instead of a cold TTS TTFB. A nil p is the feature-off default — the
+// Reaction still pre-renders its TEXT during the Lead's playback (the #302 legacy
+// path), just not its audio, so the wiring is safe to install unconditionally. It
+// only takes effect alongside [WithEnsemble]; without an ensemble speaker nothing
+// reacts. The production pump ([wire.PlaybackPump]) is the [LookaheadPump].
+func WithReactionLookahead(p LookaheadPump) Option {
+	return func(c *Conversation) { c.lookahead = p }
+}
+
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
 // the reactors fire inside bus callbacks (currently the replier's TTS dispatch).
 // Without it such failures are dropped silently.
@@ -257,6 +292,10 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		// EnsembleRouted as a speculative fan-out + Lead race. The barge-in requirement
 		// is validated above (unconditionally); here just install it.
 		replier.ensemble = c.ensemble
+		// Pump look-ahead seam (#375, ADR-0025): the Cross-talk Reaction pre-renders its
+		// first sentence's audio during the Lead's playback via this pump lane. Nil is
+		// the feature-off default (TEXT-only pre-render, #302 legacy path).
+		replier.lookahead = c.lookahead
 		if c.bargeEnabled {
 			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
 			// reactor yields it on a human interruption. Bind BargeIn before the

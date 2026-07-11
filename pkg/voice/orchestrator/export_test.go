@@ -45,6 +45,11 @@ func (d *DirectSpeech) SetGate(g TurnGate) { d.gate = g }
 // r.ensemble inside Conversation.Register from [WithEnsemble].
 func (r *Replier) SetEnsemble(s EnsembleSpeaker) { r.ensemble = s }
 
+// SetLookahead installs the pump look-ahead seam on the replier for the Cross-talk
+// Reaction pre-render tests (external test package, #375). Production wiring sets
+// r.lookahead inside Conversation.Register from [WithReactionLookahead].
+func (r *Replier) SetLookahead(p LookaheadPump) { r.lookahead = p }
+
 // SetErrorHandler installs onError on the segmenter for the off-loop STT error
 // tests (external test package). Production wiring sets it inside
 // Conversation.Register from [WithErrorHandler].

@@ -744,3 +744,53 @@ func TestChunker_BusCallbackNeverBlocks(t *testing.T) {
 		t.Fatalf("writer wrote %d chunks, want %d (in-flight + queue; overflow dropped)", store.done(), want)
 	}
 }
+
+// TestChunker_LookaheadReaction_CommitsOnDelivery pins #375 at the chunk tier (happy):
+// with F1+F2 the reaction's TTSInvoked (at release) is followed by its FirstAudio (after
+// playback), so the reaction text is buffered THEN committed — it lands in the chunk.
+func TestChunker_LookaheadReaction_CommitsOnDelivery(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{Window: time.Hour}) // no auto-close
+
+	// Lead turn delivers.
+	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: uuid.NewString(), AgentRole: "character", Name: "Bart"}})
+	agentReply(bus, "Te", "Bart leads.", at(1))
+	// Reaction: TTSInvoked (at release) THEN FirstAudio (after playback) — F1/F2 order.
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "I disagree.", TurnID: "rID"})
+	bus.Publish(voiceevent.FirstAudio{At: at(2), TurnID: "rID"})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	if store.count() != 1 {
+		t.Fatalf("chunk inserts = %d, want 1", store.count())
+	}
+	content := store.all()[0].Content
+	if !strings.Contains(content, "I disagree.") {
+		t.Fatalf("chunk content = %q, want it to contain the delivered reaction text", content)
+	}
+}
+
+// TestChunker_LookaheadReaction_DiscardCommitsNoReactionText pins #375's discard win at
+// the chunk tier: a reaction that was pre-rendered but DISCARDED before playback emits
+// NEITHER TTSInvoked{rID} (F1) NOR FirstAudio{rID} (F2), so no reaction text is ever
+// buffered or committed — the chunk holds only the Lead's line.
+func TestChunker_LookaheadReaction_DiscardCommitsNoReactionText(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{Window: time.Hour})
+
+	bus.Publish(voiceevent.AddressRouted{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: uuid.NewString(), AgentRole: "character", Name: "Bart"}})
+	agentReply(bus, "Te", "Bart leads.", at(1))
+	// Barge before release: no TTSInvoked{rID}, no FirstAudio{rID} are ever published.
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	content := store.all()[0].Content
+	if !strings.Contains(content, "Bart leads.") {
+		t.Fatalf("chunk content = %q, want the Lead's line", content)
+	}
+	if strings.Contains(content, "I disagree.") {
+		t.Fatalf("chunk content = %q, must NOT contain a discarded reaction's text", content)
+	}
+}

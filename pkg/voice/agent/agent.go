@@ -401,14 +401,28 @@ func (r *Replier) Draft(ctx context.Context, text string) (string, error) {
 // are dropped. It returns the delivered text; a ctx-cancel is the expected barge
 // path, not a failure, so it returns a nil error there.
 func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: userText})
-	r.trimHistoryLocked()
-	r.mu.Unlock()
-
 	var split sentenceSplitter
 	var spoken strings.Builder
 	voice := r.cfg.Persona.Voice
+
+	// Lazy user-append (#375, F3): append the user message on the FIRST successful
+	// dispatch, not eagerly at the top. A turn that delivers ZERO sentences (every
+	// sentence start-errors, or a barge cut it before the first) must log NOTHING —
+	// ADR-0012: "If zero sentences were delivered the utterance is not logged at all."
+	// The old eager prologue left an orphan user message on such turns; committing the
+	// user message at the same deliver-then-commit boundary as the assistant text fixes
+	// it. userAppended keeps it exactly-once across the split + flush emits.
+	userAppended := false
+	appendUserOnce := func() {
+		if userAppended {
+			return
+		}
+		userAppended = true
+		r.mu.Lock()
+		r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: userText})
+		r.trimHistoryLocked()
+		r.mu.Unlock()
+	}
 
 	// Deliver-then-commit (ADR-0012, mirrors streamTurn's emit): dispatch FIRST; a
 	// sentence joins the spoken builder only once dispatch returns nil.
@@ -422,6 +436,9 @@ func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispat
 			}
 			return e
 		}
+		// Delivered: append the user message now (once), BEFORE the spoken text, so a
+		// zero-delivered turn never logs an orphan user message.
+		appendUserOnce()
 		if spoken.Len() > 0 {
 			spoken.WriteByte(' ')
 		}
