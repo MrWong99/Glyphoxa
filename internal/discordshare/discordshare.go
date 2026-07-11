@@ -187,12 +187,16 @@ func postFile(ctx context.Context, token, channelID, caption, filename, contentT
 	mw := multipart.NewWriter(&body)
 
 	// payload_json carries the message content + the attachment descriptor Discord
-	// pairs with files[0] by index.
+	// pairs with files[0] by index. allowed_mentions suppresses EVERY mention: the
+	// caption is a raw transcript/LLM excerpt and this is the codebase's first public
+	// post — an "@everyone" (or a user/role mention) in an excerpt must NOT ping the
+	// guild. An empty parse list disables all four mention types (Discord's docs).
 	payload, err := json.Marshal(map[string]any{
 		"content": caption,
 		"attachments": []map[string]any{
 			{"id": 0, "filename": filename},
 		},
+		"allowed_mentions": map[string]any{"parse": []string{}},
 	})
 	if err != nil {
 		return fmt.Errorf("discordshare: marshal payload: %w", err)

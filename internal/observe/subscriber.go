@@ -308,6 +308,13 @@ func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
 // counter attributes WHY a turn died instead of the coarse no-first-audio
 // catch-all. A turn-end arriving AFTER first audio (e.g. a barge mid-playback) is
 // a normal interruption: outcomeDone is already set, so it is ignored.
+//
+// A TurnEnded for a turn this subscriber never OPENED (no prior STTFinal /
+// AddressRouted / TTSInvoked to anchor a timing spine) is ignored — it has no turn
+// to attribute an outcome to. That is the #310 Highlight voice-replay case: a
+// barge cutting a replay publishes TurnEnded{replayTurnID, barge}, but a replay
+// runs no STT/LLM/TTS, so the id was never opened; recording it would fabricate a
+// phantom abandoned/barge turn for audio that actually played (the #391 class).
 func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	if e.TurnID == "" {
 		return
@@ -318,8 +325,7 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	defer s.mu.Unlock()
 	t := s.turns[e.TurnID]
 	if t == nil {
-		t = &turnState{}
-		s.turns[e.TurnID] = t
+		return // a turn we never opened: no spine to anchor an outcome (#310 replay barge)
 	}
 	t.lastSeen = s.now()
 	if e.Text != "" {

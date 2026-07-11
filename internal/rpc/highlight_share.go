@@ -198,11 +198,20 @@ func (s *SessionServer) shareToChannel(
 		s.log.Error("ShareHighlight: fetch clip failed", "err", berr, "highlight", h.ID)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 	}
-	data, rerr := io.ReadAll(rc)
+	// The size pre-check trusted the row's clip_size_bytes; the blob is authoritative,
+	// so cap the read too — a STALE small row must not stream a huge blob into memory
+	// and up to Discord. Read one byte past the limit: if it fills, the true clip is
+	// oversize and we refuse (never send), same posture as the row pre-check.
+	data, rerr := io.ReadAll(io.LimitReader(rc, discordshare.MaxUploadBytes+1))
 	_ = rc.Close()
 	if rerr != nil {
 		s.log.Error("ShareHighlight: read clip failed", "err", rerr, "highlight", h.ID)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+	if int64(len(data)) > discordshare.MaxUploadBytes {
+		s.log.Warn("ShareHighlight: clip blob exceeds upload limit (stale row size)", "highlight", h.ID, "rowBytes", h.ClipSizeBytes)
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+			"clip exceeds Discord's %d MB upload limit", discordshare.MaxUploadBytes/(1<<20)))
 	}
 
 	caption := truncateRunes(h.Excerpt, captionMaxRunes)

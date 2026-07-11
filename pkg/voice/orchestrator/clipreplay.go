@@ -91,9 +91,11 @@ func (r *ClipReplay) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func
 
 		// Barge-in: take the shared floor and run the replay on its own goroutine so
 		// the inbound loop keeps feeding VAD during playback, and a barge yielding the
-		// floor cancels floorCtx (stopping the clip). A coalesce fold is impossible in
-		// practice (a replay never races its own key inside the window) but honored for
-		// symmetry with DirectSpeech.
+		// floor cancels floorCtx (stopping the clip). Every replay takes the floor under
+		// the SAME constant key, so a GM double-click within the floor's coalesce window
+		// folds the second replay: it is dropped silently (release + return) while its
+		// ShareHighlight RPC still returns success — an accepted de-dupe (a rapid repeat
+		// replays once, not twice), not an error path.
 		floorCtx, release, coalesced := r.floor.Take(turnCtx, replayFloorKey)
 		if coalesced {
 			release()

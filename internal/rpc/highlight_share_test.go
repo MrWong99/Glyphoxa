@@ -210,6 +210,29 @@ func TestShareHighlight_OversizeRefusedBeforeFetch(t *testing.T) {
 	}
 }
 
+// TestShareHighlight_StaleRowOversizeBlobRefused pins the belt on the row pre-check:
+// a row that UNDER-reports its clip size must not stream a huge blob to Discord — the
+// bounded read catches it and refuses, the sharer is never called.
+func TestShareHighlight_StaleRowOversizeBlobRefused(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightPromoted)
+	h.ClipSizeBytes = 1024 // row LIES: says tiny
+	store.put(h)
+	sharer := &fakeSharer{}
+	blobs := &fakeRPCBlobs{data: make([]byte, discordshare.MaxUploadBytes+100)} // blob is actually huge
+
+	client := newShareClient(t, tenantID, store, blobs, campaignSessionStore(campaignID), sharer, &fakeReplayer{}, newFakeShareStore())
+	_, err := client.ShareHighlight(context.Background(), connect.NewRequest(shareToChannelReq(h.ID.String(), "chanX")))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("stale-row oversize: want CodeFailedPrecondition, got %v", err)
+	}
+	if len(sharer.calls()) != 0 {
+		t.Fatalf("sharer sent an oversize clip: %v", sharer.calls())
+	}
+}
+
 // TestShareHighlight_PostHappy pins the file-share success path: the clip bytes +
 // caption reach the sharer with the right filename/type, and the channel is
 // remembered per campaign.

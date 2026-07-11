@@ -105,6 +105,9 @@ func TestPostFile_MultipartShape(t *testing.T) {
 					Attachments []struct {
 						Filename string `json:"filename"`
 					} `json:"attachments"`
+					AllowedMentions struct {
+						Parse []string `json:"parse"`
+					} `json:"allowed_mentions"`
 				}
 				if err := json.NewDecoder(part).Decode(&pl); err != nil {
 					t.Fatalf("decode payload_json: %v", err)
@@ -112,6 +115,14 @@ func TestPostFile_MultipartShape(t *testing.T) {
 				cap.content = pl.Content
 				if len(pl.Attachments) == 1 {
 					cap.attachName = pl.Attachments[0].Filename
+				}
+				// allowed_mentions.parse MUST be present and EMPTY so an "@everyone" in a
+				// transcript excerpt cannot ping the guild (this is a public post).
+				if pl.AllowedMentions.Parse == nil {
+					t.Error("payload_json missing allowed_mentions.parse (mentions not suppressed)")
+				}
+				if len(pl.AllowedMentions.Parse) != 0 {
+					t.Errorf("allowed_mentions.parse = %v, want empty (all mentions suppressed)", pl.AllowedMentions.Parse)
 				}
 			case "files[0]":
 				cap.fileName = part.FileName()
