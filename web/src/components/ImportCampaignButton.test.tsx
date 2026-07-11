@@ -23,7 +23,7 @@ const mockImport = vi.mocked(importCampaignBundle);
 
 // Toasts are the unmount-proof feedback channel (they render outside the panel),
 // so assert them directly rather than only the inline alert/dialog.
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 import { toast } from "sonner";
 const mockToast = vi.mocked(toast);
 
@@ -37,6 +37,7 @@ const summaryFixture: ImportSummary = {
   sessions: 0,
   lines: 0,
   chunks: 0,
+  droppedParticipantRefs: 0,
 };
 
 // A stateful backend: SetActiveCampaign records the switch; ListCampaigns +
@@ -98,6 +99,7 @@ beforeEach(() => {
   mockImport.mockReset();
   mockToast.success.mockReset();
   mockToast.error.mockReset();
+  mockToast.warning.mockReset();
 });
 
 describe("ImportCampaignButton", () => {
@@ -123,6 +125,57 @@ describe("ImportCampaignButton", () => {
     expect(within(success).getByRole("button", { name: /Switch/ })).toBeInTheDocument();
     // A toast fires too — unmount-proof feedback if the panel closes mid-flow.
     await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith(expect.stringMatching(/The Prancing Pony/)));
+  });
+
+  it("notes dropped participant refs in the success dialog when > 0 (plural)", async () => {
+    mockImport.mockResolvedValue({ ...summaryFixture, droppedParticipantRefs: 2 });
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const success = await screen.findByRole("alertdialog");
+    // Warning note — import still SUCCEEDED, so it's phrased as a caveat, not an error.
+    const note = within(success).getByText(
+      /2 participant references could not be mapped and were dropped/i,
+    );
+    expect(note).toBeInTheDocument();
+    // Warning styling (not error): guards against a mutation to the danger class.
+    expect(note.closest(".gx-import-campaign__warning")).not.toBeNull();
+    // The caveat ALSO rides an unmount-proof warning toast (mirrors the success
+    // toast): an Escape between confirm-close and success-open can unmount the
+    // dialog, and the note must not vanish with it.
+    await waitFor(() =>
+      expect(mockToast.warning).toHaveBeenCalledWith(
+        expect.stringMatching(/2 participant references could not be mapped and were dropped/i),
+      ),
+    );
+  });
+
+  it("phrases the dropped-refs note in the singular for exactly one", async () => {
+    mockImport.mockResolvedValue({ ...summaryFixture, droppedParticipantRefs: 1 });
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const success = await screen.findByRole("alertdialog");
+    expect(
+      within(success).getByText(/1 participant reference could not be mapped and was dropped/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows NO dropped-refs note when none were dropped", async () => {
+    mockImport.mockResolvedValue({ ...summaryFixture, droppedParticipantRefs: 0 });
+    renderButton();
+
+    pickFile();
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: /^Import$/ }));
+
+    const success = await screen.findByRole("alertdialog");
+    expect(within(success).queryByText(/could not be mapped/i)).not.toBeInTheDocument();
+    // No drops → no warning toast either (only the plain success toast).
+    expect(mockToast.warning).not.toHaveBeenCalled();
   });
 
   it("toasts the failure so feedback survives a mid-upload panel dismissal", async () => {
