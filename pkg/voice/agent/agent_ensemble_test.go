@@ -115,6 +115,46 @@ func TestReplier_SpeakDraft_CommitsUserMsgAndDelivered(t *testing.T) {
 	}
 }
 
+// TestReplier_SpeakDraft_ZeroDeliveredCommitsNothing pins the #375 F3 lazy-append
+// delta (ADR-0012: "If zero sentences were delivered the utterance is not logged at
+// all"): a SpeakDraft where NO sentence is delivered — every dispatch start-errors
+// (ErrNotDelivered) or the turn is cut before the first — commits NOTHING, not even
+// the user message. This is a DELIBERATE change from the old eager prologue append,
+// which left an orphan user message on a zero-delivered turn.
+func TestReplier_SpeakDraft_ZeroDeliveredCommitsNothing(t *testing.T) {
+	t.Run("all sentences start-error", func(t *testing.T) {
+		r := draftReplier()
+		dispatch := func(orchestrator.Reply) error { return orchestrator.ErrNotDelivered }
+		delivered, err := r.SpeakDraft(t.Context(), "Hail, Bart.", "First. Second.", dispatch)
+		if err != nil {
+			t.Fatalf("SpeakDraft errored: %v", err)
+		}
+		if delivered != "" {
+			t.Fatalf("delivered = %q, want empty (nothing was delivered)", delivered)
+		}
+		if hist := r.HistorySnapshot(); len(hist) != 0 {
+			t.Fatalf("history = %+v, want EMPTY — a zero-delivered turn logs nothing, incl. the user msg (ADR-0012)", hist)
+		}
+	})
+
+	t.Run("cut before the first sentence", func(t *testing.T) {
+		r := draftReplier()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // barge before anything dispatched
+		dispatch := func(orchestrator.Reply) error { return ctx.Err() }
+		delivered, err := r.SpeakDraft(ctx, "Hail, Bart.", "First. Second.", dispatch)
+		if err != nil {
+			t.Fatalf("SpeakDraft on a barge must not surface an error: %v", err)
+		}
+		if delivered != "" {
+			t.Fatalf("delivered = %q, want empty", delivered)
+		}
+		if hist := r.HistorySnapshot(); len(hist) != 0 {
+			t.Fatalf("history = %+v, want EMPTY — a cut-before-delivery turn logs nothing (ADR-0012)", hist)
+		}
+	})
+}
+
 // TestReplier_SpeakDraft_CutMidDraftCommitsDeliveredOnly pins the barge path: a
 // dispatch that reports the turn cancelled mid-draft stops the drain, and only the
 // sentences forwarded BEFORE the cut are committed (ADR-0012 delivered-only).

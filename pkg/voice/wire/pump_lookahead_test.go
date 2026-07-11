@@ -17,6 +17,42 @@ func lookaheadCtx(turnID string) context.Context {
 	return voiceevent.WithPlaybackLookahead(voiceevent.WithTurnID(context.Background(), turnID))
 }
 
+// cancelledLookaheadCtx is a look-ahead ctx already cancelled (a barge that landed
+// before the sentence was primed).
+func cancelledLookaheadCtx(turnID string) context.Context {
+	ctx, cancel := context.WithCancel(lookaheadCtx(turnID))
+	cancel()
+	return ctx
+}
+
+// TestPlaybackPump_PrimeCancelledCtxDrains pins F6 (#375): priming a look-ahead
+// sentence whose ctx is already cancelled drains it at once (no wedge), leaves any
+// other turn's held job untouched, and a subsequent live prime+release still plays.
+func TestPlaybackPump_PrimeCancelledCtxDrains(t *testing.T) {
+	p := newFakePlayer()
+	pump := newPump(p, drainingCodec{}, nil, nil)
+	defer pump.Close()
+
+	// A live look-ahead for turn A sits held.
+	cA, roA := openChunks()
+	pump.HandleSentence(lookaheadCtx("A"), roA)
+	probeA := blockProbe(t, cA, "held live turn A")
+
+	// A cancelled look-ahead for turn B is drained on arrival, NOT held — A stays.
+	cB, roB := openChunks()
+	pump.HandleSentence(cancelledLookaheadCtx("B"), roB)
+	sentB := make(chan struct{})
+	go func() { cB <- tts.AudioChunk{}; close(cB); close(sentB) }()
+	join(t, sentB, "cancelled-ctx prime drained on arrival")
+	assertNoPlay(t, p, "a cancelled-ctx prime must not play")
+
+	// A is still held: release it and it plays (its chunks then drain).
+	pump.ReleaseLookahead("A")
+	pb := p.waitPlay(t)
+	pb.finish(nil)
+	join(t, probeA, "turn A after its live release+play")
+}
+
 // drainingCodec models the real transcoder: its PlaybackSource eagerly drains the
 // sentence's chunk channel (the real codec consumes chunks to make Opus frames), so
 // a PLAYED sentence's channel is drained — unlike fakeCodec, which never pulls. The

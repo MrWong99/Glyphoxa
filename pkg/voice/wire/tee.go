@@ -108,6 +108,12 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 	// Recover the turn correlation id installed by the reply reactor so the
 	// FirstAudio (A3 hook 1) joins this sentence to its turn.
 	turnID := voiceevent.TurnIDFrom(ctx)
+	// A held look-ahead sentence (#375, F2) is synthesized eagerly but NOT yet on the
+	// wire — its audio waits in the pump lane until the coordinator releases it. So its
+	// FirstAudio SLO boundary must be delivery-aligned: published AFTER the first chunk
+	// is actually consumed by the sink (the pump plays it), not when it first becomes
+	// available. An ordinary sentence keeps the available-at-the-pump boundary.
+	lookahead := voiceevent.IsPlaybackLookahead(ctx)
 
 	out := make(chan tts.AudioChunk)
 	go func() {
@@ -124,11 +130,11 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 				return
 			}
 			// First chunk crossing to the sink is the headline SLO boundary
-			// ("first audio handed to the pump", A3 hook 1): stamp and publish it
-			// before the (possibly blocking) send so the moment measured is when
-			// audio became available to the pump, not when the pump drained it. A
-			// barge-cancelled sentence that never produces a chunk never publishes.
-			if first {
+			// ("first audio handed to the pump", A3 hook 1): for an ordinary sentence
+			// stamp it BEFORE the (possibly blocking) send so the moment measured is
+			// when audio became available to the pump. A barge-cancelled sentence that
+			// never produces a chunk never publishes.
+			if first && !lookahead {
 				first = false
 				t.publishFirstAudio(turnID)
 			}
@@ -139,6 +145,14 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 			case <-ctx.Done():
 				go drain(src) // src is not yet exhausted; release its producer
 				return
+			}
+			// A held look-ahead sentence's FirstAudio is delivery-aligned (#375, F2):
+			// publish it only once its first chunk has actually been consumed (the
+			// play-send above succeeded), so a discarded-before-playback reaction never
+			// reports first audio.
+			if first && lookahead {
+				first = false
+				t.publishFirstAudio(turnID)
 			}
 		}
 	}()

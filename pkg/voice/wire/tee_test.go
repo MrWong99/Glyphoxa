@@ -403,3 +403,102 @@ func TestTee_NilBusPublishesNothing(t *testing.T) {
 
 // Compile-time assertion: the decorator is a drop-in [tts.Synthesizer].
 var _ tts.Synthesizer = (*wire.TeeSynthesizer)(nil)
+
+// TestTee_LookaheadFirstAudioDeferredToConsume pins F2 (#375): under a look-ahead
+// ctx the tee publishes FirstAudio only AFTER the first chunk is actually consumed
+// by the sink (delivery-aligned), not when it merely becomes available — because a
+// held sentence's audio is not yet on the wire. A ctx cancel before the sink
+// consumes publishes NOTHING.
+func TestTee_LookaheadFirstAudioDeferredToConsume(t *testing.T) {
+	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000), chunk(2, 24000)}}
+	var sinkCh <-chan tts.AudioChunk
+	gotSink := make(chan struct{})
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		sinkCh = chunks
+		close(gotSink)
+	})
+
+	bus := voiceevent.NewBus()
+	var mu sync.Mutex
+	var fa int
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		fa++
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	ctx := voiceevent.WithPlaybackLookahead(voiceevent.WithTurnID(context.Background(), "R"))
+	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "held"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	<-gotSink
+	go drainAll(out) // orchestrator side drains, so the forward reaches the play-send
+
+	// The sink has NOT consumed the play channel: the first chunk is parked on the
+	// play-send, so no FirstAudio has fired (the held sentence is not on the wire).
+	count := func() int { mu.Lock(); defer mu.Unlock(); return fa }
+	time.Sleep(60 * time.Millisecond)
+	if count() != 0 {
+		t.Fatalf("FirstAudio published %d times while the held sentence was unconsumed, want 0", count())
+	}
+
+	// Consume the sink: the first chunk crosses to playback → FirstAudio now fires.
+	go drainAll(sinkCh)
+	deadline := time.Now().Add(2 * time.Second)
+	for count() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("FirstAudio never fired after the sink consumed the released chunk")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if count() != 1 {
+		t.Fatalf("FirstAudio published %d times, want exactly 1", count())
+	}
+}
+
+// TestTee_LookaheadCancelBeforeConsumePublishesNothing pins F2's barge case: a
+// look-ahead sentence discarded (ctx cancelled) before the sink ever consumes its
+// first chunk publishes NO FirstAudio — nothing was delivered.
+func TestTee_LookaheadCancelBeforeConsumePublishesNothing(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000), chunk(2, 24000)}}
+	var sinkCh <-chan tts.AudioChunk
+	gotSink := make(chan struct{})
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		sinkCh = chunks
+		close(gotSink)
+	})
+
+	bus := voiceevent.NewBus()
+	var mu sync.Mutex
+	var fa int
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		fa++
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = voiceevent.WithPlaybackLookahead(voiceevent.WithTurnID(ctx, "R"))
+	out, err := tee.Synthesize(ctx, tts.SynthesizeRequest{Sentence: "discard me"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	<-gotSink
+	go drainAll(out)
+
+	// Cancel before the sink consumes: the forward's play-send hits ctx.Done and
+	// returns without publishing. Drain the sink channel so it closes cleanly.
+	cancel()
+	go drainAll(sinkCh)
+
+	time.Sleep(60 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if fa != 0 {
+		t.Fatalf("FirstAudio published %d times for a cancelled-before-consume look-ahead, want 0", fa)
+	}
+}

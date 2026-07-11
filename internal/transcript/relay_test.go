@@ -631,3 +631,92 @@ func TestView_ZeroLinesMarshalsEmptyArray(t *testing.T) {
 		t.Errorf("zero-line live View marshals %s, want \"lines\":[]", b)
 	}
 }
+
+// TestProjection_LookaheadReaction_HappyAttributesReactor pins #375 F1 at the relay
+// tier: the ordered stream a coordinator emits on the happy path — EnsembleReaction
+// (naming the reactor) BEFORE the reaction's first TTSInvoked — projects the reaction
+// as its OWN line a:<rID> attributed to the reactor's name (never the "NPC" fallback),
+// and persists exactly that one reaction row.
+func TestProjection_LookaheadReaction_HappyAttributesReactor(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+
+	// The Lead turn.
+	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Bart leads.", TurnID: "Te"})
+	// The reaction: EnsembleReaction (attribution) STRICTLY precedes the first TTSInvoked
+	// (F1: PublishInvoked fires only after the announce, at release).
+	bus.Publish(voiceevent.EnsembleReaction{At: at(3), TurnID: "rID", LeadTurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "goblin", AgentRole: "character", Name: "Goblin"}})
+	bus.Publish(voiceevent.TTSInvoked{At: at(4), Sentence: "I disagree.", TurnID: "rID"})
+
+	// The reaction is its own line, attributed to Goblin (never "NPC").
+	v := r.View(fs.id.String())
+	var reaction *Line
+	for i := range v.Lines {
+		if v.Lines[i].ID == "a:rID" {
+			reaction = &v.Lines[i]
+		}
+	}
+	if reaction == nil {
+		t.Fatalf("no a:rID reaction line projected; lines=%+v", v.Lines)
+	}
+	if reaction.Who != "Goblin" {
+		t.Fatalf("reaction line Who = %q, want Goblin (never the NPC fallback)", reaction.Who)
+	}
+	if reaction.Text != "I disagree." {
+		t.Fatalf("reaction line text = %q, want %q", reaction.Text, "I disagree.")
+	}
+
+	// Persistence: the reaction row exists, attributed to Goblin.
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	rows, _ := store.ListTranscriptLines(context.Background(), fs.id)
+	var got *storage.TranscriptLine
+	for i := range rows {
+		if rows[i].LineID == "a:rID" {
+			got = &rows[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("reaction row a:rID not persisted; rows=%+v", rows)
+	}
+	if got.Who != "Goblin" {
+		t.Fatalf("persisted reaction Who = %q, want Goblin", got.Who)
+	}
+}
+
+// TestProjection_LookaheadReaction_BargeBeforeReleaseNoLine pins #375 F1's headline
+// win: when a barge lands BEFORE release, the coordinator emits NEITHER EnsembleReaction
+// NOR any TTSInvoked{rID} — so the relay creates NO a:<rID> line and persists ZERO rows
+// for it. (Before F1, a pre-render TTSInvoked{rID} created a misattributed "NPC" line.)
+func TestProjection_LookaheadReaction_BargeBeforeReleaseNoLine(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+
+	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Bart leads.", TurnID: "Te"})
+	// Barge before the reaction was released: the whole unit ends. NO EnsembleReaction,
+	// NO TTSInvoked for the reaction id are ever published (F1).
+	bus.Publish(voiceevent.TurnEnded{At: at(3), TurnID: "Te", Reason: voiceevent.TurnEndBarge})
+
+	v := r.View(fs.id.String())
+	for _, l := range v.Lines {
+		if l.ID == "a:rID" {
+			t.Fatalf("a reaction line a:rID was projected despite a barge before release: %+v", l)
+		}
+	}
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	rows, _ := store.ListTranscriptLines(context.Background(), fs.id)
+	for _, row := range rows {
+		if row.LineID == "a:rID" {
+			t.Fatalf("a reaction row a:rID was persisted despite a barge before release: %+v", row)
+		}
+	}
+}

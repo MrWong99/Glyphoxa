@@ -188,6 +188,14 @@ func (p *PlaybackPump) enqueue(job playJob) {
 // reaction, stale by construction), that job is drained before the new one is held
 // — the turn key makes the supersede unambiguous.
 func (p *PlaybackPump) prime(job playJob, id string) {
+	// A sentence whose ctx already cancelled (a barge that landed before the tee
+	// primed it) must NEVER be held or enqueued — it produced no committable audio.
+	// Drain it and return (checked BEFORE the release latch, so a latch-bypass of an
+	// already-dead sentence is caught too). Its tee forward goroutine is unblocked.
+	if job.ctx.Err() != nil {
+		go drain(job.chunks)
+		return
+	}
 	p.laneMu.Lock()
 	if p.released == id {
 		// Release arrived first: consume the latch and enqueue now.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,10 +25,26 @@ type fakeLookahead struct {
 	rel       map[string]chan struct{}
 	closed    map[string]bool
 	onRelease func(id string) // invoked (inside Release) for ordering probes
+
+	discardOnce sync.Once
+	discardCh   chan struct{} // closed on the FIRST DiscardLookahead — the uniform-defer barrier
 }
 
 func newFakeLookahead() *fakeLookahead {
-	return &fakeLookahead{rel: map[string]chan struct{}{}, closed: map[string]bool{}}
+	return &fakeLookahead{rel: map[string]chan struct{}{}, closed: map[string]bool{}, discardCh: make(chan struct{})}
+}
+
+// waitDiscard blocks until the coordinator's uniform defer has run its keyed
+// DiscardLookahead (fires exactly once on ALL exit paths — barge/gate-fail/decline/
+// happy/abort), a happens-before edge for asserting final ops/events/history without
+// racing the defer.
+func (f *fakeLookahead) waitDiscard(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.discardCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DiscardLookahead (the uniform defer) never ran")
+	}
 }
 
 // relCh returns (creating) the per-turn release channel laneSynth waits on.
@@ -64,6 +81,7 @@ func (f *fakeLookahead) DiscardLookahead(id string) {
 	f.mu.Lock()
 	f.ops = append(f.ops, "discard:"+id)
 	f.mu.Unlock()
+	f.discardOnce.Do(func() { close(f.discardCh) })
 }
 
 func (f *fakeLookahead) opsSnapshot() []string {
@@ -229,14 +247,21 @@ func TestReplier_Lookahead_HappyReleaseAfterLead(t *testing.T) {
 	pump := newFakeLookahead()
 	synth := &laneSynth{pump: pump, holdGate: make(chan struct{})}
 
-	// Record whether EnsembleReaction was already published when Release fires.
-	var releasedAfterEvent bool
+	// Record whether EnsembleReaction AND the reaction's first TTSInvoked were already
+	// published when Release fires (F5: atomic, read from another goroutine).
+	var releasedAfterEvent, releasedAfterInvoke atomic.Bool
 	pump.onRelease = func(id string) {
+		var sawEvent, sawInvoke bool
 		for _, e := range h.Events() {
 			if er, ok := e.(voiceevent.EnsembleReaction); ok && er.TurnID == id {
-				releasedAfterEvent = true
+				sawEvent = true
+			}
+			if ti, ok := e.(voiceevent.TTSInvoked); ok && ti.TurnID == id {
+				sawInvoke = true
 			}
 		}
+		releasedAfterEvent.Store(sawEvent)
+		releasedAfterInvoke.Store(sawInvoke)
 	}
 
 	spk := &fakeCrossTalk{
@@ -282,16 +307,45 @@ func TestReplier_Lookahead_HappyReleaseAfterLead(t *testing.T) {
 	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "I disagree, loudly." {
 		t.Fatalf("reaction committed %q, want the delivered reaction text", got)
 	}
-	// The held first sentence was released, and EnsembleReaction preceded the release.
+	pump.waitDiscard(t) // uniform defer done: ops/events settled
+
+	// The held first sentence was released, and BOTH EnsembleReaction and its first
+	// TTSInvoked preceded the release (F1 relay ordering).
 	ops := pump.opsSnapshot()
 	if len(ops) == 0 || ops[0] != "release:"+rID {
 		t.Fatalf("pump ops = %v, want a release of %q first", ops, rID)
 	}
-	if !releasedAfterEvent {
+	if !releasedAfterEvent.Load() {
 		t.Fatal("EnsembleReaction was not published before ReleaseLookahead (relay ordering broken)")
 	}
+	if !releasedAfterInvoke.Load() {
+		t.Fatal("the reaction's first TTSInvoked was not published before ReleaseLookahead (attribution ordering broken)")
+	}
+	// Order: EnsembleReaction{rID} strictly precedes TTSInvoked{rID,s1} in the log.
+	assertOrder(t, h, rID)
 	// No barge: no TurnEnded for the reaction sub-turn.
 	voicetest.AssertNoEvent[voiceevent.TurnEnded](t, h)
+}
+
+// assertOrder asserts EnsembleReaction{rID} precedes the first TTSInvoked{rID} in the
+// harness event log (the relay-critical attribution order, #375 F1).
+func assertOrder(t *testing.T, h *voicetest.Harness, rID string) {
+	t.Helper()
+	reactionAt, invokeAt := -1, -1
+	for i, e := range h.Events() {
+		if er, ok := e.(voiceevent.EnsembleReaction); ok && er.TurnID == rID && reactionAt < 0 {
+			reactionAt = i
+		}
+		if ti, ok := e.(voiceevent.TTSInvoked); ok && ti.TurnID == rID && invokeAt < 0 {
+			invokeAt = i
+		}
+	}
+	if reactionAt < 0 || invokeAt < 0 {
+		t.Fatalf("missing events: EnsembleReaction@%d TTSInvoked@%d for rID=%s", reactionAt, invokeAt, rID)
+	}
+	if reactionAt > invokeAt {
+		t.Fatalf("EnsembleReaction@%d must precede TTSInvoked{rID}@%d (relay would misattribute)", reactionAt, invokeAt)
+	}
 }
 
 // TestReplier_Lookahead_BargeDuringLeadDiscards pins #375 for ADR-0027: a barge while
@@ -340,6 +394,7 @@ func TestReplier_Lookahead_BargeDuringLeadDiscards(t *testing.T) {
 	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "" {
 		t.Fatalf("a discarded reaction committed %q, want nothing", got)
 	}
+	pump.waitDiscard(t) // uniform defer done
 	// Exactly one discard, no release; and no reaction-id TurnEnded (only the Lead's Tb).
 	ops := pump.opsSnapshot()
 	if len(ops) != 1 || ops[0][:8] != "discard:" {
@@ -377,6 +432,7 @@ func TestReplier_Lookahead_GateFailDiscards(t *testing.T) {
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleLead) bool { return e.TurnID == "Tg" }, "the Lead was elected")
 	waitFloorFree(t, floor)
 
+	pump.waitDiscard(t) // uniform defer done
 	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
 	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "" {
 		t.Fatalf("a gate-skipped reaction committed %q, want nothing", got)
@@ -422,6 +478,7 @@ func TestReplier_Lookahead_DeclineNoRelease(t *testing.T) {
 	<-spk.spokeCh
 
 	waitFloorFree(t, floor) // no deadlock: the decline path runs to completion
+	pump.waitDiscard(t)     // uniform defer done
 	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
 	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1) // only the Lead's sentence
 	ops := pump.opsSnapshot()
@@ -473,6 +530,7 @@ func TestReplier_Lookahead_FirstDispatchStartErrorAborts(t *testing.T) {
 		t.Fatal("SpeakReaction never returned after the first-sentence start-error (wedged)")
 	}
 	waitFloorFree(t, floor)
+	pump.waitDiscard(t) // uniform defer done
 	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "" {
 		t.Fatalf("an aborted reaction committed %q, want nothing", got)
 	}
@@ -539,6 +597,7 @@ func TestReplier_Lookahead_BargeDuringReactionEndsSubTurn(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("SpeakReaction never returned after the barge")
 	}
+	pump.waitDiscard(t) // uniform defer done
 	if floor.Active() {
 		t.Fatal("the floor must be free after the barge")
 	}

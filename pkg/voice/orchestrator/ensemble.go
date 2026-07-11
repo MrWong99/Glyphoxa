@@ -300,6 +300,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	var (
 		rID         string
 		decision    chan string
+		s1Ch        chan string
 		done        chan struct{}
 		cancelReact func()
 	)
@@ -308,13 +309,17 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		var reactCtx context.Context
 		reactCtx, cancelReact = context.WithCancel(turnCtx)
 		decision = make(chan string, 1)
+		// s1Ch carries the Reaction's FIRST (held) sentence text from the prerender
+		// goroutine to releaseReaction, so the coordinator announces its TTSInvoked at
+		// RELEASE (F1) — after EnsembleReaction attributes who spoke — not at pre-render.
+		s1Ch = make(chan string, 1)
 		done = make(chan struct{})
 		defer func() {
 			cancelReact()
 			<-done
 			r.lookahead.DiscardLookahead(rID)
 		}()
-		go r.prerenderReaction(reactCtx, rt, e, reactor, rID, lead.target.Name, lead.text, reactCh, decision, done)
+		go r.prerenderReaction(reactCtx, rt, e, reactor, rID, lead.target.Name, lead.text, reactCh, decision, s1Ch, done)
 	}
 
 	// Speak the Lead's draft under turnCtx. The dispatch closure mirrors
@@ -380,7 +385,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// the pump lane; announce and release it for a near-zero onset gap. The uniform
 	// defer above discards anything left held on any early return here.
 	if lookaheadOn {
-		r.releaseReaction(turnCtx, bus, e, reactor, rID, decision, done)
+		r.releaseReaction(turnCtx, bus, e, reactor, rID, decision, s1Ch, done)
 		return
 	}
 	r.speakReaction(turnCtx, rt, bus, e, reactor, lead.target.Name, lead.text, reactCh)
@@ -395,7 +400,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 // holds that sentence until [Replier.releaseReaction] releases it. reactCtx is a
 // child of turnCtx cancelled by the coordinator's uniform teardown (barge/gate-fail/
 // decline/happy), so a torn-down unit unwinds this goroutine. It closes done on exit.
-func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText string, reactCh <-chan reactionResult, decision chan<- string, done chan<- struct{}) {
+func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText string, reactCh <-chan reactionResult, decision chan<- string, s1Ch chan<- string, done chan<- struct{}) {
 	defer close(done)
 
 	var reaction string
@@ -420,8 +425,12 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 		dctx := rctx
 		lookahead := first
 		if first {
-			// The FIRST sentence is the held one: mark it so the pump lanes it.
+			// The FIRST sentence is the held one: mark it so the pump lanes it, and hand
+			// its text to the coordinator so releaseReaction can announce its TTSInvoked at
+			// RELEASE (F1). The send precedes r.tts.Dispatch, which BLOCKS on the pump lane
+			// until release — so the coordinator has s1 before it releases.
 			dctx = voiceevent.WithPlaybackLookahead(rctx)
+			s1Ch <- rep.Sentence
 			first = false
 		}
 		if err := r.tts.Dispatch(dctx, rep.Sentence, rep.Voice); err != nil {
@@ -461,7 +470,7 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 // publishes a barge [voiceevent.TurnEnded] under the reaction's own id (legacy parity;
 // the Lead's already-delivered line stays committed). A decline or a barge before the
 // release publishes nothing; the uniform defer discards any held audio.
-func (r *Replier) releaseReaction(turnCtx context.Context, bus *voiceevent.Bus, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID string, decision <-chan string, done <-chan struct{}) {
+func (r *Replier) releaseReaction(turnCtx context.Context, bus *voiceevent.Bus, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID string, decision <-chan string, s1Ch <-chan string, done <-chan struct{}) {
 	var reaction string
 	select {
 	case <-turnCtx.Done():
@@ -472,9 +481,23 @@ func (r *Replier) releaseReaction(turnCtx context.Context, bus *voiceevent.Bus, 
 		return // the reactor declined, or a barge landed the instant it finished
 	}
 
-	// Announce the sub-turn BEFORE releasing its audio, so EnsembleReaction strictly
-	// precedes the reaction's FirstOpus{rID} (relay ordering, #302).
+	// Wait for the prerender goroutine to reach the held first dispatch (it hands us the
+	// sentence text on s1Ch, then blocks on the pump lane). Safe: reactCtx ⊂ turnCtx, so
+	// a barge cancels both and the turnCtx.Done arm returns without announcing.
+	var s1 string
+	select {
+	case <-turnCtx.Done():
+		return
+	case s1 = <-s1Ch:
+	}
+
+	// Announce the sub-turn BEFORE releasing its audio (F1): EnsembleReaction attributes
+	// WHO reacts, THEN the held first sentence's TTSInvoked lands (via PublishInvoked, not
+	// at pre-render), THEN the lane is released so the audio plays. So the relay creates
+	// the reaction's line only after its speaker is known, and a barge before this point
+	// leaves no line at all.
 	bus.Publish(voiceevent.EnsembleReaction{At: time.Now(), TurnID: rID, LeadTurnID: e.TurnID, Target: reactor})
+	r.tts.PublishInvoked(rID, s1)
 	r.lookahead.ReleaseLookahead(rID)
 
 	<-done // the reaction played (or aborted / was cut); the goroutine has returned
