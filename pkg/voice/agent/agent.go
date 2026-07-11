@@ -401,6 +401,31 @@ func (r *Replier) Draft(ctx context.Context, text string) (string, error) {
 // are dropped. It returns the delivered text; a ctx-cancel is the expected barge
 // path, not a failure, so it returns a nil error there.
 func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
+	// Text-modality gate (#389, ADR-0009 2026-07-10 amendment): a Butler with a
+	// TextSink routes its winning draft by the SAME [AnswerAsText] decision the routed
+	// streaming path uses ([Replier.textModalityTurn]). A text-modality draft — a
+	// voiceless Butler (empty VoiceID), an explicit "as text" request, or a long result
+	// (#297 d2) — is posted WHOLE to the channel chat with ZERO TTS dispatch, committed
+	// user+assistant (ADR-0012 text-delivered commits), and reported with the
+	// [orchestrator.ErrTextDelivered] sentinel so the ensemble coordinator publishes
+	// TurnEnded(text_delivered), keeping metrics/relay consistent with the routed path.
+	// Because this precedes every dispatch, a voiceless Butler can NEVER reach TTS with
+	// an empty VoiceID on the ensemble Draft/Speak path OR the Cross-talk Reaction path
+	// ([Replier.SpeakReaction] delegates here) — the structural-unreachability guarantee.
+	// A failed post delivered nothing, so it commits nothing and surfaces the post error
+	// (never the sentinel), mirroring [Replier.textModalityTurn].
+	if r.cfg.TextSink != nil && strings.TrimSpace(draft) != "" {
+		voiceless := r.cfg.Persona.Voice.VoiceID == ""
+		if AnswerAsText(userText, draft, voiceless) {
+			if err := r.cfg.TextSink(ctx, draft); err != nil {
+				return "", err
+			}
+			r.appendUser(userText)
+			r.commitSpoken(draft)
+			return draft, orchestrator.ErrTextDelivered
+		}
+	}
+
 	var split sentenceSplitter
 	var spoken strings.Builder
 	voice := r.cfg.Persona.Voice
@@ -418,10 +443,7 @@ func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispat
 			return
 		}
 		userAppended = true
-		r.mu.Lock()
-		r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: userText})
-		r.trimHistoryLocked()
-		r.mu.Unlock()
+		r.appendUser(userText)
 	}
 
 	// Deliver-then-commit (ADR-0012, mirrors streamTurn's emit): dispatch FIRST; a
@@ -803,6 +825,17 @@ func (r *Replier) HistorySnapshot() []llm.Message {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]llm.Message(nil), r.history...)
+}
+
+// appendUser appends the utterance as a user message under the history lock and
+// trims to [Config.HistoryTurns]. It is the single user-append site shared by the
+// streaming/batch turns' eager append, [Replier.SpeakDraft]'s deliver-then-commit
+// lazy append, and its text-modality branch (#389).
+func (r *Replier) appendUser(text string) {
+	r.mu.Lock()
+	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
+	r.trimHistoryLocked()
+	r.mu.Unlock()
 }
 
 // commitSpoken records the text actually delivered to the pump as the assistant

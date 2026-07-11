@@ -357,9 +357,21 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	}
 	// Speak commits the delivered text to the Lead's own history and stops the drain
 	// on a barge.
-	_, _ = r.ensemble.Speak(turnCtx, voiceevent.AddressRouted{
+	_, speakErr := r.ensemble.Speak(turnCtx, voiceevent.AddressRouted{
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: lead.target,
 	}, lead.text, dispatch)
+
+	// A voiceless / long / text-requested Lead (#389) delivered its draft as channel
+	// TEXT with ZERO TTS dispatch: mirror the routed path's ErrTextDelivered mapping
+	// and publish the text_delivered terminal so the metrics TTL sweep records a
+	// SUCCESS rather than reaping a no-first-audio turn. The Lead is not audibly on the
+	// wire, so no Cross-talk Reaction opens (the floor never armed) — end the unit here.
+	if errors.Is(speakErr, ErrTextDelivered) {
+		if turnCtx.Err() == nil {
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTextDelivered})
+		}
+		return
+	}
 
 	// A TTS synth failure that produced no audio under a live turn is announced as
 	// the turn-end reason (mirrors dispatchStream); a barge publishes its own.
@@ -484,11 +496,26 @@ func (r *Replier) releaseReaction(turnCtx context.Context, bus *voiceevent.Bus, 
 	// Wait for the prerender goroutine to reach the held first dispatch (it hands us the
 	// sentence text on s1Ch, then blocks on the pump lane). Safe: reactCtx ⊂ turnCtx, so
 	// a barge cancels both and the turnCtx.Done arm returns without announcing.
+	//
+	// The <-done arm covers a voiceless / long / text-requested reactor (#389): its
+	// SpeakReaction routes to SpeakDraft's TEXT branch and NEVER calls the dispatch
+	// closure, so no first sentence is ever held (s1Ch stays empty) and the prerender
+	// goroutine closes done. Without this arm releaseReaction would block on s1Ch
+	// forever. done closes only after the goroutine has returned, so once it fires the
+	// s1Ch state is final: a non-blocking re-check distinguishes a held-then-aborted
+	// first sentence (s1Ch has it — proceed) from a text-delivered reactor (empty —
+	// return without announcing, so no audio-less sub-turn line is ever created).
 	var s1 string
 	select {
 	case <-turnCtx.Done():
 		return
 	case s1 = <-s1Ch:
+	case <-done:
+		select {
+		case s1 = <-s1Ch:
+		default:
+			return
+		}
 	}
 
 	// Announce the sub-turn BEFORE releasing its audio (F1): EnsembleReaction attributes
@@ -568,9 +595,21 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 		}
 		return nil
 	}
-	_, _ = rt.SpeakReaction(rctx, voiceevent.AddressRouted{
+	_, reactErr := rt.SpeakReaction(rctx, voiceevent.AddressRouted{
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
 	}, leadName, leadText, reaction, dispatch)
+
+	// A voiceless / long / text-requested reactor (#389) delivered its Reaction as
+	// channel TEXT with ZERO TTS dispatch (SpeakReaction → SpeakDraft's text branch).
+	// EnsembleReaction already created this sub-turn's line, so publish its
+	// text_delivered terminal — otherwise the metrics TTL sweep reaps the audio-less
+	// sub-turn as abandoned. Mirrors the routed path's ErrTextDelivered mapping.
+	if errors.Is(reactErr, ErrTextDelivered) {
+		if turnCtx.Err() == nil {
+			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndTextDelivered})
+		}
+		return
+	}
 
 	// A barge cutting the Reaction mid-playback ends this sub-turn under its OWN id
 	// (the Lead's delivered line is untouched). Only when the Reaction actually began
