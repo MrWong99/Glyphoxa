@@ -127,6 +127,23 @@ func TestMatcher_LastAddressedContinuation(t *testing.T) {
 	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
 }
 
+// TestMatcher_ButlerInterjectionDoesNotClobberContinuation guards ADR-0024's
+// AddressOnly exclusion from the last-speaker heuristic: a Butler explicitly
+// named mid-conversation is published, but must NEVER be recorded as
+// lastAddressed. Otherwise a 2-NPC scene where the player is talking to Bart,
+// interrupted by a GM "Glyphoxa, roll two d6", black-holes the player's next
+// unnamed follow-up (the Butler can't score AddressOnly and the sole-NPC
+// fallback is inert with two NPCs) — routing NOWHERE.
+func TestMatcher_ButlerInterjectionDoesNotClobberContinuation(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatch("Bart, pour me a drink."), "npc-bart")
+	assertIDs(t, m.TargetMatch("Glyphoxa, roll two d6."), "butler")
+	// The unnamed follow-up still belongs to Bart — the Butler interjection did
+	// not overwrite the continuation state.
+	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
+}
+
 // TestMatcher_SoleActiveNPCFallback covers the lone-NPC fallback: with exactly
 // one Character NPC active, an unnamed utterance routes to it.
 func TestMatcher_SoleActiveNPCFallback(t *testing.T) {
@@ -286,6 +303,57 @@ func TestMatcher_MaxTargetsCap(t *testing.T) {
 	if got := routedIDs(unlimited.TargetMatch(utter)); len(got) != 3 {
 		t.Fatalf("MaxTargets: -1 addressed %v, want 3", got)
 	}
+}
+
+// TestMatcher_TargetMatchFrom_ButlerGateExcludesNonGM pins the matcher-side
+// Butler GM-gate (S6, ADR-0024 amendment): with a ButlerGMGate configured, a
+// Butler-naming utterance from a non-GM (or empty) SpeakerID reaches nobody, while
+// the GM's identical utterance routes to the Butler. The gate fails closed on an
+// empty SpeakerID.
+func TestMatcher_TargetMatchFrom_ButlerGateExcludesNonGM(t *testing.T) {
+	const gm = "gm-111"
+	m := address.NewMatcher(address.Config{
+		Language:     "en",
+		ButlerGMGate: func(speakerID string) bool { return speakerID == gm },
+	}, butler, bart)
+
+	assertIDs(t, m.TargetMatchFrom("player-999", "Glyphoxa, roll a d6"))
+	assertIDs(t, m.TargetMatchFrom("", "Glyphoxa, roll a d6"))
+	assertIDs(t, m.TargetMatchFrom(gm, "Glyphoxa, roll a d6"), "butler")
+}
+
+// TestMatcher_TargetMatchFrom_ExcludedButlerFreesCoNamedSlot is the #256 reason
+// the gate must move matcher-side: an excluded Butler must be dropped BEFORE the
+// MaxTargets cap so it never shadows a co-named Character NPC into routing
+// nowhere. A non-GM naming both the Butler and Bart addresses Bart, not nobody.
+func TestMatcher_TargetMatchFrom_ExcludedButlerFreesCoNamedSlot(t *testing.T) {
+	m := address.NewMatcher(address.Config{
+		Language:     "en",
+		ButlerGMGate: func(string) bool { return false }, // nobody is the GM
+	}, butler, bart)
+
+	assertIDs(t, m.TargetMatchFrom("player", "Glyphoxa and Bart, hello there"), "npc-bart")
+}
+
+// TestMatcher_TargetMatchFrom_CharacterRoutingUnaffected pins AC3-adjacent: the
+// gate touches only Butler-role candidates. Character routing is byte-identical
+// regardless of the speaker.
+func TestMatcher_TargetMatchFrom_CharacterRoutingUnaffected(t *testing.T) {
+	m := address.NewMatcher(address.Config{
+		Language:     "en",
+		ButlerGMGate: func(string) bool { return false },
+	}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatchFrom("anyone", "Bart, pour me a drink"), "npc-bart")
+	assertIDs(t, m.TargetMatchFrom("anyone", "Goblin, what are you plotting?"), "npc-goblin")
+}
+
+// TestMatcher_TargetMatchFrom_NilGateAddressesButler pins the rollout default: no
+// ButlerGMGate means the Butler answers any speaker's explicit address (the
+// pre-#280 behavior), so TargetMatchFrom matches TargetMatch.
+func TestMatcher_TargetMatchFrom_NilGateAddressesButler(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart)
+	assertIDs(t, m.TargetMatchFrom("anyone", "Glyphoxa, give me a recap"), "butler")
 }
 
 // TestMatcher_AddAgent proves an Agent added after construction is addressable:

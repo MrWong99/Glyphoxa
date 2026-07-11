@@ -706,6 +706,234 @@ func TestReplyStream_FallbackStartError_CommitsNothing_NoProviderError(t *testin
 	}
 }
 
+// textSinkReplier builds a Butler-style Replier with a TextSink installed,
+// capturing text-delivered answers. voiceless picks whether the Persona carries a
+// Voice (empty VoiceID = text-only Butler).
+func textSinkReplier(t *testing.T, eng agent.Engine, voiceless bool, sink func(ctx context.Context, text string) error) *agent.Replier {
+	t.Helper()
+	voice := testVoice()
+	if voiceless {
+		voice.VoiceID = ""
+	}
+	return agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "butler", Markdown: "You are Glyphoxa.", Voice: voice},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+		TextSink:    sink,
+	})
+}
+
+// TestReplyStream_TextSink_LongAnswerPostsAsText pins the #299 text-delivery
+// branch: with a TextSink installed, a long answer is posted whole via the sink
+// (no TTS dispatch) and committed to history (ADR-0012 text-delivered commits).
+func TestReplyStream_TextSink_LongAnswerPostsAsText(t *testing.T) {
+	long := strings.Repeat("word ", 200) // > 400 runes
+	eng := batchEngine{reply: long}
+	var posted string
+	var dispatched int
+	r := textSinkReplier(t, eng, false, func(_ context.Context, text string) error {
+		posted = text
+		return nil
+	})
+
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, what happened last session?"), func(orchestrator.Reply) error {
+		dispatched++
+		return nil
+	})
+	// A text-delivered turn returns the terminal sentinel (#299), not nil.
+	if !errors.Is(err, orchestrator.ErrTextDelivered) {
+		t.Fatalf("ReplyStream err = %v, want ErrTextDelivered", err)
+	}
+	if dispatched != 0 {
+		t.Errorf("dispatched %d sentences to TTS, want 0 (text delivery)", dispatched)
+	}
+	if strings.TrimSpace(posted) != strings.TrimSpace(long) {
+		t.Errorf("posted text = %q, want the whole answer", posted)
+	}
+	if !committedAssistant(r, strings.TrimSpace(long)) {
+		t.Errorf("text-delivered answer not committed to history: %+v", r.HistorySnapshot())
+	}
+}
+
+// TestReplyStream_TextSink_ShortAnswerSpoken pins that a short answer with a voice
+// still speaks (sentence-split dispatch) and does NOT hit the TextSink, even
+// though a TextSink is installed.
+func TestReplyStream_TextSink_ShortAnswerSpoken(t *testing.T) {
+	eng := batchEngine{reply: "Two sixes. Total nine."}
+	sinkCalled := false
+	r := textSinkReplier(t, eng, false, func(context.Context, string) error {
+		sinkCalled = true
+		return nil
+	})
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, roll two d6"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+	if sinkCalled {
+		t.Error("TextSink called for a short spoken answer, want spoken via TTS")
+	}
+	want := []string{"Two sixes.", "Total nine."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("dispatched %q, want %q (sentence-split spoken)", got, want)
+	}
+}
+
+// TestReplyStream_TextSink_VoicelessAlwaysText pins that a voiceless Butler posts
+// even a short answer as text — it has no Voice to speak with.
+func TestReplyStream_TextSink_VoicelessAlwaysText(t *testing.T) {
+	eng := batchEngine{reply: "Nine."}
+	var posted string
+	var dispatched int
+	r := textSinkReplier(t, eng, true, func(_ context.Context, text string) error {
+		posted = text
+		return nil
+	})
+
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, roll two d6"), func(orchestrator.Reply) error {
+		dispatched++
+		return nil
+	})
+	// A voiceless (text-delivered) turn returns the terminal sentinel (#299).
+	if !errors.Is(err, orchestrator.ErrTextDelivered) {
+		t.Fatalf("ReplyStream err = %v, want ErrTextDelivered", err)
+	}
+	if dispatched != 0 {
+		t.Errorf("voiceless Butler dispatched %d to TTS, want 0", dispatched)
+	}
+	if strings.TrimSpace(posted) != "Nine." {
+		t.Errorf("posted = %q, want %q", posted, "Nine.")
+	}
+}
+
+// TestReplyStream_TextSink_ReturnsTextDeliveredSentinel pins the terminal signal
+// (#299 finding 3): a text-delivered Butler turn returns the
+// [orchestrator.ErrTextDelivered] sentinel so the reactor can publish
+// TurnEnded(text_delivered) instead of letting the metrics TTL sweep miscount a
+// successful voiceless/long answer as abandoned.
+func TestReplyStream_TextSink_ReturnsTextDeliveredSentinel(t *testing.T) {
+	eng := batchEngine{reply: "Nine."}
+	r := textSinkReplier(t, eng, true, func(context.Context, string) error { return nil })
+
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, roll two d6"), func(orchestrator.Reply) error {
+		return nil
+	})
+	if !errors.Is(err, orchestrator.ErrTextDelivered) {
+		t.Fatalf("ReplyStream err = %v, want ErrTextDelivered", err)
+	}
+}
+
+// TestReplyStream_TextSink_PostError_NotCommitted pins the ADR-0012
+// deliver-then-commit claim in textModalityTurn's doc (#299 finding 4a): if the
+// TextSink post FAILS, the answer was never delivered, so it must NOT be committed
+// to history — the failed post leaves no phantom assistant message.
+func TestReplyStream_TextSink_PostError_NotCommitted(t *testing.T) {
+	long := strings.Repeat("word ", 200) // > 400 runes → text branch
+	eng := batchEngine{reply: long}
+	postErr := errors.New("channel post failed")
+	r := textSinkReplier(t, eng, false, func(context.Context, string) error {
+		return postErr
+	})
+
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, what happened last session?"), func(orchestrator.Reply) error {
+		return nil
+	})
+	if !errors.Is(err, postErr) {
+		t.Fatalf("ReplyStream err = %v, want the sink post error", err)
+	}
+	// A failed post is NOT a text-delivered success.
+	if errors.Is(err, orchestrator.ErrTextDelivered) {
+		t.Fatal("a failed TextSink post must not report ErrTextDelivered")
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("undelivered answer committed to history: %+v", m)
+		}
+	}
+}
+
+// TestReplyStream_TextSink_SpokenBargeMidTurn_CommitsOnlyDelivered pins the
+// spoken branch of a Butler turn (#299 finding 4b): a short answer with a Voice is
+// sentence-split and dispatched; when a barge/ctx-cancel aborts delivery
+// mid-turn, only the sentences already delivered are committed (ADR-0012
+// delivered-sentences-only), never the whole answer.
+func TestReplyStream_TextSink_SpokenBargeMidTurn_CommitsOnlyDelivered(t *testing.T) {
+	eng := batchEngine{reply: "One. Two. Three."}
+	bargeErr := context.Canceled
+	var dispatched int
+	r := textSinkReplier(t, eng, false, func(context.Context, string) error {
+		t.Fatal("spoken answer must not hit the TextSink")
+		return nil
+	})
+
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, roll"), func(orchestrator.Reply) error {
+		dispatched++
+		if dispatched == 2 {
+			return bargeErr // barge cancels the turn during the second sentence
+		}
+		return nil
+	})
+	if !errors.Is(err, bargeErr) {
+		t.Fatalf("ReplyStream err = %v, want the barge error", err)
+	}
+	// Only the first (delivered) sentence is committed; the barged tail is dropped.
+	if !committedAssistant(r, "One.") {
+		t.Errorf("delivered sentence not committed: %+v", r.HistorySnapshot())
+	}
+	if committedAssistant(r, "One. Two. Three.") || committedAssistant(r, "One. Two.") {
+		t.Errorf("undelivered tail committed to history: %+v", r.HistorySnapshot())
+	}
+}
+
+// TestReplyStream_TextSink_SpokenStartError_SentenceNotCommittedTurnSurvives pins
+// the #362 contract on the Butler SPOKEN branch (textModalityTurn): a start-error
+// (ErrNotDelivered) on sentence 1 skips that sentence's commit but the turn
+// SURVIVES — sentence 2, delivered, IS committed, and the turn returns nil (not the
+// sentinel, which would misclassify as provider_error). Mirrors streamTurn.
+func TestReplyStream_TextSink_SpokenStartError_SentenceNotCommittedTurnSurvives(t *testing.T) {
+	eng := batchEngine{reply: "One. Two."}
+	r := textSinkReplier(t, eng, false, func(context.Context, string) error {
+		t.Fatal("spoken answer must not hit the TextSink")
+		return nil
+	})
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, roll"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		if rep.Sentence == "One." {
+			return orchestrator.ErrNotDelivered // start-error, turn stays alive
+		}
+		return nil // delivered
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (a start-error must not fail the spoken Butler turn)", err)
+	}
+	if len(got) != 2 || got[0] != "One." || got[1] != "Two." {
+		t.Fatalf("dispatched = %v, want both sentences attempted (drain continues past start-error)", got)
+	}
+	if !committedAssistant(r, "Two.") {
+		t.Errorf("delivered sentence 2 not committed: %+v", r.HistorySnapshot())
+	}
+	if committedAssistant(r, "One. Two.") || committedAssistant(r, "One.") {
+		t.Errorf("start-errored sentence committed to history: %+v", r.HistorySnapshot())
+	}
+}
+
+// committedAssistant reports whether the Replier committed an assistant message
+// equal to want.
+func committedAssistant(r *agent.Replier, want string) bool {
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant && strings.TrimSpace(m.Text) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // delayStreamEngine streams sentences with a fixed delay BEFORE each one,
 // modelling the LLM taking perSentence to produce each sentence. Its Generate
 // (the batch path) blocks for ALL sentences before returning, so a batch reply

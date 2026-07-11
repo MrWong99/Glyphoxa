@@ -1042,7 +1042,110 @@ service SessionService {
   // NOT NO_SIDE_EFFECTS: each call spends provider money + records usage, so
   // CSRF + auth guard it like a mutation.
   rpc GenerateRecap(GenerateRecapRequest) returns (GenerateRecapResponse);
+  // ListHighlights returns the Session Highlights for one Voice Session (#308,
+  // Epic 8) — the candidate + promoted moments the GM reviews after a session,
+  // newest moment first. Tenant-scoped server-side (ADR-0039), so it never
+  // returns another tenant's highlights. A read (NO_SIDE_EFFECTS).
+  rpc ListHighlights(ListHighlightsRequest) returns (ListHighlightsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // GetHighlight returns one Session Highlight by id (#308). Tenant-scoped: a
+  // foreign-tenant id is CodeNotFound (existence never leaked). A read
+  // (NO_SIDE_EFFECTS).
+  rpc GetHighlight(GetHighlightRequest) returns (GetHighlightResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // PromoteHighlight flips a candidate Highlight to 'promoted' so it survives the
+  // 7-day candidate purge (#308/ADR-0051), returning the updated row. Idempotent
+  // on the server (a re-promote keeps the original promoted_at), but it is a
+  // state change, so CSRF + auth guard it. A missing/foreign id is CodeNotFound.
+  rpc PromoteHighlight(PromoteHighlightRequest) returns (PromoteHighlightResponse);
+  // DeleteHighlight removes one Highlight and its audio clip (blob-then-row,
+  // ADR-0048), returning nothing (#308). A missing/foreign id is CodeNotFound.
+  // State-changing: CSRF + auth guard it.
+  rpc DeleteHighlight(DeleteHighlightRequest) returns (DeleteHighlightResponse);
 }
+
+// Highlight is the wire view of a Session Highlight row (#308, Epic 8): a
+// detected epic moment with its time range, caption material, speaker lanes, and
+// the clip's content-type/size (the clip bytes stream from
+// GET /api/v1/highlights/{id}/clip, not this message). clip_key is deliberately
+// NOT exposed — it is an internal blob-seam detail (ADR-0048).
+message Highlight {
+  // id is the highlight's UUID.
+  string id = 1;
+  // voice_session_id is the Voice Session the moment was detected in.
+  string voice_session_id = 2;
+  // campaign_id is the Campaign the session ran for.
+  string campaign_id = 3;
+  // status is "candidate" (subject to the 7-day purge) or "promoted" (kept).
+  string status = 4;
+  // starts_at bounds the clip's start (moment - lead).
+  google.protobuf.Timestamp starts_at = 5;
+  // ends_at bounds the clip's end (moment + tail).
+  google.protobuf.Timestamp ends_at = 6;
+  // score is the classifier's 0-10 rating of the moment.
+  double score = 7;
+  // excerpt is caption-worthy transcript text for the moment.
+  string excerpt = 8;
+  // reason is the classifier's one-line justification.
+  string reason = 9;
+  // speaker_ids are the distinct Speaker Lanes (Discord user ids) heard.
+  repeated string speaker_ids = 10;
+  // clip_content_type is the stored clip's MIME type ("audio/wav").
+  string clip_content_type = 11;
+  // clip_size_bytes is the stored clip's size in bytes.
+  int64 clip_size_bytes = 12;
+  // created_at is when the highlight was detected + stored.
+  google.protobuf.Timestamp created_at = 13;
+  // promoted_at is when the GM promoted it; unset while a candidate.
+  google.protobuf.Timestamp promoted_at = 14;
+}
+
+// ListHighlightsRequest names the Voice Session whose Highlights to list.
+message ListHighlightsRequest {
+  // voice_session_id is the session to list Highlights for.
+  string voice_session_id = 1;
+}
+
+// ListHighlightsResponse carries the session's Highlights, newest moment first.
+message ListHighlightsResponse {
+  // highlights are the session's Highlights (candidate and promoted).
+  repeated Highlight highlights = 1;
+}
+
+// GetHighlightRequest names one Highlight by id.
+message GetHighlightRequest {
+  // id is the Highlight to load.
+  string id = 1;
+}
+
+// GetHighlightResponse carries the requested Highlight.
+message GetHighlightResponse {
+  // highlight is the requested row.
+  Highlight highlight = 1;
+}
+
+// PromoteHighlightRequest names the Highlight to promote.
+message PromoteHighlightRequest {
+  // id is the Highlight to promote (candidate -> promoted).
+  string id = 1;
+}
+
+// PromoteHighlightResponse carries the promoted Highlight.
+message PromoteHighlightResponse {
+  // highlight is the updated (promoted) row.
+  Highlight highlight = 1;
+}
+
+// DeleteHighlightRequest names the Highlight to delete.
+message DeleteHighlightRequest {
+  // id is the Highlight to delete (row + clip).
+  string id = 1;
+}
+
+// DeleteHighlightResponse is empty; the delete cascades the clip through the seam.
+message DeleteHighlightResponse {}
 
 // GenerateRecapRequest carries the Voice Session ids to recap; each must belong
 // to the server-resolved Active Campaign (ADR-0039) — a cross-campaign or

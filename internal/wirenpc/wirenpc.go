@@ -21,7 +21,9 @@ import (
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -242,6 +244,17 @@ type npcSpec struct {
 	// per-NPC GrantSet against the shared Registry, so the LLM only ever sees the
 	// Tools this NPC is granted (#113). nil ⇒ granted nothing.
 	grants []tool.Grant
+	// role is this Agent's Role (CONTEXT.md "Agent Role"): "butler" or "character"
+	// (empty ⇒ character, the pre-#299 default). It flows into the routing target's
+	// AgentRole so the matcher's Butler GM-gate and the detector can tell the two
+	// apart, and it gates the Butler-only wiring (default persona, text delivery,
+	// voice-gap logging) in loadCampaignRoster / rosterDepsForLive.
+	role string
+	// addressOnly marks an Agent reachable only by an explicit name match (the
+	// Butler, ADR-0024): matcherAgent stamps it onto the address.Agent so ambient
+	// heuristics (continuation, single-NPC fallback) never route to it. false ⇒ a
+	// normal Character NPC (the pre-#299 default).
+	addressOnly bool
 	// model is the Groq model id this NPC's engine runs (#227): loadCampaignNPCs
 	// resolves it from the Agent's LLM provider_config, falling back to the
 	// tenant-level LLM row. Empty means "adapter default" — it flows verbatim into
@@ -534,10 +547,19 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 // is always the silent-NPC condition.
 func logVoiceGaps(log *slog.Logger, npcs []npcSpec) {
 	for _, npc := range npcs {
-		if npc.voice.VoiceID == "" {
-			log.Error("NPC has no synthesizable voice (empty VoiceID); it will be silent",
-				"npc", npc.name, "agentID", npc.agentID)
+		if npc.voice.VoiceID != "" {
+			continue
 		}
+		// The Butler is a legitimately text-only Agent (#299): a voiceless Butler
+		// answers via its TextSink into the channel chat, so an empty VoiceID is
+		// expected, not the silent-NPC failure. Surface it at INFO, not ERROR.
+		if npc.role == voiceevent.AgentRoleButler {
+			log.Info("Butler has no voice configured; it will answer as text only",
+				"npc", npc.name, "agentID", npc.agentID)
+			continue
+		}
+		log.Error("NPC has no synthesizable voice (empty VoiceID); it will be silent",
+			"npc", npc.name, "agentID", npc.agentID)
 	}
 }
 
@@ -825,7 +847,13 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	defer stageSub.Subscribe(bus)()
 	stageSub.Start(cycleCtx)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, pump)
+	// Butler text delivery (#299, #297 decision 2): a poster over the BORROWED
+	// Discord client that writes into the voice channel's text chat, so a Butler
+	// answering as text posts there. It reuses this cycle's client and channel; the
+	// TextSink is set on butler-role specs only inside rosterDepsForLive.
+	textPoster := newVoiceChannelPoster(client, channel)
+
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, textPoster, pump)
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -900,6 +928,68 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 // retained as the unit-test seam for the one-NPC routing invariant.
 func npcMatcher(npc npcSpec) *address.Matcher {
 	return address.NewMatcher(address.Config{Language: "en"}, matcherAgent(npc))
+}
+
+// discordMessageLimit is Discord's per-message character cap (#299): a Butler
+// text answer longer than this is split across several ordered messages.
+const discordMessageLimit = 2000
+
+// newVoiceChannelPoster builds the Butler's text-delivery sink (#299, #297
+// decision 2): a func that posts text into the voice channel's text chat over the
+// borrowed Discord client, splitting answers longer than [discordMessageLimit]
+// runes into ordered messages. The ctx bounds each REST call (a barge cancels a
+// mid-post). It is wired as the [agent.Config.TextSink] on butler-role specs only.
+func newVoiceChannelPoster(client *bot.Client, channel snowflake.ID) func(ctx context.Context, text string) error {
+	return func(ctx context.Context, text string) error {
+		for _, part := range splitDiscordMessage(text, discordMessageLimit) {
+			if _, err := client.Rest.CreateMessage(channel, discord.MessageCreate{Content: part}, rest.WithCtx(ctx)); err != nil {
+				return fmt.Errorf("wirenpc: post Butler text to channel %s: %w", channel, err)
+			}
+		}
+		return nil
+	}
+}
+
+// splitDiscordMessage breaks text into ordered chunks each at most limit RUNES
+// (never bytes — a German Butler answer), preferring a newline then a space break
+// so a chunk ends at a natural boundary; a single unbroken run longer than limit
+// is hard-cut. Every rune is delivered (never truncated). It mirrors the recap
+// splitter's contract (internal/presence.splitFollowups); it is duplicated rather
+// than imported because internal/presence imports wirenpc (an import cycle).
+func splitDiscordMessage(text string, limit int) []string {
+	runes := []rune(text)
+	if limit <= 0 || len(runes) <= limit {
+		return []string{text}
+	}
+	var parts []string
+	for len(runes) > limit {
+		cut := limit
+		if i := lastBreakRune(runes, limit, '\n'); i > 0 {
+			cut = i
+		} else if i := lastBreakRune(runes, limit, ' '); i > 0 {
+			cut = i
+		}
+		parts = append(parts, string(runes[:cut]))
+		rest := runes[cut:]
+		if cut < limit && len(rest) > 0 && (rest[0] == '\n' || rest[0] == ' ') {
+			rest = rest[1:] // drop the boundary whitespace we broke on
+		}
+		runes = rest
+	}
+	if len(runes) > 0 {
+		parts = append(parts, string(runes))
+	}
+	return parts
+}
+
+// lastBreakRune returns the last index in [1, limit) where runes[i]==ch, or -1.
+func lastBreakRune(runes []rune, limit int, ch rune) int {
+	for i := limit - 1; i > 0; i-- {
+		if runes[i] == ch {
+			return i
+		}
+	}
+	return -1
 }
 
 // npcNames returns the NPCs' display names for a log line.
@@ -1177,7 +1267,7 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 // first sentence.
 var _ orchestrator.LookaheadPump = (*wire.PlaybackPump)(nil)
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, lookahead orchestrator.LookaheadPump) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, textPoster func(ctx context.Context, text string) error, lookahead orchestrator.LookaheadPump) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -1295,7 +1385,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// in the Matcher and its Replier (over a per-NPC engine carrying that NPC's
 	// GrantSet) in the Cast. The Matcher is built from the first NPC and grown for
 	// the rest.
-	roster := newRoster(rosterDepsForLive(engineFor, newTTS(keys.tts), 16, log, memory, facts, language))
+	roster := newRoster(rosterDepsForLive(engineFor, newTTS(keys.tts), 16, log, memory, facts, language, gmSpeaker, textPoster))
 	for _, npc := range npcs {
 		roster.AddNPC(npc)
 	}

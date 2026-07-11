@@ -45,7 +45,7 @@ func TestListToolGrants_CatalogWithState(t *testing.T) {
 		t.Fatalf("ListToolGrants: %v", err)
 	}
 	grants := resp.Msg.GetGrants()
-	wantNames := []string{"dice", "kg_query", "transcript_search"} // Name-sorted catalog
+	wantNames := []string{"dice", "kg_query", "remember_knowledge", "transcript_search"} // Name-sorted catalog
 	if len(grants) != len(wantNames) {
 		t.Fatalf("catalog = %+v, want %v", grants, wantNames)
 	}
@@ -64,6 +64,9 @@ func TestListToolGrants_CatalogWithState(t *testing.T) {
 	}
 	if !scopeByName["kg_query"] {
 		t.Error("kg_query must advertise scope support (ADR-0029 own_node vs campaign)")
+	}
+	if !scopeByName["remember_knowledge"] {
+		t.Error("remember_knowledge must advertise scope support (ADR-0052 own_node vs campaign)")
 	}
 	if scopeByName["dice"] {
 		t.Error("dice must not advertise scope support")

@@ -343,6 +343,8 @@ func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string
 	switch r {
 	case voiceevent.TurnEndSupersedeCoalesced:
 		return TurnYielded, ReasonSupersessionGrace, "yielded"
+	case voiceevent.TurnEndTextDelivered:
+		return TurnTextDelivered, ReasonNone, "text_delivered"
 	case voiceevent.TurnEndBarge:
 		return TurnAbandoned, ReasonBarge, "abandoned"
 	case voiceevent.TurnEndMute:

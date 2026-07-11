@@ -13,6 +13,16 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
+// ErrTextDelivered is the sentinel a [StreamReplyFunc] returns to signal that it
+// completed a turn by delivering the whole answer as TEXT (a Butler turn routed
+// to its TextSink, #299) rather than dispatching any TTS. The turn reached no
+// first audio, but it is a SUCCESS — the reactor maps this sentinel to a
+// [voiceevent.TurnEndTextDelivered] terminal event instead of the
+// provider_error a generic non-nil producer error would report, so the metrics
+// subscriber does not miscount a delivered text answer as abandoned. It is NOT
+// surfaced through the [ErrorFunc].
+var ErrTextDelivered = errors.New("orchestrator: turn delivered as text")
+
 // Reactor is one self-contained bus interaction in the voice pipeline: it turns
 // events the call-driven stages publish (VAD, STT, TTS) into the next stage's
 // call. The address detector (STTFinal → AddressRouted), the [Segmenter]
@@ -1187,16 +1197,28 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 		}
 		return nil
 	}
-	// A producer that leaks ErrNotDelivered as its own return (returning the dispatch
-	// signal up) must NOT be misclassified as a provider failure: ttsFailed is already
-	// set, so the tts_error branch below owns the reason. Only a genuine producer error
-	// under a live ctx is provider_error.
-	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil && !errors.Is(err, ErrNotDelivered) {
-		if r.onError != nil {
-			r.onError(err)
+	// Error mapping under a LIVE ctx (a cancel is handled by the ctx.Err()==nil guard
+	// short-circuiting the whole block — a barge/mute publishes its own TurnEnded).
+	// Ordering: cancel first (guard), then the two sentinels, then the generic
+	// provider_error, so neither sentinel masks the other nor a cancel.
+	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil {
+		// A text-delivered turn (#299) is a SUCCESS that dispatched no TTS: report
+		// its terminal reason so the subscriber records text_delivered, not an
+		// abandoned/no_first_audio TTL reap, and do NOT surface it as an error.
+		if errors.Is(err, ErrTextDelivered) {
+			return voiceevent.TurnEndTextDelivered
 		}
-		// The producer (LLM round / tool loop) failed before the turn finished.
-		return voiceevent.TurnEndProviderError
+		// A producer that leaks ErrNotDelivered as its own return (#362) must NOT be
+		// misclassified as a provider failure: ttsFailed is already set, so the
+		// tts_error branch below owns the reason. Only a genuine producer error under a
+		// live ctx is provider_error.
+		if !errors.Is(err, ErrNotDelivered) {
+			if r.onError != nil {
+				r.onError(err)
+			}
+			// The producer (LLM round / tool loop) failed before the turn finished.
+			return voiceevent.TurnEndProviderError
+		}
 	}
 	if ttsFailed && ctx.Err() == nil {
 		return voiceevent.TurnEndTTSError

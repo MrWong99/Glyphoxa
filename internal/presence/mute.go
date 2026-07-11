@@ -24,8 +24,9 @@ type SessionMuter interface {
 // AgentLister is the Active Campaign roster read the mute autocomplete + resolver
 // need (#211): the Butler + Character NPCs, from the agents table (not the voiced
 // wirenpc Roster, which is unreachable here). *storage.Store satisfies it. The
-// mute surface narrows this to the voiced Character NPCs (see voiced): the
-// Address-Only Butler is listed here but is never offered as a mute target.
+// mute surface narrows this to the Character NPCs (see voiced): the Butler is
+// voiced now (ADR-0009 #299 amendment) but stays Address-Only and is never offered
+// as a mute target (mute is matcher-owned and Character-only).
 type AgentLister interface {
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 }
@@ -175,11 +176,12 @@ func resolveAgent(roster []storage.Agent, input string) (agent storage.Agent, fo
 }
 
 // voiced drops the Address-Only Butler from a campaign roster, leaving the Agents
-// a GM can actually mute. The Butler (agent_role='butler', ADR-0009/ADR-0024) is
-// never in the voiced Cast, so muting it would be an inert control — it is neither
-// offered by the autocomplete nor resolvable by name/UUID here. The manager
-// rejects it too (see session.SetAgentMute); this just keeps the /glyphoxa surface
-// from ever presenting a mute target that does nothing.
+// a GM can actually mute. The Butler (agent_role='butler') is in the voiced Cast
+// now (ADR-0009 #299 amendment), but it stays Address-Only and mute is
+// matcher-owned and Character-only, so muting it would be an inert control — it is
+// neither offered by the autocomplete nor resolvable by name/UUID here. The
+// manager rejects it too (see session.SetAgentMute); this just keeps the /glyphoxa
+// surface from ever presenting a mute target that does nothing.
 func voiced(agents []storage.Agent) []storage.Agent {
 	out := make([]storage.Agent, 0, len(agents))
 	for _, a := range agents {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -83,8 +84,9 @@ type Store interface {
 	ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, error)
 	// ListAgents returns the Active Campaign's full roster (Butler + Character
 	// NPCs). The mute subsystem (#211) narrows it to the voiced Character NPCs via
-	// voicedAgents — the Address-Only Butler (never voiced, ADR-0009/ADR-0024) is
-	// not a mute target.
+	// voicedAgents — the Butler is voiced now (ADR-0009 #299 amendment) but stays
+	// Address-Only and is not a mute target (mute is matcher-owned and
+	// Character-only).
 	ListAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	// GetTenantSpendCaps returns the Tenant's soft/hard spend caps (#130, ADR-0046),
 	// snapshot at Start to build the session's spend meter. ErrNotFound (no tenant
@@ -101,6 +103,20 @@ type Store interface {
 // (not wired / persistence off) leaves line_count at the in-memory default.
 type TranscriptFinalizer interface {
 	Finalize(ctx context.Context, id uuid.UUID) (int, error)
+}
+
+// Highlighter is the Session Highlights persistence pipeline (#308, Epic 8): the
+// Manager Begins it at Start (binding the session's owning ids), the live detector
+// feeds it Triggers through cfg.Highlights, and the Manager Finalizes it at loop
+// exit (scheduling the 7-day candidate purge) — beside transcript.Finalize, at
+// EVERY exit path. *highlight.Saver satisfies it. It embeds highlight.Sink so the
+// SAME value wires onto the base voice config's cfg.Highlights. Defined here (not
+// imported as a concrete type) to keep the seam narrow; nil (highlights off, or a
+// web-only Manager that drives no voice) makes Begin/Finalize no-ops.
+type Highlighter interface {
+	highlight.Sink
+	Begin(voiceSessionID, campaignID, tenantID uuid.UUID)
+	Finalize(ctx context.Context) error
 }
 
 // ChunkFinalizer closes a session's open Transcript Chunk on Stop / loop exit
@@ -164,6 +180,7 @@ type Manager struct {
 	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
 	chunker    ChunkFinalizer      // closes the open Transcript Chunk on Stop (#104); nil = no chunking
+	highlights Highlighter         // persists Session Highlights + schedules purge on Stop (#308); nil = highlights off
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
@@ -255,6 +272,17 @@ func (m *Manager) SetFacts(f agent.FactsRecaller) {
 // behave, the model just gets an "unavailable" tool result).
 func (m *Manager) SetToolDeps(d tool.Deps) {
 	m.base.ToolDeps = d
+}
+
+// SetHighlights wires the Session Highlights persistence pipeline (#308): the
+// Manager Begins/Finalizes it per session, and the SAME value flows onto the base
+// voice config as cfg.Highlights (the detector's Sink) every session copies. Like
+// SetTranscript it is set once at boot — the Saver needs the store + blob backend,
+// built alongside the Manager — before any session can start, so no lock is
+// needed. nil leaves highlights off (the detector, if any, gets a nil Sink).
+func (m *Manager) SetHighlights(h Highlighter) {
+	m.highlights = h
+	m.base.Highlights = h
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no
@@ -373,6 +401,14 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		as.meter = meter
 	}
 
+	// Bind the Highlights pipeline to this session before the loop (and its
+	// detector) can fire a Trigger (#308): Begin records the owning ids the Saver
+	// stamps onto every candidate row + its blob key. Finalize (runLoop) unbinds and
+	// schedules the purge. A nil Highlighter (highlights off / web-only) is skipped.
+	if m.highlights != nil {
+		m.highlights.Begin(vs.ID, campaignID, tenantID)
+	}
+
 	m.active = as
 	go m.runLoop(runCtx, as, cfg)
 	return vs, nil
@@ -473,6 +509,20 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		} else {
 			lineCount = n
 		}
+	}
+
+	// Finalize the Session Highlights pipeline beside the transcript (#308): drain
+	// the Saver's worker (persisting any queued clips) and schedule the 7-day
+	// candidate purge, then unbind. Its OWN budget (like Finalize/chunk flush) — a
+	// slow drain / enqueue logs and never blocks the row from ending. Runs at EVERY
+	// loop exit (Stop, self-exit, Shutdown), so a session's candidates always get a
+	// purge horizon (ADR-0051). nil (highlights off) is skipped.
+	if m.highlights != nil {
+		hlCtx, hlCancel := context.WithTimeout(base, m.endTimeout)
+		if err := m.highlights.Finalize(hlCtx); err != nil {
+			m.log.Warn("finalize highlights before end", "err", err, "voice_session", as.session.ID)
+		}
+		hlCancel()
 	}
 
 	// Close the session's open Transcript Chunk (#104, ADR-0011): a lone trailing
@@ -676,10 +726,11 @@ func (m *Manager) SetAgentMute(ctx context.Context, agentID string, muted bool) 
 	return ids, nil
 }
 
-// SetAllMute mutes or unmutes every VOICED Agent of the Active Campaign (the
-// Character NPCs from store.ListAgents, minus the Address-Only Butler, which is
-// never voiced — ADR-0009/ADR-0024, and not just the voiced wirenpc Roster),
-// returning the resulting sorted muted-id set (#211). It refuses when idle
+// SetAllMute mutes or unmutes every mutable Agent of the Active Campaign (the
+// Character NPCs from store.ListAgents, minus the Address-Only Butler — which is
+// voiced now (ADR-0009 #299 amendment) but is not a mute target, mute being
+// matcher-owned and Character-only), returning the resulting sorted muted-id set
+// (#211). It refuses when idle
 // (ErrNoActiveSession). The campaign is captured under m.mu, the roster is listed
 // with m.mu released (the store read may block), then the set is re-locked and
 // applied only if the SAME session is still active — a session that ended (or a
@@ -735,9 +786,10 @@ func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) 
 // SayAs publishes a GM-puppeteered direct-speech request (#295, ADR-0010): the
 // voiced Character NPC with agentID speaks text verbatim in the live Voice Session.
 // It refuses when idle (ErrNoActiveSession) and rejects an agentID that is not a
-// VOICED Agent of the active session's Campaign — a foreign agent, an unknown id,
-// or the Address-Only Butler (never voiced, ADR-0009/0024; the Butler on-ramp is a
-// #299-blocked follow-up) — with ErrAgentNotInCampaign.
+// voiced CHARACTER NPC of the active session's Campaign — a foreign agent, an
+// unknown id, or the Butler (voiced now per ADR-0009 #299, but Address-Only and
+// excluded from the /say Character roster by voicedAgents, ADR-0010) — with
+// ErrAgentNotInCampaign.
 //
 // Validation and the publish are SESSION-ATOMIC (mirrors SetAgentMute): the active
 // session is captured, its Campaign is listed with m.mu released (the store read may
@@ -810,14 +862,15 @@ func agentInList(agents []storage.Agent, agentID string) bool {
 	return false
 }
 
-// voicedAgents returns only the Agents the mute subsystem can act on — the voiced
-// Character NPCs. The auto-created Butler (agent_role='butler') is Address-Only:
-// it never enters the voiced wirenpc Roster/Matcher (ADR-0009, ADR-0024), so a
-// mute on it could only record a phantom id that silences nothing. Filtering it
-// here is the single chokepoint both SetAgentMute (which then rejects the Butler
-// with ErrAgentNotInCampaign) and SetAllMute (which then skips it) share, so the
-// live mute set is exactly the set of voiced Agents — and GetSession's reload
-// truth (muted_agent_ids) never lists the Butler.
+// voicedAgents returns only the Agents the mute subsystem can act on — the
+// Character NPCs. The auto-created Butler (agent_role='butler') now enters the
+// voiced wirenpc Roster/Matcher/Cast (ADR-0009 #299 amendment), but it stays
+// Address-Only and mute is matcher-owned and Character-only: muting the Butler is
+// refused, so filtering it here could only ever record a phantom id that silences
+// nothing. Filtering it here is the single chokepoint both SetAgentMute (which
+// then rejects the Butler with ErrAgentNotInCampaign) and SetAllMute (which then
+// skips it) share, so the live mute set is exactly the set of Character Agents —
+// and GetSession's reload truth (muted_agent_ids) never lists the Butler.
 func voicedAgents(agents []storage.Agent) []storage.Agent {
 	out := make([]storage.Agent, 0, len(agents))
 	for _, a := range agents {

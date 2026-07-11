@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/stt"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
@@ -551,6 +553,139 @@ func TestReplier_FloorTurnPublishesProviderErrorEnded(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no TurnEnded(provider_error) published for a failed-producer turn")
+	}
+}
+
+// TestReplier_FloorTextDeliveredTurnPublishesTextEnded pins the Butler
+// text-modality terminal signal (#299): a producer that delivers its whole answer
+// as text (via a TextSink) dispatches NO TTS, so it reaches no first audio. It
+// signals completion by returning the sentinel [orchestrator.ErrTextDelivered],
+// which the reactor maps to TurnEnded(text_delivered) — a SUCCESS, not a
+// provider_error — so the metrics subscriber does not TTL-reap it as abandoned.
+// The sentinel is NOT reported through the ErrorFunc.
+func TestReplier_FloorTextDeliveredTurnPublishesTextEnded(t *testing.T) {
+	h := voicetest.New(t)
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
+	var onErrCalled bool
+	reply := func(_ context.Context, _ voiceevent.AddressRouted, _ func(orchestrator.Reply) error) error {
+		return orchestrator.ErrTextDelivered
+	}
+	replier := orchestrator.NewStreamReplier(ttsStage, reply, func(error) { onErrCalled = true })
+	replier.SetFloor(orchestrator.NewFloor())
+	ended := waitTurnEnded(t, h.Bus)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{TurnID: "ttxt"})
+
+	select {
+	case e := <-ended:
+		if e.TurnID != "ttxt" || e.Reason != voiceevent.TurnEndTextDelivered {
+			t.Fatalf("TurnEnded = %+v, want {ttxt text_delivered}", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no TurnEnded(text_delivered) published for a text-delivered turn")
+	}
+	if onErrCalled {
+		t.Fatal("ErrTextDelivered must not be reported through the ErrorFunc")
+	}
+}
+
+// fixedEngine is a non-streaming [agent.Engine] returning one canned completion,
+// so a Butler [agent.Replier] runs the batch fallback (one whole-answer dispatch).
+type fixedEngine struct{ reply string }
+
+func (e fixedEngine) Generate(context.Context, []llm.Message) (string, error) { return e.reply, nil }
+
+// butlerBargeSynth records each rendered sentence and, on its first synthesis,
+// yields the shared floor mid-drain — modelling a confirmed human barge cutting
+// the turn (ADR-0027). The closed channel cuts the sentence's tail, so it is NOT
+// delivered (ADR-0012). It reports whether a turn was actually held when it
+// yielded, so a test can prove the Butler turn ran on the shared floor.
+type butlerBargeSynth struct {
+	floor *orchestrator.Floor
+	mu    sync.Mutex
+	spoke []string
+	fired bool
+	held  bool
+}
+
+func (s *butlerBargeSynth) Synthesize(_ context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	s.mu.Lock()
+	s.spoke = append(s.spoke, req.Sentence)
+	first := !s.fired
+	s.fired = true
+	s.mu.Unlock()
+	if first {
+		_, yielded := s.floor.Yield()
+		s.mu.Lock()
+		s.held = yielded
+		s.mu.Unlock()
+	}
+	ch := make(chan tts.AudioChunk)
+	close(ch)
+	return ch, nil
+}
+
+func (*butlerBargeSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+func (s *butlerBargeSynth) rendered() int   { s.mu.Lock(); defer s.mu.Unlock(); return len(s.spoke) }
+func (s *butlerBargeSynth) heldFloor() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.held }
+
+// TestReplier_ButlerSpokenTurnRunsOnSharedFloor pins the #299 finding-4c gap: the
+// voiced Butler is a first-class roster member, so its SPOKEN turn runs on the
+// same single barge-in Floor as every NPC (ADR-0027/ADR-0038 one-turn-at-a-time)
+// and is barge-able. Driven through the REAL agent Butler Replier: a confirmed
+// barge mid-drain cuts the turn, so the Butler delivers nothing and — per ADR-0012
+// (zero delivered sentences are not logged) — commits no history line, and the
+// yield proves the Butler turn actually held the shared floor.
+func TestReplier_ButlerSpokenTurnRunsOnSharedFloor(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	synth := &butlerBargeSynth{floor: floor}
+	ttsStage := orchestrator.NewTTS(h.Bus, synth)
+
+	butlerVoice := tts.Voice{ProviderID: "test", VoiceID: "glyphoxa", Name: "Glyphoxa"}
+	butler := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "glyphoxa", Markdown: "You are Glyphoxa.", Voice: butlerVoice},
+		Engine:      fixedEngine{reply: "At your service, my liege."},
+		Synthesizer: synth,
+	})
+	// Wrap the producer so the test can barrier on its return: every synth write
+	// (spoke/held) and the history commit happen inside it, so <-done establishes a
+	// happens-before for the assertions below (no poll, race-clean).
+	base := butler.ReplyStream()
+	done := make(chan struct{})
+	wrapped := func(ctx context.Context, e voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
+		defer close(done)
+		return base(ctx, e, dispatch)
+	}
+	streamRep := orchestrator.NewStreamReplier(ttsStage, wrapped, nil)
+	streamRep.SetFloor(floor) // wire the shared barge-in floor into the pipeline
+	t.Cleanup(streamRep.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.AddressRouted{
+		TurnID: "b1",
+		Text:   "Glyphoxa, are you ready?",
+		Target: voiceevent.AddressTarget{AgentID: "glyphoxa", AgentRole: voiceevent.AgentRoleButler, Name: "Glyphoxa"},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Butler turn never completed")
+	}
+	if synth.rendered() == 0 {
+		t.Fatal("Butler turn never reached TTS — it did not run on the floor")
+	}
+	// The yield cut a HELD turn: the Butler ran on the shared floor.
+	if !synth.heldFloor() {
+		t.Error("Butler spoken turn did not hold the shared floor (barge yielded nothing)")
+	}
+	// Barge cut delivery before any sentence's tail forwarded: nothing committed.
+	for _, m := range butler.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Errorf("barged Butler turn committed an assistant line (ADR-0012 violated): %+v", m)
+		}
 	}
 }
 

@@ -14,11 +14,13 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// TestButlerDiceGrantSeeded is the AC1 bar: the migration seeds the auto-created
-// Butler's dice grant. seedCampaign creates a Campaign, whose auto-Butler
-// trigger (extended in 00013) also inserts the Butler's dice grant — so a fresh
-// Butler comes with exactly one grant, `dice`, carrying no scope config.
-func TestButlerDiceGrantSeeded(t *testing.T) {
+// TestButlerDefaultGrantsSeeded is the #299 default-grant bar: the auto-Butler
+// trigger (extended in 00025) seeds the Butler's read-only knowledge Tool set —
+// `dice` + `transcript_search` + `kg_query` (#297 decision 1) — each with a NULL
+// scope config. There is deliberately NO `recap` grant (its Tool wrapper does not
+// exist yet). seedCampaign creates a Campaign, whose auto-Butler trigger fires the
+// grant inserts.
+func TestButlerDefaultGrantsSeeded(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
@@ -33,17 +35,61 @@ func TestButlerDiceGrantSeeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants(butler): %v", err)
 	}
-	if len(grants) != 1 {
-		t.Fatalf("auto-Butler has %d grants, want 1 (dice): %+v", len(grants), grants)
+	got := map[string]storage.ToolGrant{}
+	for _, g := range grants {
+		got[g.ToolName] = g
+		if g.AgentID != butler.ID {
+			t.Errorf("grant %q agent_id = %s, want butler %s", g.ToolName, g.AgentID, butler.ID)
+		}
+		if g.Config != nil {
+			t.Errorf("grant %q carries config %q, want nil (no scope narrowing)", g.ToolName, g.Config)
+		}
 	}
-	if grants[0].ToolName != "dice" {
-		t.Errorf("Butler grant = %q, want dice", grants[0].ToolName)
+	want := []string{"dice", "transcript_search", "kg_query"}
+	if len(grants) != len(want) {
+		t.Fatalf("auto-Butler has %d grants, want %d (%v): %+v", len(grants), len(want), want, grants)
 	}
-	if grants[0].Config != nil {
-		t.Errorf("dice grant carries config %q, want nil (no scope narrowing)", grants[0].Config)
+	for _, name := range want {
+		if _, ok := got[name]; !ok {
+			t.Errorf("auto-Butler missing default grant %q; has %+v", name, grants)
+		}
 	}
-	if grants[0].AgentID != butler.ID {
-		t.Errorf("grant agent_id = %s, want butler %s", grants[0].AgentID, butler.ID)
+	if _, ok := got["recap"]; ok {
+		t.Error("auto-Butler has a recap grant; the recap Tool wrapper does not exist yet (#299 follow-up)")
+	}
+}
+
+// TestButlerKnowledgeGrantBackfillIdempotent pins the 00025 backfill's
+// idempotence (ON CONFLICT DO NOTHING): re-running the two backfill INSERTs never
+// errors and never duplicates a grant, so an existing Butler keeps exactly one
+// row per Tool.
+func TestButlerKnowledgeGrantBackfillIdempotent(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	butler, err := st.GetButler(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("GetButler: %v", err)
+	}
+
+	// Re-run the migration's backfill statements: they must be no-ops now.
+	for _, tool := range []string{"transcript_search", "kg_query"} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO tool_agent_grant (agent_id, tool_name)
+			 SELECT id, $1 FROM agents WHERE agent_role = 'butler'
+			 ON CONFLICT (agent_id, tool_name) DO NOTHING`, tool); err != nil {
+			t.Fatalf("re-run backfill %q: %v", tool, err)
+		}
+	}
+
+	grants, err := st.ListToolGrants(ctx, butler.ID)
+	if err != nil {
+		t.Fatalf("ListToolGrants(butler): %v", err)
+	}
+	if len(grants) != 3 {
+		t.Fatalf("after re-running the backfill the Butler has %d grants, want 3 (no duplicates): %+v", len(grants), grants)
 	}
 }
 
@@ -311,5 +357,65 @@ func TestBackfillGrantsExistingButler(t *testing.T) {
 	}
 	if grants[0].Config != nil {
 		t.Errorf("backfilled dice grant config = %q, want nil", grants[0].Config)
+	}
+}
+
+// TestBackfillGrantsKnowledgeToolsExistingButler covers the 00025 backfill in
+// isolation (#299): a Butler that already existed with only its dice grant must
+// gain `transcript_search` + `kg_query` when 00025 applies. It migrates through
+// 00024 (before this migration; the trigger there is the 00013 dice-only body),
+// creates a Campaign to get a dice-only Butler, then applies 00025 and asserts the
+// backfill added the two knowledge grants.
+func TestBackfillGrantsKnowledgeToolsExistingButler(t *testing.T) {
+	dsn := startPostgres(t)
+	db := openSQL(t, dsn)
+	pool := openPool(t, dsn)
+	ctx := context.Background()
+
+	provider, err := storage.NewMigrationProvider(db)
+	if err != nil {
+		t.Fatalf("NewMigrationProvider: %v", err)
+	}
+
+	// Apply through 00024 only: the auto-Butler trigger here is the 00013 dice-only
+	// body, so the Campaign's Butler comes with exactly [dice].
+	if _, err := provider.UpTo(ctx, 24); err != nil {
+		t.Fatalf("migrate up to 00024: %v", err)
+	}
+
+	st := storage.New(pool)
+	tenantID, err := st.CreateTenant(ctx, "Knowledge Co")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	campaignID, err := st.CreateCampaign(ctx, storage.NewCampaign{TenantID: tenantID, Name: "Old Campaign"})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	butler, err := st.GetButler(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("GetButler at v24: %v", err)
+	}
+
+	// Apply 00025: extends the trigger AND backfills the pre-existing Butler.
+	if _, err := provider.UpTo(ctx, 25); err != nil {
+		t.Fatalf("migrate up to 00025: %v", err)
+	}
+
+	grants, err := st.ListToolGrants(ctx, butler.ID)
+	if err != nil {
+		t.Fatalf("ListToolGrants after backfill: %v", err)
+	}
+	names := map[string]bool{}
+	for _, g := range grants {
+		names[g.ToolName] = true
+	}
+	for _, want := range []string{"dice", "transcript_search", "kg_query"} {
+		if !names[want] {
+			t.Errorf("pre-existing Butler missing %q after 00025 backfill; has %+v", want, grants)
+		}
+	}
+	if len(grants) != 3 {
+		t.Fatalf("pre-existing Butler has %d grants after backfill, want 3: %+v", len(grants), grants)
 	}
 }

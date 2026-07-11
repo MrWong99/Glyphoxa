@@ -268,6 +268,44 @@ func TestAddressDetector_ButlerGMGate_CharacterUntouched(t *testing.T) {
 	)
 }
 
+// speakerAwareMatchFunc adapts a two-arg function to the SpeakerID-aware matcher
+// seam. It implements BOTH TargetMatcher and orchestrator.SpeakerAwareMatcher so
+// a test can prove the detector prefers TargetMatchFrom and threads the
+// STTFinal.SpeakerID.
+type speakerAwareMatchFunc func(speakerID, text string) []voiceevent.AddressRouted
+
+func (f speakerAwareMatchFunc) TargetMatch(text string) []voiceevent.AddressRouted {
+	return f("", text)
+}
+func (f speakerAwareMatchFunc) TargetMatchFrom(speakerID, text string) []voiceevent.AddressRouted {
+	return f(speakerID, text)
+}
+
+// TestAddressDetector_PrefersSpeakerAwareMatcher pins the #256 detector change: a
+// matcher that implements SpeakerAwareMatcher is routed through TargetMatchFrom
+// with the utterance's SpeakerID (so the matcher-side Butler gate can key off it),
+// and the TurnID is still carried onto each decision.
+func TestAddressDetector_PrefersSpeakerAwareMatcher(t *testing.T) {
+	h := voicetest.New(t)
+	var gotSpeaker string
+	m := speakerAwareMatchFunc(func(speakerID, text string) []voiceevent.AddressRouted {
+		gotSpeaker = speakerID
+		return []voiceevent.AddressRouted{{At: time.Now(), Text: text, Target: goblinTarget}}
+	})
+	d := orchestrator.NewAddressDetector(m)
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Goblin!", SpeakerID: "spk-7", TurnID: "turn-1"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.AddressRouted) bool { return e.Target == goblinTarget && e.TurnID == "turn-1" },
+		"address.routed via TargetMatchFrom carries the TurnID",
+	)
+	if gotSpeaker != "spk-7" {
+		t.Fatalf("TargetMatchFrom got SpeakerID %q, want spk-7", gotSpeaker)
+	}
+}
+
 // TestAddressDetector_NilMatcher_Panics pins that the detector has no matching
 // algorithm to fall back to: construction requires a matcher.
 func TestAddressDetector_NilMatcher_Panics(t *testing.T) {
