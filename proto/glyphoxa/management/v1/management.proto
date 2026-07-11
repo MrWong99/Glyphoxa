@@ -1064,6 +1064,22 @@ service SessionService {
   // ADR-0048), returning nothing (#308). A missing/foreign id is CodeNotFound.
   // State-changing: CSRF + auth guard it.
   rpc DeleteHighlight(DeleteHighlightRequest) returns (DeleteHighlightResponse);
+  // ListShareChannels lists the deployment guild's text channels the GM can post a
+  // Highlight file into, plus the Active Campaign's last-chosen channel so the share
+  // dialog pre-selects it (#310, Epic 8, ADR-0051). A read (NO_SIDE_EFFECTS); a
+  // missing saved Bot token is CodeFailedPrecondition ("save a Discord Bot token
+  // first"), mirroring ResolveGuildInvite.
+  rpc ListShareChannels(ListShareChannelsRequest) returns (ListShareChannelsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // ShareHighlight delivers a promoted Session Highlight into Discord on explicit GM
+  // action (#310, ADR-0051 GM-only sharing — no auto-post): either as a file to a
+  // text channel (remembered per Campaign) or as a voice replay into the live voice
+  // channel. Only a 'promoted' Highlight is shareable; a candidate is
+  // CodeFailedPrecondition. An oversize clip is refused (CodeFailedPrecondition, no
+  // re-encode). A missing/foreign/cross-campaign id is CodeNotFound. State-changing:
+  // CSRF + auth guard it.
+  rpc ShareHighlight(ShareHighlightRequest) returns (ShareHighlightResponse);
 }
 
 // Highlight is the wire view of a Session Highlight row (#308, Epic 8): a
@@ -1153,6 +1169,49 @@ message DeleteHighlightRequest {
 
 // DeleteHighlightResponse is empty; the delete cascades the clip through the seam.
 message DeleteHighlightResponse {}
+
+// ListShareChannelsRequest is empty: the guild is the deployment's single Discord
+// guild and the Campaign is resolved server-side (ADR-0039).
+message ListShareChannelsRequest {}
+
+// TextChannel is one Discord text channel the GM can post a Highlight file into
+// (#310): its snowflake id and display name.
+message TextChannel {
+  // id is the channel's Discord snowflake.
+  string id = 1;
+  // name is the channel's display name (e.g. "highlights").
+  string name = 2;
+}
+
+// ListShareChannelsResponse carries the guild's text channels (sorted for the
+// dialog) and the Active Campaign's last-chosen share channel id so the dialog
+// pre-selects it. last_share_channel_id is empty when the campaign has never
+// shared to a channel.
+message ListShareChannelsResponse {
+  // channels are the guild's text channels the GM may post into.
+  repeated TextChannel channels = 1;
+  // last_share_channel_id is the Campaign's remembered channel (empty = none yet).
+  string last_share_channel_id = 2;
+}
+
+// ShareHighlightRequest names the Highlight to share and the delivery mode (#310).
+message ShareHighlightRequest {
+  // id is the promoted Highlight to share.
+  string id = 1;
+  // mode selects the delivery: a text channel (file upload) or a voice replay.
+  oneof mode {
+    // text_channel_id posts the clip as a file to this Discord text channel; the
+    // choice is remembered per Campaign for the dialog's next pre-selection.
+    string text_channel_id = 2;
+    // voice_replay=true replays the clip into the live voice channel (requires a
+    // live Voice Session).
+    bool voice_replay = 3;
+  }
+}
+
+// ShareHighlightResponse is empty: success is the delivery itself (a posted file or
+// a queued replay); failures surface as Connect error codes.
+message ShareHighlightResponse {}
 
 // GenerateRecapRequest carries the Voice Session ids to recap; each must belong
 // to the server-resolved Active Campaign (ADR-0039) — a cross-campaign or

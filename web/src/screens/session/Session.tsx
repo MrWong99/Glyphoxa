@@ -15,6 +15,7 @@ import { useSessionEvents, formatClock } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
 import { HighlightsStrip } from "./HighlightsStrip";
+import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
 
@@ -549,7 +550,15 @@ export function Session() {
       {renderedSessionId && (
         <section className="gx-session__highlights">
           <h2 className="gx-section-title">Highlights</h2>
-          <HighlightsStrip sessionId={renderedSessionId} live={active && !viewingPast} />
+          <HighlightsStrip
+            sessionId={renderedSessionId}
+            live={active && !viewingPast}
+            renderActions={(h) =>
+              h.status === "promoted" ? (
+                <ShareHighlightDialog highlight={h} sessionLive={active} />
+              ) : null
+            }
+          />
         </section>
       )}
       </div>
