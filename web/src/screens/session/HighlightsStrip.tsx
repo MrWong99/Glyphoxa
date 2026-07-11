@@ -73,10 +73,15 @@ export function HighlightsStrip({
   // the strip stays out of the way entirely.
   if (!sessionId) return null;
 
-  // A failed load must NOT masquerade as the empty state (#270 lesson): "no
-  // highlights yet" reads as a consent-off / never-armed session, hiding a real
-  // fetch failure. Surface the error inline instead.
-  if (query.isError) {
+  // A load failure with NO cached data must not masquerade as the empty state
+  // (#270 lesson): "no highlights yet" reads as a consent-off / never-armed
+  // session, hiding a real failure. Full-replace with the error only in that
+  // no-data case. A failure WITH stale data (a 10s-poll blip mid-playback, or a
+  // refetch-on-focus on a settled ended session) is handled below by retaining
+  // the list — full-replacing there would unmount every <audio> and, since the
+  // ended-session interval is false, strand the strip in error forever (mirrors
+  // the getSession "renders from retained data" posture, Session.tsx).
+  if (query.isError && !query.data) {
     return (
       <p className="gx-highlights__error" role="alert">
         Couldn't load the highlights: {query.error.message}
@@ -99,9 +104,17 @@ export function HighlightsStrip({
 
   return (
     <>
+    {query.isError && (
+      <p className="gx-highlights__stale" role="alert" data-testid="highlights-stale-error">
+        Couldn't refresh the highlights — showing the last loaded set.
+      </p>
+    )}
     <ul className="gx-highlights__list">
       {highlights.map((h) => {
         const isCandidate = h.status === "candidate";
+        const range = `${clipClock(h.startsAt)}–${clipClock(h.endsAt)}`;
+        // A short, speakable label for the otherwise-anonymous native controls.
+        const clipLabel = `Clip: ${h.excerpt.slice(0, 40)}`;
         return (
           <li key={h.id} className="gx-highlight" data-highlight-id={h.id}>
             <div className="gx-highlight__head">
@@ -114,9 +127,7 @@ export function HighlightsStrip({
                   Promoted
                 </Badge>
               )}
-              <time className="gx-highlight__clock">
-                {clipClock(h.startsAt)}–{clipClock(h.endsAt)}
-              </time>
+              <time className="gx-highlight__clock">{range}</time>
               <span className="gx-highlight__score">{h.score.toFixed(1)}</span>
             </div>
             <blockquote className="gx-highlight__excerpt">{h.excerpt}</blockquote>
@@ -125,6 +136,7 @@ export function HighlightsStrip({
               className="gx-highlight__audio"
               controls
               preload="none"
+              aria-label={clipLabel}
               src={`/api/v1/highlights/${h.id}/clip`}
             />
             {h.imageContentType !== "" && (
@@ -132,6 +144,7 @@ export function HighlightsStrip({
                 className="gx-highlight__image"
                 src={`/api/v1/highlights/${h.id}/image`}
                 alt={h.reason}
+                loading="lazy"
               />
             )}
             <div className="gx-highlight__actions">
@@ -150,6 +163,7 @@ export function HighlightsStrip({
                 variant="ghost"
                 size="sm"
                 iconStart={<Trash2 size={14} />}
+                aria-label={`Delete highlight ${range}`}
                 onClick={() => setConfirming(h)}
                 disabled={remove.isPending}
               >

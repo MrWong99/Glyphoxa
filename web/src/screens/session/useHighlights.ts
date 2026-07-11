@@ -15,6 +15,13 @@ export const HIGHLIGHTS_LIVE_MS = 10_000;
 // the generation lands, then stops once every promoted Highlight has its image.
 export const HIGHLIGHTS_IMAGE_MS = 15_000;
 
+// HIGHLIGHTS_IMAGE_POLL_CAP bounds the image-wait cadence. When image enrichment
+// is unconfigured server-side (a nil enqueuer disables it permanently, #311), a
+// promoted Highlight's imageContentType stays "" forever — an uncapped 15s poll
+// would then run for the life of the screen. Cap it: ~40 polls ≈ 10 min is far
+// past any real generation latency, so a settled ended session stops polling.
+export const HIGHLIGHTS_IMAGE_POLL_CAP = 40;
+
 // highlightsRefetchInterval is the ListHighlights refetchInterval policy, kept a
 // PURE function of (live, highlights) so its four branches are pinned by a unit
 // test (mirrors sessionRefetchInterval, Session.tsx). While live, poll to catch
@@ -48,8 +55,16 @@ export function useHighlights(sessionId: string | undefined, live: boolean) {
       // silently — the strip surfaces it inline (never a false empty state, #270),
       // and while live the refetch interval re-fires the read on its own.
       retry: false,
-      refetchInterval: (query) =>
-        highlightsRefetchInterval(live, query.state.data?.highlights ?? []),
+      refetchInterval: (query) => {
+        const base = highlightsRefetchInterval(live, query.state.data?.highlights ?? []);
+        // Cap the ended-session image-wait cadence so an unconfigured enricher
+        // (imageContentType never fills) can't poll forever. dataUpdateCount
+        // counts successful fetches since mount; once past the cap, stop.
+        if (base === HIGHLIGHTS_IMAGE_MS && query.state.dataUpdateCount > HIGHLIGHTS_IMAGE_POLL_CAP) {
+          return false;
+        }
+        return base;
+      },
     },
   );
 }
