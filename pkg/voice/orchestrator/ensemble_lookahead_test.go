@@ -596,6 +596,64 @@ func TestReplier_Lookahead_FirstStartErrorEndsTurn(t *testing.T) {
 	}
 }
 
+// TestReplier_Lookahead_PartialDeliveryNoTTSError pins #391 AC2 for the look-ahead
+// path: when the held FIRST sentence delivers but a LATER sentence start-errors
+// (skip-and-continue, #362), the reaction commits its delivered prefix and NO
+// TurnEnded{tts_error} fires — the delivered prefix's FirstAudio is the success signal.
+func TestReplier_Lookahead_PartialDeliveryNoTTSError(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	pump := newFakeLookahead()
+	// The held first sentence "React one." delivers; the SECOND "React two." start-errors.
+	synth := &laneSynth{pump: pump, holdGate: make(chan struct{}), failOn: map[string]bool{"React two.": true}}
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft:          map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}),
+			spokeCh:        make(chan string, 2),
+		},
+		react:          map[string]string{goblinTarget.AgentID: "React one. React two."},
+		reactSentences: map[string][]string{goblinTarget.AgentID: {"React one.", "React two."}},
+		reactSpokeCh:   make(chan string, 2),
+	}
+	replier := lookaheadReplier(h, floor, spk, pump, synth)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tpd", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Tpd" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tpd"})
+	close(spk.speakPause)
+
+	var rID string
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleReaction) bool {
+		rID = e.TurnID
+		return e.LeadTurnID == "Tpd"
+	}, "ensemble.reaction announced")
+	select {
+	case <-spk.reactSpokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SpeakReaction never returned")
+	}
+	waitFloorFree(t, floor)
+	pump.waitDiscard(t)
+
+	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "React one." {
+		t.Fatalf("partial reaction committed %q, want the delivered prefix %q", got, "React one.")
+	}
+	// Partial delivery is NOT a tts_error, and no barge fired: zero TurnEnded for rID.
+	for _, e := range h.Events() {
+		if te, ok := e.(voiceevent.TurnEnded); ok && te.TurnID == rID {
+			t.Fatalf("partial-delivery reaction published TurnEnded{%s}, want none (AC2)", te.Reason)
+		}
+	}
+}
+
 // TestReplier_Lookahead_BargeDuringReactionEndsSubTurn pins #375 legacy parity: a
 // barge WHILE the released Reaction plays ends the reaction sub-turn with a barge
 // TurnEnded under its OWN id.

@@ -600,14 +600,19 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
 	}, leadName, leadText, reaction, dispatch)
 
+	// Sample the barge state ONCE for both terminal branches below: a barge landing
+	// between them must not fire BOTH a tts_error (from a nil re-sample) and a barge
+	// (from a later non-nil re-sample) for the same rID. One snapshot makes the two
+	// genuinely exclusive.
+	bargeErr := turnCtx.Err()
+
 	// All reaction sentences failed to START (nothing delivered) under a live turn:
 	// end the sub-turn tts_error (#391), mirroring the Lead (dispatchStream), so the
 	// reaction id — already announced via EnsembleReaction, but with no FirstAudio —
 	// is never reaped by the metrics TTL sweep as an abandoned/no_first_audio turn. A
 	// partial delivery (delivered != "") keeps current semantics (ADR-0012): its
-	// FirstAudio is the success signal, so no terminal event fires. Mutually exclusive
-	// with the barge branch below (that one needs a cancelled ctx).
-	if ttsFailed && delivered == "" && turnCtx.Err() == nil {
+	// FirstAudio is the success signal, so no terminal event fires.
+	if ttsFailed && delivered == "" && bargeErr == nil {
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndTTSError})
 	}
 
@@ -624,7 +629,7 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 	// clobber neither. The Lead's line — cleanly completed before the barge — keeps its
 	// delivered text; the relay treats a TurnEnded after a line is delivered as a normal
 	// interruption, not a re-count.
-	if dispatched && turnCtx.Err() != nil {
+	if dispatched && bargeErr != nil {
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndBarge})
 	}
 }
