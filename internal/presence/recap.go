@@ -66,10 +66,12 @@ type RecapStore interface {
 }
 
 // ButlerVoicer is the decision-6a socket for a truly VOICED recap: speaking the
-// recap prose into the live voice channel as the Butler. NOBODY implements it in
-// this epic — the Butler is address-only and has never been voiced (ADR-0009/0024),
-// so the wiring passes nil and a `voiced` request degrades to public text with a
-// hint. Epic 7 fills this in.
+// recap prose into the live voice channel as the Butler. *session.Manager satisfies
+// it structurally (#365): the now-voiced Butler (ADR-0009 #299) speaks via
+// SpeakAsButler → SayAs, landing the recap as a KindButler transcript line. The
+// `voiced` request still degrades to public text with a hint (decision 6a) whenever
+// it can't truly be voiced: no wired voicer, no live session, or a VOICELESS Butler
+// (SpeakAsButler returns an error, which deliverRecap turns into the same degrade).
 type ButlerVoicer interface {
 	SpeakAsButler(ctx context.Context, text string) error
 }
@@ -254,13 +256,18 @@ func isRecappable(vs storage.VoiceSession) bool {
 // kept under Discord's 2000-char cap (never truncated, #271).
 func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voiceMode bool, delivery string, publicReply bool, text string) error {
 	if voiceMode {
-		if err := butler.SpeakAsButler(ctx, text); err != nil {
-			return fmt.Errorf("presence: voice recap via butler: %w", err)
+		if err := butler.SpeakAsButler(ctx, text); err == nil {
+			// The confirmation is GM-only, matching the ephemeral placeholder. As the first
+			// post-Defer reply it lands as the placeholder edit (registry-wide rule, #335) at
+			// the Defer's ephemeral visibility — exactly right.
+			return ic.Followup("Recap voiced in the voice channel.", true)
 		}
-		// The confirmation is GM-only, matching the ephemeral placeholder. As the first
-		// post-Defer reply it lands as the placeholder edit (registry-wide rule, #335) at
-		// the Defer's ephemeral visibility — exactly right.
-		return ic.Followup("Recap voiced in the voice channel.", true)
+		// The Butler could not actually voice it — the default Butler is voiceless
+		// (ErrButlerVoiceless), or the live session ended during the up-to-120s recap
+		// (ErrNoActiveSession). Do NOT discard the finished recap or claim a phantom
+		// voicing (ADR-0012 deliver-then-commit): fall through to the SAME public-text
+		// degrade path an unwired voicer takes (decision 6a), so the room still gets it.
+		publicReply = true
 	}
 
 	body := text

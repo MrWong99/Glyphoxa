@@ -318,6 +318,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		decision    chan reactionDecision
 		s1Ch        chan string
 		done        chan struct{}
+		ttsErrCh    chan bool
 		cancelReact func()
 	)
 	if lookaheadOn {
@@ -330,12 +331,17 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		// RELEASE (F1) — after EnsembleReaction attributes who spoke — not at pre-render.
 		s1Ch = make(chan string, 1)
 		done = make(chan struct{})
+		// ttsErrCh carries the Reaction's all-start-error verdict (#391) from the
+		// prerender goroutine to releaseReaction: true iff every reaction sentence failed
+		// to start (nothing delivered), so the coordinator ends the sub-turn tts_error
+		// after the goroutine returns. Buffered so the goroutine's send never blocks.
+		ttsErrCh = make(chan bool, 1)
 		defer func() {
 			cancelReact()
 			<-done
 			r.lookahead.DiscardLookahead(rID)
 		}()
-		go r.prerenderReaction(reactCtx, rt, e, reactor, rID, lead.target.Name, lead.text, reactCh, decision, s1Ch, done)
+		go r.prerenderReaction(reactCtx, rt, e, reactor, rID, lead.target.Name, lead.text, reactCh, decision, s1Ch, done, ttsErrCh)
 	}
 
 	// Speak the Lead's draft under turnCtx. The dispatch closure mirrors
@@ -414,7 +420,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// (#389) held nothing — releaseReaction posts it now, post-gate. The uniform defer
 	// above discards anything left held on any early return here.
 	if lookaheadOn {
-		r.releaseReaction(turnCtx, rt, bus, e, reactor, rID, lead.target.Name, lead.text, decision, s1Ch, done)
+		r.releaseReaction(turnCtx, rt, bus, e, reactor, rID, lead.target.Name, lead.text, decision, s1Ch, done, ttsErrCh)
 		return
 	}
 	r.speakReaction(turnCtx, rt, bus, e, reactor, lead.target.Name, lead.text, reactCh)
@@ -429,7 +435,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 // holds that sentence until [Replier.releaseReaction] releases it. reactCtx is a
 // child of turnCtx cancelled by the coordinator's uniform teardown (barge/gate-fail/
 // decline/happy), so a torn-down unit unwinds this goroutine. It closes done on exit.
-func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText string, reactCh <-chan reactionResult, decision chan<- reactionDecision, s1Ch chan<- string, done chan<- struct{}) {
+func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText string, reactCh <-chan reactionResult, decision chan<- reactionDecision, s1Ch chan<- string, done chan<- struct{}, ttsErrCh chan<- bool) {
 	defer close(done)
 
 	var reaction string
@@ -463,6 +469,7 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 
 	rctx := voiceevent.WithTurnID(reactCtx, rID)
 	first := true
+	var ttsFailed bool
 	dispatch := func(rep Reply) error {
 		if err := reactCtx.Err(); err != nil {
 			return err
@@ -485,6 +492,7 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 			if reactCtx.Err() != nil {
 				return reactCtx.Err()
 			}
+			ttsFailed = true
 			if lookahead {
 				// ANY start-error on the held first sentence aborts the Reaction as a unit
 				// (see [errReactionLookaheadAborted]): converting ErrNotDelivered into a
@@ -501,9 +509,17 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 		}
 		return nil
 	}
-	_, _ = rt.SpeakReaction(rctx, voiceevent.AddressRouted{
+	delivered, _ := rt.SpeakReaction(rctx, voiceevent.AddressRouted{
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
 	}, leadName, leadText, reaction, dispatch)
+
+	// Hand releaseReaction the all-start-error verdict (#391): true iff a sentence
+	// failed to start AND nothing was delivered — the held first sentence aborted the
+	// unit (delivered "") — so the coordinator ends the sub-turn tts_error. A partial
+	// delivery (delivered != "") keeps current semantics (ADR-0012) and reports false.
+	// A ctx-cancel (barge) sets no ttsFailed, so it also reports false; releaseReaction
+	// takes its barge branch instead.
+	ttsErrCh <- ttsFailed && delivered == ""
 }
 
 // releaseReaction is the coordinator tail of the look-ahead Reaction (#375): after
@@ -515,7 +531,7 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 // publishes a barge [voiceevent.TurnEnded] under the reaction's own id (legacy parity;
 // the Lead's already-delivered line stays committed). A decline or a barge before the
 // release publishes nothing; the uniform defer discards any held audio.
-func (r *Replier) releaseReaction(turnCtx context.Context, rt CrossTalker, bus *voiceevent.Bus, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText string, decision <-chan reactionDecision, s1Ch <-chan string, done <-chan struct{}) {
+func (r *Replier) releaseReaction(turnCtx context.Context, rt CrossTalker, bus *voiceevent.Bus, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText string, decision <-chan reactionDecision, s1Ch <-chan string, done <-chan struct{}, ttsErrCh <-chan bool) {
 	var d reactionDecision
 	select {
 	case <-turnCtx.Done():
@@ -573,6 +589,14 @@ func (r *Replier) releaseReaction(turnCtx context.Context, rt CrossTalker, bus *
 	// The two-TurnEnded-on-barge semantics are intentional (see that method's note).
 	if turnCtx.Err() != nil {
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndBarge})
+		return
+	}
+	// All reaction sentences failed to START (nothing delivered) — the held first
+	// sentence aborted the unit under a live turn (#391). End the sub-turn tts_error,
+	// mirroring the Lead, so the reaction id (already announced via EnsembleReaction,
+	// but with no FirstAudio) is never reaped by the metrics TTL sweep as abandoned.
+	if <-ttsErrCh {
+		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndTTSError})
 	}
 }
 
@@ -648,7 +672,10 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 	rctx := voiceevent.WithTurnID(turnCtx, rID)
 	bus.Publish(voiceevent.EnsembleReaction{At: time.Now(), TurnID: rID, LeadTurnID: e.TurnID, Target: reactor})
 
-	var dispatched bool
+	var (
+		dispatched bool
+		ttsFailed  bool
+	)
 	dispatch := func(rep Reply) error {
 		if err := turnCtx.Err(); err != nil {
 			return err
@@ -663,6 +690,7 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 			}
 			// Start-error under a LIVE ctx (#362): NOT delivered, do not commit — but
 			// the Reaction turn is still alive, so keep draining later sentences.
+			ttsFailed = true
 			return ErrNotDelivered
 		}
 		if err := turnCtx.Err(); err != nil {
@@ -670,7 +698,7 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 		}
 		return nil
 	}
-	_, reactErr := rt.SpeakReaction(rctx, voiceevent.AddressRouted{
+	delivered, reactErr := rt.SpeakReaction(rctx, voiceevent.AddressRouted{
 		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
 	}, leadName, leadText, reaction, dispatch)
 
@@ -678,12 +706,30 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 	// channel TEXT with ZERO TTS dispatch (SpeakReaction → SpeakDraft's text branch).
 	// EnsembleReaction already created this sub-turn's line, so publish its
 	// text_delivered terminal — otherwise the metrics TTL sweep reaps the audio-less
-	// sub-turn as abandoned. Mirrors the routed path's ErrTextDelivered mapping.
+	// sub-turn as abandoned. Mirrors the routed path's ErrTextDelivered mapping. Mutually
+	// exclusive with the #391 tts_error branch below: a text reactor never dispatches, so
+	// ttsFailed stays false and delivered is the non-empty posted text.
 	if errors.Is(reactErr, ErrTextDelivered) {
 		if turnCtx.Err() == nil {
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndTextDelivered})
 		}
 		return
+	}
+
+	// Sample the barge state ONCE for both terminal branches below: a barge landing
+	// between them must not fire BOTH a tts_error (from a nil re-sample) and a barge
+	// (from a later non-nil re-sample) for the same rID. One snapshot makes the two
+	// genuinely exclusive.
+	bargeErr := turnCtx.Err()
+
+	// All reaction sentences failed to START (nothing delivered) under a live turn:
+	// end the sub-turn tts_error (#391), mirroring the Lead (dispatchStream), so the
+	// reaction id — already announced via EnsembleReaction, but with no FirstAudio —
+	// is never reaped by the metrics TTL sweep as an abandoned/no_first_audio turn. A
+	// partial delivery (delivered != "") keeps current semantics (ADR-0012): its
+	// FirstAudio is the success signal, so no terminal event fires.
+	if ttsFailed && delivered == "" && bargeErr == nil {
+		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndTTSError})
 	}
 
 	// A barge cutting the Reaction mid-playback ends this sub-turn under its OWN id
@@ -699,7 +745,7 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 	// clobber neither. The Lead's line — cleanly completed before the barge — keeps its
 	// delivered text; the relay treats a TurnEnded after a line is delivered as a normal
 	// interruption, not a re-count.
-	if dispatched && turnCtx.Err() != nil {
+	if dispatched && bargeErr != nil {
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: rID, Reason: voiceevent.TurnEndBarge})
 	}
 }

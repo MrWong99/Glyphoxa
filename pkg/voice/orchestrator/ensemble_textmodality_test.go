@@ -294,3 +294,63 @@ func TestReplier_Lookahead_TextReactor_PostsAfterLeadThroughRealCast(t *testing.
 		t.Fatalf("TTSInvoked = %v, want exactly the Lead's (a text reactor dispatches nothing)", got)
 	}
 }
+
+// TestReplier_Lookahead_TextReactor_LeadAllStartError_NoPostNoDeadlock is the
+// #389×#391 merge regression: a text reactor whose prerender path sends NOTHING on the
+// #391 ttsErrCh, combined with a Lead whose EVERY sentence start-errors (floor never
+// arms → the audible-Lead gate REFUSES the Reaction, ADR-0027). The text Reaction must
+// NOT post (it would react to a line nobody heard, ADR-0012), releaseReaction is never
+// reached, and the uniform defer's <-done must not wedge on the ttsErrCh the prerender
+// never sent. The unit ends with the Lead's tts_error and a freed floor — no deadlock.
+func TestReplier_Lookahead_TextReactor_LeadAllStartError_NoPostNoDeadlock(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	pump := newFakeLookahead()
+	// The Lead's only sentence start-errors → nothing delivered, no FirstOpus, no arm.
+	synth := &laneSynth{pump: pump, failOn: map[string]bool{"Bart leads.": true}, holdGate: make(chan struct{})}
+
+	leadRep := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: bartTarget.AgentID, Markdown: "You are Bart.", Voice: tts.Voice{ProviderID: "test", VoiceID: "bart", Name: "Bart"}},
+		Engine:      fixedEngine{reply: "Bart leads."},
+		Synthesizer: synth,
+	})
+	var (
+		postMu sync.Mutex
+		posted string
+	)
+	butlerRep := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: butlerTarget.AgentID, Markdown: "You are Glyphoxa.", Voice: tts.Voice{ProviderID: "test", VoiceID: "", Name: "Glyphoxa"}},
+		Engine:      reactorEngine{reaction: "As you wish, my lord."},
+		Synthesizer: synth,
+		TextSink: func(_ context.Context, text string) error {
+			postMu.Lock()
+			posted = text
+			postMu.Unlock()
+			return nil
+		},
+	})
+	cast := agent.NewCast(leadRep, butlerRep)
+
+	replier := lookaheadReplier(h, floor, cast, pump, synth)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tl", Text: "Bart, Glyphoxa — thoughts?", Targets: []voiceevent.AddressTarget{bartTarget, butlerTarget}})
+
+	// The Lead's all-start-error turn ends tts_error; the unit must fully unwind (no
+	// deadlock on the never-sent ttsErrCh) and free the floor.
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "Tl" && e.Reason == voiceevent.TurnEndTTSError
+	}, "the Lead ends tts_error")
+	waitFloorFree(t, floor)
+
+	// The text Reaction reacted to a line nobody heard → it must NOT have posted, and no
+	// reaction sub-turn line was ever announced.
+	postMu.Lock()
+	gotPost := posted
+	postMu.Unlock()
+	if gotPost != "" {
+		t.Errorf("text Reaction posted %q to a Lead line nobody heard — the gate must suppress it", gotPost)
+	}
+	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
+}

@@ -68,6 +68,13 @@ var (
 	// mute writes to, so a session swap can't sneak a foreign agent into the new
 	// session's mute set. Mapped to CodeNotFound.
 	ErrAgentNotInCampaign = errors.New("session: no such Agent in the Active Campaign")
+
+	// ErrButlerVoiceless is returned by SpeakAsButler when the Active Campaign's
+	// Butler has no synthesizable Voice (empty VoiceID — the default auto-Butler is
+	// voiceless). Voicing it would publish a KindButler transcript line that never
+	// produces audio (elevenlabs.Synthesize rejects an empty VoiceID), so the caller
+	// degrades to text instead of claiming a phantom voicing (ADR-0012, #365).
+	ErrButlerVoiceless = errors.New("session: the Butler has no voice to speak with")
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
@@ -784,22 +791,23 @@ func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) 
 }
 
 // SayAs publishes a GM-puppeteered direct-speech request (#295, ADR-0010): the
-// voiced Character NPC with agentID speaks text verbatim in the live Voice Session.
-// It refuses when idle (ErrNoActiveSession) and rejects an agentID that is not a
-// voiced CHARACTER NPC of the active session's Campaign — a foreign agent, an
-// unknown id, or the Butler (voiced now per ADR-0009 #299, but Address-Only and
-// excluded from the /say Character roster by voicedAgents, ADR-0010) — with
-// ErrAgentNotInCampaign.
+// voiced Agent with agentID speaks text verbatim in the live Voice Session. It
+// refuses when idle (ErrNoActiveSession) and rejects an agentID that is not an
+// Agent of the active session's Campaign — a foreign agent or an unknown id — with
+// ErrAgentNotInCampaign. The now-voiced Butler (ADR-0009 #299 amendment) IS a valid
+// target reached via [Manager.SpeakAsButler]; the Discord /say roster still excludes
+// it (say.go's voiced filter), so a GM cannot puppet it by hand.
 //
 // Validation and the publish are SESSION-ATOMIC (mirrors SetAgentMute): the active
 // session is captured, its Campaign is listed with m.mu released (the store read may
 // block), then the event is published only if the SAME session is still active — so
 // a session swap between the roster read and the publish can never voice a foreign
 // agent into the new session. It publishes [voiceevent.SpeakRequested] carrying the
-// agent's Target (id + character role + display name), a fresh TurnID, and the text
-// — NOT [voiceevent.AddressRouted], which would trigger the LLM Replier (ADR-0024).
-// The GM mute is deliberately NOT consulted here (puppeteering is a GM override, so
-// a muted NPC still speaks a /say — the DirectSpeech reactor bypasses the mute gate).
+// agent's Target (id + the Agent's OWN role + display name — a butler-role Target
+// projects a KindButler line, ADR-0040), a fresh TurnID, and the text — NOT
+// [voiceevent.AddressRouted], which would trigger the LLM Replier (ADR-0024). The GM
+// mute is deliberately NOT consulted here (puppeteering is a GM override, so a muted
+// NPC still speaks a /say — the DirectSpeech reactor bypasses the mute gate).
 func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
 	m.mu.Lock()
 	as := m.active
@@ -816,7 +824,7 @@ func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
 	}
 	var target storage.Agent
 	found := false
-	for _, a := range voicedAgents(agents) {
+	for _, a := range agents {
 		if a.ID.String() == agentID {
 			target = a
 			found = true
@@ -843,13 +851,68 @@ func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
 			TurnID: voiceevent.NewTurnID(),
 			Target: voiceevent.AddressTarget{
 				AgentID:   agentID,
-				AgentRole: voiceevent.AgentRoleCharacter,
+				AgentRole: sayRole(target.Role),
 				Name:      target.Name,
 			},
 			Text: text,
 		})
 	}
 	return nil
+}
+
+// sayRole maps an Agent's storage Role to the [voiceevent.AddressTarget] role
+// string the transcript relay keys its Line Kind off (ADR-0040): the Butler yields
+// the butler role (→ KindButler pill), every other Agent the character role. The two
+// vocabularies share their underlying strings, but mapping explicitly keeps SayAs
+// decoupled from that coincidence.
+func sayRole(r storage.AgentRole) string {
+	if r == storage.AgentRoleButler {
+		return voiceevent.AgentRoleButler
+	}
+	return voiceevent.AgentRoleCharacter
+}
+
+// SpeakAsButler voices text verbatim as the Active Campaign's Butler in the live
+// Voice Session (#365) — the recap decision-6a voiced on-ramp (satisfies
+// presence.ButlerVoicer structurally). It resolves the session's Butler from the
+// roster and delegates to [Manager.SayAs], so the published SpeakRequested carries
+// the Butler's butler-role Target and the transcript projects a KindButler line
+// through the NORMAL relay projection (no hand-crafted row). It refuses when idle
+// (ErrNoActiveSession), a campaign with no Butler yields ErrAgentNotInCampaign, and
+// a VOICELESS Butler (empty VoiceID — the default auto-Butler) yields
+// ErrButlerVoiceless BEFORE any publish, so the recap surface can degrade to text
+// rather than persist a phantom line for unsynthesizable speech (AC1, ADR-0012).
+func (m *Manager) SpeakAsButler(ctx context.Context, text string) error {
+	m.mu.Lock()
+	as := m.active
+	if as == nil {
+		m.mu.Unlock()
+		return ErrNoActiveSession
+	}
+	campaignID := as.campaignID
+	m.mu.Unlock()
+
+	agents, err := m.store.ListAgents(ctx, campaignID)
+	if err != nil {
+		return fmt.Errorf("session: list agents for butler say: %w", err)
+	}
+	for _, a := range agents {
+		if a.Role != storage.AgentRoleButler {
+			continue
+		}
+		// The default auto-Butler is voiceless (empty VoiceID). Refuse BEFORE SayAs
+		// publishes anything, so no phantom KindButler line is persisted for speech the
+		// room can never hear (AC1: "when a live session has a VOICED Butler").
+		voice, err := storage.VoiceFromJSON(a.Voice)
+		if err != nil {
+			return fmt.Errorf("session: decode butler voice: %w", err)
+		}
+		if voice.VoiceID == "" {
+			return ErrButlerVoiceless
+		}
+		return m.SayAs(ctx, a.ID.String(), text)
+	}
+	return ErrAgentNotInCampaign
 }
 
 // agentInList reports whether agentID (a UUID string) names an Agent in agents.
