@@ -27,9 +27,11 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
@@ -604,6 +606,37 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// Session Highlight campaign-clip sweep (#308, ADR-0048/0049): drops a hard-deleted
 	// Campaign's clip blobs, enqueued in the delete's own transaction (idempotent).
 	jobRunner.Register(highlight.JobKindSweepCampaignClips, highlight.CampaignSweepHandler(blobStore, log))
+	// Session Highlight AI image enrichment (#311, ADR-0004 amendment/0049): a
+	// promoted Highlight gets a Gemini-generated scene that lands through the blob
+	// seam. The factory resolves the tenant's image BYOK key under the hybrid policy
+	// (ADR-0039): a saved key needs the cipher (else a loud error, never a silent
+	// env fallback), no row falls back to GEMINI_API_KEY, and neither present is
+	// ErrImageNotConfigured (the handler leaves the Highlight intact without media).
+	imageFactory := func(fctx context.Context, tenantID uuid.UUID) (imagegen.Generator, string, error) {
+		var cfgPtr *storage.ProviderConfig
+		cfg, cerr := store.GetProviderConfigByComponent(fctx, tenantID, storage.ComponentImage)
+		if cerr == nil {
+			cfgPtr = &cfg
+		} else if !errors.Is(cerr, storage.ErrNotFound) {
+			return nil, "", cerr
+		}
+		key, kerr := llmbuild.ResolveKey(cipher, cfgPtr, storage.ComponentImage)
+		if kerr != nil {
+			return nil, "", kerr // saved key without cipher = loud error (ADR-0039)
+		}
+		if key == "" {
+			key = os.Getenv(imagegen.APIKeyEnv)
+		}
+		if key == "" {
+			return nil, "", highlight.ErrImageNotConfigured
+		}
+		model := imagegen.DefaultModel
+		if cfgPtr != nil && cfgPtr.Model != "" {
+			model = cfgPtr.Model
+		}
+		return imagegen.NewGemini(key, imagegen.WithModel(model)), model, nil
+	}
+	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, metrics, log))
 	go jobRunner.Run(ctx)
 
 	// Boot-time retention backstop (#308, ADR-0051, the ReconcileOrphans/#184 spirit):
@@ -879,7 +912,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// Session Highlights read/mutate (#308): List/Get/Promote/Delete over the same
 	// store + blob seam the Voice process writes through. Wired here so the many
 	// NewSessionServer call sites keep their signature.
-	sessionSrv.SetHighlights(store, blobStore)
+	sessionSrv.SetHighlights(store, blobStore, jobEnqueuer{store})
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
@@ -913,6 +946,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
 		// Session Highlight clip (#308): operator-gated audio byte stream with Range.
 		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, http.HandlerFunc(clipServer.ServeClip))},
+		// Session Highlight AI image (#311): operator-gated image byte stream, same
+		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
+		{Path: "GET /api/v1/highlights/{id}/image", Handler: auth.RequireSession(store, http.HandlerFunc(clipServer.ServeImage))},
 		// Campaign bundle export (#290): streamed gzip download, operator-gated.
 		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
 		// Campaign bundle import (#291): multipart upload, operator-gated, plus the

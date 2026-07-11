@@ -31,6 +31,17 @@ func TestMeterKnownLLMPrice(t *testing.T) {
 	approx(t, m.Status().EstimatedUSD, want.inputPerMTok+want.outputPerMTok)
 }
 
+// TestMeterGeminiImagePrice: a generated image (#311) is metered as Gemini LLM
+// output tokens and priced from the known image-model entry (no default warning).
+func TestMeterGeminiImagePrice(t *testing.T) {
+	m := NewMeter(Caps{}, nil, nil, nil)
+	// One image ≈ 1290 output tokens plus a small prompt.
+	m.LLMTokens(observe.ProviderGemini, "gemini-2.5-flash-image", 40, 1290)
+	want := llmPrices[llmKey{observe.ProviderGemini, "gemini-2.5-flash-image"}]
+	expected := 40.0/1e6*want.inputPerMTok + 1290.0/1e6*want.outputPerMTok
+	approx(t, m.Status().EstimatedUSD, expected)
+}
+
 // TestMeterUnknownModelWarnsOnce uses a model with no price entry: it falls back
 // to the conservative default AND logs exactly one warning even across repeats.
 func TestMeterUnknownModelWarnsOnce(t *testing.T) {

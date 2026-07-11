@@ -1100,6 +1100,13 @@ message Highlight {
   google.protobuf.Timestamp created_at = 13;
   // promoted_at is when the GM promoted it; unset while a candidate.
   google.protobuf.Timestamp promoted_at = 14;
+  // image_content_type is the AI-generated scene's MIME type (#311, Epic 8);
+  // empty means no image yet (unenriched, unconfigured, or a failed generation).
+  // The image bytes are served through GET /highlights/{id}/image; the blob key
+  // is NEVER exposed (clip_key posture).
+  string image_content_type = 15;
+  // image_size_bytes is the stored image's size in bytes (0 when no image yet).
+  int64 image_size_bytes = 16;
 }
 
 // ListHighlightsRequest names the Voice Session whose Highlights to list.
