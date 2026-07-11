@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +67,13 @@ func (s *fakeCrossTalk) SpeakReaction(ctx context.Context, e voiceevent.AddressR
 	var delivered strings.Builder
 	for i, snt := range sentences {
 		if err := dispatch(orchestrator.Reply{Sentence: snt, Voice: tts.Voice{VoiceID: id, Name: id}}); err != nil {
-			return delivered.String(), nil // barge: stop the drain, delivered-only
+			// Three-class dispatch contract (#362, mirrors real SpeakReaction): a
+			// start-error (ErrNotDelivered) skips this sentence but keeps draining;
+			// any other error (a barge cancel) stops the drain, delivered-only.
+			if errors.Is(err, orchestrator.ErrNotDelivered) {
+				continue
+			}
+			return delivered.String(), nil
 		}
 		if delivered.Len() > 0 {
 			delivered.WriteByte(' ')
