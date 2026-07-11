@@ -187,20 +187,29 @@ image in the default `-mode all`. Because `all` mode auto-migrates at startup,
 `docker compose up` reaches the login screen against a migrated DB with **no
 separate migrate step**.
 
-The image is **context-fed** (ADR-0034): the gitignored `gen/` proto stubs and
-the Vite SPA bundle are produced on the host and shipped into the build context,
-not generated inside `docker build`. So on a fresh checkout, before the first
-build:
+The `glyphoxa` service pulls the published `ghcr.io/mrwong99/glyphoxa` image
+(built by `release-image.yml` on each release, ADR-0034), so a machine with
+only Docker needs nothing else — no buf, no Node/npm, no local build:
 
 ```sh
 cp .env.example .env
 $EDITOR .env        # GLYPHOXA_SECRET, DISCORD_OAUTH_*, GLYPHOXA_OPERATOR_IDS (§5–§6)
+docker compose up
+```
+
+Then open `http://127.0.0.1:8080` and **Sign in with Discord**.
+
+To run against a source checkout instead of the published image (e.g. testing
+an unreleased change), use the `build:` fallback still in `compose.yml`. That
+path is **context-fed** (ADR-0034): the gitignored `gen/` proto stubs and the
+Vite SPA bundle are produced on the host and shipped into the build context,
+not generated inside `docker build`:
+
+```sh
 make proto                        # buf generate → gen/  (must exist in the build context)
 (cd web && npm ci && npm run build)   # Vite bundle → internal/spa/dist (else a blank page)
 docker compose up --build
 ```
-
-Then open `http://127.0.0.1:8080` and **Sign in with Discord**.
 
 - **Secrets** load from `.env` via the service's `env_file`. Compose strips the
   shell `export ` prefix and quotes, so the same `.env` the source build sources
@@ -215,7 +224,7 @@ Then open `http://127.0.0.1:8080` and **Sign in with Discord**.
 - The app port publishes on `127.0.0.1:8080` (loopback), matching the default
   OAuth redirect. To reach it from a LAN, change the host side of the `ports:`
   mapping and update `DISCORD_OAUTH_REDIRECT_URL` to match.
-- **Smoke steps:** `docker compose up --build` → wait for the app log line that
+- **Smoke steps:** `docker compose up` → wait for the app log line that
   the web tier is listening → `curl -fsS http://127.0.0.1:8080/` returns the SPA
   → the browser reaches the login screen. `docker compose down -v` tears it down
   and drops the volume.

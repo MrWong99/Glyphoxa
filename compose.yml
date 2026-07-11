@@ -1,18 +1,24 @@
-# Glyphoxa — self-host on-ramp (ADR-0034, issue #282).
+# Glyphoxa — self-host on-ramp (ADR-0034, issue #282, issue #354).
 #
-# The zero-to-running path: `docker compose up --build` stands up a pgvector
-# Postgres and the single Glyphoxa image in the default `-mode all` (web + the
-# in-process voice loop). `all` mode auto-applies the embedded migrations at
-# startup under the advisory lock (ADR-0031), so there is NO separate migrate
-# step — the app reaches the login screen against a migrated DB on its own.
-#
-# BEFORE the first build (gen/ is gitignored and the SPA bundle is context-fed,
-# ADR-0034), on the host:
+# The zero-to-running path: `docker compose up` pulls the published
+# ghcr.io/mrwong99/glyphoxa image and stands up a pgvector Postgres alongside
+# it, in the default `-mode all` (web + the in-process voice loop). `all` mode
+# auto-applies the embedded migrations at startup under the advisory lock
+# (ADR-0031), so there is NO separate migrate step — the app reaches the login
+# screen against a migrated DB on its own. A machine with only Docker needs
+# nothing else:
 #   cp .env.example .env && $EDITOR .env   # fill GLYPHOXA_SECRET, DISCORD_OAUTH_*, GLYPHOXA_OPERATOR_IDS
+#   docker compose up
+# Then open http://127.0.0.1:8080 and sign in with Discord.
+#
+# `build:` stays below as the documented fallback for source checkouts (e.g.
+# testing an unreleased change): `docker compose up --build` builds locally
+# instead of pulling, but first needs buf + node/npm on the host to produce
+# gen/ and the SPA bundle (gen/ is gitignored and the SPA bundle is
+# context-fed, ADR-0034):
 #   make proto                             # buf generate → gen/ (needed in the build context)
 #   (cd web && npm ci && npm run build)    # Vite bundle → internal/spa/dist (else a blank placeholder page)
 #   docker compose up --build
-# Then open http://127.0.0.1:8080 and sign in with Discord.
 #
 # Secrets come from `.env` (shell-format `export NAME='value'`, gitignored) via
 # env_file — Compose strips the `export` prefix and quotes. The DB connection is
@@ -38,7 +44,11 @@ services:
     restart: unless-stopped
 
   glyphoxa:
+    image: ghcr.io/mrwong99/glyphoxa:v0.2.0
     build:
+      # Fallback for `docker compose up --build` from a source checkout — see
+      # the file header. Not used by a plain `docker compose up`, which pulls
+      # `image:` above instead.
       context: .
     # The image's default CMD is `-mode all` (Dockerfile) — the self-host default
     # (ADR-0005/0034). Override the whole command to run another Mode, e.g.
