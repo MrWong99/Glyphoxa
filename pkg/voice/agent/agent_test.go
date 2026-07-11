@@ -166,6 +166,20 @@ func testVoice() tts.Voice {
 	return tts.Voice{ProviderID: "elevenlabs", VoiceID: "v1", Name: "Bart"}
 }
 
+// deliver simulates the dispatch site delivering every returned Reply (#362): it
+// invokes each non-nil OnDelivered hook, committing the batch turn's assistant
+// message to history exactly as a clean spoken turn would. Tests that build
+// multi-turn history call it so the batch commit-on-delivery change (assistant no
+// longer committed eagerly) does not silently drop the prior turn's reply.
+func deliver(replies []orchestrator.Reply) []orchestrator.Reply {
+	for _, rep := range replies {
+		if rep.OnDelivered != nil {
+			rep.OnDelivered()
+		}
+	}
+	return replies
+}
+
 func routed(agentID, text string) voiceevent.AddressRouted {
 	return voiceevent.AddressRouted{
 		At:     time.Now(),
@@ -255,8 +269,8 @@ func TestReply_MultiTurn_CarriesHistory(t *testing.T) {
 	})
 	reply := r.Reply()
 
-	reply(t.Context(), routed("bart", "Do you have rooms?"))
-	reply(t.Context(), routed("bart", "And a meal?"))
+	deliver(reply(t.Context(), routed("bart", "Do you have rooms?")))
+	deliver(reply(t.Context(), routed("bart", "And a meal?")))
 
 	req := prov.lastRequest(t)
 	// Expect: system, user "Do you have rooms?", assistant "Aye.", user "And a meal?".
@@ -298,9 +312,9 @@ func TestReply_HistoryTurns_BoundsTranscript(t *testing.T) {
 	})
 	reply := r.Reply()
 
-	reply(t.Context(), routed("bart", "first-utterance"))
-	reply(t.Context(), routed("bart", "second-utterance"))
-	reply(t.Context(), routed("bart", "third-utterance"))
+	deliver(reply(t.Context(), routed("bart", "first-utterance")))
+	deliver(reply(t.Context(), routed("bart", "second-utterance")))
+	deliver(reply(t.Context(), routed("bart", "third-utterance")))
 
 	req := prov.lastRequest(t)
 	var joined string
@@ -334,6 +348,82 @@ func TestReply_ProviderError_ReturnsNilAndReportsError(t *testing.T) {
 	}
 	if !errors.Is(gotErr, wantErr) {
 		t.Errorf("OnError got %v, want %v", gotErr, wantErr)
+	}
+}
+
+// TestReply_CommitsOnlyOnDelivered pins the batch residual (#362, ADR-0012): the
+// batch [Replier.Reply] no longer commits the assistant turn EAGERLY. It returns a
+// Reply carrying a non-nil OnDelivered hook; the assistant message lands in history
+// ONLY when the dispatch site invokes that hook (i.e. the sentence was delivered).
+func TestReply_CommitsOnlyOnDelivered(t *testing.T) {
+	prov := &fakeProvider{reply: "Welcome, traveler."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+	})
+
+	got := r.Reply()(t.Context(), routed("bart", "Hello."))
+	if len(got) != 1 {
+		t.Fatalf("got %d replies, want 1", len(got))
+	}
+	if got[0].OnDelivered == nil {
+		t.Fatal("batch Reply must carry a non-nil OnDelivered commit hook (#362)")
+	}
+	// BEFORE the hook fires: the assistant turn must NOT be in history yet (this is
+	// the RED against the old eager commit).
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("assistant committed BEFORE delivery: %q", m.Text)
+		}
+	}
+	// AFTER the hook fires: the assistant turn is committed.
+	got[0].OnDelivered()
+	hist := r.HistorySnapshot()
+	assistant := hist[len(hist)-1]
+	if string(assistant.Role) != "assistant" || assistant.Text != "Welcome, traveler." {
+		t.Fatalf("committed assistant turn = {%s %q}, want the delivered reply", assistant.Role, assistant.Text)
+	}
+}
+
+// TestReply_ZeroDelivered_NothingLogged pins the batch zero-delivered rule (#362,
+// ADR-0012): if the OnDelivered hook is never invoked (nothing reached the room),
+// the user message is still committed (parity with the streaming path) but the
+// assistant message is ABSENT — and a follow-up turn's prompt carries no ghost
+// reply.
+func TestReply_ZeroDelivered_NothingLogged(t *testing.T) {
+	prov := &fakeProvider{reply: "Ghost reply."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+	})
+	reply := r.Reply()
+
+	reply(t.Context(), routed("bart", "first utterance")) // hook never invoked → not delivered
+
+	var sawUser, sawAssistant bool
+	for _, m := range r.HistorySnapshot() {
+		switch m.Role {
+		case llm.RoleUser:
+			sawUser = true
+		case llm.RoleAssistant:
+			sawAssistant = true
+		}
+	}
+	if !sawUser {
+		t.Fatal("user message must be committed eagerly (parity with streamTurn)")
+	}
+	if sawAssistant {
+		t.Fatal("assistant message must be ABSENT when nothing was delivered")
+	}
+
+	// A follow-up turn's prompt must not carry the undelivered ghost reply.
+	reply(t.Context(), routed("bart", "second utterance"))
+	for _, m := range prov.lastRequest(t).Messages {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("second-turn prompt carries a ghost assistant reply %q, want none", m.Text)
+		}
 	}
 }
 
@@ -567,6 +657,55 @@ func TestReplyStream_FallbackCancelled_CommitsNothing(t *testing.T) {
 	}
 }
 
+// TestReplyStream_StartError_SentenceNotCommitted_TurnSurvives pins the streaming
+// residual (#362, ADR-0012): when dispatch returns [orchestrator.ErrNotDelivered]
+// for sentence 1 (a TTS start-error under a live turn), that sentence is NOT
+// committed but the turn SURVIVES — sentence 2, delivered, IS committed. The
+// resulting history assistant turn is sentence 2 only (an intended mid-turn gap:
+// the room heard exactly that), and streamTurn returns nil.
+func TestReplyStream_StartError_SentenceNotCommitted_TurnSurvives(t *testing.T) {
+	eng := &fakeStreamEngine{deltas: []string{"First. ", "Second. "}}
+	r := streamReplier(t, eng)
+
+	var n int
+	err := r.ReplyStream()(context.Background(), routed("bart", "go"), func(orchestrator.Reply) error {
+		n++
+		if n == 1 {
+			return orchestrator.ErrNotDelivered // start-error, turn stays alive
+		}
+		return nil // delivered
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (a start-error must not fail the turn)", err)
+	}
+	hist := r.HistorySnapshot()
+	assistant := hist[len(hist)-1]
+	if string(assistant.Role) != "assistant" || strings.TrimSpace(assistant.Text) != "Second." {
+		t.Fatalf("committed assistant turn = {%s %q}, want only the delivered sentence \"Second.\"", assistant.Role, assistant.Text)
+	}
+}
+
+// TestReplyStream_FallbackStartError_CommitsNothing_NoProviderError pins the
+// fallback residual (#362): when the single-completion fallback's dispatch returns
+// ErrNotDelivered (a start-error), nothing was delivered so NO assistant message is
+// committed, AND the sentinel is swallowed (nil return) — returning it up would
+// misclassify the turn as provider_error in dispatchStream.
+func TestReplyStream_FallbackStartError_CommitsNothing_NoProviderError(t *testing.T) {
+	r := streamReplier(t, batchEngine{reply: "The whole answer."})
+
+	err := r.ReplyStream()(context.Background(), routed("bart", "go"), func(orchestrator.Reply) error {
+		return orchestrator.ErrNotDelivered
+	})
+	if err != nil {
+		t.Fatalf("fallback ReplyStream err = %v, want nil (ErrNotDelivered must be swallowed)", err)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("committed assistant turn %q, want none (nothing delivered)", m.Text)
+		}
+	}
+}
+
 // textSinkReplier builds a Butler-style Replier with a TextSink installed,
 // capturing text-delivered answers. voiceless picks whether the Persona carries a
 // Voice (empty VoiceID = text-only Butler).
@@ -747,6 +886,40 @@ func TestReplyStream_TextSink_SpokenBargeMidTurn_CommitsOnlyDelivered(t *testing
 	}
 	if committedAssistant(r, "One. Two. Three.") || committedAssistant(r, "One. Two.") {
 		t.Errorf("undelivered tail committed to history: %+v", r.HistorySnapshot())
+	}
+}
+
+// TestReplyStream_TextSink_SpokenStartError_SentenceNotCommittedTurnSurvives pins
+// the #362 contract on the Butler SPOKEN branch (textModalityTurn): a start-error
+// (ErrNotDelivered) on sentence 1 skips that sentence's commit but the turn
+// SURVIVES — sentence 2, delivered, IS committed, and the turn returns nil (not the
+// sentinel, which would misclassify as provider_error). Mirrors streamTurn.
+func TestReplyStream_TextSink_SpokenStartError_SentenceNotCommittedTurnSurvives(t *testing.T) {
+	eng := batchEngine{reply: "One. Two."}
+	r := textSinkReplier(t, eng, false, func(context.Context, string) error {
+		t.Fatal("spoken answer must not hit the TextSink")
+		return nil
+	})
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, roll"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		if rep.Sentence == "One." {
+			return orchestrator.ErrNotDelivered // start-error, turn stays alive
+		}
+		return nil // delivered
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (a start-error must not fail the spoken Butler turn)", err)
+	}
+	if len(got) != 2 || got[0] != "One." || got[1] != "Two." {
+		t.Fatalf("dispatched = %v, want both sentences attempted (drain continues past start-error)", got)
+	}
+	if !committedAssistant(r, "Two.") {
+		t.Errorf("delivered sentence 2 not committed: %+v", r.HistorySnapshot())
+	}
+	if committedAssistant(r, "One. Two.") || committedAssistant(r, "One.") {
+		t.Errorf("start-errored sentence committed to history: %+v", r.HistorySnapshot())
 	}
 }
 

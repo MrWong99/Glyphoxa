@@ -290,12 +290,18 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 			if turnCtx.Err() != nil {
 				return turnCtx.Err()
 			}
+			// Start-error under a LIVE ctx (#362): the sentence never produced audio,
+			// so it was NOT delivered. Signal ErrNotDelivered — NOT nil, which would let
+			// Speak commit an undelivered sentence (ADR-0012) — while the turn stays
+			// alive so Speak keeps going with later sentences.
 			ttsFailed = true
-			return nil
+			return ErrNotDelivered
 		}
-		// Deliver-then-commit re-check (#363): Dispatch returns nil even when a barge
-		// cancelled the turn DURING the drain (tail audio cut). Report the cancel so
-		// Speak does not commit this undelivered sentence.
+		// Deliver-then-commit re-check (#362, #363): Dispatch returns nil even when a
+		// barge cancelled the turn DURING the drain. The forward boundary is
+		// unobservable here, so a cancel-during-drain is AMBIGUOUS — treated as
+		// undelivered (accepted under-report bias). Report the cancel so Speak does not
+		// commit this sentence.
 		if err := turnCtx.Err(); err != nil {
 			return err
 		}
@@ -317,12 +323,13 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// anywhere above tears it down and a queued Reaction after a barge is FORBIDDEN,
 	// ADR-0027), and the Lead is AUDIBLY on the wire ([Floor.Speaking] — its FirstOpus
 	// fired). Gating on audible delivery, not committed text, is load-bearing: an
-	// all-synthesis-failed Lead still commits its (undelivered) text but produced no
-	// audio and no FirstOpus, so the floor never armed — a Reaction played then would
-	// be UNBARGEABLE (its own FirstOpus{rID} can't arm a floor whose holder turn is the
-	// Lead's) and would speak AFTER the Lead's TurnEnded{tts_error}. Floor.Speaking
-	// true ⟺ FirstOpus(lead) fired ⟺ the barge is armed through the gap and the
-	// Reaction (ADR-0027).
+	// all-synthesis-failed Lead now commits NOTHING (#362 — each start-errored sentence
+	// returns ErrNotDelivered, so Speak skips it), and it produced no audio and no
+	// FirstOpus, so the floor never armed — a Reaction played then would be UNBARGEABLE
+	// (its own FirstOpus{rID} can't arm a floor whose holder turn is the Lead's) and
+	// would speak AFTER the Lead's TurnEnded{tts_error}. Floor.Speaking true ⟺
+	// FirstOpus(lead) fired ⟺ the barge is armed through the gap and the Reaction
+	// (ADR-0027).
 	if !hasReactor || turnCtx.Err() != nil || !r.floor.Speaking() {
 		return
 	}
@@ -378,7 +385,9 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 			if turnCtx.Err() != nil {
 				return turnCtx.Err()
 			}
-			return nil // a synth failure is non-fatal; keep draining the Reaction
+			// Start-error under a LIVE ctx (#362): NOT delivered, do not commit — but
+			// the Reaction turn is still alive, so keep draining later sentences.
+			return ErrNotDelivered
 		}
 		if err := turnCtx.Err(); err != nil {
 			return err
