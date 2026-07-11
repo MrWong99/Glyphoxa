@@ -140,56 +140,72 @@ func pgErrCode(err error) (string, bool) {
 // a duplicate (from, to, type) yields ErrConflict. Validation on the immutable
 // node_type is sound without a trigger because a Node's type never changes.
 func (s *Store) CreateEdge(ctx context.Context, e NewKGEdge) (KGEdge, error) {
-	if e.FromNodeID == e.ToNodeID {
-		return KGEdge{}, ErrInvalidEdge
-	}
-
 	var created KGEdge
 	err := s.InTx(ctx, func(tx *Store) error {
-		rows, err := tx.db.Query(ctx,
-			`SELECT id, node_type FROM kg_node WHERE id IN ($1, $2) AND campaign_id = $3`,
-			e.FromNodeID, e.ToNodeID, e.CampaignID)
+		c, err := createEdgeTx(ctx, tx, e)
 		if err != nil {
-			return fmt.Errorf("storage: create edge: load endpoints: %w", err)
-		}
-		types := map[uuid.UUID]KGNodeType{}
-		for rows.Next() {
-			var id uuid.UUID
-			var t KGNodeType
-			if err := rows.Scan(&id, &t); err != nil {
-				rows.Close()
-				return fmt.Errorf("storage: create edge: scan endpoint: %w", err)
-			}
-			types[id] = t
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("storage: create edge: load endpoints: %w", err)
-		}
-
-		fromType, okFrom := types[e.FromNodeID]
-		toType, okTo := types[e.ToNodeID]
-		if !okFrom || !okTo {
-			return ErrNotFound
-		}
-		if err := ValidateEdge(e.Type, fromType, toType); err != nil {
 			return err
-		}
-
-		row := tx.db.QueryRow(ctx,
-			`INSERT INTO kg_edge (campaign_id, from_node_id, to_node_id, edge_type)
-			 VALUES ($1, $2, $3, $4::kg_edge_type)
-			 RETURNING `+kgEdgeColumns,
-			e.CampaignID, e.FromNodeID, e.ToNodeID, e.Type)
-		c, err := scanKGEdge(row)
-		if err != nil {
-			return mapEdgeWriteErr("insert edge", err)
 		}
 		created = c
 		return nil
 	})
 	if err != nil {
 		return KGEdge{}, err
+	}
+	return created, nil
+}
+
+// createEdgeTx is the shared Edge-creation body run INSIDE an existing
+// transaction (#300): it self-edge-rejects, loads both endpoints' types
+// campaign-scoped, enforces the validity matrix, and INSERTs — the exact steps
+// CreateEdge used to inline. It is reused by ApproveKnowledgeProposal so an
+// approved edge proposal lands under the SAME tx that claims the proposal row,
+// with behaviour identical to a GM-authored CreateEdge (self-edge → ErrInvalidEdge,
+// missing/cross-campaign endpoint → ErrNotFound, matrix violation → ErrInvalidEdge,
+// duplicate → ErrConflict). tx MUST already be a transaction-bound Store.
+func createEdgeTx(ctx context.Context, tx *Store, e NewKGEdge) (KGEdge, error) {
+	if e.FromNodeID == e.ToNodeID {
+		return KGEdge{}, ErrInvalidEdge
+	}
+
+	rows, err := tx.db.Query(ctx,
+		`SELECT id, node_type FROM kg_node WHERE id IN ($1, $2) AND campaign_id = $3`,
+		e.FromNodeID, e.ToNodeID, e.CampaignID)
+	if err != nil {
+		return KGEdge{}, fmt.Errorf("storage: create edge: load endpoints: %w", err)
+	}
+	types := map[uuid.UUID]KGNodeType{}
+	for rows.Next() {
+		var id uuid.UUID
+		var t KGNodeType
+		if err := rows.Scan(&id, &t); err != nil {
+			rows.Close()
+			return KGEdge{}, fmt.Errorf("storage: create edge: scan endpoint: %w", err)
+		}
+		types[id] = t
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return KGEdge{}, fmt.Errorf("storage: create edge: load endpoints: %w", err)
+	}
+
+	fromType, okFrom := types[e.FromNodeID]
+	toType, okTo := types[e.ToNodeID]
+	if !okFrom || !okTo {
+		return KGEdge{}, ErrNotFound
+	}
+	if err := ValidateEdge(e.Type, fromType, toType); err != nil {
+		return KGEdge{}, err
+	}
+
+	row := tx.db.QueryRow(ctx,
+		`INSERT INTO kg_edge (campaign_id, from_node_id, to_node_id, edge_type)
+		 VALUES ($1, $2, $3, $4::kg_edge_type)
+		 RETURNING `+kgEdgeColumns,
+		e.CampaignID, e.FromNodeID, e.ToNodeID, e.Type)
+	created, err := scanKGEdge(row)
+	if err != nil {
+		return KGEdge{}, mapEdgeWriteErr("insert edge", err)
 	}
 	return created, nil
 }

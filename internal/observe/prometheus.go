@@ -87,6 +87,11 @@ type PrometheusRecorder struct {
 	// it stays idempotent across writers and restarts.
 	embeddingBacklog prometheus.Gauge
 
+	// KG embedding backlog (#300, ADR-0032): Knowledge Graph Nodes awaiting an
+	// embedding for the review-surface similarity hint. The embedworker Node phase
+	// Sets it from CountUnembeddedNodes, Set-from-COUNT like embeddingBacklog.
+	kgEmbeddingBacklog prometheus.Gauge
+
 	// memory recall (#122, ADR-0042/0032): NPC Hot Context recalls by outcome —
 	// a speculation hit, an inline miss, or a degraded/unconfigured skip. The
 	// outcome label is a bounded three-value enum (ADR-0032).
@@ -234,6 +239,12 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		Help:      "Transcript chunks awaiting embedding (embedding IS NULL).",
 	})
 
+	r.kgEmbeddingBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, // process-level like embedding_backlog (ADR-0032)
+		Name:      "kg_embedding_backlog",
+		Help:      "Knowledge Graph Nodes awaiting embedding (embedding IS NULL).",
+	})
+
 	r.memoryRecall = counterVec("memory_recall_total",
 		"NPC memory recalls by outcome (#122, ADR-0042): a speculation hit, an inline miss, or a degraded skip.",
 		"outcome")
@@ -271,7 +282,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		r.responseLatency, r.vadHangover, r.addressDetect, r.codecDecode,
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
-		r.memoryRecall, r.kgFacts,
+		r.kgEmbeddingBacklog, r.memoryRecall, r.kgFacts,
 		r.jobsBacklog, r.jobsTotal, r.jobDuration,
 		r.llmTokens, r.ttsCharacters, r.sttAudioSeconds,
 		// Standard runtime collectors so /metrics also reports process/Go health.
@@ -388,6 +399,13 @@ func (r *PrometheusRecorder) KGFacts(o FactsOutcome) {
 // the DB rather than resuming a drifted in-memory delta.
 func (r *PrometheusRecorder) SetEmbeddingBacklog(n int) {
 	r.embeddingBacklog.Set(float64(n))
+}
+
+// SetKGEmbeddingBacklog publishes the current count of Knowledge Graph Nodes
+// awaiting an embedding (#300, ADR-0032). Set-from-COUNT like SetEmbeddingBacklog,
+// so it stays idempotent across the embedworker Node phase and process restarts.
+func (r *PrometheusRecorder) SetKGEmbeddingBacklog(n int) {
+	r.kgEmbeddingBacklog.Set(float64(n))
 }
 
 // --- background job runner (jobs.Metrics, #286/ADR-0049) ---

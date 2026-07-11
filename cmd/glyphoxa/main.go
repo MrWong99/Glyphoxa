@@ -46,6 +46,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
@@ -656,9 +657,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// for BOTH: the backlog gauge exposes the permanent stall and NPC memory recall
 	// stays disabled (AC6 — Agent turns behave exactly as before), rather than
 	// crashing the process.
+	// embedProvider is hoisted out of the resolve branch so the Knowledge Proposal
+	// review surface's similarity hint (#300) can share the SAME resolved provider:
+	// nil (an unsupported provider or a config-read error) leaves the hint on its
+	// fulltext fallback, exactly as the backfill worker stalls loudly.
+	var embedProvider embeddings.Provider
 	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
 		log.Error("embeddings provider unavailable; embedding backfill and NPC memory recall disabled", "err", err)
 	} else {
+		embedProvider = provider
 		// Backfill worker (#116, ADR-0011): claims chunks written with embedding NULL,
 		// embeds their text, and UPDATEs each row — draining the gauge toward zero and
 		// making the chunks returnable by embedding-filtered retrieval. It needs only
@@ -740,7 +747,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.VoiceChannelMembers(ctx, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister, embedProvider)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -831,7 +838,7 @@ func (s highlightClipSweeper) DeleteClip(ctx context.Context, key string) error 
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -859,6 +866,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// campaign so the GM mutes the NPCs actually in the channel, not a durable
 	// selection changed mid-session (#222).
 	campaignSrv.SetSessions(mgr)
+	// The Knowledge Proposal review surface's similarity hint (#300, ADR-0052) shares
+	// the resolved embeddings provider: nil (keyless / unsupported) leaves the hint on
+	// its fulltext fallback rather than disabling review.
+	if embedProvider != nil {
+		campaignSrv.SetEmbedder(embedProvider)
+	}
 	// The Players panel's member picker (#279) lists the Discord Users currently in
 	// the operator's configured voice channel, resolved from the deployment config
 	// and read off the standing presence's voice-state cache (no privileged intent).

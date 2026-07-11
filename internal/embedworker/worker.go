@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,13 +46,24 @@ type Store interface {
 	SetChunkEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string) error
 	// CountUnembeddedChunks reports the remaining NULL-embedding backlog (gauge).
 	CountUnembeddedChunks(ctx context.Context) (int, error)
+	// ListUnembeddedNodes returns up to limit Knowledge Graph Nodes still awaiting
+	// an embedding, oldest first — the node half of the backfill queue (#300).
+	ListUnembeddedNodes(ctx context.Context, limit int) ([]storage.KGNode, error)
+	// SetNodeEmbedding fills one Node's vector and stamps the model, guarded on the
+	// updatedAt the row was LISTED with so a concurrent edit (which bumps updated_at
+	// and NULLs the embedding) is not clobbered by a stale vector (#300).
+	SetNodeEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string, updatedAt time.Time) error
+	// CountUnembeddedNodes reports the remaining NULL-embedding Node backlog (gauge).
+	CountUnembeddedNodes(ctx context.Context) (int, error)
 }
 
 // BacklogGauge receives the current NULL-embedding backlog after each pass that
 // wrote at least one embedding (Set-from-COUNT, never Inc/Dec — ADR-0032).
-// *observe.PrometheusRecorder satisfies it; a nil gauge disables the update.
+// *observe.PrometheusRecorder satisfies it; a nil gauge disables the update. The
+// chunk and Node backlogs are separate gauges (#300).
 type BacklogGauge interface {
 	SetEmbeddingBacklog(n int)
+	SetKGEmbeddingBacklog(n int)
 }
 
 // ProviderConfigStore is the single read [ResolveProvider] needs; *storage.Store
@@ -133,13 +145,22 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// pass claims one batch, embeds it, and writes each vector. An error stops the
-// pass early: a pre-write error (list, provider, wrong count/dimension) writes
+// pass drains one batch from EACH backlog — Transcript Chunks and Knowledge Graph
+// Nodes (#300) — the two independent so an error draining one never starves the
+// other. Both phases carry the same batch/timeout/dim-validation/retry-forever
+// discipline; each re-claims its own leftover work next pass.
+func (w *Worker) pass(ctx context.Context) {
+	w.passChunks(ctx)
+	w.passNodes(ctx)
+}
+
+// passChunks claims one batch, embeds it, and writes each vector. An error stops
+// the phase early: a pre-write error (list, provider, wrong count/dimension) writes
 // nothing, while a mid-batch write error keeps the rows already written and
 // leaves the rest NULL. The still-NULL chunks are re-claimed next pass (the
 // retry). The gauge is re-read only after the whole batch of writes succeeds; a
-// short or aborted pass leaves it as the last pass set it.
-func (w *Worker) pass(ctx context.Context) {
+// short or aborted phase leaves it as the last pass set it.
+func (w *Worker) passChunks(ctx context.Context) {
 	chunks, err := w.store.ListUnembeddedChunks(ctx, w.cfg.BatchSize)
 	if err != nil {
 		w.log.Warn("embed backfill: list unembedded chunks failed; retrying next pass", "err", err)
@@ -154,28 +175,9 @@ func (w *Worker) pass(ctx context.Context) {
 		texts[i] = c.Content
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, w.cfg.CallTimeout)
-	defer cancel()
-	vecs, err := w.provider.Embed(callCtx, texts)
-	if err != nil {
-		w.log.Warn("embed backfill: provider embed failed; chunks stay NULL, retrying next pass",
-			"batch", len(chunks), "err", err)
+	vecs, ok := w.embedBatch(ctx, "chunks", texts)
+	if !ok {
 		return
-	}
-	if len(vecs) != len(chunks) {
-		w.log.Warn("embed backfill: provider returned wrong vector count; abandoning pass",
-			"want", len(chunks), "got", len(vecs))
-		return
-	}
-	// Validate every dimension BEFORE writing any row: a wrong dimension signals a
-	// mis-configured model, so the whole batch is suspect — write none and retry
-	// rather than corrupt the vector store with a partial, wrong-shape write.
-	for i, v := range vecs {
-		if len(v) != embeddings.Dim {
-			w.log.Warn("embed backfill: provider returned a wrong-dimension vector; abandoning pass",
-				"index", i, "want", embeddings.Dim, "got", len(v))
-			return
-		}
 	}
 
 	// Write each row; a failure stops the loop but keeps the rows already written
@@ -191,12 +193,89 @@ func (w *Worker) pass(ctx context.Context) {
 
 	n, err := w.store.CountUnembeddedChunks(ctx)
 	if err != nil {
-		w.log.Warn("embed backfill: recount backlog failed; gauge left stale", "err", err)
+		w.log.Warn("embed backfill: recount chunk backlog failed; gauge left stale", "err", err)
 		return
 	}
 	if w.gauge != nil {
 		w.gauge.SetEmbeddingBacklog(n)
 	}
+}
+
+// passNodes is the Knowledge Graph Node half of the backfill (#300), mirroring
+// passChunks exactly. The embed text is the Node's name + body joined by a blank
+// line and trimmed, so a body-less Node still embeds on its name alone. A wiki edit
+// resets the row's embedding (storage.UpdateNode), so it is re-claimed here.
+func (w *Worker) passNodes(ctx context.Context) {
+	nodes, err := w.store.ListUnembeddedNodes(ctx, w.cfg.BatchSize)
+	if err != nil {
+		w.log.Warn("embed backfill: list unembedded nodes failed; retrying next pass", "err", err)
+		return
+	}
+	if len(nodes) == 0 {
+		return
+	}
+
+	texts := make([]string, len(nodes))
+	for i, n := range nodes {
+		texts[i] = strings.TrimSpace(n.Name + "\n\n" + n.Body)
+	}
+
+	vecs, ok := w.embedBatch(ctx, "nodes", texts)
+	if !ok {
+		return
+	}
+
+	for i, n := range nodes {
+		// Guard the write on the listed updated_at: a Node edited/approved since we
+		// listed it (embedding NULLed, updated_at bumped) matches 0 rows and stays in
+		// the backlog for the next pass to re-embed with fresh text (#300).
+		if err := w.store.SetNodeEmbedding(ctx, n.ID, vecs[i], w.model, n.UpdatedAt); err != nil {
+			w.log.Warn("embed backfill: set node embedding failed; this and later nodes retry next pass",
+				"node_id", n.ID, "err", err)
+			return
+		}
+	}
+
+	count, err := w.store.CountUnembeddedNodes(ctx)
+	if err != nil {
+		w.log.Warn("embed backfill: recount node backlog failed; gauge left stale", "err", err)
+		return
+	}
+	if w.gauge != nil {
+		w.gauge.SetKGEmbeddingBacklog(count)
+	}
+}
+
+// embedBatch runs the shared provider call + validation both phases use: a timeout
+// derived from the run context, a total (one vector per input) and dimension check
+// BEFORE any write. ok=false means the batch is unusable and the phase must abandon
+// this pass (nothing written), leaving the rows NULL for the next pass. kind is the
+// phase label for logs.
+func (w *Worker) embedBatch(ctx context.Context, kind string, texts []string) ([][]float32, bool) {
+	callCtx, cancel := context.WithTimeout(ctx, w.cfg.CallTimeout)
+	defer cancel()
+	vecs, err := w.provider.Embed(callCtx, texts)
+	if err != nil {
+		w.log.Warn("embed backfill: provider embed failed; rows stay NULL, retrying next pass",
+			"kind", kind, "batch", len(texts), "err", err)
+		return nil, false
+	}
+	if len(vecs) != len(texts) {
+		w.log.Warn("embed backfill: provider returned wrong vector count; abandoning pass",
+			"kind", kind, "want", len(texts), "got", len(vecs))
+		return nil, false
+	}
+	// Validate every dimension BEFORE writing any row: a wrong dimension signals a
+	// mis-configured model, so the whole batch is suspect — write none and retry
+	// rather than corrupt the vector store with a partial, wrong-shape write.
+	for i, v := range vecs {
+		if len(v) != embeddings.Dim {
+			w.log.Warn("embed backfill: provider returned a wrong-dimension vector; abandoning pass",
+				"kind", kind, "index", i, "want", embeddings.Dim, "got", len(v))
+			return nil, false
+		}
+	}
+	return vecs, true
 }
 
 // ResolveProvider resolves the process's embeddings Provider and its model from

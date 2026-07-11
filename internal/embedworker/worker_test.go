@@ -35,6 +35,17 @@ type fakeStore struct {
 	listErr   error
 	setFailID uuid.UUID
 	countErr  error
+
+	// Node backlog (#300): mirrors the chunk fields so a test can drive the node
+	// phase independently.
+	pendingNodes  []storage.KGNode
+	embeddedNodes map[uuid.UUID]embedRecord
+	nodeListErr   error
+	nodeSetFailID uuid.UUID
+	nodeCountErr  error
+	// nodeUpdatedAt holds the LIVE updated_at per node id, so a test can bump it
+	// mid-pass to simulate a concurrent edit and exercise the stale-write guard.
+	nodeUpdatedAt map[uuid.UUID]time.Time
 }
 
 type embedRecord struct {
@@ -85,10 +96,91 @@ func (f *fakeStore) CountUnembeddedChunks(_ context.Context) (int, error) {
 	return len(f.pending), nil
 }
 
+func (f *fakeStore) ListUnembeddedNodes(_ context.Context, limit int) ([]storage.KGNode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nodeListErr != nil {
+		return nil, f.nodeListErr
+	}
+	n := limit
+	if n > len(f.pendingNodes) {
+		n = len(f.pendingNodes)
+	}
+	out := make([]storage.KGNode, n)
+	copy(out, f.pendingNodes[:n])
+	return out, nil
+}
+
+func (f *fakeStore) SetNodeEmbedding(_ context.Context, id uuid.UUID, vec []float32, model string, updatedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nodeSetFailID != uuid.Nil && id == f.nodeSetFailID {
+		return errors.New("set node embedding: injected write failure")
+	}
+	// Model the storage guard: a row whose live updated_at no longer matches the
+	// one the worker listed matches 0 rows — nothing is written, the row stays in
+	// the backlog. nodeUpdatedAt holds the LIVE updated_at per id (default: the
+	// listed one, so a normal write succeeds).
+	if cur, ok := f.nodeUpdatedAt[id]; ok && !cur.Equal(updatedAt) {
+		return nil // 0 rows: stale write ignored
+	}
+	for i, n := range f.pendingNodes {
+		if n.ID == id {
+			f.pendingNodes = append(f.pendingNodes[:i], f.pendingNodes[i+1:]...)
+			break
+		}
+	}
+	if f.embeddedNodes == nil {
+		f.embeddedNodes = map[uuid.UUID]embedRecord{}
+	}
+	f.embeddedNodes[id] = embedRecord{vec: append([]float32(nil), vec...), model: model}
+	return nil
+}
+
+// bumpNodeUpdatedAt simulates a concurrent edit landing on a node mid-pass: the
+// live updated_at moves away from what the worker listed, so its pending SetNode-
+// Embedding write will match 0 rows.
+func (f *fakeStore) bumpNodeUpdatedAt(id uuid.UUID, to time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nodeUpdatedAt == nil {
+		f.nodeUpdatedAt = map[uuid.UUID]time.Time{}
+	}
+	f.nodeUpdatedAt[id] = to
+}
+
+func (f *fakeStore) CountUnembeddedNodes(_ context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nodeCountErr != nil {
+		return 0, f.nodeCountErr
+	}
+	return len(f.pendingNodes), nil
+}
+
 func (f *fakeStore) embeddedCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.embedded)
+}
+
+func (f *fakeStore) embeddedNodeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.embeddedNodes)
+}
+
+func (f *fakeStore) pendingNodeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.pendingNodes)
+}
+
+func (f *fakeStore) nodeEmbedRecord(id uuid.UUID) (embedRecord, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.embeddedNodes[id]
+	return r, ok
 }
 
 func (f *fakeStore) pendingCount() int {
@@ -106,14 +198,27 @@ func (f *fakeStore) isEmbedded(id uuid.UUID) bool {
 
 // fakeGauge records every Set so a test can assert the backlog curve.
 type fakeGauge struct {
-	mu   sync.Mutex
-	sets []int
+	mu       sync.Mutex
+	sets     []int
+	nodeSets []int
 }
 
 func (g *fakeGauge) SetEmbeddingBacklog(n int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.sets = append(g.sets, n)
+}
+
+func (g *fakeGauge) SetKGEmbeddingBacklog(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.nodeSets = append(g.nodeSets, n)
+}
+
+func (g *fakeGauge) nodeSnapshot() []int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]int(nil), g.nodeSets...)
 }
 
 func (g *fakeGauge) snapshot() []int {
@@ -124,6 +229,106 @@ func (g *fakeGauge) snapshot() []int {
 
 func chunk(content string) storage.TranscriptChunk {
 	return storage.TranscriptChunk{ID: uuid.New(), CampaignID: uuid.New(), Content: content}
+}
+
+func node(name, body string) storage.KGNode {
+	return storage.KGNode{
+		ID: uuid.New(), CampaignID: uuid.New(), Name: name, Body: body,
+		UpdatedAt: time.Unix(1_700_000_000, 0),
+	}
+}
+
+// editingProvider runs a callback on the FIRST Embed call — after the worker has
+// listed the batch, before it writes — so a test can land a concurrent edit
+// mid-pass. It then delegates to inner for the actual vectors.
+type editingProvider struct {
+	once  sync.Once
+	edit  func()
+	inner embeddings.Provider
+}
+
+func (p *editingProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	p.once.Do(p.edit)
+	return p.inner.Embed(ctx, texts)
+}
+
+// TestPassNodeStaleEditIgnored: a Node edited BETWEEN list and write (its live
+// updated_at moves) is not clobbered by the now-stale vector — the write matches 0
+// rows and the row stays in the backlog for the next pass. Guards the mutable-node
+// stale-embedding race.
+func TestPassNodeStaleEditIgnored(t *testing.T) {
+	n := node("Bart", "v1")
+	store := &fakeStore{pendingNodes: []storage.KGNode{n}}
+	prov := &editingProvider{
+		inner: embeddingstest.Deterministic{},
+		// Simulate a GM edit landing mid-pass: the live updated_at moves off what
+		// the worker listed.
+		edit: func() { store.bumpNodeUpdatedAt(n.ID, time.Unix(1_700_000_099, 0)) },
+	}
+	w := New(store, prov, "m", nil, discardLog(), Config{})
+
+	w.pass(context.Background())
+
+	if _, ok := store.nodeEmbedRecord(n.ID); ok {
+		t.Error("stale vector was installed on an edited node; the guard must skip it")
+	}
+	if store.pendingNodeCount() != 1 {
+		t.Errorf("pendingNodes = %d, want 1 (edited node stays for next pass)", store.pendingNodeCount())
+	}
+}
+
+// TestPassEmbedsNodeBacklog: the node phase mirrors the chunk phase — it drains
+// the Node backlog, embeds name+body (trimmed, blank-line joined), stamps the
+// model, and Sets the KG backlog gauge to the true remaining count.
+func TestPassEmbedsNodeBacklog(t *testing.T) {
+	n0, n1 := node("Bart", "An innkeeper."), node("Neverwinter", "")
+	store := &fakeStore{pendingNodes: []storage.KGNode{n0, n1}}
+	gauge := &fakeGauge{}
+	w := New(store, embeddingstest.Deterministic{}, "nomic-embed-text", gauge, discardLog(), Config{})
+
+	w.pass(context.Background())
+
+	if store.pendingNodeCount() != 0 || store.embeddedNodeCount() != 2 {
+		t.Fatalf("pendingNodes=%d embeddedNodes=%d, want 0/2", store.pendingNodeCount(), store.embeddedNodeCount())
+	}
+	rec, ok := store.nodeEmbedRecord(n0.ID)
+	if !ok {
+		t.Fatal("n0 not embedded")
+	}
+	if len(rec.vec) != embeddings.Dim {
+		t.Errorf("node vector = %d dims, want %d", len(rec.vec), embeddings.Dim)
+	}
+	if rec.model != "nomic-embed-text" {
+		t.Errorf("node model = %q, want nomic-embed-text", rec.model)
+	}
+	// A body-less node still embeds (name alone), never a panic or skip.
+	if _, ok := store.nodeEmbedRecord(n1.ID); !ok {
+		t.Error("body-less node n1 not embedded")
+	}
+	sets := gauge.nodeSnapshot()
+	if len(sets) == 0 || sets[len(sets)-1] != 0 {
+		t.Errorf("KG backlog gauge = %v, want final 0", sets)
+	}
+}
+
+// TestPassNodePhaseIndependentOfChunkError: a failing chunk phase must not starve
+// the node phase — the two backlogs drain independently.
+func TestPassNodePhaseIndependentOfChunkError(t *testing.T) {
+	store := &fakeStore{
+		pending:      []storage.TranscriptChunk{chunk("c")},
+		listErr:      errors.New("chunk db down"),
+		pendingNodes: []storage.KGNode{node("N", "b")},
+	}
+	w := New(store, embeddingstest.Deterministic{}, "m", nil, discardLog(), Config{})
+
+	w.pass(context.Background())
+
+	if store.embeddedCount() != 0 {
+		t.Errorf("chunks embedded = %d, want 0 (chunk phase failed)", store.embeddedCount())
+	}
+	if store.embeddedNodeCount() != 1 {
+		t.Errorf("nodes embedded = %d, want 1 (node phase must still run)", store.embeddedNodeCount())
+	}
 }
 
 // Test 1: three NULL chunks are all embedded with 768-dim vectors and the model
