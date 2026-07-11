@@ -2,7 +2,9 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +33,27 @@ type fakeCrossTalk struct {
 	reactSentences map[string][]string // agentID -> sentences SpeakReaction dispatches (default: [reaction])
 	reactPause     chan struct{}       // if set, SpeakReaction blocks after dispatching sentence[0]
 	reactSpokeCh   chan string         // agentID pushed when SpeakReaction returns (optional)
+
+	reactMu        sync.Mutex
+	reactDelivered map[string]string // agentID -> text SpeakReaction committed (#375)
+}
+
+// recordReactDelivered stores what the Reaction committed for id, so a #375 test can
+// assert an aborted/discarded/declined reaction commits nothing.
+func (s *fakeCrossTalk) recordReactDelivered(id, text string) {
+	s.reactMu.Lock()
+	if s.reactDelivered == nil {
+		s.reactDelivered = map[string]string{}
+	}
+	s.reactDelivered[id] = text
+	s.reactMu.Unlock()
+}
+
+// reactDeliveredFor returns the Reaction text committed for id ("" = nothing).
+func (s *fakeCrossTalk) reactDeliveredFor(id string) string {
+	s.reactMu.Lock()
+	defer s.reactMu.Unlock()
+	return s.reactDelivered[id]
 }
 
 func (s *fakeCrossTalk) React(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText string) (string, error) {
@@ -59,14 +82,22 @@ func (s *fakeCrossTalk) SpeakReaction(ctx context.Context, e voiceevent.AddressR
 	if s.reactSpokeCh != nil {
 		defer func() { s.reactSpokeCh <- id }()
 	}
+	var delivered strings.Builder
+	// Record what the Reaction committed (deliver-then-commit) so the #375 look-ahead
+	// tests can assert an aborted/discarded reaction commits nothing.
+	defer func() { s.recordReactDelivered(id, delivered.String()) }()
 	sentences := []string{reaction}
 	if s.reactSentences != nil {
 		sentences = s.reactSentences[id]
 	}
-	var delivered strings.Builder
 	for i, snt := range sentences {
 		if err := dispatch(orchestrator.Reply{Sentence: snt, Voice: tts.Voice{VoiceID: id, Name: id}}); err != nil {
-			return delivered.String(), nil // barge: stop the drain, delivered-only
+			// Mirror SpeakDraft (#362/#375): ErrNotDelivered skips this sentence but keeps
+			// draining; any other error (a barge, or the look-ahead abort) stops the drain.
+			if errors.Is(err, orchestrator.ErrNotDelivered) {
+				continue
+			}
+			return delivered.String(), nil // barge/abort: stop the drain, delivered-only
 		}
 		if delivered.Len() > 0 {
 			delivered.WriteByte(' ')
