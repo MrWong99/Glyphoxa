@@ -160,3 +160,31 @@ func TestReplier_SpeakReaction_VoicelessButler_DeliversTextNoDispatch(t *testing
 		t.Errorf("posted=%q delivered=%q, want the reaction delivered as text", posted, delivered)
 	}
 }
+
+// TestReplier_SpeakReaction_ModalityKeysOnRawUtterance pins #389 finding 3: a VOICED
+// Butler reactor's modality is decided on the RAW utterance, NOT the Cross-talk
+// composite. Here the raw utterance carries no text-forcing phrase, but the Lead's
+// quoted line does ("Post it …"). Keying on the composite would flip the reactor to
+// text; keying on the raw utterance keeps it SPOKEN (a short answer with a Voice).
+func TestReplier_SpeakReaction_ModalityKeysOnRawUtterance(t *testing.T) {
+	sinkCalled := false
+	r := textSinkReplier(t, batchEngine{}, false, func(context.Context, string) error {
+		sinkCalled = true
+		return nil
+	})
+
+	var got []string
+	_, err := r.SpeakReaction(t.Context(), "Bart, Glyphoxa — thoughts?", "Bart", "Post it on the tavern board.", "Aye, a fine idea.", func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SpeakReaction errored: %v", err)
+	}
+	if sinkCalled {
+		t.Error("modality keyed on the composite Lead line → wrongly text; want spoken (raw utterance has no phrase)")
+	}
+	if len(got) == 0 {
+		t.Fatal("the voiced reactor was not spoken; want sentence-split TTS dispatch")
+	}
+}

@@ -2,9 +2,13 @@ package orchestrator_test
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -186,55 +190,107 @@ func TestReplier_Ensemble_TextDeliveredReactor_PublishesTerminal(t *testing.T) {
 	}
 }
 
-// TestReplier_Lookahead_TextDeliveredReactor_NoHang pins the #389 look-ahead guard:
-// a voiceless Butler reactor text-delivers (SpeakReaction never calls the dispatch
-// closure), so the prerender goroutine holds NO first sentence — s1Ch stays empty and
-// done closes. releaseReaction's <-done arm must return instead of blocking forever on
-// s1Ch. The turn completes (floor freed), the uniform defer's DiscardLookahead fires,
-// and no EnsembleReaction / reaction TTSInvoked is published (the Reaction went to
-// channel text, not the wire).
-func TestReplier_Lookahead_TextDeliveredReactor_NoHang(t *testing.T) {
+// reactorEngine is a scripted [agent.Engine] for the REAL-Cast look-ahead text-reactor
+// test: a Cross-talk turn (its user message carries the composite `<lead> says: "…"`)
+// generates the Reaction; any other call (the speculative Draft) returns "" so this
+// Agent never wins the Lead race and is left as the sole remaining reactor.
+type reactorEngine struct{ reaction string }
+
+func (e reactorEngine) Generate(_ context.Context, msgs []llm.Message) (string, error) {
+	for _, m := range msgs {
+		if strings.Contains(m.Text, `says: "`) {
+			return e.reaction, nil
+		}
+	}
+	return "", nil
+}
+
+// TestReplier_Lookahead_TextReactor_PostsAfterLeadThroughRealCast is the #389
+// finding-1/-2 regression, driven through the REAL agent.Cast (production wires the
+// look-ahead pump, so prerenderReaction/releaseReaction IS the production Cross-talk
+// path). A voiced Character Lead speaks; a VOICELESS Butler reactor with a real
+// TextSink is co-addressed. The coordinator must classify the reactor as text BEFORE
+// pre-render (ReactionModality), keep it OUT of the pump lane, and post its Reaction
+// only via the post-gate tail — so the irreversible TextSink post lands AFTER the Lead
+// is audibly on the wire (floor.Speaking), with EnsembleReaction + TurnEnded(text_delivered)
+// and NO second TTSInvoked. Look-ahead on now produces the SAME events as off.
+func TestReplier_Lookahead_TextReactor_PostsAfterLeadThroughRealCast(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	pump := newFakeLookahead()
-	synth := &laneSynth{pump: pump, holdGate: make(chan struct{})}
-	defer close(synth.holdGate)
+	synth := &laneSynth{pump: pump, holdSet: map[string]bool{"Bart leads.": true}, holdGate: make(chan struct{})}
 
-	spk := &textReactorSpeaker{
-		leadID:     bartTarget.AgentID,
-		leadDraft:  "Bart leads.",
-		reaction:   "As you wish, my lord.",
-		speakPause: make(chan struct{}),
-		reactSpoke: make(chan string, 2),
-	}
-	replier := lookaheadReplier(h, floor, spk, pump, synth)
+	// The real Lead: a voiced Character whose Draft/Speak run through agent.Replier.
+	leadRep := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: bartTarget.AgentID, Markdown: "You are Bart.", Voice: tts.Voice{ProviderID: "test", VoiceID: "bart", Name: "Bart"}},
+		Engine:      fixedEngine{reply: "Bart leads."},
+		Synthesizer: synth,
+	})
+	// The real reactor: a VOICELESS Butler (empty VoiceID) with a TextSink. Its
+	// SpeakReaction routes through the real speakDraftModality TEXT branch.
+	var (
+		postMu       sync.Mutex
+		posted       string
+		postSawAudio bool
+	)
+	butlerRep := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: butlerTarget.AgentID, Markdown: "You are Glyphoxa.", Voice: tts.Voice{ProviderID: "test", VoiceID: "", Name: "Glyphoxa"}},
+		Engine:      reactorEngine{reaction: "As you wish, my lord."},
+		Synthesizer: synth,
+		TextSink: func(_ context.Context, text string) error {
+			postMu.Lock()
+			posted = text
+			postSawAudio = floor.Speaking() // the Lead must be audible when the text posts
+			postMu.Unlock()
+			return nil
+		},
+	})
+	cast := agent.NewCast(leadRep, butlerRep)
+
+	replier := lookaheadReplier(h, floor, cast, pump, synth)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
 	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tl", Text: "Bart, Glyphoxa?", Targets: []voiceevent.AddressTarget{bartTarget, butlerTarget}})
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tl", Text: "Bart, Glyphoxa — thoughts?", Targets: []voiceevent.AddressTarget{bartTarget, butlerTarget}})
 
-	// Arm the floor once the Lead is audible, then release the paused Lead.
+	// The Lead's sentence is on the wire but HELD by the lane synth (Speak blocked). Arm
+	// the floor, then release the Lead so its Speak returns and the post-gate tail runs.
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
 		return e.TurnID == "Tl" && e.Sentence == "Bart leads."
 	}, "the Lead's sentence is on the wire")
-	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tl"})
-	close(spk.speakPause)
-
-	// The reactor's SpeakReaction returned (text-delivered) — the coordinator must not
-	// wedge on s1Ch.
-	select {
-	case <-spk.reactSpoke:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the text reactor's SpeakReaction never returned (look-ahead release wedged on s1Ch?)")
+	// The reactor's text post must NOT have happened yet — it is forbidden mid-Lead.
+	postMu.Lock()
+	early := posted
+	postMu.Unlock()
+	if early != "" {
+		t.Fatalf("the text Reaction posted DURING the Lead's playback (%q) — must wait for the post-gate tail", early)
 	}
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tl"})
+	close(synth.holdGate)
 
-	// The uniform defer ran and the whole unit completed.
-	pump.waitDiscard(t)
+	var rID string
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleReaction) bool {
+		if e.LeadTurnID == "Tl" && e.Target.AgentID == butlerTarget.AgentID {
+			rID = e.TurnID
+			return true
+		}
+		return false
+	}, "ensemble.reaction announced for the Butler reactor (post-gate)")
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == rID && e.Reason == voiceevent.TurnEndTextDelivered
+	}, "turn.ended(text_delivered) for the text reactor")
 	waitFloorFree(t, floor)
 
-	// No audio-less reaction line was created, and the reactor dispatched no audio.
-	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
+	postMu.Lock()
+	gotPost, sawAudio := posted, postSawAudio
+	postMu.Unlock()
+	if gotPost != "As you wish, my lord." {
+		t.Errorf("TextSink post = %q, want the reaction delivered as text", gotPost)
+	}
+	if !sawAudio {
+		t.Error("the text Reaction posted before the Lead was audibly on the wire (must be post-gate)")
+	}
 	if got := ttsInvokedInOrder(t, h); len(got) != 1 || got[0].TurnID != "Tl" {
-		t.Fatalf("TTSInvoked = %v, want exactly the Lead's (a text reactor holds/dispatches nothing)", got)
+		t.Fatalf("TTSInvoked = %v, want exactly the Lead's (a text reactor dispatches nothing)", got)
 	}
 }

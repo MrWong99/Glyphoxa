@@ -401,6 +401,35 @@ func (r *Replier) Draft(ctx context.Context, text string) (string, error) {
 // are dropped. It returns the delivered text; a ctx-cancel is the expected barge
 // path, not a failure, so it returns a nil error there.
 func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
+	// A Lead draft's modality decision keys on the very utterance it commits.
+	return r.speakDraftModality(ctx, userText, userText, draft, dispatch)
+}
+
+// ReactsAsText reports whether this Agent would deliver its Cross-talk Reaction
+// (reaction) to utterance as channel TEXT rather than speech — the SAME
+// [AnswerAsText] decision [Replier.SpeakReaction] applies (voiceless Butler, an
+// explicit request, or a #297-d2 long answer). It is the coordinator's pre-render
+// seam (#389, ADR-0025/0027): the Ensemble coordinator classifies the reactor BEFORE
+// entering the look-ahead pre-render, so a text reactor is routed through the
+// post-gate tail — its irreversible TextSink post never happens mid-Lead-playback (an
+// audio Reaction is held in the pump lane and discardable; a text post is not). It
+// keys on the RAW utterance, matching the modality decision SpeakReaction makes. A
+// nil TextSink (every non-Butler) is never text.
+func (r *Replier) ReactsAsText(utterance, reaction string) bool {
+	if r.cfg.TextSink == nil {
+		return false
+	}
+	voiceless := r.cfg.Persona.Voice.VoiceID == ""
+	return AnswerAsText(utterance, reaction, voiceless)
+}
+
+// speakDraftModality is the shared body of [Replier.SpeakDraft] and
+// [Replier.SpeakReaction]. commitText is what a delivered turn appends as the user
+// message (the composite Cross-talk line for a Reaction, the raw utterance for a
+// Lead); modalityUtterance is what [AnswerAsText] keys on — always the RAW utterance,
+// so a Reaction's quoted Lead line never contaminates the keyword match (#389 finding
+// 3). draft is the answer text.
+func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUtterance, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
 	// Text-modality gate (#389, ADR-0009 2026-07-10 amendment): a Butler with a
 	// TextSink routes its winning draft by the SAME [AnswerAsText] decision the routed
 	// streaming path uses ([Replier.textModalityTurn]). A text-modality draft — a
@@ -416,11 +445,11 @@ func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispat
 	// (never the sentinel), mirroring [Replier.textModalityTurn].
 	if r.cfg.TextSink != nil && strings.TrimSpace(draft) != "" {
 		voiceless := r.cfg.Persona.Voice.VoiceID == ""
-		if AnswerAsText(userText, draft, voiceless) {
+		if AnswerAsText(modalityUtterance, draft, voiceless) {
 			if err := r.cfg.TextSink(ctx, draft); err != nil {
 				return "", err
 			}
-			r.appendUser(userText)
+			r.appendUser(commitText)
 			r.commitSpoken(draft)
 			return draft, orchestrator.ErrTextDelivered
 		}
@@ -443,7 +472,7 @@ func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispat
 			return
 		}
 		userAppended = true
-		r.appendUser(userText)
+		r.appendUser(commitText)
 	}
 
 	// Deliver-then-commit (ADR-0012, mirrors streamTurn's emit): dispatch FIRST; a
@@ -571,14 +600,16 @@ func isSilenceSentinel(reply string) bool {
 }
 
 // SpeakReaction speaks an already-generated Cross-talk Reaction (from a prior
-// [Replier.React]) as this Agent's own sub-turn (ADR-0025, #302). It reuses
-// [Replier.SpeakDraft] with the SAME composite user text React reasoned over
-// ([crossTalkUserText]) so the committed user message and the prompt never drift,
-// and delivers the reaction under deliver-then-commit (ADR-0012). It returns the
-// delivered text; a ctx-cancel (a barge cutting the reaction mid-playback) commits
-// only the sentences spoken before the cut.
+// [Replier.React]) as this Agent's own sub-turn (ADR-0025, #302). It commits the SAME
+// composite user text React reasoned over ([crossTalkUserText]) so the committed user
+// message and the prompt never drift, and delivers the reaction under
+// deliver-then-commit (ADR-0012). The text-modality decision (#389), however, keys on
+// the RAW utterance — NOT the composite — so the Lead's quoted line can never flip a
+// voiced reactor to text via a keyword match ("Post it on the tavern board.", finding
+// 3). It returns the delivered text; a ctx-cancel (a barge cutting the reaction
+// mid-playback) commits only the sentences spoken before the cut.
 func (r *Replier) SpeakReaction(ctx context.Context, userText, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	return r.SpeakDraft(ctx, crossTalkUserText(userText, leadName, leadText), reaction, dispatch)
+	return r.speakDraftModality(ctx, crossTalkUserText(userText, leadName, leadText), userText, reaction, dispatch)
 }
 
 // ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop

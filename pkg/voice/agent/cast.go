@@ -143,6 +143,18 @@ func (c *Cast) React(ctx context.Context, e voiceevent.AddressRouted, leadName, 
 	return r.React(ctx, e.Text, leadName, leadText)
 }
 
+// ReactsAsText implements [orchestrator.ReactionModality]: it reports whether the
+// addressed Agent would deliver its Cross-talk Reaction as channel TEXT (the same
+// [AnswerAsText] decision SpeakReaction applies), the coordinator's pre-render seam
+// (#389). An unknown (or removed) Agent — and every non-Butler — is never text.
+func (c *Cast) ReactsAsText(agentID, utterance, reaction string) bool {
+	r := c.lookup(agentID)
+	if r == nil {
+		return false
+	}
+	return r.ReactsAsText(utterance, reaction)
+}
+
 // SpeakReaction implements [orchestrator.CrossTalker]: it speaks the addressed
 // Agent's pre-generated Reaction as its own sub-turn (committing the delivered text
 // to that member's history, ADR-0012), by delegating to [Replier.SpeakReaction]. An
