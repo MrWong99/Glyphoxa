@@ -230,6 +230,12 @@ func TestDeleteCampaignCascade(t *testing.T) {
 		t.Fatalf("insert transcript chunk: %v", err)
 	}
 
+	// A Session Highlight under the same session (#308): its voice_session_id FK is
+	// ON DELETE RESTRICT, but campaign_id CASCADEs, so the campaign hard-delete removes
+	// the highlight row BEFORE the cascaded voice_sessions delete — proving RESTRICT is
+	// inert on the campaign-delete path (it only blocks a direct session delete).
+	seedHighlight(t, st, tenantID, sessionID, campaignID, storage.HighlightCandidate)
+
 	// Delete before archiving is refused; the row survives.
 	if err := st.DeleteCampaign(ctx, campaignID); !errors.Is(err, storage.ErrNotArchived) {
 		t.Fatalf("DeleteCampaign(non-archived) = %v, want ErrNotArchived", err)
@@ -260,6 +266,7 @@ func TestDeleteCampaignCascade(t *testing.T) {
 		{"voice_sessions", `SELECT count(*) FROM voice_sessions WHERE campaign_id = $1`, campaignID},
 		{"transcript_line", `SELECT count(*) FROM transcript_line WHERE campaign_id = $1`, campaignID},
 		{"transcript_chunk", `SELECT count(*) FROM transcript_chunk WHERE campaign_id = $1`, campaignID},
+		{"highlight", `SELECT count(*) FROM highlight WHERE campaign_id = $1`, campaignID},
 	} {
 		var n int
 		if err := pool.QueryRow(ctx, tc.query, tc.arg).Scan(&n); err != nil {
@@ -274,5 +281,56 @@ func TestDeleteCampaignCascade(t *testing.T) {
 	// An unknown id is ErrNotFound.
 	if err := st.DeleteCampaign(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("DeleteCampaign(random) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteCampaignWithJob_Atomic proves the delete + follow-up job enqueue are one
+// transaction (#308): a committed delete leaves exactly one pending job carrying the
+// payload, and a REFUSED delete (not archived) enqueues NO job — no orphan sweep of a
+// surviving campaign.
+func TestDeleteCampaignWithJob_Atomic(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	const kind = "highlight.sweep_campaign_clips"
+	payload := []byte(`{"clip_keys":["k1","k2"]}`)
+
+	countJobs := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM job WHERE kind = $1`, kind).Scan(&n); err != nil {
+			t.Fatalf("count jobs: %v", err)
+		}
+		return n
+	}
+
+	// Not archived → refused, and NO job enqueued (the tx rolled back).
+	if err := st.DeleteCampaignWithJob(ctx, campaignID, kind, payload); !errors.Is(err, storage.ErrNotArchived) {
+		t.Fatalf("DeleteCampaignWithJob(non-archived) = %v, want ErrNotArchived", err)
+	}
+	if n := countJobs(); n != 0 {
+		t.Fatalf("refused delete enqueued %d jobs, want 0", n)
+	}
+
+	// Archive, then delete-with-job for real → campaign gone AND one job enqueued.
+	if _, err := st.ArchiveCampaign(ctx, campaignID); err != nil {
+		t.Fatalf("ArchiveCampaign: %v", err)
+	}
+	if err := st.DeleteCampaignWithJob(ctx, campaignID, kind, payload); err != nil {
+		t.Fatalf("DeleteCampaignWithJob(archived): %v", err)
+	}
+	if _, err := st.GetCampaign(ctx, campaignID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("campaign should be gone: %v", err)
+	}
+	if n := countJobs(); n != 1 {
+		t.Fatalf("committed delete enqueued %d jobs, want 1", n)
+	}
+	var gotPayload []byte
+	if err := pool.QueryRow(ctx, `SELECT payload FROM job WHERE kind = $1`, kind).Scan(&gotPayload); err != nil {
+		t.Fatalf("read job payload: %v", err)
+	}
+	if string(gotPayload) != `{"clip_keys": ["k1", "k2"]}` && string(gotPayload) != string(payload) {
+		t.Fatalf("job payload = %s, want the carried clip keys", gotPayload)
 	}
 }

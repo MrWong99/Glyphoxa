@@ -132,3 +132,22 @@ func (s *Store) DeleteCampaign(ctx context.Context, id uuid.UUID) error {
 	}
 	return nil
 }
+
+// DeleteCampaignWithJob hard-deletes an archived campaign AND enqueues a follow-up
+// job in the SAME transaction (#308, ADR-0048/0049): the job row exists if and only
+// if the delete committed. This closes the blob-orphan window a delete-then-enqueue
+// would open — a refused/failed delete never leaves a sweep that would drop a
+// surviving campaign's clips, and a crash right after the delete never loses the
+// sweep. The delete's error mapping (ErrNotFound / ErrNotArchived) is unchanged.
+// jobPayload must be non-empty; callers with nothing to sweep use [DeleteCampaign].
+func (s *Store) DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error {
+	return s.InTx(ctx, func(tx *Store) error {
+		if err := tx.DeleteCampaign(ctx, id); err != nil {
+			return err
+		}
+		if _, err := tx.EnqueueJob(ctx, jobKind, jobPayload, 0); err != nil {
+			return fmt.Errorf("storage: enqueue campaign-delete job: %w", err)
+		}
+		return nil
+	})
+}

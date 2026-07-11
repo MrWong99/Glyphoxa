@@ -71,6 +71,8 @@ type fakeCampaignStore struct {
 	unarchiveErr      error
 	deleteCalls       []uuid.UUID
 	deleteCampaignErr error
+	deleteJobKind     string // the follow-up job kind DeleteCampaignWithJob enqueued (#308)
+	deleteJobPayload  []byte // the follow-up job payload (the clip keys to sweep)
 	// listNodesCampaign/searchNodesCampaign record the campaign id ListNodes /
 	// SearchNodes resolved so the scope precedence can be asserted (#222).
 	listNodesCampaign   uuid.UUID
@@ -275,6 +277,18 @@ func (f *fakeCampaignStore) UnarchiveCampaign(_ context.Context, id uuid.UUID) (
 func (f *fakeCampaignStore) DeleteCampaign(_ context.Context, id uuid.UUID) error {
 	f.deleteCalls = append(f.deleteCalls, id)
 	return f.deleteCampaignErr
+}
+
+func (f *fakeCampaignStore) DeleteCampaignWithJob(_ context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error {
+	f.deleteCalls = append(f.deleteCalls, id)
+	if f.deleteCampaignErr != nil {
+		// Delete refused inside the tx: nothing committed, so no job is recorded — the
+		// real store enqueues in the SAME tx that rolls back.
+		return f.deleteCampaignErr
+	}
+	f.deleteJobKind = jobKind
+	f.deleteJobPayload = jobPayload
+	return nil
 }
 
 func (f *fakeCampaignStore) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -103,6 +104,20 @@ type TranscriptFinalizer interface {
 	Finalize(ctx context.Context, id uuid.UUID) (int, error)
 }
 
+// Highlighter is the Session Highlights persistence pipeline (#308, Epic 8): the
+// Manager Begins it at Start (binding the session's owning ids), the live detector
+// feeds it Triggers through cfg.Highlights, and the Manager Finalizes it at loop
+// exit (scheduling the 7-day candidate purge) — beside transcript.Finalize, at
+// EVERY exit path. *highlight.Saver satisfies it. It embeds highlight.Sink so the
+// SAME value wires onto the base voice config's cfg.Highlights. Defined here (not
+// imported as a concrete type) to keep the seam narrow; nil (highlights off, or a
+// web-only Manager that drives no voice) makes Begin/Finalize no-ops.
+type Highlighter interface {
+	highlight.Sink
+	Begin(voiceSessionID, campaignID, tenantID uuid.UUID)
+	Finalize(ctx context.Context) error
+}
+
 // ChunkFinalizer closes a session's open Transcript Chunk on Stop / loop exit
 // (#104, ADR-0011): a lone trailing utterance is flushed ONLY here, at session
 // end. *transcript.Chunker satisfies it; defined here (not imported) so the
@@ -164,6 +179,7 @@ type Manager struct {
 	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
 	chunker    ChunkFinalizer      // closes the open Transcript Chunk on Stop (#104); nil = no chunking
+	highlights Highlighter         // persists Session Highlights + schedules purge on Stop (#308); nil = highlights off
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
@@ -255,6 +271,17 @@ func (m *Manager) SetFacts(f agent.FactsRecaller) {
 // behave, the model just gets an "unavailable" tool result).
 func (m *Manager) SetToolDeps(d tool.Deps) {
 	m.base.ToolDeps = d
+}
+
+// SetHighlights wires the Session Highlights persistence pipeline (#308): the
+// Manager Begins/Finalizes it per session, and the SAME value flows onto the base
+// voice config as cfg.Highlights (the detector's Sink) every session copies. Like
+// SetTranscript it is set once at boot — the Saver needs the store + blob backend,
+// built alongside the Manager — before any session can start, so no lock is
+// needed. nil leaves highlights off (the detector, if any, gets a nil Sink).
+func (m *Manager) SetHighlights(h Highlighter) {
+	m.highlights = h
+	m.base.Highlights = h
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no
@@ -373,6 +400,14 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		as.meter = meter
 	}
 
+	// Bind the Highlights pipeline to this session before the loop (and its
+	// detector) can fire a Trigger (#308): Begin records the owning ids the Saver
+	// stamps onto every candidate row + its blob key. Finalize (runLoop) unbinds and
+	// schedules the purge. A nil Highlighter (highlights off / web-only) is skipped.
+	if m.highlights != nil {
+		m.highlights.Begin(vs.ID, campaignID, tenantID)
+	}
+
 	m.active = as
 	go m.runLoop(runCtx, as, cfg)
 	return vs, nil
@@ -473,6 +508,20 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 		} else {
 			lineCount = n
 		}
+	}
+
+	// Finalize the Session Highlights pipeline beside the transcript (#308): drain
+	// the Saver's worker (persisting any queued clips) and schedule the 7-day
+	// candidate purge, then unbind. Its OWN budget (like Finalize/chunk flush) — a
+	// slow drain / enqueue logs and never blocks the row from ending. Runs at EVERY
+	// loop exit (Stop, self-exit, Shutdown), so a session's candidates always get a
+	// purge horizon (ADR-0051). nil (highlights off) is skipped.
+	if m.highlights != nil {
+		hlCtx, hlCancel := context.WithTimeout(base, m.endTimeout)
+		if err := m.highlights.Finalize(hlCtx); err != nil {
+			m.log.Warn("finalize highlights before end", "err", err, "voice_session", as.session.ID)
+		}
+		hlCancel()
 	}
 
 	// Close the session's open Transcript Chunk (#104, ADR-0011): a lone trailing

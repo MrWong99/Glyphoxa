@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,12 +18,15 @@ import (
 	"time"
 
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
@@ -353,6 +357,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	}
 	defer pool.Close()
 	store := storage.New(pool)
+	// The blob seam (ADR-0048): the v1 Postgres bytea backend, shared by the Voice
+	// process (Session Highlight clip writes) and the Web process (clip serve). Both
+	// meet only through Postgres, never shared memory (#308).
+	blobStore := blob.NewPostgres(pool)
 
 	// Boot-time session sweep (ADR-0041 amendment, issue #184): the allowlist
 	// gates only NEW logins at the OAuth callback, so sessions issued before the
@@ -557,6 +565,17 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	chunker := transcript.NewChunker(eventBus, mgr, store, metrics, log, transcript.ChunkerConfig{})
 	chunker.SetResolver(speakerResolver) // #281: resolved name as each human line's chunk prefix
 	mgr.SetChunkFlusher(chunker)
+
+	// Session Highlights persistence (#308, Epic 8, ADR-0051): the Saver is #307's
+	// detector Sink — it encodes each Trigger's tape snapshot to a clip (behind the
+	// blob seam), writes a 'candidate' highlight row, and on session end schedules
+	// the 7-day candidate purge job. It rides the SAME base voice config the manager
+	// copies per session (cfg.Highlights = the Saver), and the manager Begins/
+	// Finalizes it per session (beside transcript.Finalize). In web-only mode the
+	// manager starts no sessions, so it stays dormant; the RPC read side + clip serve
+	// (below) reach the same rows through Postgres regardless.
+	highlightSaver := highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log)
+	mgr.SetHighlights(highlightSaver)
 	// Seed the backlog gauge from the DB at boot so it reads the true count before
 	// the first chunk is written (idempotent Set-from-COUNT, ADR-0032). A read
 	// failure logs and leaves the gauge at 0 rather than failing the boot.
@@ -575,8 +594,24 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// bespoke and recap/import stay synchronous RPCs. With an empty registry the
 	// runner idles without touching the DB.
 	jobRunner := jobs.New(store, metrics, log, jobs.Config{})
-	// Job-kind handlers register here; none exist yet.
+	// Session Highlights candidate purge (#308, ADR-0051/0049): the 7-day sweep of a
+	// session's still-candidate highlights. Idempotent + at-least-once — it drops
+	// each clip through the blob seam FIRST, then the rows. Registered in web AND all
+	// mode (the sweep needs only the DB + blob backend, not the voice loop).
+	jobRunner.Register(highlight.JobKindPurgeCandidates, highlight.PurgeHandler(store, blobStore, log))
+	// Session Highlight campaign-clip sweep (#308, ADR-0048/0049): drops a hard-deleted
+	// Campaign's clip blobs, enqueued in the delete's own transaction (idempotent).
+	jobRunner.Register(highlight.JobKindSweepCampaignClips, highlight.CampaignSweepHandler(blobStore, log))
 	go jobRunner.Run(ctx)
+
+	// Boot-time retention backstop (#308, ADR-0051, the ReconcileOrphans/#184 spirit):
+	// a crash between a session ending and the Saver scheduling its 7-day candidate
+	// purge would strand those candidates. At boot, enqueue a purge for every ended
+	// session that has candidates but no live purge job. Loud-but-non-fatal: a failure
+	// logs and boot continues (the next boot retries).
+	if err := highlight.SweepMissingCandidatePurges(ctx, store, jobEnqueuer{store}, log); err != nil {
+		log.Warn("highlight purge backstop sweep failed at boot", "err", err)
+	}
 
 	// Resolve the process embeddings provider ONCE and share it across the two
 	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
@@ -668,7 +703,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.VoiceChannelMembers(ctx, channelID)
 		}
 	}
-	mounts := managementMounts(store, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -725,11 +760,41 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 // still stands and the API simply has no way in. cipher seals BYOK provider
 // keys (ADR-0004); it may be nil (saving keys then fails CodeFailedPrecondition).
 // mgr drives the in-process voice loop for SessionService (#72, ADR-0039).
+// jobEnqueuer adapts *storage.Store to the highlight.JobEnqueuer seam (#308): it
+// JSON-marshals the payload and enqueues a job with an explicit future run_after
+// (the 7-day candidate purge horizon), which plain EnqueueJob cannot express.
+type jobEnqueuer struct{ store *storage.Store }
+
+func (e jobEnqueuer) Enqueue(ctx context.Context, kind string, payload any, runAfter time.Time) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal %s payload: %w", kind, err)
+	}
+	_, err = e.store.EnqueueJobAt(ctx, kind, b, 0, runAfter)
+	return err
+}
+
+// highlightClipSweeper adapts *storage.Store + blob.Store to the RPC campaign
+// hard-delete's clip sweep (#308, ADR-0048): list a campaign's highlight clip
+// keys, then drop each blob through the seam.
+type highlightClipSweeper struct {
+	store *storage.Store
+	blobs blob.Store
+}
+
+func (s highlightClipSweeper) CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
+	return s.store.ListCampaignHighlightClipKeys(ctx, campaignID)
+}
+
+func (s highlightClipSweeper) DeleteClip(ctx context.Context, key string) error {
+	return s.blobs.Delete(ctx, key)
+}
+
 // relay serves the live transcript over SSE + a JSON snapshot (#73, ADR-0014):
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -769,6 +834,10 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// the live relay re-resolves future lines with the new mapping (#281, ADR-0039
 	// in-proc direct-method invalidation).
 	campaignSrv.SetSpeakerInvalidator(speakerResolver)
+	// A campaign hard delete sweeps its Session Highlight clips out of blob storage
+	// (#308, ADR-0048): the highlight rows cascade with the campaign, but their clip
+	// blobs have no FK and must be dropped through the seam.
+	campaignSrv.SetHighlightClipSweeper(highlightClipSweeper{store: store, blobs: blobStore})
 	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +
@@ -802,7 +871,21 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 	// and meters usage, so SessionService.GenerateRecap is CSRF-guarded like a
 	// mutation. It is constructed ONCE in runWeb and passed in, so the GenerateRecap
 	// RPC (#274) and the /glyphoxa recap slash command (#273) share one instance.
-	sessionPath, sessionHandler := rpc.NewSessionServer(mgr, store, recapEngine, log).Handler(stack.HandlerOptions()...)
+	sessionSrv := rpc.NewSessionServer(mgr, store, recapEngine, log)
+	// Session Highlights read/mutate (#308): List/Get/Promote/Delete over the same
+	// store + blob seam the Voice process writes through. Wired here so the many
+	// NewSessionServer call sites keep their signature.
+	sessionSrv.SetHighlights(store, blobStore)
+	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
+
+	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
+	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated by
+	// auth.RequireSession. Tenant-scoped row load + blob.Get + http.ServeContent
+	// (Range → scrub).
+	// The clip route scopes to the Active Campaign server-side (#308), sharing the
+	// SessionServer's read-side resolution so a foreign-campaign clip id is 404 just
+	// like the Highlight RPCs.
+	clipServer := highlight.NewClipServer(store, blobStore, sessionSrv.ResolveActiveCampaign, log)
 
 	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
 	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
@@ -824,6 +907,8 @@ func managementMounts(store *storage.Store, cipher *crypto.Cipher, metrics obser
 		// validates the glyphoxa_session cookie the EventSource/fetch send.
 		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
+		// Session Highlight clip (#308): operator-gated audio byte stream with Range.
+		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, http.HandlerFunc(clipServer.ServeClip))},
 		// Campaign bundle export (#290): streamed gzip download, operator-gated.
 		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
 		// Campaign bundle import (#291): multipart upload, operator-gated, plus the

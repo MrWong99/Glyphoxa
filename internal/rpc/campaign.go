@@ -53,6 +53,11 @@ type campaignStore interface {
 	ArchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	UnarchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 	DeleteCampaign(ctx context.Context, id uuid.UUID) error
+	// DeleteCampaignWithJob hard-deletes AND enqueues a follow-up job atomically
+	// (#308): the campaign hard delete uses it to schedule the Highlight-clip blob
+	// sweep in the delete's own transaction, so the sweep exists iff the delete
+	// committed (no orphan sweep of a surviving campaign, no lost sweep on a crash).
+	DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error
 	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
 	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
@@ -104,6 +109,29 @@ type CampaignServer struct {
 	// re-resolves future lines with the new mapping. Nil disables (feature off / no
 	// live resolver); set once at boot before serving.
 	speakerInv SpeakerInvalidator
+	// clips sweeps a campaign's Session Highlight clips out of blob storage on hard
+	// delete (#308, ADR-0048): highlight rows cascade with the campaign, but the
+	// clip blobs have NO FK and must be dropped through the seam. Nil disables the
+	// sweep (web-only / no blob backend); set once at boot before serving.
+	clips HighlightClipSweeper
+}
+
+// HighlightClipSweeper drops a campaign's Session Highlight clips through the blob
+// seam on hard delete (#308, ADR-0048). main.go wires it over
+// storage.ListCampaignHighlightClipKeys + blob.Delete. The keys are listed BEFORE
+// the campaign row delete (which cascades the highlight rows away) and the blobs
+// are dropped AFTER the delete succeeds, so a refused delete never orphans a live
+// campaign's clips.
+type HighlightClipSweeper interface {
+	CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
+	DeleteClip(ctx context.Context, key string) error
+}
+
+// SetHighlightClipSweeper wires the highlight-clip blob sweep the campaign hard
+// delete runs (#308). Called once at boot before serving; nil leaves the sweep
+// off (the highlight rows still cascade, only their blobs would linger).
+func (s *CampaignServer) SetHighlightClipSweeper(sw HighlightClipSweeper) {
+	s.clips = sw
 }
 
 // SpeakerInvalidator drops a campaign's cached speaker→name resolutions. The live
