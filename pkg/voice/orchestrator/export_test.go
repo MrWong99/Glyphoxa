@@ -101,3 +101,8 @@ func (m *StreamManager) WaitStreamUp(timeout time.Duration) bool {
 	}
 	return false
 }
+
+// SetFloor installs the shared barge-in floor on the ClipReplay reactor for the
+// Highlight voice-replay tests (external test package, #310). Production wiring
+// sets it inside Conversation.Register from the same floor the barge path uses.
+func (r *ClipReplay) SetFloor(floor *Floor) { r.floor = floor }

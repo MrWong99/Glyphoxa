@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/mixdown"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
@@ -47,6 +49,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
@@ -364,6 +367,24 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// process (Session Highlight clip writes) and the Web process (clip serve). Both
 	// meet only through Postgres, never shared memory (#308).
 	blobStore := blob.NewPostgres(pool)
+
+	// Highlight voice replay (#310, Epic 8, ADR-0051): the clip loader the ClipReplay
+	// reactor uses to resolve a ReplayRequested's blob KEY back into playable chunks
+	// (ADR-0005 — the event never carries audio). It rides the base voice config the
+	// Manager copies per session, so a live replay plays the promoted clip through the
+	// session's outbound pump. Web-only mode never starts a session, so it stays inert.
+	cfg.ClipReplayLoader = func(ctx context.Context, clipKey string) ([]tts.AudioChunk, error) {
+		rc, _, err := blobStore.Get(ctx, clipKey)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		data, rerr := io.ReadAll(rc)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return mixdown.DecodeWAV(data)
+	}
 
 	// Boot-time session sweep (ADR-0041 amendment, issue #184): the allowlist
 	// gates only NEW logins at the OAuth callback, so sessions issued before the
@@ -926,6 +947,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// store + blob seam the Voice process writes through. Wired here so the many
 	// NewSessionServer call sites keep their signature.
 	sessionSrv.SetHighlights(store, blobStore, jobEnqueuer{store})
+	// Highlight Discord delivery (#310, Epic 8, ADR-0051): the GM shares a promoted
+	// Highlight as a file to a text channel (DeploymentSharer resolves the Bot token +
+	// guild from deployment_config via the cipher, then plain net/http Discord REST —
+	// ADR-0047) or replays it into the live voice channel (the session Manager). The
+	// Campaign's last-chosen channel is remembered through the store.
+	sessionSrv.SetSharing(rpc.NewDeploymentSharer(store, cipher, log), mgr, store)
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a

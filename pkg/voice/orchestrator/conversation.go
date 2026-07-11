@@ -70,6 +70,14 @@ type Conversation struct {
 	// it at the Lead's end for a near-zero onset gap. Set only with an ensemble
 	// speaker; inert without one (only the ensemble path reacts).
 	lookahead LookaheadPump
+
+	// clipReplayLoad + clipReplaySink are the Highlight voice-replay seam
+	// ([WithClipReplay], #310): both nil = feature off. When set, Register binds a
+	// [ClipReplay] reactor on [voiceevent.ReplayRequested], sharing the barge-in
+	// floor (so a human barge cancels a replay) but deliberately WITHOUT the turn
+	// gate — a replay spends no provider money.
+	clipReplayLoad ClipLoader
+	clipReplaySink ClipSink
 }
 
 // LookaheadPump is the pump pre-render seam the Cross-talk Reaction coordinator
@@ -222,6 +230,22 @@ func WithReactionLookahead(p LookaheadPump) Option {
 	return func(c *Conversation) { c.lookahead = p }
 }
 
+// WithClipReplay enables the Highlight voice-replay path (#310, ADR-0051): a
+// [ClipReplay] reactor plays a promoted Session Highlight's clip into the live
+// voice channel on a [voiceevent.ReplayRequested], loading the clip via load and
+// pushing its chunks to sink (the outbound playback path). It shares the barge-in
+// floor built for [WithReply] (so a human barge cancels a replay) but deliberately
+// carries NO turn gate — a replay is pre-recorded audio, zero provider spend. Both
+// load and sink must be non-nil for the feature; leaving either nil is the
+// feature-off default. Like [WithDirectSpeech] it is independent of the reply path:
+// ReplayRequested is its own event, so it never wakes the LLM Replier.
+func WithClipReplay(load ClipLoader, sink ClipSink) Option {
+	return func(c *Conversation) {
+		c.clipReplayLoad = load
+		c.clipReplaySink = sink
+	}
+}
+
 // WithErrorHandler sets the [ErrorFunc] used to report failures from stage calls
 // the reactors fire inside bus callbacks (currently the replier's TTS dispatch).
 // Without it such failures are dropped silently.
@@ -332,6 +356,17 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 		ds.floor = c.floor // shared with the barge path (nil when barge-in is off)
 		ds.gate = c.gate
 		reactors = append(reactors, ds)
+	}
+	// Highlight voice replay (#310): a ClipReplay reactor on ReplayRequested, sharing
+	// the barge-in floor (built above, so a barge cancels a replay) but no turn gate
+	// (zero provider spend). Bound AFTER the direct-speech reactor — ReplayRequested
+	// is a distinct event on its own turn, so it never contends with a /say or an
+	// AddressRouted. Needs no TTS stage (it plays pre-recorded audio). Both load and
+	// sink must be set; either nil is the feature-off default.
+	if c.clipReplayLoad != nil && c.clipReplaySink != nil {
+		cr := NewClipReplay(c.clipReplayLoad, c.clipReplaySink, c.onError)
+		cr.floor = c.floor // shared with the barge path (nil when barge-in is off)
+		reactors = append(reactors, cr)
 	}
 	return Bind(ctx, c.bus, reactors...)
 }

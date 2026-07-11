@@ -444,6 +444,27 @@ type TapeConsentChanged struct {
 // EventName implements [Event].
 func (TapeConsentChanged) EventName() string { return "tape.consent_changed" }
 
+// ReplayRequested marks a GM request to replay a promoted Session Highlight's clip
+// into the live voice channel (#310, Epic 8, ADR-0051 GM-only sharing). It is the
+// seam between the session Manager (which validates a live session and publishes
+// this) and the orchestrator's ClipReplay reactor (which takes the barge-in floor
+// and plays the clip through the outbound playback path — floor rules apply exactly
+// like Agent speech, so a human barge cancels the replay mid-clip).
+//
+// Per ADR-0005 the event carries the clip's BLOB KEY, never audio: the reactor's
+// ClipLoader fetches + decodes the blob. TurnID is minted at publish so the floor
+// can mark the replay turn speaking (via [FirstOpus]) and a barge attributes to it,
+// exactly as an LLM turn does; the replay deliberately runs no TTS, so it publishes
+// no [TTSInvoked] and produces NO transcript line (the relay ignores [FirstOpus]).
+type ReplayRequested struct {
+	At      time.Time
+	TurnID  string
+	ClipKey string
+}
+
+// EventName implements [Event].
+func (ReplayRequested) EventName() string { return "replay.requested" }
+
 // SpendCapLevel names which per-session spend cap a [SpendCapReached] announces
 // (#130, ADR-0046): the soft cap (refuse new turns) or the hard cap (end the
 // session). It is a bounded enum, DISTINCT from the [TurnEndReason] a refused turn

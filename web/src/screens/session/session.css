@@ -630,6 +630,54 @@
   display: flex;
   gap: var(--spacing-sm);
   flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+/* Highlight share surface (#310): the GM's Discord-delivery panel, opened from the
+ * per-row Share action. A compact column so the channel picker, replay, and
+ * download read as one group. */
+.gx-highlight-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.15));
+  width: 100%;
+}
+
+.gx-highlight-share__channel,
+.gx-highlight-share__replay {
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.gx-highlight-share__hint,
+.gx-highlight-share__error {
+  color: var(--text-subtle);
+  font-size: 0.8125rem;
+}
+
+.gx-highlight-share__error {
+  color: var(--danger, #f87171);
+}
+
+.gx-highlight-share__download {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs, 4px);
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+  text-decoration: none;
+  width: fit-content;
+}
+
+.gx-highlight-share__download:hover {
+  color: var(--text);
+  text-decoration: underline;
 }
 
 /* Settled empty + error states (AC: render cleanly; #270 lesson: an error is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"time"
 
 	"connectrpc.com/connect"
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -60,10 +62,12 @@ type HighlightStore interface {
 	DeleteHighlight(ctx context.Context, tenantID, id uuid.UUID) (string, error)
 }
 
-// highlightBlobs is the blob-seam surface DeleteHighlight needs (ADR-0048): drop
-// the clip (and image, #311) before the row. *blob.Postgres satisfies it. Kept
-// narrow so the RPC package carries no import of the concrete backend.
+// highlightBlobs is the blob-seam surface the Highlight RPCs need (ADR-0048):
+// DeleteHighlight drops the clip (and image, #311) before the row; ShareHighlight
+// (#310) fetches the clip bytes to upload to Discord. *blob.Postgres satisfies it.
+// Kept narrow so the RPC package carries no import of the concrete backend.
 type highlightBlobs interface {
+	Get(ctx context.Context, key string) (io.ReadCloser, blob.Meta, error)
 	Delete(ctx context.Context, key string) error
 }
 

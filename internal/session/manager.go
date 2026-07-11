@@ -860,6 +860,37 @@ func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
 	return nil
 }
 
+// ReplayHighlight publishes a [voiceevent.ReplayRequested] so the orchestrator's
+// ClipReplay reactor plays a promoted Session Highlight's clip into the live voice
+// channel (#310, Epic 8, ADR-0051 GM-only sharing). It mirrors [Manager.SayAs]'s
+// active-session guard: with no live Voice Session it is refused ErrNoActiveSession
+// and publishes nothing. The clipKey is the blob key the ShareHighlight RPC already
+// resolved (and campaign-ownership-checked) — the Manager only gates on a live
+// session and mints the turn (ADR-0005: the event carries the KEY, never audio).
+//
+// The active session is captured under m.mu and the publish happens only if a
+// session is still live (session-atomic, mirroring SayAs), so a session that ended
+// between the check and the publish can never replay into a dead session.
+func (m *Manager) ReplayHighlight(_ context.Context, clipKey string) error {
+	m.mu.Lock()
+	as := m.active
+	if as == nil {
+		m.mu.Unlock()
+		return ErrNoActiveSession
+	}
+	bus := m.base.Bus
+	m.mu.Unlock()
+
+	if bus != nil {
+		bus.Publish(voiceevent.ReplayRequested{
+			At:      time.Now(),
+			TurnID:  voiceevent.NewTurnID(),
+			ClipKey: clipKey,
+		})
+	}
+	return nil
+}
+
 // sayRole maps an Agent's storage Role to the [voiceevent.AddressTarget] role
 // string the transcript relay keys its Line Kind off (ADR-0040): the Butler yields
 // the butler role (→ KindButler pill), every other Agent the character role. The two

@@ -1,9 +1,11 @@
 package rpc_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -87,10 +90,14 @@ func (f *fakeHighlightStore) DeleteHighlight(_ context.Context, tenantID, id uui
 	return h.ClipKey, nil
 }
 
-// fakeRPCBlobs records the keys deleted through the seam.
+// fakeRPCBlobs records the keys deleted through the seam and serves clip bytes for
+// the ShareHighlight fetch (#310).
 type fakeRPCBlobs struct {
 	mu      sync.Mutex
 	deleted []string
+	data    []byte // clip bytes Get returns; defaults to "RIFFDATA"
+	getErr  error  // when set, Get fails with it
+	gotKeys []string
 }
 
 func (f *fakeRPCBlobs) Delete(_ context.Context, key string) error {
@@ -98,6 +105,20 @@ func (f *fakeRPCBlobs) Delete(_ context.Context, key string) error {
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, key)
 	return nil
+}
+
+func (f *fakeRPCBlobs) Get(_ context.Context, key string) (io.ReadCloser, blob.Meta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gotKeys = append(f.gotKeys, key)
+	if f.getErr != nil {
+		return nil, blob.Meta{}, f.getErr
+	}
+	data := f.data
+	if data == nil {
+		data = []byte("RIFFDATA")
+	}
+	return io.NopCloser(bytes.NewReader(data)), blob.Meta{ContentType: "audio/wav", Size: int64(len(data))}, nil
 }
 
 func (f *fakeRPCBlobs) deletedKeys() []string {
