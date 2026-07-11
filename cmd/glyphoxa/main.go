@@ -958,10 +958,14 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
 		// Session Highlight clip (#308): operator-gated audio byte stream with Range.
-		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, http.HandlerFunc(clipServer.ServeClip))},
+		// ServeClip/ServeImage require the tenant, so the mount is session AND tenant
+		// (#408): RequireTenant (inside RequireSession) resolves it server-side off the
+		// operator — the plain-HTTP mirror of the Connect tenant interceptor. Without it
+		// TenantID always missed and every request 401'd.
+		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeClip)))},
 		// Session Highlight AI image (#311): operator-gated image byte stream, same
 		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
-		{Path: "GET /api/v1/highlights/{id}/image", Handler: auth.RequireSession(store, http.HandlerFunc(clipServer.ServeImage))},
+		{Path: "GET /api/v1/highlights/{id}/image", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeImage)))},
 		// Campaign bundle export (#290): streamed gzip download, operator-gated.
 		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
 		// Campaign bundle import (#291): multipart upload, operator-gated, plus the

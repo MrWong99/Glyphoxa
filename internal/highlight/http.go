@@ -29,8 +29,9 @@ type ClipStore interface {
 type CampaignResolver func(ctx context.Context) (uuid.UUID, bool, error)
 
 // ClipServer serves a Highlight's audio clip over plain HTTP (#308/#309): GET
-// /api/v1/highlights/{id}/clip, mounted behind auth.RequireSession beside the SSE
-// relay (ADR-0015 — a byte stream, not a Connect unary). It loads the row
+// /api/v1/highlights/{id}/clip, mounted behind auth.RequireSession +
+// auth.RequireTenant (#408 — session AND tenant) beside the SSE relay (ADR-0015 —
+// a byte stream, not a Connect unary). It loads the row
 // tenant-scoped, fetches the clip through the blob seam (ADR-0048), and streams
 // it with http.ServeContent so the browser <audio> scrubber's Range requests
 // resolve to partial content.
@@ -50,10 +51,13 @@ func NewClipServer(store ClipStore, blobs blob.Store, resolve CampaignResolver, 
 	return &ClipServer{store: store, blobs: blobs, resolve: resolve, log: log}
 }
 
-// ServeClip streams one Highlight's clip. The auth.RequireSession wrapper has
-// already authenticated the operator and injected the tenant; this handler
-// re-reads the tenant to scope the row load, so a foreign-tenant id (or an
-// unparsable one) is 404 — existence is never leaked. A missing blob is also 404
+// ServeClip streams one Highlight's clip. CONTRACT (#408): the mount must be
+// "session AND tenant", not just session — auth.RequireSession authenticates the
+// operator, and auth.RequireTenant (composed inside it) resolves and injects the
+// tenant server-side. RequireSession ALONE injects only the user, so TenantID
+// misses and this handler 401s every request (the production bug #408 fixed). This
+// handler re-reads that injected tenant to scope the row load, so a foreign-tenant
+// id (or an unparsable one) is 404 — existence is never leaked. A missing blob is also 404
 // (the row and clip should agree, but a purge race must not 500). http.ServeContent
 // handles Range (scrub) and conditional requests off the row's created_at.
 func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
@@ -121,7 +125,8 @@ func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
 }
 
 // ServeImage streams one Highlight's AI-generated image (#311), mirroring
-// ServeClip: GET /api/v1/highlights/{id}/image behind auth.RequireSession. It
+// ServeClip: GET /api/v1/highlights/{id}/image behind auth.RequireSession +
+// auth.RequireTenant (session AND tenant, per #408 — see ServeClip). It
 // applies the same tenant + Active-Campaign 404 posture (existence never leaked)
 // and serves through http.ServeContent (Range/conditional). A Highlight with no
 // image yet (image_key == "") is 404 — the enrichment has not run, is not
