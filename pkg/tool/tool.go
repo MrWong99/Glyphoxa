@@ -9,11 +9,14 @@
 // Agent loop assembles its prompt, then hands messages + granted tools to
 // [Loop.Run] and gets back the LLM's final text.
 //
-// v1.0 ships exactly one Tool — [Dice] — and only the read-only inline
-// execution path of ADR-0030. The side-effecting / deferred-to-turn-commit
-// path is deliberately not built (no side-effecting Tool exists yet); a Tool
-// that reports it is not read-only is rejected by the loop rather than
-// silently inlined. See package-level ADR references.
+// The read-only inline execution path of ADR-0030 is the default; the
+// side-effecting / deferred-to-turn-commit path is deliberately not built (an
+// atomic-with-the-utterance effect has no v1 Tool). A Tool that reports it is
+// not read-only is rejected by the loop rather than silently inlined — UNLESS it
+// is proposal-mediated (ADR-0052): a [ProposalMediated] Tool's only effect is a
+// GM-reviewed Knowledge Proposal row, not a canon mutation, so it runs inline
+// and a barged draft may still leave a (harmless, GM-gated) proposal. See
+// package-level ADR references.
 package tool
 
 import (
@@ -65,4 +68,20 @@ type Tool interface {
 	// context: honoring its cancellation lets barge-in tear down an in-flight
 	// call (ADR-0030).
 	Execute(ctx context.Context, args json.RawMessage, grantConfig any) (string, error)
+}
+
+// ProposalMediated is the optional capability a non-read-only [Tool] declares to
+// opt out of the loop's hard-refusal of side-effecting Tools (ADR-0052). Its
+// ONLY effect is a GM-reviewed Knowledge Proposal — nothing touches campaign
+// canon until the GM approves — so, unlike a turn-commit effect, it is safe to
+// run inline from a possibly-discarded draft: a barged reply still yields the
+// proposal (the NPC heard the fact), and the GM review is the safety net for
+// anything malformed. A Tool that is not read-only AND not proposal-mediated is
+// still refused inline (the ADR-0030 machinery is unbuilt). remember_knowledge is
+// the sole v1 implementor.
+type ProposalMediated interface {
+	Tool
+	// ProposalMediated reports that this Tool's effect is a GM-reviewed proposal,
+	// not a canon mutation, so the loop may run it inline despite ReadOnly=false.
+	ProposalMediated() bool
 }

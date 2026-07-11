@@ -23,6 +23,32 @@ Two consequences follow, and both are enforced:
 
 If a future version voices the Butler, wire it through the same voiced-roster path consistently (Cast + Matcher + mute surface) rather than special-casing it.
 
+## Amendment (Butler joins the voiced Cast, 2026-07-10, #299)
+
+The 2026-07-09 "not part of the voiced Cast" amendment is **superseded**: the
+Butler now enters the live Voice Session roster (Epic 7, #256/#299). `loadCampaignRoster`
+appends the auto-created Butler **last** (the primary Character stays first), so it
+joins the address Matcher and the Cast as a regular candidate — but keeps its
+`AddressOnly` rule, so ambient heuristics (continuation, single-NPC fallback)
+never route to it; only an explicit name address reaches it. Its GM-only
+voice-address rule is enforced **matcher-side** (see ADR-0024's #256 amendment).
+
+Two things from the prior amendment still hold and are unchanged:
+
+- **Still not a mute target.** The mute surfaces (`voicedAgents` in
+  `internal/session`, `voiced` in `internal/presence`, the web Voice panel) remain
+  narrowed to the voiced **Character** NPCs, so muting the Butler is still refused
+  (`ErrAgentNotInCampaign`) and a mute-all leaves it unmuted. The Butler is
+  Address-Only, not mutable roster state.
+- **Role and Address-Only stay pinned** by `UpdateAgent`, and the Butler stays
+  undeletable.
+
+Answer modality (#297 decision 2): short answers are spoken through its Voice;
+long ones — and a voiceless Butler's — post as text to the voice channel chat via
+a `TextSink`. Its default grant set grows to the read-only knowledge Tools
+(`transcript_search`, `kg_query`) alongside `dice` (migration 00025), seeded by
+the same auto-Butler trigger invariant.
+
 ## Amendment (Q14, 2026-05-28)
 
 The original default grant set `dice` + `transcript_search` + `rules_lookup` named tools that do not yet exist. Per Q14 we ship **only the `dice` Tool** in v1.0 (PoC); further tools are added when their building blocks land (transcript search needs the ADR-0011 pgvector path wired into a Tool; rules lookup needs an SRD corpus). The Butler's **as-built default grant is `dice` only**; `transcript_search` and `rules_lookup` join the default set as those tools are built. See the Q14 ADR for the Tool framework.

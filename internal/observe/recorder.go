@@ -131,6 +131,12 @@ const (
 	// It was never spoken — distinct from abandoned so the over-split rate (and the
 	// dropped-text residual) is observable on its own.
 	TurnYielded TurnOutcome = "yielded"
+	// TurnTextDelivered: a Butler turn delivered as TEXT to the voice channel chat
+	// (#299) — no TTS, so no first audio and no response_latency sample, yet a
+	// SUCCESS. Distinct from first_audio (never reached the wire) and from abandoned
+	// (it DID deliver its whole answer), so voiceless/long Butler replies do not
+	// pollute the abandoned rate.
+	TurnTextDelivered TurnOutcome = "text_delivered"
 )
 
 // TurnReason is the bounded sub-reason label on the turn-lifecycle counter,

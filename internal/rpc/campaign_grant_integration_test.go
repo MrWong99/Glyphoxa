@@ -15,6 +15,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -38,7 +39,8 @@ func TestToolGrants_Integration(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
 
-	// The auto-Butler comes seeded with dice (migration 00013).
+	// The auto-Butler comes seeded with dice + the #296 knowledge Tools (migration
+	// 00025): dice, kg_query, transcript_search.
 	roster, err := client.GetCampaignRoster(ctx, connect.NewRequest(&managementv1.GetCampaignRosterRequest{}))
 	if err != nil {
 		t.Fatalf("GetCampaignRoster: %v", err)
@@ -50,11 +52,12 @@ func TestToolGrants_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants(butler): %v", err)
 	}
-	// The catalog now lists every built-in (dice + the #296 knowledge Tools); assert
-	// by the GRANTED set, not by catalog index — the auto-Butler is seeded with dice
-	// only (migration 00013), the rest listed present-but-off.
-	if granted := grantedNames(butlerGrants.Msg.GetGrants()); len(granted) != 1 || granted[0] != "dice" {
-		t.Fatalf("butler granted = %v, want [dice] (seeded); full catalog = %+v", granted, butlerGrants.Msg.GetGrants())
+	// The catalog lists every built-in (dice + the #296 knowledge Tools); assert by
+	// the GRANTED set, not by catalog index — the auto-Butler is seeded with all
+	// three (migration 00025).
+	wantButlerGrants := []string{"dice", "kg_query", "transcript_search"}
+	if granted := grantedNames(butlerGrants.Msg.GetGrants()); !slices.Equal(granted, wantButlerGrants) {
+		t.Fatalf("butler granted = %v, want %v; full catalog = %+v", granted, wantButlerGrants, butlerGrants.Msg.GetGrants())
 	}
 
 	// A fresh Character NPC has no grants → dice listed but off.
@@ -94,18 +97,20 @@ func TestToolGrants_Integration(t *testing.T) {
 		t.Fatalf("granted NPC hydrates declarations %v, want [dice]", got)
 	}
 
-	// AC4 (revoke): toggle the Butler's dice off; the row is gone, so the next
-	// session hydrates ZERO declarations — the LLM is never shown the Tool.
+	// AC4 (revoke): toggle the Butler's dice off; its row is gone, so the next
+	// session hydrates declarations for the REMAINING grants only (kg_query,
+	// transcript_search) — dice is never shown to the LLM.
 	if _, err := client.UpdateToolGrant(ctx, connect.NewRequest(&managementv1.UpdateToolGrantRequest{
 		AgentId: butler.GetId(), ToolName: "dice", Granted: false,
 	})); err != nil {
 		t.Fatalf("UpdateToolGrant(butler dice off): %v", err)
 	}
-	if got := grantedNames(listGrants(t, client, butler.GetId())); got != nil {
-		t.Fatalf("after revoke, butler granted = %v, want none", got)
+	wantAfterRevoke := []string{"kg_query", "transcript_search"}
+	if got := grantedNames(listGrants(t, client, butler.GetId())); !slices.Equal(got, wantAfterRevoke) {
+		t.Fatalf("after revoke, butler granted = %v, want %v", got, wantAfterRevoke)
 	}
-	if got := hydratedDeclarations(t, store, butlerID); len(got) != 0 {
-		t.Fatalf("revoked Butler hydrates declarations %v, want none (LLM shown no Tool)", got)
+	if got := hydratedDeclarations(t, store, butlerID); !slices.Equal(got, wantAfterRevoke) {
+		t.Fatalf("revoked Butler hydrates declarations %v, want %v (dice never shown)", got, wantAfterRevoke)
 	}
 }
 

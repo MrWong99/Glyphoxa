@@ -92,6 +92,13 @@ type SessionServer struct {
 	store    SessionStore
 	recapper RecapEngine
 	log      *slog.Logger
+
+	// highlights + blobs back the Session Highlights RPCs (#308); wired via
+	// SetHighlights after construction so the many existing call sites keep their
+	// signature. Nil (unwired, e.g. keyless tests) makes the Highlight RPCs report
+	// CodeUnimplemented rather than panic.
+	highlights HighlightStore
+	blobs      highlightBlobs
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)
@@ -473,6 +480,16 @@ func (s *SessionServer) GenerateRecap(
 		SessionIds: outIDs,
 		Windowed:   res.Windowed,
 	}), nil
+}
+
+// ResolveActiveCampaign exposes the SessionServer's read-side Active-Campaign
+// resolution (searchCampaign: live Voice Session first, else the profile-first
+// durable selection) for out-of-band HTTP surfaces that share the posture — the
+// Highlight clip byte stream (#308), a plain net/http mount that is not a Connect
+// method and so cannot reach searchCampaign directly. ok is false when neither
+// resolves (never-run state).
+func (s *SessionServer) ResolveActiveCampaign(ctx context.Context) (uuid.UUID, bool, error) {
+	return s.searchCampaign(ctx)
 }
 
 // searchCampaign resolves the campaign the web transcript search scopes to: the

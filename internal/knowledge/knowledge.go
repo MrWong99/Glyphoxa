@@ -16,8 +16,10 @@ package knowledge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -45,6 +47,14 @@ type Store interface {
 	// AgentNodeFacts is the Agent's own edge-aware neighbourhood, already
 	// gm_private-filtered (#133).
 	AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]storage.KGNode, error)
+	// AgentLinkedNode is the Agent's own linked Node (the NPC-Node↔Agent link),
+	// the anchor an own_node-scoped remember_knowledge proposal attaches to (#300,
+	// ADR-0052). ok=false means the Agent has no linked entry.
+	AgentLinkedNode(ctx context.Context, agentID uuid.UUID) (storage.KGNode, bool, error)
+	// CreateKnowledgeProposal records a pending Knowledge Proposal (#300,
+	// ADR-0052) — the sole effect of remember_knowledge. proposedWrite is the raw
+	// jsonb payload; nothing touches kg_node/kg_edge until the GM approves.
+	CreateKnowledgeProposal(ctx context.Context, campaignID, agentID uuid.UUID, proposedWrite []byte) error
 }
 
 // Sessions reports the active Voice Session (for its Campaign). *session.Manager
@@ -179,8 +189,61 @@ func typeLabel(t storage.KGNodeType) string {
 	}
 }
 
+// proposalWriteTimeout bounds the cancel-immune proposal INSERT: ADR-0052 barge
+// semantics require the write to SURVIVE the turn's cancellation (a barged reply
+// still yields its proposal), so it runs under context.WithoutCancel; the timeout
+// then prevents a goroutine leak if the DB is wedged.
+const proposalWriteTimeout = 5 * time.Second
+
+// OwnNode implements [tool.KGWriter]. It resolves the caller's own linked Node
+// (ADR-0008) for own_node-scoped proposals. The agentID is the turn ctx caller,
+// never the LLM args; an empty or unparseable id has no linked Node (ok=false),
+// so the handler refuses rather than proposing against a wrong Node.
+func (a *Adapter) OwnNode(ctx context.Context, agentID string) (tool.KGNodeRef, bool, error) {
+	aid, err := uuid.Parse(agentID)
+	if err != nil || aid == uuid.Nil {
+		return tool.KGNodeRef{}, false, nil
+	}
+	node, ok, err := a.store.AgentLinkedNode(ctx, aid)
+	if err != nil {
+		return tool.KGNodeRef{}, false, fmt.Errorf("knowledge: own node: %w", err)
+	}
+	if !ok {
+		return tool.KGNodeRef{}, false, nil
+	}
+	return tool.KGNodeRef{ID: node.ID.String(), Name: node.Name}, true, nil
+}
+
+// CreateProposal implements [tool.KGWriter]. It resolves the Campaign from the
+// active session (no session ⇒ ErrNoActiveSession), marshals the storage-free
+// [tool.ProposedWrite] to jsonb HERE, and INSERTs the pending proposal. The
+// insert runs under context.WithoutCancel(ctx) with a bounded timeout so a
+// barge-in (turn ctx cancel) does not roll back a proposal the NPC already made
+// (ADR-0052), while a wedged DB still cannot leak the goroutine.
+func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.ProposedWrite) error {
+	campaignID, err := a.activeCampaign()
+	if err != nil {
+		return err
+	}
+	aid, err := uuid.Parse(agentID)
+	if err != nil || aid == uuid.Nil {
+		return fmt.Errorf("knowledge: create proposal: invalid authoring agent id %q", agentID)
+	}
+	payload, err := json.Marshal(w)
+	if err != nil {
+		return fmt.Errorf("knowledge: create proposal: marshal proposed write: %w", err)
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteTimeout)
+	defer cancel()
+	if err := a.store.CreateKnowledgeProposal(writeCtx, campaignID, aid, payload); err != nil {
+		return fmt.Errorf("knowledge: create proposal: %w", err)
+	}
+	return nil
+}
+
 // Compile-time assertions that the adapter satisfies the tool seams.
 var (
 	_ tool.TranscriptSearcher = (*Adapter)(nil)
 	_ tool.KGReader           = (*Adapter)(nil)
+	_ tool.KGWriter           = (*Adapter)(nil)
 )

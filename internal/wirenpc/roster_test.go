@@ -2,6 +2,8 @@ package wirenpc
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -601,6 +603,123 @@ func TestMatcherAgent_DerivesTruncationAliases(t *testing.T) {
 	}
 }
 
+// TestMatcherAgent_ButlerRoleAndAddressOnly pins the #299 Butler derivation: a
+// butler-role spec produces an address.Agent with AgentRole "butler" and
+// AddressOnly true, so ambient heuristics never route to it. A zero-role spec
+// stays a non-AddressOnly Character (byte-identical to the pre-#299 default).
+func TestMatcherAgent_ButlerRoleAndAddressOnly(t *testing.T) {
+	butlerSpec := npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: string(voiceevent.AgentRoleButler), addressOnly: true}
+	got := matcherAgent(butlerSpec)
+	if got.Target.AgentRole != voiceevent.AgentRoleButler {
+		t.Fatalf("butler matcherAgent role = %q, want %q", got.Target.AgentRole, voiceevent.AgentRoleButler)
+	}
+	if !got.AddressOnly {
+		t.Fatal("butler matcherAgent must be AddressOnly")
+	}
+
+	character := matcherAgent(specFor("npc-bart", "Bart", ""))
+	if character.Target.AgentRole != voiceevent.AgentRoleCharacter {
+		t.Fatalf("zero-role matcherAgent role = %q, want %q", character.Target.AgentRole, voiceevent.AgentRoleCharacter)
+	}
+	if character.AddressOnly {
+		t.Fatal("Character matcherAgent must not be AddressOnly")
+	}
+}
+
+// TestRoster_ButlerVoiceEndToEnd is the #299 pipeline pin over the real Matcher +
+// Cast + TTS: a GM naming the Butler with a short answer gets it SPOKEN in the
+// Butler's Voice (AC1's spoken path), a NON-GM naming the Butler is dropped
+// matcher-side (GM gate), and a Character NPC named by anyone is undisturbed
+// (AC3). Long Butler answers post as text via the TextSink instead of speaking.
+func TestRoster_ButlerVoiceEndToEnd(t *testing.T) {
+	bus := voiceevent.NewBus()
+	synth := &recordingSynth{}
+	const gm = "gm-1"
+	var posted []string
+	poster := func(_ context.Context, text string) error { posted = append(posted, text); return nil }
+
+	butlerVoice := tts.Voice{ProviderID: "test", VoiceID: "glyphoxa", Name: "Glyphoxa"}
+	repliers := map[string]*agent.Replier{
+		"npc-bart": replierFor(specFor("npc-bart", "Bart", ""), "What'll it be?", synth),
+	}
+	newButler := func(line string) *agent.Replier {
+		return agent.NewReplier(agent.Config{
+			Persona:     agent.Persona{AgentID: "glyphoxa", Markdown: "You are Glyphoxa.", Voice: butlerVoice},
+			Engine:      scriptEngine{line: line},
+			Synthesizer: synth,
+			TextSink:    poster,
+		})
+	}
+
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier {
+			if s.agentID == "glyphoxa" {
+				return repliers["glyphoxa"]
+			}
+			return repliers[s.agentID]
+		},
+		butlerGate: func(id string) bool { return id == gm },
+	}
+	repliers["glyphoxa"] = newButler("Two sixes. Total nine.")
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: voiceevent.AgentRoleButler, addressOnly: true, voice: butlerVoice})
+
+	ttsStage := orchestrator.NewTTS(bus, synth)
+	detector := orchestrator.NewAddressDetector(r.matcher)
+	streamRep := orchestrator.NewStreamReplier(ttsStage, r.cast.ReplyStream(), nil)
+	t.Cleanup(orchestrator.Bind(context.Background(), bus, detector, streamRep))
+
+	pubFrom := func(speaker, text string) {
+		bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: text, SpeakerID: speaker})
+	}
+
+	// GM addresses the Butler with a short answer → spoken in the Butler's Voice.
+	pubFrom(gm, "Glyphoxa, roll two d6")
+	if got := synth.spokenBy("glyphoxa"); len(got) == 0 {
+		t.Fatalf("GM 'Glyphoxa, roll two d6' produced no spoken Butler answer; spoke=%+v posted=%v", synth.spoke, posted)
+	}
+	if len(posted) != 0 {
+		t.Errorf("short Butler answer was posted as text %v, want spoken", posted)
+	}
+
+	// A NON-GM naming the Butler is dropped matcher-side: no new Butler speech.
+	spokenBefore := len(synth.spokenBy("glyphoxa"))
+	pubFrom("player-9", "Glyphoxa, roll two d6")
+	if got := len(synth.spokenBy("glyphoxa")); got != spokenBefore {
+		t.Errorf("non-GM Butler address produced %d Butler lines, want %d (GM gate)", got, spokenBefore)
+	}
+
+	// A Character NPC named by anyone is undisturbed (AC3).
+	pubFrom("player-9", "Bart, a room please")
+	if got := synth.spokenBy("npc-bart"); len(got) == 0 {
+		t.Error("Character NPC did not answer when named by a non-GM (AC3 regression)")
+	}
+}
+
+// TestRoster_ButlerExcludedFromFallback is the AC3 pin at the Roster level: in a
+// scene of one Character NPC + the Address-Only Butler, an unnamed utterance
+// reaches the Character via the sole-NPC fallback (the Butler is not counted),
+// while naming the Butler reaches it. NPC-only routing is unchanged by the
+// Butler's presence.
+func TestRoster_ButlerExcludedFromFallback(t *testing.T) {
+	synth := &recordingSynth{}
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: string(voiceevent.AgentRoleButler), addressOnly: true,
+		voice: tts.Voice{ProviderID: "test", VoiceID: "glyphoxa", Name: "Glyphoxa"}})
+
+	if got := routedTo(r, "so what is on tap tonight?"); got != "npc-bart" {
+		t.Fatalf("unnamed utterance routed to %q, want npc-bart (Butler excluded from fallback)", got)
+	}
+	if got := routedTo(r, "Glyphoxa, roll two d6"); got != "glyphoxa" {
+		t.Fatalf("named-Butler utterance routed to %q, want glyphoxa", got)
+	}
+}
+
 // TestRoster_TruncatedNameRoutesViaDerivedAlias is the end-to-end #197 bar over
 // the Roster: a "de" scene of Bart/Greta/Marek routes an utterance opening with
 // the STT truncation "Art" to Bart and "Arek" to Marek via their derived
@@ -637,6 +756,91 @@ func routedTo(r *Roster, text string) string {
 		return ""
 	}
 	return routed[0].Target.AgentID
+}
+
+// routedFrom returns the AgentID the matcher routes text to for a given speaker,
+// or "" for no route (the SpeakerID-aware Butler GM-gate path).
+func routedFrom(r *Roster, speakerID, text string) string {
+	routed := r.matcher.TargetMatchFrom(speakerID, text)
+	if len(routed) == 0 {
+		return ""
+	}
+	return routed[0].Target.AgentID
+}
+
+// TestRosterDepsForLive_TextSinkOnButlerOnly pins the #299 live wiring: the text
+// poster is installed as the TextSink on butler-role specs only (so a long Butler
+// answer posts to the channel chat), while a Character NPC keeps the pure-TTS
+// path (nil TextSink), and the GM-gate predicate reaches the Roster.
+func TestRosterDepsForLive_TextSinkOnButlerOnly(t *testing.T) {
+	synth := &recordingSynth{}
+	long := strings.Repeat("word ", 200) // > 400 runes → text modality
+	engineFor := func(npcSpec) agent.Engine { return scriptEngine{line: long} }
+	var posted []string
+	poster := func(_ context.Context, text string) error { posted = append(posted, text); return nil }
+	gm := func(string) bool { return false }
+	log := slog.New(slog.DiscardHandler)
+
+	deps := rosterDepsForLive(engineFor, synth, 16, log, nil, nil, "", gm, poster)
+	if deps.butlerGate == nil {
+		t.Fatal("rosterDepsForLive did not thread the GM-gate predicate")
+	}
+
+	// Butler spec: a long answer posts through the TextSink, not TTS.
+	butlerR := deps.replierFor(npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: voiceevent.AgentRoleButler,
+		voice: tts.Voice{ProviderID: "test", VoiceID: "g", Name: "Glyphoxa"}})
+	butlerRoute := voiceevent.AddressRouted{At: time.Now(), Text: "Glyphoxa, recap everything",
+		Target: voiceevent.AddressTarget{AgentID: "glyphoxa", AgentRole: voiceevent.AgentRoleButler, Name: "Glyphoxa"}}
+	// A text-delivered Butler turn returns the terminal sentinel (#299), not nil.
+	if err := butlerR.ReplyStream()(context.Background(), butlerRoute, func(orchestrator.Reply) error { return nil }); !errors.Is(err, orchestrator.ErrTextDelivered) {
+		t.Fatalf("butler ReplyStream err = %v, want ErrTextDelivered", err)
+	}
+	if len(posted) == 0 {
+		t.Error("butler long answer was not posted via the TextSink")
+	}
+
+	// Character spec: no TextSink — the answer goes to TTS, the poster is untouched.
+	posted = nil
+	charR := deps.replierFor(specFor("npc-bart", "Bart", ""))
+	charRoute := voiceevent.AddressRouted{At: time.Now(), Text: "Bart, tell me a long story",
+		Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: voiceevent.AgentRoleCharacter, Name: "Bart"}}
+	var dispatched int
+	if err := charR.ReplyStream()(context.Background(), charRoute, func(orchestrator.Reply) error { dispatched++; return nil }); err != nil {
+		t.Fatalf("character ReplyStream: %v", err)
+	}
+	if len(posted) != 0 {
+		t.Errorf("character answer posted via TextSink %d times, want 0", len(posted))
+	}
+	if dispatched == 0 {
+		t.Error("character answer was not dispatched to TTS")
+	}
+}
+
+// TestRoster_ButlerGateThreadedIntoMatcher pins the #299 wiring: rosterDeps.butlerGate
+// reaches the Matcher's ButlerGMGate, so a non-GM naming the Butler routes nowhere
+// while the GM's identical utterance reaches it — enforced matcher-side (pre-cap).
+func TestRoster_ButlerGateThreadedIntoMatcher(t *testing.T) {
+	synth := &recordingSynth{}
+	const gm = "gm-1"
+	deps := rosterDeps{
+		replierFor: func(s npcSpec) *agent.Replier { return replierFor(s, "(unused)", synth) },
+		butlerGate: func(id string) bool { return id == gm },
+	}
+	r := newRoster(deps)
+	r.AddNPC(specFor("npc-bart", "Bart", ""))
+	r.AddNPC(npcSpec{agentID: "glyphoxa", name: "Glyphoxa", role: voiceevent.AgentRoleButler, addressOnly: true,
+		voice: tts.Voice{ProviderID: "test", VoiceID: "glyphoxa", Name: "Glyphoxa"}})
+
+	if got := routedFrom(r, "player", "Glyphoxa, roll a d6"); got != "" {
+		t.Errorf("non-GM naming Butler routed to %q, want nobody (matcher gate)", got)
+	}
+	if got := routedFrom(r, gm, "Glyphoxa, roll a d6"); got != "glyphoxa" {
+		t.Errorf("GM naming Butler routed to %q, want glyphoxa", got)
+	}
+	// Character routing is unaffected by the gate.
+	if got := routedFrom(r, "player", "Bart, a drink"); got != "npc-bart" {
+		t.Errorf("Character routing = %q, want npc-bart", got)
+	}
 }
 
 // TestRoster_SingleNPCBehaviorPreserved pins the Stage-2 acceptance bar: with a

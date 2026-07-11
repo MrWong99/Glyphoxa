@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -110,15 +111,53 @@ func (s *CampaignServer) DeleteCampaign(
 		return nil, err
 	}
 
-	if err := s.store.DeleteCampaign(ctx, id); err != nil {
+	// Capture the campaign's Highlight clip keys BEFORE the delete — the row cascade
+	// removes the highlight rows, after which they can't be listed (#308, ADR-0048).
+	var clipKeys []string
+	if s.clips != nil {
+		keys, err := s.clips.CampaignClipKeys(ctx, id)
+		if err != nil {
+			slog.Default().Error("DeleteCampaign: list highlight clip keys failed", "campaign_id", id, "err", err)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		clipKeys = keys
+	}
+
+	// The blob sweep is a DURABLE job enqueued in the delete's OWN transaction
+	// (#308, ADR-0049): it exists iff the delete committed, so a refused delete never
+	// schedules a sweep of a surviving campaign's clips, and a crash right after the
+	// delete never loses the sweep. With no clips there is nothing to sweep, so the
+	// plain delete runs. The inline best-effort sweep below is a fast-path; the job is
+	// the backstop that guarantees eventual cleanup.
+	var deleteErr error
+	if len(clipKeys) > 0 {
+		payload, merr := highlight.MarshalCampaignSweep(clipKeys)
+		if merr != nil {
+			slog.Default().Error("DeleteCampaign: marshal clip sweep payload failed", "campaign_id", id, "err", merr)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		deleteErr = s.store.DeleteCampaignWithJob(ctx, id, highlight.JobKindSweepCampaignClips, payload)
+	} else {
+		deleteErr = s.store.DeleteCampaign(ctx, id)
+	}
+	if deleteErr != nil {
 		switch {
-		case errors.Is(err, storage.ErrNotFound):
+		case errors.Is(deleteErr, storage.ErrNotFound):
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
-		case errors.Is(err, storage.ErrNotArchived):
+		case errors.Is(deleteErr, storage.ErrNotArchived):
 			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("campaign must be archived before deletion"))
 		default:
-			slog.Default().Error("DeleteCampaign: store delete failed", "campaign_id", id, "err", err)
+			slog.Default().Error("DeleteCampaign: store delete failed", "campaign_id", id, "err", deleteErr)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+	}
+
+	// Fast-path: the rows are gone (cascade); drop their clips through the seam now so
+	// storage reclaims immediately. Best-effort — a failure here logs and leaves the
+	// blob for the durable sweep job (idempotent Delete), never failing the RPC.
+	for _, k := range clipKeys {
+		if err := s.clips.DeleteClip(ctx, k); err != nil {
+			slog.Default().Warn("DeleteCampaign: highlight clip sweep deferred to job", "campaign_id", id, "key", k, "err", err)
 		}
 	}
 	return connect.NewResponse(&managementv1.DeleteCampaignResponse{}), nil

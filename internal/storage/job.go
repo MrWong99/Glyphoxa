@@ -86,6 +86,32 @@ func (s *Store) EnqueueJob(ctx context.Context, kind string, payload []byte, max
 	return id, nil
 }
 
+// EnqueueJobAt is EnqueueJob with an explicit run_after: the job stays pending
+// (not runnable) until runAfter arrives. It backs deferred work like the Session
+// Highlights 7-day candidate purge (#308, ADR-0051/0049). A zero runAfter falls
+// back to now() (immediately runnable), matching EnqueueJob.
+func (s *Store) EnqueueJobAt(ctx context.Context, kind string, payload []byte, maxAttempts int, runAfter time.Time) (uuid.UUID, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultJobMaxAttempts
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	if runAfter.IsZero() {
+		runAfter = time.Now()
+	}
+	var id uuid.UUID
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO job (kind, payload, max_attempts, run_after)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id`,
+		kind, payload, maxAttempts, runAfter).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("storage: enqueue job %q at %s: %w", kind, runAfter, err)
+	}
+	return id, nil
+}
+
 // ClaimJob atomically claims the single oldest runnable job in any of kinds and
 // returns it in its post-claim state (status='running', attempts incremented,
 // leased_until = now()+lease). Runnable means a pending job whose run_after has

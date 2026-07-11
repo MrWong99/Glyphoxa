@@ -25,8 +25,9 @@ var ErrMaxRoundsExceeded = errors.New("tool: max tool-call rounds exceeded")
 //
 // Least-privilege (ADR-0029) and side-effect timing (ADR-0030) are both
 // enforced here: only Tools the Agent is granted are declared and executable,
-// and only read-only Tools run inline — a non-read-only Tool is refused
-// because v1.0 does not build the deferred-to-turn-commit path.
+// and only read-only — or [ProposalMediated] (ADR-0052) — Tools run inline. A
+// non-read-only Tool that is not proposal-mediated is refused because v1.0 does
+// not build the deferred-to-turn-commit path.
 type Loop struct {
 	provider Provider
 	grants   *GrantSet
@@ -220,9 +221,13 @@ func (l *Loop) execute(ctx context.Context, call ToolCall) ToolResult {
 	if !t.ReadOnly() {
 		// ADR-0030: side-effecting Tools must defer to turn-commit; that path
 		// is not built in v1.0, so refuse rather than mutate state inline from
-		// a draft that may be discarded.
-		return errResult(call.ID, fmt.Sprintf(
-			"tool %q is not read-only; side-effecting tools are not supported in this version", call.Name))
+		// a draft that may be discarded. ADR-0052 carves out ONE exception: a
+		// proposal-mediated Tool (remember_knowledge) whose only effect is a
+		// GM-reviewed proposal row is safe to run inline, so it falls through.
+		if pm, ok := t.(ProposalMediated); !ok || !pm.ProposalMediated() {
+			return errResult(call.ID, fmt.Sprintf(
+				"tool %q is not read-only; side-effecting tools are not supported in this version", call.Name))
+		}
 	}
 
 	out, err := t.Execute(ctx, call.Input, config)
