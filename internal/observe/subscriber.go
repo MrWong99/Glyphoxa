@@ -309,12 +309,16 @@ func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
 // catch-all. A turn-end arriving AFTER first audio (e.g. a barge mid-playback) is
 // a normal interruption: outcomeDone is already set, so it is ignored.
 //
-// A TurnEnded for a turn this subscriber never OPENED (no prior STTFinal /
-// AddressRouted / TTSInvoked to anchor a timing spine) is ignored — it has no turn
-// to attribute an outcome to. That is the #310 Highlight voice-replay case: a
-// barge cutting a replay publishes TurnEnded{replayTurnID, barge}, but a replay
-// runs no STT/LLM/TTS, so the id was never opened; recording it would fabricate a
-// phantom abandoned/barge turn for audio that actually played (the #391 class).
+// A BARGE for a turn this subscriber never OPENED (no prior STTFinal /
+// AddressRouted / TTSInvoked spine) is ignored — that is the #310 Highlight
+// voice-replay case: a barge cutting a replay publishes TurnEnded{replayTurnID,
+// barge}, but a replay runs no STT/LLM/TTS, so the id was never opened; recording
+// it would fabricate a phantom abandoned/barge turn for audio that actually played
+// (the #391 class). The guard is NARROW to barge on purpose: every OTHER spine-less
+// terminal is a legit sole signal that must still be counted by fabricating the
+// turn — a text-modality Cross-talk Reaction sub-turn's TurnEnded{text_delivered}
+// (#389) and the /say pre-dispatch refusals (directspeech.go) never open a turn yet
+// their outcome is real.
 func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	if e.TurnID == "" {
 		return
@@ -325,7 +329,11 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	defer s.mu.Unlock()
 	t := s.turns[e.TurnID]
 	if t == nil {
-		return // a turn we never opened: no spine to anchor an outcome (#310 replay barge)
+		if e.Reason == voiceevent.TurnEndBarge {
+			return // an unopened barge = a #310 replay cut; no spine to attribute audio that played
+		}
+		t = &turnState{}
+		s.turns[e.TurnID] = t
 	}
 	t.lastSeen = s.now()
 	if e.Text != "" {

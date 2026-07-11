@@ -613,3 +613,22 @@ func TestStageSubscriberTurnEndedUnknownTurnIgnored(t *testing.T) {
 		t.Fatalf("TurnEnded for an unopened turn recorded %+v, want nothing", got)
 	}
 }
+
+// TestStageSubscriberSpinelessTextDeliveredRecorded pins that the barge-only guard
+// (#310) does NOT drop legit spine-less terminals: a text-modality Cross-talk
+// Reaction sub-turn (#389) publishes ONLY TurnEnded{text_delivered} for its fresh
+// reaction id — no STTFinal/AddressRouted/TTSInvoked opener — yet its success outcome
+// must still be counted (the reaction is the ONLY signal of that sub-turn).
+func TestStageSubscriberSpinelessTextDeliveredRecorded(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	// The real spine-less reaction sequence: a fresh reaction id ends text_delivered
+	// with no prior opener events for that id.
+	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "reaction-1", Reason: voiceevent.TurnEndTextDelivered})
+
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnTextDelivered {
+		t.Fatalf("spine-less text_delivered outcomes = %+v, want one [text_delivered]", got)
+	}
+}
