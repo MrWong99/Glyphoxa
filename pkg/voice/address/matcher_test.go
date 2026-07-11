@@ -127,6 +127,23 @@ func TestMatcher_LastAddressedContinuation(t *testing.T) {
 	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
 }
 
+// TestMatcher_ButlerInterjectionDoesNotClobberContinuation guards ADR-0024's
+// AddressOnly exclusion from the last-speaker heuristic: a Butler explicitly
+// named mid-conversation is published, but must NEVER be recorded as
+// lastAddressed. Otherwise a 2-NPC scene where the player is talking to Bart,
+// interrupted by a GM "Glyphoxa, roll two d6", black-holes the player's next
+// unnamed follow-up (the Butler can't score AddressOnly and the sole-NPC
+// fallback is inert with two NPCs) — routing NOWHERE.
+func TestMatcher_ButlerInterjectionDoesNotClobberContinuation(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "en"}, butler, bart, goblin)
+
+	assertIDs(t, m.TargetMatch("Bart, pour me a drink."), "npc-bart")
+	assertIDs(t, m.TargetMatch("Glyphoxa, roll two d6."), "butler")
+	// The unnamed follow-up still belongs to Bart — the Butler interjection did
+	// not overwrite the continuation state.
+	assertIDs(t, m.TargetMatch("and what else do you have?"), "npc-bart")
+}
+
 // TestMatcher_SoleActiveNPCFallback covers the lone-NPC fallback: with exactly
 // one Character NPC active, an unnamed utterance routes to it.
 func TestMatcher_SoleActiveNPCFallback(t *testing.T) {

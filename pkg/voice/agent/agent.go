@@ -681,6 +681,12 @@ func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, disp
 // Deliver-then-commit (ADR-0012) holds on both branches: the answer is committed
 // only after the sink post (text) or the dispatch (voice) succeeds, so a
 // barge/cancel that aborts delivery leaves no phantom assistant message.
+//
+// The text branch returns the [orchestrator.ErrTextDelivered] sentinel (#299) so
+// the reactor publishes a TurnEnded(text_delivered) terminal event: a text turn
+// dispatches no TTS and reaches no first audio, so without this signal the
+// metrics TTL sweep would miscount a delivered answer as abandoned. The spoken
+// branch stays silent on success (first audio is its terminal signal).
 func (r *Replier) textModalityTurn(ctx context.Context, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	answer, err := r.engine.Generate(ctx, messages)
 	if err != nil {
@@ -701,7 +707,11 @@ func (r *Replier) textModalityTurn(ctx context.Context, utterance string, messag
 			return err
 		}
 		r.commitSpoken(answer)
-		return nil
+		// Signal a text-delivered terminal outcome (#299): this turn dispatched no
+		// TTS, so it reaches no first audio. Returning the sentinel lets the reactor
+		// publish TurnEnded(text_delivered) — a SUCCESS — instead of the metrics TTL
+		// sweep miscounting it as an abandoned/no_first_audio turn.
+		return orchestrator.ErrTextDelivered
 	}
 
 	// Spoken delivery: sentence-split the whole answer and dispatch each, committing

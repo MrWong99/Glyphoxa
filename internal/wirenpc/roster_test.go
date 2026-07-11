@@ -2,6 +2,7 @@ package wirenpc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -790,8 +791,9 @@ func TestRosterDepsForLive_TextSinkOnButlerOnly(t *testing.T) {
 		voice: tts.Voice{ProviderID: "test", VoiceID: "g", Name: "Glyphoxa"}})
 	butlerRoute := voiceevent.AddressRouted{At: time.Now(), Text: "Glyphoxa, recap everything",
 		Target: voiceevent.AddressTarget{AgentID: "glyphoxa", AgentRole: voiceevent.AgentRoleButler, Name: "Glyphoxa"}}
-	if err := butlerR.ReplyStream()(context.Background(), butlerRoute, func(orchestrator.Reply) error { return nil }); err != nil {
-		t.Fatalf("butler ReplyStream: %v", err)
+	// A text-delivered Butler turn returns the terminal sentinel (#299), not nil.
+	if err := butlerR.ReplyStream()(context.Background(), butlerRoute, func(orchestrator.Reply) error { return nil }); !errors.Is(err, orchestrator.ErrTextDelivered) {
+		t.Fatalf("butler ReplyStream err = %v, want ErrTextDelivered", err)
 	}
 	if len(posted) == 0 {
 		t.Error("butler long answer was not posted via the TextSink")

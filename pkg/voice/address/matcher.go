@@ -560,6 +560,16 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		if _, isMuted := m.muted[h.agent.Target.AgentID]; isMuted {
 			continue
 		}
+		// An AddressOnly addressee (the Butler, #299) is likewise published but
+		// NEVER recorded as lastAddressed. ADR-0024 excludes AddressOnly Agents
+		// from the last-speaker heuristic, so recording it can never help routing
+		// — it can only black-hole the next unnamed continuation onto an Agent no
+		// ambient heuristic can ever reach. Mirror the muted-agent guard above: a
+		// GM naming the Butler mid-scene must not erase who the player was talking
+		// to.
+		if h.agent.AddressOnly {
+			continue
+		}
 		addressed[h.agent.Target.AgentID] = true
 	}
 	// Record this turn's UNMUTED addressees for next turn's continuation heuristic.
