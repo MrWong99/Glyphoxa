@@ -38,8 +38,8 @@
   margin-top: var(--spacing-sm);
   padding: var(--spacing-xs) var(--spacing-sm);
   border-radius: var(--radius-sm, 4px);
-  border: 1px solid var(--warning, #a86800);
-  background: color-mix(in srgb, var(--warning, #a86800) 12%, transparent);
-  color: var(--warning, #a86800);
+  border: 1px solid var(--status-warning);
+  background: var(--status-warning-bg);
+  color: var(--status-warning);
   font-size: 13px;
 }

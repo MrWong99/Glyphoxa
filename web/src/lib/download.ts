@@ -118,7 +118,8 @@ export async function importCampaignBundle(file: File): Promise<ImportSummary> {
     sessions: number;
     lines: number;
     chunks: number;
-    dropped_participant_refs: number;
+    // Optional: a pre-#386 server omits it; default to 0 (zero absent-safe).
+    dropped_participant_refs?: number;
   };
   return {
     campaignId: body.campaign_id,

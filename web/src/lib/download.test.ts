@@ -178,6 +178,33 @@ describe("importCampaignBundle", () => {
     vi.unstubAllGlobals();
   });
 
+  it("defaults droppedParticipantRefs to 0 when the field is absent (old server)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            campaign_id: "camp-9",
+            name: "The Prancing Pony",
+            agents: 0,
+            nodes: 0,
+            edges: 0,
+            characters: 0,
+            sessions: 0,
+            lines: 0,
+            chunks: 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    const summary = await importCampaignBundle(bundleFile());
+
+    expect(summary.droppedParticipantRefs).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
   it("throws the server {error} message on a 400 bad-bundle response", async () => {
     vi.stubGlobal(
       "fetch",
