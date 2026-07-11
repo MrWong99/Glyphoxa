@@ -511,7 +511,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			// choice (voiced/public/ephemeral, #271). The Manager is the ButlerVoicer
 			// (#365): the now-voiced Butler (ADR-0009 #299) speaks a `voiced` recap via
 			// SpeakAsButler → SayAs, so it lands as a KindButler transcript line; with no
-			// live session a voiced request still degrades to public text.
+			// live session OR a voiceless Butler a voiced request degrades to public text.
 			presence.RecapCommand(store, mgr, recapEngine, mgr),
 			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).

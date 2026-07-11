@@ -68,6 +68,13 @@ var (
 	// mute writes to, so a session swap can't sneak a foreign agent into the new
 	// session's mute set. Mapped to CodeNotFound.
 	ErrAgentNotInCampaign = errors.New("session: no such Agent in the Active Campaign")
+
+	// ErrButlerVoiceless is returned by SpeakAsButler when the Active Campaign's
+	// Butler has no synthesizable Voice (empty VoiceID — the default auto-Butler is
+	// voiceless). Voicing it would publish a KindButler transcript line that never
+	// produces audio (elevenlabs.Synthesize rejects an empty VoiceID), so the caller
+	// degrades to text instead of claiming a phantom voicing (ADR-0012, #365).
+	ErrButlerVoiceless = errors.New("session: the Butler has no voice to speak with")
 )
 
 // Store is the narrow storage surface the Manager needs: the saved Discord
@@ -871,7 +878,10 @@ func sayRole(r storage.AgentRole) string {
 // roster and delegates to [Manager.SayAs], so the published SpeakRequested carries
 // the Butler's butler-role Target and the transcript projects a KindButler line
 // through the NORMAL relay projection (no hand-crafted row). It refuses when idle
-// (ErrNoActiveSession); a campaign with no Butler yields ErrAgentNotInCampaign.
+// (ErrNoActiveSession), a campaign with no Butler yields ErrAgentNotInCampaign, and
+// a VOICELESS Butler (empty VoiceID — the default auto-Butler) yields
+// ErrButlerVoiceless BEFORE any publish, so the recap surface can degrade to text
+// rather than persist a phantom line for unsynthesizable speech (AC1, ADR-0012).
 func (m *Manager) SpeakAsButler(ctx context.Context, text string) error {
 	m.mu.Lock()
 	as := m.active
@@ -887,9 +897,20 @@ func (m *Manager) SpeakAsButler(ctx context.Context, text string) error {
 		return fmt.Errorf("session: list agents for butler say: %w", err)
 	}
 	for _, a := range agents {
-		if a.Role == storage.AgentRoleButler {
-			return m.SayAs(ctx, a.ID.String(), text)
+		if a.Role != storage.AgentRoleButler {
+			continue
 		}
+		// The default auto-Butler is voiceless (empty VoiceID). Refuse BEFORE SayAs
+		// publishes anything, so no phantom KindButler line is persisted for speech the
+		// room can never hear (AC1: "when a live session has a VOICED Butler").
+		voice, err := storage.VoiceFromJSON(a.Voice)
+		if err != nil {
+			return fmt.Errorf("session: decode butler voice: %w", err)
+		}
+		if voice.VoiceID == "" {
+			return ErrButlerVoiceless
+		}
+		return m.SayAs(ctx, a.ID.String(), text)
 	}
 	return ErrAgentNotInCampaign
 }

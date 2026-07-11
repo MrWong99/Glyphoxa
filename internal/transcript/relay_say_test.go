@@ -64,6 +64,43 @@ func TestProjection_SayPersistenceTeeFires(t *testing.T) {
 	}
 }
 
+// TestProjection_ButlerSayLine pins #365 AC2: a Butler /say (SpeakAsButler → SayAs)
+// lands through the SAME SpeakRequested → TTSInvoked projection a Character /say uses —
+// no hand-crafted row — but the butler-role Target makes the line render with the
+// KindButler kind + "Butler" pill, and it persists via the normal relay tee.
+func TestProjection_ButlerSayLine(t *testing.T) {
+	bus := voiceevent.NewBus()
+	fs := &fakeSessions{id: uuid.New(), active: true}
+	store := newFakeLineStore()
+	r := NewRelay(bus, fs, store, nil)
+
+	bus.Publish(voiceevent.SpeakRequested{
+		At: at(1), TurnID: "s1", Text: "At your service.",
+		Target: voiceevent.AddressTarget{AgentID: "butler-id", AgentRole: "butler", Name: "Glyphoxa"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "At your service.", Index: 0, TurnID: "s1"})
+
+	v := r.View(fs.id.String())
+	if len(v.Lines) != 1 {
+		t.Fatalf("got %d lines, want 1: %+v", len(v.Lines), v.Lines)
+	}
+	l := v.Lines[0]
+	if l.ID != "a:s1" || l.Who != "Glyphoxa" || l.Kind != KindButler || l.Tag != "Butler" {
+		t.Errorf("butler say line meta = {id %q who %q kind %q tag %q}, want {a:s1 Glyphoxa butler Butler}", l.ID, l.Who, l.Kind, l.Tag)
+	}
+	if l.Text != "At your service." {
+		t.Errorf("butler say line text = %q, want the verbatim /say text", l.Text)
+	}
+
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	got, _ := store.ListTranscriptLines(context.Background(), fs.id)
+	if len(got) != 1 || got[0].LineID != "a:s1" || got[0].Who != "Glyphoxa" || got[0].Text != "At your service." {
+		t.Errorf("persisted butler say line = %+v, want one {a:s1 Glyphoxa At your service.}", got)
+	}
+}
+
 // TestProjection_EnsembleLeadAttributesLine pins #301: the Ensemble Turn's Lead
 // speaks under the ensemble's original TurnID, and its EnsembleLead attribution
 // makes the coalesced reply land as the Lead's line (a:<turn>, the Lead's name +

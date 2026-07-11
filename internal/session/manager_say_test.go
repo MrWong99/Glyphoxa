@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,6 +11,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
+
+// voiceJSON builds a canonical Agent voice column carrying voiceID — the shape
+// storage.VoiceFromJSON reads back — so a test Butler counts as VOICED.
+func voiceJSON(voiceID string) json.RawMessage {
+	return json.RawMessage(`{"VoiceID":"` + voiceID + `"}`)
+}
 
 // TestSayAs_IdleReturnsNoActiveSession pins the active-session requirement (#295,
 // ADR-0010): a /say with no live Voice Session is refused before any roster lookup
@@ -89,7 +96,7 @@ func TestSayAs_ButlerPublishesButlerRole(t *testing.T) {
 // (→ KindButler line) and the verbatim text — the recap decision-6a voiced path.
 func TestSpeakAsButler_PublishesButlerLine(t *testing.T) {
 	store := newFakeStore()
-	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa"}
+	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa", Voice: voiceJSON("v1")}
 	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
 	store.agents = []storage.Agent{bart, butler}
 	mgr, bus := muteManager(t, store)
@@ -134,6 +141,29 @@ func TestSpeakAsButler_IdleReturnsNoActiveSession(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("idle SpeakAsButler published %d SpeakRequested, want none", len(got))
+	}
+}
+
+// TestSpeakAsButler_VoicelessRefused pins the voiced-Butler precondition (#365, AC1):
+// the default auto-Butler is VOICELESS (empty VoiceID). Voicing it would publish a
+// KindButler transcript line the room never hears (elevenlabs.Synthesize hard-errors
+// on an empty VoiceID → tts_error, zero audio) — a phantom line + false "voiced"
+// claim (ADR-0012). So SpeakAsButler refuses a voiceless Butler with ErrButlerVoiceless
+// BEFORE publishing anything; the recap surface degrades that to public text.
+func TestSpeakAsButler_VoicelessRefused(t *testing.T) {
+	store := newFakeStore()
+	// No Voice column → VoiceFromJSON zero → empty VoiceID → voiceless.
+	store.agents = []storage.Agent{{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa"}}
+	mgr, bus := muteManager(t, store)
+	startMuteSession(t, mgr)
+	var got []voiceevent.SpeakRequested
+	t.Cleanup(voiceevent.On(bus, func(e voiceevent.SpeakRequested) { got = append(got, e) }))
+
+	if err := mgr.SpeakAsButler(context.Background(), "hello"); err != session.ErrButlerVoiceless {
+		t.Fatalf("SpeakAsButler with a voiceless Butler = %v, want ErrButlerVoiceless", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("voiceless SpeakAsButler published %d SpeakRequested, want none (no phantom line)", len(got))
 	}
 }
 
