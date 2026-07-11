@@ -17,12 +17,21 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/MrWong99/Glyphoxa/internal/blob"
 )
+
+// ErrImageTooLarge is returned when a generated image exceeds the blob seam's
+// per-blob cap (blob.MaxSize). It is a PERMANENT failure — retrying re-bills the
+// same oversize generation — so the enrichment handler treats it as a clean no-op
+// (log + leave the Highlight intact) rather than a retryable error.
+var ErrImageTooLarge = errors.New("imagegen: generated image exceeds the blob size cap")
 
 const (
 	// ProviderID is the stable string identifying this adapter; it matches the
@@ -45,6 +54,12 @@ const (
 	// apiKeyHeader is Gemini's native-endpoint auth header (NOT a Bearer token —
 	// the compat endpoint uses Authorization, this one uses x-goog-api-key).
 	apiKeyHeader = "x-goog-api-key"
+
+	// maxResponseBytes bounds the response read: the blob cap (blob.MaxSize)
+	// doubled covers a full-cap image base64-encoded (~4/3 inflation) plus JSON
+	// envelope, so an at-cap image still parses while an unbounded body cannot
+	// exhaust memory. The post-decode blob.MaxSize check owns the actual reject.
+	maxResponseBytes = 2 * blob.MaxSize
 )
 
 // Result is one generated image plus the token counts the provider metered for
@@ -157,8 +172,11 @@ func (g *Gemini) Generate(ctx context.Context, prompt string) (Result, error) {
 	}
 
 	body, err := json.Marshal(generateContentRequest{
-		Contents:         []reqContent{{Parts: []reqPart{{Text: prompt}}}},
-		GenerationConfig: generationConfig{ResponseModalities: []string{"IMAGE"}},
+		Contents: []reqContent{{Parts: []reqPart{{Text: prompt}}}},
+		// ["TEXT","IMAGE"], NOT image-only: the canonical Gemini image-generation
+		// examples request both modalities, and image-only has 400'd on prior models.
+		// The parser skips any leading text part and takes the first inlineData image.
+		GenerationConfig: generationConfig{ResponseModalities: []string{"TEXT", "IMAGE"}},
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("imagegen: marshal request: %w", err)
@@ -178,7 +196,11 @@ func (g *Gemini) Generate(ctx context.Context, prompt string) (Result, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	// Bound the response read to the blob cap plus base64/JSON headroom (base64
+	// inflates ~4/3): a body that decodes past blob.MaxSize can never be stored, so
+	// reading beyond this only wastes memory. maxResponseBytes over-reads slightly
+	// so an at-cap image still parses and the post-decode check owns the reject.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return Result{}, fmt.Errorf("imagegen: read response: %w", err)
 	}
@@ -199,6 +221,9 @@ func (g *Gemini) Generate(ctx context.Context, prompt string) (Result, error) {
 			data, err := base64.StdEncoding.DecodeString(p.InlineData.Data)
 			if err != nil {
 				return Result{}, fmt.Errorf("imagegen: decode inline image: %w", err)
+			}
+			if int64(len(data)) > blob.MaxSize {
+				return Result{}, ErrImageTooLarge
 			}
 			return Result{
 				Data:         data,

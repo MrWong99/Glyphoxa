@@ -9,6 +9,8 @@ vi.mock("sonner", () => ({
   Toaster: () => null,
 }));
 
+import { toast } from "sonner";
+
 import {
   SessionService,
   HighlightSchema,
@@ -22,6 +24,7 @@ import {
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { HighlightsStrip } from "./HighlightsStrip";
+import { HIGHLIGHTS_LIVE_MS } from "./useHighlights";
 
 type HighlightInit = MessageInitShape<typeof HighlightSchema>;
 
@@ -51,16 +54,28 @@ function promoted(over: HighlightInit = {}): Highlight {
 // tests can prove the id reaches the wire and the list refetches after invalidate.
 function mockTransport(
   seed: Highlight[],
-  opts: { failList?: boolean; failPromote?: boolean; failDelete?: boolean } = {},
+  opts: {
+    failList?: boolean;
+    // failListAfter: succeed for the first N listHighlights calls, then fail —
+    // models a transient background-refetch blip after the initial load landed.
+    failListAfter?: number;
+    failPromote?: boolean;
+    failDelete?: boolean;
+  } = {},
 ) {
   let highlights = [...seed];
+  let listCalls = 0;
   const promoteCalls: PromoteHighlightRequest[] = [];
   const deleteCalls: DeleteHighlightRequest[] = [];
 
   const transport = createRouterTransport(({ service }) => {
     service(SessionService, {
       listHighlights: () => {
+        listCalls += 1;
         if (opts.failList) throw new ConnectError("list boom", Code.Internal);
+        if (opts.failListAfter !== undefined && listCalls > opts.failListAfter) {
+          throw new ConnectError("refetch boom", Code.Internal);
+        }
         return create(ListHighlightsResponseSchema, { highlights });
       },
       promoteHighlight: (req) => {
@@ -81,13 +96,18 @@ function mockTransport(
       },
     });
   });
-  return { transport, promoteCalls, deleteCalls };
+  return { transport, promoteCalls, deleteCalls, listCallCount: () => listCalls };
 }
 
 function renderStrip(
   seed: Highlight[],
   props: { sessionId?: string; live?: boolean } = {},
-  opts?: { failList?: boolean; failPromote?: boolean; failDelete?: boolean },
+  opts?: {
+    failList?: boolean;
+    failListAfter?: number;
+    failPromote?: boolean;
+    failDelete?: boolean;
+  },
 ) {
   const ctx = mockTransport(seed, opts);
   render(
@@ -180,5 +200,68 @@ describe("HighlightsStrip (#309)", () => {
     const err = await screen.findByRole("alert");
     expect(err).toHaveTextContent(/Couldn't load the highlights/i);
     expect(screen.queryByText(/No highlights yet/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the loaded list (and its <audio>) when a background refetch fails, showing only a small inline notice", async () => {
+    // The first load succeeds; the promote-triggered refetch fails. A full-replace
+    // error would unmount every <audio> mid-playback (AC2) and, on a settled ended
+    // session, strand the strip in error forever. Stale data must survive.
+    renderStrip([promoted()], {}, { failListAfter: 1 });
+    // Loaded row is on screen with its clip.
+    expect(await screen.findByText(/the dragon spoke my true name/i)).toBeInTheDocument();
+    expect(document.querySelector("audio")).not.toBeNull();
+
+    // Force a refetch that fails (delete's onSuccess invalidates the list).
+    fireEvent.click(screen.getByRole("button", { name: /delete/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete highlight/i }));
+
+    // The stale row + its <audio> stay mounted, and a small inline notice appears —
+    // never the full-replace error card.
+    await waitFor(() => expect(screen.getByTestId("highlights-stale-error")).toBeInTheDocument());
+    expect(screen.getByText(/the dragon spoke my true name/i)).toBeInTheDocument();
+    expect(document.querySelector("audio")).not.toBeNull();
+  });
+
+  it("re-fires listHighlights on the live poll cadence (pins the refetchInterval wiring)", async () => {
+    // Without this, deleting the refetchInterval option or passing !live keeps
+    // every other test green. Assert a live strip fires a SECOND read one cadence
+    // later — the promotions-as-they-land contract (AC1).
+    vi.useFakeTimers();
+    try {
+      const ctx = mockTransport([promoted()]);
+      render(
+        <Providers transport={ctx.transport} queryClient={makeQueryClient()}>
+          <HighlightsStrip sessionId="vs1" live />
+        </Providers>,
+      );
+      await vi.waitFor(() => expect(ctx.listCallCount()).toBe(1));
+      await vi.advanceTimersByTimeAsync(HIGHLIGHTS_LIVE_MS + 100);
+      await vi.waitFor(() => expect(ctx.listCallCount()).toBeGreaterThanOrEqual(2));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces a promote failure as a toast (ADR-0017)", async () => {
+    renderStrip([candidate()], {}, { failPromote: true });
+    fireEvent.click(await screen.findByRole("button", { name: /promote/i }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't promote/i.test(String(m))),
+      ).toBe(true),
+    );
+  });
+
+  it("surfaces a delete failure as a toast (ADR-0017)", async () => {
+    renderStrip([promoted()], {}, { failDelete: true });
+    fireEvent.click(await screen.findByRole("button", { name: /delete highlight/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete highlight/i }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(toast.error).mock.calls.some(([m]) => /couldn't delete/i.test(String(m))),
+      ).toBe(true),
+    );
   });
 });

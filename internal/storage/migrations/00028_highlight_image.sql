@@ -13,8 +13,8 @@
 -- text/bigint), so it is safe inside goose's transaction; a re-run is a no-op via
 -- IF NOT EXISTS.
 --
--- NOTE (merge order): 00027 belongs to #372 (recap tool, in flight); this
--- migration is numbered 00028 and merges AFTER it.
+-- NOTE (merge order): 00027 is already on main (#397, commit a501335), so 00028
+-- is the next free number and merges normally.
 ALTER TYPE provider_component ADD VALUE IF NOT EXISTS 'image';
 
 ALTER TABLE highlight ADD COLUMN image_key text NOT NULL DEFAULT '';

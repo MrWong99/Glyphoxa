@@ -52,20 +52,23 @@ is [docs/configuration.md](docs/configuration.md); the game-running walkthrough 
 
 ### Fastest: Docker Compose
 
-`compose.yml` stands up a pgvector Postgres + the Glyphoxa image in `-mode all`,
-which auto-migrates at startup — so this reaches the login screen against a
-migrated DB with no separate migrate step ([ADR-0034](docs/adr/0034-deployment-artifacts.md)):
+`compose.yml` stands up a pgvector Postgres + the published Glyphoxa image
+(`ghcr.io/mrwong99/glyphoxa`) in `-mode all`, which auto-migrates at startup —
+so this reaches the login screen against a migrated DB with no separate
+migrate step ([ADR-0034](docs/adr/0034-deployment-artifacts.md)). A machine
+with only Docker needs nothing else:
 
 ```sh
 cp .env.example .env              # fill GLYPHOXA_SECRET + DISCORD_OAUTH_* + GLYPHOXA_OPERATOR_IDS (docs/configuration.md §5–§6)
-make proto                        # gen/ is context-fed into the image build
-(cd web && npm ci && npm run build)   # SPA bundle → internal/spa/dist (else a blank page)
-docker compose up --build
+docker compose up
 ```
 
 Then open `http://127.0.0.1:8080` and sign in with Discord. For a bare-metal
 box, `deploy/glyphoxa.service` runs the same `-mode all` under systemd
-(docs/configuration.md §10).
+(docs/configuration.md §10). To run against a source checkout instead of the
+published image, `docker compose up --build` falls back to the local `build:`
+(needs `make proto` + `(cd web && npm ci && npm run build)` first — see
+docs/configuration.md §9).
 
 ### Build from source
 

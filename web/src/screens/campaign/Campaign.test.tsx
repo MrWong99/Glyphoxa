@@ -21,6 +21,7 @@ import {
   CharacterSchema,
   ListCharactersResponseSchema,
   ListDiscordVoiceMembersResponseSchema,
+  ListKnowledgeProposalsResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
@@ -151,6 +152,9 @@ function mockTransport() {
           ],
         }),
       listDiscordVoiceMembers: () => create(ListDiscordVoiceMembersResponseSchema, {}),
+      // Proposals view (#300): an empty queue is enough for the tab-switch test to
+      // prove the panel mounts on its own RPC.
+      listKnowledgeProposals: () => create(ListKnowledgeProposalsResponseSchema, { proposals: [] }),
     });
   });
   return { transport, npcs, previewCalls, grants };
@@ -347,6 +351,17 @@ describe("Campaign", () => {
     // Back to Cast — the roster is unchanged.
     fireEvent.click(screen.getByRole("tab", { name: "Cast" }));
     expect(await screen.findByText("Bart")).toBeInTheDocument();
+  });
+
+  it("exposes a fourth Proposals tab that mounts the review panel (#300)", async () => {
+    renderScreen();
+    expect(await screen.findByText("Bart")).toBeInTheDocument();
+
+    // Switch to Proposals — the panel mounts on its own ListKnowledgeProposals RPC.
+    fireEvent.click(screen.getByRole("tab", { name: "Proposals" }));
+    expect(await screen.findByText(/No pending suggestions/i)).toBeInTheDocument();
+    // The roster (Cast) is no longer mounted.
+    expect(screen.queryByText("Bart")).not.toBeInTheDocument();
   });
 
   it("surfaces an error cue when the voice preview fails", async () => {

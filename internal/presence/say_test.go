@@ -108,6 +108,33 @@ func TestSayCommand_UnknownAgentRefused(t *testing.T) {
 	}
 }
 
+// TestSayCommand_ButlerRefusedOnHandle pins #365 review finding 4: the manager
+// SayAs now ACCEPTS the Butler (SpeakAsButler needs it), so the Discord /say
+// puppet-exclusion must hold at the presence Handle path — not only in Autocomplete.
+// The Address-Only Butler is filtered out of the resolvable roster (voiced()), so a
+// GM naming the Butler by name OR by UUID gets an ephemeral "no such Agent" refusal
+// and SayAs is NEVER called (no accidental Butler puppeting, ADR-0009/0024).
+func TestSayCommand_ButlerRefusedOnHandle(t *testing.T) {
+	campaign := uuid.New()
+	butler := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa"}
+	bart := storage.Agent{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Bart"}
+
+	for _, as := range []string{"Glyphoxa", butler.ID.String()} {
+		sayer := &fakeSayer{active: true, campaignID: campaign}
+		lister := &fakeLister{agents: []storage.Agent{butler, bart}}
+		resp := &fakeResponder{}
+		if err := SayCommand(sayer, lister).Handle(context.Background(), sayIC(resp, "hi", as)); err != nil {
+			t.Fatalf("Handle(as=%q): %v", as, err)
+		}
+		if len(sayer.calls) != 0 {
+			t.Fatalf("SayAs called for the Butler (as=%q), want 0 calls (puppet-excluded)", as)
+		}
+		if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
+			t.Fatalf("butler refusal (as=%q) = %+v, want one ephemeral error", as, resp.replies)
+		}
+	}
+}
+
 // TestSayCommand_HappyCallsSayAs pins the success path: a resolved voiced NPC is
 // spoken via SayAs(id, text) and the GM gets an ephemeral ack naming the Agent.
 func TestSayCommand_HappyCallsSayAs(t *testing.T) {

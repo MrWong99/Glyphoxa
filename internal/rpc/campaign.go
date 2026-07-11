@@ -73,6 +73,15 @@ type campaignStore interface {
 	NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
 	SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
 	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+	// Knowledge Proposal review (#300, ADR-0052): the GM review surface's list of
+	// pending proposals, the single-proposal read the similarity hint keys off, the
+	// atomic approve/reject writes, and the embedding-vector nearest-neighbour search
+	// the similarity hint runs.
+	ListPendingKnowledgeProposals(ctx context.Context, campaignID uuid.UUID) ([]storage.KnowledgeProposal, error)
+	GetPendingKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) (storage.KnowledgeProposal, error)
+	ApproveKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) error
+	RejectKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) error
+	SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]storage.KGNode, error)
 	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
 	UpsertToolGrant(ctx context.Context, g storage.NewToolGrant) error
 	DeleteToolGrant(ctx context.Context, agentID uuid.UUID, toolName string) error
@@ -114,6 +123,25 @@ type CampaignServer struct {
 	// clip blobs have NO FK and must be dropped through the seam. Nil disables the
 	// sweep (web-only / no blob backend); set once at boot before serving.
 	clips HighlightClipSweeper
+	// embedder embeds a proposal's subject text for the ListSimilarKnowledge vector
+	// hint (#300, ADR-0011/0052). Nil (no embeddings provider wired, or a keyless
+	// deployment) makes the hint degrade silently to fulltext SearchNodes. Set once
+	// at boot before serving, so no lock is needed.
+	embedder Embedder
+}
+
+// Embedder embeds short texts to query vectors for the Knowledge Proposal
+// similarity hint (#300, ADR-0052). The resolved embeddings provider satisfies it;
+// nil disables the vector path (the hint falls back to fulltext search).
+type Embedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
+}
+
+// SetEmbedder wires the embeddings provider the ListSimilarKnowledge vector hint
+// uses (#300). Called once at boot before serving; nil leaves the hint on the
+// fulltext fallback only.
+func (s *CampaignServer) SetEmbedder(e Embedder) {
+	s.embedder = e
 }
 
 // HighlightClipSweeper drops a campaign's Session Highlight clips through the blob

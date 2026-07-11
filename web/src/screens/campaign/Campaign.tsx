@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { playAudioBlob } from "@/lib/audio";
 import { KnowledgePanel } from "./KnowledgePanel";
 import { PlayersPanel } from "./PlayersPanel";
+import { ProposalsPanel } from "./ProposalsPanel";
 
 import "./campaign.css";
 
@@ -60,7 +61,7 @@ export function Campaign() {
   // Cast (roster editor), Knowledge (KG entries), or Players (Character ↔ Discord
   // User bindings, #279) — the design's seg-control beside the title. Cast is the
   // default so the roster is what loads first (#71).
-  const [view, setView] = useState<"cast" | "knowledge" | "players">("cast");
+  const [view, setView] = useState<"cast" | "knowledge" | "players" | "proposals">("cast");
 
   const invalidateRoster = () =>
     queryClient.invalidateQueries({
@@ -119,6 +120,15 @@ export function Campaign() {
             >
               Players
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "proposals"}
+              data-active={view === "proposals" ? "true" : undefined}
+              onClick={() => setView("proposals")}
+            >
+              Proposals
+            </button>
           </div>
         </div>
         <div className="gx-campaign-screen__sub">
@@ -128,7 +138,9 @@ export function Campaign() {
               ? "What the world knows. Public entries prime your NPCs; GM-private ones stay yours."
               : view === "players"
                 ? "Bind each Discord User to their Character so the transcript names their voice."
-                : "One Butler is required; add as many NPCs as your table needs."}
+                : view === "proposals"
+                  ? "What your NPCs want to remember. Approve to make it canon, or reject."
+                  : "One Butler is required; add as many NPCs as your table needs."}
           </span>
         </div>
       </header>
@@ -137,6 +149,8 @@ export function Campaign() {
         <KnowledgePanel />
       ) : view === "players" ? (
         <PlayersPanel />
+      ) : view === "proposals" ? (
+        <ProposalsPanel />
       ) : status === "pending" ? (
         <div className="gx-skeleton" data-testid="roster-loading" />
       ) : status === "error" ? (

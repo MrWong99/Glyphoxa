@@ -52,10 +52,10 @@ func TestToolGrants_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants(butler): %v", err)
 	}
-	// The catalog lists every built-in (dice + the #296 knowledge Tools); assert by
-	// the GRANTED set, not by catalog index — the auto-Butler is seeded with all
-	// three (migration 00025).
-	wantButlerGrants := []string{"dice", "kg_query", "transcript_search"}
+	// The catalog lists every built-in; assert by the GRANTED set, not by catalog
+	// index — the auto-Butler is seeded with dice + the #296 knowledge Tools + recap
+	// (migrations 00025, 00027).
+	wantButlerGrants := []string{"dice", "kg_query", "recap", "transcript_search"}
 	if granted := grantedNames(butlerGrants.Msg.GetGrants()); !slices.Equal(granted, wantButlerGrants) {
 		t.Fatalf("butler granted = %v, want %v; full catalog = %+v", granted, wantButlerGrants, butlerGrants.Msg.GetGrants())
 	}
@@ -105,7 +105,7 @@ func TestToolGrants_Integration(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("UpdateToolGrant(butler dice off): %v", err)
 	}
-	wantAfterRevoke := []string{"kg_query", "transcript_search"}
+	wantAfterRevoke := []string{"kg_query", "recap", "transcript_search"}
 	if got := grantedNames(listGrants(t, client, butler.GetId())); !slices.Equal(got, wantAfterRevoke) {
 		t.Fatalf("after revoke, butler granted = %v, want %v", got, wantAfterRevoke)
 	}
