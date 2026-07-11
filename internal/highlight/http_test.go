@@ -257,6 +257,80 @@ func TestImage_CrossCampaign404(t *testing.T) {
 	}
 }
 
+// --- real middleware chain (#408) ---
+//
+// These drive ServeClip through the ACTUAL auth.RequireSession + auth.RequireTenant
+// stack (the production mount composition) with only a session cookie — no
+// pre-injected tenant. This is the class of test the unit tests above (which
+// pre-inject auth.WithTenant) could not catch: #408 was that the mounts wrapped
+// only RequireSession, so TenantID always missed and every clip 401'd.
+
+// chainAuthN is a one-token Authenticator for the middleware chain tests.
+type chainAuthN struct {
+	token string
+	user  storage.User
+}
+
+func (a chainAuthN) AuthenticateSession(_ context.Context, token string) (storage.User, error) {
+	if token == a.token {
+		return a.user, nil
+	}
+	return storage.User{}, storage.ErrNotFound
+}
+
+// chainTenant resolves every operator to a fixed tenant (the thin ADR-0039
+// pass-through), server-side — the point being the client never supplies it.
+type chainTenant struct{ tenantID uuid.UUID }
+
+func (t chainTenant) TenantForUser(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return t.tenantID, nil
+}
+
+// TestClip_RealChainServesWithCookieOnly proves that a request carrying ONLY a
+// valid session cookie (the tenant is NOT pre-injected) is served 200 with bytes
+// through the real RequireSession→RequireTenant→ServeClip chain. Regression guard
+// for #408.
+func TestClip_RealChainServesWithCookieOnly(t *testing.T) {
+	srv, tenantID, id := newClipFixture(t)
+	const token = "sess-abc"
+	authN := chainAuthN{token: token, user: storage.User{ID: uuid.New(), Role: "operator"}}
+	chain := auth.RequireSession(authN, auth.RequireTenant(chainTenant{tenantID: tenantID}, http.HandlerFunc(srv.ServeClip)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/highlights/"+id.String()+"/clip", nil)
+	req.SetPathValue("id", id.String())
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("real chain, cookie only: want 200, got %d", rr.Code)
+	}
+	if rr.Body.Len() != 200 {
+		t.Fatalf("want 200 bytes, got %d", rr.Body.Len())
+	}
+}
+
+// TestClip_RealChainForeignTenant404 proves the chain still enforces tenant
+// scoping: when the operator's resolved tenant differs from the highlight's owner,
+// the row reads as absent → 404, existence never leaked.
+func TestClip_RealChainForeignTenant404(t *testing.T) {
+	srv, _, id := newClipFixture(t)
+	const token = "sess-abc"
+	authN := chainAuthN{token: token, user: storage.User{ID: uuid.New(), Role: "operator"}}
+	// A tenant that does NOT own the fixture highlight.
+	chain := auth.RequireSession(authN, auth.RequireTenant(chainTenant{tenantID: uuid.New()}, http.HandlerFunc(srv.ServeClip)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/highlights/"+id.String()+"/clip", nil)
+	req.SetPathValue("id", id.String())
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("real chain, foreign tenant: want 404, got %d", rr.Code)
+	}
+}
+
 // TestClip_MissingBlob404: the row exists but its clip blob is gone (a purge race) —
 // the handler must 404, not 500 (#308, finding #6).
 func TestClip_MissingBlob404(t *testing.T) {
