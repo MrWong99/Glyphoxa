@@ -93,22 +93,31 @@ export function HighlightsStrip({
   if (query.isPending) {
     return <div className="gx-skeleton" data-testid="highlights-loading" />;
   }
+
+  // A refetch failure over cached data (any shape — full or EMPTY list) keeps the
+  // last loaded set on screen; the notice flags the staleness in both branches so
+  // a cached-empty list + failed refetch doesn't read as a clean, settled empty.
+  const staleNotice = query.isError ? (
+    <p className="gx-highlights__stale" role="alert" data-testid="highlights-stale-error">
+      Couldn't refresh the highlights — showing the last loaded set.
+    </p>
+  ) : null;
+
   if (highlights.length === 0) {
     return (
-      <p className="gx-highlights__empty">
-        No highlights yet — epic moments appear here when the rollover tape is armed
-        and consented.
-      </p>
+      <>
+        {staleNotice}
+        <p className="gx-highlights__empty">
+          No highlights yet — epic moments appear here when the rollover tape is armed
+          and consented.
+        </p>
+      </>
     );
   }
 
   return (
     <>
-    {query.isError && (
-      <p className="gx-highlights__stale" role="alert" data-testid="highlights-stale-error">
-        Couldn't refresh the highlights — showing the last loaded set.
-      </p>
-    )}
+    {staleNotice}
     <ul className="gx-highlights__list">
       {highlights.map((h) => {
         const isCandidate = h.status === "candidate";
