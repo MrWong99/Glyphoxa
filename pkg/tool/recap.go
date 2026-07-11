@@ -19,7 +19,15 @@ const (
 	MaxRecapSessions = 3
 	// RecapResultBudgetRunes bounds the whole rendered recap, counted in RUNES so a
 	// multibyte-heavy (German) recap is never over-budget nor split mid-codepoint.
-	RecapResultBudgetRunes = 8000
+	// Sized for HONEST end-to-end deliverability, not the raw recap length: the
+	// Butler RELAYS this text through its own answer completion, capped at
+	// groq.DefaultMaxTokens (1024 ≈ ~3.5k runes of German). A larger budget would
+	// let a near-budget recap get clipped mid-prose by the relay despite the "do not
+	// shorten" instruction. So the Tool truncates to what the relay can actually
+	// carry; the full untruncated recap stays available via /glyphoxa recap (the
+	// slash surface splits it across ordered followups, #271). The Description tells
+	// the model as much.
+	RecapResultBudgetRunes = 3500
 )
 
 // recapInputSchema is the JSON Schema recap declares to the LLM. "sessions" is
@@ -88,7 +96,8 @@ func (*Recap) Name() string { return "recap" }
 func (*Recap) Description() string {
 	return "Summarize what happened in this campaign's most recent ended voice session(s). " +
 		"Use when asked to recap the last session. " +
-		"Relay the returned recap to the players; do not shorten it."
+		"Relay the returned recap to the players; do not shorten it. " +
+		"A very long recap may be trimmed to fit a spoken reply; for the full text, the GM can run /glyphoxa recap."
 }
 
 // InputSchema implements [Tool].

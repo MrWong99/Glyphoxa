@@ -21,11 +21,23 @@ import (
 const recapListLimit = 50
 
 // recapToolTimeout bounds the in-voice recap work: the recap engine fans out
-// map-reduce windows and can run for many seconds. It is a child of the turn ctx
-// (WithTimeout below), so a barge-in that cancels the turn also cancels the recap,
-// while a slow/stuck LLM is cut off here rather than blocking the turn open-ended.
-// A var (not a const) so a test can shrink it without a 120s wait; production 120s.
-var recapToolTimeout = 120 * time.Second
+// map-reduce windows and can run for many seconds. It is a CHILD of the Butler turn
+// ctx, which already carries agent.DefaultTurnTimeout (60s, pkg/voice/agent) — so
+// this bound is set deliberately BELOW that deadline. Two reasons: a barge-in that
+// cancels the turn still cancels the recap (child), AND when a slow/stuck LLM blows
+// the recap budget, THIS 45s child fires first — while the turn ctx is still alive —
+// so RecapLastSessions can map the deadline to a friendly tool-result message the
+// Butler relays in the turn's remaining seconds, rather than letting the 60s turn
+// ctx expire and kill the whole turn (which would leave the Butler answering
+// nothing). Raising the Butler turn timeout is a separate design change, out of
+// scope here. A var (not a const) so a test can shrink it without a 45s wait.
+var recapToolTimeout = 45 * time.Second
+
+// recapTookTooLong is the friendly tool-result text when the recap engine blows the
+// recapToolTimeout: returned as the Tool's RESULT (not an error), so the Butler can
+// relay it to the players while the turn ctx is still alive — a raw error mapped to
+// the turn's dead ctx would surface nothing speakable.
+const recapTookTooLong = "The recap took too long to put together — try again in a moment, or ask the GM to run /glyphoxa recap for the full text."
 
 // errNoRecappableSession is the friendly failure when no ended, non-empty Voice
 // Session exists to recap (idle history, or only running/empty rows). The Tool
@@ -104,6 +116,14 @@ func (a *RecapAdapter) RecapLastSessions(ctx context.Context, n int) (string, er
 	res, err := a.eng.Recap(ctx, ids)
 	if errors.Is(err, recap.ErrNoTranscript) {
 		return "", errNoRecappableSession
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// The recapToolTimeout child fired (a slow/stuck LLM), NOT a barge-in
+		// (that is context.Canceled). Return a friendly result, not an error: the
+		// turn ctx is still alive (this bound is below the turn deadline), so the
+		// Butler relays this text in the turn's remaining seconds. An error here
+		// would leave the loop nothing speakable.
+		return recapTookTooLong, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("knowledge: recap: %w", err)
