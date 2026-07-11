@@ -104,11 +104,16 @@ type KGNodeUpdate struct {
 // so a Node in another Campaign matches no row and yields ErrNotFound — a
 // cross-campaign mutation is refused server-side. A missing id yields ErrNotFound.
 func (s *Store) UpdateNode(ctx context.Context, u KGNodeUpdate) (KGNode, error) {
+	// A wiki edit invalidates any existing embedding: reset it to NULL and clear
+	// the model stamp so the row re-enters the embedworker backfill queue (#300,
+	// ADR-0011) and future similarity hints reflect the new text.
 	row := s.db.QueryRow(ctx,
 		`UPDATE kg_node SET
 		    name = $2,
 		    body = $3,
 		    gm_private = $4,
+		    embedding = NULL,
+		    embedding_model = '',
 		    updated_at = now()
 		  WHERE id = $1 AND campaign_id = $5
 		 RETURNING `+kgNodeColumns,
@@ -226,4 +231,102 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 		return nil, fmt.Errorf("storage: agent node facts for agent %s: %w", agentID, err)
 	}
 	return out, nil
+}
+
+// SimilarNodes returns the k Knowledge Graph Nodes in campaignID nearest the
+// query vector by cosine distance (<=>), nearest first — the ADR-0011 similarity
+// hint the GM review surface shows beside a Knowledge Proposal (#300, ADR-0052).
+// NULL-embedding rows are excluded (the partial HNSW index). Unlike the
+// prompt-facing searches this INCLUDES gm_private Nodes: it is GM-facing review
+// only, so the exclusion that guards NPC prompts does not apply here. NEVER reuse
+// this for NPC prompt assembly — it would leak GM secrets. k <= 0 is a caller bug
+// and errors. The query vector reuses encodeVector + a server-side ::vector cast,
+// so storage carries no pgvector-go dependency.
+func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]KGNode, error) {
+	if k <= 0 {
+		return nil, fmt.Errorf("storage: similar nodes: k must be > 0, got %d", k)
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT `+kgNodeColumns+`
+		   FROM kg_node
+		  WHERE campaign_id = $1 AND embedding IS NOT NULL
+		  ORDER BY embedding <=> $2::vector
+		  LIMIT $3`, campaignID, encodeVector(query), k)
+	if err != nil {
+		return nil, fmt.Errorf("storage: similar kg nodes for campaign %s: %w", campaignID, err)
+	}
+	defer rows.Close()
+
+	var out []KGNode
+	for rows.Next() {
+		n, err := scanKGNode(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan similar kg node: %w", err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: similar kg nodes for campaign %s: %w", campaignID, err)
+	}
+	return out, nil
+}
+
+// ListUnembeddedNodes returns up to limit Knowledge Graph Nodes still awaiting an
+// embedding (embedding IS NULL), oldest first — the node half of the embedworker
+// backfill queue (#300, ADR-0011), mirroring ListUnembeddedChunks. An empty
+// result means the backlog is drained. The name+body is embedded by the worker;
+// both columns are selected via kgNodeColumns.
+func (s *Store) ListUnembeddedNodes(ctx context.Context, limit int) ([]KGNode, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+kgNodeColumns+`
+		   FROM kg_node
+		  WHERE embedding IS NULL
+		  ORDER BY created_at, id
+		  LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list unembedded kg nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []KGNode
+	for rows.Next() {
+		n, err := scanKGNode(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: scan unembedded kg node: %w", err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list unembedded kg nodes: %w", err)
+	}
+	return out, nil
+}
+
+// SetNodeEmbedding fills one Node's embedding vector and stamps the model that
+// produced it (#300, ADR-0011), mirroring SetChunkEmbedding. The vector is passed
+// as pgvector's text form and cast server-side (::vector) so storage carries no
+// pgvector-go dependency; the column is vector(768), so a wrong-length vector is
+// rejected by Postgres. Once set, the row leaves the NULL-embedding backlog and
+// becomes returnable by SimilarNodes.
+func (s *Store) SetNodeEmbedding(ctx context.Context, id uuid.UUID, vec []float32, model string) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE kg_node
+		    SET embedding = $2::vector, embedding_model = $3
+		  WHERE id = $1`, id, encodeVector(vec), model); err != nil {
+		return fmt.Errorf("storage: set kg node embedding %s: %w", id, err)
+	}
+	return nil
+}
+
+// CountUnembeddedNodes returns the number of Knowledge Graph Nodes still awaiting
+// an embedding (embedding IS NULL) — the node embedding-backlog gauge value (#300,
+// ADR-0032), mirroring CountUnembeddedChunks. Process-wide (no campaign filter) to
+// keep the metric's cardinality bounded.
+func (s *Store) CountUnembeddedNodes(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRow(ctx,
+		`SELECT count(*) FROM kg_node WHERE embedding IS NULL`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("storage: count unembedded kg nodes: %w", err)
+	}
+	return n, nil
 }
