@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 )
 
@@ -66,6 +67,10 @@ func RequireTenant(tr TenantResolver, next http.Handler) http.Handler {
 		}
 		tenantID, err := tr.TenantForUser(r.Context(), u.ID)
 		if err != nil {
+			// Mirror NewTenantInterceptor's log (interceptors.go) so a 401 here is
+			// never a blind wall — the exact debugging pain that made #408 need a live
+			// repro. The byte handlers require a tenant, so we reject rather than proceed.
+			slog.Default().Warn("require tenant: no tenant for operator", "user_id", u.ID, "err", err)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
