@@ -28,6 +28,21 @@ type Deps struct {
 	// but its Execute reports it is unavailable in this mode (the grant-editor RPC
 	// and voice bench build a zero Deps).
 	KGW KGWriter
+	// Recap backs the recap Tool (#372). nil ⇒ the Tool is registered but its
+	// Execute reports it is unavailable in this mode (the grant-editor RPC and
+	// voice bench build a zero Deps).
+	Recap Recapper
+}
+
+// Recapper is the narrow read seam the recap Tool needs (#372, #297 decision 5):
+// it summarizes the active Campaign's `sessions` most recent ended, non-empty Voice
+// Sessions and returns the recap prose. Session selection lives ENTIRELY in the
+// adapter — the active Campaign comes from the live session and the rows are the
+// newest ENDED non-empty ones — so the LLM never names a session id (ADR-0029) and
+// can never recap another Campaign. *knowledge.RecapAdapter satisfies it; a nil
+// Recapper on [Deps] reports unavailable at Execute.
+type Recapper interface {
+	RecapLastSessions(ctx context.Context, sessions int) (string, error)
 }
 
 // ProposedWrite is the versioned, storage-free payload one remember_knowledge

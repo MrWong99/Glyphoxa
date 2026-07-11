@@ -20,5 +20,6 @@ func BuiltinRegistry(deps Deps) *Registry {
 	r.MustRegister(NewTranscriptSearch(deps.Transcripts))
 	r.MustRegister(NewKGQuery(deps.KG))
 	r.MustRegister(NewRememberKnowledge(deps.KGW))
+	r.MustRegister(NewRecap(deps.Recap))
 	return r
 }
