@@ -540,6 +540,62 @@ func TestReplier_Lookahead_FirstDispatchStartErrorAborts(t *testing.T) {
 	}
 }
 
+// TestReplier_Lookahead_FirstStartErrorEndsTurn pins #391 for the look-ahead path:
+// when the held first (and only) reaction sentence fails to START synthesis, the
+// released reaction sub-turn — already announced via EnsembleReaction — is ended with
+// TurnEnded{rID, tts_error} so it is never TTL-reaped as abandoned. Nothing commits.
+func TestReplier_Lookahead_FirstStartErrorEndsTurn(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	pump := newFakeLookahead()
+	// The reaction's ONLY (held) sentence start-errors → nothing delivered.
+	synth := &laneSynth{pump: pump, holdGate: make(chan struct{}), failOn: map[string]bool{"React one.": true}}
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft:          map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}),
+			spokeCh:        make(chan string, 2),
+		},
+		react:        map[string]string{goblinTarget.AgentID: "React one."},
+		reactSpokeCh: make(chan string, 2),
+	}
+	replier := lookaheadReplier(h, floor, spk, pump, synth)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tp", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Tp" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tp"})
+	close(spk.speakPause)
+
+	var rID string
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleReaction) bool {
+		rID = e.TurnID
+		return e.LeadTurnID == "Tp"
+	}, "ensemble.reaction announced")
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == rID && e.Reason == voiceevent.TurnEndTTSError
+	}, "turn.ended tts_error for the released reaction (no TTL reap)")
+
+	select {
+	case <-spk.reactSpokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SpeakReaction never returned after the first-sentence start-error")
+	}
+	waitFloorFree(t, floor)
+	pump.waitDiscard(t)
+	// No barge fired: the reaction's tts_error is the only turn-end.
+	voicetest.AssertEventCount[voiceevent.TurnEnded](t, h, 1)
+	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "" {
+		t.Fatalf("an aborted reaction committed %q, want nothing", got)
+	}
+}
+
 // TestReplier_Lookahead_BargeDuringReactionEndsSubTurn pins #375 legacy parity: a
 // barge WHILE the released Reaction plays ends the reaction sub-turn with a barge
 // TurnEnded under its OWN id.
