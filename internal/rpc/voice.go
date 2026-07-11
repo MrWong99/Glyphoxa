@@ -21,6 +21,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/groq"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
@@ -82,6 +83,9 @@ type VoiceServer struct {
 	// pingLLM is the Groq liveness test-call (a real key -> nil). Defaults to a
 	// GET against the Groq models endpoint.
 	pingLLM func(ctx context.Context, apiKey string) error
+	// pingImage is the Gemini image-provider liveness test-call (#311). Defaults
+	// to a GET against Gemini's OpenAI-compat models endpoint; unit tests fake it.
+	pingImage func(ctx context.Context, apiKey string) error
 	// listModels fetches a provider's live model catalog for the model select
 	// (#227). Defaults to the Groq OpenAI-compatible GET /models via the shared
 	// adapter; unit tests fake it so the default `go test` makes no vendor call.
@@ -147,6 +151,7 @@ func NewVoiceServer(store voiceStore, cipher *crypto.Cipher, log *slog.Logger) *
 		newLister:    func(apiKey string) tts.VoiceLister { return elevenlabs.New(apiKey) },
 		newSynth:     func(apiKey string) tts.Synthesizer { return elevenlabs.New(apiKey) },
 		pingLLM:      livePingGroq,
+		pingImage:    livePingGemini,
 		listModels:   func(ctx context.Context, apiKey string) ([]string, error) { return groq.New(apiKey).ListModels(ctx) },
 		botTag:       func(ctx context.Context, token string) (string, error) { return discordtag.Resolve(ctx, token, log) },
 		now:          time.Now,
@@ -460,6 +465,7 @@ func (s *VoiceServer) probeProviders(ctx context.Context, tenantID uuid.UUID, la
 	}{
 		{"groq", s.healthLLM},
 		{"elevenlabs", s.healthTTS},
+		{"gemini", s.healthImage},
 		{"discord", func(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
 			return s.healthDiscord(ctx, tenantID, lastBotTag)
 		}},
@@ -516,6 +522,21 @@ func (s *VoiceServer) healthLLM(ctx context.Context, tenantID uuid.UUID) *manage
 		return degraded("groq", err)
 	}
 	return healthy("groq")
+}
+
+// healthImage pings the Gemini image provider with the decrypted image key (#311),
+// mirroring healthLLM. No configured key (nor GEMINI_API_KEY fallback) → degraded.
+func (s *VoiceServer) healthImage(ctx context.Context, tenantID uuid.UUID) *managementv1.ProviderHealth {
+	key, err := s.resolveComponentKey(ctx, tenantID, storage.ComponentImage)
+	if err != nil {
+		return degraded("gemini", err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+	defer cancel()
+	if err := s.pingImage(cctx, key); err != nil {
+		return degraded("gemini", err)
+	}
+	return healthy("gemini")
 }
 
 // healthTTS reuses ListVoices as the ElevenLabs liveness probe (GET /v1/voices).
@@ -711,6 +732,37 @@ func livePingGroq(ctx context.Context, apiKey string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("groq ping: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// geminiPingClient bounds the Gemini image-provider health probe (#311).
+var geminiPingClient = &http.Client{Timeout: healthCheckTimeout}
+
+// livePingGemini is the default Gemini image-provider liveness test-call (#311):
+// a GET against the OpenAI-compatibility /models endpoint with the bearer key
+// (mirrors livePingGroq — the same key family already serves Gemini LLM/embeddings
+// through this surface). A 2xx means the key authenticates. An empty key falls
+// back to GEMINI_API_KEY (the hybrid env path, ADR-0039).
+func livePingGemini(ctx context.Context, apiKey string) error {
+	if apiKey == "" {
+		apiKey = os.Getenv(gemini.APIKeyEnv)
+	}
+	if apiKey == "" {
+		return fmt.Errorf("gemini: missing API key (set %s)", gemini.APIKeyEnv)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gemini.DefaultBaseURL+"/models", nil)
+	if err != nil {
+		return fmt.Errorf("gemini ping: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := geminiPingClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("gemini ping: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("gemini ping: HTTP %d", resp.StatusCode)
 	}
 	return nil
 }

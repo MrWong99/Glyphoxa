@@ -99,6 +99,9 @@ type SessionServer struct {
 	// CodeUnimplemented rather than panic.
 	highlights HighlightStore
 	blobs      highlightBlobs
+	// enqueue schedules the image-enrichment job on promotion (#311, ADR-0049);
+	// nil disables enrichment (the promote itself still succeeds).
+	enqueue HighlightEnqueuer
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)

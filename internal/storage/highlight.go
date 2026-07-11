@@ -46,14 +46,24 @@ type Highlight struct {
 	ClipKey         string
 	ClipContentType string
 	ClipSizeBytes   int64
-	CreatedAt       time.Time
-	PromotedAt      *time.Time
+	// ImageKey / ImageContentType / ImageSizeBytes carry the AI-generated scene
+	// (#311, Epic 8, ADR-0004 amendment): the enrichment job stores an image
+	// behind the blob seam (ADR-0048) and lands it here. ImageKey == "" means no
+	// image yet (unenriched, unconfigured, or a failed generation — the row stays
+	// intact without media). ImageKey is NEVER exposed on the wire (clip_key
+	// posture): the image is served through GET /highlights/{id}/image.
+	ImageKey         string
+	ImageContentType string
+	ImageSizeBytes   int64
+	CreatedAt        time.Time
+	PromotedAt       *time.Time
 }
 
 const highlightColumns = `
 	id, tenant_id, voice_session_id, campaign_id, status,
 	starts_at, ends_at, score, excerpt, reason, speaker_ids,
-	clip_key, clip_content_type, clip_size_bytes, created_at, promoted_at`
+	clip_key, clip_content_type, clip_size_bytes,
+	image_key, image_content_type, image_size_bytes, created_at, promoted_at`
 
 func scanHighlight(row pgx.Row) (Highlight, error) {
 	var (
@@ -63,7 +73,8 @@ func scanHighlight(row pgx.Row) (Highlight, error) {
 	err := row.Scan(
 		&h.ID, &h.TenantID, &h.VoiceSessionID, &h.CampaignID, &h.Status,
 		&h.StartsAt, &h.EndsAt, &h.Score, &h.Excerpt, &h.Reason, &h.SpeakerIDs,
-		&h.ClipKey, &h.ClipContentType, &h.ClipSizeBytes, &h.CreatedAt, &pr,
+		&h.ClipKey, &h.ClipContentType, &h.ClipSizeBytes,
+		&h.ImageKey, &h.ImageContentType, &h.ImageSizeBytes, &h.CreatedAt, &pr,
 	)
 	h.PromotedAt = pr
 	return h, err
@@ -185,6 +196,29 @@ func (s *Store) DeleteHighlight(ctx context.Context, tenantID, id uuid.UUID) (st
 	return clipKey, nil
 }
 
+// SetHighlightImage lands an AI-generated image on a Highlight (#311): the
+// enrichment job (ADR-0049) stores the image behind the blob seam (ADR-0048) and
+// then records its key, MIME type, and size here. It is tenant-free (the handler
+// carries no tenant — the id scopes the row, and image_key derives from the
+// tenant baked into the blob key) and returns ErrNotFound if the row is gone (a
+// Highlight deleted between the job's GetHighlight and this write — the handler
+// compensates by deleting the just-stored blob). Idempotent at the row level: a
+// re-run overwrites the same deterministic key with the same fields.
+func (s *Store) SetHighlightImage(ctx context.Context, id uuid.UUID, imageKey, contentType string, sizeBytes int64) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE highlight
+		    SET image_key = $2, image_content_type = $3, image_size_bytes = $4
+		  WHERE id = $1`,
+		id, imageKey, contentType, sizeBytes)
+	if err != nil {
+		return fmt.Errorf("storage: set highlight image %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ListSessionCandidateClipKeys returns the clip_key of every remaining CANDIDATE
 // highlight for a Voice Session — the blob keys the 7-day purge job drops through
 // the seam BEFORE it deletes the rows (blob-first, ADR-0048). Promoted rows are
@@ -259,13 +293,17 @@ func (s *Store) ListSessionsNeedingCandidatePurge(ctx context.Context, purgeKind
 	return out, nil
 }
 
-// ListCampaignHighlightClipKeys returns the clip_key of EVERY highlight
-// (candidate and promoted) in a Campaign — the blob keys a campaign hard-delete
-// sweeps through the seam BEFORE the row cascade removes them (ADR-0048). No
-// status filter: a campaign delete takes its highlights with it, kept or not.
+// ListCampaignHighlightClipKeys returns EVERY blob key a campaign hard-delete
+// must sweep through the seam BEFORE the row cascade removes the highlights
+// (ADR-0048): each highlight's clip_key AND its image_key when non-empty (#311 —
+// a promoted, enriched Highlight owns two blobs). No status filter: a campaign
+// delete takes its highlights with it, kept or not. clip_key is always present;
+// image_key is UNION ALL'd only where set, so unenriched rows contribute one key.
 func (s *Store) ListCampaignHighlightClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error) {
 	return s.scanClipKeys(ctx,
-		`SELECT clip_key FROM highlight WHERE campaign_id = $1`, campaignID)
+		`SELECT clip_key FROM highlight WHERE campaign_id = $1
+		 UNION ALL
+		 SELECT image_key FROM highlight WHERE campaign_id = $1 AND image_key <> ''`, campaignID)
 }
 
 // scanClipKeys runs a single-column clip_key query and collects the results.

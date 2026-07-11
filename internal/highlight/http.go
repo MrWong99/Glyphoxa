@@ -119,3 +119,78 @@ func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
 	// fallback content-type sniff, which our explicit header pre-empts.
 	http.ServeContent(w, req, "clip.wav", h.CreatedAt, bytes.NewReader(data))
 }
+
+// ServeImage streams one Highlight's AI-generated image (#311), mirroring
+// ServeClip: GET /api/v1/highlights/{id}/image behind auth.RequireSession. It
+// applies the same tenant + Active-Campaign 404 posture (existence never leaked)
+// and serves through http.ServeContent (Range/conditional). A Highlight with no
+// image yet (image_key == "") is 404 — the enrichment has not run, is not
+// configured, or failed, and there is nothing to serve. A missing blob is also
+// 404 (a purge race must not 500).
+func (c *ClipServer) ServeImage(w http.ResponseWriter, req *http.Request) {
+	tenantID, ok := auth.TenantID(req.Context())
+	if !ok {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	id, err := uuid.Parse(req.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+
+	h, err := c.store.GetHighlight(req.Context(), tenantID, id)
+	if errors.Is(err, storage.ErrNotFound) {
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		c.log.Error("highlight image: load row", "err", err, "highlight", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Active-Campaign scoping (#308 posture): an image whose highlight belongs to a
+	// campaign other than the resolved Active Campaign is 404. A nil resolver leaves
+	// scoping tenant-only.
+	if c.resolve != nil {
+		campaignID, ok, rerr := c.resolve(req.Context())
+		if rerr != nil {
+			c.log.Error("highlight image: resolve active campaign", "err", rerr, "highlight", id)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok || h.CampaignID != campaignID {
+			http.NotFound(w, req)
+			return
+		}
+	}
+
+	// No image yet: nothing to serve. 404 keeps the posture uniform with a foreign id.
+	if h.ImageKey == "" {
+		http.NotFound(w, req)
+		return
+	}
+
+	rc, _, err := c.blobs.Get(req.Context(), h.ImageKey)
+	if errors.Is(err, blob.ErrNotFound) {
+		http.NotFound(w, req)
+		return
+	}
+	if err != nil {
+		c.log.Error("highlight image: fetch blob", "err", err, "highlight", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		c.log.Error("highlight image: read blob", "err", err, "highlight", id)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", h.ImageContentType)
+	http.ServeContent(w, req, "image", h.CreatedAt, bytes.NewReader(data))
+}

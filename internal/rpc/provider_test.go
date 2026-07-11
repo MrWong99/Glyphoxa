@@ -202,10 +202,10 @@ func TestProviderList_EmptyShowsKeyNeeded(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	creds := resp.Msg.GetCredentials()
-	if len(creds) != 3 {
-		t.Fatalf("credentials = %d, want 3 (discord, groq, elevenlabs)", len(creds))
+	if len(creds) != 4 {
+		t.Fatalf("credentials = %d, want 4 (discord, groq, elevenlabs, gemini)", len(creds))
 	}
-	for _, want := range []string{"discord", "groq", "elevenlabs"} {
+	for _, want := range []string{"discord", "groq", "elevenlabs", "gemini"} {
 		c := credByProvider(creds, want)
 		if c == nil {
 			t.Fatalf("missing credential slot %q", want)
@@ -262,6 +262,33 @@ func TestProviderSave_SealStoreLast4_WriteOnly(t *testing.T) {
 	}
 	if string(opened) != secret {
 		t.Errorf("round-trip = %q, want %q", opened, secret)
+	}
+}
+
+func TestProviderSave_GeminiUpsertsImage(t *testing.T) {
+	t.Parallel()
+	store := newFakeProviderStore()
+	cipher := testCipher(t)
+	client, _ := newProviderClient(t, store, cipher)
+
+	const secret = "test-gemini-secret-3333"
+	resp, err := client.SaveProviderConfig(context.Background(), connect.NewRequest(&managementv1.SaveProviderConfigRequest{
+		Provider: "gemini", Secret: secret,
+	}))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	cred := resp.Msg.GetCredential()
+	if cred.GetComponent() != "image" || cred.GetProvider() != "gemini" {
+		t.Errorf("component/provider = %q/%q, want image/gemini", cred.GetComponent(), cred.GetProvider())
+	}
+	// The image Component row was upserted with the sealed key.
+	row, ok := store.configs["image|gemini"]
+	if !ok {
+		t.Fatalf("missing upserted image|gemini row")
+	}
+	if row.CredentialsLast4 != crypto.Last4(secret) {
+		t.Errorf("image last4 = %q, want %q", row.CredentialsLast4, crypto.Last4(secret))
 	}
 }
 

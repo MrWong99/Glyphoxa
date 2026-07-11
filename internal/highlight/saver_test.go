@@ -48,7 +48,8 @@ type fakeBlobs struct {
 	data      map[string][]byte
 	gate      chan struct{} // if non-nil, Put blocks until a receive
 	putErr    error
-	deleteErr error // if set, Delete returns it (blob-backend failure)
+	deleteErr error    // if set, Delete returns it (blob-backend failure)
+	deleted   []string // keys passed to Delete (compensation assertions)
 }
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{data: map[string][]byte{}} }
@@ -84,6 +85,7 @@ func (f *fakeBlobs) Delete(_ context.Context, key string) error {
 		return f.deleteErr
 	}
 	delete(f.data, key)
+	f.deleted = append(f.deleted, key)
 	return nil
 }
 
@@ -91,6 +93,13 @@ func (f *fakeBlobs) keys() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.data)
+}
+
+func (f *fakeBlobs) has(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.data[key]
+	return ok
 }
 
 // fakeEnqueuer records the last enqueued job.

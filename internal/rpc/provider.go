@@ -65,6 +65,10 @@ type byokSlot struct {
 var byokSlots = []byokSlot{
 	{provider: "groq", components: []storage.Component{storage.ComponentLLM}},
 	{provider: "elevenlabs", components: []storage.Component{storage.ComponentTTS, storage.ComponentSTT}},
+	// Gemini backs the image Component (#311, ADR-0004 amendment): a distinct
+	// BYOK slot + health check, even though Gemini already appears in the LLM
+	// matrix — the image key is managed on its own Configuration row.
+	{provider: "gemini", components: []storage.Component{storage.ComponentImage}},
 }
 
 func slotFor(provider string) (byokSlot, bool) {
