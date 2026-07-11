@@ -2,6 +2,7 @@ package wire
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -330,4 +331,77 @@ func TestPump_LookaheadTeeIntegration_HoldsThenDrains(t *testing.T) {
 	if got != 3 {
 		t.Fatalf("orchestrator got %d chunks, want 3", got)
 	}
+}
+
+// faCounter subscribes a FirstAudio counter to bus.
+func faCounter(bus *voiceevent.Bus) func() int {
+	var mu sync.Mutex
+	var n int
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+	})
+	return func() int { mu.Lock(); defer mu.Unlock(); return n }
+}
+
+// TestPlaybackPump_HeldLookaheadNeverFirstAudio pins the structural guarantee (#375):
+// a held look-ahead sentence that is DRAINED rather than played — by Close, by
+// DiscardLookahead, or by a same-turn supersede — never publishes FirstAudio, because
+// the drain paths never build or pull a playback source. The ctx stays LIVE throughout
+// (the guarantee is structural, not a cancelled-ctx side effect), and each assertion
+// follows a positive drain-completion signal (no cancel-vs-drain race).
+func TestPlaybackPump_HeldLookaheadNeverFirstAudio(t *testing.T) {
+	t.Run("Close drains the held job", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		fa := faCounter(bus)
+		p := newFakePlayer()
+		pump := newPump(p, drainingCodec{}, nil, bus)
+
+		cr, ror := openChunks()
+		pump.HandleSentence(lookaheadCtx("R"), ror) // live ctx, held
+		probe := blockProbe(t, cr, "held live-ctx look-ahead")
+		pump.Close()
+		join(t, probe, "Close draining the held job")
+		if fa() != 0 {
+			t.Fatalf("FirstAudio = %d for a Close-drained held sentence, want 0", fa())
+		}
+	})
+
+	t.Run("Discard drains the held job", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		fa := faCounter(bus)
+		p := newFakePlayer()
+		pump := newPump(p, drainingCodec{}, nil, bus)
+		defer pump.Close()
+
+		cr, ror := openChunks()
+		pump.HandleSentence(lookaheadCtx("R"), ror)
+		probe := blockProbe(t, cr, "held live-ctx look-ahead")
+		pump.DiscardLookahead("R")
+		join(t, probe, "Discard draining the held job")
+		if fa() != 0 {
+			t.Fatalf("FirstAudio = %d for a discarded held sentence, want 0", fa())
+		}
+	})
+
+	t.Run("supersede drains the stale job", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		fa := faCounter(bus)
+		p := newFakePlayer()
+		pump := newPump(p, drainingCodec{}, nil, bus)
+		defer pump.Close()
+
+		cOld, roOld := openChunks()
+		pump.HandleSentence(lookaheadCtx("old"), roOld)
+		probe := blockProbe(t, cOld, "stale held look-ahead")
+		cNew, roNew := openChunks()
+		pump.HandleSentence(lookaheadCtx("new"), roNew) // supersedes old → drains it
+		join(t, probe, "supersede draining the stale job")
+		if fa() != 0 {
+			t.Fatalf("FirstAudio = %d for a superseded held sentence, want 0", fa())
+		}
+		pump.DiscardLookahead("new")
+		close(cNew)
+	})
 }

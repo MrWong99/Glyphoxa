@@ -108,11 +108,13 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 	// Recover the turn correlation id installed by the reply reactor so the
 	// FirstAudio (A3 hook 1) joins this sentence to its turn.
 	turnID := voiceevent.TurnIDFrom(ctx)
-	// A held look-ahead sentence (#375, F2) is synthesized eagerly but NOT yet on the
-	// wire — its audio waits in the pump lane until the coordinator releases it. So its
-	// FirstAudio SLO boundary must be delivery-aligned: published AFTER the first chunk
-	// is actually consumed by the sink (the pump plays it), not when it first becomes
-	// available. An ordinary sentence keeps the available-at-the-pump boundary.
+	// A held look-ahead sentence (#375) is synthesized eagerly but NOT yet on the wire —
+	// its audio waits in the pump lane until the coordinator releases it, so the tee's
+	// "available at the pump" boundary is the WRONG moment for its FirstAudio. The tee
+	// therefore publishes NOTHING for a look-ahead sentence; its delivery-aligned
+	// FirstAudio is owned by the playback source ([newFirstAudioSource], playback.go),
+	// which fires on the first frame actually pulled to the wire. An ordinary sentence
+	// keeps the available-at-the-pump boundary here.
 	lookahead := voiceevent.IsPlaybackLookahead(ctx)
 
 	out := make(chan tts.AudioChunk)
@@ -130,13 +132,16 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 				return
 			}
 			// First chunk crossing to the sink is the headline SLO boundary
-			// ("first audio handed to the pump", A3 hook 1): for an ordinary sentence
-			// stamp it BEFORE the (possibly blocking) send so the moment measured is
-			// when audio became available to the pump. A barge-cancelled sentence that
-			// never produces a chunk never publishes.
-			if first && !lookahead {
+			// ("first audio handed to the pump", A3 hook 1): stamp and publish it
+			// before the (possibly blocking) send so the moment measured is when
+			// audio became available to the pump, not when the pump drained it. A
+			// barge-cancelled sentence that never produces a chunk never publishes.
+			// A look-ahead sentence is skipped — the playback source owns its FirstAudio.
+			if first {
 				first = false
-				t.publishFirstAudio(turnID)
+				if !lookahead {
+					t.publishFirstAudio(turnID)
+				}
 			}
 			// Forward the same chunk to playback. A cancelled ctx (barge-in) ends
 			// the sentence; the deferred closes unwind both channels.
@@ -145,14 +150,6 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 			case <-ctx.Done():
 				go drain(src) // src is not yet exhausted; release its producer
 				return
-			}
-			// A held look-ahead sentence's FirstAudio is delivery-aligned (#375, F2):
-			// publish it only once its first chunk has actually been consumed (the
-			// play-send above succeeded), so a discarded-before-playback reaction never
-			// reports first audio.
-			if first && lookahead {
-				first = false
-				t.publishFirstAudio(turnID)
 			}
 		}
 	}()
