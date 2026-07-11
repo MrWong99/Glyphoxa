@@ -119,6 +119,7 @@ describe("importCampaignBundle", () => {
           sessions: 0,
           lines: 0,
           chunks: 0,
+          dropped_participant_refs: 0,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
@@ -146,7 +147,34 @@ describe("importCampaignBundle", () => {
       sessions: 0,
       lines: 0,
       chunks: 0,
+      droppedParticipantRefs: 0,
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("maps dropped_participant_refs into droppedParticipantRefs on the summary", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          campaign_id: "camp-9",
+          name: "The Prancing Pony",
+          agents: 2,
+          nodes: 4,
+          edges: 2,
+          characters: 1,
+          sessions: 3,
+          lines: 10,
+          chunks: 5,
+          dropped_participant_refs: 2,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const summary = await importCampaignBundle(bundleFile());
+
+    expect(summary.droppedParticipantRefs).toBe(2);
     vi.unstubAllGlobals();
   });
 

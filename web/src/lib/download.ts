@@ -19,6 +19,10 @@ export type ImportSummary = {
   sessions: number;
   lines: number;
   chunks: number;
+  // Chunk participant refs that mapped to no imported agent/character and were
+  // dropped (#381/#388). Not fatal — the import still succeeds; the UI surfaces
+  // a warning note when > 0. The field is always present (zero absent-safe).
+  droppedParticipantRefs: number;
 };
 
 // The filename used when the server sends no Content-Disposition (it always does,
@@ -114,6 +118,7 @@ export async function importCampaignBundle(file: File): Promise<ImportSummary> {
     sessions: number;
     lines: number;
     chunks: number;
+    dropped_participant_refs: number;
   };
   return {
     campaignId: body.campaign_id,
@@ -125,5 +130,6 @@ export async function importCampaignBundle(file: File): Promise<ImportSummary> {
     sessions: body.sessions,
     lines: body.lines,
     chunks: body.chunks,
+    droppedParticipantRefs: body.dropped_participant_refs ?? 0,
   };
 }
