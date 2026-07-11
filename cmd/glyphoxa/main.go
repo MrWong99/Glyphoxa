@@ -668,6 +668,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		Transcripts: knowledgeAdapter,
 		KG:          knowledgeAdapter,
 		KGW:         knowledgeAdapter,
+		Recap:       knowledge.NewRecap(recapEngine, store, mgr),
 	})
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord

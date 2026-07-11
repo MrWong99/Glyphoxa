@@ -14,12 +14,11 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// TestButlerDefaultGrantsSeeded is the #299 default-grant bar: the auto-Butler
-// trigger (extended in 00025) seeds the Butler's read-only knowledge Tool set —
-// `dice` + `transcript_search` + `kg_query` (#297 decision 1) — each with a NULL
-// scope config. There is deliberately NO `recap` grant (its Tool wrapper does not
-// exist yet). seedCampaign creates a Campaign, whose auto-Butler trigger fires the
-// grant inserts.
+// TestButlerDefaultGrantsSeeded is the #372 default-grant bar: the auto-Butler
+// trigger (extended in 00025 then 00027) seeds the Butler's read-only Tool set —
+// `dice` + `transcript_search` + `kg_query` + `recap` (#297 decisions 1 & 5) — each
+// with a NULL scope config. seedCampaign creates a Campaign, whose auto-Butler
+// trigger fires the grant inserts.
 func TestButlerDefaultGrantsSeeded(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, campaignID := seedCampaign(t, dsn)
@@ -45,7 +44,7 @@ func TestButlerDefaultGrantsSeeded(t *testing.T) {
 			t.Errorf("grant %q carries config %q, want nil (no scope narrowing)", g.ToolName, g.Config)
 		}
 	}
-	want := []string{"dice", "transcript_search", "kg_query"}
+	want := []string{"dice", "transcript_search", "kg_query", "recap"}
 	if len(grants) != len(want) {
 		t.Fatalf("auto-Butler has %d grants, want %d (%v): %+v", len(grants), len(want), want, grants)
 	}
@@ -53,9 +52,6 @@ func TestButlerDefaultGrantsSeeded(t *testing.T) {
 		if _, ok := got[name]; !ok {
 			t.Errorf("auto-Butler missing default grant %q; has %+v", name, grants)
 		}
-	}
-	if _, ok := got["recap"]; ok {
-		t.Error("auto-Butler has a recap grant; the recap Tool wrapper does not exist yet (#299 follow-up)")
 	}
 }
 
@@ -75,7 +71,7 @@ func TestButlerKnowledgeGrantBackfillIdempotent(t *testing.T) {
 	}
 
 	// Re-run the migration's backfill statements: they must be no-ops now.
-	for _, tool := range []string{"transcript_search", "kg_query"} {
+	for _, tool := range []string{"transcript_search", "kg_query", "recap"} {
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO tool_agent_grant (agent_id, tool_name)
 			 SELECT id, $1 FROM agents WHERE agent_role = 'butler'
@@ -88,8 +84,8 @@ func TestButlerKnowledgeGrantBackfillIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolGrants(butler): %v", err)
 	}
-	if len(grants) != 3 {
-		t.Fatalf("after re-running the backfill the Butler has %d grants, want 3 (no duplicates): %+v", len(grants), grants)
+	if len(grants) != 4 {
+		t.Fatalf("after re-running the backfill the Butler has %d grants, want 4 (no duplicates): %+v", len(grants), grants)
 	}
 }
 
