@@ -24,6 +24,10 @@ import {
   TranscriptLineMatchSchema,
   SearchTranscriptLinesResponseSchema,
   ListSessionsResponseSchema,
+  ListHighlightsResponseSchema,
+  HighlightSchema,
+  PromoteHighlightResponseSchema,
+  DeleteHighlightResponseSchema,
   GenerateRecapResponseSchema,
 } from "@gen/glyphoxa/management/v1/management_pb";
 import { Providers } from "@/app/Providers";
@@ -43,6 +47,7 @@ function mockTransport() {
 
   const transport = createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () =>
         create(GetSessionResponseSchema, { session: active ? current : last, active }),
       startSession: () => {
@@ -154,6 +159,7 @@ function liveTransport() {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: current, active: true }),
       startSession: () => create(StartSessionResponseSchema, { session: current }),
       stopSession: () => create(StopSessionResponseSchema, { session: current }),
@@ -181,6 +187,7 @@ function endedTransport() {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
       startSession: () => create(StartSessionResponseSchema, { session: ended }),
       stopSession: () => create(StopSessionResponseSchema, { session: ended }),
@@ -251,6 +258,7 @@ function deadSessionTransport() {
   let gets = 0;
   const transport = createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       // First read: the stale "active" the screen cached; later reads: the truth.
       getSession: () =>
         create(GetSessionResponseSchema, gets++ === 0 ? { session: live, active: true } : { session: ended, active: false }),
@@ -524,6 +532,7 @@ function failedTransport() {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: failed, active: false }),
       startSession: () => create(StartSessionResponseSchema, { session: failed }),
       stopSession: () => create(StopSessionResponseSchema, { session: failed }),
@@ -654,6 +663,7 @@ function searchTransport(searchCalls: string[]) {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
       listSessions: () => create(ListSessionsResponseSchema, { sessions: [ended, older] }),
       searchTranscriptLines: (req) => {
@@ -814,6 +824,7 @@ function spendCapTransport(state: string, estimatedSpendUsd: number) {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () =>
         create(GetSessionResponseSchema, {
           session: current,
@@ -922,6 +933,7 @@ function pickerTransport() {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: latest, active: false }),
       listSessions: () => create(ListSessionsResponseSchema, { sessions: [latest, older] }),
     });
@@ -1022,6 +1034,7 @@ function livePickerTransport() {
   });
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: running, active: true }),
       listSessions: () => create(ListSessionsResponseSchema, { sessions: [running, older] }),
       startSession: () => create(StartSessionResponseSchema, { session: running }),
@@ -1116,6 +1129,7 @@ function switchTransport(state: { campaign: "A" | "B" }) {
   const bCurrent = mk("vsB", 7);
   return createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () =>
         create(GetSessionResponseSchema, {
           session: state.campaign === "A" ? aCurrent : bCurrent,
@@ -1220,6 +1234,7 @@ function recapTransport(
   const requested: string[][] = [];
   const transport = createRouterTransport(({ service }) => {
     service(SessionService, {
+      listHighlights: () => create(ListHighlightsResponseSchema, { highlights: [] }),
       getSession: () => create(GetSessionResponseSchema, { session: ended, active: false }),
       listSessions: () => create(ListSessionsResponseSchema, { sessions }),
       generateRecap: async (req) => {
@@ -1446,5 +1461,110 @@ describe("Session zero-line live snapshot (#248)", () => {
     );
 
     expect(await screen.findByText("Live")).toBeInTheDocument();
+  });
+});
+
+// highlightsTransport wires the SessionService highlight RPCs to prove the strip
+// is mounted for the rendered session (#309): listHighlights returns one promoted
+// Highlight per session id so a session's OWN highlights render when it is the
+// rendered session (live, or a picked past one). getSession reflects `active`.
+function highlightsTransport(active: boolean) {
+  const current = create(VoiceSessionSchema, {
+    id: "vs1",
+    campaignId: "c1",
+    status: active ? "running" : "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 30 * 60 * 1000)),
+    ...(active ? {} : { endedAt: timestampFromDate(new Date()), lineCount: 7 }),
+  });
+  const older = create(VoiceSessionSchema, {
+    id: "vsOld",
+    campaignId: "c1",
+    status: "ended",
+    startedAt: timestampFromDate(new Date(Date.now() - 5 * 60 * 60 * 1000)),
+    endedAt: timestampFromDate(new Date(Date.now() - 4 * 60 * 60 * 1000)),
+    lineCount: 5,
+  });
+  const excerptFor: Record<string, string> = {
+    vs1: "The keep's gate shattered inward.",
+    vsOld: "A whisper from the sealed crypt.",
+  };
+  return createRouterTransport(({ service }) => {
+    service(SessionService, {
+      getSession: () => create(GetSessionResponseSchema, { session: current, active }),
+      listSessions: () => create(ListSessionsResponseSchema, { sessions: [current, older] }),
+      listHighlights: (req) =>
+        create(ListHighlightsResponseSchema, {
+          highlights: [
+            create(HighlightSchema, {
+              id: `h-${req.voiceSessionId}`,
+              voiceSessionId: req.voiceSessionId,
+              status: "promoted",
+              startsAt: timestampFromDate(new Date()),
+              endsAt: timestampFromDate(new Date()),
+              score: 9,
+              excerpt: excerptFor[req.voiceSessionId] ?? "",
+              reason: "Peak moment.",
+              clipContentType: "audio/wav",
+            }),
+          ],
+        }),
+      promoteHighlight: (req) =>
+        create(PromoteHighlightResponseSchema, {
+          highlight: create(HighlightSchema, { id: req.id, status: "promoted" }),
+        }),
+      deleteHighlight: () => create(DeleteHighlightResponseSchema, {}),
+    });
+    service(CampaignService, {
+      getActiveCampaign: () =>
+        create(GetActiveCampaignResponseSchema, {
+          campaign: create(CampaignSchema, { id: "c1", name: "The Sunless Citadel" }),
+        }),
+    });
+  });
+}
+
+describe("Session highlights strip (#309)", () => {
+  beforeEach(() => {
+    // Snapshot fetch for the transcript card; the strip is transport-driven and
+    // independent, but the live/past transcript still fires this.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ lines: [], status: "idle", typing: { active: false, label: "" } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+  });
+
+  it("mounts the strip for the LIVE session — its highlights render", async () => {
+    render(
+      <Providers transport={highlightsTransport(true)} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+    expect(await screen.findByText(/The keep's gate shattered inward/)).toBeInTheDocument();
+  });
+
+  it("mounts the strip for a PICKED past session — that session's highlights render", async () => {
+    render(
+      <Providers transport={highlightsTransport(false)} queryClient={makeQueryClient()}>
+        <Session />
+      </Providers>,
+    );
+    // Default view is the current (ended) session — its highlight shows first.
+    expect(await screen.findByText(/The keep's gate shattered inward/)).toBeInTheDocument();
+
+    // Pick the older session → the strip now renders THAT session's highlight.
+    const picker = await screen.findByTestId("session-picker");
+    fireEvent.click(within(picker).getByText(/5 lines/));
+    expect(await screen.findByText(/A whisper from the sealed crypt/)).toBeInTheDocument();
+    expect(screen.queryByText(/The keep's gate shattered inward/)).not.toBeInTheDocument();
+  });
+
+  it("is absent when there is no session at all", async () => {
+    // Idle, no last session: renderedSessionId is null, so the Highlights section
+    // stays out entirely (no perpetual skeleton, no empty-state masquerade).
+    renderScreen();
+    await screen.findByText("Idle");
+    expect(screen.queryByRole("heading", { name: /^Highlights$/ })).not.toBeInTheDocument();
   });
 });
