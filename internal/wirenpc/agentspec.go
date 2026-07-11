@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -203,8 +204,8 @@ func loadCampaignNPCs(ctx context.Context, st *storage.Store, campaignID uuid.UU
 
 // loadCampaignRoster is the shared roster hydration the loaders end in: given a
 // resolved Campaign, read its Character NPCs and map each to the npcSpec the voice
-// loop builds its Roster from. The auto-created Butler is ignored (it is the
-// slash-command Agent, not voiced here — decision 5 / #299). Split out so the
+// loop builds its Roster from, then append the auto-created Butler LAST (#299) so
+// it joins the voiced Cast as a GM-address-only candidate (ADR-0024). Split out so the
 // runtime by-id loader ([loadCampaignNPCs], #323) and the seed-name test helper
 // (loadSeededNPCs, in the integration tests) share ONE mapping and can't drift.
 //
@@ -270,7 +271,63 @@ func loadCampaignRoster(ctx context.Context, st *storage.Store, campaign storage
 		spec.grants = grantsFromRows(grantRows)
 		specs = append(specs, spec)
 	}
+
+	// Append the auto-created Butler LAST (#299): it joins the voiced Cast as a
+	// regular candidate, reachable only by explicit GM address (Address-Only,
+	// ADR-0024), so the primary (first) Character is untouched. Every Campaign
+	// auto-creates its Butler (ADR-0009), so ErrNotFound is not expected in
+	// practice; it is tolerated (a Campaign lacking one simply voices no Butler)
+	// rather than failing the whole session load.
+	butler, err := st.GetButler(ctx, campaign.ID)
+	switch {
+	case err == nil:
+		bspec, err := butlerSpec(ctx, st, butler, tenantLLMModel)
+		if err != nil {
+			return nil, storage.LoadedAgent{}, storage.Campaign{}, err
+		}
+		specs = append(specs, bspec)
+	case errors.Is(err, storage.ErrNotFound):
+		// No Butler for this Campaign — skip it (ADR-0009 makes this unreachable
+		// for trigger-created Campaigns).
+	default:
+		return nil, storage.LoadedAgent{}, storage.Campaign{}, fmt.Errorf("wirenpc: load NPCs: get butler: %w", err)
+	}
+
 	return specs, primary, campaign, nil
+}
+
+// defaultButlerPersona is the system persona a Butler runs with when its persona
+// column is empty (#299): the auto-Butler trigger seeds no persona text, so
+// without this the Butler would answer under a blank Persona. The GM can override
+// it via the Agent editor.
+const defaultButlerPersona = `You are Glyphoxa, the session's assistant. You help the Game Master run the game: answer questions about the campaign, roll dice, and recall what has happened. Keep answers short and clear, and use your granted tools when they help.`
+
+// butlerSpec maps the auto-created Butler Agent to the npcSpec the voice loop
+// voices it from (#299): role butler + Address-Only (so ambient heuristics never
+// route to it), the default persona when its column is empty, its resolved model,
+// and its hydrated Tool Grants (dice + the knowledge grants the trigger seeds). An
+// empty VoiceID is allowed — a voiceless Butler answers as text only.
+func butlerSpec(ctx context.Context, st *storage.Store, butler storage.Agent, tenantLLMModel string) (npcSpec, error) {
+	loaded, err := st.LoadAgent(ctx, butler.ID)
+	if err != nil {
+		return npcSpec{}, err
+	}
+	spec, err := npcSpecFromAgent(loaded.Agent)
+	if err != nil {
+		return npcSpec{}, err
+	}
+	spec.role = string(storage.AgentRoleButler)
+	spec.addressOnly = true
+	if strings.TrimSpace(spec.persona) == "" {
+		spec.persona = defaultButlerPersona
+	}
+	spec.model = resolveNPCModel(loaded.LLMConfig, tenantLLMModel)
+	grantRows, err := st.ListToolGrants(ctx, butler.ID)
+	if err != nil {
+		return npcSpec{}, err
+	}
+	spec.grants = grantsFromRows(grantRows)
+	return spec, nil
 }
 
 // resolveNPCModel picks the model id for one NPC's engine (#227): the Agent's own

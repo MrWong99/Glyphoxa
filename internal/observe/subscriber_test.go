@@ -349,6 +349,40 @@ func TestStageSubscriberYieldedOutcome(t *testing.T) {
 	}
 }
 
+// TestStageSubscriberTextDeliveredOutcome pins the Butler text-modality turn
+// (#299): a turn delivered as text (no TTS, so no FirstAudio) ends with the
+// distinct SUCCESS outcome `text_delivered` — NOT abandoned/no_first_audio — and
+// a later TTL reap of its state must not re-count it. Without this terminal
+// signal every voiceless/long-answer Butler reply would pollute the abandoned
+// rate.
+func TestStageSubscriberTextDeliveredOutcome(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	sub := NewStageSubscriber(rec)
+	sub.Subscribe(bus)
+
+	clock := base
+	sub.now = func() time.Time { return clock }
+
+	bus.Publish(voiceevent.STTFinal{At: clock, TurnID: "txt", SpeechEndAt: clock})
+	bus.Publish(voiceevent.AddressRouted{At: clock, TurnID: "txt", Target: voiceevent.AddressTarget{AgentRole: "butler"}})
+	bus.Publish(voiceevent.TurnEnded{At: clock, TurnID: "txt", Reason: voiceevent.TurnEndTextDelivered})
+
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnTextDelivered || got[0].reason != ReasonNone {
+		t.Fatalf("turn outcomes = %+v, want one [text_delivered none]", got)
+	}
+	// A text turn synthesizes nothing, so it records no response_latency sample.
+	if len(rec.responseLat) != 0 {
+		t.Fatalf("text turn recorded a latency sample: %+v", rec.responseLat)
+	}
+	// Reaping the text turn's state must not re-count it as abandoned.
+	clock = base.Add(2 * defaultTurnTTL)
+	sub.Sweep()
+	if got := rec.outcomes(); len(got) != 1 {
+		t.Fatalf("reap of a text-delivered turn re-counted the outcome: %+v", got)
+	}
+}
+
 // TestStageSubscriberTurnEndedReasons pins the precise-reason mapping: each
 // TurnEnded reason records the right outcome+reason, and a turn-end arriving
 // AFTER first audio is ignored (the turn already counted first_audio).

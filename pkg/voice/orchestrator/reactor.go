@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -11,6 +12,16 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
+
+// ErrTextDelivered is the sentinel a [StreamReplyFunc] returns to signal that it
+// completed a turn by delivering the whole answer as TEXT (a Butler turn routed
+// to its TextSink, #299) rather than dispatching any TTS. The turn reached no
+// first audio, but it is a SUCCESS — the reactor maps this sentinel to a
+// [voiceevent.TurnEndTextDelivered] terminal event instead of the
+// provider_error a generic non-nil producer error would report, so the metrics
+// subscriber does not miscount a delivered text answer as abandoned. It is NOT
+// surfaced through the [ErrorFunc].
+var ErrTextDelivered = errors.New("orchestrator: turn delivered as text")
 
 // Reactor is one self-contained bus interaction in the voice pipeline: it turns
 // events the call-driven stages publish (VAD, STT, TTS) into the next stage's
@@ -1127,6 +1138,12 @@ func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted
 		return nil
 	}
 	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil {
+		// A text-delivered turn (#299) is a SUCCESS that dispatched no TTS: report
+		// its terminal reason so the subscriber records text_delivered, not an
+		// abandoned/no_first_audio TTL reap, and do NOT surface it as an error.
+		if errors.Is(err, ErrTextDelivered) {
+			return voiceevent.TurnEndTextDelivered
+		}
 		if r.onError != nil {
 			r.onError(err)
 		}

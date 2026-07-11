@@ -357,6 +357,14 @@ const (
 	// [TurnEndMute] it is a deliberate policy stop, not a barge or a fault — the turn
 	// opened no floor, ran no producer, and produced no audio.
 	TurnEndSpendCap TurnEndReason = "spend_cap"
+	// TurnEndTextDelivered: a Butler turn was delivered as TEXT to the voice
+	// channel chat via its TextSink (#299, ADR-0009 #299 amendment) — a voiceless
+	// Butler, an explicit text-modality request, or a long answer. It dispatches no
+	// TTS, so it emits no FirstAudio; unlike the failure reasons this is a SUCCESS
+	// terminal signal, distinguishing a delivered text answer from a turn that
+	// vanished (which the TTL sweep would otherwise miscount as
+	// abandoned/no_first_audio).
+	TurnEndTextDelivered TurnEndReason = "text_delivered"
 )
 
 // TurnEnded marks a turn that ended for a known reason — distinct from a turn

@@ -189,6 +189,18 @@ type Config struct {
 	// slot stays empty and the prompt is byte-identical to the pre-facts behavior.
 	Facts FactsRecaller
 
+	// TextSink, when non-nil, gives this Agent a text-delivery channel for its
+	// replies (the Butler's in-voice text answers, #299 / #297 decision 2). With a
+	// TextSink installed, the streaming [Replier.ReplyStream] path runs a BATCH
+	// completion (it needs the whole answer to decide modality), then routes the
+	// answer by [AnswerAsText]: a text-modality answer is posted whole via TextSink
+	// and committed to history with ZERO TTS dispatch, while a spoken one is
+	// sentence-split and dispatched as usual. A nil TextSink (every Character NPC,
+	// and the Butler until wired) is byte-identical to the pre-#299 streaming path.
+	// TextSink is called under the turn ctx, so a barge cancels a mid-post; its
+	// error aborts the turn without committing.
+	TextSink func(ctx context.Context, text string) error
+
 	// Retry is the [retry.Policy] the default [providerEngine] wraps its LLM start
 	// call in (#124, ADR-0044): a transient 429/5xx or net.Error start-error is
 	// retried with backoff INSIDE the per-turn deadline, a non-retryable error fails
@@ -565,6 +577,14 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	messages := r.hotContextLocked(mem, facts)
 	r.mu.Unlock()
 
+	// TextSink installed (the Butler, #299): decide modality on the WHOLE answer, so
+	// this path needs a batch completion rather than incremental streaming. A
+	// text-modality answer posts via the sink with zero TTS dispatch; a spoken one
+	// is sentence-split and dispatched. See [Replier.textModalityTurn].
+	if r.cfg.TextSink != nil {
+		return r.textModalityTurn(ctx, text, messages, dispatch)
+	}
+
 	streamer, ok := r.engine.(StreamingEngine)
 	if !ok {
 		// Non-streaming engine: fall back to one completion, then dispatch it whole.
@@ -647,6 +667,81 @@ func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, disp
 		return err
 	}
 	r.commitSpoken(reply)
+	return nil
+}
+
+// textModalityTurn runs a Butler turn with a TextSink installed (#299): it takes
+// ONE batch completion (the whole answer is needed to decide modality), then
+// routes it by [AnswerAsText]. A text-modality answer (voiceless Butler, an
+// explicit modality request, or a long result) is posted whole through TextSink
+// and committed to history (ADR-0012: text-delivered commits) with NO TTS
+// dispatch; a spoken one is sentence-split and dispatched exactly like the batch
+// fallback. utterance is the addressed text, consulted for keyword overrides.
+//
+// Deliver-then-commit (ADR-0012) holds on both branches: the answer is committed
+// only after the sink post (text) or the dispatch (voice) succeeds, so a
+// barge/cancel that aborts delivery leaves no phantom assistant message.
+//
+// The text branch returns the [orchestrator.ErrTextDelivered] sentinel (#299) so
+// the reactor publishes a TurnEnded(text_delivered) terminal event: a text turn
+// dispatches no TTS and reaches no first audio, so without this signal the
+// metrics TTL sweep would miscount a delivered answer as abandoned. The spoken
+// branch stays silent on success (first audio is its terminal signal).
+func (r *Replier) textModalityTurn(ctx context.Context, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
+	answer, err := r.engine.Generate(ctx, messages)
+	if err != nil {
+		if ctx.Err() == nil && r.cfg.OnError != nil {
+			r.cfg.OnError(err)
+		}
+		return err
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return nil
+	}
+
+	voiceless := r.cfg.Persona.Voice.VoiceID == ""
+	if AnswerAsText(utterance, answer, voiceless) {
+		// Text delivery: post the whole answer to the channel chat, then commit it.
+		if err := r.cfg.TextSink(ctx, answer); err != nil {
+			return err
+		}
+		r.commitSpoken(answer)
+		// Signal a text-delivered terminal outcome (#299): this turn dispatched no
+		// TTS, so it reaches no first audio. Returning the sentinel lets the reactor
+		// publish TurnEnded(text_delivered) — a SUCCESS — instead of the metrics TTL
+		// sweep miscounting it as an abandoned/no_first_audio turn.
+		return orchestrator.ErrTextDelivered
+	}
+
+	// Spoken delivery: sentence-split the whole answer and dispatch each, committing
+	// only what was delivered (mirrors [Replier.streamTurn]'s emit).
+	var split sentenceSplitter
+	var spoken strings.Builder
+	voice := r.cfg.Persona.Voice
+	emit := func(sentence string) error {
+		if err := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); err != nil {
+			return err
+		}
+		if spoken.Len() > 0 {
+			spoken.WriteByte(' ')
+		}
+		spoken.WriteString(sentence)
+		return nil
+	}
+	for _, sentence := range split.Push(answer) {
+		if err := emit(sentence); err != nil {
+			r.commitSpoken(spoken.String())
+			return err
+		}
+	}
+	if tail := split.Flush(); tail != "" {
+		if err := emit(tail); err != nil {
+			r.commitSpoken(spoken.String())
+			return err
+		}
+	}
+	r.commitSpoken(spoken.String())
 	return nil
 }
 
