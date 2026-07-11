@@ -78,18 +78,22 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 }
 
 // importResponse is the ServeImport 200 body: the minted campaign identity plus
-// the per-section counts the UI surfaces ("Imported <name>"). Part 1 always
-// reports zero sessions/lines/chunks (History is part 2, #292).
+// the per-section counts the UI surfaces ("Imported <name>"). A history-less
+// bundle reports zero sessions/lines/chunks. DroppedParticipantRefs is ALWAYS
+// present so the response shape is stable for clients — a chunk participant ref
+// that mapped to no imported Agent was dropped (not fatal), and a nonzero count
+// also lands as a slog.Warn in the importer (#381).
 type importResponse struct {
-	CampaignID string `json:"campaign_id"`
-	Name       string `json:"name"`
-	Agents     int    `json:"agents"`
-	Nodes      int    `json:"nodes"`
-	Edges      int    `json:"edges"`
-	Characters int    `json:"characters"`
-	Sessions   int    `json:"sessions"`
-	Lines      int    `json:"lines"`
-	Chunks     int    `json:"chunks"`
+	CampaignID             string `json:"campaign_id"`
+	Name                   string `json:"name"`
+	Agents                 int    `json:"agents"`
+	Nodes                  int    `json:"nodes"`
+	Edges                  int    `json:"edges"`
+	Characters             int    `json:"characters"`
+	Sessions               int    `json:"sessions"`
+	Lines                  int    `json:"lines"`
+	Chunks                 int    `json:"chunks"`
+	DroppedParticipantRefs int    `json:"dropped_participant_refs"`
 }
 
 // ServeImport ingests an uploaded campaign bundle: POST /api/v1/campaigns/import,
@@ -158,15 +162,16 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(importResponse{
-		CampaignID: res.CampaignID.String(),
-		Name:       res.Name,
-		Agents:     res.Agents,
-		Nodes:      res.Nodes,
-		Edges:      res.Edges,
-		Characters: res.Characters,
-		Sessions:   res.Sessions,
-		Lines:      res.Lines,
-		Chunks:     res.Chunks,
+		CampaignID:             res.CampaignID.String(),
+		Name:                   res.Name,
+		Agents:                 res.Agents,
+		Nodes:                  res.Nodes,
+		Edges:                  res.Edges,
+		Characters:             res.Characters,
+		Sessions:               res.Sessions,
+		Lines:                  res.Lines,
+		Chunks:                 res.Chunks,
+		DroppedParticipantRefs: res.DroppedParticipantRefs,
 	})
 }
 

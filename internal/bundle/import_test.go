@@ -3,11 +3,13 @@
 package bundle_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings/embeddingstest"
 )
@@ -806,6 +809,88 @@ func TestImportHistoryRollsBackWithPart1(t *testing.T) {
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Doomed History"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("rolled-back import left a campaign: %v", err)
+	}
+}
+
+// TestImportWarnsOnDroppedParticipantRefs (#381): when a chunk carries a
+// participant ref that maps to no imported Agent, the importer emits a single
+// slog.Warn on the context logger (ADR-0032 request-scoped) carrying campaign_id
+// and the dropped count — so a lossy import is visible in the logs, not silent.
+func TestImportWarnsOnDroppedParticipantRefs(t *testing.T) {
+	ctx := context.Background()
+	st, tid := freshTenant(t)
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx = observe.WithLogger(ctx, log)
+
+	base := time.Date(2026, 6, 8, 20, 0, 0, 0, time.UTC)
+	ended := base.Add(time.Hour)
+	bnd := &bundle.Bundle{
+		FormatVersion: bundle.FormatVersion,
+		Campaign: bundle.Campaign{
+			Name: "Warns", System: "dnd5e", Language: "en",
+			Agents: []bundle.Agent{{ID: "a1", Role: "character", Name: "Bart"}},
+			History: &bundle.History{Sessions: []bundle.Session{{
+				ID: "s1", StartedAt: base, EndedAt: &ended, Status: "ended", LineCount: 0,
+				Chunks: []bundle.Chunk{{
+					Content:              "the dragon spoke of gold",
+					ParticipatedAgentIDs: []string{"a1", "ghost", "phantom"},
+					StartedAt:            base,
+				}},
+			}}},
+		},
+	}
+	res, err := bundle.Import(ctx, st, tid, bnd)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if res.DroppedParticipantRefs != 2 {
+		t.Fatalf("DroppedParticipantRefs = %d, want 2", res.DroppedParticipantRefs)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "level=WARN") {
+		t.Errorf("no WARN emitted for dropped refs: %q", logged)
+	}
+	if !strings.Contains(logged, res.CampaignID.String()) {
+		t.Errorf("warn missing campaign_id %s: %q", res.CampaignID, logged)
+	}
+	if !strings.Contains(logged, "count=2") {
+		t.Errorf("warn missing count=2: %q", logged)
+	}
+}
+
+// TestImportSilentWhenNoDroppedRefs (#381): a clean import (every participant ref
+// maps) emits NO dropped-refs warning — the log line is gated on count > 0.
+func TestImportSilentWhenNoDroppedRefs(t *testing.T) {
+	ctx := context.Background()
+	st, tid := freshTenant(t)
+
+	var buf bytes.Buffer
+	ctx = observe.WithLogger(ctx, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	base := time.Date(2026, 6, 9, 20, 0, 0, 0, time.UTC)
+	ended := base.Add(time.Hour)
+	bnd := &bundle.Bundle{
+		FormatVersion: bundle.FormatVersion,
+		Campaign: bundle.Campaign{
+			Name: "Clean", System: "dnd5e", Language: "en",
+			Agents: []bundle.Agent{{ID: "a1", Role: "character", Name: "Bart"}},
+			History: &bundle.History{Sessions: []bundle.Session{{
+				ID: "s1", StartedAt: base, EndedAt: &ended, Status: "ended", LineCount: 0,
+				Chunks: []bundle.Chunk{{
+					Content:              "the dragon spoke of gold",
+					ParticipatedAgentIDs: []string{"a1"},
+					StartedAt:            base,
+				}},
+			}}},
+		},
+	}
+	if _, err := bundle.Import(ctx, st, tid, bnd); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("clean import emitted a warning: %q", buf.String())
 	}
 }
 

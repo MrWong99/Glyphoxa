@@ -6,15 +6,19 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // ImportResult reports what an [Import] persisted. AgentIDs maps each bundle
 // agent ref key to the minted (or, for the Butler, the trigger-created) Agent id;
 // part 1 fills it and part 2 (#292) consumes it IN-FUNCTION to remap a Chunk's
-// participated_agent_ids. The int counts feed the ServeImport JSON response.
+// participated_agent_ids. Every int count — including DroppedParticipantRefs —
+// feeds the ServeImport JSON response, always present so the response shape is
+// stable for clients.
 // DroppedParticipantRefs counts chunk participant refs that mapped to no imported
-// Agent and were dropped (not fatal).
+// Agent and were dropped (not fatal); a nonzero value also emits a single
+// slog.Warn from importHistory (#381), so a lossy import is never silent.
 type ImportResult struct {
 	CampaignID uuid.UUID
 	Name       string
@@ -76,6 +80,15 @@ func Import(ctx context.Context, st *storage.Store, tenantID uuid.UUID, b *Bundl
 	})
 	if err != nil {
 		return ImportResult{}, err
+	}
+	// Surface a lossy import (a foreign/deleted participant carried no local NPC):
+	// gated on count>0, one WARN on the request-scoped logger with campaign_id +
+	// count (ADR-0032), so the count is visible in logs, not just the response JSON.
+	// Emitted AFTER commit succeeds, so a rolled-back import never logs a
+	// campaign_id that did not persist.
+	if res.DroppedParticipantRefs > 0 {
+		observe.CtxLogger(ctx).Warn("bundle: import dropped participant refs",
+			"campaign_id", res.CampaignID, "count", res.DroppedParticipantRefs)
 	}
 	return res, nil
 }
@@ -234,6 +247,13 @@ func importHistory(ctx context.Context, tx *storage.Store, campaignID uuid.UUID,
 
 		for j := range s.Lines {
 			l := &s.Lines[j]
+			// Edge (documented, no behavior change): two bundle Lines sharing a line_id
+			// COALESCE at the DB upsert (ADR-0040 replay key = (voice_session_id,
+			// line_id)) — the last write wins on text/who while an earlier seq can
+			// linger, and res.Lines still counts BOTH inputs, so the reported Lines can
+			// exceed the persisted row count. A well-formed exported bundle never
+			// carries dup line_ids; this only bites a hand-edited/foreign bundle, and
+			// the import stays correct-by-replay. Left as-is per #381 review.
 			if err := tx.UpsertTranscriptLine(ctx, storage.TranscriptLine{
 				VoiceSessionID:       sessionID,
 				CampaignID:           campaignID,
