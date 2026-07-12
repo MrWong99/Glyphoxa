@@ -67,6 +67,7 @@ func (f *fakeEnrichStore) SetHighlightImage(_ context.Context, id uuid.UUID, key
 func (f *fakeEnrichStore) TryClaimHighlightEnrich(_ context.Context, id uuid.UUID, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.claimCalls++ // count EVERY attempt (win or lose), not just winners
 	if f.claimErr != nil {
 		return false, f.claimErr
 	}
@@ -80,14 +81,20 @@ func (f *fakeEnrichStore) TryClaimHighlightEnrich(_ context.Context, id uuid.UUI
 		f.claimed = map[uuid.UUID]time.Time{}
 	}
 	f.claimed[id] = time.Now()
-	f.claimCalls++
 	return true, nil
 }
 
-func (f *fakeEnrichStore) ReleaseHighlightEnrichClaim(_ context.Context, id uuid.UUID) error {
+// ReleaseHighlightEnrichClaim mimics a real DB call: a cancelled ctx fails the
+// statement and the claim is NOT cleared. The handler must therefore release with
+// a cancel-immune ctx (context.WithoutCancel) so an error-path release under a
+// dead handler ctx still frees the claim.
+func (f *fakeEnrichStore) ReleaseHighlightEnrichClaim(ctx context.Context, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releaseCalls++
+	if err := ctx.Err(); err != nil {
+		return err // a cancelled/expired ctx aborts the release; the claim lingers
+	}
 	delete(f.claimed, id)
 	return nil
 }
@@ -218,6 +225,50 @@ func TestEnrichImageHandler_Claim_GeneratesAtMostOnce(t *testing.T) {
 	got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
 	if got.ImageKey == "" {
 		t.Fatal("winner did not land the image on the row")
+	}
+	// Both jobs attempted the claim; the winner landed the image, so NO release
+	// happened (release is only for non-image exits), and the loser bailed before
+	// owning the claim.
+	if store.claimCalls != 2 {
+		t.Fatalf("want 2 claim attempts (one per job), got %d", store.claimCalls)
+	}
+	if store.releaseCalls != 0 {
+		t.Fatalf("a winning enrichment must not release its claim, got %d releases", store.releaseCalls)
+	}
+}
+
+// TestEnrichImageHandler_ReleasesClaimUnderCancelledCtx pins the finding-2 fix
+// (#421): on an error-path exit the handler releases its claim so a fast retry can
+// re-claim without waiting out the TTL — and that release must succeed even when
+// the handler ctx is already cancelled (lease-timeout or shutdown). The release
+// therefore runs on a cancel-immune ctx.
+func TestEnrichImageHandler_ReleasesClaimUnderCancelledCtx(t *testing.T) {
+	tenantID := uuid.New()
+	store := newFakeEnrichStore()
+	h := seedRow(store, tenantID)
+	blobs := newFakeBlobs()
+	// A provider error is a release-then-return exit path.
+	gen := &fakeGen{err: errors.New("provider 503")}
+
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	payload, _ := MarshalEnrichImage(h.ID, tenantID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the handler runs with an already-dead ctx
+
+	if err := handler(ctx, payload); err == nil {
+		t.Fatal("provider error must surface so the runner retries")
+	}
+	// The claim was released despite the cancelled ctx: a real retry can re-claim
+	// immediately instead of burning attempts against a lingering claim.
+	if store.releaseCalls != 1 {
+		t.Fatalf("want exactly one release attempt, got %d", store.releaseCalls)
+	}
+	store.mu.Lock()
+	_, stillClaimed := store.claimed[h.ID]
+	store.mu.Unlock()
+	if stillClaimed {
+		t.Fatal("claim lingered: release ran with the dead handler ctx instead of a cancel-immune one")
 	}
 }
 
