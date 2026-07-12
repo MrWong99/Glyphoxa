@@ -313,3 +313,62 @@ func TestSizeCapBoundary(t *testing.T) {
 		t.Fatalf("Put over cap err = %v, want ErrTooLarge", err)
 	}
 }
+
+// TestListPrefixScan proves List returns exactly the keys under a prefix, in
+// ascending order, reading keys only. It is the seam capability the process-wide
+// reconciliation sweeps enumerate blobs through (#421), replacing a direct query
+// against the blob table.
+func TestListPrefixScan(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	tenant := seedTenant(t, pool, "acme")
+	other := seedTenant(t, pool, "beta")
+
+	owner := uuid.New()
+	kImg := mustKey(t, tenant, owner, "image")
+	kClip := mustKey(t, tenant, owner, "clip.wav")
+	kOther := mustKey(t, other, uuid.New(), "image")
+	for _, k := range []string{kImg, kClip, kOther} {
+		if err := store.Put(ctx, k, "image/png", bytes.NewReader([]byte("x")), 1); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+
+	// AllKeysPrefix walks the whole store, ascending.
+	all, err := store.List(ctx, blob.AllKeysPrefix)
+	if err != nil {
+		t.Fatalf("List all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("List all = %v, want 3 keys", all)
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i-1] > all[i] {
+			t.Fatalf("List not ascending: %v", all)
+		}
+	}
+
+	// A tenant-scoped prefix isolates one tenant's blobs.
+	tenantPrefix := "t/" + tenant.String() + "/"
+	scoped, err := store.List(ctx, tenantPrefix)
+	if err != nil {
+		t.Fatalf("List tenant: %v", err)
+	}
+	if len(scoped) != 2 {
+		t.Fatalf("tenant-scoped List = %v, want the 2 acme keys", scoped)
+	}
+	for _, k := range scoped {
+		if k == kOther {
+			t.Fatalf("tenant prefix leaked another tenant's key: %v", scoped)
+		}
+	}
+
+	// A prefix that matches nothing is an empty (non-error) result.
+	none, err := store.List(ctx, "t/"+uuid.New().String()+"/")
+	if err != nil {
+		t.Fatalf("List empty: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("no-match List = %v, want empty", none)
+	}
+}

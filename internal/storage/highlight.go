@@ -395,43 +395,38 @@ func (s *Store) ReleaseHighlightEnrichClaim(ctx context.Context, id uuid.UUID) e
 	return nil
 }
 
-// ListOrphanHighlightImageKeys returns every blob key under the Highlight IMAGE
-// owner-kind prefix (t/<tenant>/highlight/<id>/image, ADR-0048) whose embedded
-// Highlight id no longer matches any highlight row — the images a delete-vs-enrich
-// interleaving orphaned (the delete read the row with an empty image_key, then the
-// enrich committed a blob whose row was already gone), #406. It is the (b) half of
-// the boot reconciliation sweep. It ONLY matches the image name segment, so a
-// Highlight's audio clip (name 'clip.wav') under the SAME owner-kind is never
-// touched, and it only touches the 'highlight' owner-kind — never another owner's
-// blobs. An in-flight enrichment (row still present, image_key not yet set) is
-// NOT collected because the row's id still matches. Process-wide, carries no tenant.
-func (s *Store) ListOrphanHighlightImageKeys(ctx context.Context) ([]string, error) {
+// HighlightsExist reports which of the given Highlight ids still have a row,
+// returning a set (present ids map to true; absent ids are simply not in the map).
+// It is the membership half of the boot orphan-image sweep's anti-join (#421): the
+// sweep enumerates image blobs THROUGH the blob seam (blob.Store.List), extracts
+// each blob's Highlight id, then asks this which of them still exist — the blobs
+// whose id is absent are the delete-vs-enrich orphans. Keeping the anti-join in Go
+// (not a SELECT against the blob table) is what keeps the orphan sweep working
+// across a blob-backend swap (ADR-0048). An empty input runs no query. Process-wide,
+// carries no tenant (the ids are globally unique PKs).
+func (s *Store) HighlightsExist(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	present := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return present, nil
+	}
 	rows, err := s.db.Query(ctx,
-		`SELECT b.key
-		   FROM blob b
-		  WHERE split_part(b.key, '/', 3) = 'highlight'
-		    AND split_part(b.key, '/', 5) = 'image'
-		    AND NOT EXISTS (
-		          SELECT 1 FROM highlight h
-		           WHERE h.id::text = split_part(b.key, '/', 4)
-		        )`)
+		`SELECT id FROM highlight WHERE id = ANY($1)`, ids)
 	if err != nil {
-		return nil, fmt.Errorf("storage: list orphan highlight image keys: %w", err)
+		return nil, fmt.Errorf("storage: highlights exist: %w", err)
 	}
 	defer rows.Close()
 
-	var out []string
 	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return nil, fmt.Errorf("storage: scan orphan image key: %w", err)
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("storage: scan highlight id: %w", err)
 		}
-		out = append(out, k)
+		present[id] = true
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: list orphan highlight image keys: %w", err)
+		return nil, fmt.Errorf("storage: highlights exist: %w", err)
 	}
-	return out, nil
+	return present, nil
 }
 
 // scanClipKeys runs a single-column clip_key query and collects the results.

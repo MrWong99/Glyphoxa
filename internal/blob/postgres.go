@@ -103,6 +103,34 @@ func (p *Postgres) Get(ctx context.Context, key string) (io.ReadCloser, Meta, er
 	return io.NopCloser(bytes.NewReader(raw)), meta, nil
 }
 
+// List returns the keys of every blob whose key begins with prefix, ascending.
+// It scans the key column ONLY (never bytea), so a whole-store walk stays cheap.
+// starts_with keeps the prefix a literal (no LIKE metacharacter surprises). The
+// prefix is not key-validated: it is a partial key by design (a bare owner-kind
+// cannot be prefix-isolated because the tenant segment comes first), and callers
+// filter the results by owner-kind/name via blob.ParseKey.
+func (p *Postgres) List(ctx context.Context, prefix string) ([]string, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT key FROM blob WHERE starts_with(key, $1) ORDER BY key`, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("blob: list %q: %w", prefix, err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("blob: scan key: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("blob: list %q: %w", prefix, err)
+	}
+	return out, nil
+}
+
 // Delete removes the blob at key. Deleting an absent key returns nil
 // (idempotent) — the deterministic Key() plus this Delete are the lifecycle
 // mechanism owning rows use (ADR-0048; wiring is E8's). An invalid key is
