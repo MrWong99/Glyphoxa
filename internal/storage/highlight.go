@@ -365,14 +365,19 @@ func (s *Store) ListPromotedHighlightsNeedingEnrichment(ctx context.Context, enr
 // column is never scanned onto the wire, so the marker cannot leak into an RPC
 // response. Tenant-free (the id scopes the row, like SetHighlightImage).
 func (s *Store) TryClaimHighlightEnrich(ctx context.Context, id uuid.UUID, ttl time.Duration) (bool, error) {
-	cutoff := time.Now().Add(-ttl)
+	// Single-clock lease (#421): the stamp AND the expiry cutoff are both DB now(),
+	// so an app-clock skewed AHEAD of the DB can no longer shorten the effective TTL
+	// and reclaim a still-LIVE winner mid-generation (a double Generate). The app
+	// contributes only the TTL magnitude, never a wall-clock reading. make_interval's
+	// secs is double precision, so a sub-second TTL survives.
 	tag, err := s.db.Exec(ctx,
 		`UPDATE highlight
 		    SET image_enrich_claimed_at = now()
 		  WHERE id = $1
 		    AND image_key = ''
-		    AND (image_enrich_claimed_at IS NULL OR image_enrich_claimed_at < $2)`,
-		id, cutoff)
+		    AND (image_enrich_claimed_at IS NULL
+		         OR image_enrich_claimed_at < now() - make_interval(secs => $2))`,
+		id, ttl.Seconds())
 	if err != nil {
 		return false, fmt.Errorf("storage: claim highlight enrich %s: %w", id, err)
 	}
