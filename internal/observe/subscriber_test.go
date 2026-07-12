@@ -61,6 +61,7 @@ func (r *recordingStage) ProviderError(Stage, Provider)               {}
 func (r *recordingStage) LLMTokens(Provider, string, int, int)        {}
 func (r *recordingStage) TTSCharacters(Provider, int)                 {}
 func (r *recordingStage) STTAudioSeconds(Provider, time.Duration)     {}
+func (r *recordingStage) MalformedToolGen(Provider, MalformedPath)    {}
 func (r *recordingStage) TurnOutcome(outcome TurnOutcome, reason TurnReason) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -594,5 +595,41 @@ func TestStageSubscriberEnsembleRoutedStageMark(t *testing.T) {
 	}
 	if len(rec.responseLat) != 1 || rec.responseLat[0].label != "character" || rec.responseLat[0].d != 1600*time.Millisecond {
 		t.Fatalf("response_latency = %+v, want one [character 1.6s] anchored on the ensemble mark", rec.responseLat)
+	}
+}
+
+// TestStageSubscriberTurnEndedUnknownTurnIgnored pins the #310/#391-class guard: a
+// TurnEnded for a turn the subscriber never OPENED (no STTFinal/AddressRouted/
+// TTSInvoked spine) records NO outcome — otherwise a Highlight voice replay cut by
+// a barge would fabricate a phantom abandoned/barge turn for audio that played.
+func TestStageSubscriberTurnEndedUnknownTurnIgnored(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	// No prior stage events open this id (a replay publishes no STT/LLM/TTS).
+	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "replay-turn", Reason: voiceevent.TurnEndBarge})
+
+	if got := rec.outcomes(); len(got) != 0 {
+		t.Fatalf("TurnEnded for an unopened turn recorded %+v, want nothing", got)
+	}
+}
+
+// TestStageSubscriberSpinelessTextDeliveredRecorded pins that the barge-only guard
+// (#310) does NOT drop legit spine-less terminals: a text-modality Cross-talk
+// Reaction sub-turn (#389) publishes ONLY TurnEnded{text_delivered} for its fresh
+// reaction id — no STTFinal/AddressRouted/TTSInvoked opener — yet its success outcome
+// must still be counted (the reaction is the ONLY signal of that sub-turn).
+func TestStageSubscriberSpinelessTextDeliveredRecorded(t *testing.T) {
+	rec := &recordingStage{}
+	bus := voiceevent.NewBus()
+	NewStageSubscriber(rec).Subscribe(bus)
+
+	// The real spine-less reaction sequence: a fresh reaction id ends text_delivered
+	// with no prior opener events for that id.
+	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "reaction-1", Reason: voiceevent.TurnEndTextDelivered})
+
+	if got := rec.outcomes(); len(got) != 1 || got[0].outcome != TurnTextDelivered {
+		t.Fatalf("spine-less text_delivered outcomes = %+v, want one [text_delivered]", got)
 	}
 }

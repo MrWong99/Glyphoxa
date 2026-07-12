@@ -175,6 +175,26 @@ const (
 	ReasonSpendCap TurnReason = "spend_cap"
 )
 
+// MalformedPath is the bounded label naming WHICH detection site caught a
+// malformed tool generation on the [StageRecorder.MalformedToolGen] counter
+// (#398/#399/#410). All three values are reserved now so the series' label space
+// is fixed from the first slice (ADR-0032 bounded labels); #398 emits only
+// [MalformedStreamError], with #399/#410 lighting up the other two.
+type MalformedPath string
+
+const (
+	// MalformedStreamError: the provider surfaced a tool_use_failed — as an
+	// in-stream error frame or a 400 start error — and the agenttool bridge caught it
+	// (#398). The malformed generation never reached the transcript.
+	MalformedStreamError MalformedPath = "stream_error"
+	// MalformedTextLeak: pseudo-XML arrived as ordinary assistant prose with NO
+	// provider error, caught by the text-path scrubber (#410, pkg/tool).
+	MalformedTextLeak MalformedPath = "text_leak"
+	// MalformedRollClaim: the model narrated a dice result it never actually rolled
+	// via the tool, caught by the roll-claim guard (#399).
+	MalformedRollClaim MalformedPath = "roll_claim"
+)
+
 // StageRecorder records the orchestrator's per-stage / per-turn latency
 // histograms and the provider-call counters. It is the contract the bus-driven
 // sibling subscriber (latency spans) and the provider adapters (provider calls,
@@ -268,6 +288,15 @@ type StageRecorder interface {
 	// audio. (glyphoxa_voice_tts_characters_total{provider}) — WIRED by the TTS
 	// stage after a successful Synthesize start.
 	TTSCharacters(provider Provider, chars int)
+	// MalformedToolGen counts one malformed tool generation by provider and the
+	// detection path that caught it (#398/#399/#410): a provider tool_use_failed the
+	// agenttool bridge retried ([MalformedStreamError]), a pseudo-XML text leak, or a
+	// fabricated roll claim. It keeps provider-flake frequency observable even when
+	// the retry / fallback fully recovers the turn (an operator sees a healthy turn
+	// but the meter still ticks). (glyphoxa_llm_malformed_toolgen_total{provider,path})
+	// — WIRED by agenttool.providerAdapter per malformed generation.
+	MalformedToolGen(provider Provider, path MalformedPath)
+
 	// STTAudioSeconds counts the audio duration submitted to an STT recognizer
 	// (#127, ADR-0045/0042): the batch path bills the submitted clip length, the
 	// streaming path the voiced+pre-roll duration accumulated per utterance and
@@ -296,6 +325,7 @@ func (Discard) ProviderCall(Stage, Provider, Outcome)       {}
 func (Discard) ProviderError(Stage, Provider)               {}
 func (Discard) TurnOutcome(TurnOutcome, TurnReason)         {}
 func (Discard) LLMTokens(Provider, string, int, int)        {}
+func (Discard) MalformedToolGen(Provider, MalformedPath)    {}
 func (Discard) TTSCharacters(Provider, int)                 {}
 func (Discard) STTAudioSeconds(Provider, time.Duration)     {}
 

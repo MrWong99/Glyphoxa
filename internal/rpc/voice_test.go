@@ -310,6 +310,7 @@ func TestGetProviderHealth_AllHealthyResolvesBotTag(t *testing.T) {
 	srv := NewVoiceServer(store, cipher, nil)
 	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
 	srv.pingLLM = func(context.Context, string) error { return nil }
+	srv.pingImage = func(context.Context, string) error { return nil }
 	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
 
 	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
@@ -346,6 +347,7 @@ func TestGetProviderHealth_DegradedOnFailures(t *testing.T) {
 	srv := NewVoiceServer(store, cipher, nil)
 	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{err: errors.New("401 unauthorized")} }
 	srv.pingLLM = func(context.Context, string) error { return errors.New("groq down") }
+	srv.pingImage = func(context.Context, string) error { return errors.New("gemini down") }
 	srv.botTag = func(context.Context, string) (string, error) { return "", errors.New("bad token") }
 
 	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
@@ -355,6 +357,66 @@ func TestGetProviderHealth_DegradedOnFailures(t *testing.T) {
 	for _, p := range resp.Msg.GetProviders() {
 		if p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_DEGRADED {
 			t.Errorf("%s should be degraded: %+v", p.GetProvider(), p)
+		}
+	}
+}
+
+// TestGetProviderHealth_GeminiImagePing pins the #311 image-provider health check:
+// a Gemini key that pings 2xx reports healthy off the fake pingImage seam, and a
+// failing ping reports degraded — the same posture as the Groq LLM check.
+func TestGetProviderHealth_GeminiImagePing(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	store := healthyStore(t, cipher)
+	store.configs[storage.ComponentImage] = savedConfig(t, cipher, storage.ComponentImage, "gemini", "gemini-key")
+
+	srv := NewVoiceServer(store, cipher, nil)
+	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
+	srv.pingLLM = func(context.Context, string) error { return nil }
+	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
+
+	var gotKey string
+	srv.pingImage = func(_ context.Context, key string) error { gotKey = key; return nil }
+
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	var gemini *managementv1.ProviderHealth
+	for _, p := range resp.Msg.GetProviders() {
+		if p.GetProvider() == "gemini" {
+			gemini = p
+		}
+	}
+	if gemini == nil || gemini.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_HEALTHY {
+		t.Fatalf("gemini not healthy off a passing ping: %+v", gemini)
+	}
+	if gotKey != "gemini-key" {
+		t.Errorf("pingImage got key %q, want the decrypted tenant image key", gotKey)
+	}
+}
+
+// TestGetProviderHealth_GeminiImagePingFails: a failing image ping degrades the
+// gemini slot (mirrors the Groq degraded posture).
+func TestGetProviderHealth_GeminiImagePingFails(t *testing.T) {
+	t.Parallel()
+	cipher := voiceTestCipher(t)
+	store := healthyStore(t, cipher)
+	store.configs[storage.ComponentImage] = savedConfig(t, cipher, storage.ComponentImage, "gemini", "gemini-key")
+
+	srv := NewVoiceServer(store, cipher, nil)
+	srv.newLister = func(string) tts.VoiceLister { return &fakeLister{} }
+	srv.pingLLM = func(context.Context, string) error { return nil }
+	srv.botTag = func(context.Context, string) (string, error) { return "Glyphoxa#4823", nil }
+	srv.pingImage = func(context.Context, string) error { return errors.New("gemini 403") }
+
+	resp, err := srv.GetProviderHealth(tenantCtx(), connect.NewRequest(&managementv1.GetProviderHealthRequest{}))
+	if err != nil {
+		t.Fatalf("GetProviderHealth: %v", err)
+	}
+	for _, p := range resp.Msg.GetProviders() {
+		if p.GetProvider() == "gemini" && p.GetStatus() != managementv1.HealthStatus_HEALTH_STATUS_DEGRADED {
+			t.Fatalf("gemini should be degraded on a failing ping: %+v", p)
 		}
 	}
 }
@@ -407,6 +469,10 @@ func TestGetProviderHealth_ChecksRunConcurrently(t *testing.T) {
 		sleepCtx(ctx, checkDelay)
 		return nil
 	}
+	srv.pingImage = func(ctx context.Context, _ string) error {
+		sleepCtx(ctx, checkDelay)
+		return nil
+	}
 	srv.botTag = func(ctx context.Context, _ string) (string, error) {
 		sleepCtx(ctx, checkDelay)
 		return "Glyphoxa#4823", nil
@@ -418,8 +484,8 @@ func TestGetProviderHealth_ChecksRunConcurrently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProviderHealth: %v", err)
 	}
-	if got := len(resp.Msg.GetProviders()); got != 3 {
-		t.Fatalf("providers = %d, want 3", got)
+	if got := len(resp.Msg.GetProviders()); got != 4 {
+		t.Fatalf("providers = %d, want 4", got)
 	}
 	if elapsed < checkDelay {
 		t.Errorf("elapsed %v < one check's delay %v — checks were skipped, not run", elapsed, checkDelay)
@@ -447,7 +513,7 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 // countingHealthSeams wires all three provider seams to atomic counters so a
 // test can pin how often the vendors were actually touched.
 type countingHealthSeams struct {
-	lister, llm, discord atomic.Int64
+	lister, llm, image, discord atomic.Int64
 }
 
 func (c *countingHealthSeams) wire(srv *VoiceServer) {
@@ -459,14 +525,18 @@ func (c *countingHealthSeams) wire(srv *VoiceServer) {
 		c.llm.Add(1)
 		return nil
 	}
+	srv.pingImage = func(context.Context, string) error {
+		c.image.Add(1)
+		return nil
+	}
 	srv.botTag = func(context.Context, string) (string, error) {
 		c.discord.Add(1)
 		return "Glyphoxa#4823", nil
 	}
 }
 
-func (c *countingHealthSeams) counts() [3]int64 {
-	return [3]int64{c.lister.Load(), c.llm.Load(), c.discord.Load()}
+func (c *countingHealthSeams) counts() [4]int64 {
+	return [4]int64{c.lister.Load(), c.llm.Load(), c.image.Load(), c.discord.Load()}
 }
 
 // TestGetProviderHealth_CachedWithinTTL pins #150's server-side TTL cache: two
@@ -494,12 +564,12 @@ func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
 	}
 
 	first := req()
-	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+	if got := seams.counts(); got != [4]int64{1, 1, 1, 1} {
 		t.Fatalf("counts after first call = %v, want each vendor touched once", got)
 	}
 
 	second := req()
-	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+	if got := seams.counts(); got != [4]int64{1, 1, 1, 1} {
 		t.Errorf("counts after second call within TTL = %v, want still 1 each (served from cache)", got)
 	}
 	if len(second.GetProviders()) != len(first.GetProviders()) {
@@ -509,7 +579,7 @@ func TestGetProviderHealth_CachedWithinTTL(t *testing.T) {
 	// Advance past the TTL: the next call probes the vendors again.
 	now = now.Add(healthCacheTTL + time.Second)
 	req()
-	if got := seams.counts(); got != [3]int64{2, 2, 2} {
+	if got := seams.counts(); got != [4]int64{2, 2, 2, 2} {
 		t.Errorf("counts after TTL expiry = %v, want each vendor probed again (2)", got)
 	}
 }
@@ -716,7 +786,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 	}
 
 	health("initial")
-	if got := seams.counts(); got != [3]int64{1, 1, 1} {
+	if got := seams.counts(); got != [4]int64{1, 1, 1, 1} {
 		t.Fatalf("counts after initial call = %v, want 1 each", got)
 	}
 
@@ -727,7 +797,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 		t.Fatalf("SaveProviderConfig: %v", err)
 	}
 	health("after key save")
-	if got := seams.counts(); got != [3]int64{2, 2, 2} {
+	if got := seams.counts(); got != [4]int64{2, 2, 2, 2} {
 		t.Errorf("counts after key save = %v, want 2 each (cache busted)", got)
 	}
 
@@ -738,7 +808,7 @@ func TestSaveCredentials_InvalidateHealthCache(t *testing.T) {
 		t.Fatalf("SaveDiscordSettings: %v", err)
 	}
 	health("after discord save")
-	if got := seams.counts(); got != [3]int64{3, 3, 3} {
+	if got := seams.counts(); got != [4]int64{3, 3, 3, 3} {
 		t.Errorf("counts after discord save = %v, want 3 each (cache busted)", got)
 	}
 }
@@ -868,8 +938,8 @@ func TestGetProviderHealth_WaitersShareLeaderProbe(t *testing.T) {
 	if elapsed >= 2*srv.probeTimeout {
 		t.Errorf("%d concurrent callers took %v — waiters ran their own probes instead of sharing the leader's (probeTimeout %v)", n, elapsed, srv.probeTimeout)
 	}
-	// One probe = 3 store reads (LLM config, TTS config, deployment config).
-	if got := bs.reads.Load(); got != 3 {
-		t.Errorf("store reads = %d, want 3 (exactly one probe launched)", got)
+	// One probe = 4 store reads (LLM config, TTS config, image config, deployment config).
+	if got := bs.reads.Load(); got != 4 {
+		t.Errorf("store reads = %d, want 4 (exactly one probe launched)", got)
 	}
 }

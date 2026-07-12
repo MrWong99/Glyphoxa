@@ -442,6 +442,14 @@ type Config struct {
 	// owns its Close.
 	Highlights highlight.Sink
 
+	// ClipReplayLoader, when non-nil, loads a promoted Session Highlight's clip by
+	// its blob key and decodes it into playable chunks for the voice-replay path
+	// (#310, ADR-0005: the ReplayRequested event carries the KEY, this resolves it).
+	// The live binary sets it to blob.Get + mixdown.DecodeWAV; nil (default) leaves
+	// the ClipReplay reactor unwired, so a ReplayRequested is inert. The playback
+	// sink is always the session's own PlaybackPump.
+	ClipReplayLoader orchestrator.ClipLoader
+
 	// GMSpeaker reports whether a Discord SpeakerID belongs to a Game Master —
 	// operator-allowlist membership per ADR-0050/ADR-0041, the deterministic GM
 	// identity with no per-session binding. When non-nil it arms the Butler
@@ -853,7 +861,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// TextSink is set on butler-role specs only inside rosterDepsForLive.
 	textPoster := newVoiceChannelPoster(client, channel)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, textPoster, pump)
+	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, textPoster, pump, cfg.ClipReplayLoader, orchestrator.ClipSink(pump.HandleSentence))
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}
@@ -1267,7 +1275,7 @@ func wireTapeConsent(ctx context.Context, bus *voiceevent.Bus, t *tape.Tape, cam
 // first sentence.
 var _ orchestrator.LookaheadPump = (*wire.PlaybackPump)(nil)
 
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, textPoster func(ctx context.Context, text string) error, lookahead orchestrator.LookaheadPump) (*orchestrator.Conversation, *Roster, func(), error) {
+func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, textPoster func(ctx context.Context, text string) error, lookahead orchestrator.LookaheadPump, clipReplayLoad orchestrator.ClipLoader, clipReplaySink orchestrator.ClipSink) (*orchestrator.Conversation, *Roster, func(), error) {
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
@@ -1445,6 +1453,13 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// A nil pump is the feature-off default (TEXT-only pre-render); it only takes
 		// effect alongside an Ensemble speaker, so it is safe to wire unconditionally.
 		orchestrator.WithReactionLookahead(lookahead),
+		// Highlight voice replay (#310, ADR-0051): a ClipReplay reactor plays a promoted
+		// Highlight's clip into the live voice channel on a ReplayRequested, loading the
+		// clip via clipReplayLoad and pushing its chunks to the session's PlaybackPump.
+		// It shares the barge-in floor (so a human barge cancels a replay). A nil loader
+		// is the feature-off default — the sink is always the live pump, so this is safe
+		// to wire unconditionally; Register only binds the reactor when the loader is set.
+		orchestrator.WithClipReplay(clipReplayLoad, clipReplaySink),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).

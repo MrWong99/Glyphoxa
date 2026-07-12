@@ -352,3 +352,10 @@ func TestBus_ConcurrentPublishAndSubscribe(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestReplayRequested_EventName(t *testing.T) {
+	got := ReplayRequested{}.EventName()
+	if got != "replay.requested" {
+		t.Errorf("EventName = %q, want %q", got, "replay.requested")
+	}
+}

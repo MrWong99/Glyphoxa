@@ -105,13 +105,13 @@ func TestCampaignManagement_Integration(t *testing.T) {
 	for _, g := range grants {
 		gotGrants[g.ToolName] = true
 	}
-	for _, want := range []string{"dice", "transcript_search", "kg_query"} {
+	for _, want := range []string{"dice", "transcript_search", "kg_query", "recap"} {
 		if !gotGrants[want] {
 			t.Errorf("auto-Butler missing default grant %q; has %+v", want, grants)
 		}
 	}
-	if len(grants) != 3 {
-		t.Errorf("auto-Butler grants = %+v, want dice + transcript_search + kg_query (#299)", grants)
+	if len(grants) != 4 {
+		t.Errorf("auto-Butler grants = %+v, want dice + transcript_search + kg_query + recap (#372)", grants)
 	}
 
 	// --- List returns every campaign name-ordered: Alpha Quest, Lost Mine, Zeta Reach.

@@ -77,6 +77,12 @@ type PrometheusRecorder struct {
 	ttsCharacters   *prometheus.CounterVec // provider
 	sttAudioSeconds *prometheus.CounterVec // provider
 
+	// malformed tool generations (#398/#399/#410): provider flake frequency by the
+	// detection path that caught it. Process-level (namespace glyphoxa_llm_*, no voice
+	// subsystem) since it is an LLM-provider health signal, not a voice-pipeline stage;
+	// both labels are bounded enums (ADR-0032).
+	malformedToolGen *prometheus.CounterVec // provider, path
+
 	// turn lifecycle (StageRecorder): the survivorship counterpart to
 	// response_latency — every turn records one terminal outcome.
 	turnTotal *prometheus.CounterVec // outcome, reason
@@ -86,6 +92,11 @@ type PrometheusRecorder struct {
 	// backfill worker (#116) Sets it too. Always Set-from-COUNT, never Inc/Dec, so
 	// it stays idempotent across writers and restarts.
 	embeddingBacklog prometheus.Gauge
+
+	// KG embedding backlog (#300, ADR-0032): Knowledge Graph Nodes awaiting an
+	// embedding for the review-surface similarity hint. The embedworker Node phase
+	// Sets it from CountUnembeddedNodes, Set-from-COUNT like embeddingBacklog.
+	kgEmbeddingBacklog prometheus.Gauge
 
 	// memory recall (#122, ADR-0042/0032): NPC Hot Context recalls by outcome —
 	// a speculation hit, an inline miss, or a degraded/unconfigured skip. The
@@ -234,6 +245,22 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		Help:      "Transcript chunks awaiting embedding (embedding IS NULL).",
 	})
 
+	r.kgEmbeddingBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, // process-level like embedding_backlog (ADR-0032)
+		Name:      "kg_embedding_backlog",
+		Help:      "Knowledge Graph Nodes awaiting embedding (embedding IS NULL).",
+	})
+
+	// Malformed-tool-generation counter (#398): namespace glyphoxa_llm_* (an
+	// LLM-provider health signal, not a voice-pipeline stage), provider + path both
+	// bounded enums (ADR-0032).
+	r.malformedToolGen = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "llm",
+		Name:      "malformed_toolgen_total",
+		Help:      "Malformed tool generations by provider and the detection path that caught it (#398: a tool_use_failed retried; #399/#410 add roll_claim/text_leak).",
+	}, []string{"provider", "path"})
+
 	r.memoryRecall = counterVec("memory_recall_total",
 		"NPC memory recalls by outcome (#122, ADR-0042): a speculation hit, an inline miss, or a degraded skip.",
 		"outcome")
@@ -271,9 +298,9 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		r.responseLatency, r.vadHangover, r.addressDetect, r.codecDecode,
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
-		r.memoryRecall, r.kgFacts,
+		r.kgEmbeddingBacklog, r.memoryRecall, r.kgFacts,
 		r.jobsBacklog, r.jobsTotal, r.jobDuration,
-		r.llmTokens, r.ttsCharacters, r.sttAudioSeconds,
+		r.llmTokens, r.ttsCharacters, r.sttAudioSeconds, r.malformedToolGen,
 		// Standard runtime collectors so /metrics also reports process/Go health.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
@@ -365,6 +392,13 @@ func (r *PrometheusRecorder) STTAudioSeconds(p Provider, d time.Duration) {
 	r.sttAudioSeconds.WithLabelValues(string(p)).Add(d.Seconds())
 }
 
+// MalformedToolGen counts one malformed tool generation by provider and the
+// detection path that caught it (#398/#399/#410). Both labels are bounded enums
+// (ADR-0032); the series lives at glyphoxa_llm_malformed_toolgen_total.
+func (r *PrometheusRecorder) MalformedToolGen(p Provider, path MalformedPath) {
+	r.malformedToolGen.WithLabelValues(string(p), string(path)).Inc()
+}
+
 // MemoryRecall counts one NPC memory recall by its bounded outcome (#122,
 // ADR-0042/0032). It is the standalone recall-metrics sink the internal/recall
 // component records against (its local Metrics interface), separate from the
@@ -388,6 +422,13 @@ func (r *PrometheusRecorder) KGFacts(o FactsOutcome) {
 // the DB rather than resuming a drifted in-memory delta.
 func (r *PrometheusRecorder) SetEmbeddingBacklog(n int) {
 	r.embeddingBacklog.Set(float64(n))
+}
+
+// SetKGEmbeddingBacklog publishes the current count of Knowledge Graph Nodes
+// awaiting an embedding (#300, ADR-0032). Set-from-COUNT like SetEmbeddingBacklog,
+// so it stays idempotent across the embedworker Node phase and process restarts.
+func (r *PrometheusRecorder) SetKGEmbeddingBacklog(n int) {
+	r.kgEmbeddingBacklog.Set(float64(n))
 }
 
 // --- background job runner (jobs.Metrics, #286/ADR-0049) ---

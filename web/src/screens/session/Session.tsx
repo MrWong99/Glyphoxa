@@ -14,6 +14,8 @@ import { Input } from "@/components/ui/Input";
 import { useSessionEvents, formatClock } from "./useSessionEvents";
 import { VoicePanel } from "./VoicePanel";
 import { SessionBindAffordance } from "./SessionBindAffordance";
+import { HighlightsStrip } from "./HighlightsStrip";
+import { ShareHighlightDialog } from "./ShareHighlightDialog";
 
 import "./session.css";
 
@@ -540,6 +542,25 @@ export function Session() {
           )}
         </Card>
       </section>
+
+      {/* Session Highlights (#309, Epic 8): the rendered session's epic moments —
+          live promotions stream in while running, an ended session shows its
+          persisted set on selection. renderedSessionId unifies live + picked past
+          session; the whole section stays out when there is no session at all. */}
+      {renderedSessionId && (
+        <section className="gx-session__highlights">
+          <h2 className="gx-section-title">Highlights</h2>
+          <HighlightsStrip
+            sessionId={renderedSessionId}
+            live={active && !viewingPast}
+            renderActions={(h) =>
+              h.status === "promoted" ? (
+                <ShareHighlightDialog highlight={h} sessionLive={active} />
+              ) : null
+            }
+          />
+        </section>
+      )}
       </div>
 
       <VoicePanel active={active} mutedIds={data?.mutedAgentIds ?? []} />

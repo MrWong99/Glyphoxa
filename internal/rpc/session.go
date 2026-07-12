@@ -99,6 +99,16 @@ type SessionServer struct {
 	// CodeUnimplemented rather than panic.
 	highlights HighlightStore
 	blobs      highlightBlobs
+	// enqueue schedules the image-enrichment job on promotion (#311, ADR-0049);
+	// nil disables enrichment (the promote itself still succeeds).
+	enqueue HighlightEnqueuer
+
+	// sharer / replayer / shareStore back the Highlight Discord-delivery RPCs (#310);
+	// wired via SetSharing after construction. Nil (unwired) makes ShareHighlight /
+	// ListShareChannels report CodeUnimplemented rather than panic.
+	sharer     HighlightSharer
+	replayer   HighlightReplayer
+	shareStore ShareChannelStore
 }
 
 var _ managementv1connect.SessionServiceHandler = (*SessionServer)(nil)

@@ -25,6 +25,9 @@ const (
 	ComponentTTS        Component = "tts"
 	ComponentEmbeddings Component = "embeddings"
 	ComponentS2S        Component = "s2s"
+	// ComponentImage is AI image generation (#311, Epic 8, ADR-0004 amendment):
+	// the enum value the 00028 migration adds. Gemini is its v1 provider.
+	ComponentImage Component = "image"
 )
 
 // Tenant is the top-level isolation boundary.

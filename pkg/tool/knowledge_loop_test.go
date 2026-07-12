@@ -69,6 +69,55 @@ func TestLoopRunsKnowledgeToolsInline(t *testing.T) {
 	}
 }
 
+// TestLoopRunsRecapInline is the ADR-0021/ADR-0030 pin for the recap built-in
+// (#372): a granted recap executes INLINE inside the tool-use loop (read-only, so
+// never refused) and its returned prose is fed back to the model as a tool-role
+// message it relays. It drives the loop with a scripted provider over a fake
+// Recapper — the framework's cassette.
+func TestLoopRunsRecapInline(t *testing.T) {
+	const prose = "Last session, the party stormed the keep and freed the Duke."
+	rc := &fakeRecapper{text: prose}
+	reg := BuiltinRegistry(Deps{Recap: rc})
+	gs := NewGrantSet(reg, Grant{ToolName: "recap"}) // no scope
+
+	p := &scriptedProvider{
+		t: t,
+		steps: []scriptStep{
+			// Round 1: the model asks for a recap of the last session.
+			{reply: AssistantMessage{ToolCalls: []ToolCall{
+				{ID: "c1", Name: "recap", Input: json.RawMessage(`{"sessions":1}`)},
+			}}},
+			// Round 2: relays it to the players.
+			{reply: AssistantMessage{Text: prose}},
+		},
+	}
+	loop := NewLoop(p, gs)
+
+	final, err := loop.Run(context.Background(), []Message{
+		{Role: RoleSystem, Text: "You are Glyphoxa."},
+		{Role: RoleUser, Text: "Glyphoxa, recap last session."},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final != prose {
+		t.Errorf("final = %q, want %q", final, prose)
+	}
+	if rc.callCount != 1 {
+		t.Errorf("recap hit the source %d times, want 1", rc.callCount)
+	}
+	if rc.gotSessions != 1 {
+		t.Errorf("recap asked for %d sessions, want 1", rc.gotSessions)
+	}
+	res := findToolResult(t, p.seenMessages, "c1")
+	if res.IsError {
+		t.Errorf("recap fed back as error (was it refused as side-effecting?): %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "freed the Duke") {
+		t.Errorf("recap result not rendered for the prompt: %q", res.Content)
+	}
+}
+
 // findToolResult scans the messages the provider saw for the tool-role result
 // keyed to callID.
 func findToolResult(t *testing.T, seen [][]Message, callID string) ToolResult {

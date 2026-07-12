@@ -11,6 +11,15 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 import "./importCampaignButton.css";
 
+// droppedRefsNote phrases the dropped-participant-refs caveat (singular/plural).
+// Shared by the success dialog note and the unmount-proof warning toast so they
+// never drift. Import still SUCCEEDED — this is a caveat, never an error.
+function droppedRefsNote(n: number): string {
+  return n === 1
+    ? "1 participant reference could not be mapped and was dropped."
+    : `${n} participant references could not be mapped and were dropped.`;
+}
+
 // ImportCampaignButton — the campaign-restore affordance in the switcher's
 // manage-view footer (#294, beside CreateCampaignForm). It uploads a Campaign
 // Bundle (the export's counterpart) over the plain-net/http importer, which mints
@@ -93,6 +102,14 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
       void invalidateList();
       setSummary(result);
       toast.success(`Imported “${result.name}”`);
+      // The dropped-refs caveat rides its OWN warning toast, not only the success
+      // dialog: an Escape/outside-click between the confirm dialog closing and the
+      // success dialog opening can unmount this component (see runImport note
+      // above), taking the dialog's note with it. The toast is the unmount-proof
+      // channel — warning styling (richColors), since the import still succeeded.
+      if (result.droppedParticipantRefs > 0) {
+        toast.warning(droppedRefsNote(result.droppedParticipantRefs));
+      }
     } catch (err) {
       const message = (err as Error).message;
       setError(message);
@@ -165,9 +182,19 @@ export function ImportCampaignButton({ onSwitched }: { onSwitched?: () => void }
         }}
         title={summary ? `Imported “${summary.name}”` : ""}
         description={
-          summary
-            ? `“${summary.name}” was imported as a new campaign — switch to it now?`
-            : undefined
+          summary ? (
+            <span className="gx-import-campaign__success">
+              “{summary.name}” was imported as a new campaign — switch to it now?
+              {summary.droppedParticipantRefs > 0 && (
+                // Import SUCCEEDED — some chunk participant refs mapped to no
+                // imported agent/character and were dropped (#381/#388). A caveat,
+                // not an error: warning styling, and the campaign is fully usable.
+                <span className="gx-import-campaign__warning" role="status">
+                  {droppedRefsNote(summary.droppedParticipantRefs)}
+                </span>
+              )}
+            </span>
+          ) : undefined
         }
         confirmLabel="Switch"
         cancelLabel="Not now"

@@ -144,6 +144,27 @@ type fakeCampaignStore struct {
 	grantUpsertErr error
 	grantDeleteErr error
 
+	// Knowledge Proposal review state (#300): pendingProposals backs the list read;
+	// getProposal/getProposalErr back GetPendingKnowledgeProposal; approve/reject
+	// record calls and force error paths; similarResults/similarErr back SimilarNodes
+	// and similarQueryVec records the vector it was queried with.
+	pendingProposals      []storage.KnowledgeProposal
+	listProposalsErr      error
+	listProposalsCampaign uuid.UUID
+	getProposal           storage.KnowledgeProposal
+	getProposalErr        error
+	getProposalCampaign   uuid.UUID
+	approveErr            error
+	approveCalls          []uuid.UUID
+	approveCampaign       uuid.UUID
+	rejectErr             error
+	rejectCalls           []uuid.UUID
+	rejectCampaign        uuid.UUID
+	similarResults        []storage.KGNode
+	similarErr            error
+	similarCalls          int
+	similarQueryVec       []float32
+
 	// Player Character state (#276): characters backs ListCharacters/Update/Delete;
 	// charsCreated records CreateCharacter inputs; charsListCampaign records the
 	// campaign id ListCharacters resolved (scope assertion); the *Err hooks force
@@ -505,6 +526,21 @@ func crudClient(t *testing.T, store *fakeCampaignStore) managementv1connect.Camp
 	t.Cleanup(srv.Close)
 	return managementv1connect.NewCampaignServiceClient(
 		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
+	)
+}
+
+// crudClientWithEmbedder is crudClient with a wired Embedder so the
+// ListSimilarKnowledge vector path (#300) is exercised.
+func crudClientWithEmbedder(t *testing.T, store *fakeCampaignStore, emb rpc.Embedder) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	srv := rpc.NewCampaignServer(store)
+	srv.SetEmbedder(emb)
+	mux := http.NewServeMux()
+	mux.Handle(srv.Handler())
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return managementv1connect.NewCampaignServiceClient(
+		http.DefaultClient, s.URL, connect.WithProtoJSON(),
 	)
 }
 

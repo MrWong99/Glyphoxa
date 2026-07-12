@@ -740,3 +740,119 @@
   gap: var(--spacing-sm);
   flex-wrap: wrap;
 }
+
+/* Knowledge Proposal review (#300). A single-column stack of review cards. */
+.gx-proposals-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  max-width: 720px;
+}
+
+.gx-proposal-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+}
+
+.gx-proposal-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.gx-proposal-card__author {
+  font-weight: 600;
+}
+
+.gx-proposal-card__when {
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  margin-right: auto;
+}
+
+.gx-proposal-card__write {
+  font-size: var(--body-md);
+  line-height: 1.5;
+}
+
+.gx-proposal-card__body {
+  color: var(--text-subtle);
+}
+
+.gx-proposal-card__unreadable {
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+.gx-proposal-card__similar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken, rgba(127, 127, 127, 0.08));
+}
+
+.gx-proposal-card__similar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+}
+
+.gx-proposal-card__similar-empty {
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+}
+
+.gx-proposal-card__similar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gx-proposal-card__similar-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.gx-proposal-card__similar-name {
+  font-size: var(--body-sm);
+}
+
+.gx-proposal-card__similar-skel {
+  height: 2rem;
+}
+
+.gx-proposal-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.gx-proposal-card__similar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: var(--body-sm);
+  cursor: pointer;
+}
+
+.gx-proposal-card__similar-btn:hover {
+  color: var(--text);
+}

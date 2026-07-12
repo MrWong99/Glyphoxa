@@ -2,13 +2,18 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -20,7 +25,7 @@ import (
 // Voice Session first, else the profile-first durable selection), and a highlight
 // (or session) belonging to ANOTHER campaign is CodeNotFound — existence never
 // leaked, exactly the GenerateRecap "names nothing" posture. PromoteHighlight
-// deliberately does NOT enqueue enrichment; that is #311's hook.
+// enqueues AI image enrichment (#311) on a successful keep.
 
 // errNoSuchHighlight is the single static NotFound every Highlight RPC returns for
 // a foreign-tenant, cross-campaign, unknown, or unparsable id — so a probe can
@@ -57,20 +62,34 @@ type HighlightStore interface {
 	DeleteHighlight(ctx context.Context, tenantID, id uuid.UUID) (string, error)
 }
 
-// highlightBlobs is the blob-seam surface DeleteHighlight needs (ADR-0048): drop
-// the clip before the row. *blob.Postgres satisfies it. Kept narrow so the RPC
-// package carries no import of the concrete backend.
+// highlightBlobs is the blob-seam surface the Highlight RPCs need (ADR-0048):
+// DeleteHighlight drops the clip (and image, #311) before the row; ShareHighlight
+// (#310) fetches the clip bytes to upload to Discord. *blob.Postgres satisfies it.
+// Kept narrow so the RPC package carries no import of the concrete backend.
 type highlightBlobs interface {
+	Get(ctx context.Context, key string) (io.ReadCloser, blob.Meta, error)
 	Delete(ctx context.Context, key string) error
+}
+
+// HighlightEnqueuer schedules the image-enrichment job PromoteHighlight fires
+// (#311, ADR-0049). It is the same kind/payload/run_after adapter the Saver's
+// purge scheduler uses; main.go wires *storage.Store behind it. A nil enqueuer
+// (unwired, keyless tests) makes promotion skip enrichment — the promote itself
+// still succeeds.
+type HighlightEnqueuer interface {
+	Enqueue(ctx context.Context, kind string, payload any, runAfter time.Time) error
 }
 
 // SetHighlights wires the Session Highlights read/mutate seam onto the
 // SessionServer (#308). Called once at boot after the store + blob backend are
 // built; the many NewSessionServer call sites keep their signature. Unwired, the
-// Highlight RPCs report CodeUnimplemented.
-func (s *SessionServer) SetHighlights(store HighlightStore, blobs highlightBlobs) {
+// Highlight RPCs report CodeUnimplemented. enqueue (#311) is the image-enrichment
+// job scheduler PromoteHighlight fires; nil disables enrichment (promote still
+// works).
+func (s *SessionServer) SetHighlights(store HighlightStore, blobs highlightBlobs, enqueue HighlightEnqueuer) {
 	s.highlights = store
 	s.blobs = blobs
+	s.enqueue = enqueue
 }
 
 // notWired is the CodeUnimplemented error a Highlight RPC returns when the server
@@ -175,7 +194,8 @@ func (s *SessionServer) GetHighlight(
 // Active Campaign (#308/#309), returning the updated row. Idempotent on the server.
 // A foreign-tenant, cross-campaign, unknown, or unparsable id is CodeNotFound. The
 // campaign ownership is checked BEFORE the mutation, so another campaign's row is
-// never promoted. It does NOT enqueue enrichment (#311's hook).
+// never promoted. On a successful keep it enqueues AI image enrichment (#311)
+// unless the Highlight is already enriched.
 func (s *SessionServer) PromoteHighlight(
 	ctx context.Context,
 	req *connect.Request[managementv1.PromoteHighlightRequest],
@@ -216,6 +236,23 @@ func (s *SessionServer) PromoteHighlight(
 	if err != nil {
 		s.log.Error("PromoteHighlight: store promote failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	// Enqueue AI image enrichment (#311, ADR-0049): a promoted Highlight with no
+	// image yet gets a background generation job. Skipped when already enriched
+	// (an idempotent re-promote never re-spends) or when the enqueuer is unwired.
+	// An enqueue failure is logged only — the promotion succeeded, and the boot
+	// reconciliation sweep (#406, highlight.SweepEnrichmentReconciliation) is the
+	// backstop: it re-enqueues enrichment for any promoted Highlight left imageless
+	// with no live enrich job, so a lost enqueue here is recovered at next boot.
+	// Failing the RPC here would wrongly report the keep as failed.
+	if s.enqueue != nil && h.ImageKey == "" {
+		payload, merr := highlight.MarshalEnrichImage(h.ID, tenantID)
+		if merr != nil {
+			s.log.Error("PromoteHighlight: marshal enrich payload failed", "err", merr, "highlight", h.ID)
+		} else if eerr := s.enqueue.Enqueue(ctx, highlight.JobKindEnrichImage, json.RawMessage(payload), time.Now()); eerr != nil {
+			s.log.Error("PromoteHighlight: enqueue image enrichment failed", "err", eerr, "highlight", h.ID)
+		}
 	}
 	return connect.NewResponse(&managementv1.PromoteHighlightResponse{Highlight: toProtoHighlight(h)}), nil
 }
@@ -260,11 +297,33 @@ func (s *SessionServer) DeleteHighlight(
 		return nil, errNoSuchHighlight() // cross-campaign: never delete, never leak existence
 	}
 
+	// Residual race, now backstopped (#406): an enrichment job can commit
+	// SetHighlightImage between the load above and the blob deletes below, so the
+	// image_key read there is stale-empty and the just-stored image blob would be
+	// orphaned. Cheap shrink: re-read the row immediately before the blob deletes to
+	// pick up a freshly-committed image_key, narrowing the window to the microseconds
+	// between this read and the delete. A re-read failure is non-fatal — fall back to
+	// the earlier snapshot and still delete the clip+row. Whatever image blob still
+	// slips through this shrunk window is collected by the boot orphan sweep
+	// (highlight.SweepEnrichmentReconciliation), so it is never permanently orphaned.
+	if fresh, rerr := s.highlights.GetHighlight(ctx, tenantID, id); rerr == nil {
+		h.ImageKey = fresh.ImageKey
+	}
+
 	// Blob first (idempotent Delete): a missing clip must not block the row delete.
+	// A Highlight owns up to two blobs — the audio clip and (once enriched, #311)
+	// the generated image — so drop both before the row (ADR-0048). The image key
+	// is only present on an enriched row; an empty one is skipped.
 	if s.blobs != nil {
 		if err := s.blobs.Delete(ctx, h.ClipKey); err != nil {
 			s.log.Error("DeleteHighlight: delete clip failed", "err", err, "highlight", id)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		}
+		if h.ImageKey != "" {
+			if err := s.blobs.Delete(ctx, h.ImageKey); err != nil {
+				s.log.Error("DeleteHighlight: delete image failed", "err", err, "highlight", id)
+				return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+			}
 		}
 	}
 	if _, err := s.highlights.DeleteHighlight(ctx, tenantID, id); err != nil {
@@ -294,7 +353,12 @@ func toProtoHighlight(h storage.Highlight) *managementv1.Highlight {
 		SpeakerIds:      h.SpeakerIDs,
 		ClipContentType: h.ClipContentType,
 		ClipSizeBytes:   h.ClipSizeBytes,
-		CreatedAt:       timestamppb.New(h.CreatedAt),
+		// Image fields (#311): content type + size are exposed so the UI knows an
+		// image exists and its type; image_key is deliberately omitted (an internal
+		// blob-seam detail, the clip_key posture). Empty when no image yet.
+		ImageContentType: h.ImageContentType,
+		ImageSizeBytes:   h.ImageSizeBytes,
+		CreatedAt:        timestamppb.New(h.CreatedAt),
 	}
 	if h.PromotedAt != nil {
 		pb.PromotedAt = timestamppb.New(*h.PromotedAt)

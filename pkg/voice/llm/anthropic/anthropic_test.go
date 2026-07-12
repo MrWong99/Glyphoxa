@@ -362,6 +362,77 @@ func TestComplete_RequestShape_PinsBodyAndHeaders(t *testing.T) {
 	}
 }
 
+// TestComplete_ToolChoice_MapsModesToWire pins the #398/#399 per-round knob on the
+// Anthropic wire: the zero value stays {type:auto} (byte-identical to pre-#398), the
+// tool-less fallback maps to {type:none}, Required maps to Anthropic's {type:any},
+// and the pinned-Tool mode maps to {type:tool,name:X}. tool_choice is only present
+// when tools are declared.
+func TestComplete_ToolChoice_MapsModesToWire(t *testing.T) {
+	capttc := func(t *testing.T, tc llm.ToolChoice) (typ, name string, present bool) {
+		t.Helper()
+		var capture atomic.Value
+		srv := sseServer(t, &capture, sse(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`))
+		defer srv.Close()
+		c := anthropic.New("k", anthropic.WithBaseURL(srv.URL), anthropic.WithModel("claude-test"))
+		ch, err := c.Complete(context.Background(), llm.Request{
+			MaxTokens:  128,
+			Messages:   []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}},
+			Tools:      []llm.ToolDef{{Name: "dice", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+			ToolChoice: tc,
+		})
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		collect(t, ch)
+		raw, _ := capture.Load().([]byte)
+		var body struct {
+			ToolChoice *struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"tool_choice"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("request body not JSON: %v\nbody: %s", err, raw)
+		}
+		if body.ToolChoice == nil {
+			return "", "", false
+		}
+		return body.ToolChoice.Type, body.ToolChoice.Name, true
+	}
+
+	if typ, _, ok := capttc(t, llm.ToolChoice{}); !ok || typ != "auto" {
+		t.Errorf("zero ToolChoice → tool_choice type = %q (present=%v), want auto", typ, ok)
+	}
+	if typ, _, ok := capttc(t, llm.ToolChoice{Mode: llm.ToolChoiceNone}); !ok || typ != "none" {
+		t.Errorf("None → tool_choice type = %q (present=%v), want none", typ, ok)
+	}
+	if typ, _, ok := capttc(t, llm.ToolChoice{Mode: llm.ToolChoiceRequired}); !ok || typ != "any" {
+		t.Errorf("Required → tool_choice type = %q (present=%v), want any (Anthropic's required)", typ, ok)
+	}
+	if typ, name, ok := capttc(t, llm.ToolChoice{Mode: llm.ToolChoiceTool, Tool: "dice"}); !ok || typ != "tool" || name != "dice" {
+		t.Errorf("Tool → tool_choice = {%q,%q} (present=%v), want {tool,dice}", typ, name, ok)
+	}
+
+	// No tools declared: tool_choice absent even with a mode set.
+	var capture atomic.Value
+	srv := sseServer(t, &capture, sse(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`))
+	defer srv.Close()
+	c := anthropic.New("k", anthropic.WithBaseURL(srv.URL), anthropic.WithModel("claude-test"))
+	ch, err := c.Complete(context.Background(), llm.Request{
+		MaxTokens:  128,
+		Messages:   []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+		ToolChoice: llm.ToolChoice{Mode: llm.ToolChoiceRequired},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	collect(t, ch)
+	raw, _ := capture.Load().([]byte)
+	if strings.Contains(string(raw), "tool_choice") {
+		t.Errorf("tool_choice present with no tools declared; got %s", raw)
+	}
+}
+
 // TestComplete_ToolResultRoundTrip_MapsToUserToolResultBlocks pins the ADR-0028
 // return path: a [llm.RoleTool] message (the results the tool-use loop appends
 // after executing an assistant turn's calls) must serialize as one user-role

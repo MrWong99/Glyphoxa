@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,9 +28,12 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/imagegen"
 	"github.com/MrWong99/Glyphoxa/internal/jobs"
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/knowledge"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/mixdown"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/recall"
@@ -44,6 +48,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/web"
 	"github.com/MrWong99/Glyphoxa/internal/wirenpc"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
@@ -362,6 +368,24 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// meet only through Postgres, never shared memory (#308).
 	blobStore := blob.NewPostgres(pool)
 
+	// Highlight voice replay (#310, Epic 8, ADR-0051): the clip loader the ClipReplay
+	// reactor uses to resolve a ReplayRequested's blob KEY back into playable chunks
+	// (ADR-0005 — the event never carries audio). It rides the base voice config the
+	// Manager copies per session, so a live replay plays the promoted clip through the
+	// session's outbound pump. Web-only mode never starts a session, so it stays inert.
+	cfg.ClipReplayLoader = func(ctx context.Context, clipKey string) ([]tts.AudioChunk, error) {
+		rc, _, err := blobStore.Get(ctx, clipKey)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		data, rerr := io.ReadAll(rc)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return mixdown.DecodeWAV(data)
+	}
+
 	// Boot-time session sweep (ADR-0041 amendment, issue #184): the allowlist
 	// gates only NEW logins at the OAuth callback, so sessions issued before the
 	// gate existed — or before a snowflake was removed — would stay valid for up
@@ -508,9 +532,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			presence.SearchCommand(store, mgr),
 			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
 			// Session via the SAME shared slash resolver, delivered per the invoker's
-			// choice (voiced/public/ephemeral, #271). butler is nil — the Butler is not
-			// voiced today (ADR-0009/0024), so a voiced request degrades to public text.
-			presence.RecapCommand(store, mgr, recapEngine, nil),
+			// choice (voiced/public/ephemeral, #271). The Manager is the ButlerVoicer
+			// (#365): the now-voiced Butler (ADR-0009 #299) speaks a `voiced` recap via
+			// SpeakAsButler → SayAs, so it lands as a KindButler transcript line; with no
+			// live session OR a voiceless Butler a voiced request degrades to public text.
+			presence.RecapCommand(store, mgr, recapEngine, mgr),
 			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
 			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
 			presence.MuteCommand(mgr, store),
@@ -602,6 +628,37 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// Session Highlight campaign-clip sweep (#308, ADR-0048/0049): drops a hard-deleted
 	// Campaign's clip blobs, enqueued in the delete's own transaction (idempotent).
 	jobRunner.Register(highlight.JobKindSweepCampaignClips, highlight.CampaignSweepHandler(blobStore, log))
+	// Session Highlight AI image enrichment (#311, ADR-0004 amendment/0049): a
+	// promoted Highlight gets a Gemini-generated scene that lands through the blob
+	// seam. The factory resolves the tenant's image BYOK key under the hybrid policy
+	// (ADR-0039): a saved key needs the cipher (else a loud error, never a silent
+	// env fallback), no row falls back to GEMINI_API_KEY, and neither present is
+	// ErrImageNotConfigured (the handler leaves the Highlight intact without media).
+	imageFactory := func(fctx context.Context, tenantID uuid.UUID) (imagegen.Generator, string, error) {
+		var cfgPtr *storage.ProviderConfig
+		cfg, cerr := store.GetProviderConfigByComponent(fctx, tenantID, storage.ComponentImage)
+		if cerr == nil {
+			cfgPtr = &cfg
+		} else if !errors.Is(cerr, storage.ErrNotFound) {
+			return nil, "", cerr
+		}
+		key, kerr := llmbuild.ResolveKey(cipher, cfgPtr, storage.ComponentImage)
+		if kerr != nil {
+			return nil, "", kerr // saved key without cipher = loud error (ADR-0039)
+		}
+		if key == "" {
+			key = os.Getenv(imagegen.APIKeyEnv)
+		}
+		if key == "" {
+			return nil, "", highlight.ErrImageNotConfigured
+		}
+		model := imagegen.DefaultModel
+		if cfgPtr != nil && cfgPtr.Model != "" {
+			model = cfgPtr.Model
+		}
+		return imagegen.NewGemini(key, imagegen.WithModel(model)), model, nil
+	}
+	jobRunner.Register(highlight.JobKindEnrichImage, highlight.EnrichImageHandler(store, blobStore, imageFactory, metrics, log))
 	go jobRunner.Run(ctx)
 
 	// Boot-time retention backstop (#308, ADR-0051, the ReconcileOrphans/#184 spirit):
@@ -613,6 +670,17 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("highlight purge backstop sweep failed at boot", "err", err)
 	}
 
+	// Boot-time enrichment reconciliation (#406, ADR-0043/0048/0049): the same
+	// rows-are-the-source-of-truth backstop for image enrichment. It re-enqueues
+	// enrichment for every promoted Highlight left imageless with no live enrich job
+	// (recovering a crash between promote-commit and the enqueue), and drops image
+	// blobs whose Highlight row is gone (the delete-vs-enrich orphan the RPC's
+	// re-read window only shrinks). Loud-but-non-fatal: a failure logs and boot
+	// continues, exactly like the purge backstop above.
+	if err := highlight.SweepEnrichmentReconciliation(ctx, store, blobStore, jobEnqueuer{store}, log); err != nil {
+		log.Warn("highlight enrichment reconciliation sweep failed at boot", "err", err)
+	}
+
 	// Resolve the process embeddings provider ONCE and share it across the two
 	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
 	// backlog, and the NPC memory recaller (#122) embeds utterances for Hot Context
@@ -621,9 +689,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// for BOTH: the backlog gauge exposes the permanent stall and NPC memory recall
 	// stays disabled (AC6 — Agent turns behave exactly as before), rather than
 	// crashing the process.
+	// embedProvider is hoisted out of the resolve branch so the Knowledge Proposal
+	// review surface's similarity hint (#300) can share the SAME resolved provider:
+	// nil (an unsupported provider or a config-read error) leaves the hint on its
+	// fulltext fallback, exactly as the backfill worker stalls loudly.
+	var embedProvider embeddings.Provider
 	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
 		log.Error("embeddings provider unavailable; embedding backfill and NPC memory recall disabled", "err", err)
 	} else {
+		embedProvider = provider
 		// Backfill worker (#116, ADR-0011): claims chunks written with embedding NULL,
 		// embeds their text, and UPDATEs each row — draining the gauge toward zero and
 		// making the chunks returnable by embedding-filtered retrieval. It needs only
@@ -666,6 +740,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		Transcripts: knowledgeAdapter,
 		KG:          knowledgeAdapter,
 		KGW:         knowledgeAdapter,
+		Recap:       knowledge.NewRecap(recapEngine, store, mgr),
 	})
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
@@ -704,7 +779,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.VoiceChannelMembers(ctx, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister, embedProvider)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -795,7 +870,7 @@ func (s highlightClipSweeper) DeleteClip(ctx context.Context, key string) error 
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
 // Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error)) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -823,6 +898,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// campaign so the GM mutes the NPCs actually in the channel, not a durable
 	// selection changed mid-session (#222).
 	campaignSrv.SetSessions(mgr)
+	// The Knowledge Proposal review surface's similarity hint (#300, ADR-0052) shares
+	// the resolved embeddings provider: nil (keyless / unsupported) leaves the hint on
+	// its fulltext fallback rather than disabling review.
+	if embedProvider != nil {
+		campaignSrv.SetEmbedder(embedProvider)
+	}
 	// The Players panel's member picker (#279) lists the Discord Users currently in
 	// the operator's configured voice channel, resolved from the deployment config
 	// and read off the standing presence's voice-state cache (no privileged intent).
@@ -876,7 +957,13 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// Session Highlights read/mutate (#308): List/Get/Promote/Delete over the same
 	// store + blob seam the Voice process writes through. Wired here so the many
 	// NewSessionServer call sites keep their signature.
-	sessionSrv.SetHighlights(store, blobStore)
+	sessionSrv.SetHighlights(store, blobStore, jobEnqueuer{store})
+	// Highlight Discord delivery (#310, Epic 8, ADR-0051): the GM shares a promoted
+	// Highlight as a file to a text channel (DeploymentSharer resolves the Bot token +
+	// guild from deployment_config via the cipher, then plain net/http Discord REST —
+	// ADR-0047) or replays it into the live voice channel (the session Manager). The
+	// Campaign's last-chosen channel is remembered through the store.
+	sessionSrv.SetSharing(rpc.NewDeploymentSharer(store, cipher, log), mgr, store)
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
@@ -909,7 +996,14 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
 		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
 		// Session Highlight clip (#308): operator-gated audio byte stream with Range.
-		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, http.HandlerFunc(clipServer.ServeClip))},
+		// ServeClip/ServeImage require the tenant, so the mount is session AND tenant
+		// (#408): RequireTenant (inside RequireSession) resolves it server-side off the
+		// operator — the plain-HTTP mirror of the Connect tenant interceptor. Without it
+		// TenantID always missed and every request 401'd.
+		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeClip)))},
+		// Session Highlight AI image (#311): operator-gated image byte stream, same
+		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
+		{Path: "GET /api/v1/highlights/{id}/image", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeImage)))},
 		// Campaign bundle export (#290): streamed gzip download, operator-gated.
 		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
 		// Campaign bundle import (#291): multipart upload, operator-gated, plus the

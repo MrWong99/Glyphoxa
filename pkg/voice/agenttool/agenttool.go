@@ -23,12 +23,15 @@ package agenttool
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/providererr"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/retry"
 )
 
@@ -56,6 +59,48 @@ func nextRound(ctx context.Context) int {
 	i := *p
 	*p++
 	return i
+}
+
+// forcedChoiceKey is the context key under which [withForcedToolChoice] stores a
+// one-shot tool-choice override the adapter applies to the FIRST completion of a
+// turn. It is consumed exactly once (later rounds revert to auto), so a caller can
+// force e.g. tool_choice "required" on the opening round without pinning every
+// subsequent round.
+type forcedChoiceKey struct{}
+
+// forcedChoice is the one-shot holder behind [forcedChoiceKey]: the once gate makes
+// [consumeForcedChoice] hand the override to the first caller only.
+type forcedChoice struct {
+	choice llm.ToolChoice
+	mu     sync.Mutex
+	done   bool
+}
+
+// withForcedToolChoice returns ctx carrying a one-shot tool-choice override the
+// adapter applies to the FIRST [llm.Provider.Complete] of the turn (#399 consumes
+// this to force a tool call on the opening round; #398 ships the seam). Later rounds
+// revert to the default auto. Shipped now with adapter consumption wired but unused
+// by [Engine.Generate] / [Engine.GenerateStream] themselves.
+func withForcedToolChoice(ctx context.Context, choice llm.ToolChoice) context.Context {
+	return context.WithValue(ctx, forcedChoiceKey{}, &forcedChoice{choice: choice})
+}
+
+// consumeForcedChoice returns the one-shot forced tool choice and true the first
+// time it is called on a ctx carrying one, then (zero, false) forever after — so
+// only the turn's first completion is forced. A ctx without an override yields
+// (zero, false) immediately.
+func consumeForcedChoice(ctx context.Context) (llm.ToolChoice, bool) {
+	f, _ := ctx.Value(forcedChoiceKey{}).(*forcedChoice)
+	if f == nil {
+		return llm.ToolChoice{}, false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.done {
+		return llm.ToolChoice{}, false
+	}
+	f.done = true
+	return f.choice, true
 }
 
 // providerAdapter makes a streaming [llm.Provider] usable as the non-streaming
@@ -109,52 +154,136 @@ func (a providerAdapter) GenerateStream(ctx context.Context, messages []tool.Mes
 	return a.complete(ctx, messages, tools, onText)
 }
 
-// complete issues one streaming completion, drains it, and records the A3
-// per-round span + provider-call counter. When onText is non-nil, each
-// [llm.EventText] delta is forwarded as it arrives (the streaming path); an error
-// onText returns aborts the drain and propagates. The accumulated text and tool
-// calls are returned as the [tool.AssistantMessage] the loop expects either way.
+// attemptKind classifies how one [providerAdapter.attempt] ended, so [complete]
+// records the round's final-outcome metrics (LLMRound / ProviderCall, ADR-0044) and
+// meters usage (ADR-0045) in one place rather than duplicating the rules per branch.
+type attemptKind int
+
+const (
+	kindSuccess   attemptKind = iota // clean EventDone
+	kindBarge                        // onText returned an error mid-drain (downstream cancel)
+	kindStartErr                     // Complete could not start (retry.Do exhausted / non-retryable)
+	kindStreamErr                    // terminal EventError (may carry a tool-syntax class)
+	kindTruncated                    // stream ended without EventDone, ctx still live
+	kindCtxErr                       // stream ended without EventDone because ctx was cancelled
+)
+
+// attemptResult is one [providerAdapter.attempt]'s outcome, drained but not yet
+// metered — [complete] inspects kind to record the final-outcome span/counter and
+// the reported-or-estimate usage exactly once for the whole round.
+type attemptResult struct {
+	msg            tool.AssistantMessage
+	forwardedDelta bool // a prose delta was forwarded to onText before the outcome
+	haveUsage      bool
+	usage          llm.Usage
+	err            error // nil only on kindSuccess
+	kind           attemptKind
+}
+
+// complete issues one logical round (one requested choice, with an in-turn retry
+// and a tool-less fallback for the tool-syntax failure class) and records the A3
+// per-round span + provider-call counter + usage on the FINAL outcome only
+// (ADR-0044/0045). When onText is non-nil each [llm.EventText] delta is forwarded as
+// it arrives (the streaming path); an error onText returns aborts the drain and
+// propagates.
+//
+// Tool-syntax policy (#398, tool-armed rounds only): a round that fails with the
+// provider's tool_use_failed class and has NOT yet forwarded any prose is retried
+// once with the same tools+choice (no backoff); a second failure of the same class
+// regenerates tool-less (tools stay DECLARED, tool_choice none — the conversation
+// may hold prior tool_call/tool messages). A round that already forwarded a delta is
+// never retried (ADR-0044 mid-stream rule), and a ctx cancellation between attempts
+// aborts. Every malformed generation increments MalformedToolGen so provider flake
+// stays visible even when the turn fully recovers.
 func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, tools []tool.Decl, onText func(delta string) error) (tool.AssistantMessage, error) {
 	round := nextRound(ctx)
 	start := time.Now()
 
-	// Retry a transient START failure (429/5xx/net) with backoff before draining
-	// any deltas (#124, ADR-0044); a non-retryable error fails fast and a barge
-	// cutting ctx aborts at once, bounded by the per-turn deadline. Only the start
-	// is retried — a mid-stream failure below is never re-driven (re-speak risk).
-	// Metrics below fire on the final outcome only (#125), so a recovered retry
-	// records one round span, not one per attempt.
+	// The requested tool choice: a one-shot forced override on the turn's first
+	// completion (#399 seam), else the default auto. Consumed here so later rounds
+	// revert to auto.
+	choice := a.requestedChoice(ctx)
+
+	res := a.attempt(ctx, messages, tools, choice, onText)
+
+	// Tool-syntax retry + tool-less fallback — tool-armed rounds only (a no-tool round
+	// can never emit a tool_use_failed, and never retries per ADR-0044).
+	if len(tools) > 0 {
+		if a.isToolSyntax(res) {
+			// Attempt 2: immediate retry, same tools + choice (no backoff).
+			a.rec.MalformedToolGen(a.provName, observe.MalformedStreamError)
+			if err := ctx.Err(); err != nil {
+				return tool.AssistantMessage{}, err // barge between attempts aborts
+			}
+			res = a.attempt(ctx, messages, tools, choice, onText)
+
+			if a.isToolSyntax(res) {
+				// Attempt 3: regenerate tool-less. Tools stay declared; tool_choice none.
+				a.rec.MalformedToolGen(a.provName, observe.MalformedStreamError)
+				slog.Warn("agenttool: repeated tool_use_failed; regenerating tool-less",
+					"provider", string(a.provName), "round", round)
+				if err := ctx.Err(); err != nil {
+					return tool.AssistantMessage{}, err
+				}
+				res = a.attempt(ctx, messages, tools, llm.ToolChoice{Mode: llm.ToolChoiceNone}, onText)
+			}
+		}
+	}
+
+	return a.recordOutcome(ctx, round, start, messages, res)
+}
+
+// isToolSyntax reports whether res failed with the provider's tool-syntax class AND
+// had not yet forwarded a prose delta — the two conditions the #398 retry / fallback
+// requires (a mid-stream failure after audio already went out is never re-driven,
+// ADR-0044).
+func (a providerAdapter) isToolSyntax(res attemptResult) bool {
+	if res.forwardedDelta {
+		return false
+	}
+	var tse *providererr.ToolSyntaxError
+	return errors.As(res.err, &tse)
+}
+
+// requestedChoice returns the tool choice for this round: the one-shot forced
+// override on the turn's first completion (#399 seam), consumed here, else the
+// zero-value auto.
+func (a providerAdapter) requestedChoice(ctx context.Context) llm.ToolChoice {
+	if tc, ok := consumeForcedChoice(ctx); ok {
+		return tc
+	}
+	return llm.ToolChoice{}
+}
+
+// attempt issues ONE streaming completion for the round and drains it, classifying
+// the outcome without recording any final-outcome metric (its caller [complete]
+// owns those, once per round). It still bounds a transient START failure (429/5xx/
+// net) with the injected retry backoff (#124, ADR-0044): only the start is retried,
+// never a mid-stream delta failure (re-speak risk). A terminal EventError carrying
+// [llm.ErrClassToolSyntax] is surfaced as a typed [*providererr.ToolSyntaxError] so
+// [complete] can drive the tool-syntax policy.
+func (a providerAdapter) attempt(ctx context.Context, messages []tool.Message, tools []tool.Decl, choice llm.ToolChoice, onText func(delta string) error) attemptResult {
 	stream, err := retry.Do(ctx, a.retry, func(ctx context.Context) (<-chan llm.StreamEvent, error) {
 		return a.provider.Complete(ctx, llm.Request{
-			Model:     a.model,
-			MaxTokens: a.maxTokens,
-			Messages:  toLLMMessages(messages),
-			Tools:     toLLMToolDefs(tools),
+			Model:      a.model,
+			MaxTokens:  a.maxTokens,
+			Messages:   toLLMMessages(messages),
+			Tools:      toLLMToolDefs(tools),
+			ToolChoice: choice,
 		})
 	})
 	if err != nil {
-		// A start failure has no round span (no completion happened); attribute it to
-		// the LLM stage via the shared [observe.CallOutcome] rule so LLM agrees with
-		// STT/TTS: a barge-in cancel is OutcomeCanceled (NOT a vendor fault), a fired
-		// deadline is OutcomeTimeout, anything else is OutcomeError. ProviderError is
-		// bumped only on a fault, so a barge before first token does not inflate the
-		// error ratio (#239 review).
-		outcome := observe.CallOutcome(ctx, err)
-		a.rec.ProviderCall(observe.StageLLM, a.provName, outcome)
-		if outcome.IsFault() {
-			a.rec.ProviderError(observe.StageLLM, a.provName)
-		}
-		return tool.AssistantMessage{}, err
+		return attemptResult{err: err, kind: kindStartErr}
 	}
 
 	var out tool.AssistantMessage
 	var text []byte
 	var done bool
 	var streamErr error
+	var forwarded bool
 	// usage/haveUsage stash the provider-reported token accounting from the additive
-	// EventUsage (#127, ADR-0045). It rides a distinct event, not EventDone, and may
-	// arrive before or after done — draining to close (as we do) captures it either
-	// way.
+	// EventUsage (#127, ADR-0045); draining to close captures it whether it arrives
+	// before or after EventDone.
 	var usage llm.Usage
 	var haveUsage bool
 	for ev := range stream {
@@ -163,15 +292,10 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 			text = append(text, ev.Text...)
 			if onText != nil {
 				if err := onText(ev.Text); err != nil {
-					// Downstream cancel (barge-in): record the round we did and stop. A
-					// barge records the provider-reported usage IF it already arrived, never
-					// an estimate — a partial turn is not metered by guesswork (ADR-0045).
 					out.Text = string(text)
-					a.rec.LLMRound(a.provName, round, len(out.ToolCalls) > 0, time.Since(start))
-					a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
-					a.recordReportedUsage(haveUsage, usage)
-					return out, err
+					return attemptResult{msg: out, forwardedDelta: forwarded, haveUsage: haveUsage, usage: usage, err: err, kind: kindBarge}
 				}
+				forwarded = true
 			}
 		case llm.EventToolCall:
 			out.ToolCalls = append(out.ToolCalls, tool.ToolCall{
@@ -184,31 +308,70 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 		case llm.EventDone:
 			done = true
 		case llm.EventError:
-			streamErr = errors.New(ev.Err)
+			// A tool_use_failed is surfaced as a typed ToolSyntaxError so complete can
+			// retry/fallback; any other class stays a plain error (propagates).
+			if ev.ErrClass == llm.ErrClassToolSyntax {
+				streamErr = &providererr.ToolSyntaxError{Op: "agenttool.complete", Msg: ev.Err}
+			} else {
+				streamErr = errors.New(ev.Err)
+			}
 		}
 	}
 	if streamErr != nil {
-		// A mid-stream error records reported usage if it arrived, else nothing.
-		a.recordReportedUsage(haveUsage, usage)
-		return tool.AssistantMessage{}, streamErr
+		return attemptResult{forwardedDelta: forwarded, haveUsage: haveUsage, usage: usage, err: streamErr, kind: kindStreamErr}
 	}
 	if !done {
-		a.recordReportedUsage(haveUsage, usage)
 		if err := ctx.Err(); err != nil {
-			return tool.AssistantMessage{}, err
+			return attemptResult{forwardedDelta: forwarded, haveUsage: haveUsage, usage: usage, err: err, kind: kindCtxErr}
 		}
-		return tool.AssistantMessage{}, errors.New("agenttool: completion stream ended without done event (truncated response)")
+		return attemptResult{forwardedDelta: forwarded, haveUsage: haveUsage, usage: usage,
+			err:  errors.New("agenttool: completion stream ended without done event (truncated response)"),
+			kind: kindTruncated}
 	}
 	out.Text = string(text)
+	return attemptResult{msg: out, forwardedDelta: forwarded, haveUsage: haveUsage, usage: usage, kind: kindSuccess}
+}
 
-	hadToolCall := len(out.ToolCalls) > 0
-	a.rec.LLMRound(a.provName, round, hadToolCall, time.Since(start))
-	a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
-	// A completed round meters its tokens: the provider-reported counts, or a
-	// documented ceil(chars/4) estimate per direction when none was reported — never
-	// zero (AC, ADR-0045). An atomic counter add; it never blocks or fails the turn.
-	a.recordUsage(haveUsage, usage, messages, out.Text)
-	return out, nil
+// recordOutcome records the round's FINAL-outcome metrics (ADR-0044) and meters its
+// usage (ADR-0045) from the resolved attempt, then returns the message/error the
+// loop consumes. The per-kind rules preserve the pre-#398 behaviour exactly: a
+// success or barge records one LLMRound + provider_call(ok); a start failure records
+// provider_call with the shared [observe.CallOutcome] classification (a barge cancel
+// is not a fault); a mid-stream / truncation failure records no provider_call
+// (ADR-0044 does not meter mid-stream faults) but meters any reported usage.
+func (a providerAdapter) recordOutcome(ctx context.Context, round int, start time.Time, messages []tool.Message, res attemptResult) (tool.AssistantMessage, error) {
+	switch res.kind {
+	case kindSuccess:
+		a.rec.LLMRound(a.provName, round, len(res.msg.ToolCalls) > 0, time.Since(start))
+		a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
+		a.recordUsage(res.haveUsage, res.usage, messages, res.msg.Text)
+		return res.msg, nil
+
+	case kindBarge:
+		// The round produced output before a downstream cancel: record it, and meter
+		// only the provider-reported usage if it already arrived (never an estimate).
+		a.rec.LLMRound(a.provName, round, len(res.msg.ToolCalls) > 0, time.Since(start))
+		a.rec.ProviderCall(observe.StageLLM, a.provName, observe.OutcomeOK)
+		a.recordReportedUsage(res.haveUsage, res.usage)
+		return res.msg, res.err
+
+	case kindStartErr:
+		// No completion happened; attribute to the LLM stage via the shared outcome
+		// rule so a barge cancel is OutcomeCanceled (not a fault) while a vendor start
+		// failure is OutcomeError (a fault), matching STT/TTS (#239 review).
+		outcome := observe.CallOutcome(ctx, res.err)
+		a.rec.ProviderCall(observe.StageLLM, a.provName, outcome)
+		if outcome.IsFault() {
+			a.rec.ProviderError(observe.StageLLM, a.provName)
+		}
+		return tool.AssistantMessage{}, res.err
+
+	default: // kindStreamErr, kindTruncated, kindCtxErr
+		// A mid-stream / truncation / cancel failure meters reported usage if it
+		// arrived, else nothing (ADR-0045), and records no provider_call (ADR-0044).
+		a.recordReportedUsage(res.haveUsage, res.usage)
+		return tool.AssistantMessage{}, res.err
+	}
 }
 
 // recordReportedUsage records provider-reported token usage if it arrived, else

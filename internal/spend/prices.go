@@ -37,6 +37,11 @@ var llmPrices = map[llmKey]llmRate{
 	// Groq Llama 3.3 70B Versatile — Groq public API pricing, captured 2026-07-07:
 	// $0.59 / 1M input tokens, $0.79 / 1M output tokens. ESTIMATE (tier-dependent).
 	{observe.ProviderGroq, "llama-3.3-70b-versatile"}: {inputPerMTok: 0.59, outputPerMTok: 0.79},
+	// Gemini 2.5 Flash Image — image generation billed as tokens (#311, ADR-0004
+	// amendment). ESTIMATE captured 2026-07-11; 1 image ≈ 1290 output tokens ≈
+	// $0.039. Priced through the LLM sink because Gemini meters a generated image
+	// as output tokens (no image-specific usage kind, ADR-0045).
+	{observe.ProviderGemini, "gemini-2.5-flash-image"}: {inputPerMTok: 0.30, outputPerMTok: 30.00},
 }
 
 // ttsPricePer1kChars are the known per-1000-character TTS rates (USD). ElevenLabs
