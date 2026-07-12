@@ -241,10 +241,11 @@ func (s *SessionServer) PromoteHighlight(
 	// Enqueue AI image enrichment (#311, ADR-0049): a promoted Highlight with no
 	// image yet gets a background generation job. Skipped when already enriched
 	// (an idempotent re-promote never re-spends) or when the enqueuer is unwired.
-	// An enqueue failure is logged only — the promotion succeeded, and a GM
-	// re-promote re-triggers enrichment (there is NO boot sweep for enrichment;
-	// SweepMissingCandidatePurges covers only the purge job — follow-up issue
-	// planned). Failing the RPC here would wrongly report the keep as failed.
+	// An enqueue failure is logged only — the promotion succeeded, and the boot
+	// reconciliation sweep (#406, highlight.SweepEnrichmentReconciliation) is the
+	// backstop: it re-enqueues enrichment for any promoted Highlight left imageless
+	// with no live enrich job, so a lost enqueue here is recovered at next boot.
+	// Failing the RPC here would wrongly report the keep as failed.
 	if s.enqueue != nil && h.ImageKey == "" {
 		payload, merr := highlight.MarshalEnrichImage(h.ID, tenantID)
 		if merr != nil {
@@ -296,13 +297,15 @@ func (s *SessionServer) DeleteHighlight(
 		return nil, errNoSuchHighlight() // cross-campaign: never delete, never leak existence
 	}
 
-	// KNOWN residual race (follow-up issue planned): an enrichment job can commit
+	// Residual race, now backstopped (#406): an enrichment job can commit
 	// SetHighlightImage between the load above and the blob deletes below, so the
-	// image_key read there is stale-empty and the just-stored image blob is orphaned
-	// (there is no global orphan sweep). Cheap shrink: re-read the row immediately
-	// before the blob deletes to pick up a freshly-committed image_key, closing the
-	// window to the microseconds between this read and the delete. A re-read failure
-	// is non-fatal — fall back to the earlier snapshot and still delete the clip+row.
+	// image_key read there is stale-empty and the just-stored image blob would be
+	// orphaned. Cheap shrink: re-read the row immediately before the blob deletes to
+	// pick up a freshly-committed image_key, narrowing the window to the microseconds
+	// between this read and the delete. A re-read failure is non-fatal — fall back to
+	// the earlier snapshot and still delete the clip+row. Whatever image blob still
+	// slips through this shrunk window is collected by the boot orphan sweep
+	// (highlight.SweepEnrichmentReconciliation), so it is never permanently orphaned.
 	if fresh, rerr := s.highlights.GetHighlight(ctx, tenantID, id); rerr == nil {
 		h.ImageKey = fresh.ImageKey
 	}
