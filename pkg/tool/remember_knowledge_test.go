@@ -21,6 +21,32 @@ type fakeKGWriter struct {
 	createCtx     context.Context
 	createErr     error
 	onCreate      func()
+
+	// known seeds what the KG already holds (established facts + cross-agent
+	// pending). ExistingKnowledge ALSO reflects this fake's own prior created
+	// proposals for the same target, so a scripted double-remember in one session
+	// sees the first row and suppresses the second — no real DB needed.
+	known      KnownForTarget
+	knownErr   error
+	knownCalls int
+}
+
+func (f *fakeKGWriter) ExistingKnowledge(_ context.Context, _ string, w ProposedWrite) (KnownForTarget, error) {
+	f.knownCalls++
+	if f.knownErr != nil {
+		return KnownForTarget{}, f.knownErr
+	}
+	out := KnownForTarget{
+		Pending:     append([]string(nil), f.known.Pending...),
+		Established: append([]string(nil), f.known.Established...),
+	}
+	key := ProposalTargetKey(w)
+	for _, p := range f.created {
+		if ProposalTargetKey(p) == key {
+			out.Pending = append(out.Pending, ProposalSalient(p))
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeKGWriter) OwnNode(_ context.Context, agentID string) (KGNodeRef, bool, error) {

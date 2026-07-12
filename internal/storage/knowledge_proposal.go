@@ -66,9 +66,12 @@ type ProposalBlockedError struct{ Reason string }
 func (e *ProposalBlockedError) Error() string { return e.Reason }
 
 // CreateKnowledgeProposal inserts a pending proposal and returns the persisted
-// row. proposedWrite is the raw jsonb payload (the caller marshals it). There is
-// NO dedup — near-duplicate proposals are surfaced side-by-side for the GM to
-// merge or reject (ADR-0052: similarity is a hint, not a semantic judgment).
+// row. proposedWrite is the raw jsonb payload (the caller marshals it). This layer
+// does NO dedup by design: exact/normalized write-time dedup lives one layer up in
+// the Tool handler (pkg/tool remember_knowledge, #411), which suppresses a repeat
+// BEFORE calling here; genuine near-duplicates that differ in wording still land
+// side-by-side for the GM to merge or reject (ADR-0052: similarity is a hint, not a
+// semantic judgment — no auto-merge).
 func (s *Store) CreateKnowledgeProposal(ctx context.Context, campaignID, agentID uuid.UUID, proposedWrite []byte) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO knowledge_proposal (campaign_id, authoring_agent_id, proposed_write)
