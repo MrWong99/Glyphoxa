@@ -26,7 +26,7 @@ func enrichJobPayload(t *testing.T, highlightID, tenantID uuid.UUID) []byte {
 
 // TestListPromotedHighlightsNeedingEnrichment_SelectsOnlyImagelessPromotedWithNoLiveJob
 // pins the (a)-half query of the boot reconciliation sweep (#406): only PROMOTED,
-// image_key=” Highlights with no pending/running/done enrich job are returned.
+// image_key='' Highlights with no pending/running/done enrich job are returned.
 func TestListPromotedHighlightsNeedingEnrichment_SelectsOnlyImagelessPromotedWithNoLiveJob(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, campaignID := seedCampaign(t, dsn)

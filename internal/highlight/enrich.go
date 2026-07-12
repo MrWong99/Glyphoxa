@@ -151,13 +151,18 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		// image so a fast retry (or a later re-promotion) can re-claim without waiting
 		// out the ttl; a release failure is non-fatal (the ttl backs it up).
 		//
-		// The release runs on a cancel-immune ctx (#421): an error-path exit is
+		// The release runs on a fresh bounded ctx (#421): an error-path exit is
 		// frequently reached BECAUSE the handler ctx was cancelled (lease timeout or
 		// shutdown), and a release on that dead ctx would always fail — stranding the
 		// claim for the full ttl and burning every retry against it. context.WithoutCancel
-		// keeps the deadline/values but drops the cancellation so the release still commits.
+		// drops the parent's cancellation AND its deadline (Go: no Done, no Deadline), so
+		// we re-impose our OWN 10s timeout — otherwise this becomes the handler's only
+		// unbounded DB call and a hung conn would wedge the SERIAL job-runner drain across
+		// every background job kind until restart (the voice-STT-wedge class).
 		release := func() {
-			if rerr := store.ReleaseHighlightEnrichClaim(context.WithoutCancel(ctx), p.HighlightID); rerr != nil {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if rerr := store.ReleaseHighlightEnrichClaim(rctx, p.HighlightID); rerr != nil {
 				log.Error("highlight enrich: release claim", "err", rerr, "highlight", p.HighlightID)
 			}
 		}
