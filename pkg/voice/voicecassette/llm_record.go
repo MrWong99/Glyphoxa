@@ -105,7 +105,7 @@ func (r *LLMRecorder) write() error {
 	}
 	out := LLMCassette{
 		Exchanges: r.exchanges,
-		Notes:     appendProvenance(r.existing.Notes, "Groq", "llama-3.3-70b-versatile"),
+		Notes:     appendProvenance(r.existing.Notes, "Groq", "openai/gpt-oss-120b"),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {

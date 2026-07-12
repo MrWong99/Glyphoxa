@@ -94,8 +94,8 @@ func TestComplete_GroqDefaults_PinsPathKeyAndModel(t *testing.T) {
 	if got, _ := seenAuth.Load().(string); got != "Bearer expected-key" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer expected-key")
 	}
-	if groq.DefaultModel != "llama-3.3-70b-versatile" {
-		t.Errorf("DefaultModel = %q, want llama-3.3-70b-versatile", groq.DefaultModel)
+	if groq.DefaultModel != "openai/gpt-oss-120b" {
+		t.Errorf("DefaultModel = %q, want openai/gpt-oss-120b", groq.DefaultModel)
 	}
 	if got := bodyModel(t, capture); got != groq.DefaultModel {
 		t.Errorf("default model = %q, want %q", got, groq.DefaultModel)

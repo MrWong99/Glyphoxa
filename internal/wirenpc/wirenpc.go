@@ -1097,8 +1097,8 @@ func llmProviderLabel(providerID string) observe.Provider {
 // All NPCs share ONE tool-engine (one client, the `dice` grant in code — Tool
 // Grants are a #6 table, not yet seeded). The LLM adapter is dispatched off the
 // primary Agent's provider_config.provider via llmProviderID -> [newLLM]
-// ([llmbuild.New], #272): the seed's groq config (model llama-3.3-70b-versatile via
-// the OpenAI-compat endpoint) and the env-only "" both resolve to Groq (ADR-0036),
+// ([llmbuild.New], #272): the seed's groq config (model openai/gpt-oss-120b, the
+// #424 default, via the OpenAI-compat endpoint) and the env-only "" both resolve to Groq (ADR-0036),
 // so this stays byte-identical to the pre-#272 hardwired constructor, while a saved
 // non-Groq LLM config now gets its own adapter. Keyless cassette tests replay the
 // Anthropic adapter behind the same llm.Provider interface.

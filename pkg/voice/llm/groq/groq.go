@@ -37,15 +37,19 @@ const (
 	// the Provider Config's provider name (providers.llm.name: "groq").
 	ProviderID = "groq"
 
-	// DefaultModel is used when [llm.Request.Model] is empty. Groq's Llama 3.3
-	// 70B production id (ADR-0036); override per-client with [WithModel] or
-	// per-call with [llm.Request.Model].
-	DefaultModel = "llama-3.3-70b-versatile"
+	// DefaultModel is used when [llm.Request.Model] is empty. Groq's
+	// openai/gpt-oss-120b production id — the new deployment default per the
+	// #424 live A/B (ADR-0036 amendment 2026-07-13): clean native tool calls,
+	// natural in-character German, latency still inside the SLO, and cheaper than
+	// the prior llama-3.3-70b-versatile default. Override per-client with
+	// [WithModel] or per-call with [llm.Request.Model]; existing campaigns keep
+	// their configured provider_config model.
+	DefaultModel = "openai/gpt-oss-120b"
 
 	// DefaultMaxTokens caps a completion when [llm.Request.MaxTokens] is zero.
-	// Llama 3.3 70B is not a thinking model — every token counts toward the
-	// spoken reply — so the ceiling matches the anthropic adapter's tighter bound
-	// rather than gemini's thinking-token headroom.
+	// The ceiling matches the anthropic adapter's tighter bound rather than
+	// gemini's thinking-token headroom; the #424 live run confirmed the default
+	// model produces complete spoken replies within it.
 	DefaultMaxTokens = 1024
 )
 

@@ -34,7 +34,7 @@ build with the audio tags** (see Build below).
   Runtime via cgo. This is the canonical build mode (see `Makefile`).
 - **Provider API keys** (BYOK, ADR-0004), supplied as environment variables —
   never compiled in. The live LLM is **Groq** (`providers.llm.name "groq"`, model
-  `llama-3.3-70b-versatile`; there is no Anthropic key). The binary reads, at
+  `openai/gpt-oss-120b`, the #424 default; there is no Anthropic key). The binary reads, at
   request time:
   - `GROQ_API_KEY` — the LLM the Agent loop calls (Groq, via its
     OpenAI-compatibility endpoint). The wired adapter is Groq for any NPC; a
