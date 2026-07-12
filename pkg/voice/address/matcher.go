@@ -443,7 +443,7 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	// post-Remove roster and hand one agent's name score to the survivor
 	// reindexed into its slot (#145). nameScores stays keyed by m.agents
 	// positions only because index and roster come from one snapshot.
-	nameScores := m.index.scoreAll(words)
+	nameScores, namePositions := m.index.score(words)
 
 	m.pruneLocked(now)
 	m.recordWordsLocked(words, now)
@@ -526,39 +526,36 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		hits = kept
 	}
 
-	// Highest score wins. Equal totals rank first by a confidently name-matched
-	// Butler, then by fuzzy name similarity.
+	// Highest total wins; equal totals rank by fuzzy name similarity, then by the
+	// addressee-position convention, then by Agent order.
 	//
-	// The Butler tier (#400/#413): a named Butler is Address-Only and reachable
-	// ONLY by an explicit name (no ambient route), so naming it is always a
-	// deliberate address — whereas a Character named in the same breath is as
-	// likely the TOPIC of that address ("Glyfoxa, was hat Bart erzählt?", "Gott,
-	// was hat Gesa gesagt?"). Because NameMatch contributes a FLAT weight, the
-	// Butler (matched on the phonetic tier, 0.9) and the co-named Character (exact,
-	// 1.0) total the same, and under the single-target cap the plain
-	// name-similarity tie-break dropped the lower-scored Butler for the mentioned
-	// Character — the live #400/#413 misroute. A confidently name-matched Butler
-	// therefore outranks a co-named Character on a tie so the deliberate address
-	// wins the cap slot. (A Butler that failed the GM-gate is already excluded
-	// above, so it never reaches this sort.)
-	//
-	// The similarity tie-break below still tells two Characters apart: an exactly
+	// Name-similarity tie-break: NameMatch contributes a FLAT weight, so an exactly
 	// heard name (1.0) and an incidental phonetic collision (0.9, e.g. "gerade" ≈
-	// "Greta" under Double Metaphone, #198) total the same, and only the raw
-	// similarity separates them. Remaining ties break by Agent order so the result
-	// is stable.
-	confidentButler := func(a Agent) bool {
-		return a.Target.AgentRole == voiceevent.AgentRoleButler &&
-			nameScores[a.index] >= nameThreshold
-	}
+	// "Greta" under Double Metaphone, #198; or "geht"/"gute" ≈ a Butler named
+	// "Gott" under Kölner Phonetik) total the same. Only the raw similarity
+	// separates them, so an exactly-addressed Character always outranks a Butler
+	// (or any Agent) that merely phonetically-collided with a topic word — this is
+	// what keeps a common-word Butler name from stealing an ask plainly addressed
+	// to a Character (#413).
+	//
+	// Addressee-position tie-break (#400/#413): when two Agents match at the SAME
+	// similarity tier — both exact 1.0, e.g. a Butler addressed at the vocative
+	// head while a Character is named later as the topic ("Gott, was hat Gesa
+	// gesagt?") — the one spoken FIRST is the addressee and wins the single-target
+	// slot, regardless of roster order. Conversely a Character addressed first with
+	// the Butler named later as the topic ("Bart, ist Glyphoxa hier?") routes to
+	// the Character. This is a general convention, not a Butler special-case: the
+	// Butler earns nothing here beyond being named first. (A Butler that failed the
+	// GM-gate is already excluded above, so it never reaches this sort.)
 	sort.SliceStable(hits, func(i, j int) bool {
 		if hits[i].total != hits[j].total {
 			return hits[i].total > hits[j].total
 		}
-		if bi, bj := confidentButler(hits[i].agent), confidentButler(hits[j].agent); bi != bj {
-			return bi
+		si, sj := nameScores[hits[i].agent.index], nameScores[hits[j].agent.index]
+		if si != sj {
+			return si > sj
 		}
-		return nameScores[hits[i].agent.index] > nameScores[hits[j].agent.index]
+		return namePositions[hits[i].agent.index] < namePositions[hits[j].agent.index]
 	})
 
 	// Cap the published set before building it, so lastAddressed records only

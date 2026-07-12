@@ -133,9 +133,23 @@ func newFuzzyIndex(cfg NameMatchConfig, enc Encoder, names [][]string, truncatio
 // keyed by the agent's index. An agent absent from the map (or present with 0)
 // was not named. words is the tokenized utterance.
 func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
-	best := map[int]float64{}
+	best, _ := idx.score(words)
+	return best
+}
+
+// score returns, for every agent, its best name-match similarity in [0,1] (best,
+// keyed by agent index) AND the earliest utterance token position at which that
+// best similarity was reached (positions). positions encodes the ADDRESSEE
+// convention the matcher's tie-break uses: among equal-similarity hits the one
+// spoken FIRST is the likelier addressee, so a name at the vocative head of the
+// utterance ("Gott, was hat Gesa gesagt?") outranks a same-tier name mentioned
+// later as the topic. positions is only meaningful for agents with best > 0. words
+// is the tokenized utterance.
+func (idx *fuzzyIndex) score(words []string) (best map[int]float64, positions map[int]int) {
+	best = map[int]float64{}
+	positions = map[int]int{}
 	if len(idx.entries) == 0 || len(words) == 0 {
-		return best
+		return best, positions
 	}
 
 	// Pre-encode every candidate window once, then compare each against every
@@ -174,12 +188,21 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 			} else {
 				s = idx.similarity(c.joined, c.code, entry.joined, code)
 			}
+			if s <= 0 {
+				continue
+			}
 			if s > best[entry.agentIdx] {
 				best[entry.agentIdx] = s
+				positions[entry.agentIdx] = c.start
+			} else if s == best[entry.agentIdx] && c.start < positions[entry.agentIdx] {
+				// Same best similarity reached earlier in the utterance: keep the
+				// earliest position so the addressee-position tie-break sees the
+				// vocative-head occurrence, not a later topic mention.
+				positions[entry.agentIdx] = c.start
 			}
 		}
 	}
-	return best
+	return best, positions
 }
 
 // similarity scores one candidate window against one name entry. The tiers,
