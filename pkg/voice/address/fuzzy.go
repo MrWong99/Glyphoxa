@@ -129,37 +129,159 @@ func newFuzzyIndex(cfg NameMatchConfig, enc Encoder, names [][]string, truncatio
 	return idx
 }
 
+// utterToken is one tokenized utterance token together with its byte range in the
+// source text. The text is byte-identical to the corresponding [tokenize] output
+// token (lowercased, letters/digits only); start/end are raw byte offsets into the
+// source so the Vocative Flag can read the inter-token gaps (ADR-0024).
+type utterToken struct {
+	text       string
+	start, end int
+}
+
+// offsetTokenize splits s exactly like [tokenize] — maximal runs of letters and
+// digits, lowercased — but also returns each token's raw byte range and
+// markAfter[k], reporting whether the gap AFTER token k holds a Vocative Flag
+// marker rune (see [isVocativeMarker]). The token TEXT sequence is byte-identical
+// to tokenize(s) (pinned by a property test); the offsets and gap markers exist
+// only to drive the Vocative Flag. markAfter has len(toks)-1 entries (nil for <2
+// tokens). It is the utterance-path tokenizer; the name-build path keeps plain
+// tokenize.
+func offsetTokenize(s string) (toks []utterToken, markAfter []bool) {
+	inTok := false
+	st := 0
+	for i, r := range s {
+		word := unicode.IsLetter(r) || unicode.IsNumber(r)
+		switch {
+		case word && !inTok:
+			inTok, st = true, i
+		case !word && inTok:
+			toks = append(toks, utterToken{text: strings.ToLower(s[st:i]), start: st, end: i})
+			inTok = false
+		}
+	}
+	if inTok {
+		toks = append(toks, utterToken{text: strings.ToLower(s[st:]), start: st, end: len(s)})
+	}
+	if len(toks) > 1 {
+		markAfter = make([]bool, len(toks)-1)
+		for k := 0; k < len(toks)-1; k++ {
+			markAfter[k] = gapHasMarker(s[toks[k].end:toks[k+1].start])
+		}
+	}
+	return toks, markAfter
+}
+
+// isVocativeMarker reports whether r is a Vocative Flag marker rune (M): the
+// punctuation that brackets a spoken vocative — comma, sentence terminators, the
+// clause separators, the ellipsis, and the en/em dashes. The ASCII hyphen '-' is
+// deliberately EXCLUDED so a hyphenated name stays a single flaggable span.
+func isVocativeMarker(r rune) bool {
+	switch r {
+	case ',', '.', '!', '?', ';', ':', '…', '–', '—':
+		return true
+	}
+	return false
+}
+
+// gapHasMarker reports whether gap (the raw bytes between two utterance tokens)
+// contains any Vocative Flag marker rune.
+func gapHasMarker(gap string) bool {
+	for _, r := range gap {
+		if isVocativeMarker(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// vocativeFlagged reports whether a matched span covering utterance tokens [i..j]
+// is two-sided bracketed by markers with no marker inside it (ADR-0024): left-
+// marked ⇔ i opens the utterance OR the gap before it holds a marker; right-marked
+// ⇔ j ends the utterance OR the gap after it holds a marker; and NO marker sits in
+// any gap strictly inside the span. last is the final token index; markAfter is
+// [offsetTokenize]'s gap table (nil ⇒ no markers known, so only the boundary
+// clauses can flag).
+func vocativeFlagged(i, j, last int, markAfter []bool) bool {
+	leftMarked := i == 0 || (i-1 < len(markAfter) && markAfter[i-1])
+	rightMarked := j == last || (j < len(markAfter) && markAfter[j])
+	if !leftMarked || !rightMarked {
+		return false
+	}
+	for k := i; k < j; k++ {
+		if k < len(markAfter) && markAfter[k] {
+			return false // a marker inside the span never flags
+		}
+	}
+	return true
+}
+
 // scoreAll returns the best name-match similarity in [0,1] for every agent,
 // keyed by the agent's index. An agent absent from the map (or present with 0)
-// was not named. words is the tokenized utterance.
+// was not named. words is the tokenized utterance. It carries no byte offsets, so
+// no span is Vocative-flagged (the flag map is discarded) — callers that need the
+// flag pass real [utterToken]s to [fuzzyIndex.score].
 func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
-	best := map[int]float64{}
-	if len(idx.entries) == 0 || len(words) == 0 {
-		return best
+	toks := make([]utterToken, len(words))
+	for i, w := range words {
+		toks[i] = utterToken{text: w}
 	}
+	best, _, _ := idx.score(toks, nil)
+	return best
+}
+
+// score returns, for every agent: its best name-match similarity in [0,1] (best);
+// whether any of its best-similarity spans is Vocative-flagged (flagged); and a
+// token position (positions) — the earliest flagged best-similarity span start if
+// the agent is flagged, else the earliest best-similarity span start.
+//
+// The Vocative Flag encodes the ADDRESSEE convention the matcher's tie-break uses
+// (ADR-0024): a name punctuation-bracketed as a direct address ("So, Glyfoxa,
+// …", "…, Gesa?") outranks a same-total name that merely appears mid-sentence as
+// the TOPIC ("was hat Bart …", "wie geht es dir"). Only spans at the agent's best
+// similarity contribute, so a phonetic collision word never lends its flag to an
+// exact hit. toks are the offset utterance tokens and markAfter their gap-marker
+// table from [offsetTokenize]; best/flagged/positions are meaningful only for
+// agents with best > 0.
+func (idx *fuzzyIndex) score(toks []utterToken, markAfter []bool) (best map[int]float64, flagged map[int]bool, positions map[int]int) {
+	best = map[int]float64{}
+	flagged = map[int]bool{}
+	positions = map[int]int{}
+	if len(idx.entries) == 0 || len(toks) == 0 {
+		return best, flagged, positions
+	}
+	last := len(toks) - 1
 
 	// Pre-encode every candidate window once, then compare each against every
 	// name entry. Windows of 1..window adjacent tokens are joined so a name
 	// heard as several tokens still lines up with a single-token name.
 	type candidate struct {
-		start  int // index of the first token in this window, 0 == utterance start
-		joined string
-		code   string
+		start int // index of the first token in this window, 0 == utterance start
+		end   int // index of the last token in this window
+		joined,
+		code string
+		flag bool // is this span two-sided Vocative-flagged
 	}
 	var cands []candidate
-	for start := range words {
+	for start := range toks {
 		var sb strings.Builder
-		for n := 1; n <= idx.window && start+n <= len(words); n++ {
-			sb.WriteString(words[start+n-1])
-			joined := sb.String()
-			c := candidate{start: start, joined: joined}
+		for n := 1; n <= idx.window && start+n <= len(toks); n++ {
+			sb.WriteString(toks[start+n-1].text)
+			end := start + n - 1
+			c := candidate{start: start, end: end, joined: sb.String()}
 			if idx.enc != nil {
-				c.code = idx.enc.Encode(joined)
+				c.code = idx.enc.Encode(c.joined)
 			}
+			c.flag = vocativeFlagged(start, end, last, markAfter)
 			cands = append(cands, c)
 		}
 	}
 
+	// Per agent, track the best similarity and — separately — the earliest start
+	// among ALL best-similarity spans and among FLAGGED best-similarity spans, so
+	// the final position honours the flag preference (spec: flagged position wins
+	// when the agent is flagged).
+	flaggedAtBest := map[int]bool{}
+	posFlagged := map[int]int{}
 	for ei, entry := range idx.entries {
 		code := idx.codes[ei]
 		for _, c := range cands {
@@ -167,19 +289,50 @@ func (idx *fuzzyIndex) scoreAll(words []string) map[int]float64 {
 			if entry.initialOnly {
 				// Derived STT-truncation alias (#197): exact byte-match only, and
 				// only when the window opens the utterance. It never reaches the
-				// phonetic/edit tiers, so a near-miss earns nothing.
+				// phonetic/edit tiers, so a near-miss earns nothing. Its span [0..k]
+				// is left-marked by definition (utterance start).
 				if c.start == 0 && c.joined == entry.joined {
 					s = truncationAliasScore
 				}
 			} else {
 				s = idx.similarity(c.joined, c.code, entry.joined, code)
 			}
-			if s > best[entry.agentIdx] {
-				best[entry.agentIdx] = s
+			if s <= 0 {
+				continue
+			}
+			ai := entry.agentIdx
+			cur, seen := best[ai]
+			switch {
+			case !seen || s > cur:
+				// A strictly higher best resets the per-agent aggregates to this span.
+				best[ai] = s
+				positions[ai] = c.start
+				if c.flag {
+					flaggedAtBest[ai], posFlagged[ai] = true, c.start
+				} else {
+					flaggedAtBest[ai] = false
+				}
+			case s == cur:
+				if c.start < positions[ai] {
+					positions[ai] = c.start
+				}
+				if c.flag {
+					if !flaggedAtBest[ai] {
+						flaggedAtBest[ai], posFlagged[ai] = true, c.start
+					} else if c.start < posFlagged[ai] {
+						posFlagged[ai] = c.start
+					}
+				}
 			}
 		}
 	}
-	return best
+	for ai := range best {
+		if flaggedAtBest[ai] {
+			flagged[ai] = true
+			positions[ai] = posFlagged[ai]
+		}
+	}
+	return best, flagged, positions
 }
 
 // similarity scores one candidate window against one name entry. The tiers,
