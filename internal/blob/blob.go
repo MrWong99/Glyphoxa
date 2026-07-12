@@ -60,10 +60,23 @@ type Store interface {
 	// Delete removes the blob at key. Deleting an absent key returns nil
 	// (idempotent).
 	Delete(ctx context.Context, key string) error
+	// List returns the keys of every stored blob whose key begins with prefix, in
+	// ascending key order. It reads keys ONLY (never the bytes). It exists so the
+	// process-wide reconciliation sweeps (e.g. the Highlight orphan-image sweep,
+	// #406/#421) can enumerate blobs THROUGH the seam instead of querying a
+	// backend's table directly — an S3 swap re-implements List and the sweep is
+	// unchanged. An empty prefix lists everything; pass AllKeysPrefix to walk the
+	// whole store.
+	List(ctx context.Context, prefix string) ([]string, error)
 }
 
 // keyPrefix is the mandatory first segment of every key.
 const keyPrefix = "t"
+
+// AllKeysPrefix matches every valid key — all keys are tenant-rooted under
+// keyPrefix. A process-wide sweep that carries no tenant (ADR-0049) passes it to
+// List to enumerate the whole store, then filters by owner-kind/name in Go.
+const AllKeysPrefix = keyPrefix + "/"
 
 // Key builds the canonical tenant-scoped key
 // t/<tenant_id>/<owner-kind>/<owner-id>/<name>. It is deterministic — the same
@@ -86,39 +99,61 @@ func Key(tenantID uuid.UUID, ownerKind string, ownerID uuid.UUID, name string) (
 	return key, nil
 }
 
+// KeyParts is the decoded structure of a canonical key
+// (t/<tenant_id>/<owner-kind>/<owner-id>/<name>). ParseKey produces it so callers
+// that must reason about a key's owner-kind/name (e.g. the reconciliation sweeps)
+// do that in the blob package rather than re-deriving segment indices at the call
+// site — the package owns key structure (ADR-0048).
+type KeyParts struct {
+	TenantID  uuid.UUID
+	OwnerKind string
+	OwnerID   uuid.UUID
+	Name      string
+}
+
 // ValidateKey parses a key and returns the tenant id it encodes, or
-// ErrInvalidKey. A valid key is exactly five segments —
-// "t"/<uuid>/<kind>/<owner-id>/<name> — with a parseable tenant uuid and
-// non-empty kind and name. The backend calls this and derives the tenant_id
-// column from the result, so an invalid key never reaches SQL.
+// ErrInvalidKey. It is the narrow form of ParseKey the backend uses to derive the
+// tenant_id column, so an invalid key never reaches SQL.
 func ValidateKey(key string) (tenantID uuid.UUID, err error) {
+	parts, err := ParseKey(key)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return parts.TenantID, nil
+}
+
+// ParseKey decodes a key into its parts, or ErrInvalidKey. A valid key is exactly
+// five segments — "t"/<uuid>/<kind>/<owner-id>/<name> — with parseable, canonical
+// tenant and owner uuids and non-empty kind and name.
+func ParseKey(key string) (KeyParts, error) {
 	segs := strings.Split(key, "/")
 	if len(segs) != 5 {
-		return uuid.Nil, ErrInvalidKey
+		return KeyParts{}, ErrInvalidKey
 	}
 	if segs[0] != keyPrefix {
-		return uuid.Nil, ErrInvalidKey
+		return KeyParts{}, ErrInvalidKey
 	}
 	tenant, perr := uuid.Parse(segs[1])
 	if perr != nil {
-		return uuid.Nil, ErrInvalidKey
+		return KeyParts{}, ErrInvalidKey
 	}
 	// uuid.Parse tolerates braces/urn/no-dash forms; require the canonical dashed
 	// string so one logical blob has exactly one key. A non-canonical hand-built
 	// key would otherwise become an orphan the E8 delete hook can never
 	// reconstruct via Key().
 	if segs[1] != tenant.String() {
-		return uuid.Nil, ErrInvalidKey
+		return KeyParts{}, ErrInvalidKey
 	}
 	// segs[2] = owner-kind, segs[3] = owner-id, segs[4] = name. Kind and name
 	// must be non-empty; a slash inside either is impossible (it would raise the
 	// segment count above five). The owner-id gets the same canonical-uuid
 	// discipline as the tenant.
 	if segs[2] == "" || segs[4] == "" {
-		return uuid.Nil, ErrInvalidKey
+		return KeyParts{}, ErrInvalidKey
 	}
-	if owner, oerr := uuid.Parse(segs[3]); oerr != nil || segs[3] != owner.String() {
-		return uuid.Nil, ErrInvalidKey
+	owner, oerr := uuid.Parse(segs[3])
+	if oerr != nil || segs[3] != owner.String() {
+		return KeyParts{}, ErrInvalidKey
 	}
-	return tenant, nil
+	return KeyParts{TenantID: tenant, OwnerKind: segs[2], OwnerID: owner, Name: segs[4]}, nil
 }

@@ -31,6 +31,33 @@ type fakeEnrichStore struct {
 	claimErr     error                   // returned by TryClaimHighlightEnrich when non-nil
 	claimCalls   int
 	releaseCalls int
+
+	// readBarrier, when set, holds every GetHighlight caller until N of them have
+	// arrived, then releases them together — so racing enrich jobs all read the
+	// un-enriched row BEFORE any of them writes (no timing assumption).
+	readBarrier *readBarrier
+}
+
+// readBarrier releases the first n callers together once all n have arrived.
+type readBarrier struct {
+	mu      sync.Mutex
+	n       int
+	arrived int
+	release chan struct{}
+}
+
+func newReadBarrier(n int) *readBarrier {
+	return &readBarrier{n: n, release: make(chan struct{})}
+}
+
+func (b *readBarrier) wait() {
+	b.mu.Lock()
+	b.arrived++
+	if b.arrived == b.n {
+		close(b.release)
+	}
+	b.mu.Unlock()
+	<-b.release
 }
 
 func newFakeEnrichStore() *fakeEnrichStore {
@@ -39,8 +66,14 @@ func newFakeEnrichStore() *fakeEnrichStore {
 
 func (f *fakeEnrichStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) (storage.Highlight, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	h, ok := f.rows[id]
+	f.mu.Unlock()
+	// Barrier AFTER the snapshot (and NOT under f.mu, which would deadlock the
+	// arrivals): every reader captures the row's state before any of them returns,
+	// so a concurrent winner's later write can't make a loser read an enriched row.
+	if f.readBarrier != nil {
+		f.readBarrier.wait()
+	}
 	if !ok || h.TenantID != tenantID {
 		return storage.Highlight{}, storage.ErrNotFound
 	}
@@ -67,6 +100,7 @@ func (f *fakeEnrichStore) SetHighlightImage(_ context.Context, id uuid.UUID, key
 func (f *fakeEnrichStore) TryClaimHighlightEnrich(_ context.Context, id uuid.UUID, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.claimCalls++ // count EVERY attempt (win or lose), not just winners
 	if f.claimErr != nil {
 		return false, f.claimErr
 	}
@@ -80,14 +114,20 @@ func (f *fakeEnrichStore) TryClaimHighlightEnrich(_ context.Context, id uuid.UUI
 		f.claimed = map[uuid.UUID]time.Time{}
 	}
 	f.claimed[id] = time.Now()
-	f.claimCalls++
 	return true, nil
 }
 
-func (f *fakeEnrichStore) ReleaseHighlightEnrichClaim(_ context.Context, id uuid.UUID) error {
+// ReleaseHighlightEnrichClaim mimics a real DB call: a cancelled ctx fails the
+// statement and the claim is NOT cleared. The handler must therefore release with
+// a cancel-immune ctx (context.WithoutCancel) so an error-path release under a
+// dead handler ctx still frees the claim.
+func (f *fakeEnrichStore) ReleaseHighlightEnrichClaim(ctx context.Context, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releaseCalls++
+	if err := ctx.Err(); err != nil {
+		return err // a cancelled/expired ctx aborts the release; the claim lingers
+	}
 	delete(f.claimed, id)
 	return nil
 }
@@ -190,6 +230,11 @@ func TestEnrichImageHandler_HappyPath(t *testing.T) {
 func TestEnrichImageHandler_Claim_GeneratesAtMostOnce(t *testing.T) {
 	tenantID := uuid.New()
 	store := newFakeEnrichStore()
+	// Both jobs must clear the initial GetHighlight read BEFORE either writes, so
+	// neither can exit early via the idempotent ImageKey!="" guard — otherwise the
+	// loser races the winner's write and never attempts the claim. The barrier makes
+	// it deterministic (no sleeps).
+	store.readBarrier = newReadBarrier(2)
 	h := seedRow(store, tenantID)
 	blobs := newFakeBlobs()
 	gen := &fakeGen{res: imagegen.Result{Data: []byte("PNGDATA"), ContentType: "image/png", OutputTokens: 1290}}
@@ -219,18 +264,64 @@ func TestEnrichImageHandler_Claim_GeneratesAtMostOnce(t *testing.T) {
 	if got.ImageKey == "" {
 		t.Fatal("winner did not land the image on the row")
 	}
+	// Both jobs attempted the claim; the winner landed the image, so NO release
+	// happened (release is only for non-image exits), and the loser bailed before
+	// owning the claim.
+	if store.claimCalls != 2 {
+		t.Fatalf("want 2 claim attempts (one per job), got %d", store.claimCalls)
+	}
+	if store.releaseCalls != 0 {
+		t.Fatalf("a winning enrichment must not release its claim, got %d releases", store.releaseCalls)
+	}
+}
+
+// TestEnrichImageHandler_ReleasesClaimUnderCancelledCtx pins the finding-2 fix
+// (#421): on an error-path exit the handler releases its claim so a fast retry can
+// re-claim without waiting out the TTL — and that release must succeed even when
+// the handler ctx is already cancelled (lease-timeout or shutdown). The release
+// therefore runs on a cancel-immune ctx.
+func TestEnrichImageHandler_ReleasesClaimUnderCancelledCtx(t *testing.T) {
+	tenantID := uuid.New()
+	store := newFakeEnrichStore()
+	h := seedRow(store, tenantID)
+	blobs := newFakeBlobs()
+	// A provider error is a release-then-return exit path.
+	gen := &fakeGen{err: errors.New("provider 503")}
+
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	payload, _ := MarshalEnrichImage(h.ID, tenantID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the handler runs with an already-dead ctx
+
+	if err := handler(ctx, payload); err == nil {
+		t.Fatal("provider error must surface so the runner retries")
+	}
+	// The claim was released despite the cancelled ctx: a real retry can re-claim
+	// immediately instead of burning attempts against a lingering claim.
+	if store.releaseCalls != 1 {
+		t.Fatalf("want exactly one release attempt, got %d", store.releaseCalls)
+	}
+	store.mu.Lock()
+	_, stillClaimed := store.claimed[h.ID]
+	store.mu.Unlock()
+	if stillClaimed {
+		t.Fatal("claim lingered: release ran with the dead handler ctx instead of a cancel-immune one")
+	}
 }
 
 // --- boot reconciliation sweep (#406) ---
 
 // fakeReconcileStore feeds the boot enrichment reconciliation sweep: the promoted
-// imageless targets to re-enqueue, and the orphan image blob keys to collect.
+// imageless targets to re-enqueue, and the set of Highlight ids that still have a
+// row (the orphan-image anti-join's membership half).
 type fakeReconcileStore struct {
 	targets   []storage.HighlightEnrichTarget
 	gotKind   string
-	orphans   []string
+	live      map[uuid.UUID]bool // ids with a surviving row
 	targetErr error
-	orphanErr error
+	existErr  error
+	gotExist  []uuid.UUID // ids the sweep asked HighlightsExist about
 }
 
 func (f *fakeReconcileStore) ListPromotedHighlightsNeedingEnrichment(_ context.Context, enrichKind string) ([]storage.HighlightEnrichTarget, error) {
@@ -241,11 +332,18 @@ func (f *fakeReconcileStore) ListPromotedHighlightsNeedingEnrichment(_ context.C
 	return f.targets, nil
 }
 
-func (f *fakeReconcileStore) ListOrphanHighlightImageKeys(_ context.Context) ([]string, error) {
-	if f.orphanErr != nil {
-		return nil, f.orphanErr
+func (f *fakeReconcileStore) HighlightsExist(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	f.gotExist = ids
+	if f.existErr != nil {
+		return nil, f.existErr
 	}
-	return f.orphans, nil
+	present := map[uuid.UUID]bool{}
+	for _, id := range ids {
+		if f.live[id] {
+			present[id] = true
+		}
+	}
+	return present, nil
 }
 
 // enrichEnqueued records one backstop enrichment enqueue.
@@ -304,61 +402,110 @@ func TestSweepEnrichmentReconciliation_EnqueuesForImagelessPromoted(t *testing.T
 	}
 }
 
-// TestSweepEnrichmentReconciliation_CollectsOrphanImageBlobs pins AC3 (#406): the
-// boot sweep drops image blobs whose Highlight row is gone (the delete-vs-enrich
-// interleaving orphan) through the seam.
+// imageKey builds a Highlight image blob key for the given tenant/highlight.
+func imageKey(tenantID, highlightID uuid.UUID) string {
+	return "t/" + tenantID.String() + "/highlight/" + highlightID.String() + "/image"
+}
+
+// TestSweepEnrichmentReconciliation_CollectsOrphanImageBlobs pins AC3 (#406/#421):
+// the boot sweep enumerates blobs THROUGH the seam (blob.Store.List), anti-joins
+// their embedded Highlight ids against live rows in Go, and drops ONLY the images
+// whose row is gone — the delete-vs-enrich interleaving orphans. A live row's
+// image, its audio clip (same owner-kind, different name), and another owner's
+// blob are all left untouched.
 func TestSweepEnrichmentReconciliation_CollectsOrphanImageBlobs(t *testing.T) {
+	tenantID := uuid.New()
+	liveID, goneID := uuid.New(), uuid.New()
+
 	blobs := newFakeBlobs()
-	k1 := "t/" + uuid.New().String() + "/highlight/" + uuid.New().String() + "/image"
-	k2 := "t/" + uuid.New().String() + "/highlight/" + uuid.New().String() + "/image"
-	blobs.data[k1] = []byte("a")
-	blobs.data[k2] = []byte("b")
-	store := &fakeReconcileStore{orphans: []string{k1, k2}}
+	liveImg := imageKey(tenantID, liveID)
+	liveClip := "t/" + tenantID.String() + "/highlight/" + liveID.String() + "/clip.wav"
+	orphanImg := imageKey(tenantID, goneID)
+	otherOwner := "t/" + tenantID.String() + "/campaign/" + uuid.New().String() + "/image"
+	blobs.data[liveImg] = []byte("live")
+	blobs.data[liveClip] = []byte("clip")
+	blobs.data[orphanImg] = []byte("orphan")
+	blobs.data[otherOwner] = []byte("other")
+
+	// Only liveID still has a row.
+	store := &fakeReconcileStore{live: map[uuid.UUID]bool{liveID: true}}
 
 	if err := SweepEnrichmentReconciliation(context.Background(), store, blobs, &enrichRecordingEnqueuer{}, testLog()); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if blobs.keys() != 0 {
-		t.Fatalf("orphan image blobs not swept: %d left", blobs.keys())
+	if blobs.has(orphanImg) {
+		t.Fatal("orphan image blob (row gone) was not swept")
+	}
+	if !blobs.has(liveImg) || !blobs.has(liveClip) || !blobs.has(otherOwner) {
+		t.Fatalf("sweep touched a non-orphan blob: live=%v clip=%v other=%v",
+			blobs.has(liveImg), blobs.has(liveClip), blobs.has(otherOwner))
+	}
+	// The anti-join only asked about the highlight IMAGE keys, never the clip or
+	// the other owner's blob.
+	if len(store.gotExist) != 2 {
+		t.Fatalf("want membership checked for the 2 highlight image ids, got %v", store.gotExist)
 	}
 }
 
 // TestSweepEnrichmentReconciliation_NoWorkNoSideEffects: an empty catalog enqueues
-// and deletes nothing.
+// and deletes nothing — a live row's image is kept.
 func TestSweepEnrichmentReconciliation_NoWorkNoSideEffects(t *testing.T) {
+	tenantID, liveID := uuid.New(), uuid.New()
 	blobs := newFakeBlobs()
-	blobs.data["t/x/highlight/y/image"] = []byte("keep") // not reported as orphan
+	liveImg := imageKey(tenantID, liveID)
+	blobs.data[liveImg] = []byte("keep") // a live row's image, never an orphan
 	enq := &enrichRecordingEnqueuer{}
-	store := &fakeReconcileStore{}
+	store := &fakeReconcileStore{live: map[uuid.UUID]bool{liveID: true}}
 	if err := SweepEnrichmentReconciliation(context.Background(), store, blobs, enq, testLog()); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if len(enq.all) != 0 {
 		t.Fatalf("no targets should enqueue nothing, got %v", enq.all)
 	}
-	if blobs.keys() != 1 {
-		t.Fatalf("no orphans should delete nothing, got %d left", blobs.keys())
+	if !blobs.has(liveImg) {
+		t.Fatal("a live row's image must not be swept")
 	}
 }
 
-// TestSweepEnrichmentReconciliation_ListErrorNonFatal pins AC4 (#406): a store
-// list failure is reported (so boot logs it) but never aborts — the OTHER half of
-// the sweep still runs. Here the target list fails yet the orphan sweep proceeds.
+// TestSweepEnrichmentReconciliation_ListErrorNonFatal pins AC4 (#406): a list
+// failure is reported (so boot logs it) but never aborts — the OTHER half of the
+// sweep still runs. Here the (a) target list fails yet the (b) orphan sweep
+// proceeds and drops the orphan.
 func TestSweepEnrichmentReconciliation_ListErrorNonFatal(t *testing.T) {
+	tenantID, goneID := uuid.New(), uuid.New()
 	blobs := newFakeBlobs()
-	orphan := "t/" + uuid.New().String() + "/highlight/" + uuid.New().String() + "/image"
+	orphan := imageKey(tenantID, goneID)
 	blobs.data[orphan] = []byte("a")
 	store := &fakeReconcileStore{
 		targetErr: errors.New("db down"),
-		orphans:   []string{orphan},
+		live:      map[uuid.UUID]bool{}, // goneID has no row → orphan
 	}
 	err := SweepEnrichmentReconciliation(context.Background(), store, blobs, &enrichRecordingEnqueuer{}, testLog())
 	if err == nil {
 		t.Fatal("want an error surfaced when a list fails (boot logs it non-fatally)")
 	}
 	// The orphan sweep still ran despite the target-list failure.
-	if blobs.keys() != 0 {
-		t.Fatalf("orphan sweep should still run when the target list fails; %d blobs left", blobs.keys())
+	if blobs.has(orphan) {
+		t.Fatal("orphan sweep should still run when the target list fails")
+	}
+}
+
+// TestSweepEnrichmentReconciliation_BlobListErrorNonFatal: the (b) blob-seam List
+// failing is reported but does not abort the (a) enqueue half.
+func TestSweepEnrichmentReconciliation_BlobListErrorNonFatal(t *testing.T) {
+	t1, h1 := uuid.New(), uuid.New()
+	blobs := newFakeBlobs()
+	blobs.listErr = errors.New("seam list down")
+	enq := &enrichRecordingEnqueuer{}
+	store := &fakeReconcileStore{targets: []storage.HighlightEnrichTarget{{HighlightID: h1, TenantID: t1}}}
+
+	err := SweepEnrichmentReconciliation(context.Background(), store, blobs, enq, testLog())
+	if err == nil {
+		t.Fatal("want an error surfaced when the blob-seam List fails")
+	}
+	// The (a) enqueue half still ran despite the (b) list failure.
+	if len(enq.all) != 1 {
+		t.Fatalf("target enqueue should still run when the blob list fails, got %d", len(enq.all))
 	}
 }
 

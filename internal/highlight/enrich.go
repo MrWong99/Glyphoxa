@@ -26,6 +26,11 @@ import (
 // idempotent + at-least-once.
 const JobKindEnrichImage = "highlight.enrich_image"
 
+// highlightOwnerKind is the blob.Key owner-kind segment a Highlight's blobs live
+// under (t/<tenant>/highlight/<id>/<name>): both its audio clip and its generated
+// image. The orphan-image sweep scopes to this owner-kind.
+const highlightOwnerKind = "highlight"
+
 // imageBlobName is the blob.Key name segment for a Highlight's generated image
 // (mirrors the clip's "clip.wav"). The key is t/<tenant>/highlight/<id>/image.
 const imageBlobName = "image"
@@ -145,8 +150,19 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		// From here we OWN the claim. Release it on every exit that does NOT land an
 		// image so a fast retry (or a later re-promotion) can re-claim without waiting
 		// out the ttl; a release failure is non-fatal (the ttl backs it up).
+		//
+		// The release runs on a fresh bounded ctx (#421): an error-path exit is
+		// frequently reached BECAUSE the handler ctx was cancelled (lease timeout or
+		// shutdown), and a release on that dead ctx would always fail — stranding the
+		// claim for the full ttl and burning every retry against it. context.WithoutCancel
+		// drops the parent's cancellation AND its deadline (Go: no Done, no Deadline), so
+		// we re-impose our OWN 10s timeout — otherwise this becomes the handler's only
+		// unbounded DB call and a hung conn would wedge the SERIAL job-runner drain across
+		// every background job kind until restart (the voice-STT-wedge class).
 		release := func() {
-			if rerr := store.ReleaseHighlightEnrichClaim(ctx, p.HighlightID); rerr != nil {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if rerr := store.ReleaseHighlightEnrichClaim(rctx, p.HighlightID); rerr != nil {
 				log.Error("highlight enrich: release claim", "err", rerr, "highlight", p.HighlightID)
 			}
 		}
@@ -194,7 +210,7 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 			"estimated_usd", meter.Status().EstimatedUSD,
 		)
 
-		key, err := blob.Key(p.TenantID, "highlight", p.HighlightID, imageBlobName)
+		key, err := blob.Key(p.TenantID, highlightOwnerKind, p.HighlightID, imageBlobName)
 		if err != nil {
 			release()
 			return fmt.Errorf("highlight enrich: build image key: %w", err)
@@ -228,10 +244,13 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 }
 
 // ReconcileStore is the storage surface the boot enrichment reconciliation sweep
-// needs (#406); *storage.Store satisfies it and tests fake it.
+// needs (#406); *storage.Store satisfies it and tests fake it. HighlightsExist is
+// the membership half of the orphan-image anti-join (#421): the sweep enumerates
+// image blobs through the blob seam and asks the store which of their embedded
+// Highlight ids still have a row — the absent ones are the orphans.
 type ReconcileStore interface {
 	ListPromotedHighlightsNeedingEnrichment(ctx context.Context, enrichKind string) ([]storage.HighlightEnrichTarget, error)
-	ListOrphanHighlightImageKeys(ctx context.Context) ([]string, error)
+	HighlightsExist(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error)
 }
 
 // SweepEnrichmentReconciliation is the boot-time enrichment backstop (#406, the
@@ -242,11 +261,14 @@ type ReconcileStore interface {
 //     no live enrich job — recovering a crash between promote-commit and the enqueue
 //     (AC1). It complements, not replaces, PromoteHighlight's per-promotion enqueue.
 //   - (b) drop every ORPHAN image blob — an image under the Highlight image
-//     owner-kind prefix whose Highlight row is gone (a delete-vs-enrich interleaving
+//     owner-kind whose Highlight row is gone (a delete-vs-enrich interleaving
 //     that committed the image after the delete read the row imageless), closing the
-//     window DeleteHighlight's re-read only shrinks (AC3). It touches ONLY that
-//     prefix (ADR-0048), never another owner's blobs, and never a live enrichment's
-//     in-flight blob (the row still exists).
+//     window DeleteHighlight's re-read only shrinks (AC3). The blobs are enumerated
+//     THROUGH the blob seam (blob.Store.List, #421) — never a direct query against a
+//     backend table — so the sweep survives an S3 swap; the anti-join against live
+//     rows (store.HighlightsExist) happens in Go. It touches ONLY the 'highlight'
+//     owner-kind + 'image' name (ADR-0048), never a clip, another owner's blob, or a
+//     live enrichment's in-flight blob (the row still exists).
 //
 // Both halves run even if one's list fails: a store-list error is collected and
 // returned so boot logs it, but the sweep never aborts (AC4) — the caller (main.go)
@@ -275,21 +297,42 @@ func SweepEnrichmentReconciliation(ctx context.Context, store ReconcileStore, bl
 		}
 	}
 
-	// (b) Collect orphaned image blobs.
-	keys, err := store.ListOrphanHighlightImageKeys(ctx)
+	// (b) Sweep orphaned image blobs. Enumerate every blob through the seam, keep
+	// only the Highlight image blobs (owner-kind 'highlight', name 'image'), then
+	// anti-join their embedded Highlight ids against the live rows in Go: a blob
+	// whose id has no row is an orphan.
+	allKeys, err := blobs.List(ctx, blob.AllKeysPrefix)
 	if err != nil {
-		errs = append(errs, fmt.Errorf("list orphan image keys: %w", err))
+		errs = append(errs, fmt.Errorf("list blob keys: %w", err))
 	} else {
-		swept := 0
-		for _, k := range keys {
-			if err := blobs.Delete(ctx, k); err != nil {
-				log.Error("highlight enrich sweep: delete orphan image", "err", err, "key", k)
+		var imageKeys []string
+		var ids []uuid.UUID
+		for _, k := range allKeys {
+			parts, perr := blob.ParseKey(k)
+			if perr != nil || parts.OwnerKind != highlightOwnerKind || parts.Name != imageBlobName {
 				continue
 			}
-			swept++
+			imageKeys = append(imageKeys, k)
+			ids = append(ids, parts.OwnerID)
 		}
-		if swept > 0 {
-			log.Warn("swept orphaned highlight image blobs", "count", swept)
+		present, perr := store.HighlightsExist(ctx, ids)
+		if perr != nil {
+			errs = append(errs, fmt.Errorf("check highlight rows for orphan images: %w", perr))
+		} else {
+			swept := 0
+			for i, k := range imageKeys {
+				if present[ids[i]] {
+					continue // the row still exists: a live or in-flight enrichment, not an orphan
+				}
+				if err := blobs.Delete(ctx, k); err != nil {
+					log.Error("highlight enrich sweep: delete orphan image", "err", err, "key", k)
+					continue
+				}
+				swept++
+			}
+			if swept > 0 {
+				log.Warn("swept orphaned highlight image blobs", "count", swept)
+			}
 		}
 	}
 

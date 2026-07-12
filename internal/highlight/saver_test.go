@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +51,7 @@ type fakeBlobs struct {
 	gate      chan struct{} // if non-nil, Put blocks until a receive
 	putErr    error
 	deleteErr error    // if set, Delete returns it (blob-backend failure)
+	listErr   error    // if set, List returns it (seam-list failure)
 	deleted   []string // keys passed to Delete (compensation assertions)
 }
 
@@ -87,6 +90,22 @@ func (f *fakeBlobs) Delete(_ context.Context, key string) error {
 	delete(f.data, key)
 	f.deleted = append(f.deleted, key)
 	return nil
+}
+
+func (f *fakeBlobs) List(_ context.Context, prefix string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []string
+	for k := range f.data {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (f *fakeBlobs) keys() int {

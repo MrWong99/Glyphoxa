@@ -4,13 +4,11 @@ package storage_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -127,53 +125,44 @@ func TestTryClaimHighlightEnrich_ConditionalTransition(t *testing.T) {
 	}
 }
 
-// TestListOrphanHighlightImageKeys_OnlyImageBlobsWithNoRow pins the (b)-half query
-// (#406): only image blobs whose Highlight row is gone are returned — a live row's
-// image, the audio clip (same owner-kind, different name), and other owners' blobs
-// are all left alone.
-func TestListOrphanHighlightImageKeys_OnlyImageBlobsWithNoRow(t *testing.T) {
+// TestHighlightsExist_ReportsSurvivingRows pins the membership half of the boot
+// orphan-image sweep's anti-join (#421): given a mix of ids, only those with a
+// surviving highlight row come back present; a deleted/never-existed id is absent.
+// The anti-join itself (candidate blobs − present rows) runs in the sweep, in Go.
+func TestHighlightsExist_ReportsSurvivingRows(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
-	blobs := blob.NewPostgres(pool)
 
 	vs, err := st.CreateVoiceSession(ctx, campaignID)
 	if err != nil {
 		t.Fatalf("create voice session: %v", err)
 	}
 
-	put := func(key string) {
-		if err := blobs.Put(ctx, key, "image/png", strings.NewReader("x"), 1); err != nil {
-			t.Fatalf("put blob %s: %v", key, err)
-		}
-	}
-
-	// A live, enriched Highlight: row present + its image blob → NOT orphan.
 	liveID, _ := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightPromoted)
-	liveImg, _ := blob.Key(tenantID, "highlight", liveID, "image")
-	put(liveImg)
-	if err := st.SetHighlightImage(ctx, liveID, liveImg, "image/png", 1); err != nil {
-		t.Fatalf("set live image: %v", err)
-	}
-	// The same Highlight's audio clip (same owner-kind, name clip.wav) → NOT matched.
-	liveClip, _ := blob.Key(tenantID, "highlight", liveID, "clip.wav")
-	put(liveClip)
+	goneID := uuid.New() // no row was ever created
 
-	// An image blob whose Highlight row is GONE (delete-vs-enrich interleaving) → orphan.
-	goneID := uuid.New()
-	orphanImg, _ := blob.Key(tenantID, "highlight", goneID, "image")
-	put(orphanImg)
-
-	// A blob under a DIFFERENT owner-kind → never touched.
-	otherOwner, _ := blob.Key(tenantID, "campaign", uuid.New(), "image")
-	put(otherOwner)
-
-	got, err := st.ListOrphanHighlightImageKeys(ctx)
+	present, err := st.HighlightsExist(ctx, []uuid.UUID{liveID, goneID})
 	if err != nil {
-		t.Fatalf("list orphan image keys: %v", err)
+		t.Fatalf("highlights exist: %v", err)
 	}
-	if len(got) != 1 || got[0] != orphanImg {
-		t.Fatalf("want exactly the row-less image %s, got %+v", orphanImg, got)
+	if !present[liveID] {
+		t.Fatalf("live highlight %s reported absent", liveID)
+	}
+	if present[goneID] {
+		t.Fatalf("row-less id %s reported present", goneID)
+	}
+	if len(present) != 1 {
+		t.Fatalf("want exactly the surviving id in the set, got %v", present)
+	}
+
+	// Empty input runs no query and returns an empty set.
+	empty, err := st.HighlightsExist(ctx, nil)
+	if err != nil {
+		t.Fatalf("highlights exist (empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty input should yield an empty set, got %v", empty)
 	}
 }
