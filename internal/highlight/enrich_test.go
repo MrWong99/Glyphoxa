@@ -31,6 +31,33 @@ type fakeEnrichStore struct {
 	claimErr     error                   // returned by TryClaimHighlightEnrich when non-nil
 	claimCalls   int
 	releaseCalls int
+
+	// readBarrier, when set, holds every GetHighlight caller until N of them have
+	// arrived, then releases them together — so racing enrich jobs all read the
+	// un-enriched row BEFORE any of them writes (no timing assumption).
+	readBarrier *readBarrier
+}
+
+// readBarrier releases the first n callers together once all n have arrived.
+type readBarrier struct {
+	mu      sync.Mutex
+	n       int
+	arrived int
+	release chan struct{}
+}
+
+func newReadBarrier(n int) *readBarrier {
+	return &readBarrier{n: n, release: make(chan struct{})}
+}
+
+func (b *readBarrier) wait() {
+	b.mu.Lock()
+	b.arrived++
+	if b.arrived == b.n {
+		close(b.release)
+	}
+	b.mu.Unlock()
+	<-b.release
 }
 
 func newFakeEnrichStore() *fakeEnrichStore {
@@ -39,8 +66,14 @@ func newFakeEnrichStore() *fakeEnrichStore {
 
 func (f *fakeEnrichStore) GetHighlight(_ context.Context, tenantID, id uuid.UUID) (storage.Highlight, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	h, ok := f.rows[id]
+	f.mu.Unlock()
+	// Barrier AFTER the snapshot (and NOT under f.mu, which would deadlock the
+	// arrivals): every reader captures the row's state before any of them returns,
+	// so a concurrent winner's later write can't make a loser read an enriched row.
+	if f.readBarrier != nil {
+		f.readBarrier.wait()
+	}
 	if !ok || h.TenantID != tenantID {
 		return storage.Highlight{}, storage.ErrNotFound
 	}
@@ -197,6 +230,11 @@ func TestEnrichImageHandler_HappyPath(t *testing.T) {
 func TestEnrichImageHandler_Claim_GeneratesAtMostOnce(t *testing.T) {
 	tenantID := uuid.New()
 	store := newFakeEnrichStore()
+	// Both jobs must clear the initial GetHighlight read BEFORE either writes, so
+	// neither can exit early via the idempotent ImageKey!="" guard — otherwise the
+	// loser races the winner's write and never attempts the claim. The barrier makes
+	// it deterministic (no sleeps).
+	store.readBarrier = newReadBarrier(2)
 	h := seedRow(store, tenantID)
 	blobs := newFakeBlobs()
 	gen := &fakeGen{res: imagegen.Result{Data: []byte("PNGDATA"), ContentType: "image/png", OutputTokens: 1290}}
