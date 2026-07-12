@@ -14,13 +14,13 @@
 # against the live Groq API with `-tags=record` (GROQ_API_KEY supplies
 # credentials; the dice seed stays fixed in the test).
 exchanges:
-  - prompt_hash: 94d0e3189c69ee6b6fe388161f54ceab89eb6bbfa2871cbbfb806c02580244e1
+  - prompt_hash: f95da03d0b253bde411523d540677e72099284dba06ef137d64bfbbd9875fc98
     tool_calls:
       - id: toolu_roll1
         name: dice
         input: '{"count":1,"sides":20}'
     stop_reason: tool_use
-  - prompt_hash: 42ee6314e058ae5b1b559a3c22eee6ee8984ceedb1833c7976a85d7012362c92
+  - prompt_hash: 332b372ab31d70e03a8625f4ce9e18d0da515e7b0b04a9905ec4c7f5ebc1e882
     text: "The bones favor you tonight, traveler."
     stop_reason: end_turn
-notes: Hand-authored fixture for the tool-use-loop replay test; prompt_hashes pin model llama-3.3-70b-versatile (Groq); dice rng seeded PCG(42,99), first draw.
+notes: Hand-authored fixture for the tool-use-loop replay test; prompt_hashes pin model llama-3.3-70b-versatile (Groq); dice rng seeded PCG(42,99), first draw. Both hashes include the #399 dice-hardening instruction the armed turn appends to the system prompt (the utterance "Roll a d20 for my luck" arms the dice gate), so they reflect the hardened system message.

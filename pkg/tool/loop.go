@@ -43,8 +43,12 @@ type Loop struct {
 	// round); false when it was stripped without executing (ungranted or
 	// unparseable). nil is a no-op. It is the observability seam kept OUT of this
 	// vendor/metric-agnostic package (ADR-0028): the wiring layer supplies a
-	// callback that increments a counter.
-	OnPseudoCall func(name string, recovered bool)
+	// callback that increments a counter. ctx is the turn's context.Context (the
+	// same one Run/RunStream execute under), so a wiring-layer callback can also
+	// reach any per-turn value it stashed there — e.g. #399's "dice actually
+	// called" recorder must learn about a RECOVERED pseudo-dice call, which never
+	// surfaced as a provider-native ToolCall.
+	OnPseudoCall func(ctx context.Context, name string, recovered bool)
 }
 
 // NewLoop builds a Loop over provider and the Agent's grants. Both must be
@@ -147,7 +151,7 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 			}
 		}
 
-		l.recoverPseudoCalls(round, &asst)
+		l.recoverPseudoCalls(ctx, round, &asst)
 
 		if len(asst.ToolCalls) == 0 {
 			return asst.Text, nil
@@ -211,7 +215,7 @@ func (l *Loop) Run(ctx context.Context, messages []Message) (string, error) {
 		// Scrub + recover any pseudo-XML tool calls the model emitted as text
 		// (issue #410): clean the spoken text and promote parseable granted calls
 		// to real ToolCalls before the tool-round decision below.
-		l.recoverPseudoCalls(round, &asst)
+		l.recoverPseudoCalls(ctx, round, &asst)
 
 		if len(asst.ToolCalls) == 0 {
 			return asst.Text, nil
@@ -286,7 +290,7 @@ func errResult(callID, msg string) ToolResult {
 //
 // round seeds the synthetic ToolCall IDs ("pseudo-<round>-<i>") so a recovered
 // call correlates to its tool-role result exactly like a provider-issued call.
-func (l *Loop) recoverPseudoCalls(round int, asst *AssistantMessage) {
+func (l *Loop) recoverPseudoCalls(ctx context.Context, round int, asst *AssistantMessage) {
 	clean, matches := ExtractPseudoCalls(asst.Text)
 	if len(matches) == 0 {
 		return
@@ -304,13 +308,13 @@ func (l *Loop) recoverPseudoCalls(round int, asst *AssistantMessage) {
 					Name:  m.Name,
 					Input: m.Args,
 				})
-				l.firePseudoCall(m.Name, true)
+				l.firePseudoCall(ctx, m.Name, true)
 				continue
 			}
 		}
 		// Ungranted, unparseable, or ineligible: strip-only. The intent is lost
 		// but the leak is contained, and the occurrence is logged + metered.
-		l.firePseudoCall(m.Name, false)
+		l.firePseudoCall(ctx, m.Name, false)
 		slog.Warn("tool: stripped un-recoverable pseudo-XML tool call from assistant text",
 			"tool", m.Name, "recovered", false)
 	}
@@ -328,8 +332,8 @@ func inlineEligible(t Tool) bool {
 	return ok && pm.ProposalMediated()
 }
 
-func (l *Loop) firePseudoCall(name string, recovered bool) {
+func (l *Loop) firePseudoCall(ctx context.Context, name string, recovered bool) {
 	if l.OnPseudoCall != nil {
-		l.OnPseudoCall(name, recovered)
+		l.OnPseudoCall(ctx, name, recovered)
 	}
 }

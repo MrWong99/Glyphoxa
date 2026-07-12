@@ -1231,16 +1231,27 @@ func (p *deltaThenToolSyntaxProvider) Complete(context.Context, llm.Request) (<-
 // tool-syntax failure that arrives AFTER a prose delta was already forwarded to
 // onText is never retried — a re-drive would re-speak. The error propagates on the
 // first call.
+//
+// #399 note: dice-armed turns now BUFFER (no live streaming), so this re-speak
+// protection is exercised on the still-live streaming path — a NON-dice tool
+// (here "capture") declared on a plain, dice-unarmed turn, which routes through the
+// gated loop's RunStream and forwards deltas live.
 func TestEngine_ToolSyntax_ForwardedDeltaNotRetried(t *testing.T) {
 	prov := &deltaThenToolSyntaxProvider{}
 	rec := &recordingStage{}
-	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 0, 0,
+	// Grant a non-dice read-only tool so the dice-unarmed (streaming) turn still
+	// declares a tool — the round is tool-armed without being dice-armed.
+	var seen string
+	reg := tool.NewRegistry()
+	reg.MustRegister(callerCaptureTool{got: &seen})
+	grants := tool.NewGrantSet(reg, tool.Grant{ToolName: "capture"})
+	eng := agenttool.NewEngine(prov, grants, "", "m", 0, 0,
 		agenttool.WithMetrics(rec, observe.ProviderGroq),
 		agenttool.WithRetry(instantAgentRetry()))
 
 	var streamed strings.Builder
 	_, err := eng.GenerateStream(context.Background(),
-		[]llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}},
+		[]llm.Message{{Role: llm.RoleUser, Text: "Tell me about the inn."}},
 		func(delta string) error { streamed.WriteString(delta); return nil })
 	if err == nil {
 		t.Fatal("GenerateStream returned nil after a mid-stream tool_use_failed")
@@ -1299,6 +1310,16 @@ func TestEngine_ToolSyntax_CtxCancelBetweenAttemptsAborts(t *testing.T) {
 	if prov.calls != 1 {
 		t.Errorf("Complete calls = %d, want 1 (the retry must not dial after a cancel)", prov.calls)
 	}
+	// #399 drive-by B: the between-attempts abort must record its provider_call
+	// (canceled), like the other cancel paths — not silently drop it. A barge cancel
+	// is not a fault, so no provider_error.
+	outcomes, provErrs := rec.providerCalls()
+	if len(outcomes) != 1 || outcomes[0] != observe.OutcomeCanceled {
+		t.Errorf("provider_call outcomes = %v, want [canceled] (abort must be counted)", outcomes)
+	}
+	if provErrs != 0 {
+		t.Errorf("provider_errors = %d on a barge cancel between attempts, want 0 (not a fault)", provErrs)
+	}
 }
 
 // callerCaptureTool is a read-only, scope-supporting Tool that records the
@@ -1340,6 +1361,333 @@ func TestEngine_StampsCallerIdentity(t *testing.T) {
 	}
 }
 
+// --- #399 dice-gate enforcement: prompt hardening + invented-roll guard ---
+
+// hardeningSubstr is a byte-stable slice of the dice-hardening instruction the
+// armed turn appends to the system prompt; asserting containment avoids coupling
+// the test to the (unexported) full constant while still pinning the instruction.
+const hardeningSubstr = "Never invent, guess, or roleplay a die result."
+
+// TestEngine_DiceHardening_ArmedTurnAppendsInstruction is AC "prompt hardening
+// present on dice-armed turns": an armed utterance's first (system) request carries
+// the hardening instruction; a plain unarmed turn's system prompt does not.
+func TestEngine_DiceHardening_ArmedTurnAppendsInstruction(t *testing.T) {
+	t.Run("armed turn hardens the system prompt", func(t *testing.T) {
+		prov := &scriptedProvider{steps: []step{
+			{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+			{text: "You rolled well.", stop: "end_turn"},
+		}}
+		eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0)
+		if _, err := eng.Generate(context.Background(), []llm.Message{
+			{Role: llm.RoleSystem, Text: "You are Bart."},
+			{Role: llm.RoleUser, Text: "Roll a d20 for me."},
+		}); err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		sys := prov.requests()[0].Messages[0]
+		if sys.Role != llm.RoleSystem || !strings.Contains(sys.Text, hardeningSubstr) {
+			t.Errorf("armed system prompt = %q, want it to contain the hardening instruction", sys.Text)
+		}
+		if !strings.Contains(sys.Text, "You are Bart.") {
+			t.Errorf("armed system prompt dropped the original persona: %q", sys.Text)
+		}
+	})
+
+	t.Run("unarmed turn is not hardened", func(t *testing.T) {
+		prov := &scriptedProvider{steps: []step{{text: "A copper, traveler.", stop: "end_turn"}}}
+		eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0)
+		if _, err := eng.Generate(context.Background(), []llm.Message{
+			{Role: llm.RoleSystem, Text: "You are Bart."},
+			{Role: llm.RoleUser, Text: "How much for a pint?"},
+		}); err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if sys := prov.requests()[0].Messages[0]; strings.Contains(sys.Text, hardeningSubstr) {
+			t.Errorf("unarmed system prompt was hardened: %q", sys.Text)
+		}
+	})
+}
+
+// TestEngine_InventedRoll_RegeneratesWithForcedDice is the headline AC: dice armed,
+// the model narrates a roll result WITHOUT calling the tool → the reply is discarded
+// and regenerated with the dice tool FORCED; the delivered reply reflects the
+// actually executed roll, and exactly one roll-claim malformed-gen is counted.
+func TestEngine_InventedRoll_RegeneratesWithForcedDice(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Run 1 (buffered): invents a result, no tool call.
+		{text: "Ah, eine 19! Du hast Gluck.", stop: "end_turn"},
+		// Forced regen round 0: now it calls the dice tool.
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		// Forced regen round 1: answers with the real result in context.
+		{text: "The bones show an 8, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleSystem, Text: "You are Bart."},
+		{Role: llm.RoleUser, Text: "Wurfel einen D20 fur mich."},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show an 8, traveler." {
+		t.Errorf("delivered = %q, want the regenerated reply reflecting the executed roll", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedRollClaim {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [roll_claim]", paths)
+	}
+
+	reqs := prov.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("Complete calls = %d, want 3 (buffered run + forced regen round-trip)", len(reqs))
+	}
+	// Buffered first run: auto choice.
+	if reqs[0].ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Errorf("first-run tool_choice = %q, want auto", reqs[0].ToolChoice.Mode)
+	}
+	// Forced regen round 0: pinned to the dice tool.
+	if reqs[1].ToolChoice.Mode != llm.ToolChoiceTool || reqs[1].ToolChoice.Tool != "dice" {
+		t.Errorf("forced-regen round-0 tool_choice = %+v, want tool:dice", reqs[1].ToolChoice)
+	}
+	// Forced regen round 1 (after the tool result): one-shot spent, back to auto.
+	if reqs[2].ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Errorf("forced-regen round-1 tool_choice = %q, want auto (forced choice is one-shot)", reqs[2].ToolChoice.Mode)
+	}
+}
+
+// TestEngine_NativeDiceCall_NoRegeneration is AC "dice armed, model calls the tool
+// properly → no regeneration": a proper tool round-trip fires the guard for nobody,
+// so there is exactly one loop run and no roll-claim counted.
+func TestEngine_NativeDiceCall_NoRegeneration(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled an 8, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "You rolled an 8, traveler." {
+		t.Errorf("delivered = %q, want the native round-trip answer", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 0 {
+		t.Errorf("MalformedToolGen paths = %v, want none (the tool was called)", paths)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("Complete calls = %d, want 2 (single round-trip, no regeneration)", len(reqs))
+	}
+	for i, r := range reqs {
+		if r.ToolChoice.Mode == llm.ToolChoiceTool {
+			t.Errorf("req[%d] used forced tool choice %+v; want no forced regeneration", i, r.ToolChoice)
+		}
+	}
+}
+
+// TestEngine_NotArmed_GuardNeverFires is AC "dice not armed → reply text never
+// triggers the guard": a plain turn whose reply contains a bare number is delivered
+// untouched — the guard is gated on the dice-armed decision.
+func TestEngine_NotArmed_GuardNeverFires(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{{text: "That'll be 5 silver, traveler.", stop: "end_turn"}}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "How much for a room?"}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "That'll be 5 silver, traveler." {
+		t.Errorf("delivered = %q, want the reply untouched", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 0 {
+		t.Errorf("MalformedToolGen paths = %v, want none (guard is armed-only)", paths)
+	}
+	if n := len(prov.requests()); n != 1 {
+		t.Errorf("Complete calls = %d, want 1 (no regeneration on an unarmed turn)", n)
+	}
+}
+
+// TestEngine_InventedRoll_SingleEscalation is AC "guard fires at most once per
+// turn": if the FORCED regeneration still narrates a bare number, it is delivered
+// as-is — the guard does not loop. Exactly two loop runs (buffered + one regen).
+func TestEngine_InventedRoll_SingleEscalation(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ah, eine 19!", stop: "end_turn"},          // run 1: invented
+		{text: "Trust me, a solid 17.", stop: "end_turn"}, // forced regen: still a bare number, no tool call
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "Trust me, a solid 17." {
+		t.Errorf("delivered = %q, want the single regeneration delivered as-is", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 1 {
+		t.Errorf("MalformedToolGen count = %d, want 1 (guard fires at most once)", len(paths))
+	}
+	if n := len(prov.requests()); n != 2 {
+		t.Errorf("Complete calls = %d, want 2 (buffered run + exactly one regeneration)", n)
+	}
+}
+
+// guardRegenErrProvider narrates a bare roll result on its first (buffered) call,
+// then start-errors every forced regeneration call — so the #399 guard's one
+// escalation fails and the turn must propagate the error, never the invented draft.
+type guardRegenErrProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *guardRegenErrProvider) Complete(_ context.Context, _ llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+	if n == 1 {
+		ch := make(chan llm.StreamEvent)
+		go func() {
+			defer close(ch)
+			ch <- llm.StreamEvent{Type: llm.EventText, Text: "Ah, eine 19! "}
+			ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+		}()
+		return ch, nil
+	}
+	return nil, &providererr.HTTPError{Op: "test.Complete", StatusCode: 400, Status: "Bad Request", Body: "boom"}
+}
+
+// TestEngine_InventedRoll_RegenErrorPropagatesNeverDeliversDraft is AC-adjacent
+// (ADR-0030, #398/#399): when the forced regeneration fails at the provider, the
+// turn returns the error and NEVER delivers the discarded invented-roll draft.
+func TestEngine_InventedRoll_RegenErrorPropagatesNeverDeliversDraft(t *testing.T) {
+	prov := &guardRegenErrProvider{}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}})
+	if err == nil {
+		t.Fatal("Generate returned nil; want the forced-regeneration provider error")
+	}
+	if got != "" {
+		t.Errorf("delivered = %q on a failed regeneration; the discarded draft must never surface", got)
+	}
+}
+
+// TestEngine_GenerateStream_ArmedTurnBuffersThenDeliversOnce is AC/TDD-9: on the
+// streaming path a dice-armed turn BUFFERS — onText receives nothing until the guard
+// clears, then the whole final text exactly once (never live word-by-word deltas),
+// so an invented number can never be spoken mid-stream (ADR-0012).
+func TestEngine_GenerateStream_ArmedTurnBuffersThenDeliversOnce(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "You rolled a solid eight, traveler.", stop: "end_turn"},
+	}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0)
+
+	var deltas []string
+	full, err := eng.GenerateStream(context.Background(),
+		[]llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}},
+		func(delta string) error { deltas = append(deltas, delta); return nil })
+	if err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+	if strings.TrimSpace(full) != "You rolled a solid eight, traveler." {
+		t.Errorf("full = %q, want the buffered final text", full)
+	}
+	if len(deltas) != 1 {
+		t.Fatalf("onText called %d times, want exactly 1 (whole-text push, buffered — not live deltas)", len(deltas))
+	}
+	if strings.TrimSpace(deltas[0]) != "You rolled a solid eight, traveler." {
+		t.Errorf("single delta = %q, want the whole final text", deltas[0])
+	}
+}
+
+// usageThenToolSyntaxProvider reports usage then fails tool-syntax on its first
+// `fails` calls (a mid-stream tool_use_failed AFTER an EventUsage), then streams the
+// answer with its own usage. It drives the #399 drive-by A: a discarded failed
+// attempt's provider-REPORTED usage must still be metered (ADR-0045).
+type usageThenToolSyntaxProvider struct {
+	mu         sync.Mutex
+	calls      int
+	fails      int
+	failUsage  llm.Usage
+	answer     string
+	finalUsage llm.Usage
+}
+
+func (p *usageThenToolSyntaxProvider) Complete(_ context.Context, _ llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+	ch := make(chan llm.StreamEvent, 3)
+	if n <= p.fails {
+		ch <- llm.StreamEvent{Type: llm.EventUsage, Usage: p.failUsage}
+		ch <- llm.StreamEvent{Type: llm.EventError, Err: "tool_use_failed", ErrClass: llm.ErrClassToolSyntax}
+		close(ch)
+		return ch, nil
+	}
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamEvent{Type: llm.EventText, Text: p.answer}
+		ch <- llm.StreamEvent{Type: llm.EventUsage, Usage: p.finalUsage}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}()
+	return ch, nil
+}
+
+// TestEngine_ToolSyntax_RetriedAttemptReportedUsageMetered is #399 drive-by A: a
+// tool-syntax attempt that already reported usage before failing is discarded on
+// retry, but its provider-REPORTED tokens are still metered — never dropped, never
+// estimated (ADR-0045). Two LLMTokens spans: the failed attempt's + the final round's.
+func TestEngine_ToolSyntax_RetriedAttemptReportedUsageMetered(t *testing.T) {
+	prov := &usageThenToolSyntaxProvider{
+		fails:      1,
+		failUsage:  llm.Usage{InputTokens: 10, OutputTokens: 2},
+		answer:     "You rolled well.",
+		finalUsage: llm.Usage{InputTokens: 40, OutputTokens: 7},
+	}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	if _, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	toks := rec.tokenSpans()
+	if len(toks) != 2 {
+		t.Fatalf("LLMTokens spans = %d, want 2 (discarded attempt's reported usage + final round)", len(toks))
+	}
+	var sawFail, sawFinal bool
+	for _, tk := range toks {
+		if tk.in == 10 && tk.out == 2 {
+			sawFail = true
+		}
+		if tk.in == 40 && tk.out == 7 {
+			sawFinal = true
+		}
+	}
+	if !sawFail {
+		t.Error("the discarded tool-syntax attempt's reported usage (10/2) was dropped; want it metered")
+	}
+	if !sawFinal {
+		t.Error("the final recovered round's usage (40/7) was not metered")
+	}
+}
+
 // TestEngine_PseudoXMLTextLeak_MetersMalformedTextLeak pins the #410 wiring: when
 // the model emits a tool call as malformed TEXT content (no provider error), the
 // agenttool bridge counts it on MalformedToolGen with the text_leak path — the
@@ -1366,5 +1714,48 @@ func TestEngine_PseudoXMLTextLeak_MetersMalformedTextLeak(t *testing.T) {
 	paths := rec.malformedPaths()
 	if len(paths) != 1 || paths[0] != observe.MalformedTextLeak {
 		t.Errorf("MalformedToolGen paths = %v, want exactly [text_leak]", paths)
+	}
+}
+
+// TestEngine_RecoveredPseudoDice_SuppressesInventedRollGuard is the #399 review
+// gate: on a dice-armed turn the model emits its dice call as pseudo-XML TEXT (no
+// provider error). pkg/tool recovers it into a REAL executed ToolCall (#410) that
+// the adapter never saw as a provider-native call — but the OnPseudoCall(recovered)
+// seam marks "dice" in the turn's called-Tools set, so the invented-roll guard does
+// NOT fire: exactly one loop run (no forced regeneration), NO roll_claim counted
+// (only the text_leak from the recovery), and the delivered text is the follow-up
+// round's answer built on the real roll.
+func TestEngine_RecoveredPseudoDice_SuppressesInventedRollGuard(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Round 0: the dice call arrives as pseudo-XML text — recovered + executed.
+		{text: `Let me roll. <function=dice {"count":1,"sides":20}</function>`, stop: "end_turn"},
+		// Round 1: answers with the real result in context.
+		{text: "The bones show a 14, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 14, traveler." {
+		t.Errorf("delivered = %q, want the follow-up round's answer (no regeneration)", got)
+	}
+	// text_leak counted once by the recovery; NO roll_claim — the guard saw dice called.
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedTextLeak {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [text_leak] (recovered pseudo-dice must not trip the roll-claim guard)", paths)
+	}
+	// Exactly one loop run: round 0 (recovered call) + round 1 (answer) = 2 requests,
+	// and no forced-regeneration round.
+	reqs := prov.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("Complete calls = %d, want 2 (recovered round-trip, no regeneration)", len(reqs))
+	}
+	for i, r := range reqs {
+		if r.ToolChoice.Mode == llm.ToolChoiceTool {
+			t.Errorf("req[%d] used forced tool choice %+v; want no forced regeneration", i, r.ToolChoice)
+		}
 	}
 }

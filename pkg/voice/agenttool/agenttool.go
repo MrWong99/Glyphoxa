@@ -103,6 +103,64 @@ func consumeForcedChoice(ctx context.Context) (llm.ToolChoice, bool) {
 	return f.choice, true
 }
 
+// calledToolsKey is the context key under which [withCalledTools] stores the
+// per-turn set of Tool names the adapter actually executed a call for. The
+// invented-roll guard (#399) reads it back to answer "was the dice Tool really
+// called this turn" — the signal the post-hoc regeneration hinges on.
+type calledToolsKey struct{}
+
+// calledTools is the per-turn recorder behind [calledToolsKey]: the adapter marks
+// every Tool the model emitted a call for; the guard queries it with [has]. Safe
+// for the loop's single goroutine plus the race detector.
+type calledTools struct {
+	mu    sync.Mutex
+	names map[string]bool
+}
+
+// newCalledTools builds an empty per-turn called-Tools recorder.
+func newCalledTools() *calledTools { return &calledTools{names: map[string]bool{}} }
+
+// withCalledTools returns ctx carrying c, so the adapter records executed tool-call
+// names into it as the turn runs.
+func withCalledTools(ctx context.Context, c *calledTools) context.Context {
+	return context.WithValue(ctx, calledToolsKey{}, c)
+}
+
+// has reports whether a call for name was recorded this turn.
+func (c *calledTools) has(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.names[name]
+}
+
+// recordCalledTools marks every tool-call name in calls on the per-turn recorder
+// ctx carries, if any (a ctx without one is a silent no-op — the pre-#399 path and
+// the forced regeneration round both run without a recorder).
+func recordCalledTools(ctx context.Context, calls []tool.ToolCall) {
+	c, _ := ctx.Value(calledToolsKey{}).(*calledTools)
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, tc := range calls {
+		c.names[tc.Name] = true
+	}
+}
+
+// markCalledTool marks a single Tool name on the per-turn recorder ctx carries, if
+// any (a no-op otherwise). It is the seam for a call the adapter never saw as a
+// provider-native ToolCall — a pkg/tool-recovered pseudo-XML call (#410/#399).
+func markCalledTool(ctx context.Context, name string) {
+	c, _ := ctx.Value(calledToolsKey{}).(*calledTools)
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.names[name] = true
+}
+
 // providerAdapter makes a streaming [llm.Provider] usable as the non-streaming
 // [tool.Provider] the tool-use loop drives. model and maxTokens are baked in
 // here because [tool.Provider.Generate] carries no generation knobs — the
@@ -212,24 +270,32 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 		if a.isToolSyntax(res) {
 			// Attempt 2: immediate retry, same tools + choice (no backoff).
 			a.rec.MalformedToolGen(a.provName, observe.MalformedStreamError)
+			// The failed attempt is being discarded; meter any usage it already
+			// reported so a retried round's provider-REPORTED tokens are not dropped
+			// (reported-only, never an estimate — ADR-0045).
+			a.recordReportedUsage(res.haveUsage, res.usage)
 			if err := ctx.Err(); err != nil {
-				return tool.AssistantMessage{}, err // barge between attempts aborts
+				return a.abortBetweenAttempts(ctx, err) // barge between attempts aborts
 			}
 			res = a.attempt(ctx, messages, tools, choice, onText)
 
 			if a.isToolSyntax(res) {
 				// Attempt 3: regenerate tool-less. Tools stay declared; tool_choice none.
 				a.rec.MalformedToolGen(a.provName, observe.MalformedStreamError)
+				a.recordReportedUsage(res.haveUsage, res.usage)
 				slog.Warn("agenttool: repeated tool_use_failed; regenerating tool-less",
 					"provider", string(a.provName), "round", round)
 				if err := ctx.Err(); err != nil {
-					return tool.AssistantMessage{}, err
+					return a.abortBetweenAttempts(ctx, err)
 				}
 				res = a.attempt(ctx, messages, tools, llm.ToolChoice{Mode: llm.ToolChoiceNone}, onText)
 			}
 		}
 	}
 
+	// Record which Tools the resolved round actually asked to run, for the #399
+	// invented-roll guard; a no-op unless this turn installed a [calledTools] set.
+	recordCalledTools(ctx, res.msg.ToolCalls)
 	return a.recordOutcome(ctx, round, start, messages, res)
 }
 
@@ -243,6 +309,22 @@ func (a providerAdapter) isToolSyntax(res attemptResult) bool {
 	}
 	var tse *providererr.ToolSyntaxError
 	return errors.As(res.err, &tse)
+}
+
+// abortBetweenAttempts records the provider-call outcome for a ctx cancellation
+// that lands between tool-syntax attempts, then returns the ctx error. Without
+// this the between-attempts abort bypassed [recordOutcome] entirely, silently
+// dropping the provider_call the other cancel paths (kindStartErr, kindCtxErr)
+// record — so a barge here went uncounted. It classifies via the shared
+// [observe.CallOutcome] rule (a barge cancel is OutcomeCanceled, not a fault; a
+// deadline is a timeout fault), matching kindStartErr.
+func (a providerAdapter) abortBetweenAttempts(ctx context.Context, err error) (tool.AssistantMessage, error) {
+	outcome := observe.CallOutcome(ctx, err)
+	a.rec.ProviderCall(observe.StageLLM, a.provName, outcome)
+	if outcome.IsFault() {
+		a.rec.ProviderError(observe.StageLLM, a.provName)
+	}
+	return tool.AssistantMessage{}, err
 }
 
 // requestedChoice returns the tool choice for this round: the one-shot forced
@@ -451,15 +533,6 @@ type Engine struct {
 	provName observe.Provider
 }
 
-// loopFor selects the loop for this turn: the full grants when the utterance
-// plausibly needs dice, the dice-less grants otherwise.
-func (e *Engine) loopFor(messages []llm.Message) *tool.Loop {
-	if needsDice(e.language, messages) {
-		return e.full
-	}
-	return e.gated
-}
-
 // EngineOption configures a [NewEngine]: [WithMetrics] opts the per-round LLM
 // instrumentation in, and [WithLanguage] selects the dice gate's keyword set.
 // Without either, the Engine records nothing and gates dice in English (the
@@ -540,8 +613,17 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 		// counter family as #398 with the text_leak path so provider flake stays
 		// visible. The scrub itself lives in pkg/tool (vendor/metric-agnostic,
 		// ADR-0028); this callback is the observability wiring.
-		l.OnPseudoCall = func(string, bool) {
+		l.OnPseudoCall = func(ctx context.Context, name string, recovered bool) {
 			cfg.rec.MalformedToolGen(cfg.provName, observe.MalformedTextLeak)
+			// #399: a RECOVERED pseudo-XML dice call is promoted to a real executed
+			// ToolCall downstream in pkg/tool, so it never reached the adapter as a
+			// provider-native ToolCall — mark it in the turn's called-Tools set so the
+			// invented-roll guard does not mistake a correctly-rolled reply for an
+			// invented one (which would double-count with text_leak and force a
+			// needless second RNG draw + round-trip).
+			if recovered {
+				markCalledTool(ctx, name)
+			}
 		}
 		return l
 	}
@@ -559,15 +641,10 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 }
 
 // Generate implements [agent.Engine]. It converts the assembled Hot Context to
-// [tool.Message]s and runs the loop to its final text. It installs a fresh
-// per-turn round counter into ctx so the adapter's LLMRound spans index from 0
-// for this turn and never share state with a concurrent turn (barge-in).
+// [tool.Message]s and runs the loop to its final text (see [Engine.generate]).
 func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, error) {
 	start := time.Now()
-	// Stamp the caller identity once per turn (S2): a scope-narrowing Tool handler
-	// resolves the Agent from ctx, never the LLM args.
-	ctx = tool.WithCaller(ctx, e.agentID)
-	out, err := e.loopFor(messages).Run(withRoundCounter(ctx), toToolMessages(messages))
+	out, err := e.generate(ctx, messages, nil)
 	// #125: one full-turn span per Generate, spanning every round, recorded on the
 	// success AND error path so a turn that fails mid-loop is still measured.
 	e.rec.LLMTurn(e.provName, time.Since(start))
@@ -577,18 +654,100 @@ func (e *Engine) Generate(ctx context.Context, messages []llm.Message) (string, 
 // GenerateStream implements [agent.StreamingEngine] (B1): it runs the same
 // tool-use loop but streams the final answer's prose deltas to onText as they
 // arrive, so the voice loop can segment and dispatch sentences before the
-// completion finishes. It installs the same per-turn round counter as
-// [Engine.Generate], so the A3 LLMRound / provider-call metrics are recorded
-// identically on the streaming production path. Returns the full final text.
+// completion finishes. On a dice-armed turn the reply is BUFFERED and the whole
+// text is pushed once after the invented-roll guard clears (#399, ADR-0012: a
+// spoken invented number cannot be unsaid, so an armed turn must not stream live);
+// the caller's sentence splitter handles the whole-text push exactly as the
+// non-streaming RunStream fallback does. Returns the full final text.
 func (e *Engine) GenerateStream(ctx context.Context, messages []llm.Message, onText func(delta string) error) (string, error) {
 	start := time.Now()
-	// Stamp the caller identity once per turn (S2), identical to Generate.
-	ctx = tool.WithCaller(ctx, e.agentID)
-	out, err := e.loopFor(messages).RunStream(withRoundCounter(ctx), toToolMessages(messages), onText)
+	out, err := e.generate(ctx, messages, onText)
 	// #125: the streaming production path records the same one-per-turn LLMTurn span
 	// Generate does, on success and error alike.
 	e.rec.LLMTurn(e.provName, time.Since(start))
 	return out, err
+}
+
+// generate is the shared body of [Engine.Generate] and [Engine.GenerateStream]. It
+// computes the dice-arming decision ONCE (replacing the old double-call loop
+// selection), then:
+//
+//   - Unarmed turn: the dice-less loop runs, streaming straight through to onText
+//     when the caller wants it (byte-identical to the pre-#399 path).
+//   - Armed turn: the system prompt is hardened on a COPIED slice (#399 Option B),
+//     the turn runs BUFFERED through the full loop — even on the streaming path —
+//     while a [calledTools] recorder tracks whether the dice Tool was actually
+//     executed, and the post-hoc invented-roll guard (Option C) runs before any
+//     prose is handed to onText.
+//
+// onText nil selects the non-streaming Generate path. It always stamps the caller
+// identity (S2) and a fresh per-turn round counter so LLMRound spans index from 0.
+func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText func(delta string) error) (string, error) {
+	// Stamp the caller identity once per turn (S2): a scope-narrowing Tool handler
+	// resolves the Agent from ctx, never the LLM args.
+	ctx = tool.WithCaller(ctx, e.agentID)
+
+	if !needsDice(e.language, messages) {
+		// Plain turn: dice-less loop, no hardening, stream straight through. This
+		// path is byte-identical to the pre-#399 behaviour.
+		msgs := toToolMessages(messages)
+		if onText != nil {
+			return e.gated.RunStream(withRoundCounter(ctx), msgs, onText)
+		}
+		return e.gated.Run(withRoundCounter(ctx), msgs)
+	}
+
+	// Armed turn: harden the system prompt (copied slice) and run BUFFERED so the
+	// guard can rewrite the whole reply before a single number is spoken.
+	msgs := toToolMessages(withDiceHardening(messages))
+	called := newCalledTools()
+	text, err := e.full.Run(withCalledTools(withRoundCounter(ctx), called), msgs)
+	if err != nil {
+		return "", err
+	}
+
+	// Post-hoc guard (Option C): dice was armed, the dice Tool was never actually
+	// called, and the reply narrates a numeric roll result → the model invented it.
+	// Regenerate ONCE with the dice Tool forced; the forced round's provider failures
+	// flow into the #398 policy (no new retry). The discarded draft is NEVER
+	// delivered — on a regeneration error the turn fails rather than speak the
+	// invented number (ADR-0030: a discarded draft must not surface).
+	if !called.has(diceToolName) && claimsRollResult(text) {
+		e.rec.MalformedToolGen(e.provName, observe.MalformedRollClaim)
+		slog.Warn("agenttool: dice armed but model narrated an unrolled result; regenerating with forced dice tool",
+			"provider", string(e.provName))
+		forced := withForcedToolChoice(withRoundCounter(ctx), llm.ToolChoice{Mode: llm.ToolChoiceTool, Tool: diceToolName})
+		regen, rerr := e.full.Run(forced, msgs)
+		if rerr != nil {
+			return "", rerr
+		}
+		text = regen // deliver the regenerated reply as-is — the guard fires at most once
+	}
+
+	// Deliver the (possibly regenerated) whole text once — same whole-text push the
+	// non-streaming RunStream fallback performs, so the caller's sentence splitter
+	// behaves identically.
+	if onText != nil && text != "" {
+		if err := onText(text); err != nil {
+			return "", err
+		}
+	}
+	return text, nil
+}
+
+// withDiceHardening returns messages with [diceHardeningInstruction] appended to
+// the system prompt, on a COPIED slice so the caller's Hot Context is untouched
+// (#399 Option B). If messages[0] is the system message its text is extended;
+// otherwise a system message carrying the instruction is prepended. Applied only
+// on dice-armed turns.
+func withDiceHardening(messages []llm.Message) []llm.Message {
+	if len(messages) > 0 && messages[0].Role == llm.RoleSystem {
+		out := make([]llm.Message, len(messages))
+		copy(out, messages)
+		out[0].Text = out[0].Text + "\n\n" + diceHardeningInstruction
+		return out
+	}
+	return append([]llm.Message{{Role: llm.RoleSystem, Text: diceHardeningInstruction}}, messages...)
 }
 
 // toToolMessages converts the agent loop's [llm.Message]s into [tool.Message]s.
