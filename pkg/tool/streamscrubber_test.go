@@ -23,22 +23,43 @@ func collect(t *testing.T, deltas []string) string {
 }
 
 // TestStreamScrubberSplitAtEveryIndex is the zero-leak guarantee: no matter WHERE
-// the provider chunks the stream, the marked pseudo-call never reaches the sink,
-// and the surrounding prose does. The whole message is split at every possible
-// byte boundary.
+// the provider chunks the stream (including mid-UTF-8-rune, since deltas are
+// byte-sliced), the marked pseudo-call never reaches the sink and the surrounding
+// prose is reconstructed exactly. Each row is split at every possible byte
+// boundary.
 func TestStreamScrubberSplitAtEveryIndex(t *testing.T) {
-	full := `Rolling now. <function=dice {"count":1,"sides":20}</function>`
-	wantPrefix := "Rolling now."
+	rows := []struct {
+		full string
+		want string // the visible prose after scrubbing
+	}{
+		{`Rolling now. <function=dice {"count":1,"sides":20}</function>`, "Rolling now. "},
+		{`Trailing prose <function=dice {}</function> after the call.`, "Trailing prose  after the call."},
+		// Multi-byte runes around the call: café/☕/über must survive byte-split.
+		{`café ☕ <function=dice {}</function> über`, "café ☕  über"},
+	}
+	for _, row := range rows {
+		for i := 0; i <= len(row.full); i++ {
+			got := collect(t, []string{row.full[:i], row.full[i:]})
+			if strings.Contains(got, "<function") || strings.Contains(got, "</function") {
+				t.Fatalf("%q split at %d leaked the marker: %q", row.full, i, got)
+			}
+			if got != row.want {
+				t.Fatalf("%q split at %d: visible = %q, want %q", row.full, i, got, row.want)
+			}
+		}
+	}
+}
+
+// TestStreamScrubberResumesAfterCall — a completed pseudo-call must NOT put the
+// scrubber into a permanent swallow: trailing prose after </function> is spoken,
+// matching what the batch scrub keeps. Split at every boundary for good measure.
+func TestStreamScrubberResumesAfterCall(t *testing.T) {
+	full := `Hmm <function=dice {}</function> ok`
 	for i := 0; i <= len(full); i++ {
-		deltas := []string{full[:i], full[i:]}
-		got := collect(t, deltas)
-		if strings.Contains(got, "<function") || strings.Contains(got, "</function") {
-			t.Fatalf("split at %d leaked the marker: %q", i, got)
+		got := collect(t, []string{full[:i], full[i:]})
+		if got != "Hmm  ok" {
+			t.Fatalf("split at %d: got %q, want %q (trailing prose dropped?)", i, got, "Hmm  ok")
 		}
-		if !strings.HasPrefix(got, "Rolling now.") {
-			t.Fatalf("split at %d dropped prose: %q", i, got)
-		}
-		_ = wantPrefix
 	}
 }
 
@@ -75,11 +96,12 @@ func TestStreamScrubberDivergingPartialMarker(t *testing.T) {
 	}
 }
 
-// TestStreamScrubberHoldbackCap pins that a pathological unterminated "<function"
-// prefix does not buffer unbounded — past the cap it is flushed as prose.
-func TestStreamScrubberHoldbackCap(t *testing.T) {
-	// A '<' followed by 5 KiB of 'f' can never complete "<function=", but it is a
-	// prefix at each step for the first few bytes; the cap must release it.
+// TestStreamScrubberLongDivergingRunFlushed pins that a long run that starts
+// like the marker but diverges ("<ffff…") is flushed as prose, not buffered:
+// held only ever holds a proper prefix of "<function=" (≤ 9 bytes), so a
+// diverging run releases immediately rather than growing unbounded.
+func TestStreamScrubberLongDivergingRunFlushed(t *testing.T) {
+	// A '<' followed by 5 KiB of 'f' diverges at the 3rd byte ('f' vs 'u').
 	big := "<" + strings.Repeat("f", 5000)
 	var got strings.Builder
 	sc := &streamScrubber{out: func(s string) error { got.WriteString(s); return nil }}

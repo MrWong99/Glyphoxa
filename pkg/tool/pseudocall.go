@@ -21,46 +21,105 @@ import (
 // text→text; the observability hook lives on [Loop] as a caller-supplied
 // callback, not an observe/metrics import here.
 
-// pseudoCallRE matches one `<function=NAME ...>...</function>` occurrence. The
-// (?s) flag lets the middle span newlines; the non-greedy body stops at the
-// first `</function>` (valid JSON never contains that literal).
+const (
+	pseudoMarker = "<function=" // opening literal of a pseudo-call
+	pseudoClose  = "</function>"
+)
+
+// pseudoCallRE matches one well-formed `<function=NAME ...>...</function>`
+// occurrence. The (?s) flag lets the middle span newlines; the non-greedy body
+// stops at the first `</function>` (valid JSON never contains that literal).
 var pseudoCallRE = regexp.MustCompile(`(?s)<function=(\w+)(.*?)</function>`)
+
+// openerNameRE reads the tool name off an UNTERMINATED opener (a `<function=`
+// with no closing `</function>`, e.g. a max_tokens-truncated call).
+var openerNameRE = regexp.MustCompile(`^<function=(\w+)`)
 
 // PseudoCall is one recovered pseudo-XML tool call: the Tool name and the parsed
 // JSON arguments. Args is nil when the wrapper's arguments could not be parsed
-// as JSON — the occurrence is still stripped from spoken text, but the [Loop]
-// treats a nil-Args call as unrecoverable (logged + metered, never executed).
+// as JSON — or when the wrapper was unterminated — so the occurrence is stripped
+// from spoken text but the [Loop] treats it as unrecoverable (logged + metered,
+// never executed). Name is "" when even the name could not be read.
 type PseudoCall struct {
 	Name string
 	Args json.RawMessage
 }
 
-// ExtractPseudoCalls scans text for `<function=…>…</function>` pseudo-tool-call
-// syntax, returns the text with every occurrence removed (clean speech/transcript
-// text), and one [PseudoCall] per occurrence in order. Text with no occurrence is
-// returned unchanged with a nil slice (identity). A whole-message pseudo-call
-// yields clean == "".
+// ExtractPseudoCalls scans text for pseudo-tool-call syntax, returns the text
+// with every occurrence removed (clean speech/transcript text), and one
+// [PseudoCall] per occurrence in order. It handles three shapes:
+//
+//   - well-formed `<function=…>…</function>` — parsed for recoverable args;
+//   - an UNTERMINATED `<function=…` opener with no close (truncation / the model
+//     forgetting the tag) — stripped from the opener to end of text, Args nil
+//     (unrecoverable: the args are incomplete);
+//   - orphan `</function>` closers left behind when a JSON string arg itself
+//     contained the literal `</function>` — stripped so no garbage is spoken.
+//
+// Text with none of these is returned byte-identical with a nil slice. Excision
+// joints are whitespace-collapsed locally (so "Los! <call>" → "Los!") while
+// untouched prose — including newlines in Butler markdown — stays byte-identical.
+// A whole-message pseudo-call yields clean == "".
 func ExtractPseudoCalls(text string) (string, []PseudoCall) {
 	locs := pseudoCallRE.FindAllStringSubmatchIndex(text, -1)
-	if len(locs) == 0 {
-		return text, nil
-	}
 
-	calls := make([]PseudoCall, 0, len(locs))
-	var b strings.Builder
+	var calls []PseudoCall
+
+	// Prose segments between well-formed matches; each match becomes a PseudoCall.
+	segs := make([]string, 0, len(locs)+1)
 	prev := 0
 	for _, m := range locs {
-		// m[0:2] full match, m[2:4] name group, m[4:6] middle group.
-		b.WriteString(text[prev:m[0]])
+		segs = append(segs, text[prev:m[0]])
 		prev = m[1]
-
 		name := text[m[2]:m[3]]
 		args, _ := parseArgs(text[m[4]:m[5]])
 		calls = append(calls, PseudoCall{Name: name, Args: args})
 	}
-	b.WriteString(text[prev:])
+	segs = append(segs, text[prev:])
 
-	return collapseSpace(b.String()), calls
+	// Join segments, collapsing whitespace only at the excision joints.
+	clean := joinAtSeams(segs)
+
+	// Unterminated opener: everything from the leftover `<function=` to end of
+	// text is an incomplete call. Strip it (no recovery) and meter it.
+	if idx := strings.Index(clean, pseudoMarker); idx >= 0 {
+		name := ""
+		if m := openerNameRE.FindStringSubmatch(clean[idx:]); m != nil {
+			name = m[1]
+		}
+		clean = strings.TrimRight(clean[:idx], " \t\r\n")
+		calls = append(calls, PseudoCall{Name: name, Args: nil})
+	}
+
+	// Orphan closers left by an inner literal </function> in a JSON string arg.
+	clean = strings.ReplaceAll(clean, pseudoClose, "")
+
+	if len(calls) == 0 {
+		// Byte-identical identity for prose with nothing to scrub.
+		return text, nil
+	}
+	return clean, calls
+}
+
+// joinAtSeams concatenates prose segments, trimming whitespace on both sides of
+// each seam (where a pseudo-call was excised) and inserting a single space when
+// both sides are non-empty. Interior bytes of each segment — including newlines —
+// are preserved exactly.
+func joinAtSeams(segs []string) string {
+	clean := segs[0]
+	for _, seg := range segs[1:] {
+		l := strings.TrimRight(clean, " \t\r\n")
+		r := strings.TrimLeft(seg, " \t\r\n")
+		switch {
+		case l == "":
+			clean = r
+		case r == "":
+			clean = l
+		default:
+			clean = l + " " + r
+		}
+	}
+	return clean
 }
 
 // parseArgs turns the raw middle of a pseudo-call wrapper into JSON args. It
@@ -88,13 +147,3 @@ func parseArgs(middle string) (json.RawMessage, bool) {
 	}
 	return json.RawMessage(cand), true
 }
-
-// collapseSpace tidies the seam left where a pseudo-call was cut out of prose:
-// runs of blank space (incl. newlines) collapse to a single space and the ends
-// are trimmed, so "Los, Philipp! <call>" → "Los, Philipp!" rather than leaving a
-// dangling double space.
-func collapseSpace(s string) string {
-	return strings.TrimSpace(spaceRunRE.ReplaceAllString(s, " "))
-}
-
-var spaceRunRE = regexp.MustCompile(`[ \t\r\n]+`)

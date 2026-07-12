@@ -294,7 +294,11 @@ func (l *Loop) recoverPseudoCalls(round int, asst *AssistantMessage) {
 	asst.Text = clean
 	for i, m := range matches {
 		if m.Args != nil {
-			if _, _, ok := l.grants.resolve(m.Name); ok {
+			// Recover only if the call will ACTUALLY execute: granted, registered,
+			// and eligible for inline execution (read-only or proposal-mediated,
+			// ADR-0030/0052). A granted-but-refused call is metered as NOT
+			// recovered so the metric never overcounts recoveries execute rejects.
+			if t, _, ok := l.grants.resolve(m.Name); ok && inlineEligible(t) {
 				asst.ToolCalls = append(asst.ToolCalls, ToolCall{
 					ID:    fmt.Sprintf("pseudo-%d-%d", round, i),
 					Name:  m.Name,
@@ -304,12 +308,24 @@ func (l *Loop) recoverPseudoCalls(round int, asst *AssistantMessage) {
 				continue
 			}
 		}
-		// Ungranted or unparseable: strip-only. The intent is lost but the leak is
-		// contained, and the occurrence is logged + metered.
+		// Ungranted, unparseable, or ineligible: strip-only. The intent is lost
+		// but the leak is contained, and the occurrence is logged + metered.
 		l.firePseudoCall(m.Name, false)
 		slog.Warn("tool: stripped un-recoverable pseudo-XML tool call from assistant text",
 			"tool", m.Name, "recovered", false)
 	}
+}
+
+// inlineEligible reports whether t may run inline during generation (ADR-0030):
+// a read-only Tool, or a [ProposalMediated] one (ADR-0052). It mirrors the gate
+// in [Loop.execute] so recovery and the OnPseudoCall recovered=true signal agree
+// on which pseudo-calls will genuinely execute.
+func inlineEligible(t Tool) bool {
+	if t.ReadOnly() {
+		return true
+	}
+	pm, ok := t.(ProposalMediated)
+	return ok && pm.ProposalMediated()
 }
 
 func (l *Loop) firePseudoCall(name string, recovered bool) {

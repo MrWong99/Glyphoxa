@@ -29,7 +29,8 @@ type scriptedStreamingProvider struct {
 }
 
 func (p *scriptedStreamingProvider) GenerateStream(ctx context.Context, messages []Message, tools []Decl, onText func(string) error) (AssistantMessage, error) {
-	// Peek the scripted reply WITHOUT consuming, mirror Generate's bookkeeping.
+	// Consume the next scripted step (advancing p.calls), mirroring Generate's
+	// bookkeeping, then stream its reply text in chunks.
 	p.seenMessages = append(p.seenMessages, messages)
 	p.seenDecls = append(p.seenDecls, tools)
 	if p.calls >= len(p.steps) {
@@ -204,6 +205,39 @@ func TestLoopStripsUnparseablePseudoCall(t *testing.T) {
 	}
 	if len(rec.names) != 1 || rec.recovered[0] {
 		t.Errorf("OnPseudoCall = %+v, want (dice,false)", rec.recovered)
+	}
+}
+
+// TestLoopIneligiblePseudoCallNotRecovered — the metric must not overcount: a
+// granted but side-effecting, non-proposal-mediated Tool (which loop.execute
+// would refuse, ADR-0030) is stripped, NOT executed, and metered recovered=false
+// even though it resolves to a granted Tool.
+func TestLoopIneligiblePseudoCallNotRecovered(t *testing.T) {
+	rec := &pseudoRecorder{}
+	r := NewRegistry()
+	r.MustRegister(stubTool{name: "writer", readOnly: false})
+	gs := NewGrantSet(r, Grant{ToolName: "writer"})
+	p := &scriptedProvider{
+		t: t,
+		steps: []scriptStep{
+			{reply: AssistantMessage{Text: `Saving. <function=writer {"data":1}</function>`}},
+		},
+	}
+	loop := NewLoop(p, gs)
+	loop.OnPseudoCall = rec.hook
+
+	final, err := loop.Run(context.Background(), []Message{{Role: RoleUser, Text: "save"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final != "Saving." {
+		t.Errorf("final = %q, want scrubbed prose", final)
+	}
+	if p.calls != 1 {
+		t.Errorf("ineligible call must not force a tool round, calls = %d", p.calls)
+	}
+	if len(rec.names) != 1 || rec.names[0] != "writer" || rec.recovered[0] {
+		t.Errorf("OnPseudoCall = %+v/%+v, want one (writer,false)", rec.names, rec.recovered)
 	}
 }
 

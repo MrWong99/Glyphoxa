@@ -24,10 +24,11 @@ func TestExtractPseudoCallsLiveVariants(t *testing.T) {
 			wantArgs: `{"count":1,"sides":20}`,
 		},
 		{
+			// Byte-exact to the live paren form (spaces after ':' and ',').
 			name:     "paren-wrapped",
-			in:       `Let me check. <function=kg_query({"query":"We-Wetter","limit":5})</function>`,
+			in:       `Let me check. <function=kg_query({"query": "We-Wetter", "limit": 5})</function>`,
 			wantName: "kg_query",
-			wantArgs: `{"query":"We-Wetter","limit":5}`,
+			wantArgs: `{"query": "We-Wetter", "limit": 5}`,
 		},
 		{
 			name:     "bare-brace",
@@ -131,6 +132,67 @@ func TestExtractPseudoCallsNoArgsIsEmptyObject(t *testing.T) {
 	}
 	if !jsonEqual(t, calls[0].Args, `{}`) {
 		t.Errorf("no-brace args should default to {}, got %s", calls[0].Args)
+	}
+}
+
+// TestExtractPseudoCallsUnterminatedEmbedded — the medium bug: a `<function=`
+// opener with NO closing `</function>` (max_tokens cut / model forgot the tag)
+// used to slip past the regex and get spoken/persisted verbatim. It must be
+// stripped from the opener to end of text; the prose before it survives, and the
+// occurrence is recorded strip-only (nil Args).
+func TestExtractPseudoCallsUnterminatedEmbedded(t *testing.T) {
+	in := `Let me roll. <function=dice {"count":1,"sides":20`
+	clean, calls := ExtractPseudoCalls(in)
+	if clean != "Let me roll." {
+		t.Errorf("clean = %q, want surviving prose %q", clean, "Let me roll.")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	if calls[0].Name != "dice" {
+		t.Errorf("unterminated opener name = %q, want dice", calls[0].Name)
+	}
+	if calls[0].Args != nil {
+		t.Errorf("unterminated call must be unrecoverable (nil Args), got %s", calls[0].Args)
+	}
+}
+
+func TestExtractPseudoCallsUnterminatedWholeMessage(t *testing.T) {
+	in := `<function=remember_knowledge>{"kind":"edge","relation":"knows"`
+	clean, calls := ExtractPseudoCalls(in)
+	if clean != "" {
+		t.Errorf("whole-message truncated call should leave empty clean, got %q", clean)
+	}
+	if len(calls) != 1 || calls[0].Name != "remember_knowledge" || calls[0].Args != nil {
+		t.Fatalf("calls = %+v, want one (remember_knowledge, nil)", calls)
+	}
+}
+
+// TestExtractPseudoCallsInnerLiteralCloser — a JSON string arg that itself
+// contains the literal `</function>` makes the regex close early, leaving an
+// orphan `</function>` fragment behind. It must not survive into spoken text.
+func TestExtractPseudoCallsInnerLiteralCloser(t *testing.T) {
+	in := `Note this <function=note {"text":"a </function> tag"}</function> done`
+	clean, _ := ExtractPseudoCalls(in)
+	if strings.Contains(clean, "</function>") {
+		t.Errorf("orphan closer leaked into clean text: %q", clean)
+	}
+	if strings.Contains(clean, "<function") {
+		t.Errorf("opener leaked into clean text: %q", clean)
+	}
+}
+
+// TestExtractPseudoCallsPreservesMarkdownNewlines — Butler replies are markdown;
+// excising a call must NOT flatten newlines in the untouched prose (a bullet list
+// stays a bullet list).
+func TestExtractPseudoCallsPreservesMarkdownNewlines(t *testing.T) {
+	in := "Here is the list:\n- one\n- two\n<function=dice {\"count\":1,\"sides\":6}</function>"
+	clean, calls := ExtractPseudoCalls(in)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if clean != "Here is the list:\n- one\n- two" {
+		t.Errorf("markdown newlines not preserved: %q", clean)
 	}
 }
 
