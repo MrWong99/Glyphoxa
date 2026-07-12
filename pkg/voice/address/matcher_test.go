@@ -334,6 +334,65 @@ func TestMatcher_GenuineNameOutranksDerivedAlias(t *testing.T) {
 	assertIDs(t, m.TargetMatch("Art, wie läuft das Geschäft heute Abend?"), "npc-art")
 }
 
+// #413 "Gott"-class corpus. The Butler carries a common-word / exclamation
+// German name ("Gott"), voiced (not GM-gated here), alongside two fallback-
+// eligible Character NPCs. gott413 is AddressOnly like the production Butler.
+var (
+	gott413 = address.Agent{
+		Target:      voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Gott"},
+		AddressOnly: true,
+	}
+	gesa413    = address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-gesa", AgentRole: "character", Name: "Gesa"}}
+	philipp413 = address.Agent{Target: voiceevent.AddressTarget{AgentID: "npc-philipp", AgentRole: "character", Name: "Philipp"}}
+)
+
+// TestMatcher_ButlerNamedWinsOverLastSpeakerBonus is #413 AC1: a voiced Butler
+// named "Gott" addressed by name wins the turn even though a fallback-eligible
+// Character (Gesa) holds the last-speaker bonus. Both the exact name and a
+// phonetic STT variant ("Goth", Kölner code 42 ≡ "gott") are covered. Clearing
+// the name threshold sets AnyNameMatched, which suppresses Gesa's LastAddressed
+// bonus, so the confidently-named Butler stands alone — the "confident Butler
+// match must outrank a Character fallback bonus" decision, pinned both ways.
+func TestMatcher_ButlerNamedWinsOverLastSpeakerBonus(t *testing.T) {
+	for _, ask := range []string{"Gott, was denkst du darüber?", "Goth, was denkst du darüber?"} {
+		m := address.NewMatcher(address.Config{Language: "de"}, gott413, gesa413, philipp413)
+		// Gesa holds the floor (last-speaker bonus) going into the Butler ask.
+		assertIDs(t, m.TargetMatch("Gesa, erzähl mir von den Kräutern."), "npc-gesa")
+		assertIDs(t, m.TargetMatch(ask), "butler")
+	}
+}
+
+// TestMatcher_ButlerNamedWinsOverCoNamedCharacter is #413 AC2 from the ranking
+// angle: the Butler "Gott" is rostered AFTER both Characters, and the ask names
+// the Butler AND a Character ("Gesa") in one breath. Both are exact hits (1.0),
+// so without the Butler tie-break the roster-order fallback would hand the
+// single-target slot to Gesa (rostered first). A confidently name-matched Butler
+// outranks the co-named Character regardless of roster position (#400 fix, shared
+// corpus), so the deliberate Butler address wins.
+func TestMatcher_ButlerNamedWinsOverCoNamedCharacter(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, gesa413, philipp413, gott413)
+	assertIDs(t, m.TargetMatch("Gott, was hat Gesa gerade gesagt?"), "butler")
+}
+
+// TestMatcher_GottExclamationFromPlayerDoesNotReachButler is the false-positive
+// guard for the "Gott"-class collision name. "Gott" is a common German
+// exclamation ("Oh Gott, was war das?"), so an exact-name match on it is
+// unavoidable at the fuzzy layer. The principled mitigation is the Butler's
+// GM-gate (ADR-0024): with a gate armed, a PLAYER exclaiming "Oh Gott" is dropped
+// before scoring and reaches nobody — the exclamation never routes to the Butler
+// nor black-holes onto a Character (AnyNameMatched suppresses the fallbacks). The
+// residual case (the GM themself exclaiming "Oh Gott") is an inherent exact-name
+// collision, mitigated at configuration time by the rename-collision warning
+// follow-up filed against #413.
+func TestMatcher_GottExclamationFromPlayerDoesNotReachButler(t *testing.T) {
+	const gm = "gm-1"
+	m := address.NewMatcher(address.Config{
+		Language:     "de",
+		ButlerGMGate: func(s string) bool { return s == gm },
+	}, gott413, gesa413, philipp413)
+	assertIDs(t, m.TargetMatchFrom("player-7", "Oh Gott, was war das?"))
+}
+
 // TestMatcher_MaxTargetsCap proves the cap is configurable: MaxTargets: 2 keeps
 // the top two of a larger named set, while MaxTargets: -1 keeps them all.
 func TestMatcher_MaxTargetsCap(t *testing.T) {
