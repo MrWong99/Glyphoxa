@@ -272,63 +272,121 @@ func TestMatcher_GlyfoxaPhoneticVariantRoutesToButler(t *testing.T) {
 	}
 }
 
-// TestMatcher_ExactCharacterBeatsPhoneticButlerCollision is the #400/#413
-// counter-case that bounds the fix: an exactly-addressed Character must NOT lose
-// to a Butler that merely PHONETICALLY collides with a topic word. NameMatch is a
-// FLAT weight so both total 1.0, but the raw-similarity tie-break separates them —
-// the exact Character (1.0) outranks the phonetic Butler (0.9). Rows:
-//
-//   - "Gesa, wie geht es dir?"        — "geht" ≡ "Gott" (Kölner code 42)
-//   - "Gesa, das ist eine gute Idee." — "gute" ≡ "Gott"
-//   - "Philipp, wie geht es deinem Bruder?"
-//   - "So, Glyfoxa, was hat Bart …?"  — the #400 live line: the Butler is only a
-//     ph→f phonetic hit ("Glyfoxa" ≡ "Glyphoxa", 0.9) while "Bart" is exact (1.0),
-//     so the exactly-heard Character wins. This is the accepted topic-mention
-//     trade-off: a phonetic Butler collision cannot outrank an exact Character.
-//
-// Without the score-primary rule a common-word Butler name would steal every ask
-// that happens to contain a phonetically-colliding word — the regression this
-// pins shut.
-func TestMatcher_ExactCharacterBeatsPhoneticButlerCollision(t *testing.T) {
+// TestMatcher_VocativeFlagCorpus is the binding #400/#413 corpus (ADR-0024
+// Vocative Flag amendment). A name PUNCTUATION-BRACKETED as a direct address
+// (two-sided: a marker on each side, none inside) outranks a same-total name that
+// merely appears mid-clause as the TOPIC — tie-break tier 2, above name
+// similarity. Each row states the routed Agent and why the flag falls where it
+// does.
+func TestMatcher_VocativeFlagCorpus(t *testing.T) {
+	// Roster factories (the Butler is always AddressOnly, as in production).
+	glyphoxaBart := func() *address.Matcher {
+		return address.NewMatcher(address.Config{Language: "de"}, glyfoxaButler, bart)
+	}
+	gottScene := func() *address.Matcher {
+		return address.NewMatcher(address.Config{Language: "de"}, gott413, gesa413, philipp413)
+	}
+	gottSceneButlerLast := func() *address.Matcher {
+		return address.NewMatcher(address.Config{Language: "de"}, gesa413, philipp413, gott413)
+	}
+
 	cases := []struct {
-		utter, want string
+		name  string
+		m     *address.Matcher
+		utter string
+		want  []string
 	}{
-		{"Gesa, wie geht es dir?", "npc-gesa"},
-		{"Gesa, das ist eine gute Idee.", "npc-gesa"},
-		{"Philipp, wie geht es deinem Bruder?", "npc-philipp"},
+		// 1: Butler flagged ("So, Glyfoxa,"), Bart mid-clause unflagged → Butler,
+		// even though the Butler is only a ph→f phonetic hit (0.9) vs Bart exact 1.0.
+		{"1 glyfoxa-vocative-bart-topic", glyphoxaBart(),
+			"So, Glyfoxa, was hat Bart über sein Gasthaus erzählt?", []string{"butler"}},
+		// 2–4: Character flagged at the head, Butler only a phonetic collision word
+		// ("geht"/"gute" ≡ "Gott") mid-clause and unflagged → Character.
+		{"2 gesa-head-geht-collision", gottScene(), "Gesa, wie geht es dir?", []string{"npc-gesa"}},
+		{"3 gesa-head-gute-collision", gottScene(), "Gesa, das ist eine gute Idee.", []string{"npc-gesa"}},
+		{"4 philipp-head-geht-collision", gottScene(), "Philipp, wie geht es deinem Bruder?", []string{"npc-philipp"}},
+		// 5: trailing vocative — Gesa is flagged (comma before, utterance end after);
+		// the "geht" collision stays unflagged mid-clause → Gesa.
+		{"5 gesa-trailing-vocative", gottScene(), "Wie geht es dir, Gesa?", []string{"npc-gesa"}},
+		// 8: two-sided rule — "Glyfoxa," is flagged; "frag Bart," is comma-FOLLOWED
+		// but its left neighbour is a word, so Bart is unflagged → Butler.
+		{"8 glyfoxa-vocative-bart-comma-followed-only", glyphoxaBart(),
+			"Glyfoxa, frag Bart, ob er kommt.", []string{"butler"}},
+		// 9: "Oh Gott," — Gott's left neighbour "Oh" is a word → Butler unflagged;
+		// "Gesa," is two-sided flagged → Gesa (the exclamation loses to the address).
+		{"9 oh-gott-unflagged-gesa-vocative", gottScene(),
+			"Oh Gott, Gesa, was war das?", []string{"npc-gesa"}},
+		// 11: no punctuation at all → zero flags; tier 2 is a wash and tier 3 (name
+		// similarity) restores plain score order: Bart exact 1.0 beats Glyfoxa 0.9.
+		// The documented no-punctuation degrade.
+		{"11 no-punctuation-degrade", glyphoxaBart(),
+			"So Glyfoxa was hat Bart über sein Gasthaus erzählt", []string{"npc-bart"}},
 	}
 	for _, tc := range cases {
-		m := address.NewMatcher(address.Config{Language: "de"}, gott413, gesa413, philipp413)
-		assertIDs(t, m.TargetMatch(tc.utter), tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			assertIDs(t, tc.m.TargetMatch(tc.utter), tc.want...)
+		})
 	}
-	// The #400 live line, on its own roster (Butler "Glyphoxa" + Bart).
-	m := address.NewMatcher(address.Config{Language: "de"}, glyfoxaButler, bart)
-	assertIDs(t, m.TargetMatch("So, Glyfoxa, was hat Bart über sein Gasthaus erzählt?"), "npc-bart")
+
+	// 6: Character addressed first — "Bart," flagged, "Glyphoxa" mid-clause
+	// (left neighbour "ist") unflagged → Bart, regardless of roster order.
+	for _, m := range []*address.Matcher{
+		address.NewMatcher(address.Config{Language: "en"}, glyfoxaButler, bart),
+		address.NewMatcher(address.Config{Language: "en"}, bart, glyfoxaButler),
+	} {
+		assertIDs(t, m.TargetMatch("Bart, ist Glyphoxa hier?"), "npc-bart")
+	}
+
+	// 7: Butler addressed first — "Gott," flagged, "Gesa" mid-clause unflagged →
+	// Butler, whether the Butler is rostered first or last (the "Kings im Ring" ask).
+	for _, m := range []*address.Matcher{gottScene(), gottSceneButlerLast()} {
+		assertIDs(t, m.TargetMatch("Gott, was hat Gesa gerade gesagt?"), "butler")
+	}
 }
 
-// TestMatcher_EarliestAddresseeOutranksSameTierTopic pins the addressee-position
-// convention that resolves same-tier co-name ties (#400/#413, reviewer finding
-// #3). When two Agents match at the SAME similarity tier — both exact 1.0 — the
-// one spoken FIRST is the addressee and wins the single-target slot, regardless of
-// roster order:
-//
-//   - "Bart, ist Glyphoxa hier?" — Character addressed first, Butler named later
-//     as the topic → Bart. On main the Butler is rostered first, so the plain
-//     roster-order tie-break wrongly handed it the Butler; the position tie-break
-//     is what corrects it (this row is RED without the fix).
-//   - "Gott, was hat Gesa gerade gesagt?" — Butler addressed first, Character
-//     named later as the topic → Butler, whether the Butler is rostered first or
-//     LAST (the live "Kings im Ring" ask, #413).
-func TestMatcher_EarliestAddresseeOutranksSameTierTopic(t *testing.T) {
-	// Character addressed first, Butler is the topic → Character.
-	bartFirst := address.NewMatcher(address.Config{Language: "en"}, glyfoxaButler, bart)
-	assertIDs(t, bartFirst.TargetMatch("Bart, ist Glyphoxa hier?"), "npc-bart")
+// TestOffsetTokenizeMatchesTokenize is the property pin: the utterance-path
+// offset-preserving tokenizer produces a token TEXT sequence byte-identical to the
+// plain name-path tokenizer across the whole corpus (and edge inputs), so the
+// Vocative Flag rides on offsets alone and never perturbs which tokens match.
+func TestOffsetTokenizeMatchesTokenize(t *testing.T) {
+	corpus := []string{
+		"So, Glyfoxa, was hat Bart über sein Gasthaus erzählt?",
+		"Gesa, wie geht es dir?",
+		"Gesa, das ist eine gute Idee.",
+		"Philipp, wie geht es deinem Bruder?",
+		"Wie geht es dir, Gesa?",
+		"Bart, ist Glyphoxa hier?",
+		"Gott, was hat Gesa gerade gesagt?",
+		"Glyfoxa, frag Bart, ob er kommt.",
+		"Oh Gott, Gesa, was war das?",
+		"Oh Gott, was war das?",
+		"So Glyfoxa was hat Bart über sein Gasthaus erzählt",
+		"Marek, was liegt gerade auf deinem Amboss?",
+		"Art, wie läuft das Geschäft heute Abend?",
+		"Bart-Holomew — der Wirt … kommt?", // en/em dash, ellipsis, hyphenated
+		"",
+		"   ",
+		"…!?,",
+		"D20 rolls a 7",
+		"Straße, Grüße, Öl",
+	}
+	for _, s := range corpus {
+		if got, want := address.OffsetTokenizeTexts(s), address.Tokenize(s); !equalStrings(got, want) {
+			t.Errorf("offsetTokenize(%q) tokens = %v, want %v", s, got, want)
+		}
+	}
+}
 
-	// Butler addressed first, Character is the topic → Butler, both roster orders.
-	butlerLast := address.NewMatcher(address.Config{Language: "de"}, gesa413, philipp413, gott413)
-	assertIDs(t, butlerLast.TargetMatch("Gott, was hat Gesa gerade gesagt?"), "butler")
-	butlerFirst := address.NewMatcher(address.Config{Language: "de"}, gott413, gesa413, philipp413)
-	assertIDs(t, butlerFirst.TargetMatch("Gott, was hat Gesa gerade gesagt?"), "butler")
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestMatcher_TruncatedNameRoutesToAgent pins the #197 live misroute

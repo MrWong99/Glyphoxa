@@ -434,7 +434,14 @@ func (m *Matcher) TargetMatchFrom(speakerID, text string) []voiceevent.AddressRo
 // MaxTargets slot, and is never recorded as lastAddressed.
 func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRouted {
 	now := m.clock()
-	words := tokenize(text)
+	// Offset-preserving tokenization on the utterance path: the token TEXT is
+	// byte-identical to tokenize(text), and the byte offsets/gap markers drive the
+	// Vocative Flag (ADR-0024). words feeds the recency/heuristic state unchanged.
+	toks, markAfter := offsetTokenize(text)
+	words := make([]string, len(toks))
+	for i := range toks {
+		words[i] = toks[i].text
+	}
 
 	m.mu.Lock()
 
@@ -443,7 +450,7 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 	// post-Remove roster and hand one agent's name score to the survivor
 	// reindexed into its slot (#145). nameScores stays keyed by m.agents
 	// positions only because index and roster come from one snapshot.
-	nameScores, namePositions := m.index.score(words)
+	nameScores, nameFlagged, namePositions := m.index.score(toks, markAfter)
 
 	m.pruneLocked(now)
 	m.recordWordsLocked(words, now)
@@ -526,30 +533,33 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		hits = kept
 	}
 
-	// Highest total wins; equal totals rank by fuzzy name similarity, then by the
-	// addressee-position convention, then by Agent order.
+	// Tie-break chain (ADR-0024 amendment, #400/#413):
+	//   1. highest total wins;
+	//   2. a Vocative-flagged name (punctuation-bracketed as a direct address) beats
+	//      an unflagged one;
+	//   3. higher fuzzy name similarity;
+	//   4. earlier addressee position;
+	//   5. stable roster order.
 	//
-	// Name-similarity tie-break: NameMatch contributes a FLAT weight, so an exactly
-	// heard name (1.0) and an incidental phonetic collision (0.9, e.g. "gerade" ≈
-	// "Greta" under Double Metaphone, #198; or "geht"/"gute" ≈ a Butler named
-	// "Gott" under Kölner Phonetik) total the same. Only the raw similarity
-	// separates them, so an exactly-addressed Character always outranks a Butler
-	// (or any Agent) that merely phonetically-collided with a topic word — this is
-	// what keeps a common-word Butler name from stealing an ask plainly addressed
-	// to a Character (#413).
-	//
-	// Addressee-position tie-break (#400/#413): when two Agents match at the SAME
-	// similarity tier — both exact 1.0, e.g. a Butler addressed at the vocative
-	// head while a Character is named later as the topic ("Gott, was hat Gesa
-	// gesagt?") — the one spoken FIRST is the addressee and wins the single-target
-	// slot, regardless of roster order. Conversely a Character addressed first with
-	// the Butler named later as the topic ("Bart, ist Glyphoxa hier?") routes to
-	// the Character. This is a general convention, not a Butler special-case: the
-	// Butler earns nothing here beyond being named first. (A Butler that failed the
-	// GM-gate is already excluded above, so it never reaches this sort.)
+	// NameMatch contributes a FLAT weight, so every name-matched hit totals the same
+	// (1.0) and tiers 2–4 do the real work. The Vocative Flag (tier 2) is why "So,
+	// Glyfoxa, was hat Bart …?" routes to the Butler: "Glyfoxa" is bracketed by
+	// commas (flagged) while "Bart" sits mid-clause (unflagged), so the flagged
+	// Butler wins even though its phonetic similarity (0.9) is below Bart's exact
+	// 1.0 — the #400 headline. Conversely "Bart, ist Glyphoxa hier?" flags only Bart
+	// (Glyphoxa's left neighbour is a word), so the Character wins. When neither name
+	// is bracketed (no punctuation at all) tier 2 is a wash and tier 3 restores the
+	// plain score order (documented no-punctuation degrade). The similarity tier
+	// still keeps a phonetic topic-collision ("geht" ≈ "Gott") from stealing an
+	// exactly-addressed Character (#413), and #198/#199 char-vs-char resolve on tiers
+	// 3–4 exactly as before. (A GM-gated-out Butler is excluded above the sort.)
+	flag := func(a Agent) bool { return nameFlagged[a.index] }
 	sort.SliceStable(hits, func(i, j int) bool {
 		if hits[i].total != hits[j].total {
 			return hits[i].total > hits[j].total
+		}
+		if fi, fj := flag(hits[i].agent), flag(hits[j].agent); fi != fj {
+			return fi
 		}
 		si, sj := nameScores[hits[i].agent.index], nameScores[hits[j].agent.index]
 		if si != sj {
