@@ -14,7 +14,7 @@ type pseudoRecorder struct {
 	recovered []bool
 }
 
-func (r *pseudoRecorder) hook(name string, recovered bool) {
+func (r *pseudoRecorder) hook(_ context.Context, name string, recovered bool) {
 	r.names = append(r.names, name)
 	r.recovered = append(r.recovered, recovered)
 }

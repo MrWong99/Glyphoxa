@@ -13,6 +13,13 @@ const diceHardeningInstruction = "When asked to roll dice, call the dice tool an
 // "a perfect 100"). A number outside 1..100 (a price, a year) mostly falls
 // outside the range, but the detector is recall-biased on purpose (see
 // [claimsRollResult]).
+//
+// Residual: the 1..100 cap misses a 3-digit invented result ("Ergebnis: 120") —
+// a false NEGATIVE. This is deliberate: extending to arbitrary integers would
+// false-POSITIVE on years, quantities, and gold amounts on the far more common
+// non-roll turns, and the cap covers every single die (d100 is the largest
+// standard die). Revisit if live traffic shows the model narrating multi-die SUMS
+// above 100 (e.g. "3d100") without calling the tool.
 var standaloneRollNumber = regexp.MustCompile(`\b([1-9][0-9]?|100)\b`)
 
 // claimsRollResult reports whether text reads as a narrated die result (#399,

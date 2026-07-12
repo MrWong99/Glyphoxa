@@ -1716,3 +1716,46 @@ func TestEngine_PseudoXMLTextLeak_MetersMalformedTextLeak(t *testing.T) {
 		t.Errorf("MalformedToolGen paths = %v, want exactly [text_leak]", paths)
 	}
 }
+
+// TestEngine_RecoveredPseudoDice_SuppressesInventedRollGuard is the #399 review
+// gate: on a dice-armed turn the model emits its dice call as pseudo-XML TEXT (no
+// provider error). pkg/tool recovers it into a REAL executed ToolCall (#410) that
+// the adapter never saw as a provider-native call — but the OnPseudoCall(recovered)
+// seam marks "dice" in the turn's called-Tools set, so the invented-roll guard does
+// NOT fire: exactly one loop run (no forced regeneration), NO roll_claim counted
+// (only the text_leak from the recovery), and the delivered text is the follow-up
+// round's answer built on the real roll.
+func TestEngine_RecoveredPseudoDice_SuppressesInventedRollGuard(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Round 0: the dice call arrives as pseudo-XML text — recovered + executed.
+		{text: `Let me roll. <function=dice {"count":1,"sides":20}</function>`, stop: "end_turn"},
+		// Round 1: answers with the real result in context.
+		{text: "The bones show a 14, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 14, traveler." {
+		t.Errorf("delivered = %q, want the follow-up round's answer (no regeneration)", got)
+	}
+	// text_leak counted once by the recovery; NO roll_claim — the guard saw dice called.
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedTextLeak {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [text_leak] (recovered pseudo-dice must not trip the roll-claim guard)", paths)
+	}
+	// Exactly one loop run: round 0 (recovered call) + round 1 (answer) = 2 requests,
+	// and no forced-regeneration round.
+	reqs := prov.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("Complete calls = %d, want 2 (recovered round-trip, no regeneration)", len(reqs))
+	}
+	for i, r := range reqs {
+		if r.ToolChoice.Mode == llm.ToolChoiceTool {
+			t.Errorf("req[%d] used forced tool choice %+v; want no forced regeneration", i, r.ToolChoice)
+		}
+	}
+}

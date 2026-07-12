@@ -148,6 +148,19 @@ func recordCalledTools(ctx context.Context, calls []tool.ToolCall) {
 	}
 }
 
+// markCalledTool marks a single Tool name on the per-turn recorder ctx carries, if
+// any (a no-op otherwise). It is the seam for a call the adapter never saw as a
+// provider-native ToolCall — a pkg/tool-recovered pseudo-XML call (#410/#399).
+func markCalledTool(ctx context.Context, name string) {
+	c, _ := ctx.Value(calledToolsKey{}).(*calledTools)
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.names[name] = true
+}
+
 // providerAdapter makes a streaming [llm.Provider] usable as the non-streaming
 // [tool.Provider] the tool-use loop drives. model and maxTokens are baked in
 // here because [tool.Provider.Generate] carries no generation knobs — the
@@ -600,8 +613,17 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 		// counter family as #398 with the text_leak path so provider flake stays
 		// visible. The scrub itself lives in pkg/tool (vendor/metric-agnostic,
 		// ADR-0028); this callback is the observability wiring.
-		l.OnPseudoCall = func(string, bool) {
+		l.OnPseudoCall = func(ctx context.Context, name string, recovered bool) {
 			cfg.rec.MalformedToolGen(cfg.provName, observe.MalformedTextLeak)
+			// #399: a RECOVERED pseudo-XML dice call is promoted to a real executed
+			// ToolCall downstream in pkg/tool, so it never reached the adapter as a
+			// provider-native ToolCall — mark it in the turn's called-Tools set so the
+			// invented-roll guard does not mistake a correctly-rolled reply for an
+			// invented one (which would double-count with text_leak and force a
+			// needless second RNG draw + round-trip).
+			if recovered {
+				markCalledTool(ctx, name)
+			}
 		}
 		return l
 	}
