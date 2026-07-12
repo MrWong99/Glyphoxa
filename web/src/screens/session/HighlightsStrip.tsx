@@ -109,7 +109,8 @@ export function HighlightsStrip({
         {staleNotice}
         <p className="gx-highlights__empty">
           No highlights yet — epic moments appear here when the rollover tape is armed
-          and consented.
+          and consented. To arm it, open the campaign menu in the top bar, choose
+          Campaign settings, and enable &ldquo;Rollover tape&rdquo;.
         </p>
       </>
     );

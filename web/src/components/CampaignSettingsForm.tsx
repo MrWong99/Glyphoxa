@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { CampaignService, type Campaign } from "@gen/glyphoxa/management/v1/management_pb";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
+import { Switch } from "@/components/ui/Switch";
 import { Button } from "@/components/ui/Button";
 import { invalidateActiveCampaignScopedQueries } from "@/lib/campaignCache";
 
@@ -57,6 +58,7 @@ export function CampaignSettingsForm({
   const [name, setName] = useState(campaign.name);
   const [system, setSystem] = useState(campaign.system);
   const [language, setLanguage] = useState(campaign.language);
+  const [tapeArmed, setTapeArmed] = useState(campaign.tapeArmed);
 
   // The Campaign Language choices come solely from the registered encoders.
   // retry:false so a failed load settles into the error hint at once rather than
@@ -109,7 +111,7 @@ export function CampaignSettingsForm({
     e.preventDefault();
     if (!canSubmit) return;
     // Name is trimmed (the server rejects empty); System/Language ride opaque.
-    update.mutate({ id: campaign.id, name: name.trim(), system, language });
+    update.mutate({ id: campaign.id, name: name.trim(), system, language, tapeArmed });
   };
 
   return (
@@ -150,6 +152,23 @@ export function CampaignSettingsForm({
               Couldn&apos;t load the language choices: {langQ.error.message}
             </span>
           )}
+        </div>
+      </div>
+      <div className="gx-campaign-create__row">
+        <div className="gx-field">
+          <Switch
+            id="gx-tape-armed"
+            checked={tapeArmed}
+            onCheckedChange={setTapeArmed}
+            label="Rollover tape"
+            disabled={update.isPending}
+          />
+          <span className="gx-field__hint">
+            When armed, a consent message with Consent/Revoke buttons is posted in
+            the voice channel&apos;s chat at session start; only consenting
+            speakers are taped — the GM must press Consent too, there is no
+            auto-consent. Takes effect at the next session start.
+          </span>
         </div>
       </div>
       <div className="gx-campaign-create__actions">
