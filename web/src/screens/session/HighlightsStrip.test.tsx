@@ -195,11 +195,16 @@ describe("HighlightsStrip (#309)", () => {
     expect(document.querySelector("audio")).toBeNull();
   });
 
-  it("links the empty state to Campaign settings so the GM can arm the tape (#412)", async () => {
+  it("points the empty state at the top-bar campaign menu to arm the tape (#412)", async () => {
+    // The Rollover tape toggle lives ONLY in the topbar CampaignSwitcher edit
+    // panel, not on the Campaign roster screen — so the copy names that real
+    // location honestly instead of an href to a screen that lacks the toggle.
     renderStrip([]);
-    await screen.findByText(/No highlights yet/i);
-    const link = screen.getByRole("link", { name: /campaign settings/i });
-    expect(link).toHaveAttribute("href", expect.stringMatching(/\/campaign$/));
+    await screen.findByText(/campaign menu in the top bar/i);
+    expect(screen.getByText(/Campaign settings/i)).toBeInTheDocument();
+    expect(screen.getByText(/Rollover tape/i)).toBeInTheDocument();
+    // No misleading link to the roster screen.
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
   it("surfaces a load failure inline as an error, not the empty state (#270 lesson)", async () => {

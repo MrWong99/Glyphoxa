@@ -212,10 +212,12 @@ describe("CampaignSettingsForm", () => {
 
   it("explains the consent flow and next-session effectiveness", () => {
     renderForm();
-    expect(screen.getByText(/grant\/revoke/i)).toBeInTheDocument();
+    // The real Discord disclosure buttons are labeled "Consent" / "Revoke"
+    // (internal/wirenpc/tapedisclosure.go), so the copy must match them.
+    expect(screen.getByText(/consent\/revoke/i)).toBeInTheDocument();
     expect(screen.getByText(/next session start/i)).toBeInTheDocument();
-    // No GM/operator auto-consent (triage decision) — the GM must press Grant too.
-    expect(screen.getByText(/gm must press grant/i)).toBeInTheDocument();
+    // No GM/operator auto-consent (triage decision) — the GM must press Consent too.
+    expect(screen.getByText(/gm must press consent/i)).toBeInTheDocument();
   });
 
   it("round-trips the tape-armed field through UpdateCampaign when toggled on", async () => {

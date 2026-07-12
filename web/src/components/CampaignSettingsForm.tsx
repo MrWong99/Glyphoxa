@@ -164,9 +164,9 @@ export function CampaignSettingsForm({
             disabled={update.isPending}
           />
           <span className="gx-field__hint">
-            When armed, a consent message with Grant/Revoke buttons is posted in
+            When armed, a consent message with Consent/Revoke buttons is posted in
             the voice channel&apos;s chat at session start; only consenting
-            speakers are taped — the GM must press Grant too, there is no
+            speakers are taped — the GM must press Consent too, there is no
             auto-consent. Takes effect at the next session start.
           </span>
         </div>

@@ -293,15 +293,15 @@ a Voice Session ("the rollover tape") — see
 and retention model. The feature is **off by default** and entirely opt-in per
 Campaign. The flow, end to end:
 
-1. **Arm.** In the Campaign screen's settings, flip the **Rollover tape**
-   toggle on and save. This is a Campaign-level GM opt-in — it does not, by
-   itself, record anything.
+1. **Arm.** Open the campaign menu in the top bar, choose **Campaign
+   settings**, flip the **Rollover tape** toggle on, and save. This is a
+   Campaign-level GM opt-in — it does not, by itself, record anything.
 2. **Consent, at the next session start.** Arming takes effect from the
    **next** Voice Session start, not mid-session: there is no re-post of the
    disclosure into an already-running session. When a session with the tape
-   armed starts, the Bot posts an in-channel message with **Grant**/**Revoke**
+   armed starts, the Bot posts an in-channel message with **Consent**/**Revoke**
    buttons. Every human participant decides individually and can revoke later;
-   **the GM is not auto-consented** — they must press Grant like anyone else.
+   **the GM is not auto-consented** — they must press Consent like anyone else.
    Only consenting speakers' audio ever enters the buffer; non-consenting
    speakers are never captured, even transiently.
 3. **Detect.** While the tape is armed and running, a detector flags
@@ -314,7 +314,8 @@ Campaign. The flow, end to end:
    share action — consent covers capture, the GM gate covers distribution.
 
 If a Voice Session has no Highlights yet, the Highlights strip's empty state
-links back to the Campaign screen's settings so the GM can arm the tape.
+points the GM at the top-bar campaign menu → Campaign settings, where the
+**Rollover tape** toggle lives.
 
 ## Environment variable reference
 

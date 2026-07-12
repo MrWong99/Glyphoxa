@@ -13,16 +13,6 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { formatClock } from "./useSessionEvents";
 import { useHighlights } from "./useHighlights";
 
-// campaignSettingsHref derives the Campaign screen URL from the current
-// /t/:tenantSlug/... path without needing a live TanStack Router context (the
-// strip renders in plain-Providers unit tests too) — a plain <a> beats pulling
-// in a router dependency for one link. Falls back to the app's default tenant
-// slug (router.tsx) when the path doesn't match, e.g. under test.
-function campaignSettingsHref(): string {
-  const match = /^\/t\/([^/]+)\//.exec(window.location.pathname);
-  return `/t/${match ? match[1] : "default"}/campaign`;
-}
-
 // clipClock renders a Highlight bound (starts_at/ends_at) as an "HH:MM:SS" clock,
 // reusing the transcript's formatClock. An unset bound renders "".
 function clipClock(ts: Highlight["startsAt"]): string {
@@ -119,8 +109,8 @@ export function HighlightsStrip({
         {staleNotice}
         <p className="gx-highlights__empty">
           No highlights yet — epic moments appear here when the rollover tape is armed
-          and consented. Arm the tape in{" "}
-          <a href={campaignSettingsHref()}>Campaign settings</a>.
+          and consented. To arm it, open the campaign menu in the top bar, choose
+          Campaign settings, and enable &ldquo;Rollover tape&rdquo;.
         </p>
       </>
     );
