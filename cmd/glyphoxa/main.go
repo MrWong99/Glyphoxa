@@ -670,6 +670,17 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("highlight purge backstop sweep failed at boot", "err", err)
 	}
 
+	// Boot-time enrichment reconciliation (#406, ADR-0043/0048/0049): the same
+	// rows-are-the-source-of-truth backstop for image enrichment. It re-enqueues
+	// enrichment for every promoted Highlight left imageless with no live enrich job
+	// (recovering a crash between promote-commit and the enqueue), and drops image
+	// blobs whose Highlight row is gone (the delete-vs-enrich orphan the RPC's
+	// re-read window only shrinks). Loud-but-non-fatal: a failure logs and boot
+	// continues, exactly like the purge backstop above.
+	if err := highlight.SweepEnrichmentReconciliation(ctx, store, blobStore, jobEnqueuer{store}, log); err != nil {
+		log.Warn("highlight enrichment reconciliation sweep failed at boot", "err", err)
+	}
+
 	// Resolve the process embeddings provider ONCE and share it across the two
 	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
 	// backlog, and the NPC memory recaller (#122) embeds utterances for Hot Context

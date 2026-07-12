@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -25,6 +26,11 @@ type fakeEnrichStore struct {
 	lastImgKey string
 	lastImgCT  string
 	lastImgSz  int64
+
+	claimed      map[uuid.UUID]time.Time // live claims (id -> claimed_at)
+	claimErr     error                   // returned by TryClaimHighlightEnrich when non-nil
+	claimCalls   int
+	releaseCalls int
 }
 
 func newFakeEnrichStore() *fakeEnrichStore {
@@ -55,6 +61,34 @@ func (f *fakeEnrichStore) SetHighlightImage(_ context.Context, id uuid.UUID, key
 	h.ImageKey, h.ImageContentType, h.ImageSizeBytes = key, ct, sz
 	f.rows[id] = h
 	f.lastImgKey, f.lastImgCT, f.lastImgSz = key, ct, sz
+	return nil
+}
+
+func (f *fakeEnrichStore) TryClaimHighlightEnrich(_ context.Context, id uuid.UUID, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return false, f.claimErr
+	}
+	if h, ok := f.rows[id]; ok && h.ImageKey != "" {
+		return false, nil // already enriched: nothing to claim
+	}
+	if prev, ok := f.claimed[id]; ok && time.Since(prev) < ttl {
+		return false, nil // a fresh claim is held by a concurrent worker
+	}
+	if f.claimed == nil {
+		f.claimed = map[uuid.UUID]time.Time{}
+	}
+	f.claimed[id] = time.Now()
+	f.claimCalls++
+	return true, nil
+}
+
+func (f *fakeEnrichStore) ReleaseHighlightEnrichClaim(_ context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releaseCalls++
+	delete(f.claimed, id)
 	return nil
 }
 
@@ -147,6 +181,184 @@ func TestEnrichImageHandler_HappyPath(t *testing.T) {
 	// Metered as Gemini LLM tokens.
 	if !rec.seen || rec.provider != observe.ProviderGemini || rec.in != 40 || rec.out != 1290 {
 		t.Errorf("metering wrong: seen=%v provider=%q in=%d out=%d", rec.seen, rec.provider, rec.in, rec.out)
+	}
+}
+
+// TestEnrichImageHandler_Claim_GeneratesAtMostOnce pins AC2 (#406): two enrich
+// jobs racing for the SAME Highlight run the provider Generate at most once — the
+// conditional claim lets exactly one win; the loser never spends.
+func TestEnrichImageHandler_Claim_GeneratesAtMostOnce(t *testing.T) {
+	tenantID := uuid.New()
+	store := newFakeEnrichStore()
+	h := seedRow(store, tenantID)
+	blobs := newFakeBlobs()
+	gen := &fakeGen{res: imagegen.Result{Data: []byte("PNGDATA"), ContentType: "image/png", OutputTokens: 1290}}
+
+	handler := EnrichImageHandler(store, blobs, factoryReturning(gen, "m", nil), nil, nil)
+	payload, _ := MarshalEnrichImage(h.ID, tenantID)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = handler(context.Background(), payload)
+		}(i)
+	}
+	wg.Wait()
+
+	if gen.calls != 1 {
+		t.Fatalf("Generate ran %d times; the claim must pin it to exactly 1", gen.calls)
+	}
+	// Exactly one image blob was stored (the winner's), and the row is enriched.
+	if blobs.keys() != 1 {
+		t.Fatalf("want exactly one image blob stored, got %d", blobs.keys())
+	}
+	got, _ := store.GetHighlight(context.Background(), tenantID, h.ID)
+	if got.ImageKey == "" {
+		t.Fatal("winner did not land the image on the row")
+	}
+}
+
+// --- boot reconciliation sweep (#406) ---
+
+// fakeReconcileStore feeds the boot enrichment reconciliation sweep: the promoted
+// imageless targets to re-enqueue, and the orphan image blob keys to collect.
+type fakeReconcileStore struct {
+	targets   []storage.HighlightEnrichTarget
+	gotKind   string
+	orphans   []string
+	targetErr error
+	orphanErr error
+}
+
+func (f *fakeReconcileStore) ListPromotedHighlightsNeedingEnrichment(_ context.Context, enrichKind string) ([]storage.HighlightEnrichTarget, error) {
+	f.gotKind = enrichKind
+	if f.targetErr != nil {
+		return nil, f.targetErr
+	}
+	return f.targets, nil
+}
+
+func (f *fakeReconcileStore) ListOrphanHighlightImageKeys(_ context.Context) ([]string, error) {
+	if f.orphanErr != nil {
+		return nil, f.orphanErr
+	}
+	return f.orphans, nil
+}
+
+// enrichEnqueued records one backstop enrichment enqueue.
+type enrichEnqueued struct {
+	kind    string
+	payload enrichPayload
+}
+
+type enrichRecordingEnqueuer struct {
+	mu  sync.Mutex
+	all []enrichEnqueued
+}
+
+func (r *enrichRecordingEnqueuer) Enqueue(_ context.Context, kind string, payload any, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := enrichEnqueued{kind: kind}
+	if p, ok := payload.(enrichPayload); ok {
+		e.payload = p
+	}
+	r.all = append(r.all, e)
+	return nil
+}
+
+// TestSweepEnrichmentReconciliation_EnqueuesForImagelessPromoted pins AC1 (#406):
+// the boot sweep enqueues image enrichment for every promoted Highlight left
+// imageless (the crash-between-promote-and-enqueue backstop).
+func TestSweepEnrichmentReconciliation_EnqueuesForImagelessPromoted(t *testing.T) {
+	t1, t2 := uuid.New(), uuid.New()
+	h1, h2 := uuid.New(), uuid.New()
+	store := &fakeReconcileStore{targets: []storage.HighlightEnrichTarget{
+		{HighlightID: h1, TenantID: t1},
+		{HighlightID: h2, TenantID: t2},
+	}}
+	enq := &enrichRecordingEnqueuer{}
+
+	if err := SweepEnrichmentReconciliation(context.Background(), store, newFakeBlobs(), enq, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if store.gotKind != JobKindEnrichImage {
+		t.Fatalf("sweep asked with wrong kind: %q", store.gotKind)
+	}
+	if len(enq.all) != 2 {
+		t.Fatalf("want 2 backstop enrichments enqueued, got %d", len(enq.all))
+	}
+	for _, e := range enq.all {
+		if e.kind != JobKindEnrichImage {
+			t.Fatalf("enqueued wrong kind: %q", e.kind)
+		}
+	}
+	if enq.all[0].payload.HighlightID != h1 || enq.all[0].payload.TenantID != t1 {
+		t.Fatalf("first enqueue payload wrong: %+v", enq.all[0].payload)
+	}
+	if enq.all[1].payload.HighlightID != h2 || enq.all[1].payload.TenantID != t2 {
+		t.Fatalf("second enqueue payload wrong: %+v", enq.all[1].payload)
+	}
+}
+
+// TestSweepEnrichmentReconciliation_CollectsOrphanImageBlobs pins AC3 (#406): the
+// boot sweep drops image blobs whose Highlight row is gone (the delete-vs-enrich
+// interleaving orphan) through the seam.
+func TestSweepEnrichmentReconciliation_CollectsOrphanImageBlobs(t *testing.T) {
+	blobs := newFakeBlobs()
+	k1 := "t/" + uuid.New().String() + "/highlight/" + uuid.New().String() + "/image"
+	k2 := "t/" + uuid.New().String() + "/highlight/" + uuid.New().String() + "/image"
+	blobs.data[k1] = []byte("a")
+	blobs.data[k2] = []byte("b")
+	store := &fakeReconcileStore{orphans: []string{k1, k2}}
+
+	if err := SweepEnrichmentReconciliation(context.Background(), store, blobs, &enrichRecordingEnqueuer{}, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if blobs.keys() != 0 {
+		t.Fatalf("orphan image blobs not swept: %d left", blobs.keys())
+	}
+}
+
+// TestSweepEnrichmentReconciliation_NoWorkNoSideEffects: an empty catalog enqueues
+// and deletes nothing.
+func TestSweepEnrichmentReconciliation_NoWorkNoSideEffects(t *testing.T) {
+	blobs := newFakeBlobs()
+	blobs.data["t/x/highlight/y/image"] = []byte("keep") // not reported as orphan
+	enq := &enrichRecordingEnqueuer{}
+	store := &fakeReconcileStore{}
+	if err := SweepEnrichmentReconciliation(context.Background(), store, blobs, enq, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(enq.all) != 0 {
+		t.Fatalf("no targets should enqueue nothing, got %v", enq.all)
+	}
+	if blobs.keys() != 1 {
+		t.Fatalf("no orphans should delete nothing, got %d left", blobs.keys())
+	}
+}
+
+// TestSweepEnrichmentReconciliation_ListErrorNonFatal pins AC4 (#406): a store
+// list failure is reported (so boot logs it) but never aborts — the OTHER half of
+// the sweep still runs. Here the target list fails yet the orphan sweep proceeds.
+func TestSweepEnrichmentReconciliation_ListErrorNonFatal(t *testing.T) {
+	blobs := newFakeBlobs()
+	orphan := "t/" + uuid.New().String() + "/highlight/" + uuid.New().String() + "/image"
+	blobs.data[orphan] = []byte("a")
+	store := &fakeReconcileStore{
+		targetErr: errors.New("db down"),
+		orphans:   []string{orphan},
+	}
+	err := SweepEnrichmentReconciliation(context.Background(), store, blobs, &enrichRecordingEnqueuer{}, testLog())
+	if err == nil {
+		t.Fatal("want an error surfaced when a list fails (boot logs it non-fatally)")
+	}
+	// The orphan sweep still ran despite the target-list failure.
+	if blobs.keys() != 0 {
+		t.Fatalf("orphan sweep should still run when the target list fails; %d blobs left", blobs.keys())
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -58,12 +59,30 @@ func MarshalEnrichImage(highlightID, tenantID uuid.UUID) ([]byte, error) {
 	return json.Marshal(enrichPayload{HighlightID: highlightID, TenantID: tenantID})
 }
 
+// enrichClaimTTL is how long a claim on a Highlight's image enrichment stays
+// valid before it is reclaimable (#406). It MUST exceed the runner's per-handler
+// lease deadline (ADR-0049 default 5m) so a live winner is never reclaimed
+// mid-generation, while a crashed winner's claim eventually frees and a later
+// retry (or boot re-enqueue) re-drives the enrichment.
+const enrichClaimTTL = 10 * time.Minute
+
 // EnrichStore is the storage surface the enrichment handler needs; *storage.Store
 // satisfies it and tests fake it. GetHighlight is tenant-scoped; SetHighlightImage
 // lands the result (ErrNotFound if the row was deleted meanwhile).
+// TryClaimHighlightEnrich / ReleaseHighlightEnrichClaim implement the race-proof
+// claim (#406): a conditional state transition so two concurrent enrich jobs for
+// the same Highlight run the provider Generate AT MOST once.
 type EnrichStore interface {
 	GetHighlight(ctx context.Context, tenantID, id uuid.UUID) (storage.Highlight, error)
 	SetHighlightImage(ctx context.Context, id uuid.UUID, imageKey, contentType string, sizeBytes int64) error
+	// TryClaimHighlightEnrich atomically claims the enrichment of an imageless
+	// Highlight: it reports true iff THIS caller won the claim (the row is still
+	// imageless and no fresh claim within ttl is held). A false (no error) means a
+	// concurrent worker holds the claim or the row was enriched meanwhile.
+	TryClaimHighlightEnrich(ctx context.Context, id uuid.UUID, ttl time.Duration) (bool, error)
+	// ReleaseHighlightEnrichClaim clears a claim so a retry (or a later
+	// re-promotion) can re-claim without waiting out the ttl. Idempotent.
+	ReleaseHighlightEnrichClaim(ctx context.Context, id uuid.UUID) error
 }
 
 // EnrichImageHandler builds the JobKindEnrichImage handler (ADR-0049). It is
@@ -105,23 +124,42 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		if h.ImageKey != "" {
 			// Already enriched (a re-run of an at-least-once job): stop before any
 			// spend so the same Highlight is never billed twice.
-			//
-			// KNOWN residual race (follow-up issue planned): this guard is
-			// read-then-act, not a lock. Two replicas promoting the same Highlight at
-			// once can both read ImageKey=="" and both Generate — bounded to one extra
-			// image's spend, and the second SetHighlightImage simply overwrites the
-			// first's deterministic key (harmless result, no orphan). The single-Voice
-			// -Session deployment (ADR-0039) makes this near-impossible in practice.
 			return nil
+		}
+
+		// Race-proof claim (#406): a conditional state transition so two concurrent
+		// enrich jobs for the SAME Highlight run Generate AT MOST once. A false-no-error
+		// means a live winner holds the claim (or the row was enriched between our read
+		// and here): return a retryable error so this duplicate job re-checks after
+		// backoff — the next attempt sees the winner's image_key and completes, or (if
+		// the winner crashed) reclaims the stale claim after enrichClaimTTL. The marker
+		// lives on a column that never reaches the wire (toProtoHighlight omits it), so
+		// no sentinel leaks into an RPC response.
+		claimed, err := store.TryClaimHighlightEnrich(ctx, p.HighlightID, enrichClaimTTL)
+		if err != nil {
+			return fmt.Errorf("highlight enrich: claim highlight %s: %w", p.HighlightID, err)
+		}
+		if !claimed {
+			return fmt.Errorf("highlight enrich: %s claimed by a concurrent worker", p.HighlightID)
+		}
+		// From here we OWN the claim. Release it on every exit that does NOT land an
+		// image so a fast retry (or a later re-promotion) can re-claim without waiting
+		// out the ttl; a release failure is non-fatal (the ttl backs it up).
+		release := func() {
+			if rerr := store.ReleaseHighlightEnrichClaim(ctx, p.HighlightID); rerr != nil {
+				log.Error("highlight enrich: release claim", "err", rerr, "highlight", p.HighlightID)
+			}
 		}
 
 		gen, model, err := factory(ctx, p.TenantID)
 		if errors.Is(err, ErrImageNotConfigured) {
+			release()
 			log.Info("highlight enrich: image generation not configured, leaving highlight without media",
 				"highlight", p.HighlightID, "tenant", p.TenantID)
 			return nil
 		}
 		if err != nil {
+			release()
 			return fmt.Errorf("highlight enrich: build generator: %w", err)
 		}
 
@@ -130,6 +168,7 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 			// PERMANENT: an oversize image can never be stored, and a retry only
 			// re-bills the same generation. Log + return nil — the Highlight stays
 			// intact without media (AC), no dead-letter churn.
+			release()
 			log.Warn("highlight enrich: generated image exceeds blob cap, leaving highlight without media",
 				"highlight", p.HighlightID)
 			return nil
@@ -137,6 +176,7 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 		if err != nil {
 			// Provider error: return it so the runner retries / dead-letters. The row
 			// is untouched — the Highlight keeps its clip and stays imageless (AC).
+			release()
 			return fmt.Errorf("highlight enrich: generate image: %w", err)
 		}
 
@@ -156,15 +196,18 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 
 		key, err := blob.Key(p.TenantID, "highlight", p.HighlightID, imageBlobName)
 		if err != nil {
+			release()
 			return fmt.Errorf("highlight enrich: build image key: %w", err)
 		}
 		if err := blobs.Put(ctx, key, res.ContentType, bytes.NewReader(res.Data), int64(len(res.Data))); err != nil {
 			if errors.Is(err, blob.ErrTooLarge) {
 				// Same PERMANENT posture as an oversize generation: never retryable.
+				release()
 				log.Warn("highlight enrich: image exceeds blob cap at Put, leaving highlight without media",
 					"highlight", p.HighlightID)
 				return nil
 			}
+			release()
 			return fmt.Errorf("highlight enrich: store image: %w", err)
 		}
 		if err := store.SetHighlightImage(ctx, p.HighlightID, key, res.ContentType, int64(len(res.Data))); err != nil {
@@ -177,10 +220,83 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 				}
 				return nil
 			}
+			release()
 			return fmt.Errorf("highlight enrich: record image on highlight: %w", err)
 		}
 		return nil
 	}
+}
+
+// ReconcileStore is the storage surface the boot enrichment reconciliation sweep
+// needs (#406); *storage.Store satisfies it and tests fake it.
+type ReconcileStore interface {
+	ListPromotedHighlightsNeedingEnrichment(ctx context.Context, enrichKind string) ([]storage.HighlightEnrichTarget, error)
+	ListOrphanHighlightImageKeys(ctx context.Context) ([]string, error)
+}
+
+// SweepEnrichmentReconciliation is the boot-time enrichment backstop (#406, the
+// pattern-sibling of SweepMissingCandidatePurges / ADR-0043 "rows are the source
+// of truth, reconcile on boot"). Before serving, it does ONE sweep with two halves:
+//
+//   - (a) enqueue image enrichment for every PROMOTED Highlight left imageless with
+//     no live enrich job — recovering a crash between promote-commit and the enqueue
+//     (AC1). It complements, not replaces, PromoteHighlight's per-promotion enqueue.
+//   - (b) drop every ORPHAN image blob — an image under the Highlight image
+//     owner-kind prefix whose Highlight row is gone (a delete-vs-enrich interleaving
+//     that committed the image after the delete read the row imageless), closing the
+//     window DeleteHighlight's re-read only shrinks (AC3). It touches ONLY that
+//     prefix (ADR-0048), never another owner's blobs, and never a live enrichment's
+//     in-flight blob (the row still exists).
+//
+// Both halves run even if one's list fails: a store-list error is collected and
+// returned so boot logs it, but the sweep never aborts (AC4) — the caller (main.go)
+// treats a returned error as loud-but-non-fatal, exactly like the purge backstop. A
+// per-item enqueue/delete error logs and the sweep continues (the next boot retries).
+func SweepEnrichmentReconciliation(ctx context.Context, store ReconcileStore, blobs blob.Store, enqueue JobEnqueuer, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	var errs []error
+
+	// (a) Re-enqueue enrichment for imageless promoted Highlights.
+	targets, err := store.ListPromotedHighlightsNeedingEnrichment(ctx, JobKindEnrichImage)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list promoted highlights needing enrichment: %w", err))
+	} else {
+		for _, t := range targets {
+			payload := enrichPayload{HighlightID: t.HighlightID, TenantID: t.TenantID}
+			if err := enqueue.Enqueue(ctx, JobKindEnrichImage, payload, time.Now()); err != nil {
+				log.Error("highlight enrich sweep: enqueue backstop enrichment", "err", err, "highlight", t.HighlightID)
+				continue
+			}
+		}
+		if len(targets) > 0 {
+			log.Warn("scheduled backstop image enrichment for imageless promoted highlights", "count", len(targets))
+		}
+	}
+
+	// (b) Collect orphaned image blobs.
+	keys, err := store.ListOrphanHighlightImageKeys(ctx)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list orphan image keys: %w", err))
+	} else {
+		swept := 0
+		for _, k := range keys {
+			if err := blobs.Delete(ctx, k); err != nil {
+				log.Error("highlight enrich sweep: delete orphan image", "err", err, "key", k)
+				continue
+			}
+			swept++
+		}
+		if swept > 0 {
+			log.Warn("swept orphaned highlight image blobs", "count", swept)
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("highlight enrich sweep: %w", errors.Join(errs...))
+	}
+	return nil
 }
 
 // buildImagePrompt renders the fixed image prompt from a Highlight's caption

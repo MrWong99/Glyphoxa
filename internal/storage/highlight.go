@@ -306,6 +306,129 @@ func (s *Store) ListCampaignHighlightClipKeys(ctx context.Context, campaignID uu
 		 SELECT image_key FROM highlight WHERE campaign_id = $1 AND image_key <> ''`, campaignID)
 }
 
+// HighlightEnrichTarget is a promoted, still-imageless Highlight the boot
+// reconciliation sweep must (re)enqueue image enrichment for (#406): the id plus
+// the tenant that owns it, exactly the enrich job payload's two fields (the sweep
+// carries no ambient tenant — it is process-wide, ADR-0049).
+type HighlightEnrichTarget struct {
+	HighlightID uuid.UUID
+	TenantID    uuid.UUID
+}
+
+// ListPromotedHighlightsNeedingEnrichment returns every PROMOTED Highlight with an
+// empty image_key and NO enrich job of the given kind in a live state
+// (pending/running/done) — the promoted Highlights whose image enrichment was
+// never enqueued (a crash between promote-commit and the enqueue) or whose only
+// enqueue was lost (#406). It is the (a) half of the boot reconciliation sweep,
+// mirroring ListSessionsNeedingCandidatePurge. A 'done' job counts as satisfied so
+// an unconfigured/failed-permanent enrichment (the handler returns nil and leaves
+// the row imageless by design) is NOT re-swept every boot; 'dead' is treated as
+// absent so a genuinely dead-lettered enrichment is re-scheduled. A job is matched
+// on its payload's highlight_id. Process-wide, carries no tenant.
+func (s *Store) ListPromotedHighlightsNeedingEnrichment(ctx context.Context, enrichKind string) ([]HighlightEnrichTarget, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT h.id, h.tenant_id
+		   FROM highlight h
+		  WHERE h.status = 'promoted'
+		    AND h.image_key = ''
+		    AND NOT EXISTS (
+		          SELECT 1 FROM job j
+		           WHERE j.kind = $1
+		             AND j.status IN ('pending','running','done')
+		             AND j.payload->>'highlight_id' = h.id::text
+		        )`, enrichKind)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list promoted highlights needing enrichment: %w", err)
+	}
+	defer rows.Close()
+
+	var out []HighlightEnrichTarget
+	for rows.Next() {
+		var t HighlightEnrichTarget
+		if err := rows.Scan(&t.HighlightID, &t.TenantID); err != nil {
+			return nil, fmt.Errorf("storage: scan enrich target: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list promoted highlights needing enrichment: %w", err)
+	}
+	return out, nil
+}
+
+// TryClaimHighlightEnrich atomically claims the image enrichment of a Highlight
+// (#406): a conditional UPDATE that stamps image_enrich_claimed_at iff the row is
+// still imageless AND no claim newer than ttl is held. It reports whether THIS
+// caller won (RowsAffected == 1). A false-no-error means a live worker holds the
+// claim or the row was enriched meanwhile. The lease (ttl) makes a crashed
+// claimant's claim reclaimable, so a Highlight is never stranded imageless. The
+// column is never scanned onto the wire, so the marker cannot leak into an RPC
+// response. Tenant-free (the id scopes the row, like SetHighlightImage).
+func (s *Store) TryClaimHighlightEnrich(ctx context.Context, id uuid.UUID, ttl time.Duration) (bool, error) {
+	cutoff := time.Now().Add(-ttl)
+	tag, err := s.db.Exec(ctx,
+		`UPDATE highlight
+		    SET image_enrich_claimed_at = now()
+		  WHERE id = $1
+		    AND image_key = ''
+		    AND (image_enrich_claimed_at IS NULL OR image_enrich_claimed_at < $2)`,
+		id, cutoff)
+	if err != nil {
+		return false, fmt.Errorf("storage: claim highlight enrich %s: %w", id, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReleaseHighlightEnrichClaim clears a Highlight's enrichment claim (#406) so a
+// retry (or a later re-promotion) can re-claim without waiting out the ttl. It is
+// idempotent — clearing an already-null claim is a no-op — and tenant-free.
+func (s *Store) ReleaseHighlightEnrichClaim(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE highlight SET image_enrich_claimed_at = NULL WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("storage: release highlight enrich claim %s: %w", id, err)
+	}
+	return nil
+}
+
+// ListOrphanHighlightImageKeys returns every blob key under the Highlight IMAGE
+// owner-kind prefix (t/<tenant>/highlight/<id>/image, ADR-0048) whose embedded
+// Highlight id no longer matches any highlight row — the images a delete-vs-enrich
+// interleaving orphaned (the delete read the row with an empty image_key, then the
+// enrich committed a blob whose row was already gone), #406. It is the (b) half of
+// the boot reconciliation sweep. It ONLY matches the image name segment, so a
+// Highlight's audio clip (name 'clip.wav') under the SAME owner-kind is never
+// touched, and it only touches the 'highlight' owner-kind — never another owner's
+// blobs. An in-flight enrichment (row still present, image_key not yet set) is
+// NOT collected because the row's id still matches. Process-wide, carries no tenant.
+func (s *Store) ListOrphanHighlightImageKeys(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT b.key
+		   FROM blob b
+		  WHERE split_part(b.key, '/', 3) = 'highlight'
+		    AND split_part(b.key, '/', 5) = 'image'
+		    AND NOT EXISTS (
+		          SELECT 1 FROM highlight h
+		           WHERE h.id::text = split_part(b.key, '/', 4)
+		        )`)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list orphan highlight image keys: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("storage: scan orphan image key: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list orphan highlight image keys: %w", err)
+	}
+	return out, nil
+}
+
 // scanClipKeys runs a single-column clip_key query and collects the results.
 func (s *Store) scanClipKeys(ctx context.Context, sql string, arg uuid.UUID) ([]string, error) {
 	rows, err := s.db.Query(ctx, sql, arg)
