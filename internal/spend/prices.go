@@ -36,7 +36,16 @@ type llmRate struct {
 var llmPrices = map[llmKey]llmRate{
 	// Groq Llama 3.3 70B Versatile — Groq public API pricing, captured 2026-07-07:
 	// $0.59 / 1M input tokens, $0.79 / 1M output tokens. ESTIMATE (tier-dependent).
+	// Kept: existing campaigns still run this via their provider_config model.
 	{observe.ProviderGroq, "llama-3.3-70b-versatile"}: {inputPerMTok: 0.59, outputPerMTok: 0.79},
+	// Groq tool-capable catalog (#424/#426) — console.groq.com/docs/models pricing,
+	// retrieved 2026-07-13. ESTIMATES (tier-dependent). openai/gpt-oss-120b is the
+	// new deployment default (#424), so its entry keeps the recap/live price meter
+	// off the conservative-default warn path.
+	{observe.ProviderGroq, "openai/gpt-oss-120b"}:                       {inputPerMTok: 0.15, outputPerMTok: 0.60},
+	{observe.ProviderGroq, "openai/gpt-oss-20b"}:                        {inputPerMTok: 0.075, outputPerMTok: 0.30},
+	{observe.ProviderGroq, "meta-llama/llama-4-scout-17b-16e-instruct"}: {inputPerMTok: 0.11, outputPerMTok: 0.34},
+	{observe.ProviderGroq, "qwen/qwen3-32b"}:                            {inputPerMTok: 0.29, outputPerMTok: 0.59},
 	// Gemini 2.5 Flash Image — image generation billed as tokens (#311, ADR-0004
 	// amendment). ESTIMATE captured 2026-07-11; 1 image ≈ 1290 output tokens ≈
 	// $0.039. Priced through the LLM sink because Gemini meters a generated image
