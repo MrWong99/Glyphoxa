@@ -26,8 +26,9 @@ func TestExistingKnowledge_OwnNodeGathersPendingAndEstablished(t *testing.T) {
 	aid := uuid.New()
 	ownNodeID := uuid.New()
 	store := &fakeStore{
-		linkedNode: storage.KGNode{ID: ownNodeID, Name: "Gesa", Body: "Gesa liebt Kuchen\nGesa wohnt im Wald"},
-		linkedOK:   true,
+		allNodes: []storage.KGNode{
+			{ID: ownNodeID, Name: "Gesa", Body: "Gesa liebt Kuchen\nGesa wohnt im Wald"},
+		},
 		pending: []storage.KnowledgeProposal{
 			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: ownNodeID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
 			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: uuid.New().String(), Subject: "Arturus", Fact: "ist ein Ritter"}), // different target
@@ -76,6 +77,53 @@ func TestExistingKnowledge_CampaignBySubjectName(t *testing.T) {
 	}
 	if len(known.Pending) != 1 || known.Pending[0] != "is old" {
 		t.Errorf("pending = %q, want the same-subject proposal", known.Pending)
+	}
+}
+
+// Cross-path unification (#411): an own_node pending row (keyed by node id) must
+// suppress a Butler campaign re-proposal of the same fact (keyed by subject name),
+// because the subject name resolves to the same Node. Without unification the two
+// keys diverge and the duplicate slips through invisibly.
+func TestExistingKnowledge_UnifiesOwnNodeAndCampaignKeys(t *testing.T) {
+	cid := uuid.New()
+	gesaID := uuid.New()
+	store := &fakeStore{
+		allNodes: []storage.KGNode{{ID: gesaID, Name: "Gesa"}},
+		pending: []storage.KnowledgeProposal{
+			// An own_node proposal the NPC already made (keyed by node id).
+			pendingRow(cid, tool.ProposedWrite{Kind: "fact", NodeID: gesaID.String(), Subject: "Gesa", Fact: "ist die Schwester von Arturus"}),
+		},
+	}
+	adapter := knowledge.New(store, liveSession(cid))
+
+	// The Butler now re-proposes the same fact campaign-scoped (no node id, subject
+	// by name) — it must see the NPC's pending row via the unified key.
+	w := tool.ProposedWrite{Kind: "fact", Subject: "Gesa", Fact: "ist die Schwester von Arturus"}
+	known, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), w)
+	if err != nil {
+		t.Fatalf("ExistingKnowledge: %v", err)
+	}
+	if len(known.Pending) != 1 || known.Pending[0] != "ist die Schwester von Arturus" {
+		t.Errorf("campaign proposal did not see the own_node pending row: %q", known.Pending)
+	}
+}
+
+// Established facts on a gm_private Node are NEVER surfaced — echoing a body line
+// would leak a GM secret into a prompt (ADR-0008).
+func TestExistingKnowledge_SkipsGMPrivateEstablished(t *testing.T) {
+	cid := uuid.New()
+	secretID := uuid.New()
+	store := &fakeStore{
+		allNodes: []storage.KGNode{{ID: secretID, Name: "The Traitor", Body: "is secretly the spy", GMPrivate: true}},
+	}
+	adapter := knowledge.New(store, liveSession(cid))
+	w := tool.ProposedWrite{Kind: "fact", Subject: "The Traitor", Fact: "is secretly the spy"}
+	known, err := adapter.ExistingKnowledge(context.Background(), uuid.New().String(), w)
+	if err != nil {
+		t.Fatalf("ExistingKnowledge: %v", err)
+	}
+	if len(known.Established) != 0 {
+		t.Errorf("gm_private body leaked into established facts: %q", known.Established)
 	}
 }
 

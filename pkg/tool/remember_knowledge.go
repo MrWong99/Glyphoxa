@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 )
@@ -152,7 +153,9 @@ func (*RememberKnowledge) Description() string {
 		"It is saved as a suggestion for the GM to review — not instantly canon. " +
 		"Only remember facts that are NOT already known to you: never re-propose a " +
 		"fact you already remembered earlier in this session, and do not restate a " +
-		"fact the world already records. Exact and reworded repeats are ignored."
+		"fact the world already records. Exact and normalized (case/punctuation) " +
+		"repeats are dropped automatically, but a fact you reword in DIFFERENT words " +
+		"is not caught — so do not re-propose the same fact phrased differently."
 }
 
 // InputSchema implements [Tool].
@@ -227,6 +230,11 @@ func (rk *RememberKnowledge) Execute(ctx context.Context, args json.RawMessage, 
 		if matched, dup := firstKnownMatch(ProposalSalient(w), append(known.Established, known.Pending...)); dup {
 			return alreadyNotedResult(matched, known.Pending), nil
 		}
+	} else {
+		// Fail OPEN: a KG read hiccup must never drop the NPC's memory. Warn so a
+		// SYSTEMATIC dedup failure (which silently reopens the proposal flood) is
+		// visible to the operator instead of degrading unnoticed.
+		slog.WarnContext(ctx, "remember_knowledge: dedup read failed; proposing without dedup", "error", err)
 	}
 
 	if err := rk.dst.CreateProposal(ctx, CallerID(ctx), w); err != nil {
@@ -236,8 +244,13 @@ func (rk *RememberKnowledge) Execute(ctx context.Context, args json.RawMessage, 
 }
 
 // maxEchoedPending caps how many of the target's pending proposals are echoed
-// back to the model, so a busy target cannot blow the tool result up.
-const maxEchoedPending = 10
+// back to the model, and maxEchoedRunes caps each one's length, so a busy target
+// with long facts cannot blow the hot-context budget up via the echo (a count cap
+// alone still admits ~20k characters).
+const (
+	maxEchoedPending = 10
+	maxEchoedRunes   = 200
+)
 
 // alreadyNotedResult is the tool result when a proposal duplicates a known fact:
 // no row was created, and it names the exact known wording (plus the target's
@@ -265,7 +278,7 @@ func withPendingEcho(lead string, pending []string) string {
 	}
 	quoted := make([]string, len(pending))
 	for i, p := range pending {
-		quoted[i] = fmt.Sprintf("%q", p)
+		quoted[i] = fmt.Sprintf("%q", truncateRunes(p, maxEchoedRunes))
 	}
 	return lead + " You have already proposed these facts about this subject (do not repeat them): " +
 		strings.Join(quoted, "; ") + "."

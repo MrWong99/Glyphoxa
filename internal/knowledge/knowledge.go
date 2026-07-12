@@ -255,32 +255,58 @@ func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.Pro
 // back to the model. It gathers two candidate sets, both scoped to the target
 // entity (never global): the target Node's established body facts (its body split
 // into non-empty lines) and the salient text of every PENDING proposal addressing
-// the same target ([tool.ProposalTargetKey]). The Campaign is the active session's
-// (no session ⇒ ErrNoActiveSession); the comparison itself is the handler's.
-func (a *Adapter) ExistingKnowledge(ctx context.Context, agentID string, w tool.ProposedWrite) (tool.KnownForTarget, error) {
+// the same target.
+//
+// The target key is UNIFIED across the two write paths: an own_node proposal keys
+// on its anchor node id, and a campaign proposal keys on its subject NAME — but the
+// same real entity would then carry two keys, so a Butler and its linked NPC would
+// double-propose the same fact invisibly to each other. Here the subject name is
+// resolved to the node id via the campaign's Node list, so both paths collapse onto
+// "id:<node>" whenever the subject names a real Node; only an unresolvable name
+// keeps a "subj:" key. Established body facts skip gm_private Nodes — a GM secret
+// must never surface into a prompt via the echo (ADR-0008). No session ⇒
+// ErrNoActiveSession; the comparison itself is the handler's.
+func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.ProposedWrite) (tool.KnownForTarget, error) {
 	campaignID, err := a.activeCampaign()
 	if err != nil {
 		return tool.KnownForTarget{}, err
 	}
 
+	nodes, err := a.store.ListNodes(ctx, campaignID)
+	if err != nil {
+		return tool.KnownForTarget{}, fmt.Errorf("knowledge: existing knowledge: list nodes: %w", err)
+	}
+	nameToID := make(map[string]string, len(nodes))
+	idToNode := make(map[string]storage.KGNode, len(nodes))
+	for _, n := range nodes {
+		idToNode[n.ID.String()] = n
+		if k := textnorm.Normalize(n.Name); k != "" {
+			nameToID[k] = n.ID.String()
+		}
+	}
+
+	wantKey := canonicalTargetKey(w, nameToID)
+	if wantKey == "" {
+		return tool.KnownForTarget{}, nil // no identifiable target ⇒ nothing to compare
+	}
+
 	var known tool.KnownForTarget
-	if body, ok, err := a.targetBody(ctx, agentID, w); err != nil {
-		return tool.KnownForTarget{}, err
-	} else if ok {
-		known.Established = bodyLines(body)
+	if id, ok := strings.CutPrefix(wantKey, "id:"); ok {
+		if n, ok := idToNode[id]; ok && !n.GMPrivate {
+			known.Established = bodyLines(n.Body)
+		}
 	}
 
 	pending, err := a.store.ListPendingKnowledgeProposals(ctx, campaignID)
 	if err != nil {
 		return tool.KnownForTarget{}, fmt.Errorf("knowledge: existing knowledge: %w", err)
 	}
-	wantKey := tool.ProposalTargetKey(w)
 	for _, p := range pending {
 		var pw tool.ProposedWrite
 		if err := json.Unmarshal(p.ProposedWrite, &pw); err != nil {
 			continue // a malformed legacy row is not a comparable duplicate
 		}
-		if tool.ProposalTargetKey(pw) == wantKey {
+		if canonicalTargetKey(pw, nameToID) == wantKey {
 			if s := tool.ProposalSalient(pw); s != "" {
 				known.Pending = append(known.Pending, s)
 			}
@@ -289,47 +315,26 @@ func (a *Adapter) ExistingKnowledge(ctx context.Context, agentID string, w tool.
 	return known, nil
 }
 
-// targetBody resolves the body prose of the Node a proposal is about, for the
-// established-fact dedup. An own_node proposal (w.NodeID set) targets the caller's
-// own linked Node; a campaign proposal targets the Node whose name matches the
-// subject (fact/edge) or the new entry's own name (node). ok=false means no such
-// Node exists yet (nothing established to match).
-func (a *Adapter) targetBody(ctx context.Context, agentID string, w tool.ProposedWrite) (string, bool, error) {
+// canonicalTargetKey is [tool.ProposalTargetKey] with subject-name → node-id
+// resolution layered on: a subject that names a real Node collapses onto the
+// node-id key so own_node and campaign proposals about the same entity unify. An
+// unresolvable name keeps the pure "subj:" key; an empty target yields "".
+func canonicalTargetKey(w tool.ProposedWrite, nameToID map[string]string) string {
 	if w.NodeID != "" {
-		if aid, err := uuid.Parse(agentID); err == nil && aid != uuid.Nil {
-			node, ok, err := a.store.AgentLinkedNode(ctx, aid)
-			if err != nil {
-				return "", false, fmt.Errorf("knowledge: existing knowledge: own node: %w", err)
-			}
-			if ok && node.ID.String() == w.NodeID {
-				return node.Body, true, nil
-			}
-		}
-		return "", false, nil
+		return "id:" + w.NodeID
 	}
-
 	name := w.Subject
 	if name == "" && w.Kind == "node" {
 		name = w.Name
 	}
-	if strings.TrimSpace(name) == "" {
-		return "", false, nil
+	n := textnorm.Normalize(name)
+	if n == "" {
+		return ""
 	}
-	campaignID, err := a.activeCampaign()
-	if err != nil {
-		return "", false, err
+	if id, ok := nameToID[n]; ok {
+		return "id:" + id
 	}
-	nodes, err := a.store.ListNodes(ctx, campaignID)
-	if err != nil {
-		return "", false, fmt.Errorf("knowledge: existing knowledge: list nodes: %w", err)
-	}
-	want := textnorm.Normalize(name)
-	for _, n := range nodes {
-		if textnorm.Normalize(n.Name) == want {
-			return n.Body, true, nil
-		}
-	}
-	return "", false, nil
+	return "subj:" + n
 }
 
 // bodyLines splits a Node's body prose into its individual established facts —
