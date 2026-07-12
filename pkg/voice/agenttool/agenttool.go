@@ -595,6 +595,14 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 	newLoop := func(g *tool.GrantSet) *tool.Loop {
 		l := tool.NewLoop(adapter, g)
 		l.MaxRounds = maxRounds
+		// #410: every pseudo-XML tool call the model emitted as plain text —
+		// recovered or stripped — is a malformed generation. Count it on the same
+		// counter family as #398 with the text_leak path so provider flake stays
+		// visible. The scrub itself lives in pkg/tool (vendor/metric-agnostic,
+		// ADR-0028); this callback is the observability wiring.
+		l.OnPseudoCall = func(string, bool) {
+			cfg.rec.MalformedToolGen(cfg.provName, observe.MalformedTextLeak)
+		}
 		return l
 	}
 	// Two loops over the same adapter: full grants, and grants with dice dropped.

@@ -1687,3 +1687,32 @@ func TestEngine_ToolSyntax_RetriedAttemptReportedUsageMetered(t *testing.T) {
 		t.Error("the final recovered round's usage (40/7) was not metered")
 	}
 }
+
+// TestEngine_PseudoXMLTextLeak_MetersMalformedTextLeak pins the #410 wiring: when
+// the model emits a tool call as malformed TEXT content (no provider error), the
+// agenttool bridge counts it on MalformedToolGen with the text_leak path — the
+// same observability family as #398's stream_error — and the leak never reaches
+// the returned (spoken/persisted) text.
+func TestEngine_PseudoXMLTextLeak_MetersMalformedTextLeak(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: `Rolling. <function=dice {"count":1,"sides":20}</function>`, stop: "end_turn"},
+		{text: "You rolled twelve.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "claude-test", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	final, err := eng.Generate(context.Background(), []llm.Message{
+		{Role: llm.RoleUser, Text: "Roll a d20 for me."},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.Contains(final, "<function") || strings.Contains(final, "</function") {
+		t.Errorf("returned text leaked the pseudo-call: %q", final)
+	}
+	paths := rec.malformedPaths()
+	if len(paths) != 1 || paths[0] != observe.MalformedTextLeak {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [text_leak]", paths)
+	}
+}
