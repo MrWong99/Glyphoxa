@@ -37,6 +37,23 @@ type fakeStore struct {
 	proposalJSON  []byte
 	proposalErrAt error // ctx.Err() observed INSIDE the store call
 	createErr     error
+
+	// Dedup read seam (#411).
+	pending      []storage.KnowledgeProposal // ListPendingKnowledgeProposals result
+	allNodes     []storage.KGNode            // ListNodes result
+	gotPendCID   uuid.UUID
+	gotNodesCID  uuid.UUID
+	pendingErr   error
+	listNodesErr error
+}
+
+func (f *fakeStore) ListPendingKnowledgeProposals(_ context.Context, cid uuid.UUID) ([]storage.KnowledgeProposal, error) {
+	f.gotPendCID = cid
+	return f.pending, f.pendingErr
+}
+func (f *fakeStore) ListNodes(_ context.Context, cid uuid.UUID) ([]storage.KGNode, error) {
+	f.gotNodesCID = cid
+	return f.allNodes, f.listNodesErr
 }
 
 func (f *fakeStore) AgentLinkedNode(_ context.Context, aid uuid.UUID) (storage.KGNode, bool, error) {

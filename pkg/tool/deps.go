@@ -77,9 +77,32 @@ type KGNodeRef struct {
 //   - CreateProposal records the proposal row (status pending). It is the ONLY
 //     side effect; per ADR-0052 barge semantics the adapter writes it under a
 //     cancel-immune context so a barged turn's proposal is never rolled back.
+//   - ExistingKnowledge reports what the KG already holds for a proposal's target
+//     (#411): the salient text of the target's pending proposals plus its
+//     established facts, so the handler can suppress an exact/normalized
+//     re-proposal and echo the target's pending proposals back to the model. It is
+//     a READ; a nil/empty result simply means nothing is known yet.
 type KGWriter interface {
 	OwnNode(ctx context.Context, agentID string) (KGNodeRef, bool, error)
 	CreateProposal(ctx context.Context, agentID string, w ProposedWrite) error
+	ExistingKnowledge(ctx context.Context, agentID string, w ProposedWrite) (KnownForTarget, error)
+}
+
+// KnownForTarget is what the Knowledge Graph already holds for one proposal's
+// target (#411), gathered by the [KGWriter] adapter and judged by the handler:
+//
+//   - Pending is the salient text of every pending Knowledge Proposal addressing
+//     the SAME target (per [ProposalTargetKey]). It is both a dedup candidate set
+//     and the echo list fed back to the model so it can see what it has already
+//     proposed this session and stop repeating itself (ADR-0052 mechanism c).
+//   - Established is the target Node's already-canon facts (its body, split into
+//     lines). A re-proposal that matches one creates no row.
+//
+// Both are RAW text (unnormalized): the handler normalizes at compare time via the
+// shared [textnorm.Normalize], and echoes the raw pending wording verbatim.
+type KnownForTarget struct {
+	Pending     []string
+	Established []string
 }
 
 // TranscriptHit is one persisted transcript Line the knowledge adapter surfaces

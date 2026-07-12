@@ -143,10 +143,16 @@ func NewRememberKnowledge(dst KGWriter) *RememberKnowledge {
 // Name implements [Tool].
 func (*RememberKnowledge) Name() string { return "remember_knowledge" }
 
-// Description implements [Tool].
+// Description implements [Tool]. It is hardened against the #411 proposal flood:
+// the model is told to remember only genuinely NEW facts and never to re-remember
+// something it already proposed this session (the tool echoes the target's pending
+// proposals back on every call, and silently suppresses exact/normalized repeats).
 func (*RememberKnowledge) Description() string {
 	return "Remember a new fact, relationship or entry about the world. " +
-		"It is saved as a suggestion for the GM to review — not instantly canon."
+		"It is saved as a suggestion for the GM to review — not instantly canon. " +
+		"Only remember facts that are NOT already known to you: never re-propose a " +
+		"fact you already remembered earlier in this session, and do not restate a " +
+		"fact the world already records. Exact and reworded repeats are ignored."
 }
 
 // InputSchema implements [Tool].
@@ -210,10 +216,59 @@ func (rk *RememberKnowledge) Execute(ctx context.Context, args json.RawMessage, 
 		return "", err
 	}
 
+	// Write-time dedup (#411, ADR-0052 mechanism a): suppress an exact/normalized
+	// re-proposal of something already pending for this target or already canon on
+	// its Node, and feed the agent its own pending proposals so it stops repeating
+	// itself. The read is best-effort — a KG hiccup must never drop the NPC's
+	// memory — so it FAILS OPEN to creating the row.
+	var known KnownForTarget
+	if k, err := rk.dst.ExistingKnowledge(ctx, CallerID(ctx), w); err == nil {
+		known = k
+		if matched, dup := firstKnownMatch(ProposalSalient(w), append(known.Established, known.Pending...)); dup {
+			return alreadyNotedResult(matched, known.Pending), nil
+		}
+	}
+
 	if err := rk.dst.CreateProposal(ctx, CallerID(ctx), w); err != nil {
 		return "", fmt.Errorf("remember_knowledge: %w", err)
 	}
-	return "Noted — saved for the GM's review.", nil
+	return notedResult(known.Pending), nil
+}
+
+// maxEchoedPending caps how many of the target's pending proposals are echoed
+// back to the model, so a busy target cannot blow the tool result up.
+const maxEchoedPending = 10
+
+// alreadyNotedResult is the tool result when a proposal duplicates a known fact:
+// no row was created, and it names the exact known wording (plus the target's
+// other pending proposals) so the model stops re-remembering it.
+func alreadyNotedResult(matched string, pending []string) string {
+	return withPendingEcho(fmt.Sprintf(
+		"Already noted — %q is already known, so no new suggestion was saved.", matched), pending)
+}
+
+// notedResult is the tool result for a freshly created proposal; it echoes the
+// target's pending proposals so the model can see what it has already suggested
+// this session (ADR-0052 mechanism c).
+func notedResult(pending []string) string {
+	return withPendingEcho("Noted — saved for the GM's review.", pending)
+}
+
+// withPendingEcho appends the target's pending proposal texts (capped) to a tool
+// result, so the agent sees its own session proposals and does not repeat them.
+func withPendingEcho(lead string, pending []string) string {
+	if len(pending) == 0 {
+		return lead
+	}
+	if len(pending) > maxEchoedPending {
+		pending = pending[:maxEchoedPending]
+	}
+	quoted := make([]string, len(pending))
+	for i, p := range pending {
+		quoted[i] = fmt.Sprintf("%q", p)
+	}
+	return lead + " You have already proposed these facts about this subject (do not repeat them): " +
+		strings.Join(quoted, "; ") + "."
 }
 
 // validateArgs enforces the per-kind required fields and the text-length caps,
