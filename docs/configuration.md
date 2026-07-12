@@ -285,6 +285,37 @@ loop. `/etc/glyphoxa/env` is required (no `-` prefix on `EnvironmentFile`): a
 missing file fails the unit up front rather than crash-looping the binary on
 absent secrets.
 
+## Session highlights (rollover tape)
+
+Highlights are GM-curated clips cut from a 120-second rolling audio buffer of
+a Voice Session ("the rollover tape") — see
+[ADR-0051](adr/0051-rollover-tape-consent-retention.md) for the full consent
+and retention model. The feature is **off by default** and entirely opt-in per
+Campaign. The flow, end to end:
+
+1. **Arm.** In the Campaign screen's settings, flip the **Rollover tape**
+   toggle on and save. This is a Campaign-level GM opt-in — it does not, by
+   itself, record anything.
+2. **Consent, at the next session start.** Arming takes effect from the
+   **next** Voice Session start, not mid-session: there is no re-post of the
+   disclosure into an already-running session. When a session with the tape
+   armed starts, the Bot posts an in-channel message with **Grant**/**Revoke**
+   buttons. Every human participant decides individually and can revoke later;
+   **the GM is not auto-consented** — they must press Grant like anyone else.
+   Only consenting speakers' audio ever enters the buffer; non-consenting
+   speakers are never captured, even transiently.
+3. **Detect.** While the tape is armed and running, a detector flags
+   noteworthy moments and cuts them into ephemeral **Highlight Candidates**,
+   blob-backed but retained only until the GM reviews them at session end
+   (7-day safety auto-purge for anything never reviewed).
+4. **Promote.** From the Session screen's Highlights strip, the GM promotes a
+   candidate into a durable **Highlight** (kept until explicitly deleted) or
+   deletes it. Nothing leaves the instance without an explicit GM
+   share action — consent covers capture, the GM gate covers distribution.
+
+If a Voice Session has no Highlights yet, the Highlights strip's empty state
+links back to the Campaign screen's settings so the GM can arm the tape.
+
 ## Environment variable reference
 
 Every variable the shipped binary reads. See `.env.example` for a copy-paste

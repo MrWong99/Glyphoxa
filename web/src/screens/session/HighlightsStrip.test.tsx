@@ -195,6 +195,13 @@ describe("HighlightsStrip (#309)", () => {
     expect(document.querySelector("audio")).toBeNull();
   });
 
+  it("links the empty state to Campaign settings so the GM can arm the tape (#412)", async () => {
+    renderStrip([]);
+    await screen.findByText(/No highlights yet/i);
+    const link = screen.getByRole("link", { name: /campaign settings/i });
+    expect(link).toHaveAttribute("href", expect.stringMatching(/\/campaign$/));
+  });
+
   it("surfaces a load failure inline as an error, not the empty state (#270 lesson)", async () => {
     renderStrip([candidate()], {}, { failList: true });
     const err = await screen.findByRole("alert");
