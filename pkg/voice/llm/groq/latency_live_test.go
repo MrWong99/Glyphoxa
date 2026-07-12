@@ -1,27 +1,30 @@
 //go:build live
 
-// Live latency measurement for the deployment LLM (ADR-0036): Llama 3.3 70B on
-// Groq. Excluded from the default keyless suite by the `live` tag — it makes
-// PAID calls to the real Groq endpoint and only runs with `go test -tags=live`
-// and GROQ_API_KEY set (key from the keyring via env, never printed).
+// Live latency measurement for the deployment LLM (ADR-0036, #424 amendment):
+// openai/gpt-oss-120b on Groq. Excluded from the default keyless suite by the
+// `live` tag — it makes PAID calls to the real Groq endpoint and only runs with
+// `go test -tags=live` and GROQ_API_KEY set (key from the keyring via env,
+// never printed).
 //
-// ADR-0036 moved the default LLM off gemini-2.5-flash — whose dynamic thinking
-// tail the ADR-0035 reasoning_effort cap was fighting — and onto Llama 3.3 70B
-// on Groq's LPU, a NON-reasoning model chosen precisely because it has "no tail
-// to cap". The research behind that call cited ~0.27 s LLM TTFT, but the ADR's
-// own caveat says to "measure the live tier from the deployment's egress before
-// assuming" it (a self-serve key may route US, not the Helsinki endpoint). This
-// test is that measurement: it reports the wall-time DISTRIBUTION (p50/p95/p99)
-// of time-to-first-content-token and total completion across two prompt tiers.
+// ADR-0036 moved the default LLM off gemini-2.5-flash; the #424 amendment then
+// moved it off llama-3.3-70b-versatile and onto openai/gpt-oss-120b on Groq's
+// LPU after a live A/B (cleaner tool calls, natural German, cheaper). Unlike the
+// prior llama default, gpt-oss-120b IS reasoning-capable, and the default path
+// sends no reasoning_effort — so its reasoning tokens share the 1024
+// DefaultMaxTokens budget. The #424 A/B accepted a higher first_audio
+// (~1.9–3.5 s vs llama's ~1.4–2.0 s) as within budget. This test measures the
+// LLM-stage half of that: it reports the wall-time DISTRIBUTION (p50/p95/p99) of
+// time-to-first-content-token and total completion across two prompt tiers,
+// against the ADR-0036 caveat to "measure the live tier from the deployment's
+// egress before assuming" the research TTFT (a self-serve key may route US).
 //
-// The successor to gemini's TestLive_ThinkingCap_AB: that test A/B'd three
-// reasoning_effort arms to prove the cap tightened Gemini's tail. There are no
-// arms here because Llama does not think — there is nothing to cap. Instead the
-// two tiers ARE the evidence. On the old Gemini default the reasoning-bait
-// prompt opened a multi-second thinking stall before the first token; on Llama
-// it should not, so a bait TTFT that tracks the trivial TTFT (no blow-out tail)
-// is the live confirmation that ADR-0036's "no tail" premise holds on the real
-// endpoint.
+// Descendant of gemini's TestLive_ThinkingCap_AB: that test A/B'd three
+// reasoning_effort arms to prove the cap tightened Gemini's tail. The two tiers
+// here ARE the evidence in the same spirit — a trivial control vs a
+// reasoning-bait prompt. On a reasoning model the bait tier MAY open a thinking
+// stall before the first token; the per-tier readout is exactly what shows
+// whether that tail stays inside the #424-accepted first_audio envelope on the
+// real endpoint (and whether reasoning tokens starve the reply within the cap).
 //
 // This is an ISOLATED provider call (one-line system prompt, no history, no
 // tools, no orchestrator), so it proves the LLM-STAGE TTFT, not the in-pipeline
@@ -55,10 +58,10 @@ var ttftPrompts = []struct {
 	{"reasoning-bait", "You are Bart, a gruff but warm tavern innkeeper. Reply in one short spoken line.", "Bart, if three travelers split a 17-copper tab evenly but one only drank half, what does each owe?"},
 }
 
-// TestLive_GroqLlama_TTFT measures the deployment LLM's live wall-time
+// TestLive_GroqGPTOSS_TTFT measures the deployment LLM's live wall-time
 // distribution per prompt tier: time-to-first-content-token (the headline TTFT
 // the SLO leans on) and total completion time. It drives the production default
-// (groq.New("") ⇒ llama-3.3-70b-versatile) against the real Groq endpoint.
+// (groq.New("") ⇒ openai/gpt-oss-120b) against the real Groq endpoint.
 //
 // Pacing:
 //   - a per-call sleep (GX_GROQ_DELAY) keeps the loop under Groq's per-model RPM
@@ -66,13 +69,14 @@ var ttftPrompts = []struct {
 //     generous than Gemini's old 5-req/min ceiling.
 //
 // Reporting is bucketed PER tier: pooling trivial with reasoning-bait would hide
-// the very comparison the test exists to make — does the bait tier (which blew
-// up Gemini's tail) stay flat on a non-reasoning Llama? Set GX_GROQ_LOG_ALL=1 to
-// log every answer for a German-quality eyeball (an ADR-0036 caveat).
+// the very comparison the test exists to make — how far does the bait tier's
+// reasoning stall push TTFT past the trivial tier on gpt-oss-120b? Set
+// GX_GROQ_LOG_ALL=1 to log every answer for a German-quality eyeball (an
+// ADR-0036 caveat).
 //
 // The test asserts only that some sample landed; the verdict is the printed
 // per-tier distribution (fold into ADR-0036's "re-test before launch" caveats).
-func TestLive_GroqLlama_TTFT(t *testing.T) {
+func TestLive_GroqGPTOSS_TTFT(t *testing.T) {
 	if os.Getenv(groq.APIKeyEnv) == "" {
 		t.Skipf("%s not set; skipping paid live Groq latency run", groq.APIKeyEnv)
 	}
@@ -87,12 +91,13 @@ func TestLive_GroqLlama_TTFT(t *testing.T) {
 		}
 	}
 	// GX_GROQ_LOG_ALL=1 logs EVERY answer (not just the first per tier) so a
-	// quality re-run can eyeball the full set — ADR-0036 flags Llama's German as
-	// unproven on real NPC prompts, and one sample per tier can't show that.
+	// quality re-run can eyeball the full set — ADR-0036 flags German as unproven
+	// on real NPC prompts, and one sample per tier can't show that.
 	logAll := os.Getenv("GX_GROQ_LOG_ALL") == "1"
 
 	// The production default: empty key ⇒ GROQ_API_KEY, default model ⇒
-	// llama-3.3-70b-versatile, no reasoning_effort (Llama does not think).
+	// openai/gpt-oss-120b, no reasoning_effort sent (reasoning tokens, if any,
+	// share the DefaultMaxTokens budget).
 	client := groq.New("")
 
 	// samples bucketed by tier name → the per-tier distribution; failed calls
