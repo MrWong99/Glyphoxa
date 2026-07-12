@@ -526,15 +526,37 @@ func (m *Matcher) match(text string, excludeButler bool) []voiceevent.AddressRou
 		hits = kept
 	}
 
-	// Highest score wins. Equal totals rank by fuzzy name similarity, because
-	// NameMatch contributes a flat weight above its threshold: an exactly heard
-	// name (1.0) and an incidental phonetic collision (0.9, e.g. "gerade" ≈
+	// Highest score wins. Equal totals rank first by a confidently name-matched
+	// Butler, then by fuzzy name similarity.
+	//
+	// The Butler tier (#400/#413): a named Butler is Address-Only and reachable
+	// ONLY by an explicit name (no ambient route), so naming it is always a
+	// deliberate address — whereas a Character named in the same breath is as
+	// likely the TOPIC of that address ("Glyfoxa, was hat Bart erzählt?", "Gott,
+	// was hat Gesa gesagt?"). Because NameMatch contributes a FLAT weight, the
+	// Butler (matched on the phonetic tier, 0.9) and the co-named Character (exact,
+	// 1.0) total the same, and under the single-target cap the plain
+	// name-similarity tie-break dropped the lower-scored Butler for the mentioned
+	// Character — the live #400/#413 misroute. A confidently name-matched Butler
+	// therefore outranks a co-named Character on a tie so the deliberate address
+	// wins the cap slot. (A Butler that failed the GM-gate is already excluded
+	// above, so it never reaches this sort.)
+	//
+	// The similarity tie-break below still tells two Characters apart: an exactly
+	// heard name (1.0) and an incidental phonetic collision (0.9, e.g. "gerade" ≈
 	// "Greta" under Double Metaphone, #198) total the same, and only the raw
-	// similarity still tells them apart. Remaining ties break by Agent order so
-	// the result is stable.
+	// similarity separates them. Remaining ties break by Agent order so the result
+	// is stable.
+	confidentButler := func(a Agent) bool {
+		return a.Target.AgentRole == voiceevent.AgentRoleButler &&
+			nameScores[a.index] >= nameThreshold
+	}
 	sort.SliceStable(hits, func(i, j int) bool {
 		if hits[i].total != hits[j].total {
 			return hits[i].total > hits[j].total
+		}
+		if bi, bj := confidentButler(hits[i].agent), confidentButler(hits[j].agent); bi != bj {
+			return bi
 		}
 		return nameScores[hits[i].agent.index] > nameScores[hits[j].agent.index]
 	})

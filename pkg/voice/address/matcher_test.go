@@ -245,6 +245,51 @@ func TestMatcher_ExactNameOutranksPhoneticCollision(t *testing.T) {
 	assertIDs(t, m.TargetMatch("Marek, was liegt gerade auf deinem Amboss?"), "npc-marek")
 }
 
+// glyfoxaButler is the Tenant Butler under its default name, used by the #400
+// "Glyfoxa"-class corpus. It is AddressOnly like the production Butler.
+var glyfoxaButler = address.Agent{
+	Target:      voiceevent.AddressTarget{AgentID: "butler", AgentRole: "butler", Name: "Glyphoxa"},
+	AddressOnly: true,
+}
+
+// TestMatcher_GlyfoxaPhoneticVariantRoutesToButler is the #400 "Glyfoxa"-class
+// block: the ph→f STT rendering "Glyfoxa" of the Butler name "Glyphoxa" routes
+// to the Butler, with and without a leading filler word ("So,", "Also,",
+// "Ähm,"). Under Kölner Phonetik "glyphoxa" and "glyfoxa" collapse to the same
+// code (45348), so the Butler clears the name threshold on the phonetic tier and
+// filler position is irrelevant (a configured name matches at any offset, not
+// only utterance-initial). These cases already routed correctly before the fix
+// and pin that they keep doing so.
+func TestMatcher_GlyfoxaPhoneticVariantRoutesToButler(t *testing.T) {
+	for _, utter := range []string{
+		"Glyfoxa, roll a d6",
+		"So, Glyfoxa, roll a d6",
+		"Also, Glyfoxa, roll a d6",
+		"Ähm, Glyfoxa, roll a d6",
+	} {
+		m := address.NewMatcher(address.Config{Language: "de"}, glyfoxaButler, bart)
+		assertIDs(t, m.TargetMatch(utter), "butler")
+	}
+}
+
+// TestMatcher_ButlerNamedWinsOverCoNamedCharacterTopic pins the actual #400
+// misroute. ROOT CAUSE: the live utterance addresses the Butler by a ph→f
+// variant ("Glyfoxa", phonetic 0.9) while MENTIONING a Character by exact name
+// ("Bart", 1.0) as the topic of the question. NameMatch contributes a FLAT
+// weight, so both the Butler and Bart total exactly 1.0. The single-target cap
+// (MaxTargets defaults to 1) then keeps one, and the equal-total tie-break by
+// raw name similarity dropped the lower-scored Butler (0.9) for the exactly-heard
+// Bart (1.0) — so Bart answered a question addressed to the Butler. The losing
+// stage is the tie-break + single-target cap when a Character is co-named, NOT
+// utterance-initial anchoring (filler-only variants already route, above) nor the
+// phonetic stage ("glyphoxa"≡"glyfoxa" under Kölner Phonetik) nor tokenization.
+// The fix: a confidently name-matched Butler (Address-Only, reachable ONLY by an
+// explicit name) outranks a co-named Character on the tie.
+func TestMatcher_ButlerNamedWinsOverCoNamedCharacterTopic(t *testing.T) {
+	m := address.NewMatcher(address.Config{Language: "de"}, glyfoxaButler, bart)
+	assertIDs(t, m.TargetMatch("So, Glyfoxa, was hat Bart über sein Gasthaus erzählt?"), "butler")
+}
+
 // TestMatcher_TruncatedNameRoutesToAgent pins the #197 live misroute
 // (turn 47aecba4be320d54): STT drops the leading consonant of "Bart" to "Art",
 // which falls under the rune floor and never matched. With Bart carrying the
