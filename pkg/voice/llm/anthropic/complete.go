@@ -76,10 +76,12 @@ type wireTool struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// wireToolChoice mirrors the Anthropic tool_choice object. The adapter sets
-// {type: "auto"} whenever tools are present, letting the model decide.
+// wireToolChoice mirrors the Anthropic tool_choice object. Type is the choice
+// discriminator ("auto"|"none"|"any"|"tool"); Name is set only for the pinned-tool
+// choice ({type:"tool",name:X}), so it carries omitempty (#398/#399).
 type wireToolChoice struct {
 	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
 }
 
 // Complete implements [llm.Provider]. It posts a streaming Messages request and
@@ -120,7 +122,7 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 		Stream:    true,
 	}
 	if len(body.Tools) > 0 {
-		body.ToolChoice = &wireToolChoice{Type: "auto"}
+		body.ToolChoice = wireToolChoiceFor(req.ToolChoice)
 	}
 
 	payload, err := json.Marshal(body)
@@ -212,6 +214,23 @@ func toolResultBlocks(m llm.Message) []contentBlock {
 		}
 	}
 	return blocks
+}
+
+// wireToolChoiceFor maps the [llm.ToolChoice] knob onto the Anthropic tool_choice
+// object (#398/#399). Auto (the zero value) → {type:auto}, byte-identical to the
+// pre-#398 wire; None → {type:none}; Required → {type:any} (Anthropic's spelling of
+// "must call some tool"); Tool → {type:tool,name:X} pinning the model to one tool.
+func wireToolChoiceFor(tc llm.ToolChoice) *wireToolChoice {
+	switch tc.Mode {
+	case llm.ToolChoiceNone:
+		return &wireToolChoice{Type: "none"}
+	case llm.ToolChoiceRequired:
+		return &wireToolChoice{Type: "any"}
+	case llm.ToolChoiceTool:
+		return &wireToolChoice{Type: "tool", Name: tc.Tool}
+	default: // ToolChoiceAuto / zero
+		return &wireToolChoice{Type: "auto"}
+	}
 }
 
 // toWireTools maps the [llm.ToolDef]s onto the Anthropic tools array. Returns

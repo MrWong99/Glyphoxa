@@ -420,6 +420,68 @@ func TestComplete_RequestShape_PinsBodyAndHeaders(t *testing.T) {
 	}
 }
 
+// TestComplete_ToolChoice_SerializesModes pins the #398/#399 per-round knob on the
+// OpenAI-compat wire: the zero value stays "auto" (byte-identical to pre-#398, so
+// every existing turn is unchanged), "none"/"required" serialize as bare strings,
+// and the pinned-Tool mode serializes as the named-function object. tool_choice is
+// only present when tools are declared.
+func TestComplete_ToolChoice_SerializesModes(t *testing.T) {
+	reqWith := func(tc llm.ToolChoice) llm.Request {
+		return llm.Request{
+			Messages:   []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+			Tools:      []llm.ToolDef{{Name: "dice", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+			ToolChoice: tc,
+		}
+	}
+	// scalar decodes tool_choice when it is a bare string ("auto"/"none"/"required").
+	scalar := func(t *testing.T, raw []byte) string {
+		t.Helper()
+		var body struct {
+			ToolChoice string `json:"tool_choice"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("tool_choice not a scalar string: %v\nbody: %s", err, raw)
+		}
+		return body.ToolChoice
+	}
+
+	if got := scalar(t, captureBody(t, reqWith(llm.ToolChoice{}))); got != "auto" {
+		t.Errorf("zero ToolChoice → tool_choice = %q, want auto (unchanged wire)", got)
+	}
+	if got := scalar(t, captureBody(t, reqWith(llm.ToolChoice{Mode: llm.ToolChoiceNone}))); got != "none" {
+		t.Errorf("None → tool_choice = %q, want none", got)
+	}
+	if got := scalar(t, captureBody(t, reqWith(llm.ToolChoice{Mode: llm.ToolChoiceRequired}))); got != "required" {
+		t.Errorf("Required → tool_choice = %q, want required", got)
+	}
+
+	// Tool mode: the named-function object union.
+	var namedBody struct {
+		ToolChoice struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tool_choice"`
+	}
+	raw := captureBody(t, reqWith(llm.ToolChoice{Mode: llm.ToolChoiceTool, Tool: "dice"}))
+	if err := json.Unmarshal(raw, &namedBody); err != nil {
+		t.Fatalf("named tool_choice not an object: %v\nbody: %s", err, raw)
+	}
+	if namedBody.ToolChoice.Type != "function" || namedBody.ToolChoice.Function.Name != "dice" {
+		t.Errorf("Tool mode → tool_choice = %+v, want {function, dice}", namedBody.ToolChoice)
+	}
+
+	// No tools declared: tool_choice must be absent even if a mode is set.
+	noTools := captureBody(t, llm.Request{
+		Messages:   []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+		ToolChoice: llm.ToolChoice{Mode: llm.ToolChoiceRequired},
+	})
+	if strings.Contains(string(noTools), "tool_choice") {
+		t.Errorf("tool_choice present with no tools declared; got %s", noTools)
+	}
+}
+
 // TestComplete_ModelSelection pins the configurable-model contract: with no
 // per-call override the body carries the constructor default; a non-empty
 // [llm.Request.Model] wins over it.
@@ -616,6 +678,65 @@ func TestComplete_429_TypedHTTPError(t *testing.T) {
 			t.Errorf("error %q missing required substring %q", err, must)
 		}
 	}
+}
+
+// TestComplete_StartToolUseFailed_TypedToolSyntaxError pins #398 detection site
+// two: a 400 whose body carries "code":"tool_use_failed" surfaces as a
+// [*providererr.ToolSyntaxError] (NOT the generic [*providererr.HTTPError]), so the
+// agenttool bridge routes it into the retry / tool-less-fallback path instead of
+// treating it as a hard 4xx. A generic 400 with no tool_use_failed code stays a
+// plain HTTPError — the regression guard that the new path does not swallow every
+// bad request.
+func TestComplete_StartToolUseFailed_TypedToolSyntaxError(t *testing.T) {
+	t.Run("400 tool_use_failed → ToolSyntaxError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Failed to call a function.","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"<function=dice></function>"}}`))
+		}))
+		defer srv.Close()
+		c := newClient(srv.URL)
+		_, err := c.Complete(context.Background(), llm.Request{
+			Messages: []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}},
+			Tools:    []llm.ToolDef{{Name: "dice", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		})
+		var tse *providererr.ToolSyntaxError
+		if !errors.As(err, &tse) {
+			t.Fatalf("error %v is not a *providererr.ToolSyntaxError", err)
+		}
+		var he *providererr.HTTPError
+		if errors.As(err, &he) {
+			t.Errorf("a tool_use_failed 400 must NOT also be an HTTPError; got %v", he)
+		}
+		if retry.Retryable(err) {
+			t.Error("a tool_use_failed error must not be retryable by the generic retry helper")
+		}
+		if !strings.Contains(tse.Error(), "tool_use_failed") {
+			t.Errorf("ToolSyntaxError message %q does not preserve the provider body", tse.Error())
+		}
+	})
+
+	t.Run("generic 400 stays HTTPError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"missing model","type":"invalid_request_error","code":"invalid_request"}}`))
+		}))
+		defer srv.Close()
+		c := newClient(srv.URL)
+		_, err := c.Complete(context.Background(), llm.Request{
+			Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+		})
+		var he *providererr.HTTPError
+		if !errors.As(err, &he) {
+			t.Fatalf("generic 400 error %v is not a *providererr.HTTPError", err)
+		}
+		if he.StatusCode != 400 {
+			t.Errorf("StatusCode = %d, want 400", he.StatusCode)
+		}
+		var tse *providererr.ToolSyntaxError
+		if errors.As(err, &tse) {
+			t.Errorf("a generic 400 must NOT be a ToolSyntaxError; got %v", tse)
+		}
+	})
 }
 
 // TestComplete_MalformedFrame_EmitsEventError pins the truncation contract: a
@@ -846,4 +967,61 @@ func TestComplete_ContextCanceled_NoTerminalEvent(t *testing.T) {
 			t.Error("got EventDone on ctx cancel, want clean close")
 		}
 	}
+}
+
+// TestComplete_InStreamToolUseFailed_ClassifiesToolSyntax pins #398 detection site
+// one: Groq surfaces a malformed pseudo-XML tool call as an in-stream error frame
+// carrying "code":"tool_use_failed". The adapter must terminate with an
+// [llm.EventError] whose ErrClass is [llm.ErrClassToolSyntax] (never an
+// [llm.EventDone]), so the agenttool bridge can retry the round rather than
+// abandon the turn. A generic in-stream error frame stays [llm.ErrClassNone].
+func TestComplete_InStreamToolUseFailed_ClassifiesToolSyntax(t *testing.T) {
+	toolFail := sse(`{"error":{"message":"Failed to call a function. Please adjust your prompt.","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"<function=dice{\"sides\":20}</function>"}}`)
+
+	t.Run("tool_use_failed → ErrClassToolSyntax", func(t *testing.T) {
+		srv := sseServer(t, nil, toolFail)
+		defer srv.Close()
+		c := newClient(srv.URL)
+		ch, err := c.Complete(context.Background(), llm.Request{
+			Messages: []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}},
+			Tools:    []llm.ToolDef{{Name: "dice", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		})
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		events := collect(t, ch)
+		last := events[len(events)-1]
+		if last.Type != llm.EventError {
+			t.Fatalf("last event = %+v, want EventError", last)
+		}
+		if last.ErrClass != llm.ErrClassToolSyntax {
+			t.Errorf("ErrClass = %q, want %q", last.ErrClass, llm.ErrClassToolSyntax)
+		}
+		for _, ev := range events {
+			if ev.Type == llm.EventDone {
+				t.Error("stream emitted EventDone despite the tool_use_failed error")
+			}
+		}
+	})
+
+	t.Run("generic in-stream error stays ErrClassNone", func(t *testing.T) {
+		srv := sseServer(t, nil, sse(`{"error":{"message":"upstream boom","type":"server_error","code":"internal"}}`))
+		defer srv.Close()
+		c := newClient(srv.URL)
+		ch, err := c.Complete(context.Background(), llm.Request{
+			Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+			Tools:    []llm.ToolDef{{Name: "dice", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		})
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		events := collect(t, ch)
+		last := events[len(events)-1]
+		if last.Type != llm.EventError {
+			t.Fatalf("last event = %+v, want EventError", last)
+		}
+		if last.ErrClass != llm.ErrClassNone {
+			t.Errorf("ErrClass = %q, want none for a non-tool-syntax stream error", last.ErrClass)
+		}
+	})
 }

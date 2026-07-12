@@ -136,5 +136,9 @@ func (t *recorderTap) LLMTokens(observe.Provider, string, int, int)    {}
 func (t *recorderTap) TTSCharacters(observe.Provider, int)             {}
 func (t *recorderTap) STTAudioSeconds(observe.Provider, time.Duration) {}
 
+// MalformedToolGen (#398) is a provider-flake counter, not a latency stage, so the
+// bench tap ignores it.
+func (t *recorderTap) MalformedToolGen(observe.Provider, observe.MalformedPath) {}
+
 // compile-time assertion: the tap satisfies the recorder the orchestrator drives.
 var _ observe.StageRecorder = (*recorderTap)(nil)

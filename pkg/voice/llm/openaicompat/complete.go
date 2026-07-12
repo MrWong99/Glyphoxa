@@ -74,9 +74,11 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 	}
 	if tools := toTools(req.Tools); len(tools) > 0 {
 		params.Tools = tools
-		// auto: the model decides whether to call a tool. The SDK defaults to auto
-		// when tools are present, but we set it explicitly so the wire is stable.
-		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openai.String("auto")}
+		// The per-round tool-choice knob (#398/#399). The zero value maps to "auto"
+		// exactly as before — the SDK defaults to auto when tools are present, but we
+		// set it explicitly so the wire is stable. tool_choice is only sent when tools
+		// are declared (the llm.Request contract: ToolChoice is inert with no tools).
+		params.ToolChoice = toToolChoice(req.ToolChoice)
 	}
 	if c.reasoningEffort != "" {
 		params.ReasoningEffort = openai.ReasoningEffort(c.reasoningEffort)
@@ -118,6 +120,13 @@ func (c *Client) Complete(ctx context.Context, req llm.Request) (<-chan llm.Stre
 // (transport, empty request) keeps the plain prose wrap — it is not retryable and
 // needs no status.
 func (c *Client) startError(err error) error {
+	// A tool_use_failed 400 is a per-round policy signal, not a transient HTTP
+	// fault: surface it as a distinct [*providererr.ToolSyntaxError] so the agenttool
+	// bridge retries the round tool-less rather than the generic retry helper failing
+	// fast on a 4xx (#398). Byte-preserve the SDK message for diagnosability.
+	if isToolSyntaxErr(err) {
+		return &providererr.ToolSyntaxError{Op: c.name + ".Complete", Msg: err.Error()}
+	}
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) && apiErr.StatusCode != 0 {
 		return &providererr.HTTPError{
@@ -203,6 +212,28 @@ func toolResultMessages(m llm.Message) []openai.ChatCompletionMessageParamUnion 
 		out = append(out, openai.ToolMessage(tr.Content, tr.CallID))
 	}
 	return out
+}
+
+// toToolChoice maps the [llm.ToolChoice] knob onto the OpenAI tool_choice union
+// (#398/#399): Auto (the zero value) and None/Required serialize as the bare
+// strings "auto"/"none"/"required"; Tool serializes as the named-function object
+// pinning the model to one tool. The Auto default keeps the pre-#398 wire
+// byte-identical for every turn that never sets a choice.
+func toToolChoice(tc llm.ToolChoice) openai.ChatCompletionToolChoiceOptionUnionParam {
+	switch tc.Mode {
+	case llm.ToolChoiceNone:
+		return openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openai.String("none")}
+	case llm.ToolChoiceRequired:
+		return openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openai.String("required")}
+	case llm.ToolChoiceTool:
+		return openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: tc.Tool},
+			},
+		}
+	default: // ToolChoiceAuto / zero
+		return openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openai.String("auto")}
+	}
 }
 
 // toTools maps the [llm.ToolDef]s onto the OpenAI function-tools array. Returns
@@ -370,6 +401,68 @@ func (c *Client) streamEvents(ctx context.Context, stream *ssestream.Stream[open
 		if ctx.Err() != nil {
 			return // cancellation closes cleanly; not a stream failure
 		}
-		fail(fmt.Sprintf("%s: read stream: %s", c.name, err.Error()))
+		// A provider tool_use_failed surfaces here as an in-stream error frame
+		// (the SDK sets stream.Err() from a data: {"error":{…}} chunk). Classify it
+		// so the agenttool bridge retries the round rather than abandon the turn
+		// (#398); any other stream failure stays the default unclassified error.
+		msg := fmt.Sprintf("%s: read stream: %s", c.name, err.Error())
+		if isToolSyntaxErr(err) {
+			send(llm.StreamEvent{Type: llm.EventError, Err: msg, ErrClass: llm.ErrClassToolSyntax})
+			return
+		}
+		fail(msg)
 	}
+}
+
+// toolUseFailedCode is the provider error code Groq (and other OpenAI-compat
+// gateways) return when the model emitted malformed pseudo-XML instead of a native
+// tool call. Detecting it is what lets the agenttool bridge retry the round and, on
+// a repeat, regenerate tool-less rather than abandon the voice turn (#398).
+const toolUseFailedCode = "tool_use_failed"
+
+// isToolSyntaxErr reports whether err carries the provider's tool_use_failed code,
+// on either detection path: the SDK's typed [*openai.Error] (a 400 start error,
+// whose Code / RawJSON body carries it) or the in-stream [ssestream.StreamError]
+// (whose message embeds the error-object JSON). It reads the typed Code first, then
+// falls back to extracting the first embedded JSON object and reading its "code" —
+// so neither path relies on brittle whole-string substring matching.
+func isToolSyntaxErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		if apiErr.Code == toolUseFailedCode {
+			return true
+		}
+		if codeInJSON(apiErr.RawJSON()) == toolUseFailedCode {
+			return true
+		}
+	}
+	return codeInJSON(err.Error()) == toolUseFailedCode
+}
+
+// codeInJSON extracts the first '{'-delimited JSON object embedded in s and returns
+// its error code — either a top-level "code" or a nested "error":{"code"} — or ""
+// if nothing parses. A [json.Decoder] is used so trailing text after the object
+// (the StreamError's prefix leaves none, but a defensive parse costs nothing) does
+// not defeat the decode.
+func codeInJSON(s string) string {
+	i := strings.IndexByte(s, '{')
+	if i < 0 {
+		return ""
+	}
+	var probe struct {
+		Code  string `json:"code"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&probe); err != nil {
+		return ""
+	}
+	if probe.Code != "" {
+		return probe.Code
+	}
+	return probe.Error.Code
 }

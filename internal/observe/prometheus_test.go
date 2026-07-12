@@ -64,6 +64,8 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	rec.KGFacts(FactsEmpty)
 	rec.KGFacts(FactsDegraded)
 
+	rec.MalformedToolGen(ProviderGroq, MalformedStreamError)
+
 	out := scrape(t, rec)
 
 	// Every family is present and namespaced glyphoxa_voice_* (embedding_backlog
@@ -96,6 +98,7 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 		`glyphoxa_kg_facts_total{outcome="ok"} 1`,
 		`glyphoxa_kg_facts_total{outcome="empty"} 1`,
 		`glyphoxa_kg_facts_total{outcome="degraded"} 1`,
+		`glyphoxa_llm_malformed_toolgen_total{path="stream_error",provider="groq"} 1`,
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(out, want) {

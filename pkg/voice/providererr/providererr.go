@@ -29,3 +29,22 @@ type HTTPError struct {
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d %s: %s", e.Op, e.StatusCode, e.Status, e.Body)
 }
+
+// ToolSyntaxError is a provider "tool_use_failed": the model emitted malformed
+// pseudo-XML instead of a native tool call, so the vendor (Groq surfaces this) 400s
+// the start call or aborts the stream (#398). It is a DISTINCT type, deliberately
+// NOT a [HTTPError] and NOT matched by the generic [github.com/MrWong99/Glyphoxa/pkg/voice/retry].Do
+// predicates: a tool-syntax failure is not a transient 429/5xx to back off on but a
+// per-round policy signal the agenttool bridge acts on (retry once with the same
+// tools, then regenerate tool-less). Op names the adapter operation for
+// diagnosability; Msg is preserved byte-for-byte from the surfaced provider text so
+// logs and any downstream string compare are unchanged.
+type ToolSyntaxError struct {
+	Op  string
+	Msg string
+}
+
+// Error returns Msg verbatim — the surfaced provider message, byte-preserved so a
+// log or a substring check on the underlying error text sees exactly what the
+// vendor returned.
+func (e *ToolSyntaxError) Error() string { return e.Msg }

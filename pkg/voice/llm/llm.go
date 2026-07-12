@@ -122,6 +122,41 @@ type ToolDef struct {
 	InputSchema json.RawMessage
 }
 
+// ToolChoiceMode is the per-round tool-choice knob a [Request] carries: it tells
+// the Provider whether the model may call a Tool this round, must call one, or is
+// pinned to a named Tool. It is a bounded enum, mapped onto each vendor's wire in
+// the adapter (ADR-0028). The zero value is [ToolChoiceAuto] — the model decides —
+// so an unset [Request.ToolChoice] preserves today's behaviour byte-for-byte.
+type ToolChoiceMode string
+
+const (
+	// ToolChoiceAuto lets the model decide whether to call a Tool. It is the zero
+	// value, so a [Request] that never sets ToolChoice is Auto — the pre-#398 wire.
+	ToolChoiceAuto ToolChoiceMode = ""
+
+	// ToolChoiceNone forbids tool calls this round: the Tools stay DECLARED (the
+	// conversation may hold prior tool_call / tool-role messages that must remain
+	// well-formed) but the model must answer in prose. The tool-less fallback round
+	// (#398) uses this after a repeated tool-syntax failure.
+	ToolChoiceNone ToolChoiceMode = "none"
+
+	// ToolChoiceRequired forces the model to call some Tool this round (#399).
+	ToolChoiceRequired ToolChoiceMode = "required"
+
+	// ToolChoiceTool pins the model to the single Tool named in [ToolChoice.Tool]
+	// (#399).
+	ToolChoiceTool ToolChoiceMode = "tool"
+)
+
+// ToolChoice is the per-round tool-choice selection on a [Request]. Tool is
+// meaningful only when Mode is [ToolChoiceTool]; it names the one Tool the model
+// is pinned to. A [Request] whose Tools list is empty ignores ToolChoice — there
+// is nothing to choose — so the field is inert on a no-tool round.
+type ToolChoice struct {
+	Mode ToolChoiceMode
+	Tool string // set iff Mode == ToolChoiceTool
+}
+
 // Request is one completion call: the assembled conversation plus the Tools the
 // Agent may call and generation limits. The system prompt travels as a
 // [RoleSystem] [Message] in Messages; providers route it to their native system
@@ -143,6 +178,11 @@ type Request struct {
 	// MaxTokens caps the completion length. Zero lets the Provider choose a
 	// sane default.
 	MaxTokens int
+
+	// ToolChoice is the per-round tool-choice knob (#398/#399). Ignored when Tools
+	// is empty. The zero value is [ToolChoiceAuto], so a Request that never sets it
+	// serializes exactly as before this field existed (cassette hashes unchanged).
+	ToolChoice ToolChoice
 }
 
 // StreamEventType discriminates a [StreamEvent].
@@ -191,6 +231,27 @@ type Usage struct {
 	OutputTokens int
 }
 
+// ErrClass classifies an [EventError] (and, downstream, a start error) so a
+// consumer can act on the KIND of failure without string-matching the message.
+// It is an ADDITIVE, bounded enum: the zero value [ErrClassNone] is the default
+// unclassified failure, so an event that never sets it — every pre-#398 error and
+// every cassette — reads as before. Only the OpenAI-compat adapter sets a
+// non-zero class today ([ErrClassToolSyntax]); the agenttool bridge maps it to a
+// typed [github.com/MrWong99/Glyphoxa/pkg/voice/providererr.ToolSyntaxError] to
+// drive the retry / tool-less-fallback policy (#398).
+type ErrClass string
+
+const (
+	// ErrClassNone is the unclassified failure (transport, malformed frame, size
+	// bound) — the zero value, so any error that does not opt in stays here.
+	ErrClassNone ErrClass = ""
+
+	// ErrClassToolSyntax marks a provider "tool_use_failed": the model emitted
+	// malformed pseudo-XML instead of a native tool call. It is the one class the
+	// #398 retry path acts on.
+	ErrClassToolSyntax ErrClass = "tool_syntax"
+)
+
 // StreamEvent is one item in a [Provider] completion stream. The active fields
 // depend on Type: Text on [EventText], ToolCall on [EventToolCall], StopReason
 // on [EventDone], Usage on [EventUsage].
@@ -209,6 +270,12 @@ type StreamEvent struct {
 	// Err is the failure description on an [EventError]. A string, not an
 	// error, so cassette recordings serialize it faithfully (ADR-0021).
 	Err string
+
+	// ErrClass optionally classifies an [EventError] (#398). ADDITIVE: the zero
+	// value [ErrClassNone] is the default, so events that do not set it — and every
+	// old cassette — are unchanged. [ErrClassToolSyntax] marks a tool_use_failed the
+	// agenttool bridge retries.
+	ErrClass ErrClass
 
 	// Usage is the token accounting on an [EventUsage].
 	Usage Usage
