@@ -31,6 +31,39 @@ func TestMeterKnownLLMPrice(t *testing.T) {
 	approx(t, m.Status().EstimatedUSD, want.inputPerMTok+want.outputPerMTok)
 }
 
+// TestMeterGroqCatalogPricesKnown pins the #424/#426 Groq tool-capable catalog:
+// each model resolves to a code-const rate and the recap/no-price WARN class
+// cannot fire for it. openai/gpt-oss-120b is the new deployment default (#424),
+// so a miss here would re-introduce the every-recap conservative-estimate warn.
+func TestMeterGroqCatalogPricesKnown(t *testing.T) {
+	// Expected in/out USD-per-MTok literals (console.groq.com/docs/models,
+	// retrieved 2026-07-13). Hard-coded, NOT read from llmPrices, so a typo in the
+	// price map fails this test instead of silently agreeing with itself.
+	cases := []struct {
+		model   string
+		in, out float64
+	}{
+		{"openai/gpt-oss-120b", 0.15, 0.60},
+		{"openai/gpt-oss-20b", 0.075, 0.30},
+		{"meta-llama/llama-4-scout-17b-16e-instruct", 0.11, 0.34},
+		{"qwen/qwen3-32b", 0.29, 0.59},
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			m := NewMeter(Caps{}, log, nil, nil)
+			// 1M in + 1M out ⇒ EstimatedUSD == in-rate + out-rate.
+			m.LLMTokens(observe.ProviderGroq, c.model, 1_000_000, 1_000_000)
+
+			approx(t, m.Status().EstimatedUSD, c.in+c.out)
+			if strings.Contains(buf.String(), "no price") {
+				t.Fatalf("groq/%s logged the conservative-default warn:\n%s", c.model, buf.String())
+			}
+		})
+	}
+}
+
 // TestMeterGeminiImagePrice: a generated image (#311) is metered as Gemini LLM
 // output tokens and priced from the known image-model entry (no default warning).
 func TestMeterGeminiImagePrice(t *testing.T) {

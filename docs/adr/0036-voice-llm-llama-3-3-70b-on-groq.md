@@ -37,3 +37,19 @@ Keeping the OpenAI-compat adapter is the reason this is cheap: the gemini packag
 - **Supersedes ADR-0035** for the deployment default: the thinking-cap default (`reasoning_effort: "low"`) is moot on a non-reasoning model. ADR-0035 stays as the record of the Gemini A/B and keeps the `WithReasoningEffort`/`WithThinkingBudget` knobs alive for the Gemini fallback.
 - **Extends ADR-0004 (BYOK provider matrix).** That ADR fixes the *tenant-supplied* 2-providers-per-component set (LLM: Anthropic + Ollama). The deployment's own voice NPC has always run a provider outside that BYOK set (Gemini, now Groq); this ADR records the deployment default, it does not change the BYOK matrix. Adding Groq to the self-serve BYOK provider list is a separate, additive decision.
 - **No change to ADR-0021** (cassette determinism) or **ADR-0028** (tool seam): unit tests stay keyless via cassettes, and the OpenAI-compat tool-result-by-id mapping is unchanged across compat providers.
+
+## Amendment (2026-07-13, #424 — default model → `openai/gpt-oss-120b`)
+
+The deployment default LLM moves from `llama-3.3-70b-versatile` to **`openai/gpt-oss-120b` on Groq** (`groq.DefaultModel`). This **reverses the "gpt-oss-120b … Not pursued" line** in *Considered options* above: that pre-launch rejection cited "documented German weaknesses; English-first", but a live A/B (campaign *The Prancing Pony*, 2026-07-13 night) contradicted it on the actual NPC prompts.
+
+Live findings vs `llama-3.3-70b-versatile`:
+
+- **Tool calling:** clean native calls throughout (dice single/multi + sum, recap ×3, remember with correct scope handling) — zero pseudo-XML text leaks. llama-3.3 produced the #398/#410 pseudo-call flake class the same evening.
+- **German:** in-character and natural, including a roleplayed scope rejection — no sign of the weakness the original ADR feared.
+- **Latency:** first_audio ~1.9–3.5 s vs ~1.4–2.0 s on llama-3.3 — noticeably higher but accepted as within budget.
+- **Cost:** `$0.15 in / $0.60 out` per MTok — *cheaper* than llama-3.3 (`$0.59 / $0.79`), consistent with ADR-0046's conservative-default posture. Price entry added to `internal/spend/prices.go` (#426).
+- **Residual:** one live case of a tool call emitted despite `tool_choice=none` during a forced-regen chain → Groq 400 → turn abandoned; tracked separately as #427.
+
+Scope: only the **default for fresh setups** changes (the seed `internal/wirenpc/agentspec.go` `llmModel` and the adapter fallback). Existing campaigns keep their configured `provider_config` model — the `llama-3.3-70b-versatile` price entry is retained for them, and no migration rewrites existing rows. Everything else in this ADR (Groq provider, OpenAI-compat wire, Gemini Flash-Lite fallback, no `reasoning_effort` on the default path) stands unchanged. ADR-0021 is still unaffected: cassette prompt hashes key on the request model (`""` on the default path), so the constant change alters no committed hash.
+
+Reasoning-knob posture: unlike the prior llama default, `openai/gpt-oss-120b` **is** reasoning-capable, so the "Supersedes ADR-0035 — `reasoning_effort` is moot on a non-reasoning model" rationale above no longer strictly holds. The posture is nonetheless **unchanged for now**: the default path still sends no `reasoning_effort`, and any reasoning tokens gpt-oss emits share the same `DefaultMaxTokens` (1024) budget as the spoken reply. The #424 live run produced complete replies within that cap (recap ×3, multi-tool turns), so this is accepted as-is — revisit (send an explicit low `reasoning_effort`, or widen the cap) only if a live run shows reasoning tokens starving the reply.

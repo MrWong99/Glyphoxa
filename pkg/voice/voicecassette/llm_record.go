@@ -16,7 +16,8 @@ import (
 )
 
 // LoadLLM in -tags=record builds returns an [LLMRecorder] that proxies every
-// Complete call to a live Groq client (Llama 3.3 70B, ADR-0036), captures the
+// Complete call to a live Groq client (openai/gpt-oss-120b by default, the #424
+// deployment default; ADR-0036), captures the
 // request hash and the streamed response (text, tool_calls, stop reason), and
 // rewrites tests/voice-cassettes/<name>.yaml at test cleanup. The GROQ_API_KEY
 // environment variable supplies credentials.
@@ -53,6 +54,10 @@ type LLMRecorder struct {
 
 	mu        sync.Mutex
 	exchanges []LLMExchange
+	// recModel is the model that actually produced the recorded bytes: the first
+	// non-empty req.Model seen, else groq.DefaultModel (the "" default path). The
+	// provenance stamp names it so it never lies (record_notes.go invariant).
+	recModel string
 }
 
 // Complete implements [llm.Provider]. It hashes req, forwards to the live
@@ -65,6 +70,11 @@ func (r *LLMRecorder) Complete(ctx context.Context, req llm.Request) (<-chan llm
 	if err != nil {
 		return nil, fmt.Errorf("voicecassette: LLMRecorder live Complete for cassette %q: %w", r.name, err)
 	}
+	r.mu.Lock()
+	if r.recModel == "" && req.Model != "" {
+		r.recModel = req.Model
+	}
+	r.mu.Unlock()
 
 	out := make(chan llm.StreamEvent)
 	go func() {
@@ -103,9 +113,13 @@ func (r *LLMRecorder) write() error {
 	if len(r.exchanges) == 0 {
 		return nil
 	}
+	model := r.recModel
+	if model == "" {
+		model = groq.DefaultModel // "" request path: the adapter fills this.
+	}
 	out := LLMCassette{
 		Exchanges: r.exchanges,
-		Notes:     appendProvenance(r.existing.Notes, "Groq", "llama-3.3-70b-versatile"),
+		Notes:     appendProvenance(r.existing.Notes, "Groq", model),
 	}
 	body, err := yaml.Marshal(out)
 	if err != nil {
