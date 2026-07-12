@@ -550,6 +550,133 @@ func TestReplier_Ensemble_ZeroDeliveredLeadSkipsReaction(t *testing.T) {
 	}
 }
 
+// TestReplier_Ensemble_ReactionAllStartErrorEndsTurn pins #391 (legacy #302 path):
+// when EVERY sentence of the Cross-talk Reaction fails to START synthesis — nothing
+// delivered — under a live turn, the reaction sub-turn is announced (EnsembleReaction)
+// and THEN ended with TurnEnded{rID, tts_error}, mirroring the Lead. Without the
+// terminal event the reaction id emits EnsembleReaction but no FirstAudio and no
+// TurnEnded, so the metrics TTL sweep miscounts it as an abandoned/no_first_audio turn.
+func TestReplier_Ensemble_ReactionAllStartErrorEndsTurn(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft:          map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}), // pause so the floor arms before the reaction gate
+			spokeCh:        make(chan string, 2),
+		},
+		react:        map[string]string{goblinTarget.AgentID: "I react anyway."},
+		reactSpokeCh: make(chan string, 2),
+	}
+	// The Lead's sentence synthesizes fine; the reaction's ONLY sentence start-errors.
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"I react anyway.": true}})
+	replier := orchestrator.NewStreamReplier(ttsStage, func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error {
+		return nil
+	}, nil)
+	replier.SetFloor(floor)
+	replier.SetEnsemble(spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tp", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	// The Lead is audible: arm the floor, then release it so the Reaction is reached.
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Tp" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tp"})
+	close(spk.speakPause)
+
+	// The reaction is announced, then ended tts_error (all its sentences failed to start).
+	var rID string
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleReaction) bool {
+		if e.LeadTurnID == "Tp" && e.Target.AgentID == goblinTarget.AgentID {
+			rID = e.TurnID
+			return true
+		}
+		return false
+	}, "ensemble.reaction announced for the reactor")
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == rID && e.Reason == voiceevent.TurnEndTTSError
+	}, "turn.ended tts_error for the reaction sub-turn (no TTL reap)")
+
+	waitFloorFree(t, floor)
+	// Nothing delivered, and the ONLY turn-end is the reaction's tts_error (no barge, and
+	// the Lead's own turn cleanly delivered so it emits none).
+	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "" {
+		t.Fatalf("an all-start-error reaction committed %q, want nothing", got)
+	}
+	voicetest.AssertEventCount[voiceevent.TurnEnded](t, h, 1)
+}
+
+// TestReplier_Ensemble_ReactionPartialDeliveryNoTTSError pins #391 AC2 (legacy path):
+// a Reaction where SOME sentences fail to start but ≥1 is delivered keeps current
+// semantics (ADR-0012) — the delivered prefix commits, its FirstAudio is the success
+// signal, and NO TurnEnded{tts_error} fires. The reaction's first sentence "Aye."
+// start-errors (skip-and-continue) but "Indeed." delivers, so delivered != "".
+func TestReplier_Ensemble_ReactionPartialDeliveryNoTTSError(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft:          map[string]string{bartTarget.AgentID: "Bart leads."},
+			gate:           map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: make(chan struct{})},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}),
+			spokeCh:        make(chan string, 2),
+		},
+		react:          map[string]string{goblinTarget.AgentID: "Aye. Indeed."},
+		reactSentences: map[string][]string{goblinTarget.AgentID: {"Aye.", "Indeed."}},
+		reactSpokeCh:   make(chan string, 2),
+	}
+	// The Lead's sentence + the reaction's SECOND sentence synthesize fine; only the
+	// reaction's FIRST sentence start-errors → partial delivery ("Indeed." commits).
+	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{failOn: map[string]bool{"Aye.": true}})
+	replier := orchestrator.NewStreamReplier(ttsStage, func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error {
+		return nil
+	}, nil)
+	replier.SetFloor(floor)
+	replier.SetEnsemble(spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tpd", Text: "Bart, Goblin?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Tpd" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tpd"})
+	close(spk.speakPause)
+
+	// The reaction plays and commits its delivered prefix "Indeed." (the "Aye." skipped).
+	var rID string
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleReaction) bool {
+		if e.LeadTurnID == "Tpd" && e.Target.AgentID == goblinTarget.AgentID {
+			rID = e.TurnID
+			return true
+		}
+		return false
+	}, "ensemble.reaction announced for the reactor")
+	select {
+	case <-spk.reactSpokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the Reaction's SpeakReaction never returned")
+	}
+	waitFloorFree(t, floor)
+
+	if got := spk.reactDeliveredFor(goblinTarget.AgentID); got != "Indeed." {
+		t.Fatalf("partial reaction committed %q, want the delivered prefix %q", got, "Indeed.")
+	}
+	// Partial delivery is NOT a tts_error, and no barge fired: zero TurnEnded for rID.
+	for _, e := range h.Events() {
+		if te, ok := e.(voiceevent.TurnEnded); ok && te.TurnID == rID {
+			t.Fatalf("partial-delivery reaction published TurnEnded{%s}, want none (AC2)", te.Reason)
+		}
+	}
+}
+
 // TestReplier_Ensemble_TTSFailedLeadSkipsReaction pins ADR-0027 for the Reaction gate
 // (#302): a Lead whose ONLY sentence fails synthesis produced NO audio and NO
 // FirstOpus, so the floor never armed. Even though its (undelivered) text is committed

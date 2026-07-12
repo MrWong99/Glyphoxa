@@ -144,6 +144,78 @@ func TestHighlight_Delete_ReturnsClipKey(t *testing.T) {
 	}
 }
 
+func TestHighlight_SetImage(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, _ := st.CreateVoiceSession(ctx, campaignID)
+	id, _ := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightPromoted)
+
+	// Freshly created row has no image.
+	before, err := st.GetHighlight(ctx, tenantID, id)
+	if err != nil {
+		t.Fatalf("get before: %v", err)
+	}
+	if before.ImageKey != "" || before.ImageContentType != "" || before.ImageSizeBytes != 0 {
+		t.Fatalf("want empty image on fresh row, got %q/%q/%d", before.ImageKey, before.ImageContentType, before.ImageSizeBytes)
+	}
+
+	imgKey := "t/" + tenantID.String() + "/highlight/" + id.String() + "/image"
+	if err := st.SetHighlightImage(ctx, id, imgKey, "image/png", 9001); err != nil {
+		t.Fatalf("set image: %v", err)
+	}
+	after, err := st.GetHighlight(ctx, tenantID, id)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if after.ImageKey != imgKey || after.ImageContentType != "image/png" || after.ImageSizeBytes != 9001 {
+		t.Fatalf("image not persisted: %q/%q/%d", after.ImageKey, after.ImageContentType, after.ImageSizeBytes)
+	}
+}
+
+func TestHighlight_SetImage_NotFound(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, _ := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if err := st.SetHighlightImage(ctx, uuid.New(), "t/x/highlight/y/image", "image/png", 1); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("set image on missing row: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestHighlight_CampaignClipKeySweep_IncludesImages(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, _ := st.CreateVoiceSession(ctx, campaignID)
+	id1, clip1 := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightPromoted)
+	_, clip2 := seedHighlight(t, st, tenantID, vs.ID, campaignID, storage.HighlightCandidate)
+
+	// Only the first highlight is enriched with an image.
+	imgKey := "t/" + tenantID.String() + "/highlight/" + id1.String() + "/image"
+	if err := st.SetHighlightImage(ctx, id1, imgKey, "image/png", 42); err != nil {
+		t.Fatalf("set image: %v", err)
+	}
+
+	keys, err := st.ListCampaignHighlightClipKeys(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("list campaign keys: %v", err)
+	}
+	set := map[string]bool{}
+	for _, k := range keys {
+		set[k] = true
+	}
+	// Both clips PLUS the one image key; the unenriched row contributes no image.
+	if !set[clip1] || !set[clip2] || !set[imgKey] || len(keys) != 3 {
+		t.Fatalf("campaign sweep keys mismatch: %v", keys)
+	}
+}
+
 func TestHighlight_SessionCandidateSweep(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, tenantID, campaignID := seedCampaign(t, dsn)

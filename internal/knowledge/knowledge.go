@@ -19,11 +19,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/internal/textnorm"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -55,6 +57,12 @@ type Store interface {
 	// ADR-0052) — the sole effect of remember_knowledge. proposedWrite is the raw
 	// jsonb payload; nothing touches kg_node/kg_edge until the GM approves.
 	CreateKnowledgeProposal(ctx context.Context, campaignID, agentID uuid.UUID, proposedWrite []byte) error
+	// ListPendingKnowledgeProposals backs the #411 write-time dedup: the pending
+	// queue a re-proposal is checked against.
+	ListPendingKnowledgeProposals(ctx context.Context, campaignID uuid.UUID) ([]storage.KnowledgeProposal, error)
+	// ListNodes resolves a campaign-scoped proposal's subject Node by name so its
+	// established body facts can be dedup candidates (#411).
+	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 }
 
 // Sessions reports the active Voice Session (for its Campaign). *session.Manager
@@ -239,6 +247,107 @@ func (a *Adapter) CreateProposal(ctx context.Context, agentID string, w tool.Pro
 		return fmt.Errorf("knowledge: create proposal: %w", err)
 	}
 	return nil
+}
+
+// ExistingKnowledge implements [tool.KGWriter] (#411, ADR-0052 mechanism a): it
+// reports what the KG already holds for a proposal's target so the handler can
+// suppress an exact/normalized re-proposal and echo the target's pending proposals
+// back to the model. It gathers two candidate sets, both scoped to the target
+// entity (never global): the target Node's established body facts (its body split
+// into non-empty lines) and the salient text of every PENDING proposal addressing
+// the same target.
+//
+// The target key is UNIFIED across the two write paths: an own_node proposal keys
+// on its anchor node id, and a campaign proposal keys on its subject NAME — but the
+// same real entity would then carry two keys, so a Butler and its linked NPC would
+// double-propose the same fact invisibly to each other. Here the subject name is
+// resolved to the node id via the campaign's Node list, so both paths collapse onto
+// "id:<node>" whenever the subject names a real Node; only an unresolvable name
+// keeps a "subj:" key. Established body facts skip gm_private Nodes — a GM secret
+// must never surface into a prompt via the echo (ADR-0008). No session ⇒
+// ErrNoActiveSession; the comparison itself is the handler's.
+func (a *Adapter) ExistingKnowledge(ctx context.Context, _ string, w tool.ProposedWrite) (tool.KnownForTarget, error) {
+	campaignID, err := a.activeCampaign()
+	if err != nil {
+		return tool.KnownForTarget{}, err
+	}
+
+	nodes, err := a.store.ListNodes(ctx, campaignID)
+	if err != nil {
+		return tool.KnownForTarget{}, fmt.Errorf("knowledge: existing knowledge: list nodes: %w", err)
+	}
+	nameToID := make(map[string]string, len(nodes))
+	idToNode := make(map[string]storage.KGNode, len(nodes))
+	for _, n := range nodes {
+		idToNode[n.ID.String()] = n
+		if k := textnorm.Normalize(n.Name); k != "" {
+			nameToID[k] = n.ID.String()
+		}
+	}
+
+	wantKey := canonicalTargetKey(w, nameToID)
+	if wantKey == "" {
+		return tool.KnownForTarget{}, nil // no identifiable target ⇒ nothing to compare
+	}
+
+	var known tool.KnownForTarget
+	if id, ok := strings.CutPrefix(wantKey, "id:"); ok {
+		if n, ok := idToNode[id]; ok && !n.GMPrivate {
+			known.Established = bodyLines(n.Body)
+		}
+	}
+
+	pending, err := a.store.ListPendingKnowledgeProposals(ctx, campaignID)
+	if err != nil {
+		return tool.KnownForTarget{}, fmt.Errorf("knowledge: existing knowledge: %w", err)
+	}
+	for _, p := range pending {
+		var pw tool.ProposedWrite
+		if err := json.Unmarshal(p.ProposedWrite, &pw); err != nil {
+			continue // a malformed legacy row is not a comparable duplicate
+		}
+		if canonicalTargetKey(pw, nameToID) == wantKey {
+			if s := tool.ProposalSalient(pw); s != "" {
+				known.Pending = append(known.Pending, s)
+			}
+		}
+	}
+	return known, nil
+}
+
+// canonicalTargetKey is [tool.ProposalTargetKey] with subject-name → node-id
+// resolution layered on: a subject that names a real Node collapses onto the
+// node-id key so own_node and campaign proposals about the same entity unify. An
+// unresolvable name keeps the pure "subj:" key; an empty target yields "".
+func canonicalTargetKey(w tool.ProposedWrite, nameToID map[string]string) string {
+	if w.NodeID != "" {
+		return "id:" + w.NodeID
+	}
+	name := w.Subject
+	if name == "" && w.Kind == "node" {
+		name = w.Name
+	}
+	n := textnorm.Normalize(name)
+	if n == "" {
+		return ""
+	}
+	if id, ok := nameToID[n]; ok {
+		return "id:" + id
+	}
+	return "subj:" + n
+}
+
+// bodyLines splits a Node's body prose into its individual established facts —
+// one per non-empty, trimmed line — the granularity the GM-approved writes append
+// at, so a re-proposal of a single line is caught.
+func bodyLines(body string) []string {
+	var out []string
+	for _, ln := range strings.Split(body, "\n") {
+		if t := strings.TrimSpace(ln); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // Compile-time assertions that the adapter satisfies the tool seams.

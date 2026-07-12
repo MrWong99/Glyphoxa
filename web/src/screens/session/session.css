@@ -554,3 +554,149 @@
   flex-direction: column;
   gap: var(--spacing-md);
 }
+
+/* Session Highlights strip (#309, Epic 8): the rendered session's epic-moment
+ * clips — status badge, clock range + score, excerpt + reason, a native audio
+ * player, an optional AI scene image, and Promote/Delete actions. */
+.gx-session__highlights {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-highlights__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.gx-highlight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.gx-highlight__head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.gx-highlight__clock {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}
+
+.gx-highlight__score {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.gx-highlight__excerpt {
+  margin: 0;
+  padding-left: var(--spacing-md);
+  border-left: 2px solid var(--border);
+  line-height: 1.5;
+  color: var(--text-default);
+}
+
+.gx-highlight__reason {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.gx-highlight__audio {
+  width: 100%;
+}
+
+.gx-highlight__image {
+  max-width: 100%;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.gx-highlight__actions {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+/* Highlight share surface (#310): the GM's Discord-delivery panel, opened from the
+ * per-row Share action. A compact column so the channel picker, replay, and
+ * download read as one group. */
+.gx-highlight-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.15));
+  width: 100%;
+}
+
+.gx-highlight-share__channel,
+.gx-highlight-share__replay {
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.gx-highlight-share__hint,
+.gx-highlight-share__error {
+  color: var(--text-subtle);
+  font-size: 0.8125rem;
+}
+
+.gx-highlight-share__error {
+  color: var(--danger, #f87171);
+}
+
+.gx-highlight-share__download {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs, 4px);
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+  text-decoration: none;
+  width: fit-content;
+}
+
+.gx-highlight-share__download:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* Settled empty + error states (AC: render cleanly; #270 lesson: an error is
+ * never a silent empty state). */
+.gx-highlights__empty,
+.gx-highlights__error {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+
+.gx-highlights__error {
+  color: var(--danger, #ff4f5e);
+}
+
+/* Non-fatal refresh blip: the last loaded set stays on screen (AC2 — never
+ * unmount a playing clip); a small muted notice flags the staleness. */
+.gx-highlights__stale {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}

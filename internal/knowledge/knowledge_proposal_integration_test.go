@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -146,5 +147,45 @@ func TestRememberKnowledge_OwnNodeProposal_RealDB(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Errorf("agent DELETE did not cascade proposals: %d remain", remaining)
+	}
+}
+
+// TestRememberKnowledge_DoubleRememberOneRow_RealDB closes the fake-mirror
+// seam-drift gap for the #411 write-time dedup: it drives the full
+// handler→adapter→real Postgres path twice with the same fact and asserts exactly
+// ONE proposal row survives — the second call's ExistingKnowledge reads the first
+// (now-persisted) proposal back from the real store and suppresses the repeat.
+func TestRememberKnowledge_DoubleRememberOneRow_RealDB(t *testing.T) {
+	dsn := startPostgres(t)
+	store, _, campaignID, agentID, _ := seedProposalWorld(t, dsn)
+	ctx := context.Background()
+
+	adapter := knowledge.New(store, staticSession{
+		sess: storage.VoiceSession{CampaignID: campaignID}, live: true,
+	})
+	rk := tool.NewRememberKnowledge(adapter)
+	callCtx := tool.WithCaller(ctx, agentID.String())
+	args := json.RawMessage(`{"kind":"fact","fact":"I brew the finest ale in the realm"}`)
+	cfg := json.RawMessage(`{"scope":"own_node"}`)
+
+	if _, err := rk.Execute(callCtx, args, cfg); err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	// A reworded/re-cased repeat of the SAME fact — the normalized guard catches it.
+	repeat := json.RawMessage(`{"kind":"fact","fact":"I brew THE finest ale in the realm!"}`)
+	out, err := rk.Execute(callCtx, repeat, cfg)
+	if err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "already") {
+		t.Errorf("second call did not report already-noted: %q", out)
+	}
+
+	pending, err := store.ListPendingKnowledgeProposals(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("ListPendingKnowledgeProposals: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("double-remember persisted %d rows, want exactly 1", len(pending))
 	}
 }

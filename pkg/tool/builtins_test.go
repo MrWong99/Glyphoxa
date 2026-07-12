@@ -14,7 +14,7 @@ import (
 // live session runs.
 func TestBuiltinRegistryRegistersKnowledgeTools(t *testing.T) {
 	reg := BuiltinRegistry(Deps{})
-	want := []string{"dice", "kg_query", "remember_knowledge", "transcript_search"} // Tools() is Name-sorted
+	want := []string{"dice", "kg_query", "recap", "remember_knowledge", "transcript_search"} // Tools() is Name-sorted
 	got := reg.Tools()
 	if len(got) != len(want) {
 		t.Fatalf("registered %d tools, want %d: %+v", len(got), len(want), got)
@@ -30,7 +30,7 @@ func TestBuiltinRegistryRegistersKnowledgeTools(t *testing.T) {
 // so the loop runs them inline (never the refused side-effecting path).
 func TestKnowledgeToolsAreReadOnly(t *testing.T) {
 	reg := BuiltinRegistry(Deps{})
-	for _, name := range []string{"transcript_search", "kg_query"} {
+	for _, name := range []string{"transcript_search", "kg_query", "recap"} {
 		tl, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("%s not registered", name)

@@ -134,6 +134,42 @@ service CampaignService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // ListKnowledgeProposals returns the active campaign's PENDING Knowledge
+  // Proposals oldest-first — the GM review queue an Agent's remember_knowledge
+  // call files into (#300, ADR-0052). Each carries its authoring Agent's joined
+  // name and the parsed proposed write (fact/edge/node); an unparseable jsonb row
+  // is still listed with an UNSET write oneof so the GM can reject it. It is a
+  // read (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc ListKnowledgeProposals(ListKnowledgeProposalsRequest) returns (ListKnowledgeProposalsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // ApproveKnowledgeProposal lands a pending proposal's write on the Knowledge
+  // Graph and marks it approved, atomically (#300, ADR-0052): the claim UPDATE and
+  // the KG write share one transaction. A refused write (unresolvable subject,
+  // matrix violation, duplicate, dangling anchor, unreadable payload) is
+  // CodeFailedPrecondition with an actionable reason and leaves the row pending; a
+  // missing/already-reviewed id is CodeNotFound; an unparsable id is
+  // CodeInvalidArgument. State-changing: the auth + CSRF interceptors guard it.
+  rpc ApproveKnowledgeProposal(ApproveKnowledgeProposalRequest) returns (ApproveKnowledgeProposalResponse);
+
+  // RejectKnowledgeProposal drops a pending proposal (status rejected, row kept)
+  // without touching the KG (#300, ADR-0052). A missing/already-reviewed id is
+  // CodeNotFound; an unparsable id is CodeInvalidArgument. State-changing: the auth
+  // + CSRF interceptors guard it.
+  rpc RejectKnowledgeProposal(RejectKnowledgeProposalRequest) returns (RejectKnowledgeProposalResponse);
+
+  // ListSimilarKnowledge returns up to 5 existing Nodes most similar to a pending
+  // proposal's subject — the ADR-0011 embedding-vector hint the review surface
+  // shows beside each proposal so the GM can merge/rewrite/reject rather than
+  // duplicate canon (ADR-0052: similarity is a hint, never an auto-merge). It
+  // degrades silently to fulltext search when no embeddings provider is wired. A
+  // missing/already-reviewed proposal id is CodeNotFound. It is a read
+  // (NO_SIDE_EFFECTS), so the CSRF check is exempt.
+  rpc ListSimilarKnowledge(ListSimilarKnowledgeRequest) returns (ListSimilarKnowledgeResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // ListToolGrants returns, for one Agent, EVERY built-in Tool (the ADR-0028
   // Registry is the available-Tools source) paired with the Agent's current grant
   // state — granted or not, its per-grant scope config, and whether the Tool
@@ -474,6 +510,113 @@ message SearchNodesRequest {
 message SearchNodesResponse {
   // nodes are the matching Knowledge Graph Nodes, ranked by relevance; gm_private
   // Nodes are included (GM-facing search).
+  repeated Node nodes = 1;
+}
+
+// ProposedFact is a remember_knowledge proposal to append a fact sentence to an
+// existing Node's body (#300, ADR-0052). node_id anchors an own_node-scoped NPC
+// proposal to its linked Node; when empty, subject names the target Node by name
+// (resolved at approval, no auto-merge).
+message ProposedFact {
+  // node_id is the anchor Node's UUID for an own_node-scoped proposal; empty when
+  // the target is named by subject.
+  string node_id = 1;
+  // subject is the target Node's name (the fallback resolution key when node_id is
+  // empty; also the display label).
+  string subject = 2;
+  // fact is the sentence to append to the Node's body.
+  string fact = 3;
+}
+
+// ProposedEdge is a remember_knowledge proposal to create a typed directional
+// Edge (#300, ADR-0052). node_id/subject name the FROM Node; target NAMES the TO
+// Node (a name, not an id — it is resolved at approval, ADR-0052 no auto-merge).
+message ProposedEdge {
+  // node_id is the from-Node's UUID for an own_node-scoped proposal; empty when
+  // the from-Node is named by subject.
+  string node_id = 1;
+  // subject is the from-Node's name (resolution key / display label).
+  string subject = 2;
+  // relation is the Edge type.
+  EdgeType relation = 3;
+  // target is the to-Node's NAME (resolved to a Node at approval time).
+  string target = 4;
+}
+
+// ProposedNode is a remember_knowledge proposal to create a new Node (#300,
+// ADR-0052; Butler-scope only). The Node is created gm_private=false.
+message ProposedNode {
+  // node_type is the new Node's type.
+  NodeType node_type = 1;
+  // name is the new Node's display name.
+  string name = 2;
+  // body is the new Node's prose.
+  string body = 3;
+}
+
+// KnowledgeProposal is one pending Knowledge Proposal for GM review (#300,
+// ADR-0052). The write oneof carries the parsed proposed write; it is UNSET when
+// the stored jsonb could not be parsed (a versioned-shape mismatch), which the UI
+// renders as "unreadable — reject".
+message KnowledgeProposal {
+  // id is the proposal's UUID.
+  string id = 1;
+  // authoring_agent_id is the Agent that filed the proposal.
+  string authoring_agent_id = 2;
+  // authoring_agent_name is that Agent's display name, joined server-side.
+  string authoring_agent_name = 3;
+  // created_at is when the proposal was filed.
+  google.protobuf.Timestamp created_at = 4;
+  // write is the parsed proposed write; UNSET when the row is unparseable.
+  oneof write {
+    ProposedFact fact = 5;
+    ProposedEdge edge = 6;
+    ProposedNode node = 7;
+  }
+}
+
+// ListKnowledgeProposalsRequest is the (empty) request; the active campaign is
+// resolved server-side (single operator, ADR-0039). There is no pagination — the
+// server returns the whole pending queue oldest-first.
+message ListKnowledgeProposalsRequest {}
+
+// ListKnowledgeProposalsResponse carries the pending queue oldest-first.
+message ListKnowledgeProposalsResponse {
+  // proposals are the campaign's pending Knowledge Proposals, oldest-first.
+  repeated KnowledgeProposal proposals = 1;
+}
+
+// ApproveKnowledgeProposalRequest names the proposal to approve. There is no
+// reason field — approve either lands the write or refuses with a reason.
+message ApproveKnowledgeProposalRequest {
+  // id is the proposal to approve.
+  string id = 1;
+}
+
+// ApproveKnowledgeProposalResponse is the (empty) response for a landed write.
+message ApproveKnowledgeProposalResponse {}
+
+// RejectKnowledgeProposalRequest names the proposal to reject.
+message RejectKnowledgeProposalRequest {
+  // id is the proposal to reject.
+  string id = 1;
+}
+
+// RejectKnowledgeProposalResponse is the (empty) response for a dropped proposal.
+message RejectKnowledgeProposalResponse {}
+
+// ListSimilarKnowledgeRequest names the pending proposal whose subject to search
+// for similar existing Nodes.
+message ListSimilarKnowledgeRequest {
+  // proposal_id is the pending proposal to find similar entries for.
+  string proposal_id = 1;
+}
+
+// ListSimilarKnowledgeResponse carries up to 5 existing Nodes nearest the
+// proposal's subject, nearest first (the ADR-0011 similarity hint).
+message ListSimilarKnowledgeResponse {
+  // nodes are the most-similar existing Nodes, nearest first (≤5). gm_private
+  // Nodes ARE included — this is a GM-facing review hint, never an NPC prompt.
   repeated Node nodes = 1;
 }
 
@@ -1064,6 +1207,22 @@ service SessionService {
   // ADR-0048), returning nothing (#308). A missing/foreign id is CodeNotFound.
   // State-changing: CSRF + auth guard it.
   rpc DeleteHighlight(DeleteHighlightRequest) returns (DeleteHighlightResponse);
+  // ListShareChannels lists the deployment guild's text channels the GM can post a
+  // Highlight file into, plus the Active Campaign's last-chosen channel so the share
+  // dialog pre-selects it (#310, Epic 8, ADR-0051). A read (NO_SIDE_EFFECTS); a
+  // missing saved Bot token is CodeFailedPrecondition ("save a Discord Bot token
+  // first"), mirroring ResolveGuildInvite.
+  rpc ListShareChannels(ListShareChannelsRequest) returns (ListShareChannelsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // ShareHighlight delivers a promoted Session Highlight into Discord on explicit GM
+  // action (#310, ADR-0051 GM-only sharing — no auto-post): either as a file to a
+  // text channel (remembered per Campaign) or as a voice replay into the live voice
+  // channel. Only a 'promoted' Highlight is shareable; a candidate is
+  // CodeFailedPrecondition. An oversize clip is refused (CodeFailedPrecondition, no
+  // re-encode). A missing/foreign/cross-campaign id is CodeNotFound. State-changing:
+  // CSRF + auth guard it.
+  rpc ShareHighlight(ShareHighlightRequest) returns (ShareHighlightResponse);
 }
 
 // Highlight is the wire view of a Session Highlight row (#308, Epic 8): a
@@ -1100,6 +1259,13 @@ message Highlight {
   google.protobuf.Timestamp created_at = 13;
   // promoted_at is when the GM promoted it; unset while a candidate.
   google.protobuf.Timestamp promoted_at = 14;
+  // image_content_type is the AI-generated scene's MIME type (#311, Epic 8);
+  // empty means no image yet (unenriched, unconfigured, or a failed generation).
+  // The image bytes are served through GET /highlights/{id}/image; the blob key
+  // is NEVER exposed (clip_key posture).
+  string image_content_type = 15;
+  // image_size_bytes is the stored image's size in bytes (0 when no image yet).
+  int64 image_size_bytes = 16;
 }
 
 // ListHighlightsRequest names the Voice Session whose Highlights to list.
@@ -1146,6 +1312,49 @@ message DeleteHighlightRequest {
 
 // DeleteHighlightResponse is empty; the delete cascades the clip through the seam.
 message DeleteHighlightResponse {}
+
+// ListShareChannelsRequest is empty: the guild is the deployment's single Discord
+// guild and the Campaign is resolved server-side (ADR-0039).
+message ListShareChannelsRequest {}
+
+// TextChannel is one Discord text channel the GM can post a Highlight file into
+// (#310): its snowflake id and display name.
+message TextChannel {
+  // id is the channel's Discord snowflake.
+  string id = 1;
+  // name is the channel's display name (e.g. "highlights").
+  string name = 2;
+}
+
+// ListShareChannelsResponse carries the guild's text channels (sorted for the
+// dialog) and the Active Campaign's last-chosen share channel id so the dialog
+// pre-selects it. last_share_channel_id is empty when the campaign has never
+// shared to a channel.
+message ListShareChannelsResponse {
+  // channels are the guild's text channels the GM may post into.
+  repeated TextChannel channels = 1;
+  // last_share_channel_id is the Campaign's remembered channel (empty = none yet).
+  string last_share_channel_id = 2;
+}
+
+// ShareHighlightRequest names the Highlight to share and the delivery mode (#310).
+message ShareHighlightRequest {
+  // id is the promoted Highlight to share.
+  string id = 1;
+  // mode selects the delivery: a text channel (file upload) or a voice replay.
+  oneof mode {
+    // text_channel_id posts the clip as a file to this Discord text channel; the
+    // choice is remembered per Campaign for the dialog's next pre-selection.
+    string text_channel_id = 2;
+    // voice_replay=true replays the clip into the live voice channel (requires a
+    // live Voice Session).
+    bool voice_replay = 3;
+  }
+}
+
+// ShareHighlightResponse is empty: success is the delivery itself (a posted file or
+// a queued replay); failures surface as Connect error codes.
+message ShareHighlightResponse {}
 
 // GenerateRecapRequest carries the Voice Session ids to recap; each must belong
 // to the server-resolved Active Campaign (ADR-0039) — a cross-campaign or

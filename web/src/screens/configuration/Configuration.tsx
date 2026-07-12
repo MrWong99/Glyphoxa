@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { MessagesSquare, BrainCircuit, AudioLines, RefreshCw } from "lucide-react";
+import { MessagesSquare, BrainCircuit, AudioLines, ImagePlus, RefreshCw } from "lucide-react";
 
 import {
   CampaignService,
@@ -38,6 +38,7 @@ import "./configuration.css";
 const BYOK_SLOTS = [
   { provider: "groq", label: "Groq", kind: "LLM", icon: <BrainCircuit size={19} />, placeholder: "Paste your Groq API key" },
   { provider: "elevenlabs", label: "ElevenLabs", kind: "Speech", icon: <AudioLines size={19} />, placeholder: "Paste your ElevenLabs API key" },
+  { provider: "gemini", label: "Gemini", kind: "Image", icon: <ImagePlus size={19} />, placeholder: "Paste your Gemini API key" },
 ] as const;
 
 function credentialFor(creds: ProviderCredential[], provider: string): ProviderCredential | undefined {

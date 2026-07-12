@@ -64,7 +64,7 @@ const GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 // saved slots and the async health the GetProviderHealth RPC reports (#70).
 function mockBackend(
   opts: {
-    saved?: Partial<Record<"groq" | "elevenlabs" | "discord", string>>;
+    saved?: Partial<Record<"groq" | "elevenlabs" | "discord" | "gemini", string>>;
     health?: ProviderHealth[];
     // discordSaves captures every SaveDiscordSettings request so tests can pin
     // the wire shape (#142: a token-only save must omit the ID fields).
@@ -105,6 +105,7 @@ function mockBackend(
     groqModel: "",
     groq: opts.saved?.groq,
     elevenlabs: opts.saved?.elevenlabs,
+    gemini: opts.saved?.gemini,
     discord: opts.saved?.discord,
     guildId: "",
     voiceChannelId: "",
@@ -131,6 +132,7 @@ function mockBackend(
             cred("discord", "discord", state.discord),
             cred("llm", "groq", state.groq, state.groqModel),
             cred("tts", "elevenlabs", state.elevenlabs),
+            cred("image", "gemini", state.gemini),
           ],
           guildId: state.guildId,
           voiceChannelId: state.voiceChannelId,
@@ -155,8 +157,11 @@ function mockBackend(
           state.groqModel = req.model;
         }
         if (req.provider === "elevenlabs") state.elevenlabs = last4;
+        if (req.provider === "gemini") state.gemini = last4;
+        const comp =
+          req.provider === "groq" ? "llm" : req.provider === "gemini" ? "image" : "tts";
         return create(SaveProviderConfigResponseSchema, {
-          credential: cred(req.provider === "groq" ? "llm" : "tts", req.provider, last4, req.model),
+          credential: cred(comp, req.provider, last4, req.model),
         });
       },
       saveDiscordSettings: (req) => {
@@ -232,9 +237,31 @@ describe("Configuration", () => {
 
   it("shows a Key-needed badge for each unsaved credential", async () => {
     renderScreen();
-    // Three secret slots start unsaved → three Key-needed badges.
-    expect(await screen.findAllByText(/key needed/i)).toHaveLength(3);
+    // Four secret slots start unsaved → four Key-needed badges (discord, groq,
+    // elevenlabs, gemini).
+    expect(await screen.findAllByText(/key needed/i)).toHaveLength(4);
     expect(screen.queryByText(/healthy/i)).not.toBeInTheDocument();
+  });
+
+  it("saves the Gemini image key write-only: the row masks and shows Replace", async () => {
+    const saves: Array<{ provider: string; secret: string; model: string }> = [];
+    renderScreen(mockBackend({ providerSaves: saves }));
+
+    // The Gemini image slot renders its own card.
+    const geminiInput = await screen.findByLabelText("Gemini key");
+    const geminiRow = geminiInput.closest(".gx-provider-row") as HTMLElement;
+    expect(within(geminiRow).getByText("Gemini")).toBeInTheDocument();
+    expect(within(geminiRow).getByText("Image")).toBeInTheDocument();
+
+    fireEvent.change(geminiInput, { target: { value: "gm-secret-abcd" } });
+    fireEvent.click(within(geminiRow).getByRole("button", { name: "Save" }));
+
+    // After the invalidated list refetches, the row masks with a Replace affordance.
+    expect(await within(geminiRow).findByText("••••••••")).toBeInTheDocument();
+    expect(within(geminiRow).getByRole("button", { name: /replace/i })).toBeInTheDocument();
+    // The save went out as the gemini provider; plaintext never lands in the DOM.
+    expect(saves.some((s) => s.provider === "gemini" && s.secret === "gm-secret-abcd")).toBe(true);
+    expect(screen.queryByText(/gm-secret-abcd/)).not.toBeInTheDocument();
   });
 
   it("saves a provider key write-only: the row masks and the badge turns Healthy", async () => {

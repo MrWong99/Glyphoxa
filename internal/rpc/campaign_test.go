@@ -129,6 +129,21 @@ func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.UUID, uuid.NullU
 func (fakeReader) SearchNodes(context.Context, uuid.UUID, string, int) ([]storage.KGNode, error) {
 	return nil, nil
 }
+func (fakeReader) ListPendingKnowledgeProposals(context.Context, uuid.UUID) ([]storage.KnowledgeProposal, error) {
+	return nil, nil
+}
+func (fakeReader) GetPendingKnowledgeProposal(context.Context, uuid.UUID, uuid.UUID) (storage.KnowledgeProposal, error) {
+	return storage.KnowledgeProposal{}, nil
+}
+func (fakeReader) ApproveKnowledgeProposal(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (fakeReader) RejectKnowledgeProposal(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (fakeReader) SimilarNodes(context.Context, uuid.UUID, []float32, int) ([]storage.KGNode, error) {
+	return nil, nil
+}
 func (fakeReader) ListToolGrants(context.Context, uuid.UUID) ([]storage.ToolGrant, error) {
 	return nil, nil
 }

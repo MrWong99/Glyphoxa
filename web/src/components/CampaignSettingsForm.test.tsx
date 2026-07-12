@@ -13,7 +13,7 @@ import { Providers } from "@/app/Providers";
 import { makeQueryClient } from "@/lib/queryClient";
 import { CampaignSettingsForm } from "./CampaignSettingsForm";
 
-type Camp = { id?: string; name?: string; system?: string; language?: string };
+type Camp = { id?: string; name?: string; system?: string; language?: string; tapeArmed?: boolean };
 
 // A Connect backend for the settings form: ListSupportedLanguages returns the
 // registered encoder codes (the Campaign Language choices, ADR-0024) and
@@ -34,13 +34,21 @@ function mockBackend(
         return create(ListSupportedLanguagesResponseSchema, { languages: opts.languages ?? ["de", "en"] });
       },
       updateCampaign: (req) => {
-        if (opts.updated) opts.updated.req = { id: req.id, name: req.name, system: req.system, language: req.language };
+        if (opts.updated)
+          opts.updated.req = {
+            id: req.id,
+            name: req.name,
+            system: req.system,
+            language: req.language,
+            tapeArmed: req.tapeArmed,
+          };
         return create(UpdateCampaignResponseSchema, {
           campaign: create(CampaignSchema, {
             id: req.id,
             name: req.name,
             system: req.system,
             language: req.language,
+            tapeArmed: req.tapeArmed ?? false,
           }),
         });
       },
@@ -54,6 +62,7 @@ function makeCampaign(c: Camp = {}) {
     name: c.name ?? "The Sunless Citadel",
     system: c.system ?? "D&D 5e",
     language: c.language ?? "en",
+    tapeArmed: c.tapeArmed ?? false,
   });
 }
 
@@ -177,7 +186,13 @@ describe("CampaignSettingsForm", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
-    expect(updated.req).toEqual({ id: "camp-9", name: "Renamed Quest", system: "D&D 5e", language: "en" });
+    expect(updated.req).toEqual({
+      id: "camp-9",
+      name: "Renamed Quest",
+      system: "D&D 5e",
+      language: "en",
+      tapeArmed: false,
+    });
   });
 
   it("calls onCancel when cancel is clicked", () => {
@@ -185,5 +200,44 @@ describe("CampaignSettingsForm", () => {
     renderForm({ onCancel });
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  // Rollover tape (#412, ADR-0051): the Campaign-level GM opt-in that arms
+  // consent-gated capture. Default OFF, round-trips through UpdateCampaign
+  // like the other fields.
+  it("prefills the Rollover tape toggle from the campaign prop", () => {
+    renderForm({ campaign: makeCampaign({ tapeArmed: true }) });
+    expect(screen.getByRole("switch", { name: /rollover tape/i })).toBeChecked();
+  });
+
+  it("explains the consent flow and next-session effectiveness", () => {
+    renderForm();
+    // The real Discord disclosure buttons are labeled "Consent" / "Revoke"
+    // (internal/wirenpc/tapedisclosure.go), so the copy must match them.
+    expect(screen.getByText(/consent\/revoke/i)).toBeInTheDocument();
+    expect(screen.getByText(/next session start/i)).toBeInTheDocument();
+    // No GM/operator auto-consent (triage decision) — the GM must press Consent too.
+    expect(screen.getByText(/gm must press consent/i)).toBeInTheDocument();
+  });
+
+  it("round-trips the tape-armed field through UpdateCampaign when toggled on", async () => {
+    const updated: { req?: Record<string, unknown> } = {};
+    const onSaved = vi.fn();
+    renderForm(
+      { campaign: makeCampaign({ id: "camp-9", system: "D&D 5e", language: "en", tapeArmed: false }), onSaved },
+      mockBackend({ languages: ["de", "en"], updated }),
+    );
+
+    fireEvent.click(screen.getByRole("switch", { name: /rollover tape/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(updated.req).toEqual({
+      id: "camp-9",
+      name: "The Sunless Citadel",
+      system: "D&D 5e",
+      language: "en",
+      tapeArmed: true,
+    });
   });
 });

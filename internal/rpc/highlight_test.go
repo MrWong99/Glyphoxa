@@ -1,7 +1,11 @@
 package rpc_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,6 +18,8 @@ import (
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/blob"
+	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -84,10 +90,14 @@ func (f *fakeHighlightStore) DeleteHighlight(_ context.Context, tenantID, id uui
 	return h.ClipKey, nil
 }
 
-// fakeRPCBlobs records the keys deleted through the seam.
+// fakeRPCBlobs records the keys deleted through the seam and serves clip bytes for
+// the ShareHighlight fetch (#310).
 type fakeRPCBlobs struct {
 	mu      sync.Mutex
 	deleted []string
+	data    []byte // clip bytes Get returns; defaults to "RIFFDATA"
+	getErr  error  // when set, Get fails with it
+	gotKeys []string
 }
 
 func (f *fakeRPCBlobs) Delete(_ context.Context, key string) error {
@@ -97,11 +107,55 @@ func (f *fakeRPCBlobs) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func (f *fakeRPCBlobs) Get(_ context.Context, key string) (io.ReadCloser, blob.Meta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gotKeys = append(f.gotKeys, key)
+	if f.getErr != nil {
+		return nil, blob.Meta{}, f.getErr
+	}
+	data := f.data
+	if data == nil {
+		data = []byte("RIFFDATA")
+	}
+	return io.NopCloser(bytes.NewReader(data)), blob.Meta{ContentType: "audio/wav", Size: int64(len(data))}, nil
+}
+
+func (f *fakeRPCBlobs) deletedKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deleted...)
+}
+
+// fakeHighlightEnqueuer records image-enrichment jobs PromoteHighlight schedules.
+type fakeHighlightEnqueuer struct {
+	mu       sync.Mutex
+	calls    int
+	kind     string
+	payload  any
+	runAfter time.Time
+	err      error // returned by Enqueue when set (enqueue-failure test)
+}
+
+func (f *fakeHighlightEnqueuer) Enqueue(_ context.Context, kind string, payload any, runAfter time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.kind, f.payload, f.runAfter = kind, payload, runAfter
+	return f.err
+}
+
 // newHighlightClient mounts a SessionServer with the highlight seam wired and an
 // authenticated operator on tenantID. sstore drives the Active-Campaign resolution
 // (#308 campaign scoping) and the voice-session ownership lookups; a nil sstore
 // falls back to a plain activeStore() (the legacy tenant-only tests).
 func newHighlightClient(t *testing.T, tenantID uuid.UUID, hstore rpc.HighlightStore, blobs *fakeRPCBlobs, sstore *fakeSessionStore) managementv1connect.SessionServiceClient {
+	return newHighlightClientEnq(t, tenantID, hstore, blobs, sstore, nil)
+}
+
+// newHighlightClientEnq is newHighlightClient plus an explicit enrichment enqueuer
+// (#311). A nil enqueuer disables enrichment (promote still succeeds).
+func newHighlightClientEnq(t *testing.T, tenantID uuid.UUID, hstore rpc.HighlightStore, blobs *fakeRPCBlobs, sstore *fakeSessionStore, enqueue rpc.HighlightEnqueuer) managementv1connect.SessionServiceClient {
 	t.Helper()
 	if sstore == nil {
 		sstore = activeStore()
@@ -113,7 +167,7 @@ func newHighlightClient(t *testing.T, tenantID uuid.UUID, hstore rpc.HighlightSt
 		}
 	})
 	srv := rpc.NewSessionServer(&fakeSessionManager{}, sstore, nil, nil)
-	srv.SetHighlights(hstore, blobs)
+	srv.SetHighlights(hstore, blobs, enqueue)
 	mux := http.NewServeMux()
 	mux.Handle(srv.Handler(connect.WithInterceptors(inject)))
 	httpSrv := httptest.NewServer(mux)
@@ -244,6 +298,143 @@ func TestRPCHighlight_Delete_BlobThenRow(t *testing.T) {
 		connect.NewRequest(&managementv1.DeleteHighlightRequest{Id: h.ID.String()}))
 	if connect.CodeOf(err) != connect.CodeNotFound {
 		t.Fatalf("double delete: want NotFound, got %v", err)
+	}
+}
+
+func TestRPCHighlight_Promote_EnqueuesImageEnrichment(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightCandidate)
+	enq := &fakeHighlightEnqueuer{}
+
+	client := newHighlightClientEnq(t, tenantID, store, &fakeRPCBlobs{}, campaignSessionStore(campaignID), enq)
+	if _, err := client.PromoteHighlight(context.Background(),
+		connect.NewRequest(&managementv1.PromoteHighlightRequest{Id: h.ID.String()})); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if enq.calls != 1 || enq.kind != highlight.JobKindEnrichImage {
+		t.Fatalf("enqueue calls=%d kind=%q, want 1 %q", enq.calls, enq.kind, highlight.JobKindEnrichImage)
+	}
+	// Payload decodes to the promoted highlight + tenant.
+	raw, ok := enq.payload.(json.RawMessage)
+	if !ok {
+		t.Fatalf("payload type = %T, want json.RawMessage", enq.payload)
+	}
+	var got struct {
+		HighlightID uuid.UUID `json:"highlight_id"`
+		TenantID    uuid.UUID `json:"tenant_id"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got.HighlightID != h.ID || got.TenantID != tenantID {
+		t.Fatalf("payload = %+v, want highlight %s tenant %s", got, h.ID, tenantID)
+	}
+}
+
+func TestRPCHighlight_Promote_SkipsEnqueueWhenAlreadyEnriched(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightCandidate)
+	// Already enriched: a re-promote must NOT re-enqueue (no double spend).
+	h.ImageKey = "t/" + tenantID.String() + "/highlight/" + h.ID.String() + "/image"
+	h.ImageContentType = "image/png"
+	store.put(h)
+	enq := &fakeHighlightEnqueuer{}
+
+	client := newHighlightClientEnq(t, tenantID, store, &fakeRPCBlobs{}, campaignSessionStore(campaignID), enq)
+	if _, err := client.PromoteHighlight(context.Background(),
+		connect.NewRequest(&managementv1.PromoteHighlightRequest{Id: h.ID.String()})); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if enq.calls != 0 {
+		t.Fatalf("enqueue called %d times for an already-enriched highlight; want 0", enq.calls)
+	}
+}
+
+func TestRPCHighlight_Promote_EnqueueFailureStillPromotes(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightCandidate)
+	enq := &fakeHighlightEnqueuer{err: errors.New("job table down")}
+
+	client := newHighlightClientEnq(t, tenantID, store, &fakeRPCBlobs{}, campaignSessionStore(campaignID), enq)
+	res, err := client.PromoteHighlight(context.Background(),
+		connect.NewRequest(&managementv1.PromoteHighlightRequest{Id: h.ID.String()}))
+	if err != nil {
+		t.Fatalf("promote must succeed despite enqueue failure, got %v", err)
+	}
+	if res.Msg.GetHighlight().GetStatus() != storage.HighlightPromoted {
+		t.Fatalf("want promoted, got %q", res.Msg.GetHighlight().GetStatus())
+	}
+}
+
+func TestRPCHighlight_Delete_RemovesBothBlobs(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightPromoted)
+	h.ImageKey = "t/" + tenantID.String() + "/highlight/" + h.ID.String() + "/image"
+	h.ImageContentType = "image/png"
+	h.ImageSizeBytes = 42
+	store.put(h)
+	blobs := &fakeRPCBlobs{}
+
+	client := newHighlightClient(t, tenantID, store, blobs, campaignSessionStore(campaignID))
+	if _, err := client.DeleteHighlight(context.Background(),
+		connect.NewRequest(&managementv1.DeleteHighlightRequest{Id: h.ID.String()})); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	del := blobs.deletedKeys()
+	if len(del) != 2 || del[0] != h.ClipKey || del[1] != h.ImageKey {
+		t.Fatalf("want clip then image deleted, got %v", del)
+	}
+}
+
+func TestRPCHighlight_Delete_EmptyImageKey_ClipOnly(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightCandidate)
+	blobs := &fakeRPCBlobs{}
+
+	client := newHighlightClient(t, tenantID, store, blobs, campaignSessionStore(campaignID))
+	if _, err := client.DeleteHighlight(context.Background(),
+		connect.NewRequest(&managementv1.DeleteHighlightRequest{Id: h.ID.String()})); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	del := blobs.deletedKeys()
+	if len(del) != 1 || del[0] != h.ClipKey {
+		t.Fatalf("unenriched highlight should delete clip only, got %v", del)
+	}
+}
+
+func TestRPCHighlight_Get_ImageFields(t *testing.T) {
+	tenantID := uuid.New()
+	campaignID := uuid.New()
+	store := newFakeHighlightStore(tenantID)
+	h := seedRPCHighlight(store, tenantID, uuid.New(), campaignID, storage.HighlightPromoted)
+	h.ImageKey = "t/" + tenantID.String() + "/highlight/" + h.ID.String() + "/image"
+	h.ImageContentType = "image/png"
+	h.ImageSizeBytes = 4242
+	store.put(h)
+
+	client := newHighlightClient(t, tenantID, store, &fakeRPCBlobs{}, campaignSessionStore(campaignID))
+	res, err := client.GetHighlight(context.Background(),
+		connect.NewRequest(&managementv1.GetHighlightRequest{Id: h.ID.String()}))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got := res.Msg.GetHighlight()
+	// Image content-type + size exposed; clip fields still present (regression).
+	if got.GetImageContentType() != "image/png" || got.GetImageSizeBytes() != 4242 {
+		t.Fatalf("image fields = %q/%d", got.GetImageContentType(), got.GetImageSizeBytes())
+	}
+	if got.GetClipContentType() != "audio/wav" || got.GetClipSizeBytes() != 1234 {
+		t.Fatalf("clip fields regressed = %q/%d", got.GetClipContentType(), got.GetClipSizeBytes())
 	}
 }
 

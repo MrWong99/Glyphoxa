@@ -83,6 +83,89 @@ func TestRequireSession_InjectsUser(t *testing.T) {
 	}
 }
 
+// TestRequireTenant_ChainInjectsTenant proves the real RequireSession+RequireTenant
+// chain — the plain-HTTP mirror of the Connect auth→tenant interceptor stack —
+// resolves the operator's tenant SERVER-SIDE (never a client header) and injects
+// it into the request ctx, so a downstream byte handler (ServeClip/ServeImage)
+// reads a present TenantID. This is the class of test that would have caught #408:
+// the mounts wrapped only RequireSession (user, no tenant), so TenantID always
+// missed → every clip/image 401'd.
+func TestRequireTenant_ChainInjectsTenant(t *testing.T) {
+	op := storage.User{ID: uuid.New(), Name: "op", Role: "operator"}
+	wantTenant := uuid.New()
+	authN := fakeAuthN{users: map[string]storage.User{validToken: op}}
+	tr := fakeTenant{id: wantTenant}
+
+	var gotTenant uuid.UUID
+	var ok bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTenant, ok = auth.TenantID(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	chain := auth.RequireSession(authN, auth.RequireTenant(tr, inner))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/highlights/x/clip", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: validToken})
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chain: code=%d, want 200", rec.Code)
+	}
+	if !ok {
+		t.Fatal("no tenant injected into ctx by the RequireSession+RequireTenant chain")
+	}
+	if gotTenant != wantTenant {
+		t.Fatalf("tenant = %s, want %s", gotTenant, wantTenant)
+	}
+}
+
+// TestRequireTenant_ResolveFailure401 documents the byte-endpoint posture: when the
+// operator has no resolvable tenant, RequireTenant rejects 401 (the handlers
+// require a tenant, so proceeding tenantless only 401s deeper — this fails fast
+// with the same code). Unlike the Connect NewTenantInterceptor, which proceeds
+// tenantless and lets each handler fail on its own terms.
+func TestRequireTenant_ResolveFailure401(t *testing.T) {
+	op := storage.User{ID: uuid.New(), Name: "op", Role: "operator"}
+	authN := fakeAuthN{users: map[string]storage.User{validToken: op}}
+	tr := fakeTenant{err: storage.ErrNotFound}
+
+	called := false
+	inner := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	chain := auth.RequireSession(authN, auth.RequireTenant(tr, inner))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/highlights/x/clip", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: validToken})
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("resolve failure: code=%d, want 401", rec.Code)
+	}
+	if called {
+		t.Fatal("inner handler ran despite an unresolved tenant")
+	}
+}
+
+// TestRequireTenant_MissingUser401 is the defensive path: RequireTenant used
+// without an upstream RequireSession has no operator in ctx and must reject 401
+// rather than resolve a nil-user tenant.
+func TestRequireTenant_MissingUser401(t *testing.T) {
+	tr := fakeTenant{id: uuid.New()}
+	called := false
+	h := auth.RequireTenant(tr, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing user: code=%d, want 401", rec.Code)
+	}
+	if called {
+		t.Fatal("inner handler ran without an operator in ctx")
+	}
+}
+
 // TestRequireCSRF drives the plain-HTTP double-submit mirror of the Connect CSRF
 // interceptor (ADR-0016): the glyphoxa_csrf cookie must constant-time-match the
 // X-CSRF-Token header, else 403; RequireSession alone does not gate a plain POST.

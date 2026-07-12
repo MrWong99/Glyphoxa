@@ -45,7 +45,7 @@ func TestListToolGrants_CatalogWithState(t *testing.T) {
 		t.Fatalf("ListToolGrants: %v", err)
 	}
 	grants := resp.Msg.GetGrants()
-	wantNames := []string{"dice", "kg_query", "remember_knowledge", "transcript_search"} // Name-sorted catalog
+	wantNames := []string{"dice", "kg_query", "recap", "remember_knowledge", "transcript_search"} // Name-sorted catalog
 	if len(grants) != len(wantNames) {
 		t.Fatalf("catalog = %+v, want %v", grants, wantNames)
 	}
