@@ -181,10 +181,23 @@ type recordingStage struct {
 	rounds       []llmRound
 	callsOK      int
 	callsErr     int
-	turns        []observe.Provider // one LLMTurn span per Engine.Generate/GenerateStream
-	outcomes     []observe.Outcome  // every ProviderCall outcome, in order
-	providerErrs int                // ProviderError invocations
-	tokens       []llmTokensRec     // one LLMTokens per drained Complete (reported or estimate)
+	turns        []observe.Provider      // one LLMTurn span per Engine.Generate/GenerateStream
+	outcomes     []observe.Outcome       // every ProviderCall outcome, in order
+	providerErrs int                     // ProviderError invocations
+	tokens       []llmTokensRec          // one LLMTokens per drained Complete (reported or estimate)
+	malformed    []observe.MalformedPath // one per MalformedToolGen (#398)
+}
+
+func (r *recordingStage) MalformedToolGen(_ observe.Provider, path observe.MalformedPath) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.malformed = append(r.malformed, path)
+}
+
+func (r *recordingStage) malformedPaths() []observe.MalformedPath {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]observe.MalformedPath(nil), r.malformed...)
 }
 
 func (r *recordingStage) LLMRound(p observe.Provider, idx int, hadToolCall bool, _ time.Duration) {
@@ -1018,6 +1031,273 @@ func TestEngine_EventError_PropagatesAsError(t *testing.T) {
 	_, err := eng.Generate(t.Context(), []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
 	if err == nil || !strings.Contains(err.Error(), "connection reset") {
 		t.Fatalf("Generate on EventError = %v, want the provider's error", err)
+	}
+}
+
+// toolSyntaxProvider fails its leading `fails` Complete calls with the provider's
+// tool-syntax failure class (#398) — either a *providererr.ToolSyntaxError start
+// error (viaStream=false) or a mid-stream EventError carrying ErrClass tool_syntax
+// (viaStream=true) — then streams `answer`. It records every Request (so a test can
+// prove the fallback round declared the same tools with tool_choice none) and the
+// tool-choice each call carried. Keyless.
+type toolSyntaxProvider struct {
+	mu        sync.Mutex
+	fails     int
+	viaStream bool
+	answer    string
+	reqs      []llm.Request
+	calls     int
+}
+
+func (p *toolSyntaxProvider) Complete(_ context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.reqs = append(p.reqs, req)
+	p.mu.Unlock()
+
+	if n <= p.fails {
+		if !p.viaStream {
+			return nil, &providererr.ToolSyntaxError{Op: "test.Complete", Msg: `test: HTTP 400: {"code":"tool_use_failed"}`}
+		}
+		ch := make(chan llm.StreamEvent, 1)
+		ch <- llm.StreamEvent{Type: llm.EventError, Err: "test: read stream: tool_use_failed", ErrClass: llm.ErrClassToolSyntax}
+		close(ch)
+		return ch, nil
+	}
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		defer close(ch)
+		for _, w := range strings.Fields(p.answer) {
+			ch <- llm.StreamEvent{Type: llm.EventText, Text: w + " "}
+		}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}()
+	return ch, nil
+}
+
+func (p *toolSyntaxProvider) requests() []llm.Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]llm.Request(nil), p.reqs...)
+}
+
+// TestEngine_ToolSyntax_RetriesOnceThenDelivers is AC 1 (#398): a tool-armed round
+// that fails once with tool_use_failed is retried once with the SAME tools; the
+// retry succeeds and its answer is delivered normally. The malformed generation is
+// counted once, and the final metrics are the recovered-round shape (one LLMRound,
+// one provider_call ok, no provider_error) — final-outcome-only per ADR-0044.
+func TestEngine_ToolSyntax_RetriesOnceThenDelivers(t *testing.T) {
+	for _, viaStream := range []bool{false, true} {
+		name := "start_error"
+		if viaStream {
+			name = "in_stream_error"
+		}
+		t.Run(name, func(t *testing.T) {
+			prov := &toolSyntaxProvider{fails: 1, viaStream: viaStream, answer: "You rolled well, traveler."}
+			rec := &recordingStage{}
+			eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+				agenttool.WithMetrics(rec, observe.ProviderGroq),
+				agenttool.WithRetry(instantAgentRetry()))
+
+			got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+			if err != nil {
+				t.Fatalf("Generate after one tool_use_failed: %v", err)
+			}
+			if strings.TrimSpace(got) != "You rolled well, traveler." {
+				t.Errorf("final text = %q, want the retry answer", got)
+			}
+			if prov.calls != 2 {
+				t.Errorf("Complete calls = %d, want 2 (one tool_use_failed retried once)", prov.calls)
+			}
+			if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedStreamError {
+				t.Errorf("MalformedToolGen paths = %v, want exactly [stream_error]", paths)
+			}
+			// The retry re-declared the same tools with the requested (auto) choice.
+			reqs := prov.requests()
+			if len(reqs) != 2 || len(reqs[1].Tools) == 0 {
+				t.Fatalf("retry request tools = %+v, want the same tools re-declared", reqs[1].Tools)
+			}
+			if reqs[1].ToolChoice.Mode != llm.ToolChoiceAuto {
+				t.Errorf("retry tool_choice = %q, want auto (same as the first attempt)", reqs[1].ToolChoice.Mode)
+			}
+
+			rounds, callsOK, callsErr := rec.snapshot()
+			if len(rounds) != 1 {
+				t.Errorf("LLMRound spans = %d, want 1 (final outcome only)", len(rounds))
+			}
+			if callsOK != 1 || callsErr != 0 {
+				t.Errorf("provider calls ok=%d err=%d, want 1/0 (recovered)", callsOK, callsErr)
+			}
+			if _, provErrs := rec.providerCalls(); provErrs != 0 {
+				t.Errorf("provider_errors = %d, want 0 (the retry recovered)", provErrs)
+			}
+		})
+	}
+}
+
+// TestEngine_ToolSyntax_FallsBackToolLessAfterTwoFailures is AC 2 (#398): a
+// tool-armed round that fails tool_use_failed TWICE regenerates without tool use —
+// the third request keeps the tools DECLARED but sets tool_choice none — and that
+// answer is delivered (nil error, NOT abandoned). Two malformed generations are
+// counted; the recovered final round records provider_call ok with no error.
+func TestEngine_ToolSyntax_FallsBackToolLessAfterTwoFailures(t *testing.T) {
+	prov := &toolSyntaxProvider{fails: 2, answer: "I cannot consult the bones right now, but you steady yourself."}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate after two tool_use_failed: %v (turn must NOT be abandoned)", err)
+	}
+	if strings.TrimSpace(got) != "I cannot consult the bones right now, but you steady yourself." {
+		t.Errorf("final text = %q, want the tool-less fallback answer", got)
+	}
+	if prov.calls != 3 {
+		t.Errorf("Complete calls = %d, want 3 (attempt, retry, tool-less fallback)", prov.calls)
+	}
+
+	// The fallback request (third) must keep the tools declared AND set tool_choice
+	// none — the conversation may hold prior tool_call/tool messages, so tools are
+	// not stripped.
+	reqs := prov.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("recorded %d requests, want 3", len(reqs))
+	}
+	if len(reqs[2].Tools) == 0 {
+		t.Errorf("fallback request stripped the tools; want them still declared")
+	}
+	if reqs[2].ToolChoice.Mode != llm.ToolChoiceNone {
+		t.Errorf("fallback tool_choice = %q, want none", reqs[2].ToolChoice.Mode)
+	}
+	// The first two attempts used the requested (auto) choice.
+	if reqs[0].ToolChoice.Mode != llm.ToolChoiceAuto || reqs[1].ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Errorf("attempts 1/2 tool_choice = %q/%q, want auto/auto", reqs[0].ToolChoice.Mode, reqs[1].ToolChoice.Mode)
+	}
+
+	if paths := rec.malformedPaths(); len(paths) != 2 {
+		t.Errorf("MalformedToolGen count = %d, want 2 (both failures counted)", len(paths))
+	}
+	rounds, callsOK, callsErr := rec.snapshot()
+	if len(rounds) != 1 || callsOK != 1 || callsErr != 0 {
+		t.Errorf("final metrics rounds=%d ok=%d err=%d, want 1/1/0 (recovered, final-outcome-only)", len(rounds), callsOK, callsErr)
+	}
+	if _, provErrs := rec.providerCalls(); provErrs != 0 {
+		t.Errorf("provider_errors = %d, want 0 (fallback recovered the turn)", provErrs)
+	}
+}
+
+// TestEngine_NonToolSyntaxError_NotRetried is AC 3 (#398): a mid-stream provider
+// error of a DIFFERENT class (not tool_use_failed) on a tool-armed round is NOT
+// retried by the tool-syntax path — it propagates on the first call, and no
+// malformed-generation is counted.
+func TestEngine_NonToolSyntaxError_NotRetried(t *testing.T) {
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(errorEventProvider{}, diceGrants(t), "", "m", 0, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	_, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Generate on a non-tool-syntax error = %v, want the provider error propagated", err)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 0 {
+		t.Errorf("MalformedToolGen count = %d on a non-tool-syntax error, want 0", len(paths))
+	}
+}
+
+// deltaThenToolSyntaxProvider forwards one prose delta, then aborts the stream with
+// a tool_use_failed EventError — the ADR-0044 mid-stream case: audio may already be
+// out, so the round must NOT be retried even though the failure class is tool-syntax.
+type deltaThenToolSyntaxProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *deltaThenToolSyntaxProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	ch := make(chan llm.StreamEvent, 2)
+	ch <- llm.StreamEvent{Type: llm.EventText, Text: "You feel "}
+	ch <- llm.StreamEvent{Type: llm.EventError, Err: "tool_use_failed", ErrClass: llm.ErrClassToolSyntax}
+	close(ch)
+	return ch, nil
+}
+
+// TestEngine_ToolSyntax_ForwardedDeltaNotRetried is AC-adjacent (#398, ADR-0044): a
+// tool-syntax failure that arrives AFTER a prose delta was already forwarded to
+// onText is never retried — a re-drive would re-speak. The error propagates on the
+// first call.
+func TestEngine_ToolSyntax_ForwardedDeltaNotRetried(t *testing.T) {
+	prov := &deltaThenToolSyntaxProvider{}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 0, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	var streamed strings.Builder
+	_, err := eng.GenerateStream(context.Background(),
+		[]llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}},
+		func(delta string) error { streamed.WriteString(delta); return nil })
+	if err == nil {
+		t.Fatal("GenerateStream returned nil after a mid-stream tool_use_failed")
+	}
+	if prov.calls != 1 {
+		t.Errorf("Complete calls = %d, want 1 (a forwarded delta forbids the retry)", prov.calls)
+	}
+	if strings.TrimSpace(streamed.String()) != "You feel" {
+		t.Errorf("streamed = %q, want the one forwarded delta", streamed.String())
+	}
+}
+
+// cancelOnFirstProvider fails the first tool-armed call with a tool-syntax start
+// error but cancels the turn ctx first — so complete's between-attempt ctx check
+// aborts before the retry ever dials.
+type cancelOnFirstProvider struct {
+	mu     sync.Mutex
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (p *cancelOnFirstProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+	if n == 1 {
+		p.cancel() // barge lands between attempt 1's failure and the retry
+		return nil, &providererr.ToolSyntaxError{Op: "test.Complete", Msg: "tool_use_failed"}
+	}
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamEvent{Type: llm.EventText, Text: "should not reach here "}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}()
+	return ch, nil
+}
+
+// TestEngine_ToolSyntax_CtxCancelBetweenAttemptsAborts is AC-adjacent (#398): a ctx
+// cancellation landing between the first tool-syntax failure and its retry aborts
+// with the ctx error and never issues the retry.
+func TestEngine_ToolSyntax_CtxCancelBetweenAttemptsAborts(t *testing.T) {
+	prov := &cancelOnFirstProvider{}
+	ctx, cancel := context.WithCancel(context.Background())
+	prov.cancel = cancel
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 0, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	_, err := eng.Generate(ctx, []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Generate = %v, want context.Canceled (abort between attempts)", err)
+	}
+	if prov.calls != 1 {
+		t.Errorf("Complete calls = %d, want 1 (the retry must not dial after a cancel)", prov.calls)
 	}
 }
 

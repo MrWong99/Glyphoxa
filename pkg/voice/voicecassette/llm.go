@@ -174,6 +174,23 @@ func (p *LLMProvider) Complete(ctx context.Context, req llm.Request) (<-chan llm
 	return ch, nil
 }
 
+// encodeToolChoice renders a [llm.ToolChoice] as the cassette-hash token (#398):
+// the zero value (Auto) encodes to "" so it drops out under omitempty and old
+// cassettes never drift; None/Required encode to their bare mode; the pinned-tool
+// choice encodes as "tool:<name>" so a different pinned tool hashes distinctly.
+func encodeToolChoice(tc llm.ToolChoice) string {
+	switch tc.Mode {
+	case llm.ToolChoiceNone:
+		return "none"
+	case llm.ToolChoiceRequired:
+		return "required"
+	case llm.ToolChoiceTool:
+		return "tool:" + tc.Tool
+	default: // ToolChoiceAuto / zero
+		return ""
+	}
+}
+
 // HashLLMRequest returns the hex sha256 cassette key for req: the rendered
 // prompt the model would see. It marshals model + system + messages + tools to
 // canonical JSON and hashes the bytes. Exported so the record path and test
@@ -200,8 +217,15 @@ func HashLLMRequest(req llm.Request) string {
 		MaxTokens int           `json:"max_tokens"`
 		Messages  []hMsg        `json:"messages"`
 		Tools     []llm.ToolDef `json:"tools,omitempty"`
+		// ToolChoice is the encoded per-round tool-choice knob (#398). It is
+		// omitempty and the zero-value [llm.ToolChoice] encodes to "" (see
+		// [encodeToolChoice]), so a request that never sets a choice hashes
+		// byte-identical to a pre-field cassette (ADR-0021). A non-zero choice — a
+		// tool-less fallback or a forced round — is a genuine prompt change and hashes
+		// distinctly.
+		ToolChoice string `json:"tool_choice,omitempty"`
 	}
-	h := hReq{Model: req.Model, MaxTokens: req.MaxTokens, Tools: req.Tools}
+	h := hReq{Model: req.Model, MaxTokens: req.MaxTokens, Tools: req.Tools, ToolChoice: encodeToolChoice(req.ToolChoice)}
 	for _, m := range req.Messages {
 		h.Messages = append(h.Messages, hMsg{
 			Role:        string(m.Role),

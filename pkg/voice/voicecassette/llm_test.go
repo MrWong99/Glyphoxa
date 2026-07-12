@@ -2,6 +2,7 @@ package voicecassette_test
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand/v2"
 	"strings"
 	"testing"
@@ -11,6 +12,49 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette"
 )
+
+// TestHashLLMRequest_ToolChoice_ZeroValueStable is the ADR-0021 cassette-stability
+// guard for the additive [llm.Request.ToolChoice] field (#398): a request whose
+// ToolChoice is the zero value MUST hash byte-identical to the pre-field golden, so
+// every committed cassette replays unchanged. A non-zero ToolChoice is a genuine
+// prompt change and MUST hash differently (a tool-less fallback round is a distinct
+// exchange).
+func TestHashLLMRequest_ToolChoice_ZeroValueStable(t *testing.T) {
+	// Golden hash of this exact request captured before ToolChoice was added to
+	// llm.Request — the byte-identity anchor for old cassettes.
+	const golden = "b8262e44fc234f55f0004320c982f2af83ca5502c21abc0f7c2fe6d05cb63c07"
+
+	base := llm.Request{
+		Model:     "m",
+		MaxTokens: 256,
+		Messages:  []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+		Tools:     []llm.ToolDef{{Name: "dice", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}
+	if got := voicecassette.HashLLMRequest(base); got != golden {
+		t.Errorf("zero-ToolChoice hash = %s, want the pre-field golden %s (old cassettes must not drift)", got, golden)
+	}
+
+	// An explicit Auto is the same as the zero value — also must not drift.
+	auto := base
+	auto.ToolChoice = llm.ToolChoice{Mode: llm.ToolChoiceAuto}
+	if got := voicecassette.HashLLMRequest(auto); got != golden {
+		t.Errorf("explicit-Auto hash = %s, want the golden %s", got, golden)
+	}
+
+	// A non-zero choice must change the hash — a fallback / forced round is a
+	// distinct exchange.
+	for _, tc := range []llm.ToolChoice{
+		{Mode: llm.ToolChoiceNone},
+		{Mode: llm.ToolChoiceRequired},
+		{Mode: llm.ToolChoiceTool, Tool: "dice"},
+	} {
+		changed := base
+		changed.ToolChoice = tc
+		if got := voicecassette.HashLLMRequest(changed); got == golden {
+			t.Errorf("ToolChoice %+v hashed identical to the zero value; want a distinct hash", tc)
+		}
+	}
+}
 
 // drain accumulates a completion stream's text and collects tool calls + stop.
 func drain(t *testing.T, ch <-chan llm.StreamEvent) (text string, calls []llm.ToolCall, stop string) {
