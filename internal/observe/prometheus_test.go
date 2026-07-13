@@ -107,6 +107,31 @@ func TestPrometheusScrapeExposesSeries(t *testing.T) {
 	}
 }
 
+// TestHighlightClassifyMetric pins the Session-Highlights classify-outcome series
+// (#428, ADR-0032): one increment per outcome exposes the exact
+// glyphoxa_voice_highlight_classify_total name with the bounded outcome label, and
+// the label space is exactly the three fixed values.
+func TestHighlightClassifyMetric(t *testing.T) {
+	rec := NewPrometheusRecorder()
+
+	rec.HighlightClassify(HighlightOK)
+	rec.HighlightClassify(HighlightParseFailed)
+	rec.HighlightClassify(HighlightLLMError)
+
+	out := scrape(t, rec)
+
+	wantSubstrings := []string{
+		`glyphoxa_voice_highlight_classify_total{outcome="ok"} 1`,
+		`glyphoxa_voice_highlight_classify_total{outcome="parse_failed"} 1`,
+		`glyphoxa_voice_highlight_classify_total{outcome="llm_error"} 1`,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrape missing %q", want)
+		}
+	}
+}
+
 // TestJobRunnerMetrics pins the background-job-runner series (#286, ADR-0049):
 // the three families expose their exact glyphoxa_jobs_* / glyphoxa_job_* names
 // and kind/outcome labels, and SetJobBacklog is a Set (idempotent) not an Inc —

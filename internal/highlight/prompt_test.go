@@ -11,37 +11,44 @@ func TestParseClassification(t *testing.T) {
 		in        string
 		wantScore float64
 		wantExc   string
+		wantOK    bool
 	}{
 		{
 			name:      "bare object",
 			in:        `{"score": 9.5, "excerpt": "nat 20", "reason": "crit"}`,
 			wantScore: 9.5,
 			wantExc:   "nat 20",
+			wantOK:    true,
 		},
 		{
 			name:      "fenced code block",
 			in:        "```json\n{\"score\": 7.0, \"excerpt\": \"clutch\", \"reason\": \"save\"}\n```",
 			wantScore: 7.0,
 			wantExc:   "clutch",
+			wantOK:    true,
 		},
 		{
 			name:      "prose wrapped",
 			in:        `Sure, here is my verdict: {"score": 3.5, "excerpt": "meh", "reason": "chatter"} hope that helps!`,
 			wantScore: 3.5,
 			wantExc:   "meh",
+			wantOK:    true,
 		},
-		{name: "no json", in: "I could not decide.", wantScore: 0, wantExc: ""},
-		{name: "malformed json", in: `{"score": not-a-number}`, wantScore: 0, wantExc: ""},
-		{name: "empty", in: "", wantScore: 0, wantExc: ""},
+		{name: "no json", in: "I could not decide.", wantScore: 0, wantExc: "", wantOK: false},
+		{name: "malformed json", in: `{"score": not-a-number}`, wantScore: 0, wantExc: "", wantOK: false},
+		{name: "empty", in: "", wantScore: 0, wantExc: "", wantOK: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseClassification(tc.in)
+			got, ok := parseClassification(tc.in)
 			if got.score != tc.wantScore {
 				t.Errorf("score = %v, want %v", got.score, tc.wantScore)
 			}
 			if got.excerpt != tc.wantExc {
 				t.Errorf("excerpt = %q, want %q", got.excerpt, tc.wantExc)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tc.wantOK)
 			}
 		})
 	}

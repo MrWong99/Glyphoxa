@@ -26,6 +26,20 @@ const (
 	windowCap = 40
 )
 
+// classifyMetrics counts Session-Highlights classifier passes by bounded outcome
+// (#428). It is the detector's non-StageRecorder metric seam: the production
+// *observe.PrometheusRecorder satisfies it, so the injected StageRecorder is
+// type-asserted onto it — no constructor widening (ADR-0032 bounded-label counter).
+type classifyMetrics interface {
+	HighlightClassify(observe.HighlightOutcome)
+}
+
+// noopClassifyMetrics is the default when the injected recorder does not implement
+// the outcome sink (a test Discard, a keyless build): outcomes are simply not counted.
+type noopClassifyMetrics struct{}
+
+func (noopClassifyMetrics) HighlightClassify(observe.HighlightOutcome) {}
+
 // finalLine is one transcript final retained in the rolling window.
 type finalLine struct {
 	speaker string
@@ -53,8 +67,13 @@ type Detector struct {
 	sink     Sink
 	gate     orchestrator.TurnGate
 	metrics  observe.StageRecorder
-	log      *slog.Logger
-	cfg      Config
+	// classifyMetric counts one classify-outcome per pass (#428). It is recovered
+	// from the injected StageRecorder when that recorder also satisfies it (the
+	// production *observe.PrometheusRecorder does) — a non-StageRecorder bounded-label
+	// counter reached without widening the constructor (ADR-0032). Never nil.
+	classifyMetric classifyMetrics
+	log            *slog.Logger
+	cfg            Config
 
 	now func() time.Time // injected in tests; time.Now in production
 
@@ -120,22 +139,29 @@ func newDetector(provider llm.Provider, model string, snap SnapshotFunc, sink Si
 	if metrics == nil {
 		metrics = observe.Discard{}
 	}
+	// Recover the classify-outcome sink from the shared recorder without a new seam:
+	// the production recorder implements it; anything else counts nothing (#428).
+	var classifyMetric classifyMetrics = noopClassifyMetrics{}
+	if cm, ok := metrics.(classifyMetrics); ok {
+		classifyMetric = cm
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Detector{
-		provider: provider,
-		model:    model,
-		snap:     snap,
-		sink:     sink,
-		gate:     gate,
-		metrics:  metrics,
-		log:      log,
-		cfg:      cfg.withDefaults(),
-		now:      time.Now,
-		ctx:      ctx,
-		cancel:   cancel,
-		done:     make(chan struct{}),
-		signal:   make(chan struct{}, 1),
-		features: make(chan frameFeature, featureMailboxCap),
+		provider:       provider,
+		model:          model,
+		snap:           snap,
+		sink:           sink,
+		gate:           gate,
+		metrics:        metrics,
+		classifyMetric: classifyMetric,
+		log:            log,
+		cfg:            cfg.withDefaults(),
+		now:            time.Now,
+		ctx:            ctx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
+		signal:         make(chan struct{}, 1),
+		features:       make(chan frameFeature, featureMailboxCap),
 	}
 }
 
@@ -302,7 +328,11 @@ func (d *Detector) classify(w *workerState, e voiceevent.STTFinal) {
 	}
 
 	req := buildRequest(d.model, w.window, w.feat.summarize())
-	cls := d.runClassifier(req)
+	cls, outcome, raw := d.runClassifier(req)
+	// One outcome count per classify pass (#428, bounded label — ADR-0032), plus the
+	// single per-pass observability line, before the confirm/streak bookkeeping.
+	d.classifyMetric.HighlightClassify(outcome)
+	d.logClassify(w, cls, outcome, raw)
 	d.notifyClassified(cls)
 
 	if cls.score >= d.cfg.Bar {
@@ -358,6 +388,10 @@ func (d *Detector) emit(w *workerState, anchor time.Time, cls classification, no
 		Excerpt:    excerpt,
 		Reason:     cls.reason,
 	}
+	// A confirmed trigger is the headline highlight signal: log it at INFO with the
+	// score and the clip range so a live run shows promotions, not just below-bar
+	// passes (#428). AC4.
+	d.log.Info("highlight trigger confirmed", "score", trig.Score, "from", trig.From, "to", trig.To)
 	d.scheduleCut(from, to, trig)
 }
 
@@ -385,19 +419,28 @@ func (d *Detector) scheduleCut(from, to time.Time, trig Trigger) {
 	}()
 }
 
+// classifyExcerptRunes bounds the raw model text logged on a parse-fail WARN: the
+// full generation is never logged (it can be long and carry chain-of-thought), only
+// a leading excerpt of at most this many runes (not bytes) for triage (#428).
+const classifyExcerptRunes = 200
+
 // runClassifier drives one provider completion, meters its token usage on the
 // stage recorder (ADR-0045/0046), and parses the verdict. It never crashes the
 // worker: a provider error, a truncated stream, or malformed JSON yields a zero
-// score (the moment is simply not confirmed).
-func (d *Detector) runClassifier(req llm.Request) classification {
+// score (the moment is simply not confirmed). It returns the parsed verdict, the
+// bounded classify outcome (#428) with precedence llm_error > parse_failed > ok, and
+// the raw model text (for the parse-fail excerpt). The existing complete/stream
+// WARNs are retained; the per-pass INFO/WARN and the outcome count are the caller's.
+func (d *Detector) runClassifier(req llm.Request) (classification, observe.HighlightOutcome, string) {
 	stream, err := d.provider.Complete(d.ctx, req)
 	if err != nil {
 		d.log.Warn("highlight classify: llm complete", "err", err)
-		return classification{}
+		return classification{}, observe.HighlightLLMError, ""
 	}
 	var sb strings.Builder
 	var usage llm.Usage
 	var haveUsage bool
+	var streamErr bool
 	for ev := range stream {
 		switch ev.Type {
 		case llm.EventText:
@@ -406,6 +449,7 @@ func (d *Detector) runClassifier(req llm.Request) classification {
 			usage, haveUsage = ev.Usage, true
 		case llm.EventError:
 			d.log.Warn("highlight classify: llm stream error", "err", ev.Err)
+			streamErr = true
 		}
 	}
 	in, out := usage.InputTokens, usage.OutputTokens
@@ -414,7 +458,58 @@ func (d *Detector) runClassifier(req llm.Request) classification {
 		out = estimateTokens(utf8.RuneCountInString(sb.String()))
 	}
 	d.metrics.LLMTokens(d.cfg.ProviderLabel, d.model, in, out)
-	return parseClassification(sb.String())
+	raw := sb.String()
+	cls, parsed := parseClassification(raw)
+	// Precedence: a stream error outranks a parse outcome — the model never
+	// delivered a trustworthy verdict, so the pass is an llm_error even if the
+	// truncated text happened to slice into parseable JSON.
+	if streamErr {
+		return cls, observe.HighlightLLMError, raw
+	}
+	if !parsed {
+		return cls, observe.HighlightParseFailed, raw
+	}
+	return cls, observe.HighlightOK, raw
+}
+
+// boundExcerpt returns text truncated to at most n runes (not bytes), for the
+// parse-fail WARN excerpt (#428).
+func boundExcerpt(text string, n int) string {
+	if utf8.RuneCountInString(text) <= n {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:n])
+}
+
+// logClassify emits the one per-pass observability line for a classify (#428): an
+// INFO carrying the score, the parsed flag and the transcript-window line count on a
+// parsed verdict (so a below-bar pass is visible in the default live config), or a
+// WARN with a rune-bounded raw excerpt when the completed stream held no parseable
+// verdict. An llm_error pass already logged its complete/stream WARN in
+// runClassifier, so it adds no second line here (the outcome counter carries it).
+func (d *Detector) logClassify(w *workerState, cls classification, outcome observe.HighlightOutcome, raw string) {
+	switch outcome {
+	case observe.HighlightParseFailed:
+		d.log.Warn("highlight classify: unparseable verdict",
+			"outcome", string(outcome),
+			"window", len(w.window),
+			"excerpt", boundExcerpt(raw, classifyExcerptRunes))
+	case observe.HighlightLLMError:
+		// The complete/stream WARN in runClassifier already carries the error detail;
+		// this adds the uniform per-pass line so every outcome is greppable by the
+		// shared message + outcome/window attrs (#428 Finding 3).
+		d.log.Warn("highlight classify",
+			"parsed", false,
+			"window", len(w.window),
+			"outcome", string(outcome))
+	case observe.HighlightOK:
+		d.log.Info("highlight classify",
+			"score", cls.score,
+			"parsed", true,
+			"window", len(w.window),
+			"outcome", string(outcome))
+	}
 }
 
 // notifyClassified is the white-box test hook: production leaves classified nil, so
