@@ -495,6 +495,14 @@ func (d *Detector) logClassify(w *workerState, cls classification, outcome obser
 			"outcome", string(outcome),
 			"window", len(w.window),
 			"excerpt", boundExcerpt(raw, classifyExcerptRunes))
+	case observe.HighlightLLMError:
+		// The complete/stream WARN in runClassifier already carries the error detail;
+		// this adds the uniform per-pass line so every outcome is greppable by the
+		// shared message + outcome/window attrs (#428 Finding 3).
+		d.log.Warn("highlight classify",
+			"parsed", false,
+			"window", len(w.window),
+			"outcome", string(outcome))
 	case observe.HighlightOK:
 		d.log.Info("highlight classify",
 			"score", cls.score,

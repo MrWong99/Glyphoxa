@@ -101,6 +101,20 @@ func (streamErrProvider) Complete(context.Context, llm.Request) (<-chan llm.Stre
 	return ch, nil
 }
 
+// streamErrThenValidProvider surfaces an in-stream error frame AND a fully parseable
+// verdict, so the outcome hinges purely on precedence: llm_error must outrank a
+// clean parse (a regression that checked parse→ok first would wrongly report ok).
+type streamErrThenValidProvider struct{}
+
+func (streamErrThenValidProvider) Complete(context.Context, llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent, 3)
+	ch <- llm.StreamEvent{Type: llm.EventText, Text: `{"score": 3.0, "excerpt": "x", "reason": "y"}`}
+	ch <- llm.StreamEvent{Type: llm.EventError, Err: "mid-stream boom"}
+	ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	close(ch)
+	return ch, nil
+}
+
 // startObserved builds and starts a detector with an injected clock, classified
 // notify channel, capturing metrics and log — the observability-test analogue of
 // buildDetector.
@@ -153,6 +167,28 @@ func TestClassifyBelowBarLogsInfo(t *testing.T) {
 	}
 	if got := metrics.all(); len(got) != 1 || got[0] != observe.HighlightOK {
 		t.Errorf("outcomes = %v, want [ok]", got)
+	}
+}
+
+// TestClassifyOutcomeCountedThroughUsageTee (AC5, capped-session path): a capped
+// tenant's Manager wraps the recorder in observe.TeeUsage(base, meter) before it
+// reaches the detector. The tee embeds StageRecorder only, so the outcome-sink
+// capability must forward through it — otherwise glyphoxa_voice_highlight_classify_total
+// never increments for exactly the capped sessions where classify+spend-gate
+// interplay matters. Here the teed recorder must still deliver the outcome to base.
+func TestClassifyOutcomeCountedThroughUsageTee(t *testing.T) {
+	bus := voiceevent.NewBus()
+	prov := &fakeProvider{respJSON: func(int) string { return scoreJSON(2.0) }}
+	sink := &fakeSink{}
+	base := &captureMetrics{}
+	teed := observe.TeeUsage(base, observe.Discard{}) // meter stand-in: any UsageSink
+	d, clk, classified := startObserved(t, bus, prov, nil, sink, allowGate{}, teed, slog.New(&logCapture{}), Config{ClassifyEvery: 2, Bar: 8.0})
+
+	publishFinals(t, d, bus, clk, "A", 2)
+	awaitClassifications(t, classified, 1)
+
+	if got := base.all(); len(got) != 1 || got[0] != observe.HighlightOK {
+		t.Errorf("outcomes through tee = %v, want [ok] (capability lost behind the usage tee)", got)
 	}
 }
 
@@ -209,6 +245,18 @@ func TestClassifyLLMErrorCounts(t *testing.T) {
 		if _, ok := cap.find("highlight classify: llm complete"); !ok {
 			t.Error("existing complete-error WARN not retained")
 		}
+		// Uniform per-pass line: every outcome is greppable by the shared "highlight
+		// classify" message carrying outcome + window (Finding 3).
+		rec, ok := cap.find("highlight classify")
+		if !ok {
+			t.Fatal("no uniform per-pass line on the llm_error path")
+		}
+		if v, ok := attrValue(rec, "outcome"); !ok || v.String() != string(observe.HighlightLLMError) {
+			t.Errorf("outcome attr = %v (ok=%v), want llm_error", v, ok)
+		}
+		if v, ok := attrValue(rec, "window"); !ok || v.Int64() != 2 {
+			t.Errorf("window attr = %v (ok=%v), want 2", v, ok)
+		}
 		if got := metrics.all(); len(got) != 1 || got[0] != observe.HighlightLLMError {
 			t.Errorf("outcomes = %v, want [llm_error]", got)
 		}
@@ -229,6 +277,22 @@ func TestClassifyLLMErrorCounts(t *testing.T) {
 		}
 		if got := metrics.all(); len(got) != 1 || got[0] != observe.HighlightLLMError {
 			t.Errorf("outcomes = %v, want [llm_error]", got)
+		}
+	})
+
+	// Precedence proof: a stream error alongside a fully parseable verdict is
+	// llm_error, not ok — the model never delivered a trustworthy verdict.
+	t.Run("stream error outranks a clean parse", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		sink := &fakeSink{}
+		metrics := &captureMetrics{}
+		d, clk, classified := startObserved(t, bus, streamErrThenValidProvider{}, nil, sink, allowGate{}, metrics, slog.New(&logCapture{}), Config{ClassifyEvery: 2})
+
+		publishFinals(t, d, bus, clk, "A", 2)
+		awaitClassifications(t, classified, 1)
+
+		if got := metrics.all(); len(got) != 1 || got[0] != observe.HighlightLLMError {
+			t.Errorf("outcomes = %v, want [llm_error] (precedence llm_error > ok broken)", got)
 		}
 	})
 }

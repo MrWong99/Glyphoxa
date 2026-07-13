@@ -50,3 +50,15 @@ func (t teeRecorder) STTAudioSeconds(provider Provider, d time.Duration) {
 	t.StageRecorder.STTAudioSeconds(provider, d)
 	t.sink.STTAudioSeconds(provider, d)
 }
+
+// HighlightClassify forwards the Session-Highlights outcome count to the wrapped
+// base when it implements the sink (#428). The tee embeds StageRecorder only, so
+// without this override a capability the detector recovers by type-assertion —
+// HighlightClassify is NOT on StageRecorder — is silently lost behind the spend tee,
+// and the counter never increments for capped sessions. Re-asserting on base keeps
+// the recovery working through any tee depth (base may itself be a tee).
+func (t teeRecorder) HighlightClassify(o HighlightOutcome) {
+	if hc, ok := t.StageRecorder.(interface{ HighlightClassify(HighlightOutcome) }); ok {
+		hc.HighlightClassify(o)
+	}
+}
