@@ -65,13 +65,16 @@ func promptRunes(req llm.Request) int {
 // parseClassification extracts the classifier's JSON verdict from the model's
 // prose. It is deliberately tolerant (a classifier that wraps the object in prose
 // or fences still parses): it slices from the first '{' to the last '}' and
-// unmarshals. A malformed or absent object yields a zero score — a classify never
-// crashes the worker (the highlight is simply not confirmed).
-func parseClassification(text string) classification {
+// unmarshals. It reports parse success as the second return: a malformed or absent
+// object yields a zero score AND ok=false, so the caller can distinguish a genuine
+// low-score verdict from an unparseable stream (#428) — either way a classify never
+// crashes the worker (the highlight is simply not confirmed). The slicing behaviour
+// is identical to the pre-#428 tolerant parse; only the ok signal is new.
+func parseClassification(text string) (classification, bool) {
 	start := strings.IndexByte(text, '{')
 	end := strings.LastIndexByte(text, '}')
 	if start < 0 || end <= start {
-		return classification{}
+		return classification{}, false
 	}
 	var raw struct {
 		Score   float64 `json:"score"`
@@ -79,9 +82,9 @@ func parseClassification(text string) classification {
 		Reason  string  `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(text[start:end+1]), &raw); err != nil {
-		return classification{}
+		return classification{}, false
 	}
-	return classification{score: raw.Score, excerpt: raw.Excerpt, reason: raw.Reason}
+	return classification{score: raw.Score, excerpt: raw.Excerpt, reason: raw.Reason}, true
 }
 
 // estimateTokens is the ceil(chars/4) per-direction token estimate (ADR-0045),

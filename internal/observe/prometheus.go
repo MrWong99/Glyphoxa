@@ -98,6 +98,13 @@ type PrometheusRecorder struct {
 	// Sets it from CountUnembeddedNodes, Set-from-COUNT like embeddingBacklog.
 	kgEmbeddingBacklog prometheus.Gauge
 
+	// highlight classify (#428, ADR-0032): Session-Highlights classifier passes by
+	// bounded outcome (ok / parse_failed / llm_error). Non-StageRecorder like
+	// memoryRecall/kgFacts — the detector records against a local interface this
+	// adapter satisfies. Makes a live classifier pass observable next to the shared
+	// llm_tokens meter it is otherwise indistinguishable from.
+	highlightClassify *prometheus.CounterVec // outcome
+
 	// memory recall (#122, ADR-0042/0032): NPC Hot Context recalls by outcome —
 	// a speculation hit, an inline miss, or a degraded/unconfigured skip. The
 	// outcome label is a bounded three-value enum (ADR-0032).
@@ -138,6 +145,25 @@ const (
 	// FactsDegraded: the read degraded to no-facts — the budget elapsed or the DB
 	// read failed. A barge cancel is NOT degraded (it counts nothing).
 	FactsDegraded FactsOutcome = "degraded"
+)
+
+// HighlightOutcome is the bounded outcome label on the Session-Highlights
+// classify-outcome counter (glyphoxa_voice_highlight_classify_total, #428). Exactly
+// three values reach a series (ADR-0032): the classifier stream parsed a verdict,
+// the completed stream carried no parseable verdict, or the provider Complete/stream
+// errored. One increment per classify pass; the precedence when more than one could
+// apply is llm_error > parse_failed > ok (the detector owns that resolution).
+type HighlightOutcome string
+
+const (
+	// HighlightOK: the classifier completed and its verdict parsed to a score.
+	HighlightOK HighlightOutcome = "ok"
+	// HighlightParseFailed: the stream completed with no parseable JSON verdict, so
+	// the score degraded to zero (the moment is simply not confirmed).
+	HighlightParseFailed HighlightOutcome = "parse_failed"
+	// HighlightLLMError: the provider Complete call failed, or the stream surfaced an
+	// error frame. Distinct from a parse failure — the model never delivered a verdict.
+	HighlightLLMError HighlightOutcome = "llm_error"
 )
 
 // RecallOutcome is the bounded outcome label on the NPC memory-recall counter
@@ -261,6 +287,10 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		Help:      "Malformed tool generations by provider and the detection path that caught it (#398: a tool_use_failed retried; #399/#410 add roll_claim/text_leak).",
 	}, []string{"provider", "path"})
 
+	r.highlightClassify = counterVec("highlight_classify_total",
+		"Session-Highlights classifier passes by bounded outcome (#428, ADR-0032): a parsed verdict (ok), a completed stream with no parseable verdict (parse_failed), or a provider Complete/stream error (llm_error).",
+		"outcome")
+
 	r.memoryRecall = counterVec("memory_recall_total",
 		"NPC memory recalls by outcome (#122, ADR-0042): a speculation hit, an inline miss, or a degraded skip.",
 		"outcome")
@@ -298,7 +328,7 @@ func NewPrometheusRecorder() *PrometheusRecorder {
 		r.responseLatency, r.vadHangover, r.addressDetect, r.codecDecode,
 		r.codecEncode, r.sttRequest, r.ttsTTFB, r.ttsTotal, r.llmRound, r.llmTurn,
 		r.providerCalls, r.providerErrors, r.turnTotal, r.embeddingBacklog,
-		r.kgEmbeddingBacklog, r.memoryRecall, r.kgFacts,
+		r.kgEmbeddingBacklog, r.memoryRecall, r.kgFacts, r.highlightClassify,
 		r.jobsBacklog, r.jobsTotal, r.jobDuration,
 		r.llmTokens, r.ttsCharacters, r.sttAudioSeconds, r.malformedToolGen,
 		// Standard runtime collectors so /metrics also reports process/Go health.
@@ -405,6 +435,14 @@ func (r *PrometheusRecorder) MalformedToolGen(p Provider, path MalformedPath) {
 // StageRecorder contract: recall is not an orchestrator stage.
 func (r *PrometheusRecorder) MemoryRecall(o RecallOutcome) {
 	r.memoryRecall.WithLabelValues(string(o)).Inc()
+}
+
+// HighlightClassify counts one Session-Highlights classifier pass by its bounded
+// outcome (#428, ADR-0032). It is the standalone classify-metrics sink the
+// internal/highlight detector records against (its local interface), separate from
+// the StageRecorder contract: a classify is not an orchestrator stage.
+func (r *PrometheusRecorder) HighlightClassify(o HighlightOutcome) {
+	r.highlightClassify.WithLabelValues(string(o)).Inc()
 }
 
 // KGFacts counts one NPC Hot Context KG-fact read by its bounded outcome (#126,
