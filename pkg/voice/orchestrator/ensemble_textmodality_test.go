@@ -71,11 +71,14 @@ func TestReplier_Ensemble_TextDeliveredLead_PublishesTerminal(t *testing.T) {
 		t.Fatal("the ensemble never elected / spoke a Lead")
 	}
 
-	voicetest.AssertEvent(t, h, func(e voiceevent.EnsembleLead) bool {
+	// WaitEvent, not AssertEvent: the coalesced spokeCh receive joins Speak, but
+	// the coordinator goroutine publishes ensemble.lead and the terminal AFTER it
+	// — AssertEvent snapshots once and races that publisher (flaked in CI).
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleLead) bool {
 		return e.TurnID == "Ttext" && e.Target.AgentID == butlerTarget.AgentID
 	}, "ensemble.lead → Butler")
 	// The terminal: a text-delivered Lead is a SUCCESS with no first audio.
-	voicetest.AssertEvent(t, h, func(e voiceevent.TurnEnded) bool {
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
 		return e.TurnID == "Ttext" && e.Reason == voiceevent.TurnEndTextDelivered
 	}, "turn.ended(text_delivered) for the text Lead")
 	// A text turn dispatches no TTS.
