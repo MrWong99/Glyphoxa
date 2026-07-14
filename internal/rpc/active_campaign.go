@@ -38,6 +38,15 @@ type activeCampaignResolver interface {
 // no session source (e.g. keyless unit tests), which skips step 1. The Manager
 // enforces a single active session (ErrSessionActive), so there is at most one
 // live campaign — no multi-session tie-break is needed.
+//
+// Two sibling surfaces implement DELIBERATE variants of this walk, not drift:
+// the slash surface (internal/presence.resolveActiveCampaign) drops step 3 and
+// fails instead (ADR-0009 strictness — the GM has /glyphoxa use right there),
+// and the standalone voice boot (cmd/glyphoxa.resolveStandaloneCampaign) drops
+// step 1 because no session source exists at boot. They also differ on a live
+// session whose campaign row vanished: this surface propagates the store error,
+// presence falls through to the durable selection rather than fail the command.
+// Change the policy only after deciding it for all three.
 func resolveActiveCampaign(ctx context.Context, live func() (uuid.UUID, bool), store activeCampaignResolver) (storage.Campaign, error) {
 	if live != nil {
 		if id, active := live(); active {

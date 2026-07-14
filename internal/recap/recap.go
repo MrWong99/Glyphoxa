@@ -198,17 +198,17 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 		priceModel = groq.DefaultModel
 	}
 
-	// Metering (gate #271 posture): a caps-free meter teed alongside the production
-	// recorder — usage is recorded and priced, but the meter has NO caps and the
-	// engine never reads one or calls AllowTurn (ADR-0046 is live-session-only).
-	meter := spend.NewMeter(spend.Caps{}, e.log, nil, nil)
+	// Metering (gate #271 posture): spend.PriceOnly tees a caps-free meter
+	// alongside the production recorder — usage is recorded and priced, but the
+	// engine never reads a cap or calls AllowTurn (ADR-0046 is live-session-only).
+	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)
 	caller := &llmCaller{
 		ctx:        ctx,
 		provider:   provider,
 		model:      model,
 		priceModel: priceModel,
 		label:      providerLabel(providerID),
-		rec:        observe.TeeUsage(e.metrics, meter),
+		rec:        rec,
 	}
 
 	chronIDs := make([]uuid.UUID, len(sessions))
@@ -220,12 +220,11 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	// once the meter/caller exist; the earlier provider-resolution errors spent
 	// nothing and have no meter to report.
 	defer func() {
-		status := meter.Status()
 		e.log.Info("recap: llm usage",
 			"voice_session_ids", chronIDs,
 			"input_tokens", caller.totalIn,
 			"output_tokens", caller.totalOut,
-			"estimated_usd", status.EstimatedUSD,
+			"estimated_usd", estimatedUSD(),
 			"ok", err == nil,
 		)
 	}()

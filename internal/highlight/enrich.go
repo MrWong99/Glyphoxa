@@ -196,18 +196,19 @@ func EnrichImageHandler(store EnrichStore, blobs blob.Store, factory GeneratorFa
 			return fmt.Errorf("highlight enrich: generate image: %w", err)
 		}
 
-		// Meter the spend (ADR-0045/0046): a caps-free meter teed onto the production
-		// recorder prices the image's tokens AND moves the glyphoxa_voice_llm_tokens
-		// series. The enrichment job is off-session and never cap-gated (the recap
-		// posture). Gemini bills the image as output tokens → LLMTokens.
-		meter := spend.NewMeter(spend.Caps{}, log, nil, nil)
-		observe.TeeUsage(rec, meter).LLMTokens(observe.ProviderGemini, model, res.PromptTokens, res.OutputTokens)
+		// Meter the spend (ADR-0045/0046): spend.PriceOnly tees a caps-free meter
+		// onto the production recorder, pricing the image's tokens AND moving the
+		// glyphoxa_voice_llm_tokens series. The enrichment job is off-session and
+		// never cap-gated (the recap posture). Gemini bills the image as output
+		// tokens → LLMTokens.
+		priced, estimatedUSD := spend.PriceOnly(rec, log)
+		priced.LLMTokens(observe.ProviderGemini, model, res.PromptTokens, res.OutputTokens)
 		log.Info("highlight enrich: image generated",
 			"highlight", p.HighlightID,
 			"model", model,
 			"input_tokens", res.PromptTokens,
 			"output_tokens", res.OutputTokens,
-			"estimated_usd", meter.Status().EstimatedUSD,
+			"estimated_usd", estimatedUSD(),
 		)
 
 		key, err := blob.Key(p.TenantID, highlightOwnerKind, p.HighlightID, imageBlobName)
