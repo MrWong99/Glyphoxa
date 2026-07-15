@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,16 +11,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
-
-// ErrTextDelivered is the sentinel a [StreamReplyFunc] returns to signal that it
-// completed a turn by delivering the whole answer as TEXT (a Butler turn routed
-// to its TextSink, #299) rather than dispatching any TTS. The turn reached no
-// first audio, but it is a SUCCESS — the reactor maps this sentinel to a
-// [voiceevent.TurnEndTextDelivered] terminal event instead of the
-// provider_error a generic non-nil producer error would report, so the metrics
-// subscriber does not miscount a delivered text answer as abandoned. It is NOT
-// surfaced through the [ErrorFunc].
-var ErrTextDelivered = errors.New("orchestrator: turn delivered as text")
 
 // Reactor is one self-contained bus interaction in the voice pipeline: it turns
 // events the call-driven stages publish (VAD, STT, TTS) into the next stage's
@@ -830,14 +819,6 @@ func (s *Segmenter) transcribe(job transcribeJob) error {
 	return s.stt.Transcribe(ctx, job.seg)
 }
 
-// ErrNotDelivered is the dispatch-callback signal (#362, ADR-0012) for a TTS
-// start-error under a LIVE turn ctx: the sentence was NOT delivered (its audio
-// never started), so the producer must NOT commit it — but the turn is still
-// alive, so the producer keeps going with later sentences. It is distinct from a
-// ctx.Err() (barge/mute) return, which cuts the turn and STOPS the producer. The
-// orchestrator owns this sentinel because it owns the dispatch contract.
-var ErrNotDelivered = errors.New("orchestrator: sentence not delivered")
-
 // Reply is one thing an addressed Agent should say: a single sentence and the
 // Voice to render it with. A [ReplyFunc] returns zero or more Replies per
 // routing decision.
@@ -847,17 +828,14 @@ type Reply struct {
 
 	// OnDelivered, when non-nil, is the producer's per-Reply commit hook
 	// (deliver-then-commit at the granularity of the Replies the [ReplyFunc]
-	// returns). The batch [Replier.dispatchAll] and streaming [Replier.dispatchStream]
-	// dispatch sites invoke it EXACTLY ONCE iff this Reply is delivered — the ADR-0012
-	// commit point: [TTS.Dispatch] returned nil AND the post-drain ctx is still live.
-	// A start-error (ErrNotDelivered) or a mid-drain cut leaves it uninvoked, so an
-	// undelivered sentence is never committed. Nil is a no-op.
-	//
-	// SCOPE: only those two dispatch sites honor this hook. The Ensemble Turn dispatch
-	// closures (ensemble.go) do NOT — their producers ([EnsembleSpeaker.Speak] /
-	// [CrossTalker.SpeakReaction]) commit via their own return-value drain and pass
-	// hook-less Replies, so a hook set on an ensemble Reply would be dropped. This is
-	// not a live bug (nothing sets it there); it is a documented boundary.
+	// returns). The [turnRun] module (#444) — which every dispatch site delegates
+	// to — invokes it EXACTLY ONCE iff this Reply is delivered: the ADR-0012
+	// commit point, synth returned nil AND the post-drain ctx is still live. A
+	// start-error or a mid-drain cut leaves it uninvoked, so an undelivered
+	// sentence is never committed. Nil is a no-op. (The Ensemble producers —
+	// [EnsembleSpeaker.Speak] / [CrossTalker.SpeakReaction] — commit via their
+	// own return-value drain and pass hook-less Replies, so they simply never
+	// set it.)
 	OnDelivered func()
 }
 
@@ -889,17 +867,11 @@ type ReplyFunc func(ctx context.Context, e voiceevent.AddressRouted) []Reply
 // that sentence is synthesized (the serial, one-at-a-time contract the
 // [PlaybackPump] depends on).
 //
-// dispatch's return is the deliver-then-commit signal (ADR-0012), in THREE
-// classes (#362):
-//   - nil → delivered: the sentence was fully synthesized under a live turn ctx,
-//     so the producer may commit it to history.
-//   - errors.Is(err, [ErrNotDelivered]) → a TTS start-error under a LIVE ctx: the
-//     sentence was NOT delivered (do NOT commit it), but the turn is still alive,
-//     so the producer KEEPS GOING with later sentences.
-//   - any other err (a ctx.Err()) → the turn was cut BEFORE or DURING the
-//     sentence's drain (a mid-stream barge/mute cuts the tail audio before its last
-//     frame is forwarded — not delivered): the producer STOPS generating AND does
-//     not commit that undelivered sentence.
+// dispatch's return is the deliver-then-commit signal (ADR-0012, #362): classify
+// it with [OutcomeOf] — [SentenceDelivered] (commit it), [SentenceNotDelivered]
+// (skip it, keep producing), or [SentenceCut] (stop producing, commit nothing
+// more). The dispatch callback is the [turnRun] module's (#444), which owns the
+// ctx-timing and error mapping behind that contract.
 //
 // ctx is the per-turn context (the barge-in floor's, under [WithBargeIn]); the
 // producer must thread it into its LLM call so a cancel tears generation down.
@@ -1110,118 +1082,33 @@ func (r *Replier) handleRouted(ctx context.Context, bus *voiceevent.Bus, e voice
 // reason if the turn failed of its own error (empty on a clean turn or a
 // ctx-cancel). With a streaming strategy it drives the producer, dispatching each
 // sentence as it arrives; otherwise it renders every [Reply] the batch
-// [ReplyFunc] returns, in order. Both stop early if ctx is cancelled (a barge-in
-// yielded the floor mid-turn). A dispatch failure is reported through the
-// ErrorFunc and does not stop the rest.
+// [ReplyFunc] returns, in order. Both delegate the deliver-then-commit protocol
+// to the [turnRun] module (#444) and stop early if ctx is cancelled (a barge-in
+// yielded the floor mid-turn).
 func (r *Replier) dispatchAll(ctx context.Context, e voiceevent.AddressRouted) voiceevent.TurnEndReason {
 	if r.replyStream != nil {
 		return r.dispatchStream(ctx, e)
 	}
-	var reason voiceevent.TurnEndReason
+	t := r.newTurn(ctx)
 	for _, rep := range r.reply(ctx, e) {
-		if ctx.Err() != nil {
+		// A start-error skips the sentence but keeps draining (the sticky
+		// ttsFailed becomes the terminal reason via finish); a cut stops the loop
+		// with no reason of its own (the cutter publishes its own TurnEnded).
+		if OutcomeOf(t.dispatch(rep)) == SentenceCut {
 			return ""
-		}
-		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil {
-			if r.onError != nil {
-				r.onError(err)
-			}
-			// A synth failure on one sentence is non-fatal to the turn, but record
-			// it as the turn-end reason if no later sentence recovers with audio. The
-			// hook is NOT invoked — a start-errored sentence was never delivered.
-			if ctx.Err() == nil {
-				reason = voiceevent.TurnEndTTSError
-			}
-			continue
-		}
-		// Deliver-then-commit re-check (#362, ADR-0012, mirrors dispatchStream):
-		// Dispatch returns nil even when a barge/mute cut the turn DURING this Reply's
-		// drain. Re-check the ctx: if it went cancelled, this Reply was NOT delivered —
-		// stop the loop and leave its hook UNINVOKED (the delivered prefix's hooks
-		// already fired).
-		if ctx.Err() != nil {
-			return ""
-		}
-		// Delivered: fire this Reply's per-Reply commit hook (nil = no-op).
-		if rep.OnDelivered != nil {
-			rep.OnDelivered()
 		}
 	}
-	return reason
+	return t.finish(nil)
 }
 
 // dispatchStream drives the streaming reply strategy for one routing decision
 // (B1), returning the turn-end reason if the turn failed of its own error (empty
-// on a clean turn or a ctx-cancel). It hands the producer a dispatch callback
-// that synthesizes one sentence at a time under ctx — serially, so the
-// [PlaybackPump]'s single-in-flight contract and the per-sentence FirstAudio
-// ordering both hold — and returns ctx.Err() once the turn is cancelled so the
-// producer stops generating. A dispatch failure is reported via the ErrorFunc but
-// does not abort the turn (one bad sentence must not silence the rest); a
-// producer-level error is likewise surfaced.
+// on a clean turn or a ctx-cancel). It hands the producer the [turnRun]'s
+// dispatch callback, which synthesizes one sentence at a time under ctx —
+// serially, so the [PlaybackPump]'s single-in-flight contract and the
+// per-sentence FirstAudio ordering both hold — and the module's finish maps the
+// producer's return to the terminal reason.
 func (r *Replier) dispatchStream(ctx context.Context, e voiceevent.AddressRouted) voiceevent.TurnEndReason {
-	var ttsFailed bool
-	dispatch := func(rep Reply) error {
-		if err := ctx.Err(); err != nil {
-			return err // barge-in cancelled the turn: stop the producer
-		}
-		if err := r.tts.Dispatch(ctx, rep.Sentence, rep.Voice); err != nil {
-			if r.onError != nil {
-				r.onError(err)
-			}
-			// A synth failure on one sentence is non-fatal to the turn, but a
-			// cancelled ctx surfaced as a Dispatch error must still stop the producer.
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			// Start-error under a LIVE ctx (#362): the sentence never produced audio,
-			// so it was NOT delivered. Signal ErrNotDelivered — NOT nil, which would let
-			// the producer commit an undelivered sentence (ADR-0012) — while the turn
-			// stays alive so the producer keeps going with later sentences.
-			ttsFailed = true
-			return ErrNotDelivered
-		}
-		// Deliver-then-commit re-check (ADR-0012): Dispatch returns nil even when a
-		// barge/mute cancelled the turn DURING the drain. The forward boundary is
-		// unobservable here, so a cancel-during-drain is AMBIGUOUS — treated as
-		// undelivered (accepted under-report bias: history may omit a sentence the room
-		// fully heard, but never includes one it did not). Report the cancel so the
-		// producer does not commit this sentence.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Delivered: fire the producer's per-Reply commit hook at the ADR-0012 commit
-		// point (Dispatch nil AND post-drain ctx live). Nil hook is a no-op.
-		if rep.OnDelivered != nil {
-			rep.OnDelivered()
-		}
-		return nil
-	}
-	// Error mapping under a LIVE ctx (a cancel is handled by the ctx.Err()==nil guard
-	// short-circuiting the whole block — a barge/mute publishes its own TurnEnded).
-	// Ordering: cancel first (guard), then the two sentinels, then the generic
-	// provider_error, so neither sentinel masks the other nor a cancel.
-	if err := r.replyStream(ctx, e, dispatch); err != nil && ctx.Err() == nil {
-		// A text-delivered turn (#299) is a SUCCESS that dispatched no TTS: report
-		// its terminal reason so the subscriber records text_delivered, not an
-		// abandoned/no_first_audio TTL reap, and do NOT surface it as an error.
-		if errors.Is(err, ErrTextDelivered) {
-			return voiceevent.TurnEndTextDelivered
-		}
-		// A producer that leaks ErrNotDelivered as its own return (#362) must NOT be
-		// misclassified as a provider failure: ttsFailed is already set, so the
-		// tts_error branch below owns the reason. Only a genuine producer error under a
-		// live ctx is provider_error.
-		if !errors.Is(err, ErrNotDelivered) {
-			if r.onError != nil {
-				r.onError(err)
-			}
-			// The producer (LLM round / tool loop) failed before the turn finished.
-			return voiceevent.TurnEndProviderError
-		}
-	}
-	if ttsFailed && ctx.Err() == nil {
-		return voiceevent.TurnEndTTSError
-	}
-	return ""
+	t := r.newTurn(ctx)
+	return t.finish(r.replyStream(ctx, e, t.dispatch))
 }

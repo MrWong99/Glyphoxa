@@ -455,51 +455,22 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 		}
 	}
 
+	// Deliver-then-commit via the shared emitter (ADR-0012, #444). Lazy
+	// user-append (#375, F3): the user message is appended on the FIRST delivered
+	// sentence, not eagerly at the top, so a turn that delivers ZERO sentences
+	// (every sentence start-errors, or a barge cut it before the first) logs
+	// NOTHING — ADR-0012: "If zero sentences were delivered the utterance is not
+	// logged at all."
 	var split sentenceSplitter
-	var spoken strings.Builder
-	voice := r.cfg.Persona.Voice
-
-	// Lazy user-append (#375, F3): append the user message on the FIRST successful
-	// dispatch, not eagerly at the top. A turn that delivers ZERO sentences (every
-	// sentence start-errors, or a barge cut it before the first) must log NOTHING —
-	// ADR-0012: "If zero sentences were delivered the utterance is not logged at all."
-	// The old eager prologue left an orphan user message on such turns; committing the
-	// user message at the same deliver-then-commit boundary as the assistant text fixes
-	// it. userAppended keeps it exactly-once across the split + flush emits.
-	userAppended := false
-	appendUserOnce := func() {
-		if userAppended {
-			return
-		}
-		userAppended = true
-		r.appendUser(commitText)
-	}
-
-	// Deliver-then-commit (ADR-0012, mirrors streamTurn's emit): dispatch FIRST; a
-	// sentence joins the spoken builder only once dispatch returns nil.
-	emit := func(sentence string) error {
-		if e := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); e != nil {
-			// A start-error under a live turn (#362): skip this sentence's commit but
-			// keep draining later ones (return nil — the sentinel must never land in
-			// dispErr). Any other error (a barge cancel) stops the drain.
-			if errors.Is(e, orchestrator.ErrNotDelivered) {
-				return nil
-			}
-			return e
-		}
-		// Delivered: append the user message now (once), BEFORE the spoken text, so a
-		// zero-delivered turn never logs an orphan user message.
-		appendUserOnce()
-		if spoken.Len() > 0 {
-			spoken.WriteByte(' ')
-		}
-		spoken.WriteString(sentence)
-		return nil
+	d := &deliveredText{
+		dispatch:         dispatch,
+		voice:            r.cfg.Persona.Voice,
+		onFirstDelivered: func() { r.appendUser(commitText) },
 	}
 
 	var dispErr error
 	for _, sentence := range split.Push(draft) {
-		if e := emit(sentence); e != nil {
+		if e := d.emit(sentence); e != nil {
 			dispErr = e
 			break
 		}
@@ -508,21 +479,61 @@ func (r *Replier) speakDraftModality(ctx context.Context, commitText, modalityUt
 	// case its tail was never spoken and must not be dispatched.
 	if dispErr == nil && ctx.Err() == nil {
 		if tail := split.Flush(); tail != "" {
-			if e := emit(tail); e != nil {
+			if e := d.emit(tail); e != nil {
 				dispErr = e
 			}
 		}
 	}
 
-	r.commitSpoken(spoken.String())
+	r.commitSpoken(d.text())
 
 	// A cancel is the expected barge path (the whole ensemble was torn down), not a
 	// turn failure; surface only a genuine dispatch error under a live ctx.
 	if ctx.Err() != nil {
-		return spoken.String(), nil
+		return d.text(), nil
 	}
-	return spoken.String(), dispErr
+	return d.text(), dispErr
 }
+
+// deliveredText accumulates one turn's delivered sentences under the
+// deliver-then-commit contract (ADR-0012, #444): emit dispatches a sentence and
+// appends it to the spoken text ONLY when the orchestrator's turn module
+// reports it delivered. A start-error ([orchestrator.SentenceNotDelivered])
+// skips the sentence's commit but keeps the turn going — the resulting history
+// gap is INTENDED (exactly what the room heard); a cut
+// ([orchestrator.SentenceCut], a barge/mute cancel) stops the drain.
+// onFirstDelivered, when non-nil, runs once before the first committed sentence
+// — the lazy user-message append (#375 F3), so a zero-delivered turn logs
+// NOTHING. It is the ONE producer-side emit path (the per-site closures it
+// replaced each re-implemented this classification).
+type deliveredText struct {
+	dispatch         func(orchestrator.Reply) error
+	voice            tts.Voice
+	onFirstDelivered func()
+	spoken           strings.Builder
+}
+
+func (d *deliveredText) emit(sentence string) error {
+	err := d.dispatch(orchestrator.Reply{Sentence: sentence, Voice: d.voice})
+	switch orchestrator.OutcomeOf(err) {
+	case orchestrator.SentenceNotDelivered:
+		return nil // skip this sentence's commit; the turn is alive, keep producing
+	case orchestrator.SentenceCut:
+		return err // stop the drain; nothing more is committed
+	}
+	if d.onFirstDelivered != nil {
+		d.onFirstDelivered()
+		d.onFirstDelivered = nil
+	}
+	if d.spoken.Len() > 0 {
+		d.spoken.WriteByte(' ')
+	}
+	d.spoken.WriteString(sentence)
+	return nil
+}
+
+// text returns the delivered text so far — the history commit.
+func (d *deliveredText) text() string { return d.spoken.String() }
 
 // crossTalkSilence is the sentinel a Cross-talk Reaction emits to DECLINE speaking
 // (ADR-0025, #302): the Reaction prompt permits an explicit "stay silent" output to
@@ -673,37 +684,17 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 		return r.fallbackTurn(ctx, messages, dispatch)
 	}
 
+	// Deliver-then-commit via the shared emitter (ADR-0012, #444): a sentence
+	// joins the history commit only once the turn module reports it delivered —
+	// fully synthesized under a live turn ctx. A dispatch rejected because the
+	// turn was cancelled (mute/barge) never reaches the spoken text: the room
+	// never heard it.
 	var split sentenceSplitter
-	var spoken strings.Builder // what actually reached the pump — the history commit
-	voice := r.cfg.Persona.Voice
-
-	// Deliver-then-commit (ADR-0012): dispatch FIRST; a sentence joins the
-	// history commit only once dispatch returns nil, i.e. it was fully
-	// synthesized under a live turn ctx. A dispatch rejected because the turn was
-	// cancelled between the two select-ready branches (mute/barge) must NOT reach
-	// the spoken builder — the room never heard it.
-	emit := func(sentence string) error {
-		if err := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); err != nil {
-			// A start-error under a live turn (#362): this sentence was NOT delivered,
-			// so skip the commit — but the turn is alive, so keep generating (return
-			// nil, do not stop the producer). The resulting history gap (sentence N
-			// skipped, N+1 committed) is INTENDED: it is exactly what the room heard
-			// (ADR-0012). Any other error (a barge/mute cancel) stops generation.
-			if errors.Is(err, orchestrator.ErrNotDelivered) {
-				return nil
-			}
-			return err
-		}
-		if spoken.Len() > 0 {
-			spoken.WriteByte(' ')
-		}
-		spoken.WriteString(sentence)
-		return nil
-	}
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice}
 
 	onText := func(delta string) error {
 		for _, sentence := range split.Push(delta) {
-			if err := emit(sentence); err != nil {
+			if err := d.emit(sentence); err != nil {
 				return err // ctx cancelled (barge-in) or a hard dispatch failure
 			}
 		}
@@ -716,13 +707,13 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	// in which case the partial tail was never spoken and must not be dispatched.
 	if genErr == nil && ctx.Err() == nil {
 		if tail := split.Flush(); tail != "" {
-			if err := emit(tail); err != nil {
+			if err := d.emit(tail); err != nil {
 				genErr = err
 			}
 		}
 	}
 
-	r.commitSpoken(spoken.String())
+	r.commitSpoken(d.text())
 
 	// A cancellation is the expected barge-in path, not a turn failure: report
 	// only a genuine engine error.
@@ -753,13 +744,14 @@ func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, disp
 	// Deliver-then-commit (ADR-0012): dispatch FIRST, commit only once the reply
 	// was delivered. A turn cancelled before the reply drained delivered nothing,
 	// so it must leave no assistant message.
-	if err := dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice}); err != nil {
-		// A start-error under a live turn (#362): nothing delivered, so commit nothing —
-		// and SWALLOW the sentinel (return nil). Returning it would misclassify the turn
-		// as provider_error in dispatchStream; the reactor already recorded tts_error.
-		if errors.Is(err, orchestrator.ErrNotDelivered) {
-			return nil
-		}
+	switch err := dispatch(orchestrator.Reply{Sentence: reply, Voice: r.cfg.Persona.Voice}); orchestrator.OutcomeOf(err) {
+	case orchestrator.SentenceNotDelivered:
+		// A start-error under a live turn (#362): nothing delivered, so commit
+		// nothing — and swallow the signal (return nil). Returning it would
+		// misclassify the turn as provider_error; the reactor already recorded
+		// tts_error.
+		return nil
+	case orchestrator.SentenceCut:
 		return err
 	}
 	r.commitSpoken(reply)
@@ -810,41 +802,23 @@ func (r *Replier) textModalityTurn(ctx context.Context, utterance string, messag
 		return orchestrator.ErrTextDelivered
 	}
 
-	// Spoken delivery: sentence-split the whole answer and dispatch each, committing
-	// only what was delivered (mirrors [Replier.streamTurn]'s emit).
+	// Spoken delivery: sentence-split the whole answer and dispatch each through
+	// the shared emitter (ADR-0012, #444), committing only what was delivered.
 	var split sentenceSplitter
-	var spoken strings.Builder
-	voice := r.cfg.Persona.Voice
-	emit := func(sentence string) error {
-		if err := dispatch(orchestrator.Reply{Sentence: sentence, Voice: voice}); err != nil {
-			// A start-error under a live turn (#362, mirrors streamTurn): this sentence
-			// was NOT delivered, so skip its commit — but the turn is alive, so keep
-			// generating (return nil). The resulting history gap is INTENDED (ADR-0012:
-			// exactly what the room heard). Any other error (a barge cancel) stops.
-			if errors.Is(err, orchestrator.ErrNotDelivered) {
-				return nil
-			}
-			return err
-		}
-		if spoken.Len() > 0 {
-			spoken.WriteByte(' ')
-		}
-		spoken.WriteString(sentence)
-		return nil
-	}
+	d := &deliveredText{dispatch: dispatch, voice: r.cfg.Persona.Voice}
 	for _, sentence := range split.Push(answer) {
-		if err := emit(sentence); err != nil {
-			r.commitSpoken(spoken.String())
+		if err := d.emit(sentence); err != nil {
+			r.commitSpoken(d.text())
 			return err
 		}
 	}
 	if tail := split.Flush(); tail != "" {
-		if err := emit(tail); err != nil {
-			r.commitSpoken(spoken.String())
+		if err := d.emit(tail); err != nil {
+			r.commitSpoken(d.text())
 			return err
 		}
 	}
-	r.commitSpoken(spoken.String())
+	r.commitSpoken(d.text())
 	return nil
 }
 
