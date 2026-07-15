@@ -33,14 +33,18 @@ var diceNotation = regexp.MustCompile(`(?i)\b\d*[dw](\d+\b|%)`)
 //   - en: \b-anchored PREFIX so inflections stay armed ("rolls", "rolling") while
 //     the "die" substring no longer trips inside unrelated words ("studied") —
 //     the substring false-positive class #226 also flags in the other direction.
+//     The named-check phrasings (perception/insight/investigation check, #438)
+//     cover the common GM "make a … check" cues the generic set missed.
 //   - de: bare substrings, because the roll cue lives inside compounds
 //     ("Würfelwerkzeug", "Rettungswurf", "Fertigkeitsprobe") that word anchors
 //     would miss. würf/wurf/wirf/werf cover würfeln + the werfen ("throw a die")
-//     verb family (imperative „wirf", „werft", „werfen wir"). This deliberately
-//     accepts rare compound false positives (Entwurf, Vorwurf, verwerfen) — the
-//     recall bias above makes that the cheap side.
+//     verb family (imperative „wirf", „werft", „werfen wir"), and the bare "probe"
+//     substring covers every named -probe check compound (Wahrnehmungsprobe,
+//     Nachforschungsprobe — the #438 DE cues) as "wurf" covers the -rettungswurf
+//     saves. This deliberately accepts rare compound false positives (Entwurf,
+//     Vorwurf, verwerfen) — the recall bias above makes that the cheap side.
 var diceKeywords = map[string]*regexp.Regexp{
-	"en": regexp.MustCompile(`(?i)\b(roll|dice|die|d20|d6|d100|saving throw|initiative|advantage|disadvantage|to hit|attack roll|ability check|skill check)`),
+	"en": regexp.MustCompile(`(?i)\b(roll|dice|die|d20|d6|d100|saving throw|initiative|advantage|disadvantage|to hit|attack roll|ability check|skill check|perception check|insight check|investigation check)`),
 	"de": regexp.MustCompile(`(?i)(würf|wurf|wirf|werf|probe|initiative)`),
 }
 

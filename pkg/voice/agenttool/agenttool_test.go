@@ -1517,6 +1517,9 @@ func TestEngine_DiceHardening_ArmedTurnAppendsInstruction(t *testing.T) {
 // the model narrates a roll result WITHOUT calling the tool → the reply is discarded
 // and regenerated with the dice tool FORCED; the delivered reply reflects the
 // actually executed roll, and exactly one roll-claim malformed-gen is counted.
+//
+// The seeded diceGrants rng rolls a 16 first — the regen narrates that same 16, so
+// the #438 consistency check sees a matching claim and the reply ships unchanged.
 func TestEngine_InventedRoll_RegeneratesWithForcedDice(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{
 		// Run 1 (buffered): invents a result, no tool call.
@@ -1524,7 +1527,7 @@ func TestEngine_InventedRoll_RegeneratesWithForcedDice(t *testing.T) {
 		// Forced regen round 0: now it calls the dice tool.
 		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
 		// Forced regen round 1: answers with the real result in context.
-		{text: "The bones show an 8, traveler.", stop: "end_turn"},
+		{text: "The bones show a 16, traveler.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
 	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
@@ -1537,7 +1540,7 @@ func TestEngine_InventedRoll_RegeneratesWithForcedDice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if strings.TrimSpace(got) != "The bones show an 8, traveler." {
+	if strings.TrimSpace(got) != "The bones show a 16, traveler." {
 		t.Errorf("delivered = %q, want the regenerated reply reflecting the executed roll", got)
 	}
 	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedRollClaim {
@@ -1619,13 +1622,19 @@ func TestEngine_NotArmed_GuardNeverFires(t *testing.T) {
 	}
 }
 
-// TestEngine_InventedRoll_SingleEscalation is AC "guard fires at most once per
-// turn": if the FORCED regeneration still narrates a bare number, it is delivered
-// as-is — the guard does not loop. Exactly two loop runs (buffered + one regen).
-func TestEngine_InventedRoll_SingleEscalation(t *testing.T) {
+// TestEngine_RegenMismatch_RetriesOnceThenDelivers is #438 AC "regen narrating a
+// value ≠ actual Tool result does not ship as-is": the first forced regen claims a
+// 17 without the dice Tool ever running, so it contradicts (no Tool result at all)
+// and is discarded; the ONE bounded retry does a proper round-trip narrating the
+// actual roll (the seeded 16) and ships. Counted: one roll_claim + one
+// regen_mismatch, both bounded labels (#430).
+func TestEngine_RegenMismatch_RetriesOnceThenDelivers(t *testing.T) {
 	prov := &scriptedProvider{steps: []step{
 		{text: "Ah, eine 19!", stop: "end_turn"},          // run 1: invented
-		{text: "Trust me, a solid 17.", stop: "end_turn"}, // forced regen: still a bare number, no tool call
+		{text: "Trust me, a solid 17.", stop: "end_turn"}, // regen 1: claims a number, tool never ran → contradiction
+		// Regen 2 (the one bounded retry): proper dice round-trip.
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "A 16! The bones favor you.", stop: "end_turn"},
 	}}
 	rec := &recordingStage{}
 	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
@@ -1635,14 +1644,130 @@ func TestEngine_InventedRoll_SingleEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if strings.TrimSpace(got) != "Trust me, a solid 17." {
-		t.Errorf("delivered = %q, want the single regeneration delivered as-is", got)
+	if strings.TrimSpace(got) != "A 16! The bones favor you." {
+		t.Errorf("delivered = %q, want the consistent retry's reply", got)
 	}
-	if paths := rec.malformedPaths(); len(paths) != 1 {
-		t.Errorf("MalformedToolGen count = %d, want 1 (guard fires at most once)", len(paths))
+	if paths := rec.malformedPaths(); len(paths) != 2 ||
+		paths[0] != observe.MalformedRollClaim || paths[1] != observe.MalformedRegenMismatch {
+		t.Errorf("MalformedToolGen paths = %v, want [roll_claim regen_mismatch]", paths)
+	}
+	if n := len(prov.requests()); n != 4 {
+		t.Errorf("Complete calls = %d, want 4 (buffered run + contradicting regen + retry round-trip)", n)
+	}
+}
+
+// TestEngine_RegenMismatch_ContradictsRealRollRetries is the #438 headline: the
+// forced regen DOES call the dice Tool (it rolls the seeded 16) but narrates a 20 —
+// the invented-number-despite-rolling case. The contradicting draft is discarded
+// and the bounded retry's consistent narration ships.
+func TestEngine_RegenMismatch_ContradictsRealRollRetries(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ah, eine 19!", stop: "end_turn"}, // run 1: invented
+		// Regen 1: calls dice (rolls 16)... then narrates a 20 anyway.
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "A natural 20! Incredible!", stop: "end_turn"},
+		// Regen 2: rolls again (13) and narrates it faithfully.
+		{calls: []llm.ToolCall{{ID: "t2", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "The bones show a 13.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 13." {
+		t.Errorf("delivered = %q, want the retry's faithful narration (the 20-claim must not ship)", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 2 ||
+		paths[0] != observe.MalformedRollClaim || paths[1] != observe.MalformedRegenMismatch {
+		t.Errorf("MalformedToolGen paths = %v, want [roll_claim regen_mismatch]", paths)
+	}
+}
+
+// TestEngine_RegenMismatch_BoundedThenFailsTurn pins the #438 bound: when the
+// retry ALSO contradicts, the turn fails — never an unbounded loop, and the
+// contradicting draft is NEVER delivered (ADR-0030). Exactly three loop runs
+// (buffered + regen + one retry) and three bounded malformed labels.
+func TestEngine_RegenMismatch_BoundedThenFailsTurn(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ah, eine 19!", stop: "end_turn"},          // run 1: invented
+		{text: "Trust me, a solid 17.", stop: "end_turn"}, // regen 1: contradicts (no roll)
+		{text: "Fine — an 11 then.", stop: "end_turn"},    // regen 2: still contradicts (no roll)
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}})
+	if err == nil {
+		t.Fatal("Generate = nil error; want the turn to fail rather than speak a contradicting roll")
+	}
+	if got != "" {
+		t.Errorf("delivered = %q; a contradicting draft must never surface", got)
+	}
+	if n := len(prov.requests()); n != 3 {
+		t.Errorf("Complete calls = %d, want 3 (buffered + regen + ONE bounded retry)", n)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 3 ||
+		paths[0] != observe.MalformedRollClaim ||
+		paths[1] != observe.MalformedRegenMismatch || paths[2] != observe.MalformedRegenMismatch {
+		t.Errorf("MalformedToolGen paths = %v, want [roll_claim regen_mismatch regen_mismatch]", paths)
+	}
+}
+
+// TestEngine_RegenWithoutClaim_ShipsUnchanged: a forced regen that makes NO
+// numeric claim has nothing to contradict — it ships as-is even though the model
+// (still) never called the dice Tool. The guard escalates on invented numbers,
+// not on a number-free deflection.
+func TestEngine_RegenWithoutClaim_ShipsUnchanged(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "Ah, eine 19!", stop: "end_turn"},                  // run 1: invented
+		{text: "The fates keep their counsel.", stop: "end_turn"}, // regen: no claim, no roll
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The fates keep their counsel." {
+		t.Errorf("delivered = %q, want the claim-free regen unchanged", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedRollClaim {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [roll_claim]", paths)
 	}
 	if n := len(prov.requests()); n != 2 {
 		t.Errorf("Complete calls = %d, want 2 (buffered run + exactly one regeneration)", n)
+	}
+}
+
+// TestEngine_InventedRoll_SpelledOutNumber is #438 item 1 at the engine level: a
+// spelled-out invented result ("a natural twenty", no tool call) trips the guard
+// exactly like a digit claim, and the forced regen's faithful narration ships.
+func TestEngine_InventedRoll_SpelledOutNumber(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		{text: "You rolled a natural twenty! Astounding!", stop: "end_turn"}, // invented, spelled out
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "The bones show a 16, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 16, traveler." {
+		t.Errorf("delivered = %q, want the regenerated faithful narration", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedRollClaim {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [roll_claim]", paths)
 	}
 }
 

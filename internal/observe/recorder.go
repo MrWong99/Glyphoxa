@@ -177,9 +177,8 @@ const (
 
 // MalformedPath is the bounded label naming WHICH detection site caught a
 // malformed tool generation on the [StageRecorder.MalformedToolGen] counter
-// (#398/#399/#410). All three values are reserved now so the series' label space
-// is fixed from the first slice (ADR-0032 bounded labels); #398 emits only
-// [MalformedStreamError], with #399/#410 lighting up the other two.
+// (#398/#399/#410/#438). The value set is closed so the series' label space is
+// fixed (ADR-0032 bounded labels).
 type MalformedPath string
 
 const (
@@ -193,6 +192,10 @@ const (
 	// MalformedRollClaim: the model narrated a dice result it never actually rolled
 	// via the tool, caught by the roll-claim guard (#399).
 	MalformedRollClaim MalformedPath = "roll_claim"
+	// MalformedRegenMismatch: the forced dice regeneration (#399) narrated a roll
+	// value contradicting the dice Tool's ACTUAL result, caught by the regen
+	// consistency check (#438). The contradicting draft was discarded.
+	MalformedRegenMismatch MalformedPath = "regen_mismatch"
 )
 
 // StageRecorder records the orchestrator's per-stage / per-turn latency
