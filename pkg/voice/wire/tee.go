@@ -131,6 +131,14 @@ func (t *TeeSynthesizer) Synthesize(ctx context.Context, req tts.SynthesizeReque
 				go drain(src) // src is not yet exhausted; release its producer
 				return
 			}
+			// A terminal Err chunk (#436) is a failure SIGNAL, not audio: it reaches
+			// the orchestrator's drain (above) so the dispatch layer sees the
+			// abnormal termination, but it is never audio for the pump and never
+			// counts as the sentence's FirstAudio — a stream that dies before its
+			// first real chunk must not read as "this turn produced audio".
+			if chunk.Err != nil {
+				continue
+			}
 			// First chunk crossing to the sink is the headline SLO boundary
 			// ("first audio handed to the pump", A3 hook 1): stamp and publish it
 			// before the (possibly blocking) send so the moment measured is when

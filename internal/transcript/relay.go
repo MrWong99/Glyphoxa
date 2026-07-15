@@ -215,6 +215,7 @@ type Relay struct {
 	sessions Sessions
 	store    LineStore       // persists projected lines (#74); nil disables persistence
 	resolver SpeakerResolver // resolves SpeakerID → name/GM (#281); nil = anonymous lane
+	scope    TenantScope     // tenant-ownership gate for the HTTP mounts (#439); nil = unscoped
 	log      *slog.Logger
 
 	mu       sync.Mutex
@@ -288,6 +289,32 @@ func (r *Relay) SetResolver(res SpeakerResolver) {
 	r.mu.Lock()
 	r.resolver = res
 	r.mu.Unlock()
+}
+
+// TenantScope reports whether the Voice Session belongs to the Tenant — the
+// ownership check behind the snapshot/SSE mounts' 404 posture (#439).
+// *storage.Store's VoiceSessionInTenant satisfies it (session → campaign →
+// tenant); tests fake it.
+type TenantScope func(ctx context.Context, tenantID, sessionID uuid.UUID) (bool, error)
+
+// SetTenantScope wires the tenant-ownership check (#439) after construction,
+// mirroring SetResolver so NewRelay call sites stay byte-identical. With a
+// scope installed, ServeSnapshot and ServeEvents 404 any session outside the
+// request's Tenant (auth.RequireTenant injects it) — the same don't-reveal
+// posture as the Highlight mounts — and the SSE rejection happens before the
+// stream opens. nil leaves the endpoints unscoped (voice-standalone builds,
+// unit-test relays). Called once at boot; guarded by r.mu.
+func (r *Relay) SetTenantScope(scope TenantScope) {
+	r.mu.Lock()
+	r.scope = scope
+	r.mu.Unlock()
+}
+
+// tenantScope reads the installed scope under the lock.
+func (r *Relay) tenantScope() TenantScope {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.scope
 }
 
 // project is the bus callback: it attributes the event to the active session,

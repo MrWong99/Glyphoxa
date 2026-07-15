@@ -174,7 +174,28 @@ func (s *TTS) Dispatch(ctx context.Context, sentence string, voice tts.Voice) er
 	// bytes). Counted here, before the drain, so a later barge cutting the audio still
 	// bills what was submitted. An atomic counter add; it never blocks or fails the turn.
 	s.rec.TTSCharacters(s.provider, utf8.RuneCountInString(sentence))
-	for range ch {
+	// Drain to close, capturing a terminal Err chunk (#436): an adapter that fails
+	// MID-STREAM emits one final chunk with Err set before closing, so an abnormal
+	// termination is distinguishable from clean completion at this seam.
+	var streamErr error
+	for chunk := range ch {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	// Mid-stream failure under a LIVE ctx (#436): the room heard at most a fragment
+	// of the sentence, so it must NOT commit as delivered. Count the vendor fault
+	// (bounded labels, the #430 discipline), announce the failed sentence so the
+	// Transcript Chunker retracts it (parity with Agent history), and return an
+	// error — the turn module classifies it like a start-error: the sentence is
+	// skipped, ttsFailed is sticky, and the turn terminates tts_error instead of a
+	// silent success. A cancelled ctx takes the barge branch below unchanged: the
+	// caller cut the stream, #401's sentence-grain commit semantics own that case.
+	if streamErr != nil && ctx.Err() == nil {
+		s.rec.ProviderCall(observe.StageTTS, s.provider, observe.OutcomeError)
+		s.rec.ProviderError(observe.StageTTS, s.provider)
+		s.bus.Publish(voiceevent.TTSStreamFailed{At: time.Now(), TurnID: voiceevent.TurnIDFrom(ctx)})
+		return fmt.Errorf("orchestrator.TTS.Dispatch: synthesis stream failed mid-delivery: %w", streamErr)
 	}
 	// The channel closed: record the DELIVER span and count the call OK. tts_total is
 	// NOT synthesis time — under the lockstep TeeSynthesizer the drain is paced by the

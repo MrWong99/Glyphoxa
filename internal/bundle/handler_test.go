@@ -28,22 +28,44 @@ func (f fakeAuthN) AuthenticateSession(_ context.Context, token string) (storage
 	return storage.User{}, storage.ErrNotFound
 }
 
+// fakeTenants resolves every operator to one fixed tenant, standing in for
+// storage.TenantForUser so the mount's RequireTenant wrapper (#439) can run
+// against the fakeAuthN operator (which has no tenant row).
+type fakeTenants struct{ tenantID uuid.UUID }
+
+func (f fakeTenants) TenantForUser(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return f.tenantID, nil
+}
+
 // exportRoute mounts ServeExport exactly as cmd/glyphoxa/main.go does — behind
-// auth.RequireSession on GET /api/v1/campaigns/{id}/export — so the test drives
-// the guarded route through a real ServeMux.
-func exportRoute(st *storage.Store, token string) http.Handler {
+// auth.RequireSession + auth.RequireTenant (session AND tenant, #439) on GET
+// /api/v1/campaigns/{id}/export — so the test drives the guarded route through
+// a real ServeMux. tenantID is the tenant the session resolves to.
+func exportRoute(st *storage.Store, token string, tenantID uuid.UUID) http.Handler {
 	h := &bundle.Handler{Store: st}
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/campaigns/{id}/export",
-		auth.RequireSession(fakeAuthN{token: token}, http.HandlerFunc(h.ServeExport)))
+		auth.RequireSession(fakeAuthN{token: token},
+			auth.RequireTenant(fakeTenants{tenantID: tenantID}, http.HandlerFunc(h.ServeExport))))
 	return mux
+}
+
+// seededTenantID resolves the seed tenant's id so tests can bind the route's
+// tenant to the campaign's owner.
+func seededTenantID(t *testing.T, st *storage.Store) uuid.UUID {
+	t.Helper()
+	tenant, err := st.FindTenantByName(context.Background(), wirenpc.SeedTenantName)
+	if err != nil {
+		t.Fatalf("FindTenantByName: %v", err)
+	}
+	return tenant.ID
 }
 
 func TestServeExport(t *testing.T) {
 	ctx := context.Background()
 	st, cid, _ := seededCampaign(t)
 	const token = "valid-session-token"
-	route := exportRoute(st, token)
+	route := exportRoute(st, token, seededTenantID(t, st))
 
 	authed := func(method, target string) *http.Request {
 		req := httptest.NewRequest(method, target, nil)
@@ -118,6 +140,28 @@ func TestServeExport(t *testing.T) {
 	})
 }
 
+// TestServeExportForeignTenant pins the #439 posture: a campaign owned by a
+// tenant other than the caller's is 404 — indistinguishable from a campaign
+// that does not exist, so existence never leaks across the tenant boundary.
+func TestServeExportForeignTenant(t *testing.T) {
+	ctx := context.Background()
+	st, cid, _ := seededCampaign(t)
+	foreignTenant, err := st.CreateTenant(ctx, "foreign-tenant")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	const token = "valid-session-token"
+	route := exportRoute(st, token, foreignTenant)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns/"+cid.String()+"/export", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	route.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign-tenant export code=%d, want 404", rec.Code)
+	}
+}
+
 // TestServeExportArchivedCampaign proves an archived campaign is still
 // exportable (backup path, ADR-0053 §7).
 func TestServeExportArchivedCampaign(t *testing.T) {
@@ -127,7 +171,7 @@ func TestServeExportArchivedCampaign(t *testing.T) {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
 	const token = "valid-session-token"
-	route := exportRoute(st, token)
+	route := exportRoute(st, token, seededTenantID(t, st))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/campaigns/"+cid.String()+"/export", nil)

@@ -820,3 +820,101 @@ func TestChunker_LookaheadReaction_DiscardCommitsNoReactionText(t *testing.T) {
 		t.Fatalf("chunk content = %q, must NOT contain a discarded reaction's text", content)
 	}
 }
+
+// TestChunker_MidStreamFailureRetractsCommittedSentence pins the #436 chunk-grain
+// parity: a sentence whose FirstAudio fired but whose synthesis stream then died
+// mid-delivery (TTSStreamFailed) is RETRACTED from the turn's line — the chunk
+// records only the fully delivered sentences, agreeing with Agent history which
+// omits the failed one (ADR-0012's never-record-unheard bias).
+func TestChunker_MidStreamFailureRetractsCommittedSentence(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello Bart", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "Well met.", at(3))
+	// The second sentence delivers its first chunk (FirstAudio commits it), then
+	// the provider drops the stream — the room heard only a fragment.
+	agentReply(bus, "t1", "Sit down and never leave this inn again.", at(4))
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(5), TurnID: "t1"})
+	// The turn recovers with a third, fully delivered sentence (skip-and-continue).
+	agentReply(bus, "t1", "What'll it be?", at(6))
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	want := "Player / DM: Hello Bart\nBart: Well met. What'll it be?"
+	if got[0].Content != want {
+		t.Errorf("content = %q,\nwant %q (the mid-stream-failed sentence retracted)", got[0].Content, want)
+	}
+}
+
+// TestChunker_MidStreamFailureOnOpeningSentenceDropsLine pins the #436 zero-line
+// case: when the turn's FIRST (and only committed) sentence fails mid-stream, the
+// retraction leaves no delivered text — the whole line leaves the open chunk, no
+// empty "Who:" artifact persists, and a later delivered sentence re-opens a line.
+func TestChunker_MidStreamFailureOnOpeningSentenceDropsLine(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello Bart", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "This whole sentence dies mid-air.", at(3))
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"})
+	agentReply(bus, "t1", "Second try lands.", at(5))
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	want := "Player / DM: Hello Bart\nBart: Second try lands."
+	if got[0].Content != want {
+		t.Errorf("content = %q,\nwant %q (no empty line artifact, retry re-opens)", got[0].Content, want)
+	}
+}
+
+// TestChunker_MidStreamFailureBeforeFirstAudioPurgesPending pins the #436
+// no-audio case: a stream that dies BEFORE its first real chunk fired no
+// FirstAudio, so the sentence still heads pending — the failure purges it so a
+// straggler FirstAudio can never commit it later.
+func TestChunker_MidStreamFailureBeforeFirstAudioPurgesPending(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello Bart", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: uuid.New().String(), AgentRole: "character", Name: "Bart"},
+	})
+	// Dispatched but the stream died before any audio: TTSInvoked, no FirstAudio.
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "Never heard at all.", TurnID: "t1"})
+	bus.Publish(voiceevent.TTSStreamFailed{At: at(4), TurnID: "t1"})
+	// A straggler FirstAudio (e.g. racing teardown) must find nothing to commit.
+	bus.Publish(voiceevent.FirstAudio{At: at(5), TurnID: "t1"})
+	agentReply(bus, "t1", "Recovered.", at(6))
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 {
+		t.Fatalf("inserts = %d, want 1", len(got))
+	}
+	want := "Player / DM: Hello Bart\nBart: Recovered."
+	if got[0].Content != want {
+		t.Errorf("content = %q,\nwant %q (the undelivered pending sentence purged)", got[0].Content, want)
+	}
+}

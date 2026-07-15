@@ -402,6 +402,11 @@ func TestReplier_Ensemble_BargeDuringReactionEndsSubTurn(t *testing.T) {
 // remaining after the Lead — reacts; the rest stay silent that turn. The Lead (Bart)
 // wins the race with the others gated; the first remaining draft to arrive (Goblin)
 // is the reactor, and the third (Mira) is silent and its speculative draft cancelled.
+//
+// Strengthened for #440: the Lead's sentence must reach the wire (TTSInvoked) while
+// BOTH remaining drafts are still gated — the reactor pick must never delay the
+// Lead's TTS dispatch ("the Lead takes the floor and streams TTS" upon winning,
+// with the pick resolving concurrently during its playback).
 func TestReplier_Ensemble_ThreeTargets_FastestRemainingReacts(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
@@ -414,8 +419,10 @@ func TestReplier_Ensemble_ThreeTargets_FastestRemainingReacts(t *testing.T) {
 				goblinTarget.AgentID: goblinGate,          // released post-election → fastest remaining → reactor
 				miraTarget.AgentID:   make(chan struct{}), // never released → cancelled, silent
 			},
-			cancelled: make(chan string, 4),
-			spokeCh:   make(chan string, 2),
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}), // the Lead pauses mid-playback until the test releases it
+			cancelled:      make(chan string, 4),
+			spokeCh:        make(chan string, 2),
 		},
 		react:        map[string]string{goblinTarget.AgentID: "I have a hot take."},
 		reactStarted: make(chan string, 4),
@@ -431,9 +438,19 @@ func TestReplier_Ensemble_ThreeTargets_FastestRemainingReacts(t *testing.T) {
 		return e.TurnID == "T3" && e.Target.AgentID == bartTarget.AgentID
 	}, "Bart elected Lead")
 
-	// Arm the floor with the Lead's FirstOpus so the Reaction may play (barge-able).
+	// #440 headline: the Lead's TTS dispatch happens NOW, with Goblin and Mira still
+	// gated — the reactor pick has not (and cannot have) resolved yet.
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "T3" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire before any remaining draft resolves")
+
+	// Arm the floor with the Lead's FirstOpus so the Reaction may play (barge-able),
+	// then let the paused Lead finish.
 	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T3"})
+	close(spk.speakPause)
 	// Release Goblin so it is the fastest remaining draft to arrive — the reactor.
+	// The Reaction proceeds normally even though the pick resolved after the Lead
+	// already spoke (#440).
 	close(goblinGate)
 
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.EnsembleReaction) bool {
@@ -465,6 +482,78 @@ func TestReplier_Ensemble_ThreeTargets_FastestRemainingReacts(t *testing.T) {
 	select {
 	case who := <-spk.reactStarted:
 		t.Fatalf("a third candidate reacted (%q); only the fastest remaining may react", who)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestReplier_Ensemble_BargeDuringLeadWithPickPending pins the #440 teardown
+// invariant: a human barge DURING the Lead's playback, while the reactor pick is
+// still waiting on gated remaining drafts, tears the WHOLE unit down — the turn
+// ends barge, every pending draft is cancelled, and no Reaction ever surfaces.
+func TestReplier_Ensemble_BargeDuringLeadWithPickPending(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fakeCrossTalk{
+		fakeEnsemble: &fakeEnsemble{
+			draft: map[string]string{bartTarget.AgentID: "Bart leads.", goblinTarget.AgentID: "never arrives", miraTarget.AgentID: "never arrives"},
+			gate: map[string]chan struct{}{
+				bartTarget.AgentID:   closedGate(),        // wins the Lead race alone
+				goblinTarget.AgentID: make(chan struct{}), // never released → pick stays pending
+				miraTarget.AgentID:   make(chan struct{}), // never released → pick stays pending
+			},
+			speakSentences: map[string][]string{bartTarget.AgentID: {"Bart leads."}},
+			speakPause:     make(chan struct{}), // the Lead is mid-playback when the barge lands
+			cancelled:      make(chan string, 4),
+			spokeCh:        make(chan string, 2),
+		},
+		react:        map[string]string{goblinTarget.AgentID: "never spoken"},
+		reactStarted: make(chan string, 4),
+	}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+	t.Cleanup(orchestrator.NewBargeIn(floor, 0).Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "Tp", Text: "Bart, Goblin, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget, miraTarget}})
+
+	// The Lead speaks while the pick is pending (#440), pausing mid-playback.
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "Tp" && e.Sentence == "Bart leads."
+	}, "the Lead's sentence is on the wire with the pick pending")
+
+	// A human barges while the Lead is audible and the pick is still pending.
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "Tp"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{})
+
+	// The whole unit tears down: barge for the ensemble's original TurnID.
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "Tp" && e.Reason == voiceevent.TurnEndBarge
+	}, "turn.ended barge for the ensemble")
+
+	// Both pending drafts were cancelled — the pick goroutine released them and exited.
+	pendingCancelled := map[string]bool{}
+	for len(pendingCancelled) < 2 {
+		select {
+		case who := <-spk.cancelled:
+			pendingCancelled[who] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("pending drafts never cancelled after the barge; got %v", pendingCancelled)
+		}
+	}
+	if !pendingCancelled[goblinTarget.AgentID] || !pendingCancelled[miraTarget.AgentID] {
+		t.Fatalf("cancelled drafts = %v, want Goblin and Mira", pendingCancelled)
+	}
+
+	// The Lead's Speak unwound and the floor is free; no Reaction ever surfaced.
+	select {
+	case <-spk.spokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the Lead's Speak never returned after the barge")
+	}
+	waitFloorFree(t, floor)
+	voicetest.AssertNoEvent[voiceevent.EnsembleReaction](t, h)
+	select {
+	case who := <-spk.reactStarted:
+		t.Fatalf("a Reaction generated (%q) despite the barge with the pick pending", who)
 	case <-time.After(100 * time.Millisecond):
 	}
 }

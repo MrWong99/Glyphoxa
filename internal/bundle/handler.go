@@ -34,6 +34,13 @@ type Handler struct {
 // transcript payload (ADR-0053 §1, default off). Archived campaigns are
 // exportable — a backup must still capture a campaign after it is archived.
 //
+// Tenant posture (#439): the mount composes auth.RequireSession +
+// auth.RequireTenant (session AND tenant, the post-#408 discipline), and this
+// handler 404s a campaign outside the injected tenant BEFORE any bytes are
+// written — foreign and nonexistent campaigns are indistinguishable, matching
+// the Highlight mounts' don't-reveal-existence posture. A missing context
+// tenant is a miswired mount and rejects 401, fail-closed.
+//
 // The bundle is [Encode]d STRAIGHT to the ResponseWriter (ADR-0048: no
 // blob.Store round-trip — the download never lands in object storage). The
 // filename is the canonical [Filename] for the campaign name.
@@ -43,12 +50,18 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid campaign id", http.StatusBadRequest)
 		return
 	}
+	tenantID, ok := auth.TenantID(r.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 
 	opts := ExportOptions{IncludeHistory: r.URL.Query().Get("include_history") == "true"}
 
-	// GetCampaign resolves name (for the filename) and existence (404) before any
-	// bytes are written, so a missing campaign is a clean 404 rather than a
-	// half-streamed body. Archived campaigns resolve fine here (backup path).
+	// GetCampaign resolves name (for the filename), existence AND tenant
+	// ownership (both 404, #439) before any bytes are written, so a missing or
+	// foreign campaign is a clean 404 rather than a half-streamed body. Archived
+	// campaigns resolve fine here (backup path).
 	campaign, err := h.Store.GetCampaign(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -57,6 +70,10 @@ func (h *Handler) ServeExport(w http.ResponseWriter, r *http.Request) {
 		}
 		h.logError("get campaign", err)
 		http.Error(w, "export failed", http.StatusInternalServerError)
+		return
+	}
+	if campaign.TenantID != tenantID {
+		http.Error(w, "campaign not found", http.StatusNotFound)
 		return
 	}
 

@@ -248,71 +248,86 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// of #301, unchanged.
 	rt, canReact := r.ensemble.(CrossTalker)
 	remaining := targetsExcept(targets, lead.target.AgentID)
+	mayReact := canReact && len(remaining) > 0
 
-	var (
-		reactor    voiceevent.AddressTarget
-		hasReactor bool
-	)
-	if canReact && len(remaining) > 0 {
-		if len(remaining) == 1 {
-			// Exactly one other Agent: it is the reactor. Its speculative draft is
-			// discarded (it regenerates a Reaction), so we never wait for that draft —
-			// a hung/gated loser must not stall the pick.
-			reactor = remaining[0]
-			hasReactor = true
-		} else {
-			// 3+ addressed: the FASTEST remaining draft to ARRIVE names the reactor
-			// (ADR-0025 — its speculative draft is discarded, it regenerates a
-			// Reaction). Only pending (not-yet-consumed) results can still arrive; the
-			// race loop already drained the empty/errored candidates it skipped, so we
-			// bound the wait by pending to avoid blocking on a result that will never
-			// come. Empty/errored arrivals are skipped here too — a candidate with
-			// nothing to draft is not made the reactor. A barge tears the unit down.
-			for pending > 0 && !hasReactor {
+	// The reactor pick is a FUTURE (#440): pick is written exactly once, then
+	// pickDone closes — the close is the happens-before edge for every reader. The
+	// Lead's Speak below must NEVER wait on further draft arrivals: ADR-0025 has
+	// the Lead take the floor and stream TTS upon winning, with the Reaction
+	// machinery running during its playback.
+	var pick struct {
+		target voiceevent.AddressTarget
+		ok     bool
+	}
+	pickDone := make(chan struct{})
+	switch {
+	case !mayReact:
+		// No reactor possible. The drafts are done being raced: cancel them all.
+		// React (below) runs under turnCtx (NOT draftCtx), so cancelling here never
+		// cancels a reaction generation.
+		close(pickDone)
+		cancelDrafts()
+	case len(remaining) == 1:
+		// Exactly one other Agent: it is the reactor. Its speculative draft is
+		// discarded (it regenerates a Reaction), so we never wait for that draft —
+		// a hung/gated loser must not stall the pick.
+		pick.target, pick.ok = remaining[0], true
+		close(pickDone)
+		cancelDrafts()
+	default:
+		// 3+ addressed: the FASTEST remaining draft to ARRIVE names the reactor
+		// (ADR-0025 — its speculative draft is discarded, it regenerates a
+		// Reaction). The wait runs on its OWN goroutine so the Lead's TTS starts
+		// now, not after the next-fastest loser resolves — the pick used to run
+		// inline here and block Speak, delaying Lead first-audio by up to the
+		// slowest remaining draft (#440). Only pending (not-yet-consumed) results
+		// can still arrive; the race loop already drained the empty/errored
+		// candidates it skipped, so the wait is bounded by pending — no wedge.
+		// Empty/errored arrivals are skipped here too — a candidate with nothing
+		// to draft is not made the reactor. A barge resolves the pick empty, and
+		// the losing drafts are still cancelled once the pick resolves (the
+		// deferred cancelDrafts), exactly as before.
+		go func() {
+			defer close(pickDone)
+			defer cancelDrafts()
+			for pending > 0 {
 				select {
 				case <-turnCtx.Done():
-					cancelDrafts()
 					return
 				case res := <-results:
 					pending--
 					if res.err == nil && res.text != "" {
-						reactor = res.target
-						hasReactor = true
+						pick.target, pick.ok = res.target, true
+						return
 					}
 				}
 			}
-		}
-	}
-	// The speculative drafts are done being raced (winner elected, reactor picked):
-	// cancel them all. React runs under turnCtx (NOT draftCtx), so this never cancels
-	// the reaction generation launched below.
-	cancelDrafts()
-
-	// Launch the reactor's React NOW so it generates and pre-renders TEXT while the
-	// Lead's audio plays (ADR-0025), landing on a BUFFERED channel so the goroutine
-	// never blocks if the unit is torn down before we read it.
-	var reactCh chan reactionResult
-	if hasReactor {
-		reactCh = make(chan reactionResult, 1)
-		go func() {
-			text, err := rt.React(turnCtx, voiceevent.AddressRouted{
-				At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
-			}, lead.target.Name, lead.text)
-			reactCh <- reactionResult{text: text, err: err}
 		}()
 	}
 
-	// Pump look-ahead (#375, ADR-0025): when a look-ahead pump is wired AND there is a
-	// reactor, pre-render the Reaction's FIRST sentence AUDIO during the Lead's playback
-	// (held in the pump lane) so its onset gap after the Lead ends is near-zero. The
-	// prerender goroutine dispatches the Reaction under a child reactCtx; its first
-	// sentence is marked WithPlaybackLookahead so the pump HOLDS it until releaseReaction
-	// releases it below. The defer is the UNIFORM teardown for every exit — barge,
-	// gate-fail, decline, happy: cancel the child ctx, wait for the goroutine, and
-	// discard any held-but-unreleased audio (a keyed discard for an already-released or
-	// never-primed turn is a harmless no-op). Without the pump this is the #302 legacy
-	// path, byte-identical.
-	lookaheadOn := r.lookahead != nil && hasReactor
+	// reactCh carries the reactor's generated Reaction; BUFFERED so the React
+	// goroutine never blocks if the unit is torn down before anyone reads it. The
+	// React launch waits on the pick future (usually already resolved) so the
+	// generation still runs during the Lead's playback whenever the pick allows.
+	var reactCh chan reactionResult
+	if mayReact {
+		reactCh = make(chan reactionResult, 1)
+	}
+
+	// Pump look-ahead (#375, ADR-0025): when a look-ahead pump is wired AND a
+	// reactor is possible, pre-render the Reaction's FIRST sentence AUDIO during the
+	// Lead's playback (held in the pump lane) so its onset gap after the Lead ends is
+	// near-zero. The launcher goroutine resolves the pick, starts React, and runs the
+	// prerender dispatch under a child reactCtx; the first sentence is marked
+	// WithPlaybackLookahead so the pump HOLDS it until releaseReaction releases it
+	// below. A pick that resolves to NO reactor reports a decline on decision, so
+	// every downstream reader sees the same signals as a reactor that declined. The
+	// defer is the UNIFORM teardown for every exit — barge, gate-fail, decline,
+	// happy: cancel the child ctx, wait for the goroutine, and discard any
+	// held-but-unreleased audio (a keyed discard for an already-released or
+	// never-primed turn is a harmless no-op). Without the pump this is the #302
+	// legacy path, byte-identical.
+	lookaheadOn := r.lookahead != nil && mayReact
 	var (
 		rID         string
 		decision    chan reactionDecision
@@ -341,7 +356,43 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 			<-done
 			r.lookahead.DiscardLookahead(rID)
 		}()
-		go r.prerenderReaction(reactCtx, rt, e, reactor, rID, lead.target.Name, lead.text, reactCh, decision, s1Ch, done, ttsErrCh)
+		go func() {
+			// Resolve the pick under reactCtx so the uniform teardown can always
+			// unwind this goroutine even while the pick is still pending (#440).
+			select {
+			case <-reactCtx.Done():
+			case <-pickDone:
+			}
+			if !pick.ok || reactCtx.Err() != nil {
+				decision <- reactionDecision{} // no reactor ≙ decline
+				close(done)
+				return
+			}
+			go func() {
+				text, err := rt.React(turnCtx, voiceevent.AddressRouted{
+					At: e.At, Text: e.Text, TurnID: e.TurnID, Target: pick.target,
+				}, lead.target.Name, lead.text)
+				reactCh <- reactionResult{text: text, err: err}
+			}()
+			r.prerenderReaction(reactCtx, rt, e, pick.target, rID, lead.target.Name, lead.text, reactCh, decision, s1Ch, done, ttsErrCh)
+		}()
+	} else if mayReact {
+		// No look-ahead pump: launch the reactor's React as soon as the pick
+		// resolves, landing on the buffered reactCh for the post-gate speakReaction.
+		go func() {
+			select {
+			case <-turnCtx.Done():
+				return
+			case <-pickDone:
+			}
+			if !pick.ok {
+				return
+			}
+			text, err := rt.React(turnCtx, voiceevent.AddressRouted{
+				At: e.At, Text: e.Text, TurnID: e.TurnID, Target: pick.target,
+			}, lead.target.Name, lead.text)
+			reactCh <- reactionResult{text: text, err: err}
+		}()
 	}
 
 	// Speak the Lead's draft under turnCtx through the turn module (#444): the
@@ -373,7 +424,8 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTTSError})
 	}
 
-	// The Reaction plays only when there is a reactor, the unit is still live (a barge
+	// The Reaction plays only when a reactor is possible (the pick future below
+	// names it — or nobody), the unit is still live (a barge
 	// anywhere above tears it down and a queued Reaction after a barge is FORBIDDEN,
 	// ADR-0027), and the Lead is AUDIBLY on the wire ([Floor.Speaking] — its FirstOpus
 	// fired). Gating on audible delivery, not committed text, is load-bearing: an
@@ -384,7 +436,19 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// would speak AFTER the Lead's TurnEnded{tts_error}. Floor.Speaking true ⟺
 	// FirstOpus(lead) fired ⟺ the barge is armed through the gap and the Reaction
 	// (ADR-0027).
-	if !hasReactor || turnCtx.Err() != nil || !r.floor.Speaking() {
+	if !mayReact || turnCtx.Err() != nil || !r.floor.Speaking() {
+		return
+	}
+	// Await the concurrently-resolving reactor pick (#440): usually resolved long
+	// before the Lead finished; with a very slow remaining draft the Reaction simply
+	// proceeds once the pick lands (bounded by the drafts' own turn deadline). A
+	// barge during the wait still tears the unit down.
+	select {
+	case <-turnCtx.Done():
+		return
+	case <-pickDone:
+	}
+	if !pick.ok || turnCtx.Err() != nil {
 		return
 	}
 	// Look-ahead path (#375): the Reaction's first-sentence audio is already held in
@@ -392,10 +456,10 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// (#389) held nothing — releaseReaction posts it now, post-gate. The uniform defer
 	// above discards anything left held on any early return here.
 	if lookaheadOn {
-		r.releaseReaction(turnCtx, rt, bus, e, reactor, rID, lead.target.Name, lead.text, decision, s1Ch, done, ttsErrCh)
+		r.releaseReaction(turnCtx, rt, bus, e, pick.target, rID, lead.target.Name, lead.text, decision, s1Ch, done, ttsErrCh)
 		return
 	}
-	r.speakReaction(turnCtx, rt, bus, e, reactor, lead.target.Name, lead.text, reactCh)
+	r.speakReaction(turnCtx, rt, bus, e, pick.target, lead.target.Name, lead.text, reactCh)
 }
 
 // prerenderReaction runs the Cross-talk Reaction's dispatch on its own goroutine so

@@ -32,8 +32,13 @@ type Synthesizer interface {
 	// complete or ctx is cancelled. Callers must drain the channel to release
 	// the implementation's goroutines.
 	//
-	// Returns a non-nil error only if the call cannot be started; mid-stream
-	// failures close the channel early.
+	// Returns a non-nil error only if the call cannot be started. A MID-STREAM
+	// failure (the provider dropped the connection after some audio flowed)
+	// emits a terminal [AudioChunk] with Err set and then closes the channel
+	// (#436), so the drain can tell an abnormal termination from clean
+	// completion and the dispatch layer never commits a half-delivered sentence
+	// as fully spoken. A ctx cancellation (barge-in) closes the channel early
+	// WITHOUT a terminal Err chunk — the cut is the caller's, not a failure.
 	Synthesize(ctx context.Context, req SynthesizeRequest) (<-chan AudioChunk, error)
 
 	// AudioMarkupPrompt returns a system-prompt fragment instructing an LLM

@@ -23,6 +23,16 @@ type AudioChunk struct {
 
 	// Channels is the channel count: 1 for mono, 2 for stereo.
 	Channels int
+
+	// Err, when non-nil, marks this chunk as the stream's TERMINAL element: the
+	// synthesis failed mid-stream and no further audio follows (#436). A terminal
+	// error chunk carries no PCM and is emitted immediately before the channel
+	// closes, so a drain can distinguish an abnormal termination from clean
+	// completion (a close with no Err chunk) — previously indistinguishable, which
+	// let a half-delivered sentence commit as fully spoken. Providers emit it only
+	// under a live ctx: a ctx-cancelled stream (barge-in) closes WITHOUT one, since
+	// the caller cut the stream deliberately.
+	Err error
 }
 
 // Voice identifies a TTS voice and carries its persisted per-NPC tuning.

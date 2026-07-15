@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,8 +42,11 @@ type synthesizeBody struct {
 //     cancellation (e.g. barge-in per ADR-0022), or the first stream read
 //     error (mid-stream failure).
 //   - The function returns a non-nil error only when the call cannot be
-//     started (missing key, bad request, non-2xx response); mid-stream
-//     failures close the channel early instead.
+//     started (missing key, bad request, non-2xx response). A mid-stream read
+//     failure under a live ctx emits a terminal [tts.AudioChunk] with Err set
+//     before the close (#436), so the dispatch layer never commits the
+//     truncated sentence as fully delivered; a ctx cancellation closes with no
+//     terminal chunk (the cut was the caller's).
 func (c *Client) Synthesize(ctx context.Context, req tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
 	if c.apiKey == "" {
 		return nil, fmt.Errorf("elevenlabs.Synthesize: missing API key (set %s or pass it to New)", APIKeyEnv)
@@ -152,9 +156,19 @@ func streamPCM(ctx context.Context, r io.ReadCloser, ch chan<- tts.AudioChunk, s
 			}
 		}
 		if err != nil {
-			// Includes io.EOF for normal completion and any mid-stream error;
-			// per ADR-0022 we close the channel early either way. A final
+			// io.EOF is normal completion: close with no terminal chunk. Any other
+			// read error under a live ctx is a MID-STREAM failure — report it as a
+			// terminal Err chunk before the close (#436) so the dispatch layer can
+			// tell the truncated sentence from a complete one. A cancelled ctx
+			// closes silently (barge-in — the caller cut the stream); the send is
+			// ctx-guarded so a torn-down drain never wedges this goroutine. A final
 			// dangling byte (a truncated last sample) is intentionally dropped.
+			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+				select {
+				case ch <- tts.AudioChunk{Err: err}:
+				case <-ctx.Done():
+				}
+			}
 			return
 		}
 	}

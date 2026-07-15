@@ -126,6 +126,27 @@ func (s *Store) GetVoiceSession(ctx context.Context, id uuid.UUID) (VoiceSession
 	return v, nil
 }
 
+// VoiceSessionInTenant reports whether the Voice Session belongs to the Tenant
+// (session → campaign → tenant). It backs the transcript snapshot/SSE mounts'
+// tenant-scoped 404 posture (#439, via transcript.TenantScope): false covers
+// both a foreign-tenant session and one that does not exist at all, so the
+// caller's 404 never reveals which.
+func (s *Store) VoiceSessionInTenant(ctx context.Context, tenantID, sessionID uuid.UUID) (bool, error) {
+	var one int
+	err := s.db.QueryRow(ctx,
+		`SELECT 1
+		   FROM voice_sessions v
+		   JOIN campaign c ON c.id = v.campaign_id
+		  WHERE v.id = $1 AND c.tenant_id = $2`, sessionID, tenantID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("storage: voice session %s in tenant %s: %w", sessionID, tenantID, err)
+	}
+	return true, nil
+}
+
 // ListVoiceSessions returns a Campaign's Voice Sessions newest-first (started_at
 // DESC, id DESC — the same tiebreak as GetLatestVoiceSession), the running row
 // included, capped at limit. It backs the Session screen's past-session picker

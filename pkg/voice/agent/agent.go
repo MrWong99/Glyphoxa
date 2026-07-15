@@ -223,10 +223,17 @@ const DefaultTurnTimeout = 60 * time.Second
 // [voiceevent.AddressRouted] (which carries only the current text). Construct
 // with [NewReplier]; obtain the [orchestrator.ReplyFunc] with [Replier.Reply].
 //
-// Safe for sequential turns. The bus delivers [voiceevent.AddressRouted]
-// synchronously in one goroutine (see [voiceevent.Bus]), so turns do not
-// overlap; the mutex guards the history against a concurrent reader and the
-// race detector.
+// Concurrency: without barge-in the bus delivers [voiceevent.AddressRouted]
+// synchronously in one goroutine (see [voiceevent.Bus]), so turns run strictly
+// one after another. Under [orchestrator.WithBargeIn] each turn runs on its own
+// goroutine, and a superseded turn's unwind may briefly overlap the superseding
+// turn: the superseded turn's delivered-prefix commit can append to history
+// AFTER the superseding turn appended its user message. The window is bounded
+// (milliseconds vs STT latency) and self-healing — every append is atomic under
+// the mutex, so messages are never torn or lost, only ordered late. Callers may
+// rely on Floor exclusivity (no two turns of this Agent are ever audible at
+// once); they may NOT rely on strict history append ordering across a
+// supersede.
 type Replier struct {
 	cfg    Config
 	engine Engine // resolved at construction: cfg.Engine, or the default built from cfg.Provider

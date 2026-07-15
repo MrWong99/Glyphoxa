@@ -83,6 +83,12 @@ type chunkTurn struct {
 	line    *chunkLine
 	pending []string
 	ended   bool
+	// lastCommitted is the sentence most recently committed to line by a
+	// FirstAudio, kept so a TTSStreamFailed (#436) can retract exactly that
+	// sentence — the stream died mid-delivery, so the room heard at most a
+	// fragment and the chunk must not record the full text (ADR-0012 parity with
+	// Agent history, which omits it). Cleared once retracted or superseded.
+	lastCommitted string
 }
 
 // chunkLine is one rendered utterance line ("Who: text") in an open chunk. It is a
@@ -217,6 +223,8 @@ func (c *Chunker) project(e voiceevent.Event) {
 		c.bufferAgentSentence(ev)
 	case voiceevent.FirstAudio:
 		c.commitDelivered(ev)
+	case voiceevent.TTSStreamFailed:
+		c.abortSentence(ev)
 	case voiceevent.TurnEnded:
 		// The turn is finalized: drop its undelivered tail (ADR-0012 — the room
 		// never heard those sentences) and refuse late dispatches.
@@ -325,6 +333,7 @@ func (c *Chunker) commitDelivered(ev voiceevent.FirstAudio) {
 	}
 	s := t.pending[0]
 	t.pending = t.pending[1:]
+	t.lastCommitted = s
 	if t.line == nil {
 		// First delivered sentence of this turn's current utterance: open it. After
 		// a chunk close detached the line, this re-opens a CONTINUATION in the next
@@ -345,6 +354,76 @@ func (c *Chunker) commitDelivered(ev voiceevent.FirstAudio) {
 		t.line.text += " "
 	}
 	t.line.text += s
+}
+
+// abortSentence handles a [voiceevent.TTSStreamFailed] (#436): the turn's
+// in-flight sentence died mid-delivery, so the room heard at most a fragment and
+// the chunk must NOT record its text — parity with Agent history, which omits it
+// (ADR-0012's never-record-unheard bias). Two cases, disambiguated by the FIFO
+// pairing state:
+//
+//   - The stream died BEFORE its first real chunk: no FirstAudio fired, so the
+//     sentence still heads pending — drop it (it must never commit off a
+//     straggler FirstAudio).
+//   - FirstAudio fired and committed the sentence: retract exactly that trailing
+//     sentence from the turn's line. A sentence that OPENED the line leaves it
+//     with no delivered text at all, so the whole line is removed from the open
+//     chunk (a later delivered sentence re-opens one). A line already detached
+//     by a chunk close was persisted before the failure surfaced — logged and
+//     accepted (the close raced the failure; rare by construction since the
+//     dispatch is serial single-in-flight).
+func (c *Chunker) abortSentence(ev voiceevent.TTSStreamFailed) {
+	t := c.turn(ev.TurnID)
+	if t.ended {
+		return
+	}
+	if len(t.pending) > 0 {
+		t.pending = t.pending[1:]
+		return
+	}
+	s := t.lastCommitted
+	t.lastCommitted = ""
+	if s == "" {
+		return // nothing committed for this turn yet — nothing to retract
+	}
+	if t.line == nil {
+		c.log.Warn("transcript: mid-stream TTS failure after chunk close; truncated sentence already persisted",
+			"turn", ev.TurnID)
+		return
+	}
+	switch {
+	case strings.HasSuffix(t.line.text, " "+s):
+		// A later sentence of a multi-sentence line: trim just the failed tail.
+		t.line.text = strings.TrimSuffix(t.line.text, " "+s)
+	case strings.HasSuffix(t.line.text, ": "+s):
+		// The failed sentence opened the line — no delivered text remains, so the
+		// line leaves the open chunk entirely and the turn re-opens on a later
+		// delivered sentence.
+		c.removeOpenLine(t.line)
+		t.line = nil
+	default:
+		c.log.Warn("transcript: mid-stream TTS failure did not match the committed tail, leaving line unchanged",
+			"turn", ev.TurnID)
+	}
+}
+
+// removeOpenLine deletes line from the open chunk's entries (pointer identity)
+// and reverses its count contribution, so a retracted opening sentence (#436)
+// neither persists an empty "Who:" line nor inflates the close thresholds. A
+// line not in the open chunk (already detached by a close) is a no-op — the
+// caller logs that case.
+func (c *Chunker) removeOpenLine(line *chunkLine) {
+	oc := c.open
+	if oc == nil {
+		return
+	}
+	for i, e := range oc.entries {
+		if e == line {
+			oc.entries = append(oc.entries[:i], oc.entries[i+1:]...)
+			oc.count--
+			return
+		}
+	}
 }
 
 // recordAgent adds the turn's Agent to the chunk's participated set (deduped,
