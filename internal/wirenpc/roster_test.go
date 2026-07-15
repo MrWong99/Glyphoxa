@@ -781,7 +781,7 @@ func TestRosterDepsForLive_TextSinkOnButlerOnly(t *testing.T) {
 	gm := func(string) bool { return false }
 	log := slog.New(slog.DiscardHandler)
 
-	deps := rosterDepsForLive(engineFor, synth, 16, log, nil, nil, "", gm, poster)
+	deps := rosterDepsForLive(conversationDeps{log: log, gmSpeaker: gm, textPoster: poster}, engineFor, synth, 16)
 	if deps.butlerGate == nil {
 		t.Fatal("rosterDepsForLive did not thread the GM-gate predicate")
 	}

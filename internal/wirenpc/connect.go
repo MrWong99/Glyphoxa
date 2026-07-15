@@ -220,7 +220,27 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// TextSink is set on butler-role specs only inside rosterDepsForLive.
 	textPoster := newVoiceChannelPoster(client, channel)
 
-	conv, roster, cleanup, err := buildConversation(bus, log, cfg.npcs, cfg.language, teeSynth, cfg.StageMetrics, cfg.keys, cfg.llmProviderID, cfg.STTStreaming, cfg.Memory, cfg.Facts, cfg.Mutes, cfg.Gate, cfg.GMSpeaker, cfg.ToolDeps, textPoster, pump, cfg.ClipReplayLoader, orchestrator.ClipSink(pump.HandleSentence))
+	conv, roster, cleanup, err := buildConversation(conversationDeps{
+		bus:            bus,
+		log:            log,
+		npcs:           cfg.npcs,
+		language:       cfg.language,
+		synth:          teeSynth,
+		stageMetrics:   cfg.StageMetrics,
+		keys:           cfg.keys,
+		llmProviderID:  cfg.llmProviderID,
+		sttStreaming:   cfg.STTStreaming,
+		memory:         cfg.Memory,
+		facts:          cfg.Facts,
+		mutes:          cfg.Mutes,
+		gate:           cfg.Gate,
+		gmSpeaker:      cfg.GMSpeaker,
+		toolDeps:       cfg.ToolDeps,
+		textPoster:     textPoster,
+		lookahead:      pump,
+		clipReplayLoad: cfg.ClipReplayLoader,
+		clipReplaySink: orchestrator.ClipSink(pump.HandleSentence),
+	})
 	if err != nil {
 		return fmt.Errorf("wirenpc: build pipeline: %w", err)
 	}

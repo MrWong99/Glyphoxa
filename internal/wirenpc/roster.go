@@ -2,7 +2,6 @@ package wirenpc
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/address"
@@ -244,28 +243,31 @@ func (r *Roster) setMutedLocked(agentID string, muted bool) {
 // constructed from a per-NPC engine (engineFor), so each NPC carries its own
 // hydrated GrantSet (#113) while still sharing one Groq client and Registry under
 // the hood — N Character NPCs reuse one client rather than each opening their
-// own. memory is the shared NPC memory recaller (#122) and facts the shared
-// KG-facts recaller (#126); every NPC's loop consults the SAME recallers, which
-// scope by the addressed AgentID / active Campaign per turn. A nil memory/facts
-// disables that slot (the prompt stays byte-identical). language is the Campaign
-// Language selecting the Matcher's phonetic encoder (#199).
-// gmSpeaker is the Butler GM-address predicate (#299): it becomes the Matcher's
+// own. The per-feature inputs ride on d ([conversationDeps]): d.memory is the
+// shared NPC memory recaller (#122) and d.facts the shared KG-facts recaller
+// (#126); every NPC's loop consults the SAME recallers, which scope by the
+// addressed AgentID / active Campaign per turn. A nil memory/facts disables that
+// slot (the prompt stays byte-identical). d.language is the Campaign Language
+// selecting the Matcher's phonetic encoder (#199).
+// d.gmSpeaker is the Butler GM-address predicate (#299): it becomes the Matcher's
 // Config.ButlerGMGate so a non-GM naming the Butler is dropped matcher-side (#256).
-// textPoster is the Butler's text-delivery channel (#297 decision 2): it is set as
-// the [agent.Config.TextSink] on butler-role specs ONLY, so a long Butler answer
-// posts to the channel chat while Character NPCs keep the pure-TTS path. Both are
-// nil on the env-only / standalone paths, reproducing the pre-#299 behavior.
-func rosterDepsForLive(engineFor func(npcSpec) agent.Engine, synth tts.Synthesizer, historyTurns int, log *slog.Logger, memory agent.MemoryRecaller, facts agent.FactsRecaller, language string, gmSpeaker func(speakerID string) bool, textPoster func(ctx context.Context, text string) error) rosterDeps {
+// d.textPoster is the Butler's text-delivery channel (#297 decision 2): it is set
+// as the [agent.Config.TextSink] on butler-role specs ONLY, so a long Butler
+// answer posts to the channel chat while Character NPCs keep the pure-TTS path.
+// Both are nil on the env-only / standalone paths, reproducing the pre-#299
+// behavior. synth is passed beside d because the Roster's Repliers drive the RAW
+// TTS client, not the tee'd d.synth the TTS stage owns.
+func rosterDepsForLive(d conversationDeps, engineFor func(npcSpec) agent.Engine, synth tts.Synthesizer, historyTurns int) rosterDeps {
 	return rosterDeps{
-		language:   language,
-		butlerGate: gmSpeaker,
+		language:   d.language,
+		butlerGate: d.gmSpeaker,
 		replierFor: func(spec npcSpec) *agent.Replier {
 			// TextSink is the Butler's text-delivery seam and is wired on butler-role
 			// specs only (#299): a nil TextSink keeps a Character NPC byte-identical to
 			// the pre-#299 streaming path.
 			var textSink func(ctx context.Context, text string) error
 			if spec.role == voiceevent.AgentRoleButler {
-				textSink = textPoster
+				textSink = d.textPoster
 			}
 			return agent.NewReplier(agent.Config{
 				Persona: agent.Persona{
@@ -276,11 +278,11 @@ func rosterDepsForLive(engineFor func(npcSpec) agent.Engine, synth tts.Synthesiz
 				Engine:       engineFor(spec),
 				Synthesizer:  synth,
 				HistoryTurns: historyTurns,
-				Memory:       memory,
-				Facts:        facts,
+				Memory:       d.memory,
+				Facts:        d.facts,
 				TextSink:     textSink,
 				OnError: func(err error) {
-					log.Warn("agent reply failed", "npc", spec.name, "err", err)
+					d.log.Warn("agent reply failed", "npc", spec.name, "err", err)
 				},
 			})
 		},

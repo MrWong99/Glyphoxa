@@ -89,50 +89,108 @@ func llmProviderLabel(providerID string) observe.Provider {
 // first sentence.
 var _ orchestrator.LookaheadPump = (*wire.PlaybackPump)(nil)
 
+// conversationDeps carries everything [buildConversation] assembles the
+// orchestrator pipeline from, with named fields instead of a positional
+// parameter list: connectAndServe populates it from the cycle's [Config] plus
+// the per-cycle constructions (tee'd synthesizer, text poster, playback pump),
+// and tests populate only the fields they exercise (the zero value of every
+// optional field is that feature's off state).
+type conversationDeps struct {
+	// bus is the cycle's voiceevent bus every stage publishes on. Required.
+	bus *voiceevent.Bus
+	// log receives structured logs. Required (callers pass a discard logger,
+	// never nil).
+	log *slog.Logger
+
+	// npcs supplies the INITIAL Character NPCs the loop voices — their
+	// addressable identity, Persona, and Voice (from the in-code seed or, via
+	// [RunFromDB], the database). buildConversation assembles them into a
+	// [Roster] (one address Matcher + one Cast): the detector routes against the
+	// Matcher and the reply stream multiplexes across the Cast, so an utterance
+	// naming an NPC is answered in that NPC's Voice and a lone NPC still catches
+	// unaddressed speech. Must be non-empty.
+	npcs []npcSpec
+	// language is the Campaign Language of the campaign the npcs belong to: it
+	// selects the Roster matcher's phonetic encoder (#199). A code with no
+	// registered encoder — including the env-only path's "" — resolves to "en"
+	// (see matcherLanguage).
+	language string
+
+	// synth is the [tts.Synthesizer] the TTS stage drives. [Run] passes a
+	// [wire.TeeSynthesizer] wrapping the real ElevenLabs synthesizer so the
+	// synthesized audio is tee'd to the playback path while the orchestrator
+	// keeps draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer
+	// also works (no audio is played). Must not be nil.
+	synth tts.Synthesizer
+	// stageMetrics receives the per-stage latency spans (A3); nil records
+	// nothing (normalized to [observe.Discard]).
+	stageMetrics observe.StageRecorder
+
+	// keys are the resolved BYOK provider keys (issue #69, hybrid policy
+	// ADR-0039): each adapter is constructed with its component's key, which
+	// OVERRIDES that adapter's *_API_KEY env var — except an empty key (the env
+	// placeholder, or the env-only [Run] path) keeps today's behavior, where the
+	// adapter reads its env var at request time (ADR-0004). So a saved key
+	// drives the session and an unconfigured component falls back to ENV.
+	keys providerKeys
+	// llmProviderID dispatches the LLM adapter off the primary Agent's
+	// provider_config.provider via [newLLM] ([llmbuild.New], #272): the seed's
+	// groq config (model openai/gpt-oss-120b, the #424 default, via the
+	// OpenAI-compat endpoint) and the env-only "" both resolve to Groq
+	// (ADR-0036), while a saved non-Groq LLM config gets its own adapter.
+	// Keyless cassette tests replay the Anthropic adapter behind the same
+	// llm.Provider interface.
+	llmProviderID string
+	// sttStreaming opts into the streaming-STT transport (ADR-0042); false is
+	// the byte-for-byte batch default. See [Config.STTStreaming].
+	sttStreaming bool
+
+	// memory / facts fill the per-turn Hot Context slots on every NPC's Agent
+	// loop (#122/#126); nil disables the slot (the prompt is byte-identical).
+	memory agent.MemoryRecaller
+	facts  agent.FactsRecaller
+
+	// mutes is the live per-Agent mute view (#211) and gate the live spend
+	// turn gate (#130); nil is each feature's off default.
+	mutes orchestrator.MuteView
+	gate  orchestrator.TurnGate
+
+	// gmSpeaker arms the Butler GM-only voice-address gate (#280, ADR-0024);
+	// nil leaves the gate off. textPoster is the Butler's text-delivery sink
+	// (#299), wired on butler-role specs only; nil keeps the pure-TTS path.
+	gmSpeaker  func(speakerID string) bool
+	textPoster func(ctx context.Context, text string) error
+
+	// toolDeps injects the built-in knowledge Tools' read sources (S1, #296);
+	// the zero value registers the Tools but reports them unavailable at
+	// Execute.
+	toolDeps tool.Deps
+
+	// lookahead is the pump look-ahead seam for the Cross-talk Reaction onset
+	// gap (#375); nil is the feature-off default (TEXT-only pre-render).
+	lookahead orchestrator.LookaheadPump
+	// clipReplayLoad + clipReplaySink wire the Highlight voice-replay reactor
+	// (#310); a nil loader leaves a ReplayRequested inert.
+	clipReplayLoad orchestrator.ClipLoader
+	clipReplaySink orchestrator.ClipSink
+}
+
 // buildConversation assembles the orchestrator reactive pipeline: VAD (Silero)
 // → STT (ElevenLabs) → Address Detection → production Reply (the Agent loop over
-// Groq, with the dice Tool granted via the tool-use loop) → TTS (synth).
-//
-// keys are the resolved BYOK provider keys (issue #69, hybrid policy ADR-0039):
-// each adapter is constructed with its component's key, which OVERRIDES that
-// adapter's *_API_KEY env var — except an empty key (the env placeholder, or the
-// env-only [Run] path) keeps today's behavior, where the adapter reads its env
-// var at request time (ADR-0004). So a saved key drives the session and an
-// unconfigured component falls back to ENV.
-//
-// npcs supplies the INITIAL Character NPCs the loop voices — their addressable
-// identity, Persona, and Voice (from the in-code seed or, via [RunFromDB], the
-// database). It assembles them into a [Roster] (one address Matcher + one Cast):
-// the detector routes against the Matcher and the reply stream multiplexes across
-// the Cast, so an utterance naming an NPC is answered in that NPC's Voice and a
-// lone NPC still catches unaddressed speech. The returned Roster is the
-// programmatic control surface for adding/removing NPCs at runtime (#49); the
-// caller owns it for the cycle's lifetime. npcs must be non-empty.
-//
-// language is the Campaign Language of the campaign the npcs belong to: it
-// selects the Roster matcher's phonetic encoder (#199). A code with no
-// registered encoder — including the env-only path's "" — resolves to "en"
-// (see matcherLanguage).
+// Groq, with the dice Tool granted via the tool-use loop) → TTS (d.synth).
 //
 // All NPCs share ONE tool-engine (one client, the `dice` grant in code — Tool
-// Grants are a #6 table, not yet seeded). The LLM adapter is dispatched off the
-// primary Agent's provider_config.provider via llmProviderID -> [newLLM]
-// ([llmbuild.New], #272): the seed's groq config (model openai/gpt-oss-120b, the
-// #424 default, via the OpenAI-compat endpoint) and the env-only "" both resolve to Groq (ADR-0036),
-// so this stays byte-identical to the pre-#272 hardwired constructor, while a saved
-// non-Groq LLM config now gets its own adapter. Keyless cassette tests replay the
-// Anthropic adapter behind the same llm.Provider interface.
-//
-// synth is the [tts.Synthesizer] the TTS stage drives. [Run] passes a
-// [wire.TeeSynthesizer] wrapping the real ElevenLabs synthesizer so the
-// synthesized audio is tee'd to the playback path while the orchestrator keeps
-// draining-and-dropping it (ADR-0021); a bare ElevenLabs synthesizer also works
-// (no audio is played). It must not be nil.
-func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, language string, synth tts.Synthesizer, stageMetrics observe.StageRecorder, keys providerKeys, llmProviderID string, streaming bool, memory agent.MemoryRecaller, facts agent.FactsRecaller, mutes orchestrator.MuteView, gate orchestrator.TurnGate, gmSpeaker func(speakerID string) bool, toolDeps tool.Deps, textPoster func(ctx context.Context, text string) error, lookahead orchestrator.LookaheadPump, clipReplayLoad orchestrator.ClipLoader, clipReplaySink orchestrator.ClipSink) (*orchestrator.Conversation, *Roster, func(), error) {
+// Grants are a #6 table, not yet seeded); only the per-NPC GrantSet and model
+// differ (see [conversationDeps] for the per-field contracts). The returned
+// Roster is the programmatic control surface for adding/removing NPCs at
+// runtime (#49); the caller owns it for the cycle's lifetime.
+func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster, func(), error) {
+	bus, log := d.bus, d.log
+	stageMetrics := d.stageMetrics
 	if stageMetrics == nil {
 		stageMetrics = observe.Discard{}
 	}
-	if len(npcs) == 0 {
+	if len(d.npcs) == 0 {
 		return nil, nil, nil, fmt.Errorf("wirenpc: buildConversation needs at least one NPC")
 	}
 
@@ -198,21 +256,21 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// One recognizer instance backs both the batch stage and — when streaming is
 	// enabled and the adapter supports it — the stream manager (the ElevenLabs
 	// Client is both a batch stt.Recognizer and a stt.StreamingRecognizer, ADR-0042).
-	var recognizer stt.Recognizer = newSTT(keys.stt)
+	var recognizer stt.Recognizer = newSTT(d.keys.stt)
 	sttStage := orchestrator.NewSTT(bus, recognizer,
 		orchestrator.WithSTTMetrics(stageMetrics, observe.ProviderElevenLabs),
 		orchestrator.WithSTTRetry(retryPolicy))
 	// tts_total + tts-stage provider health (#125): ElevenLabs is the wired TTS
 	// provider (ADR-0039), so the spans are labelled elevenlabs.
-	ttsStage := orchestrator.NewTTS(bus, synth,
+	ttsStage := orchestrator.NewTTS(bus, d.synth,
 		orchestrator.WithTTSMetrics(stageMetrics, observe.ProviderElevenLabs),
 		orchestrator.WithTTSRetry(retryPolicy))
-	streamMgr := buildStreamManager(recognizer, streaming, stageMetrics, log)
+	streamMgr := buildStreamManager(recognizer, d.sttStreaming, stageMetrics, log)
 	// Per-lane streaming STT (ADR-0042 × ADR-0050): each Speaker Lane opens its own
 	// stream (stamping its SpeakerID on partials) under a concurrency cap, so
 	// concurrent sockets track concurrent speakers, not channel size. Nil unless
 	// streaming is on AND the adapter streams — the byte-for-byte batch default.
-	laneStreamFactory := buildLaneStreamFactory(recognizer, streaming, stageMetrics)
+	laneStreamFactory := buildLaneStreamFactory(recognizer, d.sttStreaming, stageMetrics)
 
 	// Tool Grants are now DB-backed and hydrated per NPC (#113, ADR-0029): each
 	// NPC carries its own grants (spec.grants — from its tool_agent_grant rows on
@@ -235,19 +293,19 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// an empty id (env-only path, or a nil LLM config) resolves to the Groq default
 	// (ADR-0036), so the seed's groq config stays byte-identical and the keyless
 	// cassette gate holds. A saved non-Groq provider now gets its own adapter.
-	provider, err := newLLM(llmProviderID, keys.llm)
+	provider, err := newLLM(d.llmProviderID, d.keys.llm)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("wirenpc: build LLM provider: %w", err)
 	}
-	reg := tool.BuiltinRegistry(toolDeps)
-	engineFor := engineFactory(provider, reg, language, stageMetrics, llmProviderLabel(llmProviderID), retryPolicy)
+	reg := tool.BuiltinRegistry(d.toolDeps)
+	engineFor := engineFactory(provider, reg, d.language, stageMetrics, llmProviderLabel(d.llmProviderID), retryPolicy)
 
 	// Assemble the initial roster: each AddNPC registers the NPC's routing Agent
 	// in the Matcher and its Replier (over a per-NPC engine carrying that NPC's
 	// GrantSet) in the Cast. The Matcher is built from the first NPC and grown for
 	// the rest.
-	roster := newRoster(rosterDepsForLive(engineFor, newTTS(keys.tts), 16, log, memory, facts, language, gmSpeaker, textPoster))
-	for _, npc := range npcs {
+	roster := newRoster(rosterDepsForLive(d, engineFor, newTTS(d.keys.tts), 16))
+	for _, npc := range d.npcs {
 		roster.AddNPC(npc)
 	}
 
@@ -255,7 +313,7 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 	// the utterance's SpeakerID (ADR-0050 attribution) to keep the Butler a
 	// GM-only voice address. A nil gmSpeaker (voice standalone / bench) passes a
 	// nil gate — off, so every Butler route publishes exactly as before.
-	detector := newAddressDetector(roster.matcher, orchestrator.WithButlerGMGate(gmSpeaker))
+	detector := newAddressDetector(roster.matcher, orchestrator.WithButlerGMGate(d.gmSpeaker))
 
 	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
@@ -288,11 +346,11 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// before taking the floor, and a MuteCut reactor cuts the floor when the
 		// speaking Agent is muted. A nil view is the feature-off default (voice
 		// standalone / bench), so this option is unconditional.
-		orchestrator.WithMute(mutes),
+		orchestrator.WithMute(d.mutes),
 		// Per-session spend soft cap (#130, ADR-0046): the replier refuses a NEW turn
 		// once the session's estimated spend crosses the soft cap. A nil gate is the
 		// feature-off default (no caps configured), so this option is unconditional.
-		orchestrator.WithTurnGate(gate),
+		orchestrator.WithTurnGate(d.gate),
 		// GM /say direct speech (#295, ADR-0010): a DirectSpeech reactor renders a
 		// SpeakRequested (the /say slash command) to TTS in the addressed NPC's Voice,
 		// looked up from THIS roster. It shares the barge-in floor (so a human barge
@@ -305,14 +363,14 @@ func buildConversation(bus *voiceevent.Bus, log *slog.Logger, npcs []npcSpec, la
 		// Reaction's first sentence pre-renders its audio during the Lead's playback.
 		// A nil pump is the feature-off default (TEXT-only pre-render); it only takes
 		// effect alongside an Ensemble speaker, so it is safe to wire unconditionally.
-		orchestrator.WithReactionLookahead(lookahead),
+		orchestrator.WithReactionLookahead(d.lookahead),
 		// Highlight voice replay (#310, ADR-0051): a ClipReplay reactor plays a promoted
 		// Highlight's clip into the live voice channel on a ReplayRequested, loading the
 		// clip via clipReplayLoad and pushing its chunks to the session's PlaybackPump.
 		// It shares the barge-in floor (so a human barge cancels a replay). A nil loader
 		// is the feature-off default — the sink is always the live pump, so this is safe
 		// to wire unconditionally; Register only binds the reactor when the loader is set.
-		orchestrator.WithClipReplay(clipReplayLoad, clipReplaySink),
+		orchestrator.WithClipReplay(d.clipReplayLoad, d.clipReplaySink),
 		// Handles failures the reactors fire off the audio loop: the replier's TTS
 		// dispatch and the segmenter's off-loop STT call (#24). The wrapped error
 		// names its stage (orchestrator.TTS.Dispatch / orchestrator.STT.Transcribe).
