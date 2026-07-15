@@ -1189,6 +1189,111 @@ func TestEngine_ToolSyntax_FallsBackToolLessAfterTwoFailures(t *testing.T) {
 	}
 }
 
+// TestEngine_ToolSyntax_StripsToolsWhenNoneAttemptFails is AC 1 (#427): when the
+// tool-less fallback attempt (tool_choice none, tools still declared) ALSO fails
+// with the tool-syntax class and the conversation holds NO prior tool_call/tool
+// messages, ONE final attempt is made with the tool declarations stripped entirely
+// (nothing to call → the wire error is impossible). Its text is delivered and the
+// turn is NOT abandoned. All three malformed generations are counted.
+func TestEngine_ToolSyntax_StripsToolsWhenNoneAttemptFails(t *testing.T) {
+	prov := &toolSyntaxProvider{fails: 3, answer: "The bones stay silent, but your hands are steady."}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate after three tool_use_failed: %v (turn must NOT be abandoned)", err)
+	}
+	if strings.TrimSpace(got) != "The bones stay silent, but your hands are steady." {
+		t.Errorf("final text = %q, want the tool-stripped attempt's answer", got)
+	}
+	if prov.calls != 4 {
+		t.Errorf("Complete calls = %d, want 4 (attempt, retry, tool-less, tool-stripped)", prov.calls)
+	}
+
+	reqs := prov.requests()
+	if len(reqs) != 4 {
+		t.Fatalf("recorded %d requests, want 4", len(reqs))
+	}
+	// The third request is the #398 fallback: tools declared, tool_choice none.
+	if len(reqs[2].Tools) == 0 || reqs[2].ToolChoice.Mode != llm.ToolChoiceNone {
+		t.Errorf("none-attempt tools=%d choice=%q, want declared tools with choice none",
+			len(reqs[2].Tools), reqs[2].ToolChoice.Mode)
+	}
+	// The fourth request must carry NO tool declarations at all.
+	if len(reqs[3].Tools) != 0 {
+		t.Errorf("final attempt declared %d tools, want none (stripped entirely)", len(reqs[3].Tools))
+	}
+	if reqs[3].ToolChoice.Mode == llm.ToolChoiceNone || reqs[3].ToolChoice.Mode == llm.ToolChoiceTool {
+		t.Errorf("final attempt tool_choice = %q, want the default (no tools to steer)", reqs[3].ToolChoice.Mode)
+	}
+
+	// All THREE malformed generations counted (#427: the third occurrence too).
+	if paths := rec.malformedPaths(); len(paths) != 3 {
+		t.Errorf("MalformedToolGen count = %d, want 3 (every failure counted)", len(paths))
+	}
+	rounds, callsOK, callsErr := rec.snapshot()
+	if len(rounds) != 1 || callsOK != 1 || callsErr != 0 {
+		t.Errorf("final metrics rounds=%d ok=%d err=%d, want 1/1/0 (recovered, final-outcome-only)", len(rounds), callsOK, callsErr)
+	}
+}
+
+// toolHistoryThenSyntaxProvider emits one successful dice tool-call round, then
+// fails every later Complete with the tool-syntax class — so the failing round's
+// conversation carries prior tool_call/tool messages (#427's guard condition).
+type toolHistoryThenSyntaxProvider struct {
+	mu    sync.Mutex
+	reqs  []llm.Request
+	calls int
+}
+
+func (p *toolHistoryThenSyntaxProvider) Complete(_ context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.reqs = append(p.reqs, req)
+	p.mu.Unlock()
+
+	if n == 1 {
+		ch := make(chan llm.StreamEvent, 2)
+		ch <- llm.StreamEvent{Type: llm.EventToolCall, ToolCall: llm.ToolCall{
+			ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}
+		ch <- llm.StreamEvent{Type: llm.EventDone, StopReason: "tool_use"}
+		close(ch)
+		return ch, nil
+	}
+	return nil, &providererr.ToolSyntaxError{Op: "test.Complete", Msg: "tool_use_failed"}
+}
+
+// TestEngine_ToolSyntax_PriorToolHistoryPropagates is AC 2 (#427): when the
+// conversation already holds tool_call/tool messages (a dice round completed
+// earlier in the turn), the tool-stripped final attempt is NOT made — stripping
+// there risks a provider 400 on the dangling tool references (#420) — and the
+// none-attempt's failure propagates as today. The third malformed generation is
+// still counted.
+func TestEngine_ToolSyntax_PriorToolHistoryPropagates(t *testing.T) {
+	prov := &toolHistoryThenSyntaxProvider{}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq),
+		agenttool.WithRetry(instantAgentRetry()))
+
+	_, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err == nil {
+		t.Fatal("Generate = nil, want the propagated tool-syntax error (prior tool history pins today's behaviour)")
+	}
+	// 1 successful dice round + attempt/retry/none on the follow-up round — and NO
+	// fifth, tool-stripped attempt.
+	if prov.calls != 4 {
+		t.Errorf("Complete calls = %d, want 4 (dice round + 3 failed attempts, no stripped attempt)", prov.calls)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 3 {
+		t.Errorf("MalformedToolGen count = %d, want 3 (the third occurrence is counted too)", len(paths))
+	}
+}
+
 // TestEngine_NonToolSyntaxError_NotRetried is AC 3 (#398): a mid-stream provider
 // error of a DIFFERENT class (not tool_use_failed) on a tool-armed round is NOT
 // retried by the tool-syntax path — it propagates on the first call, and no

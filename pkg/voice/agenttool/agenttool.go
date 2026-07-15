@@ -249,10 +249,14 @@ type attemptResult struct {
 // provider's tool_use_failed class and has NOT yet forwarded any prose is retried
 // once with the same tools+choice (no backoff); a second failure of the same class
 // regenerates tool-less (tools stay DECLARED, tool_choice none — the conversation
-// may hold prior tool_call/tool messages). A round that already forwarded a delta is
-// never retried (ADR-0044 mid-stream rule), and a ctx cancellation between attempts
-// aborts. Every malformed generation increments MalformedToolGen so provider flake
-// stays visible even when the turn fully recovers.
+// may hold prior tool_call/tool messages). If the tool-less attempt ALSO fails with
+// the same class (#427: some models call a tool despite tool_choice none) and the
+// conversation holds no prior tool messages, one final attempt strips the tool
+// declarations entirely; with prior tool messages the failure propagates. A round
+// that already forwarded a delta is never retried (ADR-0044 mid-stream rule), and a
+// ctx cancellation between attempts aborts. Every malformed generation increments
+// MalformedToolGen so provider flake stays visible even when the turn fully
+// recovers.
 func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, tools []tool.Decl, onText func(delta string) error) (tool.AssistantMessage, error) {
 	round := nextRound(ctx)
 	start := time.Now()
@@ -289,6 +293,29 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 					return a.abortBetweenAttempts(ctx, err)
 				}
 				res = a.attempt(ctx, messages, tools, llm.ToolChoice{Mode: llm.ToolChoiceNone}, onText)
+
+				if a.isToolSyntax(res) {
+					// Attempt 4 (#427): some models ignore tool_choice none and call a
+					// tool anyway, which the provider rejects at the wire — so the #398
+					// fallback itself failed. The third malformed generation is counted
+					// either way. When the conversation holds NO prior tool_call/tool
+					// messages, ONE final attempt is made with the tool declarations
+					// stripped entirely: with nothing declared there is nothing to call,
+					// so this failure class is impossible. With prior tool messages the
+					// error propagates as before — stripping the declarations there
+					// risks a provider 400 on the now-dangling tool references (the
+					// reason #420 kept tools declared on the none-attempt).
+					a.rec.MalformedToolGen(a.provName, observe.MalformedStreamError)
+					a.recordReportedUsage(res.haveUsage, res.usage)
+					if !hasToolHistory(messages) {
+						slog.Warn("agenttool: tool-less fallback still failed tool-syntax; regenerating with tools stripped",
+							"provider", string(a.provName), "round", round)
+						if err := ctx.Err(); err != nil {
+							return a.abortBetweenAttempts(ctx, err)
+						}
+						res = a.attempt(ctx, messages, nil, llm.ToolChoice{}, onText)
+					}
+				}
 			}
 		}
 	}
@@ -297,6 +324,20 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 	// invented-roll guard; a no-op unless this turn installed a [calledTools] set.
 	recordCalledTools(ctx, res.msg.ToolCalls)
 	return a.recordOutcome(ctx, round, start, messages, res)
+}
+
+// hasToolHistory reports whether the conversation already carries a tool_call or
+// tool-result message — the #427 guard condition: only a tool-history-free
+// conversation may have its tool declarations stripped on the final degrade
+// attempt (a prior tool reference with no matching declaration risks a provider
+// 400).
+func hasToolHistory(messages []tool.Message) bool {
+	for _, m := range messages {
+		if len(m.ToolCalls) > 0 || len(m.ToolResults) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // isToolSyntax reports whether res failed with the provider's tool-syntax class AND
