@@ -12,7 +12,7 @@ import (
 // zero window lets the addressing user's own continued speech cancel the turn it
 // just triggered (single shared VAD session, no speaker identity), which was the
 // 20s self-cancel (docs/latency-investigation/audio-process.md). This test fails
-// loudly if anyone re-introduces WithBargeIn(0) for the live loop.
+// loudly if anyone re-introduces a zero barge confirm window for the live loop.
 func TestBargeConfirmWindow_NonZero(t *testing.T) {
 	if bargeConfirmWindow <= 0 {
 		t.Fatalf("bargeConfirmWindow = %v, must be > 0 against a live mic (a 0 window self-cancels the addressing user's own turn)", bargeConfirmWindow)

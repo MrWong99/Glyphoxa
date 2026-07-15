@@ -544,7 +544,7 @@ func TestReplier_FloorTurnPublishesTTSErrorEnded(t *testing.T) {
 }
 
 // TestReplier_SyncTurnPublishesTTSErrorEnded pins #20's sync-path gap: a no-floor
-// replier (the voicebench rig's config — WithReplyStream, no barge-in) whose only
+// replier (the voicebench rig's config — ReplyStrategy.Stream, no barge-in) whose only
 // sentence start-errors must publish TurnEnded(tts_error) carrying the TurnID, so
 // the metrics subscriber records abandoned/tts_error instead of the coarse
 // no-first-audio TTL reap. The floor path already does this

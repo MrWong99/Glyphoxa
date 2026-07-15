@@ -291,7 +291,7 @@ func (r *Replier) Reply() orchestrator.ReplyFunc {
 //
 // Both the batch ([Replier.Reply]) and streaming ([Replier.ReplyStream]) entry
 // points go through here so the per-turn deadline is identical on both — the
-// streaming path is the one production wires ([orchestrator.WithReplyStream]),
+// streaming path is the one production wires ([orchestrator.ReplyStrategy.Stream]),
 // and the Gemini adapter's HTTP client has no overall timeout by design,
 // relying on exactly this ctx deadline to bound a thinking-then-stalling
 // completion (gemini.defaultHTTPClient).
@@ -633,7 +633,7 @@ func (r *Replier) SpeakReaction(ctx context.Context, userText, leadName, leadTex
 // ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop
 // in streaming mode (B1): it dispatches each sentence of the reply to TTS the
 // moment it is ready, so first audio begins after the first sentence rather than
-// the whole completion. Install it with [orchestrator.WithReplyStream].
+// the whole completion. Install it as [orchestrator.ReplyStrategy.Stream].
 //
 // It requires the configured [Engine] to implement [StreamingEngine]; if it does
 // not, every turn falls back to a single post-completion dispatch (the behaviour

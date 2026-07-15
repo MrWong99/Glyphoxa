@@ -129,7 +129,7 @@ func TestRig_StubFlow_PublishesFirstAudio(t *testing.T) {
 	target := voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}
 
 	tap := newRecorderTap()
-	conv := BuildConversation(RigConfig{
+	conv, err := BuildConversation(RigConfig{
 		Bus:      h.Bus,
 		VAD:      orchestrator.NewVAD(h.Bus, &scriptVADRig{seq: []vad.VADEventType{vad.VADSpeechStart, vad.VADSpeechEnd}}),
 		STT:      orchestrator.NewSTT(h.Bus, stubRecognizer{text: "another ale"}),
@@ -139,6 +139,9 @@ func TestRig_StubFlow_PublishesFirstAudio(t *testing.T) {
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),
 		Recorder: tap,
 	})
+	if err != nil {
+		t.Fatalf("BuildConversation: %v", err)
+	}
 
 	acc := NewAccumulator("cassette", []string{"trivial"})
 	d := NewDriver(conv, h, tap, acc, benchFrame(t), 3)

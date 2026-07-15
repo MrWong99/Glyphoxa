@@ -116,11 +116,14 @@ func, `Feed(frame)` is the audio loop, and the reply behaviour is injected as a
 [`stt_test.go`](../../pkg/voice/orchestrator/stt_test.go):
 
 ```go
-conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+conv, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
     orchestrator.WithDetector(detector),
-    orchestrator.WithReply(func(ctx context.Context, e voiceevent.AddressRouted) []orchestrator.Reply { /* … */ }),
+    orchestrator.WithReply(orchestrator.ReplyStrategy{
+        Whole: func(ctx context.Context, e voiceevent.AddressRouted) []orchestrator.Reply { /* … */ },
+    }),
     orchestrator.WithErrorHandler(func(err error) { t.Errorf("reply dispatch: %v", err) }),
 )
+if err != nil { t.Fatalf("NewConversation: %v", err) } // option interactions validate here (#453)
 t.Cleanup(conv.Register(t.Context()))
 for _, f := range frames { conv.Feed(f) }
 ```

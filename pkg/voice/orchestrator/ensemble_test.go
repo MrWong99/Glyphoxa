@@ -512,7 +512,7 @@ func TestReplier_Ensemble_NoEnsembleSpeakerDegradesToTopScored(t *testing.T) {
 }
 
 // TestConversation_WithEnsemble_RegistersLeadRace pins the PRODUCTION wiring (#301):
-// WithEnsemble installs the speaker on the replier built inside Register, sharing the
+// Barge.Ensemble installs the speaker on the replier built inside Register, sharing the
 // barge-in floor, so an EnsembleRouted runs the speculative Lead race end-to-end.
 func TestConversation_WithEnsemble_RegistersLeadRace(t *testing.T) {
 	h := voicetest.New(t)
@@ -525,11 +525,10 @@ func TestConversation_WithEnsemble_RegistersLeadRace(t *testing.T) {
 		gate:    map[string]chan struct{}{bartTarget.AgentID: closedGate()},
 		spokeCh: make(chan string, 2),
 	}
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
-		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
-		orchestrator.WithBargeInCoalesce(10*time.Millisecond, 0),
-		orchestrator.WithEnsemble(spk),
-	)
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }}),
+		orchestrator.WithBargeIn(orchestrator.Barge{Confirm: 10 * time.Millisecond, Ensemble: spk}),
+	))
 	t.Cleanup(conv.Register(t.Context()))
 	if conv.Floor() == nil {
 		t.Fatal("Register must build the shared barge-in floor for the ensemble")
@@ -550,28 +549,10 @@ func TestConversation_WithEnsemble_RegistersLeadRace(t *testing.T) {
 	}, "ensemble.lead → Bart via the registered conversation")
 }
 
-// TestConversation_WithEnsemble_WithoutBargePanics pins that an ensemble speaker
-// wired without barge-in is a loud wiring error — an ensemble is one floor-holding
-// unit and needs the floor.
-func TestConversation_WithEnsemble_WithoutBargePanics(t *testing.T) {
-	h := voicetest.New(t)
-	vadStage := orchestrator.NewVAD(h.Bus, &scriptedVAD{})
-	sttStage := orchestrator.NewSTT(h.Bus, &recordingRecognizer{})
-	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
-
-	spk := &fakeEnsemble{}
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
-		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
-		orchestrator.WithEnsemble(spk), // no WithBargeIn
-	)
-
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Register must panic when WithEnsemble is set without barge-in")
-		}
-	}()
-	conv.Register(t.Context())
-}
+// Ensemble-without-barge is no longer a Register-time panic: the speaker lives
+// on [orchestrator.Barge.Ensemble] (#453), so a Conversation with an ensemble
+// but no barge floor is unrepresentable — the compiler enforces what
+// TestConversation_WithEnsemble_WithoutBargePanics used to pin.
 
 // countMute is a MuteView that reports NOT muted for the first flipAfter Muted
 // calls, then muted — so the pre-Take mute filter passes every candidate but the

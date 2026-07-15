@@ -41,7 +41,7 @@ func (r recRecognizer) Transcribe(context.Context, []audio.Frame) (stt.Transcrip
 // TestStreamingIntegration_TurnIDAndFirstAudioChain is the cross-team contract
 // test (the property observe's #10 subscriber keys ResponseLatency + per-sentence
 // TTFB on): a MULTI-sentence streamed reply, driven through the REAL Conversation
-// with WithReplyStream and a real TeeSynthesizer→bus, must produce one TTSInvoked
+// with ReplyStrategy.Stream and a real TeeSynthesizer→bus, must produce one TTSInvoked
 // and one FirstAudio per sentence, ALL sharing the turn's single TurnID, the first
 // FirstAudio being the turn's first sentence, interleaved in arrival order
 // (TTSInvoked0, FirstAudio0, TTSInvoked1, ...). This is what makes the headline
@@ -97,12 +97,15 @@ func TestStreamingIntegration_TurnIDAndFirstAudioChain(t *testing.T) {
 		Synthesizer: stubSynth{},
 	})
 
-	conv := orchestrator.NewConversation(bus, dummyVAD(t), sttStage, ttsStage,
+	conv, err := orchestrator.NewConversation(bus, dummyVAD(t), sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
-		orchestrator.WithReplyStream(replier.ReplyStream()),
-		orchestrator.WithBargeIn(0),
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: replier.ReplyStream()}),
+		orchestrator.WithBargeIn(orchestrator.Barge{}),
 		orchestrator.WithErrorHandler(func(err error) { t.Errorf("dispatch: %v", err) }),
 	)
+	if err != nil {
+		t.Fatalf("NewConversation: %v", err)
+	}
 	t.Cleanup(conv.Register(t.Context()))
 
 	// Drive one turn through STT directly (the VAD/segmenter path is covered

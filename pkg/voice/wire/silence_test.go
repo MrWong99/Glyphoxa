@@ -133,7 +133,10 @@ func newSilenceRig(t *testing.T, recText string) (*orchestrator.Conversation, *v
 
 	vadStage := orchestrator.NewVAD(h.Bus, sess)
 	sttStage := orchestrator.NewSTT(h.Bus, stubRecognizer{text: recText})
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil)
+	conv, err := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil)
+	if err != nil {
+		t.Fatalf("NewConversation: %v", err)
+	}
 
 	clip := voicetest.LoadClip(t, "hello-test")
 	chunk := testSampleRate * testFrameMs / 1000

@@ -237,7 +237,6 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 		gmSpeaker:      cfg.GMSpeaker,
 		toolDeps:       cfg.ToolDeps,
 		textPoster:     textPoster,
-		lookahead:      pump,
 		clipReplayLoad: cfg.ClipReplayLoader,
 		clipReplaySink: orchestrator.ClipSink(pump.HandleSentence),
 	})

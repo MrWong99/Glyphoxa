@@ -58,7 +58,7 @@ type RigConfig struct {
 // Register/Feed. The Tee's sink is a drain-only PlaybackSink that also publishes
 // FirstOpus on each sentence's first chunk — the bench's audible-on-wire
 // boundary, where response_latency now ends (no real playback happens).
-func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
+func BuildConversation(cfg RigConfig) (*orchestrator.Conversation, error) {
 	rec := cfg.Recorder
 	if rec == nil {
 		rec = observe.Discard{}
@@ -98,14 +98,14 @@ func BuildConversation(cfg RigConfig) *orchestrator.Conversation {
 	}
 
 	opts := []orchestrator.Option{
-		// WithReplyStream (NOT WithReply): the streaming reply dispatches each
+		// ReplyStrategy.Stream (NOT .Whole): the streaming reply dispatches each
 		// sentence to TTS the moment it's ready (B1) — one TTSInvoked + one
-		// FirstAudio per sentence. WithReply's non-streaming turn() dispatches the
+		// FirstAudio per sentence. The non-streaming turn() dispatches the
 		// whole completion as a SINGLE Reply, collapsing a multi-sentence reply to
 		// one TTS dispatch and never exercising the per-sentence Tee→FirstAudio
 		// path the response_latency / tts_ttfb spans measure. The bench must drive
 		// the same streaming path prod runs.
-		orchestrator.WithReplyStream(replier.ReplyStream()),
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: replier.ReplyStream()}),
 	}
 	if cfg.Detector != nil {
 		opts = append(opts, orchestrator.WithDetector(cfg.Detector))

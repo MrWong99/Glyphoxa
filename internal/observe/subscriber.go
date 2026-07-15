@@ -17,7 +17,7 @@ import (
 //   - stt_request → the STT adapter; tts_total → no "tts done" event; codec_* → wire.
 //
 // It keys per-turn timing state by TurnID so concurrent/overlapping turns never
-// cross-attribute (the WithBargeIn(0) reply runs on its own goroutine, and
+// cross-attribute (the barge-in reply runs on its own goroutine, and
 // [voiceevent.FirstAudio] is published off the tee's forward goroutine — so
 // deliveries race and the state is mutex-guarded).
 //

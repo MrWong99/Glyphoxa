@@ -256,14 +256,14 @@ type Config struct {
 	// voice config so every manager-started session copies it. It flows through
 	// connectAndServe (which subscribes roster.SetMuted to MuteChanged and seeds the
 	// current mute state on connect — a mid-session Discord reconnect re-applies the
-	// mutes) → buildConversation (orchestrator.WithMute). nil is the feature-off
+	// mutes) → buildConversation (orchestrator.Barge.Mutes). nil is the feature-off
 	// default: voice standalone / the benchmark are byte-for-byte unchanged.
 	Mutes orchestrator.MuteView
 
 	// Gate is the live turn gate (#130, ADR-0046): the session Manager's spend meter
 	// satisfies it (AllowTurn() false once the soft cap is crossed), and Start sets
 	// it on the per-session config copy so buildConversation wires it via
-	// orchestrator.WithTurnGate. It flows straight into the replier's pre-Take gate,
+	// orchestrator.Barge.Gate. It flows straight into the replier's pre-Take gate,
 	// beside the mute check. nil is the feature-off default: no caps configured, so
 	// voice standalone / the benchmark / an uncapped session are byte-for-byte
 	// unchanged.

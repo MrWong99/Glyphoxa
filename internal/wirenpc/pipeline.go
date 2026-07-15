@@ -86,7 +86,9 @@ func llmProviderLabel(providerID string) observe.Provider {
 
 // The playback pump is the production [orchestrator.LookaheadPump] (#375): the same
 // serialized playback path holds and releases the Cross-talk Reaction's pre-rendered
-// first sentence.
+// first sentence. The pump is wired as [orchestrator.Barge.Lookahead] together with
+// the Ensemble speaker when multi-target routing lands (ADR-0025 deferred); this
+// assertion pins the conformance until then.
 var _ orchestrator.LookaheadPump = (*wire.PlaybackPump)(nil)
 
 // conversationDeps carries everything [buildConversation] assembles the
@@ -166,9 +168,6 @@ type conversationDeps struct {
 	// Execute.
 	toolDeps tool.Deps
 
-	// lookahead is the pump look-ahead seam for the Cross-talk Reaction onset
-	// gap (#375); nil is the feature-off default (TEXT-only pre-render).
-	lookahead orchestrator.LookaheadPump
 	// clipReplayLoad + clipReplaySink wire the Highlight voice-replay reactor
 	// (#310); a nil loader leaves a ReplayRequested inert.
 	clipReplayLoad orchestrator.ClipLoader
@@ -315,20 +314,39 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	// nil gate — off, so every Butler route publishes exactly as before.
 	detector := newAddressDetector(roster.matcher, orchestrator.WithButlerGMGate(d.gmSpeaker))
 
-	conv := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
+	conv, err := orchestrator.NewConversation(bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
 		// B1: stream the reply sentence-by-sentence so first audio begins after the
 		// first sentence, not the whole completion. The agenttool Engine implements
 		// agent.StreamingEngine (it streams the final answer round), so the Cast's
 		// reply stream dispatches each sentence as it lands, to the addressed NPC.
-		orchestrator.WithReplyStream(roster.cast.ReplyStream()),
-		// Barge-in (ADR-0027): a human talking over Bart cancels his turn. The
-		// confirm window must be > 0 against a live mic — a zero window let the
-		// addressing user's own continued speech (single shared VAD session, no
-		// speaker identity) cancel the turn it had just triggered, which is the 20s
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: roster.cast.ReplyStream()}),
+		// Barge-in (ADR-0027) and everything that rides its floor, declared as one
+		// group (#453). A human talking over Bart cancels his turn: the confirm
+		// window must be > 0 against a live mic — a zero window let the addressing
+		// user's own continued speech (single shared VAD session, no speaker
+		// identity) cancel the turn it had just triggered, which is the 20s
 		// self-cancel the latency investigation found. With B1 a confirmed barge
 		// cancels mid-generation, not just pending dispatch.
-		orchestrator.WithBargeInCoalesce(bargeConfirmWindow, floorCoalesceWindow),
+		orchestrator.WithBargeIn(orchestrator.Barge{
+			Confirm:  bargeConfirmWindow,
+			Coalesce: floorCoalesceWindow,
+			// Per-Agent mute (#211): the replier discards a muted addressee's route
+			// before taking the floor, and a MuteCut reactor cuts the floor when the
+			// speaking Agent is muted. A nil view is the feature-off default (voice
+			// standalone / bench).
+			Mutes: d.mutes,
+			// Per-session spend soft cap (#130, ADR-0046): the replier refuses a NEW
+			// turn once the session's estimated spend crosses the soft cap. A nil
+			// gate is the feature-off default (no caps configured).
+			Gate: d.gate,
+			// No Ensemble speaker yet: the live matcher is single-target
+			// (Config.MaxTargets unset ⇒ 1, ADR-0025 deferred), so an EnsembleRouted
+			// never fires. The Reaction look-ahead pump ([wire.PlaybackPump]) is
+			// wired here together with the Ensemble speaker when that lands —
+			// Barge.Lookahead without Barge.Ensemble is a construction error, not a
+			// silent no-op (#453).
+		}),
 		// Streaming STT (ADR-0042, issue #180): a nil manager is byte-for-byte the
 		// batch path, so this option is unconditional — buildStreamManager returns nil
 		// unless GLYPHOXA_STT_STREAMING is set AND the adapter is a StreamingRecognizer.
@@ -342,28 +360,13 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 		// Per-lane streaming STT under the env cap (ADR-0042 × ADR-0050). A nil factory
 		// (batch default) leaves the lanes batch-only, so this is unconditional.
 		orchestrator.WithLaneStreamingSTT(laneStreamFactory, streamMaxLanes()),
-		// Per-Agent mute (#211): the replier discards a muted addressee's route
-		// before taking the floor, and a MuteCut reactor cuts the floor when the
-		// speaking Agent is muted. A nil view is the feature-off default (voice
-		// standalone / bench), so this option is unconditional.
-		orchestrator.WithMute(d.mutes),
-		// Per-session spend soft cap (#130, ADR-0046): the replier refuses a NEW turn
-		// once the session's estimated spend crosses the soft cap. A nil gate is the
-		// feature-off default (no caps configured), so this option is unconditional.
-		orchestrator.WithTurnGate(d.gate),
 		// GM /say direct speech (#295, ADR-0010): a DirectSpeech reactor renders a
 		// SpeakRequested (the /say slash command) to TTS in the addressed NPC's Voice,
 		// looked up from THIS roster. It shares the barge-in floor (so a human barge
-		// cancels a /say) and the spend gate, but bypasses mute (GM puppeteering). The
-		// session Manager publishes SpeakRequested; the lookup is always wired so /say
-		// works whenever a session is live.
+		// cancels a /say) and the barge group's spend gate, but bypasses mute (GM
+		// puppeteering). The session Manager publishes SpeakRequested; the lookup is
+		// always wired so /say works whenever a session is live.
 		orchestrator.WithDirectSpeech(roster.Voice),
-		// Pump look-ahead for the Cross-talk Reaction onset gap (#375, ADR-0025): the
-		// playback pump doubles as the [orchestrator.LookaheadPump], so a queued
-		// Reaction's first sentence pre-renders its audio during the Lead's playback.
-		// A nil pump is the feature-off default (TEXT-only pre-render); it only takes
-		// effect alongside an Ensemble speaker, so it is safe to wire unconditionally.
-		orchestrator.WithReactionLookahead(d.lookahead),
 		// Highlight voice replay (#310, ADR-0051): a ClipReplay reactor plays a promoted
 		// Highlight's clip into the live voice channel on a ReplayRequested, loading the
 		// clip via clipReplayLoad and pushing its chunks to the session's PlaybackPump.
@@ -378,6 +381,10 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 			log.Warn("voice pipeline stage failed", "err", err)
 		}),
 	)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("wirenpc: assemble conversation: %w", err)
+	}
 	return conv, roster, cleanup, nil
 }
 
