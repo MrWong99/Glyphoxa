@@ -424,6 +424,32 @@ func TestChunker_UndeliveredTailDroppedOnBarge(t *testing.T) {
 	}
 }
 
+// TestChunker_SupersededTurnDropsUndeliveredTail (#443): a turn cut by a
+// different-target floor supersession gets a TurnEnded{superseded}; the chunker
+// must fold it exactly like a barge — the delivered prefix commits, the
+// dispatched-but-undelivered tail drops on the terminal event (not a TTL sweep).
+func TestChunker_SupersededTurnDropsUndeliveredTail(t *testing.T) {
+	store := &fakeChunkStore{}
+	bus, fs, c := newChunker(t, store, nil, ChunkerConfig{})
+	agentID := uuid.New()
+
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(1), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentID: agentID.String(), AgentRole: "character", Name: "Bart"},
+	})
+	agentReply(bus, "t1", "I shall.", at(2))                                          // delivered
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "And fur—", TurnID: "t1"}) // dispatched, not delivered
+	bus.Publish(voiceevent.TurnEnded{At: at(4), TurnID: "t1", Reason: voiceevent.TurnEndSuperseded})
+
+	if err := c.FlushSession(context.Background(), fs.id); err != nil {
+		t.Fatalf("FlushSession: %v", err)
+	}
+	got := store.all()
+	if len(got) != 1 || got[0].Content != "Bart: I shall." {
+		t.Fatalf("content = %+v, want only the delivered sentence of the superseded turn", got)
+	}
+}
+
 // TestChunker_ZeroDeliveredTurnLogsNothing is #104 + ADR-0012: a turn interrupted
 // before its first sentence is delivered (no FirstAudio at all) contributes no
 // utterance — a chunk never even opens for it.

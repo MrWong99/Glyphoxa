@@ -159,6 +159,11 @@ const (
 	ReasonSupersessionGrace TurnReason = "supersession_grace"
 	// ReasonBarge: the turn was cut by a confirmed human barge-in before audio.
 	ReasonBarge TurnReason = "barge"
+	// ReasonSuperseded: a different-target route took the floor and cut this turn
+	// mid-flight before audio (#443, ADR-0038 designed supersession) — distinct
+	// from ReasonSupersessionGrace (the yielded outcome's same-target coalesce
+	// fold) and from ReasonBarge (a human interruption).
+	ReasonSuperseded TurnReason = "superseded"
 	// ReasonTTSError: the turn's TTS synthesis failed (a real provider/synth error,
 	// not a context cancel).
 	ReasonTTSError TurnReason = "tts_error"

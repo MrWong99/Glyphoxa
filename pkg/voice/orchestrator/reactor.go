@@ -969,6 +969,11 @@ func (r *Replier) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func())
 	if bus == nil {
 		panic("orchestrator.Replier.Bind: bus must not be nil")
 	}
+	// The shared floor publishes the cut turn's TurnEnded{superseded} when a Take
+	// supersedes a live holder (#443).
+	if r.floor != nil {
+		r.floor.bindSupersedeTerminal(bus)
+	}
 	unsubRouted := voiceevent.On(bus, func(e voiceevent.AddressRouted) {
 		r.handleRouted(ctx, bus, e)
 	})

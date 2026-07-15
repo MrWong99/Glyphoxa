@@ -84,6 +84,11 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 	if bus == nil {
 		panic("orchestrator.DirectSpeech.Bind: bus must not be nil")
 	}
+	// The shared floor publishes the cut turn's TurnEnded{superseded} when a Take
+	// supersedes a live holder (#443) — idempotent with the Replier's install.
+	if d.floor != nil {
+		d.floor.bindSupersedeTerminal(bus)
+	}
 	return voiceevent.On(bus, func(e voiceevent.SpeakRequested) {
 		// Carry the turn correlation id (A3) so the TTS stage and wire tee stamp the
 		// same id on TTSInvoked / FirstAudio — installed before the floor is taken so

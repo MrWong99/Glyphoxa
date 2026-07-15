@@ -482,6 +482,34 @@ func TestLateTTSInvoked_DoesNotClobber(t *testing.T) {
 	}
 }
 
+// TestSupersededTurnFinalizedByTerminalEvent (#443): a turn cut by a
+// different-target floor supersession now gets a TurnEnded{superseded}; the
+// relay must finalize its line on that terminal event — a late sentence from
+// the cut turn is dropped instead of clobbering — exactly like a barge, with no
+// TTL/rollover reliance.
+func TestSupersededTurnFinalizedByTerminalEvent(t *testing.T) {
+	bus, r, _, id := liveRelay(t)
+	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Bart, hold the door", TurnID: "t1"})
+	bus.Publish(voiceevent.AddressRouted{
+		At: at(2), TurnID: "t1",
+		Target: voiceevent.AddressTarget{AgentRole: "character", Name: "Bart"},
+	})
+	bus.Publish(voiceevent.TTSInvoked{At: at(3), Sentence: "I shall.", TurnID: "t1"})
+	bus.Publish(voiceevent.TurnEnded{At: at(4), TurnID: "t1", Reason: voiceevent.TurnEndSuperseded})
+	before := r.View(id)
+
+	bus.Publish(voiceevent.TTSInvoked{At: at(5), Sentence: "LATE", TurnID: "t1"})
+	after := r.View(id)
+
+	if len(after.Lines) != len(before.Lines) {
+		t.Fatalf("late TTS after a superseded terminal changed line count: before %d after %d", len(before.Lines), len(after.Lines))
+	}
+	agent := after.Lines[1]
+	if agent.Who != "Bart" || agent.Text != "I shall." {
+		t.Fatalf("late TTS clobbered the superseded turn's finalized line: %+v", agent)
+	}
+}
+
 // TestRingEviction_Lossless (FIX 3): subBuffer <= ringCap guarantees a lagged
 // drop is replayable from the ring. Emitting past the cap keeps a contiguous
 // suffix (no gap) so a reconnect resumes losslessly within the retained window.

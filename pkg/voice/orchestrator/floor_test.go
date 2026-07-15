@@ -101,6 +101,105 @@ func TestFloor_TakeSupersedesPreviousTurn(t *testing.T) {
 	}
 }
 
+// collectTurnEnded subscribes a collector for TurnEnded events on bus (#443).
+func collectTurnEnded(bus *voiceevent.Bus) func() []voiceevent.TurnEnded {
+	var got []voiceevent.TurnEnded
+	voiceevent.On(bus, func(e voiceevent.TurnEnded) { got = append(got, e) })
+	return func() []voiceevent.TurnEnded { return append([]voiceevent.TurnEnded(nil), got...) }
+}
+
+// TestFloor_SupersedePublishesCutTurnTerminal pins #443: a Take that supersedes
+// a live holder publishes EXACTLY ONE TurnEnded{superseded} for the CUT turn —
+// the terminal event downstream consumers previously had to TTL-reap around.
+func TestFloor_SupersedePublishesCutTurnTerminal(t *testing.T) {
+	bus := voiceevent.NewBus()
+	events := collectTurnEnded(bus)
+	f := orchestrator.NewFloor()
+	f.BindSupersedeTerminal(bus)
+
+	_, release1, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-a"), "bart")
+	defer release1()
+	_, release2, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-b"), "greta")
+	defer release2()
+
+	evs := events()
+	if len(evs) != 1 {
+		t.Fatalf("supersede published %d TurnEnded, want exactly 1: %+v", len(evs), evs)
+	}
+	if evs[0].TurnID != "turn-a" || evs[0].Reason != voiceevent.TurnEndSuperseded {
+		t.Fatalf("supersede terminal = %+v, want {turn-a superseded}", evs[0])
+	}
+}
+
+// TestFloor_SupersedeTerminalQuietPaths pins the exactly-once discipline (#443):
+// no supersede terminal fires for a Take on a free floor, a Take after the
+// holder released (natural completion), a Take after a Yield (the barge path
+// already published its own terminal), or a coalesced same-target re-take (the
+// caller publishes supersede_coalesced for the NEW segment; the HOLDER keeps
+// speaking and must get no terminal).
+func TestFloor_SupersedeTerminalQuietPaths(t *testing.T) {
+	t.Run("free floor", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		events := collectTurnEnded(bus)
+		f := orchestrator.NewFloor()
+		f.BindSupersedeTerminal(bus)
+		_, release, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-a"), "bart")
+		defer release()
+		if evs := events(); len(evs) != 0 {
+			t.Fatalf("a Take on a free floor must publish nothing, got %+v", evs)
+		}
+	})
+	t.Run("after release", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		events := collectTurnEnded(bus)
+		f := orchestrator.NewFloor()
+		f.BindSupersedeTerminal(bus)
+		_, release1, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-a"), "bart")
+		release1() // natural completion: the floor is free again
+		_, release2, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-b"), "greta")
+		defer release2()
+		if evs := events(); len(evs) != 0 {
+			t.Fatalf("a completed turn must not get a superseded terminal, got %+v", evs)
+		}
+	})
+	t.Run("after yield", func(t *testing.T) {
+		bus := voiceevent.NewBus()
+		events := collectTurnEnded(bus)
+		f := orchestrator.NewFloor()
+		f.BindSupersedeTerminal(bus)
+		_, release1, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-a"), "bart")
+		defer release1()
+		f.Yield() // the barge path publishes its own TurnEnded{barge}
+		_, release2, _ := f.Take(voiceevent.WithTurnID(context.Background(), "turn-b"), "greta")
+		defer release2()
+		if evs := events(); len(evs) != 0 {
+			t.Fatalf("a yielded (barged) turn must not ALSO get a superseded terminal, got %+v", evs)
+		}
+	})
+	t.Run("coalesced re-take", func(t *testing.T) {
+		now := time.Unix(0, 0)
+		bus := voiceevent.NewBus()
+		events := collectTurnEnded(bus)
+		f := orchestrator.NewFloorWithCoalesce(300 * time.Millisecond)
+		f.SetClock(func() time.Time { return now })
+		f.BindSupersedeTerminal(bus)
+		ctx1, release1, _ := f.Take(voiceevent.WithTurnID(context.Background(), "seg1"), "bart")
+		defer release1()
+		now = now.Add(100 * time.Millisecond)
+		_, release2, coalesced := f.Take(voiceevent.WithTurnID(context.Background(), "seg2"), "bart")
+		defer release2()
+		if !coalesced {
+			t.Fatal("same-target re-take inside the window must coalesce")
+		}
+		if ctx1.Err() != nil {
+			t.Fatal("the holder must keep the floor across a coalesced re-take")
+		}
+		if evs := events(); len(evs) != 0 {
+			t.Fatalf("a coalesced re-take supersedes nobody; floor must publish nothing, got %+v", evs)
+		}
+	})
+}
+
 // TestFloor_CoalesceWindowKeepsInFlightTurn pins root cause #2's fix: a re-Take
 // landing inside the coalesce window (one utterance VAD-split into two segments)
 // must NOT cancel the in-flight turn. The late segment's context comes back

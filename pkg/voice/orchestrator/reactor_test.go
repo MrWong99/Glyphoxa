@@ -391,6 +391,26 @@ func TestReplier_CoalescingFloorKeepsFirstSegmentTurn(t *testing.T) {
 		},
 		"turn.ended (supersede_coalesced) for the coalesced seg2 carrying its dropped transcript",
 	)
+	// Exactly-once discipline (#443): the coalesced seg2 gets ONE terminal, and
+	// the surviving seg1 — which kept the floor — gets NONE (in particular no
+	// superseded terminal from the coalesced re-take).
+	seg1, seg2 := 0, 0
+	for _, ev := range h.Events() {
+		if e, ok := ev.(voiceevent.TurnEnded); ok {
+			switch e.TurnID {
+			case "seg1":
+				seg1++
+			case "seg2":
+				seg2++
+			}
+		}
+	}
+	if seg1 != 0 {
+		t.Fatalf("the surviving seg1 must get no TurnEnded, got %d", seg1)
+	}
+	if seg2 != 1 {
+		t.Fatalf("the coalesced seg2 must get exactly one TurnEnded, got %d", seg2)
+	}
 }
 
 // TestReplier_CrossTargetAddressWithinWindowSupersedes pins #146 end-to-end:
@@ -457,11 +477,32 @@ func TestReplier_CrossTargetAddressWithinWindowSupersedes(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Bart's in-flight turn must be cancelled by Greta's cross-target supersede")
 	}
-	// The cross-target segment must not be announced as a coalesced drop.
+	// The cross-target segment must not be announced as a coalesced drop, and the
+	// CUT turn must get EXACTLY ONE terminal with the supersede reason (#443) —
+	// previously it got none and every consumer TTL-reaped its state.
+	var bartEnded, gretaEnded []voiceevent.TurnEnded
 	for _, ev := range h.Events() {
-		if e, ok := ev.(voiceevent.TurnEnded); ok && e.TurnID == "seg-greta" && e.Reason == voiceevent.TurnEndSupersedeCoalesced {
-			t.Fatal("seg-greta was published as supersede_coalesced — a cross-target address must supersede, not coalesce")
+		e, ok := ev.(voiceevent.TurnEnded)
+		if !ok {
+			continue
 		}
+		switch e.TurnID {
+		case "seg-bart":
+			bartEnded = append(bartEnded, e)
+		case "seg-greta":
+			gretaEnded = append(gretaEnded, e)
+		}
+	}
+	if len(bartEnded) != 1 {
+		t.Fatalf("the superseded seg-bart got %d TurnEnded, want exactly one (#443): %+v", len(bartEnded), bartEnded)
+	}
+	if bartEnded[0].Reason != voiceevent.TurnEndSuperseded {
+		t.Fatalf("seg-bart terminal reason = %q, want %q", bartEnded[0].Reason, voiceevent.TurnEndSuperseded)
+	}
+	// The superseding turn proceeded cleanly: no terminal of its own (a clean turn
+	// emits none), and in particular not a coalesced drop.
+	if len(gretaEnded) != 0 {
+		t.Fatalf("the superseding seg-greta must end cleanly with no TurnEnded, got %+v", gretaEnded)
 	}
 }
 

@@ -395,6 +395,7 @@ func TestStageSubscriberTurnEndedReasons(t *testing.T) {
 		wantReason  TurnReason
 	}{
 		{"barge", voiceevent.TurnEndBarge, TurnAbandoned, ReasonBarge},
+		{"superseded", voiceevent.TurnEndSuperseded, TurnAbandoned, ReasonSuperseded},
 		{"tts_error", voiceevent.TurnEndTTSError, TurnAbandoned, ReasonTTSError},
 		{"provider_error", voiceevent.TurnEndProviderError, TurnAbandoned, ReasonProviderError},
 		{"mute", voiceevent.TurnEndMute, TurnAbandoned, ReasonMute},
@@ -609,6 +610,9 @@ func TestStageSubscriberTurnEndedUnknownTurnIgnored(t *testing.T) {
 
 	// No prior stage events open this id (a replay publishes no STT/LLM/TTS).
 	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "replay-turn", Reason: voiceevent.TurnEndBarge})
+	// Same class for a supersede cut (#443): a new turn's Take cancelling a
+	// replay's floor publishes TurnEnded{superseded} for the spine-less replay id.
+	bus.Publish(voiceevent.TurnEnded{At: base, TurnID: "replay-turn-2", Reason: voiceevent.TurnEndSuperseded})
 
 	if got := rec.outcomes(); len(got) != 0 {
 		t.Fatalf("TurnEnded for an unopened turn recorded %+v, want nothing", got)

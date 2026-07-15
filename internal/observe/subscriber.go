@@ -309,16 +309,17 @@ func (s *StageSubscriber) onFirstOpus(e voiceevent.FirstOpus) {
 // catch-all. A turn-end arriving AFTER first audio (e.g. a barge mid-playback) is
 // a normal interruption: outcomeDone is already set, so it is ignored.
 //
-// A BARGE for a turn this subscriber never OPENED (no prior STTFinal /
-// AddressRouted / TTSInvoked spine) is ignored — that is the #310 Highlight
-// voice-replay case: a barge cutting a replay publishes TurnEnded{replayTurnID,
-// barge}, but a replay runs no STT/LLM/TTS, so the id was never opened; recording
-// it would fabricate a phantom abandoned/barge turn for audio that actually played
-// (the #391 class). The guard is NARROW to barge on purpose: every OTHER spine-less
-// terminal is a legit sole signal that must still be counted by fabricating the
-// turn — a text-modality Cross-talk Reaction sub-turn's TurnEnded{text_delivered}
-// (#389) and the /say pre-dispatch refusals (directspeech.go) never open a turn yet
-// their outcome is real.
+// A BARGE or SUPERSEDE cut for a turn this subscriber never OPENED (no prior
+// STTFinal / AddressRouted / TTSInvoked spine) is ignored — that is the #310
+// Highlight voice-replay case: a barge (or a new turn's floor Take, #443)
+// cutting a replay publishes TurnEnded{replayTurnID, barge|superseded}, but a
+// replay runs no STT/LLM/TTS, so the id was never opened; recording it would
+// fabricate a phantom abandoned turn for audio that actually played (the #391
+// class). The guard is NARROW to those two cut reasons on purpose: every OTHER
+// spine-less terminal is a legit sole signal that must still be counted by
+// fabricating the turn — a text-modality Cross-talk Reaction sub-turn's
+// TurnEnded{text_delivered} (#389) and the /say pre-dispatch refusals
+// (directspeech.go) never open a turn yet their outcome is real.
 func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	if e.TurnID == "" {
 		return
@@ -329,8 +330,11 @@ func (s *StageSubscriber) onTurnEnded(e voiceevent.TurnEnded) {
 	defer s.mu.Unlock()
 	t := s.turns[e.TurnID]
 	if t == nil {
-		if e.Reason == voiceevent.TurnEndBarge {
-			return // an unopened barge = a #310 replay cut; no spine to attribute audio that played
+		if e.Reason == voiceevent.TurnEndBarge || e.Reason == voiceevent.TurnEndSuperseded {
+			// An unopened barge or supersede cut = a #310 replay cut (a replay runs
+			// no STT/LLM/TTS, so its id has no spine); recording it would fabricate
+			// a phantom abandoned turn for audio that actually played (#391/#443).
+			return
 		}
 		t = &turnState{}
 		s.turns[e.TurnID] = t
@@ -361,6 +365,8 @@ func turnEndOutcome(r voiceevent.TurnEndReason) (TurnOutcome, TurnReason, string
 		return TurnTextDelivered, ReasonNone, "text_delivered"
 	case voiceevent.TurnEndBarge:
 		return TurnAbandoned, ReasonBarge, "abandoned"
+	case voiceevent.TurnEndSuperseded:
+		return TurnAbandoned, ReasonSuperseded, "abandoned"
 	case voiceevent.TurnEndMute:
 		return TurnAbandoned, ReasonMute, "abandoned"
 	case voiceevent.TurnEndSpendCap:
