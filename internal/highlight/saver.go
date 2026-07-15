@@ -41,6 +41,16 @@ const saveQueue = 16
 // stalled DB/blob backend can't wedge the single per-session worker.
 const saveTimeout = 30 * time.Second
 
+// clipBlobName is the blob.Key name segment for a Highlight's audio clip
+// (mirrors the image's imageBlobName). The key is
+// t/<tenant>/highlight/<id>/clip.wav; the boot orphan sweep keys off it (#435).
+const clipBlobName = "clip.wav"
+
+// compensateTimeout bounds the compensating blob delete after a failed
+// CreateHighlight (#435). It is a fresh budget deliberately NOT tied to the save
+// ctx: compensation is needed most exactly when that budget has expired.
+const compensateTimeout = 10 * time.Second
+
 // Store is the persistence surface the Saver's worker needs; *storage.Store
 // satisfies it and tests fake it.
 type Store interface {
@@ -63,6 +73,10 @@ type Saver struct {
 	enqueue JobEnqueuer
 	log     *slog.Logger
 
+	// saveTimeout is the per-trigger save budget — the saveTimeout constant in
+	// production, shrunk by tests that need the budget to expire (#435).
+	saveTimeout time.Duration
+
 	mu   sync.Mutex
 	sess *saverSession // nil when unbound (idle)
 }
@@ -82,7 +96,7 @@ func NewSaver(store Store, blobs blob.Store, enqueue JobEnqueuer, log *slog.Logg
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Saver{store: store, blobs: blobs, enqueue: enqueue, log: log}
+	return &Saver{store: store, blobs: blobs, enqueue: enqueue, log: log, saveTimeout: saveTimeout}
 }
 
 // Begin binds the Saver to a new Voice Session and starts its worker goroutine.
@@ -196,11 +210,11 @@ func (s *Saver) worker(ss *saverSession) {
 // deterministic (blob.Key) so the row and its clip agree and the delete hook can
 // reconstruct it. Any step failing logs and returns — best-effort durability.
 func (s *Saver) save(ss *saverSession, t Trigger) {
-	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.saveTimeout)
 	defer cancel()
 
 	highlightID := uuid.New()
-	key, err := blob.Key(ss.tenantID, "highlight", highlightID, "clip.wav")
+	key, err := blob.Key(ss.tenantID, highlightOwnerKind, highlightID, clipBlobName)
 	if err != nil {
 		s.log.Error("highlight saver: build clip key", "err", err)
 		return
@@ -233,10 +247,16 @@ func (s *Saver) save(ss *saverSession, t Trigger) {
 	if err := s.store.CreateHighlight(ctx, h); err != nil {
 		s.log.Error("highlight saver: create highlight row", "err", err, "voice_session", ss.voiceSessionID)
 		// Compensate the orphaned clip (ADR-0048): the blob is stored but no row will
-		// ever reference it, so drop it through the seam. A compensation failure only
-		// logs — the row create already failed, and a lingering blob is the lesser evil
-		// than crashing the worker (the campaign-delete sweep is the last-resort cleanup).
-		if derr := s.blobs.Delete(ctx, key); derr != nil {
+		// ever reference it, so drop it through the seam. The delete runs on a FRESH
+		// bounded budget (#435, the #421 pattern): the row insert frequently fails
+		// BECAUSE the shared save budget expired, and a delete on that dead ctx would
+		// deterministically fail too — orphaning consented room audio no row-driven
+		// reclaim can see. A compensation failure still only logs — the row create
+		// already failed, and a lingering blob is the lesser evil than crashing the
+		// worker; the boot orphan sweep (SweepEnrichmentReconciliation) reclaims it.
+		dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), compensateTimeout)
+		defer dcancel()
+		if derr := s.blobs.Delete(dctx, key); derr != nil {
 			s.log.Error("highlight saver: compensate orphan clip", "err", derr, "voice_session", ss.voiceSessionID, "key", key)
 		}
 		return

@@ -52,6 +52,16 @@ type Floor struct {
 	// supersession). now is the clock, overridable in tests.
 	coalesce time.Duration
 	now      func() time.Time
+
+	// onSuperseded, when non-nil, is called (outside f.mu) with the CUT turn's
+	// TurnID after a [Floor.Take] superseded a live holder (#443) — the Take is
+	// the only seam that knows the cause, so it publishes the cut turn's
+	// terminal. Installed by [Floor.bindSupersedeTerminal] from the floor-sharing
+	// reactors' Bind. The barge/mute paths ([Floor.Yield] and friends) clear the
+	// holder before any new Take, and a released (completed) turn cleared its
+	// cancel, so this fires ONLY for a genuine mid-flight supersession — never a
+	// second terminal for a turn that already got one from its cutter.
+	onSuperseded func(cutTurnID string)
 }
 
 // clock returns the floor's time source, defaulting to [time.Now] so a
@@ -68,6 +78,21 @@ func (f *Floor) clock() time.Time {
 // NewFloor returns an unheld floor with no coalesce window: every [Floor.Take]
 // supersedes the prior turn (the original behaviour).
 func NewFloor() *Floor { return &Floor{now: time.Now} }
+
+// bindSupersedeTerminal installs the supersede terminal publisher (#443): a
+// [Floor.Take] that cancels a live holder publishes a
+// [voiceevent.TurnEnded]{superseded} for the CUT turn on bus, so downstream
+// consumers (observe subscriber, transcript relay, chunker) fold the cut turn's
+// state on a terminal event instead of a TTL sweep. Called from every
+// floor-sharing reactor's Bind (Replier, DirectSpeech, ClipReplay) — they all
+// bind the same bus in one Conversation, so re-installation is idempotent.
+func (f *Floor) bindSupersedeTerminal(bus *voiceevent.Bus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onSuperseded = func(cutTurnID string) {
+		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: cutTurnID, Reason: voiceevent.TurnEndSuperseded})
+	}
+}
 
 // NewFloorWithCoalesce returns an unheld floor whose [Floor.Take] coalesces a
 // same-target re-take arriving within window of the previous take into the turn
@@ -120,8 +145,16 @@ func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Contex
 		cancel()
 		return ctx, func() {}, true // no-op release: this turn never held the floor
 	}
+	var superseded string
+	var notify func(string)
 	if f.cancel != nil {
 		f.cancel() // supersede a turn that is still unwinding
+		// Capture the cut turn's id + the terminal publisher (#443): every turn
+		// that took the floor terminates with exactly one TurnEnded, and a
+		// supersede cut previously published none — leaving consumers to TTL-reap
+		// the cut turn's state and the outcome metrics missing the class.
+		superseded = f.holderTurn
+		notify = f.onSuperseded
 	}
 	f.gen++
 	gen := f.gen
@@ -131,6 +164,13 @@ func (f *Floor) Take(parent context.Context, agentID string) (ctx context.Contex
 	f.holderAgent = agentID
 	f.speaking = false // a fresh holder starts silent until it produces audio
 	f.mu.Unlock()
+
+	// Publish the cut turn's terminal OUTSIDE f.mu (the bus fans out
+	// synchronously and subscribers may read the floor). An id-less holder (a
+	// parent that carried no TurnID) has nothing to attribute the terminal to.
+	if notify != nil && superseded != "" {
+		notify(superseded)
+	}
 
 	release = func() {
 		f.mu.Lock()

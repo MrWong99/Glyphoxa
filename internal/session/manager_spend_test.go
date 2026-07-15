@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -172,6 +173,69 @@ func TestStart_WithCaps_GatesAndTees(t *testing.T) {
 	}
 	if s := mgr.Spend(); s.State != spend.CapSoft || s.EstimatedUSD <= 0 {
 		t.Fatalf("Spend() after crossing soft = %+v, want soft state + positive estimate", s)
+	}
+	mgr.Shutdown()
+}
+
+// runningCount reports how many voice_sessions rows are still 'running' — the
+// #433 strand assertion: a failed Start must leave zero.
+func (f *fakeStore) runningCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, vs := range f.sessions {
+		if vs.Status == storage.VoiceSessionRunning {
+			n++
+		}
+	}
+	return n
+}
+
+// TestStart_CapsLoadFails_NoStrandedRow pins #433: a non-NotFound failure of the
+// spend-caps load aborts Start WITHOUT leaving a 'running' voice_sessions row —
+// the caps read has no dependency on the row, so it must happen before the
+// insert, like the deployment-config and token preconditions.
+func TestStart_CapsLoadFails_NoStrandedRow(t *testing.T) {
+	store := newFakeStore()
+	store.capsErr = errors.New("transient db failure")
+	runner := newReRunner()
+	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), &usageSpy{})
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err == nil {
+		t.Fatal("Start must surface a non-NotFound caps-load failure")
+	}
+	if n := store.runningCount(); n != 0 {
+		t.Fatalf("running rows after failed Start = %d, want 0 (stranded 'running' row, #433)", n)
+	}
+
+	// An immediate retry (caps load healthy again) succeeds cleanly with exactly
+	// one 'running' row — nothing left over from the failed attempt.
+	store.mu.Lock()
+	store.capsErr = nil
+	store.mu.Unlock()
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start retry after caps-load failure: %v", err)
+	}
+	if n := store.runningCount(); n != 1 {
+		t.Fatalf("running rows after successful retry = %d, want exactly 1", n)
+	}
+	mgr.Shutdown()
+}
+
+// TestStart_CapsLoadNotFound_IsNoCaps pins the ErrNotFound branch #433 must not
+// disturb: a missing tenant row means "no caps configured", and Start succeeds.
+func TestStart_CapsLoadNotFound_IsNoCaps(t *testing.T) {
+	store := newFakeStore()
+	store.capsErr = storage.ErrNotFound
+	runner := newReRunner()
+	mgr := spendManager(t, store, runner.run, voiceevent.NewBus(), &usageSpy{})
+
+	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("Start with ErrNotFound caps must succeed (no caps): %v", err)
+	}
+	<-runner.started
+	if runner.cfg().Gate != nil {
+		t.Fatal("ErrNotFound caps must mean no gate (feature off)")
 	}
 	mgr.Shutdown()
 }

@@ -357,18 +357,20 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		return storage.VoiceSession{}, ErrDiscordTokenMissing
 	}
 
-	vs, err := m.store.CreateVoiceSession(ctx, campaignID)
-	if err != nil {
-		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
-	}
-
 	// Snapshot the Tenant's spend caps for this session (#130, ADR-0046): a
 	// mid-session edit applies to the NEXT session, never this one. A missing tenant
-	// row (ErrNotFound) is no caps; any other error fails Start before a row is left
-	// stuck, mirroring the deployment-config precondition above.
+	// row (ErrNotFound) is no caps; any other error fails Start. The read has no
+	// dependency on the voice_sessions row, so it happens BEFORE the insert —
+	// mirroring the deployment-config precondition above — and a caps-load failure
+	// can never strand a 'running' row (#433).
 	storeCaps, err := m.store.GetTenantSpendCaps(ctx, tenantID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return storage.VoiceSession{}, fmt.Errorf("session: load spend caps: %w", err)
+	}
+
+	vs, err := m.store.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
 	}
 
 	cfg := m.base

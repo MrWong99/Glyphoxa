@@ -1,6 +1,15 @@
 package orchestrator
 
-import "time"
+import (
+	"time"
+
+	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
+)
+
+// BindSupersedeTerminal exposes the floor's supersede-terminal wiring (#443) for
+// the floor unit tests (external test package). Production installs it from the
+// floor-sharing reactors' Bind.
+func (f *Floor) BindSupersedeTerminal(bus *voiceevent.Bus) { f.bindSupersedeTerminal(bus) }
 
 // SetClock overrides the floor's clock for deterministic coalesce-window tests
 // (external test package). Production code always uses the real time.Now.

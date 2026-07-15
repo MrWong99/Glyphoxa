@@ -24,9 +24,19 @@ type fakeHighlightStore struct {
 	mu       sync.Mutex
 	created  []storage.Highlight
 	failNext bool
+	stall    bool // CreateHighlight parks until ctx expires, then fails like pgx (#435)
 }
 
-func (f *fakeHighlightStore) CreateHighlight(_ context.Context, h storage.Highlight) error {
+func (f *fakeHighlightStore) CreateHighlight(ctx context.Context, h storage.Highlight) error {
+	f.mu.Lock()
+	stall := f.stall
+	f.mu.Unlock()
+	if stall {
+		// A stalled DB: the call outlives the save budget and surfaces the
+		// deadline, exactly the #435 trigger window.
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failNext {
@@ -81,7 +91,13 @@ func (f *fakeBlobs) Get(_ context.Context, key string) (io.ReadCloser, blob.Meta
 	return io.NopCloser(bytes.NewReader(b)), blob.Meta{ContentType: "audio/wav", Size: int64(len(b))}, nil
 }
 
-func (f *fakeBlobs) Delete(_ context.Context, key string) error {
+func (f *fakeBlobs) Delete(ctx context.Context, key string) error {
+	// The real backend (pgx) fails immediately on an expired/cancelled ctx
+	// (internal/blob/postgres.go), so the fake honours ctx the same way — the
+	// #435 compensation test depends on this fidelity.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleteErr != nil {
@@ -195,6 +211,9 @@ func TestSaver_HandleTrigger_ClipAndRow(t *testing.T) {
 	if _, ok := blobs.data[h.ClipKey]; !ok {
 		t.Fatalf("row clip_key %q has no stored blob", h.ClipKey)
 	}
+	if len(blobs.deleted) != 0 {
+		t.Fatalf("successful save must not delete anything (#435 AC3), deleted: %v", blobs.deleted)
+	}
 }
 
 func TestSaver_Finalize_SchedulesPurge(t *testing.T) {
@@ -288,6 +307,30 @@ func TestSaver_HandleTrigger_NonBlockingDropsWhenFull(t *testing.T) {
 	}
 	if store.count() == 0 {
 		t.Fatalf("nothing saved at all")
+	}
+}
+
+// TestSaver_CompensationSurvivesExhaustedBudget pins #435: when CreateHighlight
+// fails BECAUSE the shared save budget expired (a stalled DB), the compensating
+// blob delete must still run — on a fresh, cancellation-immune budget (the #421
+// pattern) — so no row-less clip of consented room audio is ever left behind.
+// Before the fix the delete reused the expired ctx and deterministically failed.
+func TestSaver_CompensationSurvivesExhaustedBudget(t *testing.T) {
+	saver, store, blobs, _ := newTestSaver(t)
+	saver.saveTimeout = 50 * time.Millisecond // shrink the budget so the stall expires it quickly
+	store.stall = true                        // CreateHighlight outlives the budget, fails with ctx.Err()
+
+	saver.Begin(uuid.New(), uuid.New(), uuid.New())
+	saver.HandleTrigger(newTrigger()) // Put succeeds on residual budget, row insert exhausts it
+	if err := saver.Finalize(context.Background()); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	if store.count() != 0 {
+		t.Fatalf("row insert was forced to fail, got %d rows", store.count())
+	}
+	if blobs.keys() != 0 {
+		t.Fatalf("orphan clip left behind after budget-expiry row failure (#435): %d blobs remain", blobs.keys())
 	}
 }
 

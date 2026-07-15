@@ -76,6 +76,11 @@ func (r *ClipReplay) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func
 	if bus == nil {
 		panic("orchestrator.ClipReplay.Bind: bus must not be nil")
 	}
+	// The shared floor publishes the cut turn's TurnEnded{superseded} when a Take
+	// supersedes a live holder (#443) — idempotent with the Replier's install.
+	if r.floor != nil {
+		r.floor.bindSupersedeTerminal(bus)
+	}
 	return voiceevent.On(bus, func(e voiceevent.ReplayRequested) {
 		// Thread the turn correlation id so the pump's FirstOpus fires for this turn
 		// (floor marks speaking → barge-able), installed before the floor is taken so

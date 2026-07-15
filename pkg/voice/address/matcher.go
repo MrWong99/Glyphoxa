@@ -97,23 +97,28 @@ type Config struct {
 }
 
 // DefaultHeuristics returns the v1.0 scoring stack: explicit name match
-// (dominant), last-addressed continuation, recent-interruption recovery,
-// expert-on-recent-word, and the single-NPC fallback.
+// (dominant), last-addressed continuation, expert-on-recent-word, and the
+// single-NPC fallback.
 //
 // The weights encode ADR-0024's ordered chain as additive scores against the
 // default threshold of 1.0. An explicit name match (weight 1.0) addresses on
 // its own and suppresses every ambient heuristic (see
 // [DecisionContext.AnyNameMatched]), so a named Agent is never joined by a
-// fallback. When no name is heard the strong ambient signals — continuation,
-// interruption recovery, and the lone-NPC fallback — are each individually
-// decisive (weight 1.0), mirroring the chain's stages, while expert-on-word is
-// a weak hint (0.5) that only reinforces or breaks ties. No ambient signal can
-// ever route to an AddressOnly Agent, which stays name-gated regardless.
+// fallback. When no name is heard the strong ambient signals — continuation
+// and the lone-NPC fallback — are each individually decisive (weight 1.0),
+// mirroring the chain's stages, while expert-on-word is a weak hint (0.5) that
+// only reinforces or breaks ties. No ambient signal can ever route to an
+// AddressOnly Agent, which stays name-gated regardless.
+//
+// [RecentlyInterrupted] is deliberately NOT a default (#442): its signal
+// source — [Matcher.NoteInterruption], fed from the barge path — is deferred to
+// v1.5+ per ADR-0027, so as a default it could never fire and would only
+// mislead routing tuners. Opt in via Config.Heuristics once the barge wiring
+// exists.
 func DefaultHeuristics() []Heuristic {
 	return []Heuristic{
 		NameMatch{Weight: 1.0, Threshold: 0.6},
 		LastAddressed{Weight: 1.0},
-		RecentlyInterrupted{Weight: 1.0, Within: 15 * time.Second},
 		ExpertOnRecentWord{Weight: 0.5},
 		SoleActiveNPC{Weight: 1.0},
 	}

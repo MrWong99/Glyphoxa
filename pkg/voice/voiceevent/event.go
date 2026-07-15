@@ -371,6 +371,15 @@ const (
 	// supersedes instead (#146), so this reason never marks a cross-target
 	// address. [TurnEnded.Text] carries its dropped transcript.
 	TurnEndSupersedeCoalesced TurnEndReason = "supersede_coalesced"
+	// TurnEndSuperseded: a different-target route took the floor while this turn
+	// held it, cancelling it mid-flight — designed behavior (ADR-0038: two turns
+	// never speak at once), published for the CUT turn by the floor at the moment
+	// of supersession (#443). Distinct from [TurnEndSupersedeCoalesced], which
+	// marks the NEW same-target segment the coalesce window folded away; this
+	// marks the OLD turn a cross-target take cut, so consumers clean its state on
+	// the terminal event instead of a TTL sweep and the outcome metrics stop
+	// missing the whole class.
+	TurnEndSuperseded TurnEndReason = "superseded"
 	// TurnEndBarge: a confirmed human barge-in cancelled the turn (the floor was
 	// yielded while this turn held it).
 	TurnEndBarge TurnEndReason = "barge"

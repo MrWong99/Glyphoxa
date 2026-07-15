@@ -440,10 +440,39 @@ func TestSweepEnrichmentReconciliation_CollectsOrphanImageBlobs(t *testing.T) {
 		t.Fatalf("sweep touched a non-orphan blob: live=%v clip=%v other=%v",
 			blobs.has(liveImg), blobs.has(liveClip), blobs.has(otherOwner))
 	}
-	// The anti-join only asked about the highlight IMAGE keys, never the clip or
-	// the other owner's blob.
-	if len(store.gotExist) != 2 {
-		t.Fatalf("want membership checked for the 2 highlight image ids, got %v", store.gotExist)
+	// The anti-join asked about the highlight-owned blobs (2 images + 1 clip,
+	// #435), never the other owner's blob.
+	if len(store.gotExist) != 3 {
+		t.Fatalf("want membership checked for the 3 highlight blob ids, got %v", store.gotExist)
+	}
+}
+
+// TestSweepEnrichmentReconciliation_CollectsOrphanClipBlobs pins the #435 sweep
+// half: a row-less CLIP blob (the compensation-failure orphan class — consented
+// room audio) is reclaimed by the boot sweep exactly like a row-less image,
+// while a live row's clip and image are untouched.
+func TestSweepEnrichmentReconciliation_CollectsOrphanClipBlobs(t *testing.T) {
+	tenantID := uuid.New()
+	liveID, goneID := uuid.New(), uuid.New()
+
+	blobs := newFakeBlobs()
+	liveClip := "t/" + tenantID.String() + "/highlight/" + liveID.String() + "/clip.wav"
+	liveImg := imageKey(tenantID, liveID)
+	orphanClip := "t/" + tenantID.String() + "/highlight/" + goneID.String() + "/clip.wav"
+	blobs.data[liveClip] = []byte("live clip")
+	blobs.data[liveImg] = []byte("live img")
+	blobs.data[orphanClip] = []byte("orphaned consented audio")
+
+	store := &fakeReconcileStore{live: map[uuid.UUID]bool{liveID: true}}
+
+	if err := SweepEnrichmentReconciliation(context.Background(), store, blobs, &enrichRecordingEnqueuer{}, testLog()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if blobs.has(orphanClip) {
+		t.Fatal("orphan clip blob (row gone) was not swept (#435)")
+	}
+	if !blobs.has(liveClip) || !blobs.has(liveImg) {
+		t.Fatalf("sweep touched a live row's blobs: clip=%v img=%v", blobs.has(liveClip), blobs.has(liveImg))
 	}
 }
 

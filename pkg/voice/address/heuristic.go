@@ -147,6 +147,10 @@ func (h LastAddressed) Score(a Agent, dc *DecisionContext) float64 {
 // now: a participant who cut the Agent off is very likely still talking to it,
 // so the next utterance should land back on that Agent even without a name.
 // Interruptions are fed to the matcher via [Matcher.NoteInterruption].
+//
+// It is NOT part of [DefaultHeuristics] (#442): nothing in production calls
+// NoteInterruption yet — the signal would come from the barge path, and
+// ADR-0027 defers that wiring to v1.5+. Until then it is opt-in only.
 type RecentlyInterrupted struct {
 	Weight float64
 	Within time.Duration

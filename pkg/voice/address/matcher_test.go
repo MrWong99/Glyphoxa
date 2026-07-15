@@ -151,23 +151,44 @@ func TestMatcher_SoleActiveNPCFallback(t *testing.T) {
 	assertIDs(t, m.TargetMatch("so what happens next?"), "npc-bart")
 }
 
-// TestMatcher_RecentlyInterruptedRecovery covers the interruption heuristic:
-// after a participant barges in on the Goblin, the next unnamed utterance lands
-// back on the Goblin — not on Bart — even with two NPCs active and no prior
-// addressee.
+// TestDefaultHeuristics_AllSignalsWired pins #442: every heuristic in the
+// default stack must have a production signal source. RecentlyInterrupted's
+// signal (Matcher.NoteInterruption, fed from the barge path) is deferred to
+// v1.5+ (ADR-0027), so the heuristic must NOT ship in the defaults — an inert
+// weight in the stack misleads anyone tuning routing.
+func TestDefaultHeuristics_AllSignalsWired(t *testing.T) {
+	for _, h := range address.DefaultHeuristics() {
+		if _, ok := h.(address.RecentlyInterrupted); ok {
+			t.Fatalf("DefaultHeuristics contains RecentlyInterrupted: its NoteInterruption signal is unwired until v1.5 (ADR-0027, #442)")
+		}
+	}
+}
+
+// interruptedStack is the explicit opt-in stack for the RecentlyInterrupted
+// tests (#442): the default stack plus the heuristic, constructed the way the
+// deferred v1.5 barge wiring would.
+func interruptedStack() []address.Heuristic {
+	return append(address.DefaultHeuristics(),
+		address.RecentlyInterrupted{Weight: 1.0, Within: 15 * time.Second})
+}
+
+// TestMatcher_RecentlyInterruptedRecovery covers the interruption heuristic
+// under explicit opt-in (#442 — it is no longer a default): after a participant
+// barges in on the Goblin, the next unnamed utterance lands back on the Goblin
+// — not on Bart — even with two NPCs active and no prior addressee.
 func TestMatcher_RecentlyInterruptedRecovery(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
-	m := address.NewMatcher(address.Config{Language: "en", Clock: clk.now}, butler, bart, goblin)
+	m := address.NewMatcher(address.Config{Language: "en", Clock: clk.now, Heuristics: interruptedStack()}, butler, bart, goblin)
 
 	m.NoteInterruption("npc-goblin")
 	clk.advance(3 * time.Second)
 	assertIDs(t, m.TargetMatch("no wait, let me finish"), "npc-goblin")
 
-	// Past the default 15s window the interruption no longer pulls focus. A
+	// Past the 15s window the interruption no longer pulls focus. A
 	// fresh matcher isolates this from the continuation the match above would
 	// otherwise leave behind (the Goblin became the last addressee).
 	stale := &fakeClock{t: time.Unix(1000, 0)}
-	m2 := address.NewMatcher(address.Config{Language: "en", Clock: stale.now}, butler, bart, goblin)
+	m2 := address.NewMatcher(address.Config{Language: "en", Clock: stale.now, Heuristics: interruptedStack()}, butler, bart, goblin)
 	m2.NoteInterruption("npc-goblin")
 	stale.advance(30 * time.Second)
 	assertIDs(t, m2.TargetMatch("anyway, moving on"))
@@ -633,12 +654,14 @@ func TestMatcher_TextEchoedVerbatim(t *testing.T) {
 // TestMatcher_CustomThreshold proves the address threshold is configurable: at
 // a threshold above any single ambient weight, the lone-NPC fallback alone no
 // longer addresses, but combining it with an interruption (1.0 + 1.0) does.
+// Uses the opt-in interruption stack (#442) for the second, additive signal.
 func TestMatcher_CustomThreshold(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(0, 0)}
 	m := address.NewMatcher(address.Config{
 		Language:         "en",
 		AddressThreshold: 1.5,
 		Clock:            clk.now,
+		Heuristics:       interruptedStack(),
 	}, butler, bart)
 
 	assertIDs(t, m.TargetMatch("what now?")) // sole-NPC 1.0 < 1.5 → nobody

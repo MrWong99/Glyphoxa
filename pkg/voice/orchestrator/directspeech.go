@@ -84,6 +84,11 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 	if bus == nil {
 		panic("orchestrator.DirectSpeech.Bind: bus must not be nil")
 	}
+	// The shared floor publishes the cut turn's TurnEnded{superseded} when a Take
+	// supersedes a live holder (#443) — idempotent with the Replier's install.
+	if d.floor != nil {
+		d.floor.bindSupersedeTerminal(bus)
+	}
 	return voiceevent.On(bus, func(e voiceevent.SpeakRequested) {
 		// Carry the turn correlation id (A3) so the TTS stage and wire tee stamp the
 		// same id on TTSInvoked / FirstAudio — installed before the floor is taken so
@@ -136,21 +141,15 @@ func (d *DirectSpeech) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel fu
 	})
 }
 
-// dispatch renders one /say request's whole text as a single TTS dispatch under ctx.
-// A start error (real synth/provider fault, not a barge cancel) that produced no
-// audio is announced as a tts_error TurnEnded so the metrics subscriber records the
-// precise reason (mirrors the Replier); a barge cutting ctx publishes its own
-// TurnEnded, so it is not double-counted here.
+// dispatch renders one /say request's whole text as a single dispatch through the
+// turn module (#444). A start error (real synth/provider fault, not a barge
+// cancel) that produced no audio is announced as a tts_error TurnEnded so the
+// metrics subscriber records the precise reason; a barge cutting ctx publishes
+// its own TurnEnded, so it is not double-counted here.
 func (d *DirectSpeech) dispatch(ctx context.Context, bus *voiceevent.Bus, e voiceevent.SpeakRequested, voice tts.Voice) {
-	if ctx.Err() != nil {
-		return
-	}
-	if err := d.tts.Dispatch(ctx, e.Text, voice); err != nil {
-		if d.onError != nil {
-			d.onError(err)
-		}
-		if ctx.Err() == nil {
-			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTTSError})
-		}
+	t := newTurnRun(ctx, d.tts.Dispatch, d.onError)
+	_ = t.dispatch(Reply{Sentence: e.Text, Voice: voice})
+	if t.ttsFailed && ctx.Err() == nil {
+		bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndTTSError})
 	}
 }
