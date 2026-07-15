@@ -10,6 +10,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/discordmsg"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -26,11 +27,12 @@ const transcriptSearchTimeout = 10 * time.Second
 
 // Discord rejects a message whose content exceeds 2000 characters (a Followup over
 // it 400s and the GM sees nothing), so replies are bounded: discordMessageLimit is
-// the hard cap, maxQuoteChars caps a single quoted line (a coalesced Agent reply is
+// the hard cap ([discordmsg.Limit] — the shared splitter's source of truth),
+// maxQuoteChars caps a single quoted line (a coalesced Agent reply is
 // multi-sentence and can be long), and maxQueryEcho caps an echoed query (a string
 // option can be up to 6000 chars).
 const (
-	discordMessageLimit = 2000
+	discordMessageLimit = discordmsg.Limit
 	maxQuoteChars       = 200
 	maxQueryEcho        = 100
 )
