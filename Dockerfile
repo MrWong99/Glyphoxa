@@ -24,7 +24,9 @@
 # the smoke test fails loudly if the bundled lib is missing, but it cannot tell
 # you the version drifted, so keep these in lockstep.
 # ---------------------------------------------------------------------------
-ARG GO_VERSION=1.26
+# Pinned to the exact patch go.mod requires (go-version-file equivalent for the
+# image build; golang:1.26-trixie can lag a fresh patch release behind go.dev).
+ARG GO_VERSION=1.26.5
 ARG ONNX_VERSION=1.26.0
 
 # ===========================================================================
