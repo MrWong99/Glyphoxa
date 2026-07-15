@@ -195,7 +195,7 @@ Start at the [documentation index](docs/README.md).
 | [Architecture](docs/architecture.md) | Current-system overview; every subsystem names its ADR(s), and every ADR-vs-code divergence is recorded. |
 | [Configuration & self-host setup](docs/configuration.md) | Every environment variable, the `.env` template, Postgres/pgvector, Discord OAuth, the operator allowlist, and the build order. |
 | [GM quickstart](docs/quickstart-gm.md) | From a fresh clone to a talking Character NPC in a Discord voice channel. |
-| [Live NPC run (developer)](docs/agents/live-npc-run.md) | The `voice`-mode live loop, `-hardcoded` NPC, and the `opus`/`dave`/`nolibopusfile` build tags. |
+| [Live NPC run (developer)](docs/agents/live-npc-run.md) | The `voice`-mode live loop, `-hardcoded` NPC, and the `opus`/`dave` build tags. |
 | [ADRs](docs/adr/) | The Architecture Decision Records behind every subsystem. |
 | [Decisions ledger](DESIGN.md) | The full ADR ledger and open questions. |
 | [Domain glossary](CONTEXT.md) | The canonical vocabulary used across the codebase and docs. |

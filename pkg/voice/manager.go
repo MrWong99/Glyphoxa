@@ -158,7 +158,7 @@ func newManager(vm voiceManager, opts ...ManagerOption) *Manager {
 		opt(&cfg)
 	}
 	if cfg.dave && !DaveAvailable() {
-		// The caller expects encryption but this build has no libdave; surface
+		// The caller expects encryption but this build has no DAVE stack; surface
 		// it loudly rather than connect silently unencrypted (close code 4017).
 		cfg.logger.Warn("voice: DAVE expected but unavailable in this build; build with -tags dave for production")
 	}

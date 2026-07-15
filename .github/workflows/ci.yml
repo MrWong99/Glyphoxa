@@ -243,35 +243,34 @@ jobs:
           path: ~/.cache/glyphoxa/onnxruntime
           key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
 
-      # The opus codec (`//go:build opus`) links the system libopus via
-      # github.com/hraban/opus → pkg-config opus, paired with `nolibopusfile`
-      # so libopusfile isn't required (codec.go header). This is the ADR-0033
-      # "CGO/audio builds" job that keeps the live binary from silently breaking
-      # while the default suite stays CGO-light (codec stubbed).
-      - name: Install libopus
-        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
-
-      - name: Build + vet (opus tags)
+      # The opus codec (`//go:build opus`) and the DAVE build (`//go:build dave`)
+      # are pure Go since the pion/opus + dave-go migration — no system libopus,
+      # no libdave, nothing to apt-get. This is still the ADR-0033 "audio builds"
+      # job that keeps the live binary from silently breaking while the default
+      # suite stays lean (codec/DAVE stubbed); the `dave` tag is compiled here
+      # too now that it costs nothing.
+      - name: Build + vet (opus + dave tags)
         run: |
-          go build -tags "opus nolibopusfile" ./...
-          go vet -tags "opus nolibopusfile" ./...
+          go build -tags "opus dave" ./...
+          go vet -tags "opus dave" ./...
 
-      # The opus-tagged unit tests (real libopus codec round-trip, PlaybackSource
-      # concurrency) are deterministic and keyless (ADR-0021) but CGO-gated behind
-      # `//go:build opus`, so the default no-CGO PR gate never compiles them. Run
+      # The opus-tagged unit tests (real codec round-trip, PlaybackSource
+      # concurrency) are deterministic and keyless (ADR-0021), gated behind
+      # `//go:build opus`, so the default PR gate never compiles them. Run
       # them HERE — separate from build+vet for concern clarity (#374). `-race`
       # because codec/PlaybackSource pulls cross-goroutine. Targeted at the two
       # packages that own opus-gated tests (mixdown decode, wire codec).
       - name: Test (opus tags)
-        run: go test -race -tags "opus nolibopusfile" ./internal/mixdown/... ./pkg/voice/wire/...
+        run: go test -race -tags "opus" ./internal/mixdown/... ./pkg/voice/wire/...
 
       # The cassette-tier latency benchmark (Epic C): real silero VAD + codec,
       # cassettes for the network providers — keyless (no secrets, ADR-0021) but
-      # CGO, so it runs HERE, not in the default no-CGO gate (ADR-0033 addendum).
-      # It replays the corpus and diffs each stage's p95 against the committed
-      # baseline (Report.CheckRegression); an absolute SLO is the live tier's job.
+      # CGO (silero/ONNX), so it runs HERE, not in the default PR gate (ADR-0033
+      # addendum). It replays the corpus and diffs each stage's p95 against the
+      # committed baseline (Report.CheckRegression); absolute SLOs are the live
+      # tier's job.
       - name: Cassette latency benchmark (regression gate)
-        run: go test -race -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
+        run: go test -race -tags "bench opus" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
 
   image:
     name: container image (build + smoke)
@@ -304,7 +303,7 @@ jobs:
           path: internal/spa/dist
 
       # buildx + layer caching keeps the slow native build (whisper.cpp +
-      # libopus + libdave + CGO) off the critical path on warm caches. This is a
+      # CGO) off the critical path on warm caches. This is a
       # SEPARATE job from the fast `test` gate (ADR-0033): the heavy image build
       # must not slow an unrelated PR's unit feedback.
       - name: Set up Docker Buildx
@@ -323,9 +322,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       # The executable acceptance spec for issue #31: migrate --help exits 0;
-      # ldd resolves every native lib (libopus, libdave, libonnxruntime — no
-      # "not found"); the bundled ONNX runtime exists at $GLYPHOXA_ONNX_LIB; and
-      # the process runs as a non-root uid.
+      # ldd resolves every linked lib (no "not found"; the only native dep left
+      # is the dlopen'd libonnxruntime, asserted separately); the bundled ONNX
+      # runtime exists at $GLYPHOXA_ONNX_LIB; and the process runs as a
+      # non-root uid.
       - name: Container smoke test
         run: ./scripts/container-smoke.sh glyphoxa:smoke
 

@@ -26,3 +26,14 @@ Sprint 2's benchmark harness (`pkg/voice/voicebench`, Epic C) adds a `//go:build
 - **`bench` tag is orthogonal to `opus`.** `//go:build bench` marks "this file is benchmark code"; `opus`/`dave` mark "audio CGO deps present." Keeping them separate lets the same bench files run with or without audio libs.
 - **The real cassette bench is keyless-but-CGO.** It drives **real silero VAD + real codec** with **cassettes for the network providers** (STT/TTS/LLM — no keys, ADR-0021). So it is keyless (no secrets, fits the no-keys contract) but needs CGO, so it runs in the **existing audio/CGO CI job** invoked as `go test -tags "bench opus …"`, NOT in the default no-CGO PR gate. The default `go test -race ./...` never compiles the `bench` files, so the fast keyless default gate is untouched.
 - **Two assertion modes, by tier (one source of truth with the A2 alerts):** the **cassette tier is a REGRESSION-DIFF** — replay is instant, so its spans are orchestration-only (~0) and an absolute SLO would pass trivially and mask a 10x regression; it compares each stage's p95 to a committed `baseline.json` and fails on a relative delta (`Report.CheckRegression`). The **live tier (`-tags=live`, nightly cron) owns the absolute EngineeringSLO** (≤1.2 s p50 / ≤2.5 s p95 on `response_latency`, via `Report.CheckSLO`). A cassette "baseline p50/p95" is therefore a plumbing/orchestration number, NOT the user-facing latency the Sprint-2 B-fixes are judged against — that judgment is a live-tier run.
+
+---
+
+**Amendment (2026-07-16, pion/opus + dave-go migration):** the `opus` and
+`dave` tags are pure Go now (github.com/pion/opus, github.com/thomas-vilte/dave-go);
+the audio CI job no longer installs libopus or libdave (`make dave-libs` is
+gone) and the `nolibopusfile` companion tag is retired. The job itself remains —
+it still owns the tagged builds, the opus-tagged tests, and the keyless-but-CGO
+cassette benchmark (the Silero VAD's ONNX binding is still cgo) — and the `dave`
+tag is now compiled there too, since that costs nothing. References to
+"installs libopus/libdave" above are historical.

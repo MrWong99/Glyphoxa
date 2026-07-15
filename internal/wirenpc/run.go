@@ -166,7 +166,7 @@ func EnsureSchemaCurrent(ctx context.Context, dsn string) error {
 // still connects and constructs the whole pipeline but the audio loop fails fast
 // with [wire.ErrCodecUnavailable] on the first inbound frame — the binary is
 // runnable and the wiring complete without the native dependency. Build with
-// -tags "opus dave nolibopusfile" for a hearing, speaking, encrypted NPC.
+// -tags "opus dave" for a hearing, speaking, encrypted NPC.
 func Run(ctx context.Context, cfg Config) error {
 	if len(cfg.npcs) == 0 {
 		cfg.npcs = []npcSpec{hardcodedNPC()}

@@ -4,15 +4,15 @@
 #
 # There is ONE image. `mode` and all config (Postgres URL, provider keys, guild/
 # channel, etc.) are supplied at RUNTIME via args/env — there are no per-mode
-# images. The build stage compiles the live binary with the production CGO tags
-# (`opus dave nolibopusfile`) after building the whisper.cpp static lib and
-# installing libopus + libdave, exactly as the Makefile / CI do. The runtime
-# stage is a slim glibc base (distroless deferred — the CGO deps need glibc,
-# ADR-0034) carrying the binary plus the native libs it needs: libopus + libdave
-# (link-time deps, via pkg-config) and a bundled libonnxruntime (the version the
-# Silero VAD pins in pkg/voice/vad/silero/runtime.go — dlopen'd at runtime, not
-# linked). GLYPHOXA_ONNX_LIB points at that bundled lib so the VAD never
-# downloads a runtime at container start.
+# images. The build stage compiles the live binary with the production tags
+# (`opus dave` — both pure Go since the pion/opus + dave-go migration; CGO
+# remains only for the ONNX/silero binding) after building the whisper.cpp
+# static lib, exactly as the Makefile / CI do. The runtime stage is a slim glibc
+# base (distroless deferred, ADR-0034) carrying the binary plus its one native
+# runtime dep: a bundled libonnxruntime (the version the Silero VAD pins in
+# pkg/voice/vad/silero/runtime.go — dlopen'd at runtime, not linked).
+# GLYPHOXA_ONNX_LIB points at that bundled lib so the VAD never downloads a
+# runtime at container start.
 #
 # The embedded Silero model (pkg/voice/vad/silero/data/silero_vad.onnx) and the
 # SQL migrations (internal/storage/migrations/*.sql) are go:embed'd into the
@@ -26,38 +26,27 @@
 # ---------------------------------------------------------------------------
 ARG GO_VERSION=1.26
 ARG ONNX_VERSION=1.26.0
-ARG DAVE_VERSION=v1.1.0
 
 # ===========================================================================
 # Stage: build — compile the live binary + gather the native runtime deps.
 # Debian trixie (glibc 2.41) so the CGO toolchain and the runtime base agree on
-# libc. trixie — NOT the older bookworm — because the prebuilt libdave asset is
-# linked against GLIBC_2.38 / GLIBCXX_3.4.32 (it's built on a newer toolchain,
-# the same Ubuntu-24.04 glibc the CI audio job links it against); bookworm's
-# glibc 2.36 / older libstdc++ can't satisfy those symbols at link time.
+# libc. (trixie is no longer FORCED by anything — the prebuilt libdave that
+# pinned GLIBC_2.38 is gone with the dave-go migration — it is simply the
+# current stable matching the runtime stage below.)
 # ===========================================================================
 FROM golang:${GO_VERSION}-trixie AS build
 ARG ONNX_VERSION
-ARG DAVE_VERSION
 
-# A fixed HOME so the libdave install script (which targets $HOME/.local) lands
-# its lib/include/pkgconfig at a path we control and can replicate verbatim in
-# the runtime stage — the generated dave.pc bakes `-Wl,-rpath,$HOME/.local/lib`
-# into the binary, so the runtime stage recreates that exact directory too.
-ENV HOME=/opt/build
 ENV CGO_ENABLED=1
 
 # Build/runtime native deps:
-#   - cmake/git/build-essential: build whisper.cpp (static) and (fallback) libdave.
-#   - pkg-config + libopus-dev: the opus codec links libopus via pkg-config opus.
-#   - curl/unzip: fetch the libdave prebuilt + the ONNX runtime tarball.
+#   - cmake/git/build-essential: build whisper.cpp (static).
+#   - curl/unzip: fetch the ONNX runtime tarball.
 RUN apt-get update && apt-get install -y --no-install-recommends \
 		ca-certificates \
 		git \
 		cmake \
 		build-essential \
-		pkg-config \
-		libopus-dev \
 		curl \
 		unzip \
 	&& rm -rf /var/lib/apt/lists/*
@@ -80,19 +69,6 @@ RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git /tmp/whisper
 	&& cp /tmp/whisper-src/include/whisper.h "${WHISPER_DEST}/include/" \
 	&& cp -r /tmp/whisper-src/ggml/include/* "${WHISPER_DEST}/include/" \
 	&& find /tmp/whisper-src/build -name '*.a' -exec cp {} "${WHISPER_DEST}/lib/" \;
-
-# --- libdave (mirrors Makefile `dave-libs`) --------------------------------
-# Installs libdave.so → $HOME/.local/lib, dave.h → $HOME/.local/include, and
-# generates $HOME/.local/lib/pkgconfig/dave.pc. NON_INTERACTIVE so the script's
-# shell-profile prompt is skipped. Prefers the prebuilt asset, builds from
-# source otherwise.
-#
-# SHELL must be set: the script's final (cosmetic) update_shell_profile step
-# reads $SHELL, which is unset under `sh -c` in a Docker RUN, and the script's
-# `set -u` would abort with exit 2 — AFTER it has already installed the lib and
-# written dave.pc, but still failing the layer. Setting SHELL lets it finish.
-RUN git clone --depth 1 https://github.com/disgoorg/godave.git /tmp/godave \
-	&& SHELL=/bin/sh NON_INTERACTIVE=1 sh /tmp/godave/scripts/libdave_install.sh "${DAVE_VERSION}"
 
 # --- ONNX Runtime (the exact version the Silero VAD pins) ------------------
 # Bundled so GLYPHOXA_ONNX_LIB can point at it and the VAD never reaches the
@@ -121,38 +97,27 @@ RUN go mod download
 # gen/, so this COPY brings them in; the go build below then compiles them.
 COPY . .
 
-# Compile the live binary with the production CGO tags and the whisper/dave/opus
-# env the Makefile + .goreleaser.yml use. PKG_CONFIG_PATH carries both the
-# system libopus (.pc shipped by libopus-dev) and the libdave .pc the script
-# wrote under $HOME/.local. ldflags `-s -w` strip debug info, matching goreleaser.
+# Compile the live binary with the production tags and the whisper env the
+# Makefile + .goreleaser.yml use. Both tags are pure Go now; CGO stays on for
+# the ONNX/silero binding. ldflags `-s -w` strip debug info, matching goreleaser.
 ENV C_INCLUDE_PATH=${WHISPER_DEST}/include
 ENV LIBRARY_PATH=${WHISPER_DEST}/lib
-ENV PKG_CONFIG_PATH=/opt/build/.local/lib/pkgconfig
-RUN go build -tags "opus dave nolibopusfile" -ldflags "-s -w" \
+RUN go build -tags "opus dave" -ldflags "-s -w" \
 		-o /out/glyphoxa ./cmd/glyphoxa
 
 # ===========================================================================
-# Stage: runtime — slim glibc base carrying the binary + its native deps.
-# trixie-slim matches the build stage's glibc/libstdc++ (the prebuilt libdave
-# needs GLIBC_2.38 / GLIBCXX_3.4.32 at load time, not just link time).
+# Stage: runtime — slim glibc base carrying the binary + its one native dep.
+# trixie-slim matches the build stage's glibc.
 # ===========================================================================
 FROM debian:trixie-slim AS runtime
 ARG ONNX_VERSION
 
-# Runtime-only system deps: libopus shared lib (the codec links it) and the
-# loader bits. ca-certificates so outbound TLS to the providers works. No build
-# tooling, no -dev packages.
+# Runtime-only system deps: just ca-certificates so outbound TLS to the
+# providers works. No build tooling, no -dev packages — the codec and DAVE are
+# pure Go; the only native lib is the dlopen'd ONNX runtime below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
 		ca-certificates \
-		libopus0 \
 	&& rm -rf /var/lib/apt/lists/*
-
-# libdave: copied to /usr/local/lib (a default ldconfig search path) AND to the
-# exact $HOME/.local/lib the build stage used, because the binary's baked rpath
-# (from dave.pc) names that path. Either resolver then finds it.
-COPY --from=build /opt/build/.local/lib/libdave.so /usr/local/lib/libdave.so
-RUN mkdir -p /opt/build/.local/lib \
-	&& ln -s /usr/local/lib/libdave.so /opt/build/.local/lib/libdave.so
 
 # Bundled ONNX runtime (lib + its versioned soname symlinks).
 COPY --from=build /opt/onnxruntime/lib/ /usr/local/lib/

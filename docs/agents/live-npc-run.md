@@ -52,30 +52,25 @@ build with the audio tags** (see Build below).
 
 ## Build
 
-The audio codec (libopus) and DAVE/MLS encryption are opt-in native dependencies
-selected by build tags. For an **audible** run you need `opus`; for a real
-encrypted Discord session you also need `dave`.
+The audio codec (pion/opus) and DAVE/MLS encryption (thomas-vilte/dave-go) are
+pure Go, selected by build tags — no native libraries to install. For an
+**audible** run you need `opus`; for a real encrypted Discord session you also
+need `dave`.
 
 ```sh
 # Default build: codec + DAVE are stubs. The pipeline constructs and the gateway
 # connects, but the audio loop exits with `wire: audio codec unavailable` on the
-# first inbound frame — useful for wiring checks, NOT audible. Needs no native libs.
+# first inbound frame — useful for wiring checks, NOT audible.
 CGO_ENABLED=1 go build -o glyphoxa ./cmd/glyphoxa
 
-# Audible + encrypted live run. Prereqs: system libopus (e.g. `libopus` 1.6.1)
-# and the libdave native libs (`make dave-libs`, which prints the PKG_CONFIG_PATH
-# / LD_LIBRARY_PATH exports to add).
-make dave-libs
-export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
-export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
-CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
+# Audible + encrypted live run. No native prereqs — both tags are pure Go.
+# (CGO_ENABLED=1 is still required: the Silero VAD's ONNX binding is cgo.)
+CGO_ENABLED=1 go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
 ```
 
 - `opus` — real Opus↔PCM codec (else the stub: no audio).
 - `dave` — real DAVE/MLS encryption (mandatory on Discord since 2026-03-01 for
   production; else the stub, `DaveAvailable() == false`, unencrypted).
-- `nolibopusfile` — compiles out the libopusfile dependency of the Opus binding
-  (Glyphoxa does not use file decoding). **Required whenever `opus` is set.**
 
 ## Keys: keyring → env (never printed)
 
