@@ -166,7 +166,7 @@ func (h *Handler) ServeImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := Import(r.Context(), h.Store, tenantID, b)
+	res, err := Import(r.Context(), PGStore{h.Store}, tenantID, b)
 	if err != nil {
 		if errors.Is(err, ErrNewerFormat) || errors.Is(err, ErrUnsupportedFormat) {
 			writeImportError(w, http.StatusBadRequest, importErrorMessage(err))

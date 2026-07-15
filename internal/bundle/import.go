@@ -17,8 +17,9 @@ import (
 // feeds the ServeImport JSON response, always present so the response shape is
 // stable for clients.
 // DroppedParticipantRefs counts chunk participant refs that mapped to no imported
-// Agent and were dropped (not fatal); a nonzero value also emits a single
-// slog.Warn from importHistory (#381), so a lossy import is never silent.
+// Agent and were dropped (not fatal); a nonzero value also makes [Import] emit a
+// single slog.Warn after the commit succeeds (#381), so a lossy import is never
+// silent.
 type ImportResult struct {
 	CampaignID uuid.UUID
 	Name       string
@@ -35,7 +36,9 @@ type ImportResult struct {
 }
 
 // Import ingests a [Bundle] into a fresh Campaign under tenantID, in ONE
-// transaction (ADR-0049 synchronous; ADR-0053 §4/§5/§7). It mints fresh UUIDs for
+// transaction (ADR-0049 synchronous; ADR-0053 §4/§5/§7): st is the seam whose
+// [TxRunner.InTx] carries the all-or-nothing contract — production passes
+// [PGStore], unit tests an in-memory fake (#451). It mints fresh UUIDs for
 // every entity and remaps intra-bundle references, so the same bundle imported
 // twice yields two independent Campaigns (ADR-0053 §4: idempotent re-import is a
 // non-goal). Any unknown cross-reference (a node's agent link, an edge endpoint)
@@ -64,7 +67,7 @@ type ImportResult struct {
 // (ADR-0011) — a chunk's participated refs are remapped through AgentIDs and an
 // unmappable one is dropped and counted. A bundle with no History section imports
 // exactly as part 1 did (zero history counts).
-func Import(ctx context.Context, st *storage.Store, tenantID uuid.UUID, b *Bundle) (ImportResult, error) {
+func Import(ctx context.Context, st TxRunner, tenantID uuid.UUID, b *Bundle) (ImportResult, error) {
 	if err := CheckVersion(b.FormatVersion); err != nil {
 		return ImportResult{}, fmt.Errorf("bundle has format_version %d; this build supports %d: %w",
 			b.FormatVersion, FormatVersion, err)
@@ -75,7 +78,7 @@ func Import(ctx context.Context, st *storage.Store, tenantID uuid.UUID, b *Bundl
 		AgentIDs: make(map[string]uuid.UUID),
 	}
 
-	err := st.InTx(ctx, func(tx *storage.Store) error {
+	err := st.InTx(ctx, func(tx ImportStore) error {
 		return importInTx(ctx, tx, tenantID, b, &res)
 	})
 	if err != nil {
@@ -93,11 +96,11 @@ func Import(ctx context.Context, st *storage.Store, tenantID uuid.UUID, b *Bundl
 	return res, nil
 }
 
-// importInTx runs the whole ingest against a tx-bound Store (see [Import]). It is
+// importInTx runs the whole ingest against the tx-bound seam (see [Import]). It is
 // split out so the transaction body reads top-to-bottom: campaign → Butler merge
 // → character Agents → Nodes → node↔Agent links → Edges → Characters. Every step
 // records or consumes the ref→id remaps in res.AgentIDs and a local node map.
-func importInTx(ctx context.Context, tx *storage.Store, tenantID uuid.UUID, b *Bundle, res *ImportResult) error {
+func importInTx(ctx context.Context, tx ImportStore, tenantID uuid.UUID, b *Bundle, res *ImportResult) error {
 	campaignID, err := tx.CreateCampaign(ctx, storage.NewCampaign{
 		TenantID: tenantID,
 		Name:     b.Campaign.Name,
@@ -218,7 +221,7 @@ func importInTx(ctx context.Context, tx *storage.Store, tenantID uuid.UUID, b *B
 // DROPPED and counted in DroppedParticipantRefs (not fatal — a foreign agent
 // simply carries no local knowledge), while speaker snowflakes travel verbatim
 // (ADR-0053 §6). A nil History section is a no-op: counts stay zero (part-1 parity).
-func importHistory(ctx context.Context, tx *storage.Store, campaignID uuid.UUID, b *Bundle, res *ImportResult) error {
+func importHistory(ctx context.Context, tx ImportStore, campaignID uuid.UUID, b *Bundle, res *ImportResult) error {
 	if b.Campaign.History == nil {
 		return nil
 	}
@@ -322,7 +325,7 @@ func coerceTerminalStatus(status string) storage.VoiceSessionStatus {
 // are nulled (secrets never travel in a bundle, ADR-0053 §2); address_only is left
 // to the storage layer, which force-keeps a Butler's true (ADR-0024). The Butler
 // ref is recorded in AgentIDs so a node could link to it if the bundle so wires.
-func mergeButler(ctx context.Context, tx *storage.Store, campaignID uuid.UUID, a *Agent, res *ImportResult) error {
+func mergeButler(ctx context.Context, tx ImportStore, campaignID uuid.UUID, a *Agent, res *ImportResult) error {
 	butler, err := tx.GetButler(ctx, campaignID)
 	if err != nil {
 		return fmt.Errorf("bundle: import: get trigger-created butler: %w", err)
@@ -370,7 +373,7 @@ func mergeButler(ctx context.Context, tx *storage.Store, campaignID uuid.UUID, a
 // createCharacterAgent inserts one Character NPC Agent with NULL provider FKs and
 // its Tool Grants, recording the ref→id remap. Speaker-colour slot assignment is
 // server-side and depends on bundle order (deterministic).
-func createCharacterAgent(ctx context.Context, tx *storage.Store, campaignID uuid.UUID, a *Agent, res *ImportResult) error {
+func createCharacterAgent(ctx context.Context, tx ImportStore, campaignID uuid.UUID, a *Agent, res *ImportResult) error {
 	if _, err := storage.VoiceFromJSON(a.Voice); err != nil {
 		return fmt.Errorf("bundle: import: agent %q voice: %w", a.Name, err)
 	}
@@ -399,7 +402,7 @@ func createCharacterAgent(ctx context.Context, tx *storage.Store, campaignID uui
 
 // createGrants creates one Tool Grant per bundle grant for an Agent, carrying the
 // scope Config verbatim (nil when the grant narrows nothing, e.g. dice).
-func createGrants(ctx context.Context, tx *storage.Store, agentID uuid.UUID, grants []Grant) error {
+func createGrants(ctx context.Context, tx ImportStore, agentID uuid.UUID, grants []Grant) error {
 	for _, g := range grants {
 		if _, err := tx.CreateToolGrant(ctx, storage.NewToolGrant{
 			AgentID:  agentID,
