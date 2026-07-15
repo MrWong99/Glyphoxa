@@ -24,19 +24,20 @@ import (
 // (guild/channel source, #72) and records the voice_sessions Create/End calls so
 // the lifecycle can be asserted without Postgres.
 type fakeStore struct {
-	mu         sync.Mutex
-	dep        storage.DeploymentConfig
-	depErr     error
-	sessions   map[uuid.UUID]storage.VoiceSession
-	created    int
-	ended      int
-	depReads   int
-	reconciles int
-	tick       int
-	endErr     error           // injected EndVoiceSession failure (#143 Defect A)
-	agents     []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
-	caps       storage.SpendCaps
-	capsErr    error // injected GetTenantSpendCaps failure (#130)
+	mu           sync.Mutex
+	dep          storage.DeploymentConfig
+	depErr       error
+	sessions     map[uuid.UUID]storage.VoiceSession
+	created      int
+	ended        int
+	depReads     int
+	reconciles   int
+	tick         int
+	endErr       error           // injected EndVoiceSession failure (#143 Defect A)
+	agents       []storage.Agent // the Active Campaign's roster for ListAgents (#211 mute-all)
+	onListAgents func()          // mid-op hook: runs during ListAgents, no store lock held (#448)
+	caps         storage.SpendCaps
+	capsErr      error // injected GetTenantSpendCaps failure (#130)
 }
 
 func newFakeStore() *fakeStore {
@@ -128,11 +129,20 @@ func (f *fakeStore) ReconcileOrphanedVoiceSessions(ctx context.Context) (int64, 
 	return n, nil
 }
 
-// ListAgents serves the campaign's roster for the mute-all path (#211).
+// ListAgents serves the campaign's roster for the mute-all path (#211). A test
+// may set onListAgents to run mid-op — after the ops' stale-fast entry check but
+// before their authoritative revalidation — to open the #448 race window (the
+// session ending between the roster read and the write/publish). It runs with
+// no fake-store lock held, so it may drive the Manager (e.g. Stop).
 func (f *fakeStore) ListAgents(_ context.Context, _ uuid.UUID) ([]storage.Agent, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]storage.Agent(nil), f.agents...), nil
+	hook := f.onListAgents
+	roster := append([]storage.Agent(nil), f.agents...)
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return roster, nil
 }
 
 // GetTenantSpendCaps serves the canned per-Tenant spend caps snapshot at Start
@@ -200,27 +210,34 @@ func (r *blockingRunner) wasCancelled() bool {
 
 func newManager(t *testing.T, store session.Store, run session.LoopRunner, enabled bool) *session.Manager {
 	t.Helper()
-	return session.NewManager(store, run, wirenpc.Config{Token: "test-token"}, nil,
-		slog.New(slog.DiscardHandler), enabled)
+	return newManagerDeps(t, store, run, enabled, session.Deps{})
 }
 
-// fakeFactsRecaller is a no-op agent.FactsRecaller for the SetFacts wiring test.
+// newManagerDeps is newManager with explicit construction-time deps (#448): the
+// tests that used to back-wire a finalizer/pipeline via a setter now pass it
+// here, the same way the composition root does.
+func newManagerDeps(t *testing.T, store session.Store, run session.LoopRunner, enabled bool, deps session.Deps) *session.Manager {
+	t.Helper()
+	return session.NewManager(store, run, wirenpc.Config{Token: "test-token"}, nil,
+		slog.New(slog.DiscardHandler), enabled, deps)
+}
+
+// fakeFactsRecaller is a no-op agent.FactsRecaller for the Deps.Facts wiring test.
 type fakeFactsRecaller struct{}
 
 func (fakeFactsRecaller) Facts(context.Context, string) []string { return nil }
 
-// TestSetFacts_ThreadsOntoBaseConfig mirrors the SetMemory/SetChunkFlusher wiring
-// (#126): SetFacts sets the recaller on the base voice config every session copies,
+// TestDepsFacts_ThreadsOntoBaseConfig mirrors the Memory/Chunker wiring (#126):
+// Deps.Facts lands the recaller on the base voice config every session copies,
 // so it flows through Start → RunFromDB → buildConversation into each NPC's loop.
-func TestSetFacts_ThreadsOntoBaseConfig(t *testing.T) {
-	mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true)
-	if mgr.BaseFactsForTest() != nil {
-		t.Fatal("base Facts should start nil")
+func TestDepsFacts_ThreadsOntoBaseConfig(t *testing.T) {
+	if mgr := newManager(t, newFakeStore(), newBlockingRunner().run, true); mgr.BaseFactsForTest() != nil {
+		t.Fatal("base Facts should be nil with zero Deps")
 	}
 	rec := fakeFactsRecaller{}
-	mgr.SetFacts(rec)
+	mgr := newManagerDeps(t, newFakeStore(), newBlockingRunner().run, true, session.Deps{Facts: rec})
 	if mgr.BaseFactsForTest() != rec {
-		t.Errorf("SetFacts did not thread the recaller onto the base config: got %v", mgr.BaseFactsForTest())
+		t.Errorf("Deps.Facts did not thread the recaller onto the base config: got %v", mgr.BaseFactsForTest())
 	}
 }
 
@@ -372,7 +389,7 @@ func TestStartUsesSavedToken(t *testing.T) {
 
 	runner := newBlockingRunner()
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{}, cipher,
-		slog.New(slog.DiscardHandler), true)
+		slog.New(slog.DiscardHandler), true, session.Deps{})
 
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -397,7 +414,7 @@ func TestStartFallsBackToEnvToken(t *testing.T) {
 	store.dep.DiscordBotTokenLast4 = "env" // seeded placeholder: no real token in the DB
 	runner := newBlockingRunner()
 	mgr := session.NewManager(store, runner.run, wirenpc.Config{Token: "env-bot-token"}, nil,
-		slog.New(slog.DiscardHandler), true)
+		slog.New(slog.DiscardHandler), true, session.Deps{})
 
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -419,7 +436,7 @@ func TestStartFallsBackToEnvToken(t *testing.T) {
 func TestStartMissingToken(t *testing.T) {
 	store := newFakeStore() // guild/channel set, no token saved
 	mgr := session.NewManager(store, newBlockingRunner().run, wirenpc.Config{}, nil,
-		slog.New(slog.DiscardHandler), true)
+		slog.New(slog.DiscardHandler), true, session.Deps{})
 
 	_, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, session.ErrDiscordTokenMissing) {
@@ -447,7 +464,7 @@ func TestStartUndecryptableToken(t *testing.T) {
 
 	// nil cipher: a real saved token can no longer be opened.
 	mgr := session.NewManager(store, newBlockingRunner().run, wirenpc.Config{}, nil,
-		slog.New(slog.DiscardHandler), true)
+		slog.New(slog.DiscardHandler), true, session.Deps{})
 
 	_, err = mgr.Start(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, session.ErrDiscordTokenUndecryptable) {
@@ -487,9 +504,8 @@ func (f *fakeFinalizer) seen() (uuid.UUID, int) {
 func TestStopFinalizesTranscriptCount(t *testing.T) {
 	store := newFakeStore()
 	runner := newBlockingRunner()
-	mgr := newManager(t, store, runner.run, true)
 	fin := &fakeFinalizer{count: 9}
-	mgr.SetTranscript(fin)
+	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Transcript: fin})
 
 	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
 	if err != nil {
@@ -550,9 +566,8 @@ func (s *spyHighlighter) seen() (begins, finals int) {
 func TestManagerBeginsAndFinalizesHighlights(t *testing.T) {
 	store := newFakeStore()
 	runner := newBlockingRunner()
-	mgr := newManager(t, store, runner.run, true)
 	spy := &spyHighlighter{}
-	mgr.SetHighlights(spy)
+	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Highlights: spy})
 
 	tenantID, campaignID := uuid.New(), uuid.New()
 	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
@@ -595,9 +610,8 @@ func (slowFinalizer) Finalize(ctx context.Context, _ uuid.UUID) (int, error) {
 func TestSlowFinalizeStillEndsRow(t *testing.T) {
 	store := newFakeStore()
 	runner := newBlockingRunner()
-	mgr := newManager(t, store, runner.run, true)
+	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Transcript: slowFinalizer{}})
 	mgr.SetEndTimeoutForTest(50 * time.Millisecond)
-	mgr.SetTranscript(slowFinalizer{})
 
 	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
 	if err != nil {
@@ -956,9 +970,8 @@ func (f *fakeChunkFinalizer) seen() (uuid.UUID, int, int) {
 func TestStopFlushesChunkBeforeEnd(t *testing.T) {
 	store := newFakeStore()
 	runner := newBlockingRunner()
-	mgr := newManager(t, store, runner.run, true)
 	flusher := &fakeChunkFinalizer{store: store}
-	mgr.SetChunkFlusher(flusher)
+	mgr := newManagerDeps(t, store, runner.run, true, session.Deps{Chunker: flusher})
 
 	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
 	if err != nil {
@@ -988,8 +1001,8 @@ func TestStopFlushesChunkBeforeEnd(t *testing.T) {
 func TestStopSucceedsDespiteChunkFlushError(t *testing.T) {
 	store := newFakeStore()
 	runner := newBlockingRunner()
-	mgr := newManager(t, store, runner.run, true)
-	mgr.SetChunkFlusher(&fakeChunkFinalizer{store: store, err: errors.New("chunk writer wedged")})
+	mgr := newManagerDeps(t, store, runner.run, true,
+		session.Deps{Chunker: &fakeChunkFinalizer{store: store, err: errors.New("chunk writer wedged")}})
 
 	if _, err := mgr.Start(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Fatalf("Start: %v", err)

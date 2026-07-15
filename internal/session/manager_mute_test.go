@@ -29,7 +29,7 @@ func muteManager(t *testing.T, store session.Store) (*session.Manager, *voiceeve
 	t.Helper()
 	bus := voiceevent.NewBus()
 	mgr := session.NewManager(store, reRunnableRunner,
-		wirenpc.Config{Token: "test-token", Bus: bus}, nil, slog.New(slog.DiscardHandler), true)
+		wirenpc.Config{Token: "test-token", Bus: bus}, nil, slog.New(slog.DiscardHandler), true, session.Deps{})
 	return mgr, bus
 }
 

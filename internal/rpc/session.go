@@ -29,8 +29,9 @@ type SessionManager interface {
 	Snapshot() (storage.VoiceSession, bool)
 	// SetAgentMute / SetAllMute toggle the live per-Agent mute set (#211), returning
 	// the resulting sorted muted-id set; both fail ErrNoActiveSession when idle. The
-	// set is the VOICED Character NPCs only — the Address-Only Butler is never voiced
-	// (ADR-0009/ADR-0024), so SetAllMute skips it and SetAgentMute fails
+	// set is the Character NPCs only — the Address-Only Butler is not a mute target
+	// (voiced since the ADR-0009 #299 amendment, but mute is matcher-owned and
+	// Character-only), so SetAllMute skips it and SetAgentMute fails
 	// ErrAgentNotInCampaign for it, just as for an agent outside the active session's
 	// Campaign (all validated atomically against that session).
 	SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error)

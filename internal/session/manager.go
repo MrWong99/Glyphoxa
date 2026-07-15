@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"time"
 
@@ -106,8 +105,9 @@ type Store interface {
 // calls it on Stop / loop exit BEFORE EndVoiceSession so the recorded count
 // matches the persisted rows. *transcript.Relay satisfies it; defined here (not
 // imported) so the manager does NOT depend on the relay — the relay already
-// depends on the manager via Sessions, and the reverse import would cycle. nil
-// (not wired / persistence off) leaves line_count at the in-memory default.
+// depends on the active-session read via its Sessions seam (a [View], #448), and
+// the reverse import would cycle. nil (not wired / persistence off) leaves
+// line_count at the in-memory default.
 type TranscriptFinalizer interface {
 	Finalize(ctx context.Context, id uuid.UUID) (int, error)
 }
@@ -130,8 +130,9 @@ type Highlighter interface {
 // (#104, ADR-0011): a lone trailing utterance is flushed ONLY here, at session
 // end. *transcript.Chunker satisfies it; defined here (not imported) so the
 // manager does NOT depend on the transcript package — the chunker already depends
-// on the manager via Sessions, and the reverse import would cycle (mirrors
-// TranscriptFinalizer). nil (no chunking / voice-standalone) is a no-op.
+// on the active-session read via its Sessions seam (a [View], #448), and the
+// reverse import would cycle (mirrors TranscriptFinalizer). nil (no chunking /
+// voice-standalone) is a no-op.
 type ChunkFinalizer interface {
 	FlushSession(ctx context.Context, sessionID uuid.UUID) error
 }
@@ -183,7 +184,7 @@ const spendHardReason = "spend_cap_hard: estimated spend crossed the hard cap"
 type Manager struct {
 	store      Store
 	run        LoopRunner
-	base       wirenpc.Config      // Token (env fallback)/Logger/Metrics template; Guild/Channel come from saved config
+	base       wirenpc.Config      // Token (env fallback)/Logger/Metrics template; Guild/Channel come from saved config. Immutable after NewManager (#448), so lock-free reads (e.g. base.Bus) are safe.
 	cipher     *crypto.Cipher      // decrypts the saved deployment Bot token (#87); nil without $GLYPHOXA_SECRET
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
 	chunker    ChunkFinalizer      // closes the open Transcript Chunk on Stop (#104); nil = no chunking
@@ -197,99 +198,111 @@ type Manager struct {
 	closed bool // terminal: set by Shutdown; Start refuses with ErrManagerClosed (#157)
 
 	// pubMu serializes the whole write-set→publish-MuteChanged sequence across the
-	// mute ops (#211), so two overlapping ops (a per-Agent toggle racing a mute-all)
-	// can never publish events in the reverse order of their set writes — which
-	// would let a stale event de-sync the wirenpc matcher from the authoritative
-	// set. Ordered AFTER m.mu: an op takes pubMu, then m.mu for the set write, drops
-	// m.mu, publishes while still holding pubMu, then drops pubMu. Muted() (the
-	// re-read subscribers do during that publish) takes only m.mu, which is free —
-	// no inversion.
+	// [LiveSession] mute ops (#211), so two overlapping ops (a per-Agent toggle
+	// racing a mute-all) can never publish events in the reverse order of their set
+	// writes — which would let a stale event de-sync the wirenpc matcher from the
+	// authoritative set. Ordered AFTER m.mu: an op takes pubMu, then m.mu for the
+	// set write, drops m.mu, publishes while still holding pubMu, then drops pubMu.
+	// Muted() (the re-read subscribers do during that publish) takes only m.mu,
+	// which is free — no inversion. It lives on the Manager (not the handle) so the
+	// ordering is global across ALL handles to the session.
 	pubMu sync.Mutex
 }
 
-// NewManager wraps the store, loop runner and base config in a Manager. base
-// carries the env-fallback Discord token, logger and metrics recorders; Start
-// overlays the saved guild/channel onto a copy and resolves the Bot token (the
-// saved deployment token decrypted via cipher, else the base env token — #87).
-// cipher may be nil (boot without $GLYPHOXA_SECRET): the env-fallback path still
-// works, but a real saved token then fails Start with a clear precondition
-// (ErrDiscordTokenUndecryptable). enabled is false in
+// Deps are the Manager's construction-time collaborator seams (#448): the six
+// formerly post-construction setters folded into one struct, so "wired before
+// the first Start" is structural — the Manager (and its base voice config) is
+// immutable after NewManager returns — instead of comment-enforced call
+// ordering in the composition root. Every field is optional; the zero value is
+// a Manager with every collaborator off (the voice-standalone / test posture).
+//
+// Five of the collaborators themselves need the active-session read (the
+// Manager's Snapshot) — the old Manager ↔ projector construction cycle that
+// forced the setters. The cycle breaks at its true seam: they depend only on a
+// narrow Sessions{Snapshot} interface, so they are constructed FIRST against a
+// [View], and the View is bound to the Manager here at construction.
+type Deps struct {
+	// Transcript is the finalizer that drains the live transcript's writer queue on
+	// Stop / loop exit and returns the authoritative persisted line_count (#74,
+	// ADR-0040). nil (not wired / persistence off) keeps line_count at the
+	// in-memory default.
+	Transcript TranscriptFinalizer
+	// Chunker closes the session's open Transcript Chunk on Stop / loop exit
+	// (#104, ADR-0011). nil = no chunking (voice-standalone, same posture as line
+	// persistence).
+	Chunker ChunkFinalizer
+	// Highlights is the Session Highlights persistence pipeline (#308): the
+	// Manager Begins/Finalizes it per session, and the SAME value flows onto the
+	// base voice config as cfg.Highlights (the detector's Sink) every session
+	// copies. nil = highlights off (the detector, if any, gets a nil Sink).
+	Highlights Highlighter
+	// Memory is the NPC memory recaller wired onto the base voice config every
+	// manager-started session copies (#122): it flows through Start → RunFromDB →
+	// connectAndServe → buildConversation into each NPC's Agent loop. nil (an
+	// unavailable embeddings/DB path) leaves recall off (AC6).
+	Memory agent.MemoryRecaller
+	// Facts is the NPC KG-facts recaller wired onto the base voice config (#126),
+	// filling the reserved Hot Context KG-facts slot per turn. nil leaves facts
+	// off (the prompt stays byte-identical).
+	Facts agent.FactsRecaller
+	// Tools are the built-in knowledge Tools' backing sources wired onto the base
+	// voice config (#296): the adapters behind transcript_search, kg_query, the
+	// remember_knowledge proposal writer and the recap Tool, flowing through
+	// buildConversation → tool.BuiltinRegistry. The zero value leaves the Tools
+	// registered but unavailable at Execute (the prompt/loop still behave, the
+	// model just gets an "unavailable" tool result).
+	Tools tool.Deps
+	// View, when non-nil, is bound to the new Manager so the collaborators above —
+	// constructed against it BEFORE the Manager existed — read this Manager's
+	// active session. Binding inside NewManager is what makes the wiring order
+	// un-breakable (#448). A View binds to exactly one Manager.
+	View *View
+}
+
+// NewManager wraps the store, loop runner, base config and collaborator deps in
+// a Manager. base carries the env-fallback Discord token, logger and metrics
+// recorders; Start overlays the saved guild/channel onto a copy and resolves
+// the Bot token (the saved deployment token decrypted via cipher, else the base
+// env token — #87). cipher may be nil (boot without $GLYPHOXA_SECRET): the
+// env-fallback path still works, but a real saved token then fails Start with a
+// clear precondition (ErrDiscordTokenUndecryptable). enabled is false in
 // web-only mode, where the process does not drive voice (Start fails
 // ErrVoiceUnavailable).
-func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto.Cipher, log *slog.Logger, enabled bool) *Manager {
+//
+// The Manager and its base config are immutable once NewManager returns (#448):
+// every collaborator arrives via deps, so nothing needs a lock to read base and
+// no wiring can land after the first Start.
+func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto.Cipher, log *slog.Logger, enabled bool, deps Deps) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	m := &Manager{store: store, run: run, base: base, cipher: cipher, log: log, enabled: enabled, endTimeout: endTimeout}
+	m := &Manager{
+		store:      store,
+		run:        run,
+		base:       base,
+		cipher:     cipher,
+		transcript: deps.Transcript,
+		chunker:    deps.Chunker,
+		highlights: deps.Highlights,
+		log:        log,
+		enabled:    enabled,
+		endTimeout: endTimeout,
+	}
 	// The Manager IS the live mute view (#211): it owns the session-local mute set,
 	// so wire it as the base voice config's MuteView. Every session Start copies
 	// base, so each session's Conversation reads this Manager's set.
 	m.base.Mutes = m
+	m.base.Memory = deps.Memory
+	m.base.Facts = deps.Facts
+	m.base.ToolDeps = deps.Tools
+	// The SAME Highlighter the Manager Begins/Finalizes per session is the base
+	// config's detector Sink (#308), so triggers land in the pipeline the Manager
+	// owns the lifecycle of.
+	m.base.Highlights = deps.Highlights
+	if deps.View != nil {
+		deps.View.bind(m)
+	}
 	return m
-}
-
-// SetTranscript wires the transcript finalizer the Manager calls on Stop / loop
-// exit (#74). It is set once at boot — after both the Manager and the relay are
-// built (the relay needs the Manager via Sessions, so the Manager is built first
-// and the finalizer back-wired) — before any session can start, so no lock is
-// needed.
-func (m *Manager) SetTranscript(t TranscriptFinalizer) {
-	m.transcript = t
-}
-
-// SetChunkFlusher wires the chunk finalizer the Manager calls on Stop / loop exit
-// (#104). Like SetTranscript it is set once at boot, after the chunker is built
-// (the chunker needs the Manager via Sessions), before any session can start, so
-// no lock is needed. nil leaves chunking off (voice-standalone, same posture as
-// line persistence).
-func (m *Manager) SetChunkFlusher(f ChunkFinalizer) {
-	m.chunker = f
-}
-
-// SetMemory wires the NPC memory recaller onto the base voice config every
-// manager-started session copies (#122): it flows through Start → RunFromDB →
-// connectAndServe → buildConversation into each NPC's Agent loop. Like
-// SetTranscript / SetChunkFlusher it is set once at boot — the recaller needs the
-// Manager as its Sessions source (the active Campaign), so the Manager is built
-// first and the recaller back-wired — before any session can start, so no lock is
-// needed. nil (an unavailable embeddings/DB path) leaves recall off (AC6).
-func (m *Manager) SetMemory(r agent.MemoryRecaller) {
-	m.base.Memory = r
-}
-
-// SetFacts wires the NPC KG-facts recaller onto the base voice config every
-// manager-started session copies (#126): it flows through Start → RunFromDB →
-// connectAndServe → buildConversation into each NPC's Agent loop, filling the
-// reserved Hot Context KG-facts slot. Like SetMemory it is set once at boot — the
-// recaller needs the Manager as its Sessions source (the active Campaign), so the
-// Manager is built first and the recaller back-wired — before any session can
-// start, so no lock is needed. nil leaves facts off (the prompt stays byte-identical).
-func (m *Manager) SetFacts(f agent.FactsRecaller) {
-	m.base.Facts = f
-}
-
-// SetToolDeps wires the built-in knowledge Tools' read sources onto the base
-// voice config every manager-started session copies (#296, S1): the adapter
-// backing transcript_search and kg_query. Like SetFacts it flows through Start →
-// RunFromDB → connectAndServe → buildConversation → tool.BuiltinRegistry, so a
-// live NPC granted a knowledge Tool actually reaches the DB. The adapter needs
-// the Manager as its active-session source, so the Manager is built first and the
-// deps back-wired before any session starts — no lock needed. The zero value
-// leaves the Tools registered but unavailable at Execute (the prompt/loop still
-// behave, the model just gets an "unavailable" tool result).
-func (m *Manager) SetToolDeps(d tool.Deps) {
-	m.base.ToolDeps = d
-}
-
-// SetHighlights wires the Session Highlights persistence pipeline (#308): the
-// Manager Begins/Finalizes it per session, and the SAME value flows onto the base
-// voice config as cfg.Highlights (the detector's Sink) every session copies. Like
-// SetTranscript it is set once at boot — the Saver needs the store + blob backend,
-// built alongside the Manager — before any session can start, so no lock is
-// needed. nil leaves highlights off (the detector, if any, gets a nil Sink).
-func (m *Manager) SetHighlights(h Highlighter) {
-	m.highlights = h
-	m.base.Highlights = h
 }
 
 // ReconcileOrphans closes voice_sessions rows still marked 'running' that no
@@ -672,337 +685,12 @@ func (m *Manager) Muted(agentID string) bool {
 
 // MutedAgentIDs is a sorted snapshot of the currently-muted Agent ids, or nil when
 // idle. It backs GetSession's reload truth (AC5): a mid-session page reload reads
-// the true current mute state from here.
+// the true current mute state from here. It routes through the current
+// [LiveSession] (#448).
 func (m *Manager) MutedAgentIDs() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.active == nil {
+	l := m.Live()
+	if l == nil {
 		return nil
 	}
-	return mutedIDsLocked(m.active.muted)
-}
-
-// SetAgentMute mutes or unmutes one voiced Agent in the live session, returning
-// the resulting sorted muted-id set (#211). It refuses when idle
-// (ErrNoActiveSession, AC4) and rejects an agentID that is not a VOICED Agent of
-// the active session's Campaign — a foreign agent, an unknown id, or the
-// Address-Only Butler (never voiced, ADR-0009/ADR-0024) — with
-// ErrAgentNotInCampaign.
-//
-// Validation and the write are SESSION-ATOMIC (mirrors SetAllMute): the active
-// session is captured, its Campaign is listed with m.mu released (the store read
-// may block), then the set is written only if the SAME session is still active —
-// so a session swap between the roster read and the write can never sneak a
-// foreign agent (valid in the old Campaign, not the new) into the new session's
-// mute set. The write-then-publish runs under pubMu so it is globally ordered
-// against a concurrent SetAllMute (no reverse-order events).
-func (m *Manager) SetAgentMute(ctx context.Context, agentID string, muted bool) ([]string, error) {
-	m.mu.Lock()
-	as := m.active
-	if as == nil {
-		m.mu.Unlock()
-		return nil, ErrNoActiveSession
-	}
-	campaignID := as.campaignID
-	m.mu.Unlock()
-
-	agents, err := m.store.ListAgents(ctx, campaignID)
-	if err != nil {
-		return nil, fmt.Errorf("session: list agents for mute: %w", err)
-	}
-	if !agentInList(voicedAgents(agents), agentID) {
-		return nil, ErrAgentNotInCampaign
-	}
-
-	m.pubMu.Lock()
-	defer m.pubMu.Unlock()
-
-	m.mu.Lock()
-	if m.active != as {
-		// The session ended or rolled over between the roster read and the write:
-		// abort rather than mutate a set that belongs to a different session.
-		m.mu.Unlock()
-		return nil, ErrNoActiveSession
-	}
-	changed := applyMuteLocked(m.active.muted, agentID, muted)
-	ids := mutedIDsLocked(m.active.muted)
-	bus := m.base.Bus
-	m.mu.Unlock()
-
-	if changed && bus != nil {
-		bus.Publish(voiceevent.MuteChanged{At: time.Now(), AgentID: agentID, Muted: muted})
-	}
-	return ids, nil
-}
-
-// SetAllMute mutes or unmutes every mutable Agent of the Active Campaign (the
-// Character NPCs from store.ListAgents, minus the Address-Only Butler — which is
-// voiced now (ADR-0009 #299 amendment) but is not a mute target, mute being
-// matcher-owned and Character-only), returning the resulting sorted muted-id set
-// (#211). It refuses when idle
-// (ErrNoActiveSession). The campaign is captured under m.mu, the roster is listed
-// with m.mu released (the store read may block), then the set is re-locked and
-// applied only if the SAME session is still active — a session that ended (or a
-// new one that started) while listing aborts with ErrNoActiveSession. The apply +
-// its per-change MuteChanged burst run under pubMu, so the whole mute-all is
-// ordered atomically against a concurrent per-Agent toggle.
-func (m *Manager) SetAllMute(ctx context.Context, muted bool) ([]string, error) {
-	m.mu.Lock()
-	as := m.active
-	if as == nil {
-		m.mu.Unlock()
-		return nil, ErrNoActiveSession
-	}
-	campaignID := as.campaignID
-	m.mu.Unlock()
-
-	agents, err := m.store.ListAgents(ctx, campaignID)
-	if err != nil {
-		return nil, fmt.Errorf("session: list agents for mute-all: %w", err)
-	}
-
-	m.pubMu.Lock()
-	defer m.pubMu.Unlock()
-
-	m.mu.Lock()
-	if m.active != as {
-		// The session ended or rolled over while we listed agents: abort rather than
-		// mutate a set that no longer belongs to this session.
-		m.mu.Unlock()
-		return nil, ErrNoActiveSession
-	}
-	changes := make([]voiceevent.MuteChanged, 0, len(agents))
-	for _, a := range voicedAgents(agents) {
-		id := a.ID.String()
-		if applyMuteLocked(m.active.muted, id, muted) {
-			changes = append(changes, voiceevent.MuteChanged{AgentID: id, Muted: muted})
-		}
-	}
-	ids := mutedIDsLocked(m.active.muted)
-	bus := m.base.Bus
-	m.mu.Unlock()
-
-	if bus != nil {
-		now := time.Now()
-		for _, c := range changes {
-			c.At = now
-			bus.Publish(c)
-		}
-	}
-	return ids, nil
-}
-
-// SayAs publishes a GM-puppeteered direct-speech request (#295, ADR-0010): the
-// voiced Agent with agentID speaks text verbatim in the live Voice Session. It
-// refuses when idle (ErrNoActiveSession) and rejects an agentID that is not an
-// Agent of the active session's Campaign — a foreign agent or an unknown id — with
-// ErrAgentNotInCampaign. The now-voiced Butler (ADR-0009 #299 amendment) IS a valid
-// target reached via [Manager.SpeakAsButler]; the Discord /say roster still excludes
-// it (say.go's voiced filter), so a GM cannot puppet it by hand.
-//
-// Validation and the publish are SESSION-ATOMIC (mirrors SetAgentMute): the active
-// session is captured, its Campaign is listed with m.mu released (the store read may
-// block), then the event is published only if the SAME session is still active — so
-// a session swap between the roster read and the publish can never voice a foreign
-// agent into the new session. It publishes [voiceevent.SpeakRequested] carrying the
-// agent's Target (id + the Agent's OWN role + display name — a butler-role Target
-// projects a KindButler line, ADR-0040), a fresh TurnID, and the text — NOT
-// [voiceevent.AddressRouted], which would trigger the LLM Replier (ADR-0024). The GM
-// mute is deliberately NOT consulted here (puppeteering is a GM override, so a muted
-// NPC still speaks a /say — the DirectSpeech reactor bypasses the mute gate).
-func (m *Manager) SayAs(ctx context.Context, agentID, text string) error {
-	m.mu.Lock()
-	as := m.active
-	if as == nil {
-		m.mu.Unlock()
-		return ErrNoActiveSession
-	}
-	campaignID := as.campaignID
-	m.mu.Unlock()
-
-	agents, err := m.store.ListAgents(ctx, campaignID)
-	if err != nil {
-		return fmt.Errorf("session: list agents for say: %w", err)
-	}
-	var target storage.Agent
-	found := false
-	for _, a := range agents {
-		if a.ID.String() == agentID {
-			target = a
-			found = true
-			break
-		}
-	}
-	if !found {
-		return ErrAgentNotInCampaign
-	}
-
-	m.mu.Lock()
-	if m.active != as {
-		// The session ended or rolled over between the roster read and the publish:
-		// abort rather than voice into a different (or no) session.
-		m.mu.Unlock()
-		return ErrNoActiveSession
-	}
-	bus := m.base.Bus
-	m.mu.Unlock()
-
-	if bus != nil {
-		bus.Publish(voiceevent.SpeakRequested{
-			At:     time.Now(),
-			TurnID: voiceevent.NewTurnID(),
-			Target: voiceevent.AddressTarget{
-				AgentID:   agentID,
-				AgentRole: sayRole(target.Role),
-				Name:      target.Name,
-			},
-			Text: text,
-		})
-	}
-	return nil
-}
-
-// ReplayHighlight publishes a [voiceevent.ReplayRequested] so the orchestrator's
-// ClipReplay reactor plays a promoted Session Highlight's clip into the live voice
-// channel (#310, Epic 8, ADR-0051 GM-only sharing). It mirrors [Manager.SayAs]'s
-// active-session guard: with no live Voice Session it is refused ErrNoActiveSession
-// and publishes nothing. The clipKey is the blob key the ShareHighlight RPC already
-// resolved (and campaign-ownership-checked) — the Manager only gates on a live
-// session and mints the turn (ADR-0005: the event carries the KEY, never audio).
-//
-// The active session is captured under m.mu and the publish happens only if a
-// session is still live (session-atomic, mirroring SayAs), so a session that ended
-// between the check and the publish can never replay into a dead session.
-func (m *Manager) ReplayHighlight(_ context.Context, clipKey string) error {
-	m.mu.Lock()
-	as := m.active
-	if as == nil {
-		m.mu.Unlock()
-		return ErrNoActiveSession
-	}
-	bus := m.base.Bus
-	m.mu.Unlock()
-
-	if bus != nil {
-		bus.Publish(voiceevent.ReplayRequested{
-			At:      time.Now(),
-			TurnID:  voiceevent.NewTurnID(),
-			ClipKey: clipKey,
-		})
-	}
-	return nil
-}
-
-// sayRole maps an Agent's storage Role to the [voiceevent.AddressTarget] role
-// string the transcript relay keys its Line Kind off (ADR-0040): the Butler yields
-// the butler role (→ KindButler pill), every other Agent the character role. The two
-// vocabularies share their underlying strings, but mapping explicitly keeps SayAs
-// decoupled from that coincidence.
-func sayRole(r storage.AgentRole) string {
-	if r == storage.AgentRoleButler {
-		return voiceevent.AgentRoleButler
-	}
-	return voiceevent.AgentRoleCharacter
-}
-
-// SpeakAsButler voices text verbatim as the Active Campaign's Butler in the live
-// Voice Session (#365) — the recap decision-6a voiced on-ramp (satisfies
-// presence.ButlerVoicer structurally). It resolves the session's Butler from the
-// roster and delegates to [Manager.SayAs], so the published SpeakRequested carries
-// the Butler's butler-role Target and the transcript projects a KindButler line
-// through the NORMAL relay projection (no hand-crafted row). It refuses when idle
-// (ErrNoActiveSession), a campaign with no Butler yields ErrAgentNotInCampaign, and
-// a VOICELESS Butler (empty VoiceID — the default auto-Butler) yields
-// ErrButlerVoiceless BEFORE any publish, so the recap surface can degrade to text
-// rather than persist a phantom line for unsynthesizable speech (AC1, ADR-0012).
-func (m *Manager) SpeakAsButler(ctx context.Context, text string) error {
-	m.mu.Lock()
-	as := m.active
-	if as == nil {
-		m.mu.Unlock()
-		return ErrNoActiveSession
-	}
-	campaignID := as.campaignID
-	m.mu.Unlock()
-
-	agents, err := m.store.ListAgents(ctx, campaignID)
-	if err != nil {
-		return fmt.Errorf("session: list agents for butler say: %w", err)
-	}
-	for _, a := range agents {
-		if a.Role != storage.AgentRoleButler {
-			continue
-		}
-		// The default auto-Butler is voiceless (empty VoiceID). Refuse BEFORE SayAs
-		// publishes anything, so no phantom KindButler line is persisted for speech the
-		// room can never hear (AC1: "when a live session has a VOICED Butler").
-		voice, err := storage.VoiceFromJSON(a.Voice)
-		if err != nil {
-			return fmt.Errorf("session: decode butler voice: %w", err)
-		}
-		if voice.VoiceID == "" {
-			return ErrButlerVoiceless
-		}
-		return m.SayAs(ctx, a.ID.String(), text)
-	}
-	return ErrAgentNotInCampaign
-}
-
-// agentInList reports whether agentID (a UUID string) names an Agent in agents.
-func agentInList(agents []storage.Agent, agentID string) bool {
-	for _, a := range agents {
-		if a.ID.String() == agentID {
-			return true
-		}
-	}
-	return false
-}
-
-// voicedAgents returns only the Agents the mute subsystem can act on — the
-// Character NPCs. The auto-created Butler (agent_role='butler') now enters the
-// voiced wirenpc Roster/Matcher/Cast (ADR-0009 #299 amendment), but it stays
-// Address-Only and mute is matcher-owned and Character-only: muting the Butler is
-// refused, so filtering it here could only ever record a phantom id that silences
-// nothing. Filtering it here is the single chokepoint both SetAgentMute (which
-// then rejects the Butler with ErrAgentNotInCampaign) and SetAllMute (which then
-// skips it) share, so the live mute set is exactly the set of Character Agents —
-// and GetSession's reload truth (muted_agent_ids) never lists the Butler.
-func voicedAgents(agents []storage.Agent) []storage.Agent {
-	out := make([]storage.Agent, 0, len(agents))
-	for _, a := range agents {
-		if a.Role == storage.AgentRoleButler {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
-}
-
-// applyMuteLocked sets or clears agentID in the mute set, reporting whether the
-// set actually changed (so an idempotent re-mute publishes nothing). Caller holds
-// Manager.mu.
-func applyMuteLocked(set map[string]struct{}, agentID string, muted bool) bool {
-	_, was := set[agentID]
-	if muted == was {
-		return false
-	}
-	if muted {
-		set[agentID] = struct{}{}
-	} else {
-		delete(set, agentID)
-	}
-	return true
-}
-
-// mutedIDsLocked returns the muted ids as a sorted slice. Caller holds Manager.mu.
-func mutedIDsLocked(set map[string]struct{}) []string {
-	if len(set) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+	return l.MutedAgentIDs()
 }
