@@ -10,10 +10,10 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/wire"
 )
 
-// Codec is the default stub: the real transcoder links libopus and is built only
-// under `-tags opus`, so without that tag every operation reports
-// [wire.ErrCodecUnavailable]. This keeps the tree green under the team's plain
-// `CGO_ENABLED=1 go test ./...` (no libopus needed) without silently
+// Codec is the default stub: the real transcoder (pure-Go pion/opus) is built
+// only under `-tags opus`, so without that tag every operation reports
+// [wire.ErrCodecUnavailable]. This keeps the composition root's opt-in
+// structure and the CI job split unchanged, without silently
 // substituting a no-op codec — the same opt-in pattern as the DAVE `-tags dave`
 // build. The pure-Go DSP in ./dsp is always built and tested regardless.
 type Codec struct{}

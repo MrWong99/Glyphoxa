@@ -1,11 +1,10 @@
 module github.com/MrWong99/Glyphoxa
 
-go 1.26
+go 1.26.5
 
 require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
 	github.com/disgoorg/disgo v0.19.6 // pinned: pkg/voice depends on the voice.Conn/OpusFrame* API; bump deliberately
-	github.com/disgoorg/godave/golibdave v0.2.0 // DAVE/MLS glue, used only under -tags dave (CGO + libdave)
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
@@ -20,9 +19,10 @@ require (
 require (
 	connectrpc.com/connect v1.20.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/hraban/opus v0.0.0-20260708213942-bde8e4304501
 	github.com/openai/openai-go/v3 v3.43.0
+	github.com/pion/opus v0.1.1-0.20260714154015-8399d676d1e2 // pinned past v0.1.0: the public Encoder only exists on main; bump deliberately
 	github.com/prometheus/client_golang v1.23.2
+	github.com/thomas-vilte/dave-go v0.5.1 // DAVE/MLS pure Go, used only under -tags dave
 	go.uber.org/goleak v1.3.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -41,7 +41,6 @@ require (
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/disgoorg/godave v0.2.0 // indirect
-	github.com/disgoorg/godave/libdave v0.2.0 // indirect
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
 	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
@@ -81,6 +80,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.5 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/thomas-vilte/mls-go v1.6.0 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect

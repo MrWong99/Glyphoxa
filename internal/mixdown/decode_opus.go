@@ -5,15 +5,15 @@ package mixdown
 import (
 	"fmt"
 
-	"github.com/hraban/opus"
+	"github.com/pion/opus"
 )
 
-// This file is built only under `-tags opus` and links the system libopus (via
-// github.com/hraban/opus). Always pair it with `-tags nolibopusfile` so
-// hraban/opus does not also require libopusfile. It provides the real
-// [DecoderFactory]: one fresh libopus decoder per lane, decoding to mono 48 kHz
-// PCM — the same rate/layout the internal mix runs at, and independent of the
-// live codec's per-speaker decoders.
+// This file is built only under `-tags opus`, matching the live codec's opt-in
+// split (the tag no longer implies CGO — the codec is the pure-Go
+// github.com/pion/opus). It provides the real [DecoderFactory]: one fresh Opus
+// decoder per lane, decoding to mono 48 kHz PCM — the same rate/layout the
+// internal mix runs at, and independent of the live codec's per-speaker
+// decoders.
 func init() {
 	defaultDecoderFactory = newOpusDecoder
 }
@@ -23,12 +23,12 @@ func init() {
 const maxFrameSamples = decodeRate * 120 / 1000 // 5760
 
 type opusLaneDecoder struct {
-	dec *opus.Decoder
+	dec opus.Decoder
 	buf []int16
 }
 
 func newOpusDecoder() (Decoder, error) {
-	dec, err := opus.NewDecoder(decodeRate, 1)
+	dec, err := opus.NewDecoderWithOutput(decodeRate, 1)
 	if err != nil {
 		return nil, fmt.Errorf("mixdown: new Opus decoder: %w", err)
 	}
@@ -36,7 +36,7 @@ func newOpusDecoder() (Decoder, error) {
 }
 
 func (o *opusLaneDecoder) Decode(payload []byte) ([]int16, error) {
-	n, err := o.dec.Decode(payload, o.buf)
+	n, err := o.dec.DecodeToInt16(payload, o.buf)
 	if err != nil {
 		return nil, fmt.Errorf("mixdown: decode Opus frame: %w", err)
 	}

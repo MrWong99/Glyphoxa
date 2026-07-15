@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs dave-libs refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
+.PHONY: build test lint vet fmt check clean whisper-libs refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
 
 # Build voice engine
 build:
@@ -91,27 +91,6 @@ refresh-silero-model:
 	@sha256sum "$(SILERO_MODEL_DST)"
 	@echo "Update the SHA-256 in pkg/voice/vad/silero/data/README.md before committing."
 
-# Install libdave shared library for DAVE (Discord Audio Video Encryption).
-# Required by github.com/disgoorg/godave/golibdave (CGO bindings).
-# The install script downloads a pre-built binary or builds from source.
-DAVE_VERSION := v1.1.0
-DAVE_SRC     := /tmp/godave-src
-
-dave-libs:
-	@if pkg-config --exists dave 2>/dev/null; then \
-		echo "libdave already installed (found via pkg-config)"; \
-	else \
-		echo "Installing libdave $(DAVE_VERSION)..."; \
-		rm -rf $(DAVE_SRC); \
-		git clone --depth 1 https://github.com/disgoorg/godave.git $(DAVE_SRC); \
-		cd $(DAVE_SRC) && bash scripts/libdave_install.sh $(DAVE_VERSION); \
-		echo ""; \
-		echo "libdave installed. Add to your shell profile:"; \
-		echo "  export PKG_CONFIG_PATH=\"$$HOME/.local/lib/pkgconfig:\$$PKG_CONFIG_PATH\""; \
-		echo "  export LD_LIBRARY_PATH=\"$$HOME/.local/lib:\$$LD_LIBRARY_PATH\""; \
-		echo "  export CGO_ENABLED=1"; \
-	fi
-
 # Protobuf code generation via buf.
 # Install: go install github.com/bufbuild/buf/cmd/buf@latest
 proto:
@@ -135,8 +114,9 @@ clean:
 
 # --- Container image (ADR-0034) --------------------------------------------
 # One multi-stage image for the single binary; `mode`/config are runtime args.
-# The native build (whisper.cpp + libopus + libdave + CGO) is SLOW on a cold
-# layer cache — expect several minutes on first build.
+# The native build (whisper.cpp + CGO) is SLOW on a cold layer cache — expect
+# several minutes on first build. (libopus and libdave are gone: the codec and
+# DAVE are pure Go since the pion/opus + dave-go migration.)
 DOCKER_IMAGE ?= glyphoxa:smoke
 
 # Depends on `proto`: gen/ is gitignored and NOT generated inside the image

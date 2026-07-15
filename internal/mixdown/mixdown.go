@@ -6,7 +6,7 @@
 // on arrival wall-clock (per-speaker PTS is not session-global), sums with
 // int32 accumulation + clamp, and encodes one clip.
 //
-// The default decoder links libopus and is built only under `-tags opus`
+// The default decoder (pure-Go pion/opus) is built only under `-tags opus`
 // (decode_opus.go); the default build (decode_stub.go) reports
 // [ErrDecoderUnavailable]. Callers may inject their own [DecoderFactory] via
 // [Options] — the deterministic test suite does exactly that, so the alignment
@@ -48,7 +48,7 @@ var ErrDecoderUnavailable = errors.New("mixdown: opus decoder unavailable (build
 var ErrClipTooLarge = errors.New("mixdown: clip would exceed blob.MaxSize")
 
 // decodeRate is the sample rate the decoder emits and the internal mix runs at.
-// libopus decodes Discord Opus to 48 kHz mono; the output is resampled from
+// The decoder emits Discord Opus as 48 kHz mono; the output is resampled from
 // here to Options.SampleRate.
 const decodeRate = 48000
 
@@ -81,7 +81,7 @@ var defaultDecoderFactory DecoderFactory
 
 // Options parameterizes the clip. SampleRate is the output rate (default 48000;
 // 24000 / 16000 are produced via [dsp.Resampler]). Decoder overrides the
-// build-selected default; leave nil to use libopus (under -tags opus).
+// build-selected default; leave nil to use the real decoder (under -tags opus).
 type Options struct {
 	SampleRate int
 	Decoder    DecoderFactory

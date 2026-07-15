@@ -34,7 +34,7 @@ shipped tree disagree, `architecture.md` follows the tree and says so.
   the `gh` CLI.
 - **[triage-labels.md](agents/triage-labels.md)** — the triage label vocabulary.
 - **[live-npc-run.md](agents/live-npc-run.md)** — developer runbook for the
-  `voice`-mode live NPC, including the `opus`/`dave`/`nolibopusfile` build tags.
+  `voice`-mode live NPC, including the `opus`/`dave` build tags.
 
 ### [devs/](devs/) — developer guides
 

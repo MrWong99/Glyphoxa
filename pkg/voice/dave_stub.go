@@ -5,8 +5,8 @@ package voice
 import "github.com/disgoorg/disgo/bot"
 
 // DaveOption is the default (stub) build of the DAVE wiring: without the `dave`
-// build tag libdave is not linked, so it returns a no-op [bot.ConfigOpt] and the
-// client connects without end-to-end encryption. Discord rejects unencrypted
+// build tag the dave-go MLS stack is not compiled in, so it returns a no-op
+// [bot.ConfigOpt] and the client connects without end-to-end encryption. Discord rejects unencrypted
 // voice with close code 4017 (ADR-0006), so this build is for tests and tooling
 // only — never a production Voice Instance, which must build with `-tags dave`.
 // Callers that must guarantee DAVE should check [DaveAvailable] and refuse to

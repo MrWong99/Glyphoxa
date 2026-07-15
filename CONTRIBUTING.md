@@ -49,20 +49,20 @@ Order matters: `make proto` → `make spa` → `make build`, exactly as
 
 #### Audible local runs (voice mode)
 
-The audio codec (libopus) and DAVE/MLS encryption are opt-in native
-dependencies selected by build tags. A default build links stubs — the pipeline
-wires up but the audio loop exits with `wire: audio codec unavailable` on the
-first frame. For an **audible** (and encrypted) live run, install libdave and
+The audio codec (pion/opus) and DAVE/MLS encryption (dave-go) are pure Go,
+selected by build tags — no native libraries to install. A default build links
+stubs — the pipeline wires up but the audio loop exits with `wire: audio codec
+unavailable` on the first frame. For an **audible** (and encrypted) live run,
 build with the audio tags:
 
 ```bash
-make dave-libs   # installs libdave; prints the PKG_CONFIG_PATH / LD_LIBRARY_PATH exports to add
-CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
+CGO_ENABLED=1 go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
 ```
 
 - `opus` — real Opus↔PCM codec (else the stub: no audio).
 - `dave` — real DAVE/MLS encryption (mandatory on production Discord; else unencrypted).
-- `nolibopusfile` — compiles out the unused libopusfile dependency; **required whenever `opus` is set**.
+
+(CGO_ENABLED=1 is still required — the Silero VAD's ONNX binding is cgo.)
 
 See [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md) for the full
 `voice`-mode runbook.

@@ -7,21 +7,30 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hraban/opus"
+	"github.com/pion/opus"
 )
 
 // encodeOpusFrames encodes a continuous PCM stream into 20ms (960-sample) Opus
 // frames at 48 kHz mono, the shape the rollover tape captures off the wire.
 func encodeOpusFrames(t *testing.T, samples []int16) [][]byte {
 	t.Helper()
-	enc, err := opus.NewEncoder(decodeRate, 1, opus.AppVoIP)
+	enc, err := opus.NewEncoder(
+		opus.WithSampleRate(decodeRate),
+		opus.WithChannels(1),
+		opus.WithBitrate(64000),
+		opus.WithApplication(opus.ApplicationVoIP),
+	)
 	if err != nil {
 		t.Fatalf("new encoder: %v", err)
 	}
+	f32 := make([]float32, frameSamples)
 	var frames [][]byte
 	for i := 0; i+frameSamples <= len(samples); i += frameSamples {
+		for j, s := range samples[i : i+frameSamples] {
+			f32[j] = float32(s) / 32768
+		}
 		buf := make([]byte, 4000)
-		n, err := enc.Encode(samples[i:i+frameSamples], buf)
+		n, err := enc.EncodeFloat32(f32, buf)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -30,7 +39,7 @@ func encodeOpusFrames(t *testing.T, samples []int16) [][]byte {
 	return frames
 }
 
-// Under -tags opus the built-in libopus decoder round-trips real Opus: a tone
+// Under -tags opus the built-in pure-Go Opus decoder round-trips real Opus: a tone
 // encoded to Opus, dropped onto a lane, and mixed with the DEFAULT (nil)
 // decoder factory comes back as recognizable audio (non-trivial energy),
 // exercising the fresh-decoder-per-lane path against the real codec.
@@ -48,7 +57,7 @@ func TestWAVClip_RealOpusRoundTrip(t *testing.T) {
 	snap := Snapshot{From: base, To: base.Add(time.Second),
 		Lanes: []LaneSnapshot{{LaneID: "spk", Frames: frames}}}
 
-	clip, err := WAVClip(snap, Options{}) // nil Decoder → real libopus default
+	clip, err := WAVClip(snap, Options{}) // nil Decoder → real Opus default
 	if err != nil {
 		t.Fatalf("WAVClip: %v", err)
 	}

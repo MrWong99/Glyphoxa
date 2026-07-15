@@ -8,6 +8,10 @@ builds:
   - id: glyphoxa
     main: ./cmd/glyphoxa
     binary: glyphoxa
+    # opus + dave are pure Go (pion/opus + dave-go); no libopus/libdave to
+    # cross-compile against anymore. CGO stays on for the ONNX/silero binding.
+    flags:
+      - -tags=opus,dave
     env:
       - CGO_ENABLED=1
       - CGO_CFLAGS=-I/tmp/whisper/include
@@ -23,14 +27,12 @@ builds:
           - CC=x86_64-linux-gnu-gcc
           - CXX=x86_64-linux-gnu-g++
           - CGO_LDFLAGS=-L/tmp/whisper/amd64/lib
-          - PKG_CONFIG_PATH=/tmp/dave/amd64/lib/pkgconfig
       - goos: linux
         goarch: arm64
         env:
           - CC=aarch64-linux-gnu-gcc
           - CXX=aarch64-linux-gnu-g++
           - CGO_LDFLAGS=-L/tmp/whisper/arm64/lib -lm
-          - PKG_CONFIG_LIBDIR=/tmp/opus/arm64/lib/pkgconfig:/tmp/dave/arm64/lib/pkgconfig
     ldflags:
       - -s -w
 

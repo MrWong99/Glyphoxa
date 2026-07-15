@@ -5,19 +5,20 @@
 // orchestrator's PCM pipeline.
 //
 // Inbound, each Discord [gxvoice.Frame] (Opus, ~20 ms, 48 kHz, possibly stereo)
-// is decoded straight to 16 kHz mono by libopus (its decoder resamples and
-// downmixes internally), then regrouped into the orchestrator's 32 ms /
-// 512-sample [audio.Frame] cadence for VAD/STT. Outbound, the synthesized
-// [tts.AudioChunk] stream is mono-mixed, resampled to 48 kHz, cut into 20 ms /
-// 960-sample frames, and Opus-encoded into a [gxvoice.Source] for
-// [gxvoice.Session.Play] — the "playback aligner" the orchestrator left unbuilt.
+// is decoded straight to 16 kHz mono by the decoder (it resamples and downmixes
+// internally), then regrouped into the orchestrator's 32 ms / 512-sample
+// [audio.Frame] cadence for VAD/STT. Outbound, the synthesized [tts.AudioChunk]
+// stream is mono-mixed, resampled to 48 kHz, cut into 20 ms / 960-sample
+// frames, and Opus-encoded into a [gxvoice.Source] for [gxvoice.Session.Play]
+// — the "playback aligner" the orchestrator left unbuilt.
 //
-// This file is built only under `-tags opus` and links the system libopus (via
-// github.com/hraban/opus → pkg-config opus). Always pair it with
-// `-tags nolibopusfile` so hraban/opus does not also require libopusfile, which
-// the codec does not use. The default build (codec_stub.go) reports
-// [wire.ErrCodecUnavailable], keeping the tree green without libopus — the same
-// opt-in pattern as the DAVE `-tags dave` build.
+// The codec is github.com/pion/opus — pure Go, no CGO, no system libopus
+// (formerly hraban/opus + libopus; the `nolibopusfile` companion tag is gone
+// with it). The `opus` build tag no longer implies a native toolchain; it
+// still selects this real codec over the default stub (codec_stub.go, which
+// reports [wire.ErrCodecUnavailable]) so the composition root's opt-in
+// structure and the CI job split stay unchanged. Retiring the tag entirely is
+// tracked as a follow-up.
 package codec
 
 import (
@@ -29,7 +30,7 @@ import (
 	"time"
 
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/hraban/opus"
+	"github.com/pion/opus"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -40,8 +41,8 @@ import (
 )
 
 const (
-	// vadSampleRate is the PCM rate the orchestrator's VAD/STT run at; libopus
-	// decodes inbound Opus directly to this rate. Mirrors internal/wirenpc.
+	// vadSampleRate is the PCM rate the orchestrator's VAD/STT run at; the
+	// decoder emits inbound Opus directly at this rate. Mirrors internal/wirenpc.
 	vadSampleRate = 16000
 	// vadFrameMs / vadFrameSamples are the orchestrator's inbound frame size
 	// (32 ms → 512 samples at 16 kHz), the cadence DecodeInbound must emit.
@@ -55,13 +56,20 @@ const (
 	opusFrameMs      = 20
 	opusFrameSamples = discordSampleRate * opusFrameMs / 1000 // 960
 
-	// maxDecodedSamples bounds the decode buffer: the largest Opus frame is
+	// playbackBitrate is the outbound encoder's target. pion/opus defaults to
+	// 24 kbit/s, audibly below Discord's 64 kbit/s standard voice bitrate, so
+	// it is set explicitly. (hraban/opus inherited libopus's ~50 kbit/s auto
+	// default; 64k is a deliberate, slightly generous choice for speech.)
+	playbackBitrate = 64000
+
+	// maxDecodedSamples bounds the decode buffer: the largest Opus packet is
 	// 120 ms, which at 16 kHz mono is 1920 samples. Sizing for it means a
 	// malformed long packet never overflows the target.
 	maxDecodedSamples = vadSampleRate * 120 / 1000 // 1920
 
-	// maxEncodedBytes bounds one encoded Opus packet; 4000 is libopus's
-	// recommended max for a single frame.
+	// maxEncodedBytes bounds one encoded Opus packet; 4000 is the classic
+	// libopus recommendation for a single frame and comfortably exceeds the
+	// encoder's fixed byte budget (bitrate × 20 ms / 8 ≈ 160 bytes at 64k).
 	maxEncodedBytes = 4000
 
 	// reframeGap is the per-speaker PTS discontinuity beyond which the
@@ -74,7 +82,7 @@ const (
 
 	// streamIdleTTL is how long a speaker's decode state may sit unused before
 	// it is pruned. Without pruning the per-speaker map grows monotonically
-	// for the Codec's lifetime (libopus decoder + scratch per user ever heard).
+	// for the Codec's lifetime (decoder + scratch per user ever heard).
 	streamIdleTTL = 5 * time.Minute
 
 	// pruneEvery is the sweep cadence, counted in DecodeInbound calls (~50/s
@@ -82,7 +90,7 @@ const (
 	pruneEvery = 4096
 )
 
-// Codec implements [wire.Codec]. Inbound decoding keeps one libopus decoder per
+// Codec implements [wire.Codec]. Inbound decoding keeps one Opus decoder per
 // speaker (a decoder is stateful per Opus stream; feeding two SSRCs into one
 // produces garbage) plus a per-speaker reframer. Outbound state is created fresh
 // per [Codec.PlaybackSource] call, so a Codec may serve one Session's inbound
@@ -108,7 +116,7 @@ type Option func(*Codec)
 
 // WithMetrics injects the #125 instrumentation: rec receives one
 // [observe.StageRecorder.CodecDecode] span per decoded inbound frame and one
-// CodecEncode per encoded outbound frame. A nil rec leaves the no-op default in
+// CodecEncode per outbound frame. A nil rec leaves the no-op default in
 // place. The stub build (no -tags opus) accepts the same option and ignores it.
 func WithMetrics(rec observe.StageRecorder) Option {
 	return func(c *Codec) {
@@ -131,11 +139,11 @@ func New(opts ...Option) *Codec {
 
 var _ wire.Codec = (*Codec)(nil)
 
-// inboundStream is the per-speaker decode state: a libopus decoder (16 kHz mono
+// inboundStream is the per-speaker decode state: an Opus decoder (16 kHz mono
 // output) and a reframer regrouping its 320-sample packets into 512-sample
 // frames.
 type inboundStream struct {
-	dec     *opus.Decoder
+	dec     opus.Decoder
 	reframe *dsp.Reframer
 	pcm     []int16 // reused decode scratch buffer
 
@@ -175,7 +183,7 @@ func (c *Codec) DecodeInbound(frame gxvoice.Frame) ([]audio.Frame, error) {
 	// The measured section is exactly the Opus->PCM decode and the reframer regroup,
 	// the per-inbound-frame cost the series names.
 	decodeStart := time.Now()
-	n, err := stream.dec.Decode(frame.Opus, stream.pcm)
+	n, err := stream.dec.DecodeToInt16(frame.Opus, stream.pcm)
 	if err != nil {
 		return nil, fmt.Errorf("codec: decode Opus for user %s: %w", frame.UserID, err)
 	}
@@ -222,9 +230,9 @@ func (c *Codec) streamFor(user snowflake.ID) (*inboundStream, error) {
 	if s, ok := c.decoders[user]; ok {
 		return s, nil
 	}
-	// One decoder per stream, decoding to 16 kHz mono: libopus downmixes a
+	// One decoder per stream, decoding to 16 kHz mono: the decoder downmixes a
 	// stereo Discord stream and resamples 48→16 kHz internally.
-	dec, err := opus.NewDecoder(vadSampleRate, 1)
+	dec, err := opus.NewDecoderWithOutput(vadSampleRate, 1)
 	if err != nil {
 		return nil, fmt.Errorf("codec: new Opus decoder: %w", err)
 	}
@@ -241,11 +249,19 @@ func (c *Codec) streamFor(user snowflake.ID) (*inboundStream, error) {
 // PlaybackSource adapts a stream of synthesized [tts.AudioChunk]s into a
 // [gxvoice.Source] of 20 ms Opus frames for [gxvoice.Session.Play]. Each chunk
 // is mono-mixed, resampled to 48 kHz, reframed to 960 samples, and Opus-encoded
-// on demand as disgo's sender pulls frames. The encoder application is VOIP
-// (speech). The returned Source drains chunks until the channel closes, then
-// emits a final zero-padded frame for any tail and reports io.EOF.
+// on demand as disgo's sender pulls frames. The encoder emits CELT-only
+// fullband 20 ms packets (pion/opus's profile — the same shape libopus picks
+// for speech at this bitrate) at the fixed [playbackBitrate]; VBR stays off
+// deliberately, it is the encoder's newest code path. The returned Source
+// drains chunks until the channel closes, then emits a final zero-padded frame
+// for any tail and reports io.EOF.
 func (c *Codec) PlaybackSource(chunks <-chan tts.AudioChunk) (gxvoice.Source, error) {
-	enc, err := opus.NewEncoder(discordSampleRate, 1, opus.AppVoIP)
+	enc, err := opus.NewEncoder(
+		opus.WithSampleRate(discordSampleRate),
+		opus.WithChannels(1),
+		opus.WithBitrate(playbackBitrate),
+		opus.WithApplication(opus.ApplicationVoIP),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("codec: new Opus encoder: %w", err)
 	}
@@ -254,6 +270,7 @@ func (c *Codec) PlaybackSource(chunks <-chan tts.AudioChunk) (gxvoice.Source, er
 		enc:     enc,
 		reframe: dsp.NewReframer(opusFrameSamples),
 		encBuf:  make([]byte, maxEncodedBytes),
+		f32:     make([]float32, opusFrameSamples),
 		rec:     c.rec,
 	}, nil
 }
@@ -269,6 +286,7 @@ type playbackSource struct {
 	resamp  *dsp.Resampler // built lazily from the first chunk's rate
 	reframe *dsp.Reframer
 	encBuf  []byte
+	f32     []float32             // reused int16→float32 encode scratch
 	rec     observe.StageRecorder // #125: codec_encode per outbound frame
 
 	ready   [][]int16 // resampled+reframed frames awaiting encode
@@ -307,7 +325,10 @@ func (p *playbackSource) NextFrame(ctx context.Context) ([]byte, error) {
 	// <-chunks wait in pull() is deliberately excluded — it is synthesis network
 	// time, not codec cost, and would corrupt the series.
 	encStart := time.Now()
-	n, err := p.enc.Encode(frame, p.encBuf)
+	for i, s := range frame {
+		p.f32[i] = float32(s) / 32768
+	}
+	n, err := p.enc.EncodeFloat32(p.f32, p.encBuf)
 	p.rec.CodecEncode(time.Since(encStart))
 	if err != nil {
 		return nil, fmt.Errorf("codec: encode Opus frame: %w", err)

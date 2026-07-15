@@ -1,5 +1,6 @@
 // Package voice is a small, idiomatic wrapper over disgo's voice gateway and
-// godave's DAVE end-to-end encryption for streaming Discord voice.
+// DAVE end-to-end encryption (pure-Go dave-go via the godave.Session interface)
+// for streaming Discord voice.
 //
 // A [Manager] owns one disgo [bot.Client] and a [Session] per Guild. A Session
 // presents a buffered inbound channel of per-speaker Opus [Frame]s for STT, an

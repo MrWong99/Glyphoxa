@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/hraban/opus"
+	"github.com/pion/opus"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	gxvoice "github.com/MrWong99/Glyphoxa/pkg/voice"
@@ -116,15 +116,24 @@ func TestPlaybackSource_RecordsCodecEncodePerFrame(t *testing.T) {
 // Discord delivers. Used to synthesize inbound frames for DecodeInbound.
 func encodeOpus(t *testing.T, pcm []int16, rate int) [][]byte {
 	t.Helper()
-	enc, err := opus.NewEncoder(rate, 1, opus.AppVoIP)
+	enc, err := opus.NewEncoder(
+		opus.WithSampleRate(rate),
+		opus.WithChannels(1),
+		opus.WithBitrate(playbackBitrate),
+		opus.WithApplication(opus.ApplicationVoIP),
+	)
 	if err != nil {
 		t.Fatalf("new encoder: %v", err)
 	}
 	frame := rate * 20 / 1000
+	f32 := make([]float32, frame)
 	var packets [][]byte
 	for off := 0; off+frame <= len(pcm); off += frame {
+		for i, s := range pcm[off : off+frame] {
+			f32[i] = float32(s) / 32768
+		}
 		buf := make([]byte, maxEncodedBytes)
-		n, err := enc.Encode(pcm[off:off+frame], buf)
+		n, err := enc.EncodeFloat32(f32, buf)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -232,7 +241,7 @@ func TestPlaybackSource_RoundTrip(t *testing.T) {
 		t.Fatalf("PlaybackSource: %v", err)
 	}
 
-	dec, err := opus.NewDecoder(rate, 1)
+	dec, err := opus.NewDecoderWithOutput(rate, 1)
 	if err != nil {
 		t.Fatalf("decoder: %v", err)
 	}
@@ -246,7 +255,7 @@ func TestPlaybackSource_RoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NextFrame: %v", err)
 		}
-		n, err := dec.Decode(frame, pcm)
+		n, err := dec.DecodeToInt16(frame, pcm)
 		if err != nil {
 			t.Fatalf("decode round-trip: %v", err)
 		}

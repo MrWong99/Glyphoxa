@@ -20,3 +20,14 @@ ADR-0005 already committed to one binary with modes and "no audio across process
 - **Migrate as an init-container on every replica** — rejected. Every replica racing the migration is exactly what ADR-0031's advisory lock guards against, but it turns a one-time schema change into N contending startups and muddies "did the migration run?"; a single pre-deploy hook Job is cleaner and observable.
 - **k8s-only (no systemd/compose)** — rejected. The v1.0 audience is self-hosters (ADR-0001); requiring Kubernetes to run one bot is hostile to that target.
 - **Distroless/scratch runtime** — deferred, not chosen: the CGO deps (libopus, libdave, ONNX runtime) need a glibc base; a slim glibc image now, distroless revisited if the CGO surface shrinks.
+
+---
+
+**Amendment (2026-07-16, pion/opus + dave-go migration):** the image build no
+longer installs libopus or libdave; the live tags are `-tags "opus dave"`
+(pure Go) and the runtime stage carries exactly one native lib — the dlopen'd
+ONNX runtime for the Silero VAD. The trixie base is no longer forced by
+libdave's glibc 2.38 requirement (kept as current stable). The
+distroless/scratch deferral above should be revisited once the ONNX/CGO
+dependency falls (tracked as the pure-Go Silero forward-pass follow-up): with
+it gone the binary can build `CGO_ENABLED=0`, statically linked, `FROM scratch`.

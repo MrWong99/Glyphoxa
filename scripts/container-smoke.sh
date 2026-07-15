@@ -103,9 +103,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # 2. ldd on the binary resolves EVERY shared lib — no "not found".
-#    libopus and libdave are LINK-time deps (pkg-config opus / dave), so they
-#    must appear in the binary's ldd and resolve. libonnxruntime is deliberately
-#    NOT here: the Silero VAD dlopen()s it at runtime via
+#    Since the pion/opus + dave-go migration the binary has NO link-time native
+#    deps beyond glibc (libopus and libdave are gone). libonnxruntime is
+#    deliberately NOT here: the Silero VAD dlopen()s it at runtime via
 #    ort.SetSharedLibraryPath($GLYPHOXA_ONNX_LIB) — it is never link-time linked,
 #    so it correctly does not appear in `ldd glyphoxa`. Its resolvability is
 #    asserted separately in step 3 (ldd on the .so itself), which is the check
@@ -120,11 +120,14 @@ if printf '%s\n' "$ldd_out" | grep -qi 'not found'; then
 else
 	ok 'ldd reported no "not found" entries'
 fi
+# Inverse assertion: the former link-time deps must be GONE. If either name
+# reappears in ldd, a native linkage crept back in and the pure-Go migration
+# regressed.
 for lib in libopus libdave; do
 	if printf '%s\n' "$ldd_out" | grep -q "$lib"; then
-		ok "ldd links $lib"
+		bad "ldd links $lib (pure-Go migration regressed: no native codec/DAVE linkage expected)"
 	else
-		bad "ldd output does not mention $lib (expected a link-time dependency)"
+		ok "ldd does not link $lib"
 	fi
 done
 
