@@ -249,9 +249,8 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 // hint the GM review surface shows beside a Knowledge Proposal (#300, ADR-0052).
 // NULL-embedding rows are excluded (the partial HNSW index). Unlike the
 // prompt-facing searches this INCLUDES gm_private Nodes: it is GM-facing review
-// only, so the exclusion that guards NPC prompts does not apply here. NEVER reuse
-// this for NPC prompt assembly — it would leak GM secrets. k <= 0 is a caller bug
-// and errors. The query vector reuses encodeVector + a server-side ::vector cast,
+// only, and it is deliberately NOT part of [PromptKGView] — prompt assembly
+// cannot reach it (#450). k <= 0 is a caller bug and errors. The query vector reuses encodeVector + a server-side ::vector cast,
 // so storage carries no pgvector-go dependency.
 func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]KGNode, error) {
 	if k <= 0 {

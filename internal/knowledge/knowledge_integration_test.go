@@ -120,7 +120,7 @@ func TestAdapter_SearchFactsDropsGMPrivate_RealDB(t *testing.T) {
 		}
 	}
 
-	adapter := knowledge.New(store, staticSession{sess: storage.VoiceSession{CampaignID: campaignID}, live: true})
+	adapter := knowledge.New(store, store.PromptKG(), staticSession{sess: storage.VoiceSession{CampaignID: campaignID}, live: true})
 
 	// LIMIT 1 is the discriminating case: the private rows out-rank the public one,
 	// so only a BEFORE-LIMIT exclusion can return the public fact.
@@ -154,7 +154,7 @@ func TestAdapter_SearchTranscriptCampaignScoped_RealDB(t *testing.T) {
 		t.Fatalf("upsert transcript line: %v", err)
 	}
 
-	adapter := knowledge.New(store, staticSession{sess: sess, live: true})
+	adapter := knowledge.New(store, store.PromptKG(), staticSession{sess: sess, live: true})
 
 	hits, err := adapter.SearchTranscript(ctx, "promise", 10)
 	if err != nil {
@@ -165,7 +165,7 @@ func TestAdapter_SearchTranscriptCampaignScoped_RealDB(t *testing.T) {
 	}
 
 	// No active session → the campaign-scoped reads error, never read cross-campaign.
-	idle := knowledge.New(store, staticSession{live: false})
+	idle := knowledge.New(store, store.PromptKG(), staticSession{live: false})
 	if _, err := idle.SearchTranscript(ctx, "promise", 10); !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("SearchTranscript idle = %v, want ErrNoActiveSession", err)
 	}

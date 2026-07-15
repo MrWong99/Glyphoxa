@@ -19,7 +19,7 @@ import (
 // agentID string, so the render/cap tests must pass a real uuid to reach the read.
 var testAgent = uuid.New()
 
-// fakeNodes is a scripted kgfacts.Nodes: it returns fixed Nodes or an error, and
+// fakeNodes is a scripted kgfacts.PromptKG: it returns fixed Nodes or an error, and
 // can block until ctx is cancelled to exercise the budget timeout.
 type fakeNodes struct {
 	nodes    []storage.KGNode
@@ -64,7 +64,7 @@ func activeSessions(campaignID uuid.UUID) fakeSessions {
 	return fakeSessions{vs: storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID}, ok: true}
 }
 
-func newRecaller(t *testing.T, nodes kgfacts.Nodes, sessions kgfacts.Sessions, m kgfacts.Metrics) *kgfacts.Recaller {
+func newRecaller(t *testing.T, nodes kgfacts.PromptKG, sessions kgfacts.Sessions, m kgfacts.Metrics) *kgfacts.Recaller {
 	t.Helper()
 	return kgfacts.New(nodes, sessions, m, nil, kgfacts.Config{})
 }

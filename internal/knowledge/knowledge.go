@@ -9,9 +9,9 @@
 // It mirrors the kgfacts pattern (internal/kgfacts): a Store for the reads plus a
 // Sessions source for the active Campaign, with "no active session → error" so a
 // Tool called outside a live turn reports it cleanly rather than reading nothing.
-// The load-bearing invariant is SearchFacts DROPPING gm_private rows:
-// storage.SearchNodes is the GM-facing wiki search and does NOT filter them
-// (ADR-0008), so an unfiltered pass would leak a GM secret into an NPC's prompt.
+// The prompt-facing KG fact reads run exclusively through the [PromptKG] seam,
+// which has no method that can return a gm_private row (#450) — filtering is
+// enforced by that interface, see the gm_private seam test in internal/storage.
 package knowledge
 
 import (
@@ -37,19 +37,33 @@ import (
 // panic or a silent empty read against the wrong Campaign.
 var ErrNoActiveSession = errors.New("knowledge: no active voice session")
 
-// Store is the narrow set of storage reads the adapter needs. *storage.Store
-// satisfies it. Kept local (not the whole *storage.Store) so the adapter's
-// contract is explicit and unit-fakeable.
-type Store interface {
+// PromptKG is the prompt-facing KG read seam (#450): the ONLY surface the
+// adapter's fact reads (OwnNodeFacts, SearchFacts — both of which land in an
+// Agent's prompt) may touch. Every method is gm_private-filtered in storage and
+// the interface deliberately declares NO unfiltered read, so wiring a GM-facing
+// read into prompt assembly is unrepresentable here — the guard is the type, not
+// a per-call-site comment. storage.PromptKGView satisfies it.
+type PromptKG interface {
 	// SearchPublicNodes is the prompt-facing KG search: gm_private Nodes are
 	// EXCLUDED in the query (before the LIMIT), so a GM-only Node never reaches a
 	// prompt and a public match is not starved by top-ranked private hits (ADR-0008).
 	SearchPublicNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
-	// SearchTranscriptLines is the campaign-scoped transcript search (#120).
-	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
 	// AgentNodeFacts is the Agent's own edge-aware neighbourhood, already
 	// gm_private-filtered (#133).
 	AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]storage.KGNode, error)
+}
+
+// Compile-time assertion: the storage prompt view satisfies the seam.
+var _ PromptKG = storage.PromptKGView{}
+
+// Store is the narrow set of NON-prompt storage reads/writes the adapter needs —
+// the transcript search plus the Knowledge Proposal write path (ADR-0052, already
+// GM-gated). *storage.Store satisfies it. Kept local (not the whole
+// *storage.Store) so the adapter's contract is explicit and unit-fakeable. The
+// prompt-facing KG fact reads live on [PromptKG] instead (#450).
+type Store interface {
+	// SearchTranscriptLines is the campaign-scoped transcript search (#120).
+	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)
 	// AgentLinkedNode is the Agent's own linked Node (the NPC-Node↔Agent link),
 	// the anchor an own_node-scoped remember_knowledge proposal attaches to (#300,
 	// ADR-0052). ok=false means the Agent has no linked entry.
@@ -62,7 +76,8 @@ type Store interface {
 	// queue a re-proposal is checked against.
 	ListPendingKnowledgeProposals(ctx context.Context, campaignID uuid.UUID) ([]storage.KnowledgeProposal, error)
 	// ListNodes resolves a campaign-scoped proposal's subject Node by name so its
-	// established body facts can be dedup candidates (#411).
+	// established body facts can be dedup candidates (#411, write path — its output
+	// is Go-filtered for gm_private before any echo, see ExistingKnowledge).
 	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
 }
 
@@ -74,20 +89,24 @@ type Sessions interface {
 }
 
 // Adapter implements both tool.TranscriptSearcher and tool.KGReader over a
-// storage Store and the active-session source. Safe for concurrent use (its deps
-// are). Build it once at web boot and set it on the session Manager's base config.
+// storage Store, the prompt-facing [PromptKG] read seam, and the active-session
+// source. Safe for concurrent use (its deps are). Build it once at web boot and
+// set it on the session Manager's base config.
 type Adapter struct {
 	store    Store
+	kg       PromptKG // prompt-facing KG fact reads ONLY (#450)
 	sessions Sessions
 }
 
-// New builds the adapter. Both deps must be non-nil — they are wiring
-// requirements, so a nil is a boot bug, not a runtime condition.
-func New(store Store, sessions Sessions) *Adapter {
-	if store == nil || sessions == nil {
-		panic("knowledge: New: nil store or sessions")
+// New builds the adapter over the non-prompt store reads, the prompt-facing KG
+// read seam (pass storage's PromptKG() view), and the session source. All deps
+// must be non-nil — they are wiring requirements, so a nil is a boot bug, not a
+// runtime condition.
+func New(store Store, kg PromptKG, sessions Sessions) *Adapter {
+	if store == nil || kg == nil || sessions == nil {
+		panic("knowledge: New: nil store, prompt KG, or sessions")
 	}
-	return &Adapter{store: store, sessions: sessions}
+	return &Adapter{store: store, kg: kg, sessions: sessions}
 }
 
 // activeCampaign resolves the Campaign the live session scopes reads to, or
@@ -127,16 +146,17 @@ func (a *Adapter) SearchTranscript(ctx context.Context, query string, limit int)
 }
 
 // OwnNodeFacts implements [tool.KGReader]. It returns the Agent's own linked Node
-// plus its single-hop neighbourhood (#133), already gm_private-filtered and
-// edge-aware by storage. The agentID is the caller identity threaded from the
-// turn ctx (never the LLM args); an empty or unparseable id has no neighbourhood
-// to scope to and yields no facts (never a wider fallback).
+// plus its single-hop neighbourhood (#133), read through the [PromptKG] seam
+// (gm_private filtering enforced by that interface, #450). The agentID is the
+// caller identity threaded from the turn ctx (never the LLM args); an empty or
+// unparseable id has no neighbourhood to scope to and yields no facts (never a
+// wider fallback).
 func (a *Adapter) OwnNodeFacts(ctx context.Context, agentID string) ([]tool.KGFact, error) {
 	aid, err := uuid.Parse(agentID)
 	if err != nil || aid == uuid.Nil {
 		return nil, nil
 	}
-	nodes, err := a.store.AgentNodeFacts(ctx, aid)
+	nodes, err := a.kg.AgentNodeFacts(ctx, aid)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: own node facts: %w", err)
 	}
@@ -144,17 +164,16 @@ func (a *Adapter) OwnNodeFacts(ctx context.Context, agentID string) ([]tool.KGFa
 }
 
 // SearchFacts implements [tool.KGReader]. It runs the campaign-wide KG search for
-// the Butler's grant over SearchPublicNodes, which EXCLUDES gm_private Nodes in
-// the query itself — the load-bearing ADR-0008 guard. The exclusion must be in
-// the query, not a post-fetch Go filter: filtering after the SQL LIMIT would drop
-// the top-N ranked hits when they are all gm_private and starve a public match
-// ranked just past the limit. No session yields ErrNoActiveSession.
+// the Butler's grant through the [PromptKG] seam, whose SearchPublicNodes
+// EXCLUDES gm_private Nodes in the query itself, before the LIMIT (gm_private
+// filtering enforced by that interface, #450 — see the seam test in
+// internal/storage). No session yields ErrNoActiveSession.
 func (a *Adapter) SearchFacts(ctx context.Context, query string, limit int) ([]tool.KGFact, error) {
 	campaignID, err := a.activeCampaign()
 	if err != nil {
 		return nil, err
 	}
-	nodes, err := a.store.SearchPublicNodes(ctx, campaignID, query, limit)
+	nodes, err := a.kg.SearchPublicNodes(ctx, campaignID, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: search facts: %w", err)
 	}
