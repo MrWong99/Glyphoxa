@@ -3,7 +3,8 @@
 // and the generated wire types in gen/glyphoxa/management/v1, and the
 // translation of storage errors into Connect status codes. Handlers depend on
 // narrow reader interfaces (not *storage.Store) so they unit-test keyless with
-// a fake and integration-test against a real store.
+// a fake and integration-test against a real store; CampaignServer composes
+// per-feature modules, each over its own 3–6-method store slice (#445).
 package rpc
 
 import (
@@ -22,159 +23,96 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
-// campaignStore is the narrow storage surface CampaignServer needs — the active
-// campaign read, the roster reads and agent CRUD writes (#71), and the campaign
-// management reads/writes (#264). *storage.Store satisfies it, so handlers can be
-// driven by a fake in unit tests and the real store in integration tests.
-type campaignStore interface {
-	// GetActiveCampaignForUser + GetActiveCampaign are the profile-first resolution
-	// (durable /glyphoxa use selection → most-recent fallback) the header + CRUD +
-	// KG reads scope through instead of the plain most-recent read (#222).
-	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
-	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
-	// GetCampaign loads a campaign by id: the roster/mute panel resolves the LIVE
-	// Voice Session's campaign first (#222), so it fetches that specific row rather
-	// than the profile default. UpdateAgent also uses it to read the owning
-	// campaign's language for a first-save voice default (#224).
-	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	// ListCampaigns/CreateCampaign/UpdateCampaign/SetActiveCampaign back the
-	// campaign management RPCs (#264): the name-ordered picker list, the tenant-
-	// scoped create (auto-Butler fires), the opaque name/system/language write, and
-	// the durable /glyphoxa use selection shared with the slash-command surface.
-	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
-	CreateCampaign(ctx context.Context, c storage.NewCampaign) (uuid.UUID, error)
-	UpdateCampaign(ctx context.Context, c storage.CampaignUpdate) (storage.Campaign, error)
-	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
-	// The campaign archive lifecycle (#269): ListAllCampaigns is the archive-
-	// inclusive list the include_archived flag routes to; Archive/Unarchive/Delete
-	// are the lifecycle writes. Delete cascades in one statement; Archive clears any
-	// durable selection pointing at the campaign.
-	ListAllCampaigns(ctx context.Context) ([]storage.Campaign, error)
-	ArchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	UnarchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	DeleteCampaign(ctx context.Context, id uuid.UUID) error
-	// DeleteCampaignWithJob hard-deletes AND enqueues a follow-up job atomically
-	// (#308): the campaign hard delete uses it to schedule the Highlight-clip blob
-	// sweep in the delete's own transaction, so the sweep exists iff the delete
-	// committed (no orphan sweep of a surviving campaign, no lost sweep on a crash).
-	DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error
-	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
-	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
-	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
-	CreateAgent(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
-	UpdateAgent(ctx context.Context, a storage.AgentUpdate) (storage.Agent, error)
-	DeleteAgent(ctx context.Context, campaignID, id uuid.UUID) error
-	CreateNode(ctx context.Context, n storage.NewKGNode) (storage.KGNode, error)
-	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
-	UpdateNode(ctx context.Context, u storage.KGNodeUpdate) (storage.KGNode, error)
-	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
-	CreateEdge(ctx context.Context, e storage.NewKGEdge) (storage.KGEdge, error)
-	DeleteEdge(ctx context.Context, campaignID, id uuid.UUID) error
-	NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
-	SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
-	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
-	// Knowledge Proposal review (#300, ADR-0052): the GM review surface's list of
-	// pending proposals, the single-proposal read the similarity hint keys off, the
-	// atomic approve/reject writes, and the embedding-vector nearest-neighbour search
-	// the similarity hint runs.
-	ListPendingKnowledgeProposals(ctx context.Context, campaignID uuid.UUID) ([]storage.KnowledgeProposal, error)
-	GetPendingKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) (storage.KnowledgeProposal, error)
-	ApproveKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) error
-	RejectKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) error
-	SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]storage.KGNode, error)
-	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
-	UpsertToolGrant(ctx context.Context, g storage.NewToolGrant) error
-	DeleteToolGrant(ctx context.Context, agentID uuid.UUID, toolName string) error
-	// Player Character (PC) CRUD (#276, E4): the campaign-scoped roster read plus
-	// create/update (incl. Discord-User rebind)/delete. All resolve the active
-	// campaign server-side like the Agent CRUD, so another campaign's Characters
-	// are never returned nor mutable.
-	ListCharacters(ctx context.Context, campaignID uuid.UUID) ([]storage.Character, error)
-	CreateCharacter(ctx context.Context, c storage.NewCharacter) (uuid.UUID, error)
-	UpdateCharacter(ctx context.Context, c storage.CharacterUpdate) (storage.Character, error)
-	DeleteCharacter(ctx context.Context, campaignID, id uuid.UUID) error
-}
-
-// CampaignServer implements managementv1connect.CampaignServiceHandler over a
-// campaignStore. tools is the built-in Tool catalog the grant editor lists
-// (ADR-0028) — the available-Tools source for ListToolGrants and the registry
-// UpdateToolGrant validates tool_name against (#117).
+// CampaignServer implements managementv1connect.CampaignServiceHandler as a
+// composition of feature modules (#445): campaign management, the archive
+// lifecycle, the Agent roster, Player Characters, KG Nodes/Edges, Knowledge
+// Proposals, and Tool Grants. Each module declares the minimal store slice it
+// consumes (all satisfied structurally by *storage.Store) and its RPC methods
+// promote onto this struct, so the wire surface — one CampaignService behind
+// one interceptor stack — is unchanged while a unit test fakes only the slice
+// its feature reads.
 type CampaignServer struct {
-	store campaignStore
-	tools *tool.Registry
-	// liveCampaign reports the live Voice Session's campaign id, if any. Nil until
-	// SetSessions wires it; the roster/mute panel resolves through it so it scopes
-	// to the campaign actually voicing, not a durable selection changed mid-session
-	// (#222). Set once at boot before serving, so no lock is needed.
-	liveCampaign func() (uuid.UUID, bool)
-	// memberLister lists the Discord Users currently in the operator's voice
-	// channel for the Players panel picker (#279). Nil until SetMemberLister wires
-	// it (a keyless / bot-offline deployment leaves it nil); the handler then
-	// returns an empty list so the UI falls back to free-text snowflake entry. Set
-	// once at boot before serving, so no lock is needed.
-	memberLister voiceMemberLister
-	// speakerInv drops a campaign's cached speaker→name resolutions after a Character
-	// mutation (#281, ADR-0039 in-proc direct-method invalidation), so the live relay
-	// re-resolves future lines with the new mapping. Nil disables (feature off / no
-	// live resolver); set once at boot before serving.
-	speakerInv SpeakerInvalidator
-	// clips sweeps a campaign's Session Highlight clips out of blob storage on hard
-	// delete (#308, ADR-0048): highlight rows cascade with the campaign, but the
-	// clip blobs have NO FK and must be dropped through the seam. Nil disables the
-	// sweep (web-only / no blob backend); set once at boot before serving.
-	clips HighlightClipSweeper
-	// embedder embeds a proposal's subject text for the ListSimilarKnowledge vector
-	// hint (#300, ADR-0011/0052). Nil (no embeddings provider wired, or a keyless
-	// deployment) makes the hint degrade silently to fulltext SearchNodes. Set once
-	// at boot before serving, so no lock is needed.
-	embedder Embedder
+	// active is the ONE live-first Active-Campaign resolution every module
+	// shares (#222): SetSessions wires its live closure once at boot, and every
+	// surface (header, roster/mute panel, campaign CRUD, KG wiki, review queue)
+	// scopes through it, so a screen's reads and writes always agree.
+	active *activeCampaignSource
+
+	*campaignManagement
+	*campaignArchive
+	*agentRoster
+	*characterRoster
+	*kgNodes
+	*kgEdges
+	*knowledgeProposals
+	*toolGrants
 }
 
-// Embedder embeds short texts to query vectors for the Knowledge Proposal
-// similarity hint (#300, ADR-0052). The resolved embeddings provider satisfies it;
-// nil disables the vector path (the hint falls back to fulltext search).
-type Embedder interface {
-	Embed(ctx context.Context, texts []string) ([][]float32, error)
+// CampaignStores groups the per-feature store slices CampaignServer composes
+// (#445). One *storage.Store satisfies every field structurally — that is what
+// NewCampaignServer wires — while a unit test fills ONLY the slice its feature
+// under test reads (plus Active for handlers that resolve the Active Campaign)
+// and leaves the rest nil.
+type CampaignStores struct {
+	// Active backs the shared live-first Active-Campaign resolution (#222)
+	// every scoped handler walks before touching its feature slice.
+	Active activeCampaignResolver
+	// Campaigns backs the campaign management surface: list/create/update and
+	// the durable /glyphoxa use selection (#264).
+	Campaigns campaignManagementStore
+	// Archive backs the archive/hard-delete lifecycle (#269).
+	Archive campaignArchiveStore
+	// Agents backs the roster read and the Agent (NPC) CRUD (#71).
+	Agents agentStore
+	// Characters backs the Player Character CRUD (#276).
+	Characters characterStore
+	// KGNodes backs the Knowledge Graph Node CRUD + wiki search (#126, #131).
+	KGNodes kgNodeStore
+	// KGEdges backs the Knowledge Graph Edge CRUD + the voiced-by link (#132).
+	KGEdges kgEdgeStore
+	// Proposals backs the Knowledge Proposal review queue + similarity hint
+	// (#300, ADR-0052).
+	Proposals knowledgeProposalStore
+	// Grants backs the Tool Grant editor (#117).
+	Grants toolGrantStore
 }
 
-// SetEmbedder wires the embeddings provider the ListSimilarKnowledge vector hint
-// uses (#300). Called once at boot before serving; nil leaves the hint on the
-// fulltext fallback only.
-func (s *CampaignServer) SetEmbedder(e Embedder) {
-	s.embedder = e
+// NewCampaignServer wires every feature module over the one concrete store —
+// the production composition (cmd/glyphoxa) and the integration tests use it.
+// The available-Tools catalog is the shared built-in Registry (ADR-0028), so
+// the grants a GM can toggle are exactly the Tools a Voice Session runs;
+// nothing external configures it.
+func NewCampaignServer(s *storage.Store) *CampaignServer {
+	return NewCampaignServerWith(CampaignStores{
+		Active:     s,
+		Campaigns:  s,
+		Archive:    s,
+		Agents:     s,
+		Characters: s,
+		KGNodes:    s,
+		KGEdges:    s,
+		Proposals:  s,
+		Grants:     s,
+	})
 }
 
-// HighlightClipSweeper drops a campaign's Session Highlight clips through the blob
-// seam on hard delete (#308, ADR-0048). main.go wires it over
-// storage.ListCampaignHighlightClipKeys + blob.Delete. The keys are listed BEFORE
-// the campaign row delete (which cascades the highlight rows away) and the blobs
-// are dropped AFTER the delete succeeds, so a refused delete never orphans a live
-// campaign's clips.
-type HighlightClipSweeper interface {
-	CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
-	DeleteClip(ctx context.Context, key string) error
-}
-
-// SetHighlightClipSweeper wires the highlight-clip blob sweep the campaign hard
-// delete runs (#308). Called once at boot before serving; nil leaves the sweep
-// off (the highlight rows still cascade, only their blobs would linger).
-func (s *CampaignServer) SetHighlightClipSweeper(sw HighlightClipSweeper) {
-	s.clips = sw
-}
-
-// SpeakerInvalidator drops a campaign's cached speaker→name resolutions. The live
-// *speaker.Resolver satisfies it; the Character CRUD handlers call it on
-// create/update/delete so a rebind takes effect on the next projected line (#281).
-type SpeakerInvalidator interface {
-	InvalidateCampaign(campaignID uuid.UUID)
-}
-
-// NewCampaignServer wraps a campaignStore (e.g. *storage.Store) in a
-// CampaignServer. The available-Tools catalog is the shared built-in Registry
-// (ADR-0028), so the grants a GM can toggle are exactly the Tools a Voice Session
-// runs; nothing external configures it.
-func NewCampaignServer(s campaignStore) *CampaignServer {
-	return &CampaignServer{store: s, tools: tool.BuiltinRegistry(tool.Deps{})}
+// NewCampaignServerWith composes the feature modules over per-feature store
+// slices (#445), so a unit test drives one feature over the full Connect stack
+// while faking only that feature's slice. A nil slice leaves that feature's
+// handlers panicking on first use — fill exactly what the test exercises.
+func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
+	active := &activeCampaignSource{store: stores.Active}
+	return &CampaignServer{
+		active:             active,
+		campaignManagement: &campaignManagement{store: stores.Campaigns, active: active},
+		campaignArchive:    &campaignArchive{store: stores.Archive, active: active},
+		agentRoster:        &agentRoster{store: stores.Agents, active: active},
+		characterRoster:    &characterRoster{store: stores.Characters, active: active},
+		kgNodes:            &kgNodes{store: stores.KGNodes, active: active},
+		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
+		knowledgeProposals: &knowledgeProposals{store: stores.Proposals, active: active},
+		toolGrants:         &toolGrants{store: stores.Grants, active: active, tools: tool.BuiltinRegistry(tool.Deps{})},
+	}
 }
 
 // compile-time assertion that CampaignServer satisfies the generated handler.
@@ -187,7 +125,7 @@ var _ managementv1connect.CampaignServiceHandler = (*CampaignServer)(nil)
 // mid-session. Called once at boot, after the session manager exists and before
 // the server serves, so no lock is needed — mirrors VoiceServer.SetSessions.
 func (s *CampaignServer) SetSessions(src activeSessionSource) {
-	s.liveCampaign = func() (uuid.UUID, bool) {
+	s.active.live = func() (uuid.UUID, bool) {
 		vs, active := src.Snapshot()
 		return vs.CampaignID, active
 	}
@@ -197,23 +135,49 @@ func (s *CampaignServer) SetSessions(src activeSessionSource) {
 // (#281). Called once at boot before serving, so no lock is needed; nil-safe at the
 // call sites (invalidateSpeakers). A nil resolver leaves the hook off.
 func (s *CampaignServer) SetSpeakerInvalidator(inv SpeakerInvalidator) {
-	s.speakerInv = inv
+	s.characterRoster.speakerInv = inv
 }
 
-// invalidateSpeakers drops a campaign's cached speaker resolutions after a
-// Character mutation, if a resolver is wired (#281). Nil-safe.
-func (s *CampaignServer) invalidateSpeakers(campaignID uuid.UUID) {
-	if s.speakerInv != nil {
-		s.speakerInv.InvalidateCampaign(campaignID)
-	}
+// SetEmbedder wires the embeddings provider the ListSimilarKnowledge vector hint
+// uses (#300). Called once at boot before serving; nil leaves the hint on the
+// fulltext fallback only.
+func (s *CampaignServer) SetEmbedder(e Embedder) {
+	s.knowledgeProposals.embedder = e
 }
 
-// activeCampaign resolves the campaign every CampaignService handler scopes to,
-// via the one shared resolveActiveCampaign policy (live Voice Session → durable
-// /glyphoxa use selection → most-recent fallback, #222). Reads and writes on the
-// same screen therefore always name the same campaign.
-func (s *CampaignServer) activeCampaign(ctx context.Context) (storage.Campaign, error) {
-	return resolveActiveCampaign(ctx, s.liveCampaign, s.store)
+// SetHighlightClipSweeper wires the highlight-clip blob sweep the campaign hard
+// delete runs (#308). Called once at boot before serving; nil leaves the sweep
+// off (the highlight rows still cascade, only their blobs would linger).
+func (s *CampaignServer) SetHighlightClipSweeper(sw HighlightClipSweeper) {
+	s.campaignArchive.clips = sw
+}
+
+// campaignManagement is the campaign lifecycle feature module (#264, #222): the
+// Session-screen header's Active-Campaign read, the campaign list/create/update
+// management surface, the durable /glyphoxa use selection, and the Campaign
+// Language catalog (#268 — a pure registry read).
+type campaignManagement struct {
+	store  campaignManagementStore
+	active *activeCampaignSource
+}
+
+// campaignManagementStore is the narrow campaign-management surface the module
+// needs (#264); *storage.Store satisfies it, so the handlers unit-test keyless
+// with a fake.
+type campaignManagementStore interface {
+	// ListCampaigns is the name-ordered ACTIVE-only picker list; ListAllCampaigns
+	// is the archive-inclusive variant the include_archived flag routes to (#269).
+	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	ListAllCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	// CreateCampaign is the tenant-scoped create (the ADR-0009 auto-Butler trigger
+	// fires on the insert); GetCampaign backs its read-back and SetActiveCampaign's
+	// pre-write validation.
+	CreateCampaign(ctx context.Context, c storage.NewCampaign) (uuid.UUID, error)
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	UpdateCampaign(ctx context.Context, c storage.CampaignUpdate) (storage.Campaign, error)
+	// SetActiveCampaign records the durable /glyphoxa use selection shared with the
+	// slash-command surface (migration 00014).
+	SetActiveCampaign(ctx context.Context, discordUserID string, campaignID uuid.UUID) error
 }
 
 // GetActiveCampaign resolves the operator's active campaign and maps it onto the
@@ -222,11 +186,11 @@ func (s *CampaignServer) activeCampaign(ctx context.Context) (storage.Campaign, 
 // Session-screen header names the same campaign the roster, transcript, and Start
 // do (#222). A storage.ErrNotFound (no campaign exists) becomes CodeNotFound; any
 // other failure becomes CodeInternal.
-func (s *CampaignServer) GetActiveCampaign(
+func (s *campaignManagement) GetActiveCampaign(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetActiveCampaignRequest],
 ) (*connect.Response[managementv1.GetActiveCampaignResponse], error) {
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

@@ -2,8 +2,6 @@ package rpc_test
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -11,47 +9,27 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// mgmtClient stands up the CampaignService handler with an injected operator +
-// tenant (the auth interceptor stack's resolved principal, ADR-0039) and an
-// optional live Voice Session source, returning a Connect-JSON client. The
-// management RPCs (#264) need both: CreateCampaign resolves the tenant, and
-// SetActiveCampaign resolves the operator's DiscordUserID.
-func mgmtClient(t *testing.T, store *fakeCampaignStore, user storage.User, tenantID uuid.UUID, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
+// mgmtClient stands up the CampaignService handler over the management slice
+// (Active + Campaigns, one fakeManagementStore serves both, #445) with an
+// injected operator + tenant (the auth interceptor stack's resolved principal,
+// ADR-0039) and an optional live Voice Session source, returning a
+// Connect-JSON client. The management RPCs (#264) need both: CreateCampaign
+// resolves the tenant, and SetActiveCampaign resolves the operator's
+// DiscordUserID.
+func mgmtClient(t *testing.T, store *fakeManagementStore, user storage.User, tenantID uuid.UUID, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
 	t.Helper()
-	srv := rpc.NewCampaignServer(store)
-	if sessions != nil {
-		srv.SetSessions(sessions)
-	}
-	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			if user.DiscordUserID != "" {
-				ctx = auth.WithUser(ctx, user)
-			}
-			if tenantID != uuid.Nil {
-				ctx = auth.WithTenant(ctx, tenantID)
-			}
-			return next(ctx, req)
-		}
-	})
-	mux := http.NewServeMux()
-	mux.Handle(srv.Handler(connect.WithInterceptors(inject)))
-	s := httptest.NewServer(mux)
-	t.Cleanup(s.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, s.URL, connect.WithProtoJSON(),
-	)
+	return campaignClientAs(t, rpc.CampaignStores{Active: store, Campaigns: store}, user, tenantID, sessions)
 }
 
 func TestListCampaigns_NameOrdered(t *testing.T) {
 	t.Parallel()
 	// The store already returns name-ordered rows (ListCampaigns SQL); the handler
 	// maps them 1:1, so assert the order is preserved onto the wire.
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	store.campaignList = []storage.Campaign{
 		{ID: uuid.New(), TenantID: uuid.New(), Name: "Alpha Quest", System: "dnd5e", Language: "en"},
 		{ID: uuid.New(), TenantID: uuid.New(), Name: "Lost Mine", System: "pf2e", Language: "de"},
@@ -77,7 +55,7 @@ func TestListCampaigns_NameOrdered(t *testing.T) {
 
 func TestListCampaigns_Empty(t *testing.T) {
 	t.Parallel()
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, newFakeManagementStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	resp, err := client.ListCampaigns(context.Background(),
 		connect.NewRequest(&managementv1.ListCampaignsRequest{}))
@@ -91,7 +69,7 @@ func TestListCampaigns_Empty(t *testing.T) {
 
 func TestListCampaigns_Internal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	store.listCampaignErr = errAny
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
@@ -104,7 +82,7 @@ func TestListCampaigns_Internal(t *testing.T) {
 
 func TestCreateCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	tenantID := uuid.New()
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, tenantID, nil)
 
@@ -134,7 +112,7 @@ func TestCreateCampaign_HappyPath(t *testing.T) {
 
 func TestCreateCampaign_EmptyNameInvalid(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	// Whitespace-only is treated as empty (trimmed), like CreateNode.
@@ -151,7 +129,7 @@ func TestCreateCampaign_EmptyNameInvalid(t *testing.T) {
 func TestCreateCampaign_NoTenantUnauthenticated(t *testing.T) {
 	t.Parallel()
 	// No tenant injected → the handler treats it as unauthenticated.
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.Nil, nil)
+	client := mgmtClient(t, newFakeManagementStore(), storage.User{DiscordUserID: "999"}, uuid.Nil, nil)
 
 	_, err := client.CreateCampaign(context.Background(),
 		connect.NewRequest(&managementv1.CreateCampaignRequest{Name: "x"}))
@@ -162,7 +140,7 @@ func TestCreateCampaign_NoTenantUnauthenticated(t *testing.T) {
 
 func TestCreateCampaign_Internal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	store.createCampaignErr = errAny
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
@@ -175,7 +153,7 @@ func TestCreateCampaign_Internal(t *testing.T) {
 
 func TestUpdateCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	id := uuid.New()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{
 		id: {ID: id, TenantID: uuid.New(), Name: "Old", System: "old-sys", Language: "en"},
@@ -209,7 +187,7 @@ func TestUpdateCampaign_HappyPath(t *testing.T) {
 // than silently disarming it.
 func TestUpdateCampaign_TapeArmed(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	id := uuid.New()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{
 		id: {ID: id, TenantID: uuid.New(), Name: "Old", Language: "en"},
@@ -246,7 +224,7 @@ func TestUpdateCampaign_TapeArmed(t *testing.T) {
 // rejects it (curation is the settings-editor slice's call).
 func TestUpdateCampaign_OpaqueFreeText(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	id := uuid.New()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{id: {ID: id, Name: "Old"}}
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
@@ -267,7 +245,7 @@ func TestUpdateCampaign_OpaqueFreeText(t *testing.T) {
 
 func TestUpdateCampaign_InvalidID(t *testing.T) {
 	t.Parallel()
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, newFakeManagementStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	_, err := client.UpdateCampaign(context.Background(),
 		connect.NewRequest(&managementv1.UpdateCampaignRequest{Id: "not-a-uuid", Name: "x"}))
@@ -278,7 +256,7 @@ func TestUpdateCampaign_InvalidID(t *testing.T) {
 
 func TestUpdateCampaign_EmptyNameInvalid(t *testing.T) {
 	t.Parallel()
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, newFakeManagementStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	_, err := client.UpdateCampaign(context.Background(),
 		connect.NewRequest(&managementv1.UpdateCampaignRequest{Id: uuid.New().String(), Name: "  "}))
@@ -290,7 +268,7 @@ func TestUpdateCampaign_EmptyNameInvalid(t *testing.T) {
 func TestUpdateCampaign_UnknownIDNotFound(t *testing.T) {
 	t.Parallel()
 	// campaignsByID is empty, so UpdateCampaign returns ErrNotFound.
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, newFakeManagementStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	_, err := client.UpdateCampaign(context.Background(),
 		connect.NewRequest(&managementv1.UpdateCampaignRequest{Id: uuid.New().String(), Name: "x"}))
@@ -301,7 +279,7 @@ func TestUpdateCampaign_UnknownIDNotFound(t *testing.T) {
 
 func TestSetActiveCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	target := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Target"}
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{target.ID: target}
 	// No live session and no durable selection lookup wired: the resolved read
@@ -330,7 +308,7 @@ func TestSetActiveCampaign_HappyPath(t *testing.T) {
 
 func TestSetActiveCampaign_InvalidID(t *testing.T) {
 	t.Parallel()
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, newFakeManagementStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	_, err := client.SetActiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.SetActiveCampaignRequest{CampaignId: "nope"}))
@@ -343,7 +321,7 @@ func TestSetActiveCampaign_UnknownIDNotFound(t *testing.T) {
 	t.Parallel()
 	// campaignsByID is empty → the pre-write GetCampaign validation returns
 	// ErrNotFound, and the selection is never persisted.
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	_, err := client.SetActiveCampaign(context.Background(),
@@ -365,7 +343,7 @@ func TestSetActiveCampaignLiveFirstWins(t *testing.T) {
 	t.Parallel()
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
-	store := newFakeStore()
+	store := newFakeManagementStore()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live, durable.ID: durable}
 	store.forUser = durable // the durable selection, were live-first not in force
 	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live.ID))

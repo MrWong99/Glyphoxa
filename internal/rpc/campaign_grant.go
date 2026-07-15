@@ -11,9 +11,10 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
-// Campaign-screen Tool Grant handlers (#117) on CampaignServer: list every
+// toolGrants is the Campaign-screen Tool Grant feature module (#117): list every
 // built-in Tool with an Agent's current grant state, and toggle a grant on/off
 // (editing its scope config) for an Agent. The available-Tools catalog is the
 // built-in Registry (ADR-0028), so the toggles a GM sees are exactly the Tools a
@@ -23,11 +24,29 @@ import (
 // UpdateToolGrant is state-changing so the auth + CSRF interceptors guard it —
 // identical to the sibling agent CRUD mutations (AC5), inherited from the shared
 // interceptor stack the web tier mounts, not re-implemented here.
+type toolGrants struct {
+	store  toolGrantStore
+	active *activeCampaignSource
+	// tools is the built-in Tool catalog the grant editor lists (ADR-0028) — the
+	// available-Tools source for ListToolGrants and the registry UpdateToolGrant
+	// validates tool_name against (#117). Always non-nil (set by the constructor).
+	tools *tool.Registry
+}
+
+// toolGrantStore is the narrow Tool-Grant surface the module needs (#117);
+// *storage.Store satisfies it. GetAgent backs the campaign-ownership check both
+// handlers run before a grant read or write keyed on agent_id alone (#342/#356).
+type toolGrantStore interface {
+	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
+	ListToolGrants(ctx context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error)
+	UpsertToolGrant(ctx context.Context, g storage.NewToolGrant) error
+	DeleteToolGrant(ctx context.Context, agentID uuid.UUID, toolName string) error
+}
 
 // ListToolGrants returns, for one Agent, every registered Tool paired with the
 // Agent's grant state (granted, scope config, whether the Tool supports a scope).
 // An unparsable agent_id is CodeInvalidArgument.
-func (s *CampaignServer) ListToolGrants(
+func (s *toolGrants) ListToolGrants(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListToolGrantsRequest],
 ) (*connect.Response[managementv1.ListToolGrantsResponse], error) {
@@ -41,7 +60,7 @@ func (s *CampaignServer) ListToolGrants(
 	// cross-campaign (or deleted, issue #215) target as CodeNotFound — a clean
 	// missing-Agent instead of a fabricated full-catalog-ungranted list — mirroring
 	// the sibling UpdateToolGrant write guard.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -67,7 +86,7 @@ func (s *CampaignServer) ListToolGrants(
 // registered and any config is valid JSON, then reads the resulting state back so
 // the response is the persisted truth. An unparsable agent_id, an unknown Tool, or
 // invalid config is CodeInvalidArgument.
-func (s *CampaignServer) UpdateToolGrant(
+func (s *toolGrants) UpdateToolGrant(
 	ctx context.Context,
 	req *connect.Request[managementv1.UpdateToolGrantRequest],
 ) (*connect.Response[managementv1.UpdateToolGrantResponse], error) {
@@ -88,7 +107,7 @@ func (s *CampaignServer) UpdateToolGrant(
 	// campaign A could grant/revoke Tools on campaign B's Agent (incl. B's Butler).
 	// The scoped check refuses a cross-campaign target as CodeNotFound before any
 	// write — and still maps a deleted Agent to CodeNotFound (issue #215).
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -147,7 +166,7 @@ func (s *CampaignServer) UpdateToolGrant(
 // or mutation keyed on agent_id alone can reach another campaign's Agent. Any
 // other lookup failure is CodeInternal. Shared by ListToolGrants (#356) and
 // UpdateToolGrant (#342).
-func (s *CampaignServer) requireAgentInCampaign(ctx context.Context, campaignID, agentID uuid.UUID) error {
+func (s *toolGrants) requireAgentInCampaign(ctx context.Context, campaignID, agentID uuid.UUID) error {
 	a, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -167,7 +186,7 @@ func (s *CampaignServer) requireAgentInCampaign(ctx context.Context, campaignID,
 // rows into the wire list: one entry per registered Tool (Name order), each
 // carrying its description, the Agent's granted bit + scope config, and whether
 // the Tool supports a scope. It is the shared body of both grant handlers.
-func (s *CampaignServer) toolGrantsFor(ctx context.Context, agentID uuid.UUID) ([]*managementv1.ToolGrant, error) {
+func (s *toolGrants) toolGrantsFor(ctx context.Context, agentID uuid.UUID) ([]*managementv1.ToolGrant, error) {
 	rows, err := s.store.ListToolGrants(ctx, agentID)
 	if err != nil {
 		return nil, err

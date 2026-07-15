@@ -3,8 +3,6 @@ package rpc_test
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -20,22 +18,17 @@ import (
 // member lister wired (nil = no standing presence). The Players panel picker
 // (#279) reads ListDiscordVoiceMembers, which must degrade to an empty list — not
 // an error — whenever the Bot can't answer, so the UI falls back to free-text.
+// The RPC touches no store slice, so the server composes empty CampaignStores (#445).
 func voiceMembersClient(
 	t *testing.T,
 	lister func(ctx context.Context) ([]presence.Member, error),
 ) managementv1connect.CampaignServiceClient {
 	t.Helper()
-	srv := rpc.NewCampaignServer(newFakeStore())
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{})
 	if lister != nil {
 		srv.SetMemberLister(lister)
 	}
-	mux := http.NewServeMux()
-	mux.Handle(srv.Handler())
-	s := httptest.NewServer(mux)
-	t.Cleanup(s.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, s.URL, connect.WithProtoJSON(),
-	)
+	return campaignClientServe(t, srv)
 }
 
 // A nil lister (no standing presence) or a lister failure (offline Bot) yields an

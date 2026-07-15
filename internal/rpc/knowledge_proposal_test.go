@@ -12,45 +12,26 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 )
 
-// --- fakeCampaignStore proposal-review methods (#300) ---
-
-func (f *fakeCampaignStore) ListPendingKnowledgeProposals(_ context.Context, campaignID uuid.UUID) ([]storage.KnowledgeProposal, error) {
-	f.listProposalsCampaign = campaignID
-	return f.pendingProposals, f.listProposalsErr
+// proposalClient composes a CampaignService client over the Knowledge Proposal
+// review slice (#300): one fakeProposalStore serves both Active (via the
+// embedded *fakeActive) and Proposals.
+func proposalClient(t *testing.T, store *fakeProposalStore) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClient(t, rpc.CampaignStores{Active: store, Proposals: store})
 }
 
-func (f *fakeCampaignStore) GetPendingKnowledgeProposal(_ context.Context, campaignID, id uuid.UUID) (storage.KnowledgeProposal, error) {
-	f.getProposalCampaign = campaignID
-	if f.getProposalErr != nil {
-		return storage.KnowledgeProposal{}, f.getProposalErr
-	}
-	return f.getProposal, nil
-}
-
-func (f *fakeCampaignStore) ApproveKnowledgeProposal(_ context.Context, campaignID, id uuid.UUID) error {
-	f.approveCampaign = campaignID
-	f.approveCalls = append(f.approveCalls, id)
-	return f.approveErr
-}
-
-func (f *fakeCampaignStore) RejectKnowledgeProposal(_ context.Context, campaignID, id uuid.UUID) error {
-	f.rejectCampaign = campaignID
-	f.rejectCalls = append(f.rejectCalls, id)
-	return f.rejectErr
-}
-
-func (f *fakeCampaignStore) SimilarNodes(_ context.Context, campaignID uuid.UUID, query []float32, k int) ([]storage.KGNode, error) {
-	f.similarCalls++
-	f.similarQueryVec = query
-	if f.similarErr != nil {
-		return nil, f.similarErr
-	}
-	return f.similarResults, nil
+// proposalClientWithEmbedder is proposalClient with a wired Embedder so the
+// ListSimilarKnowledge vector path (#300) is exercised.
+func proposalClientWithEmbedder(t *testing.T, store *fakeProposalStore, emb rpc.Embedder) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClientWithEmbedder(t, rpc.CampaignStores{Active: store, Proposals: store}, emb)
 }
 
 // fakeEmbedder records its input texts and returns a fixed vector (or an error).
@@ -82,7 +63,7 @@ func proposalRaw(t *testing.T, w tool.ProposedWrite) json.RawMessage {
 // fact/edge/node and that an unparseable row is still listed with an unset write.
 func TestListKnowledgeProposals_MapsThreeKinds(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.pendingProposals = []storage.KnowledgeProposal{
 		{ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Bart", CreatedAt: time.Now(),
@@ -94,7 +75,7 @@ func TestListKnowledgeProposals_MapsThreeKinds(t *testing.T) {
 		{ID: uuid.New(), AuthoringAgentID: uuid.New(), AuthoringAgentName: "Glyphoxa", CreatedAt: time.Now(),
 			ProposedWrite: json.RawMessage(`{"garbage":true}`)},
 	}
-	client := crudClient(t, store)
+	client := proposalClient(t, store)
 
 	resp, err := client.ListKnowledgeProposals(context.Background(),
 		connect.NewRequest(&managementv1.ListKnowledgeProposalsRequest{}))
@@ -125,9 +106,9 @@ func TestListKnowledgeProposals_MapsThreeKinds(t *testing.T) {
 
 func TestListKnowledgeProposals_NoCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := proposalClient(t, store)
 	_, err := client.ListKnowledgeProposals(context.Background(),
 		connect.NewRequest(&managementv1.ListKnowledgeProposalsRequest{}))
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
@@ -140,9 +121,9 @@ func TestApproveKnowledgeProposal_ErrorMapping(t *testing.T) {
 	t.Parallel()
 
 	t.Run("bad uuid is InvalidArgument", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		_, err := client.ApproveKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.ApproveKnowledgeProposalRequest{Id: "not-a-uuid"}))
 		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -151,9 +132,9 @@ func TestApproveKnowledgeProposal_ErrorMapping(t *testing.T) {
 	})
 
 	t.Run("happy path scopes to active campaign", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		id := uuid.New()
 		if _, err := client.ApproveKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.ApproveKnowledgeProposalRequest{Id: id.String()})); err != nil {
@@ -165,10 +146,10 @@ func TestApproveKnowledgeProposal_ErrorMapping(t *testing.T) {
 	})
 
 	t.Run("not found is NotFound", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
 		store.approveErr = storage.ErrNotFound
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		_, err := client.ApproveKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.ApproveKnowledgeProposalRequest{Id: uuid.New().String()}))
 		if got := connect.CodeOf(err); got != connect.CodeNotFound {
@@ -177,10 +158,10 @@ func TestApproveKnowledgeProposal_ErrorMapping(t *testing.T) {
 	})
 
 	t.Run("blocked is FailedPrecondition with verbatim reason", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
 		store.approveErr = &storage.ProposalBlockedError{Reason: `no wiki entry named "Waterdeep" — create it first, then approve; or reject`}
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		_, err := client.ApproveKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.ApproveKnowledgeProposalRequest{Id: uuid.New().String()}))
 		if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
@@ -196,9 +177,9 @@ func TestRejectKnowledgeProposal_ErrorMapping(t *testing.T) {
 	t.Parallel()
 
 	t.Run("bad uuid is InvalidArgument", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		_, err := client.RejectKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.RejectKnowledgeProposalRequest{Id: "x"}))
 		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -207,10 +188,10 @@ func TestRejectKnowledgeProposal_ErrorMapping(t *testing.T) {
 	})
 
 	t.Run("not found is NotFound", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
 		store.rejectErr = storage.ErrNotFound
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		_, err := client.RejectKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.RejectKnowledgeProposalRequest{Id: uuid.New().String()}))
 		if got := connect.CodeOf(err); got != connect.CodeNotFound {
@@ -219,9 +200,9 @@ func TestRejectKnowledgeProposal_ErrorMapping(t *testing.T) {
 	})
 
 	t.Run("happy path forwards id", func(t *testing.T) {
-		store := newFakeStore()
+		store := newFakeProposalStore()
 		store.campaign = storage.Campaign{ID: uuid.New()}
-		client := crudClient(t, store)
+		client := proposalClient(t, store)
 		id := uuid.New()
 		if _, err := client.RejectKnowledgeProposal(context.Background(),
 			connect.NewRequest(&managementv1.RejectKnowledgeProposalRequest{Id: id.String()})); err != nil {
@@ -237,14 +218,14 @@ func TestRejectKnowledgeProposal_ErrorMapping(t *testing.T) {
 // is embedded and SimilarNodes is queried with the resulting vector.
 func TestListSimilarKnowledge_EmbedderPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
 		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"}),
 	}
 	store.similarResults = []storage.KGNode{{ID: uuid.New(), Type: storage.KGNodeNPC, Name: "Bart"}}
 	emb := &fakeEmbedder{vec: make([]float32, embeddings.Dim)} // correct dimension → vector path
-	client := crudClientWithEmbedder(t, store, emb)
+	client := proposalClientWithEmbedder(t, store, emb)
 
 	resp, err := client.ListSimilarKnowledge(context.Background(),
 		connect.NewRequest(&managementv1.ListSimilarKnowledgeRequest{ProposalId: uuid.New().String()}))
@@ -267,13 +248,13 @@ func TestListSimilarKnowledge_EmbedderPath(t *testing.T) {
 // on the ::vector cast.
 func TestListSimilarKnowledge_WrongDimFallsBackToFTS(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
 		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "fact", Subject: "Bart", Fact: "Fears dark"}),
 	}
 	emb := &fakeEmbedder{vec: []float32{0.1, 0.2, 0.3}} // 3 dims, not embeddings.Dim
-	client := crudClientWithEmbedder(t, store, emb)
+	client := proposalClientWithEmbedder(t, store, emb)
 
 	if _, err := client.ListSimilarKnowledge(context.Background(),
 		connect.NewRequest(&managementv1.ListSimilarKnowledgeRequest{ProposalId: uuid.New().String()})); err != nil {
@@ -291,13 +272,13 @@ func TestListSimilarKnowledge_WrongDimFallsBackToFTS(t *testing.T) {
 // runs SearchNodes with the subject text.
 func TestListSimilarKnowledge_NilEmbedderFallsBackToFTS(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
 		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "node", Name: "Zhent", Body: "shadow"}),
 	}
 	store.searchResults = []storage.KGNode{{ID: uuid.New(), Type: storage.KGNodeFaction, Name: "Zhentarim"}}
-	client := crudClient(t, store) // no embedder
+	client := proposalClient(t, store) // no embedder
 
 	resp, err := client.ListSimilarKnowledge(context.Background(),
 		connect.NewRequest(&managementv1.ListSimilarKnowledgeRequest{ProposalId: uuid.New().String()}))
@@ -319,13 +300,13 @@ func TestListSimilarKnowledge_NilEmbedderFallsBackToFTS(t *testing.T) {
 // silently to fulltext search rather than failing the review.
 func TestListSimilarKnowledge_EmbedErrorFallsBackToFTS(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposal = storage.KnowledgeProposal{
 		ID: uuid.New(), ProposedWrite: proposalRaw(t, tool.ProposedWrite{V: 1, Kind: "edge", Subject: "Bart", Relation: "knows", Target: "Gundren"}),
 	}
 	emb := &fakeEmbedder{err: errors.New("provider down")}
-	client := crudClientWithEmbedder(t, store, emb)
+	client := proposalClientWithEmbedder(t, store, emb)
 
 	if _, err := client.ListSimilarKnowledge(context.Background(),
 		connect.NewRequest(&managementv1.ListSimilarKnowledgeRequest{ProposalId: uuid.New().String()})); err != nil {
@@ -343,10 +324,10 @@ func TestListSimilarKnowledge_EmbedErrorFallsBackToFTS(t *testing.T) {
 // proposal is CodeNotFound.
 func TestListSimilarKnowledge_MissingProposalIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeProposalStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.getProposalErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := proposalClient(t, store)
 	_, err := client.ListSimilarKnowledge(context.Background(),
 		connect.NewRequest(&managementv1.ListSimilarKnowledgeRequest{ProposalId: uuid.New().String()}))
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {

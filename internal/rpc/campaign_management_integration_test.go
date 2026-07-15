@@ -4,9 +4,15 @@
 // Connect-JSON against a real *storage.Store (testcontainers Postgres): list,
 // create (auto-Butler + dice grant invariant, ADR-0009), the opaque
 // name/system/language update, and the durable Active Campaign selection shared
-// with `/glyphoxa use` (migration 00014), including the live-first resolution
-// rule (#222). Tag-isolated behind `integration`; reuses startPostgres/seedStore
-// from campaign_integration_test.go.
+// with `/glyphoxa use` (migration 00014). Only the SQL-shaped behavior lives
+// here (#445) — the triggers, seed migrations, ORDER BY, and the shared
+// selection row. The live-first precedence is unit coverage
+// (TestSetActiveCampaignLiveFirstWins), and the #268 language-edit/voice
+// separation is covered twice elsewhere: structurally at the handler layer (the
+// management store slice cannot even name an Agent write) and at the SQL layer
+// by internal/storage's TestUpdateCampaignLanguageLeavesAgentVoiceUntouched.
+// Tag-isolated behind `integration`; reuses startPostgres/seedStore from
+// campaign_integration_test.go.
 
 package rpc_test
 
@@ -213,127 +219,5 @@ func TestCampaignManagement_Integration(t *testing.T) {
 	}))
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
 		t.Errorf("SetActiveCampaign(unknown) code = %v, want NotFound", got)
-	}
-}
-
-// TestUpdateCampaignLanguage_LeavesAgentVoiceUntouched pins the #268 decision that
-// a Campaign Language change mutates NOTHING downstream: existing Agents' voice
-// settings stay byte-identical (ADR-0009, #224). The first-save voice seeding
-// (applyVoiceSelection) lives ONLY on the agent-write path (UpdateAgent) and must
-// never fire from UpdateCampaign — this guards against a future re-seed regression
-// that would re-derive every Agent's voice from the new language.
-func TestUpdateCampaignLanguage_LeavesAgentVoiceUntouched(t *testing.T) {
-	dsn := startPostgres(t)
-	store, seededID := seedStore(t, dsn)
-	ctx := context.Background()
-
-	seeded, err := store.GetCampaign(ctx, seededID)
-	if err != nil {
-		t.Fatalf("GetCampaign(seeded): %v", err)
-	}
-	const operator = "operator-268"
-	client := mgmtIntegrationClient(t, store, seeded.TenantID, operator, nil)
-
-	// A fresh campaign in language "en" with its auto-Butler (ADR-0009), made the
-	// durable Active Campaign so the agent-write path resolves it (#222).
-	created, err := client.CreateCampaign(ctx, connect.NewRequest(&managementv1.CreateCampaignRequest{
-		Name: "Voice Guard", System: "dnd5e", Language: "en",
-	}))
-	if err != nil {
-		t.Fatalf("CreateCampaign: %v", err)
-	}
-	campID := created.Msg.GetCampaign().GetId()
-	if _, err := client.SetActiveCampaign(ctx, connect.NewRequest(&managementv1.SetActiveCampaignRequest{
-		CampaignId: campID,
-	})); err != nil {
-		t.Fatalf("SetActiveCampaign: %v", err)
-	}
-
-	butler, err := store.GetButler(ctx, uuid.MustParse(campID))
-	if err != nil {
-		t.Fatalf("GetButler: %v", err)
-	}
-
-	// Give the Butler a concrete voice via the agent-write path — this is where the
-	// language legitimately seeds the first-save voice default (#224).
-	if _, err := client.UpdateAgent(ctx, connect.NewRequest(&managementv1.UpdateAgentRequest{
-		Id: butler.ID.String(), Name: butler.Name, Title: butler.Title, Persona: butler.Persona,
-		Voice: "voice-en-123", AddressOnly: butler.AddressOnly,
-	})); err != nil {
-		t.Fatalf("UpdateAgent(seed voice): %v", err)
-	}
-	before, err := store.GetAgent(ctx, butler.ID)
-	if err != nil {
-		t.Fatalf("GetAgent(before): %v", err)
-	}
-	if len(before.Voice) == 0 {
-		t.Fatalf("precondition: Butler voice not seeded, got %q", string(before.Voice))
-	}
-
-	// The change under test: Campaign Language en -> de.
-	if _, err := client.UpdateCampaign(ctx, connect.NewRequest(&managementv1.UpdateCampaignRequest{
-		Id: campID, Name: "Voice Guard", System: "dnd5e", Language: "de",
-	})); err != nil {
-		t.Fatalf("UpdateCampaign(lang en->de): %v", err)
-	}
-
-	// The language column moved…
-	after, err := store.GetCampaign(ctx, uuid.MustParse(campID))
-	if err != nil {
-		t.Fatalf("GetCampaign(after): %v", err)
-	}
-	if after.Language != "de" {
-		t.Fatalf("campaign language = %q, want de", after.Language)
-	}
-	// …but the Butler's voice blob is byte-identical: a language change mutates no
-	// Agent voice (the #268 decision; applyVoiceSelection stays unused here).
-	agentAfter, err := store.GetAgent(ctx, butler.ID)
-	if err != nil {
-		t.Fatalf("GetAgent(after): %v", err)
-	}
-	if string(agentAfter.Voice) != string(before.Voice) {
-		t.Errorf("Butler voice changed on a language edit:\n before = %s\n after  = %s",
-			string(before.Voice), string(agentAfter.Voice))
-	}
-}
-
-// TestSetActiveCampaignLiveFirst_Integration pins the live-first resolution rule
-// (#222, #264) end to end: with a live Voice Session bound to campaign L, a
-// durable selection of a DIFFERENT campaign D is still written (both surfaces in
-// lockstep) but the resolved Active Campaign is L — the live session wins.
-func TestSetActiveCampaignLiveFirst_Integration(t *testing.T) {
-	dsn := startPostgres(t)
-	store, liveID := seedStore(t, dsn) // "Lost Mine" is the live campaign L
-	ctx := context.Background()
-
-	seeded, err := store.GetCampaign(ctx, liveID)
-	if err != nil {
-		t.Fatalf("GetCampaign(seeded): %v", err)
-	}
-	// A second campaign D in the same tenant to durably select.
-	durableID, err := store.CreateCampaign(ctx, storage.NewCampaign{
-		TenantID: seeded.TenantID, Name: "Durable D", System: "dnd5e", Language: "en",
-	})
-	if err != nil {
-		t.Fatalf("CreateCampaign(D): %v", err)
-	}
-
-	// A live session bound to L.
-	client := mgmtIntegrationClient(t, store, seeded.TenantID, "operator-live", liveMgr(liveID))
-
-	setResp, err := client.SetActiveCampaign(ctx, connect.NewRequest(&managementv1.SetActiveCampaignRequest{
-		CampaignId: durableID.String(),
-	}))
-	if err != nil {
-		t.Fatalf("SetActiveCampaign(D): %v", err)
-	}
-	// Resolved Active Campaign is the LIVE one, not the just-selected D.
-	if got := setResp.Msg.GetCampaign().GetId(); got != liveID.String() {
-		t.Errorf("resolved = %s, want the LIVE campaign %s (not the selected %s)", got, liveID, durableID)
-	}
-	// ...but the durable selection D was still written (lockstep with /glyphoxa use).
-	forUser, err := store.GetActiveCampaignForUser(ctx, "operator-live")
-	if err != nil || forUser.ID != durableID {
-		t.Errorf("durable selection = %+v, %v, want D %s", forUser, err, durableID)
 	}
 }

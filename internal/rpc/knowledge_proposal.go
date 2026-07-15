@@ -19,13 +19,45 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 )
 
-// Knowledge Proposal review handlers (#300, ADR-0052) on CampaignServer: the GM
-// review surface for the pending queue an Agent's remember_knowledge call files
-// into. List renders each proposal (parsing the jsonb write into a oneof), approve
-// lands the write atomically, reject drops it, and the similarity hint surfaces
-// existing Nodes near a proposal's subject so the GM merges rather than duplicates
-// (similarity is a HINT — no auto-merge, ADR-0052). They resolve the single
-// operator's active campaign server-side (ADR-0039), like the KG Node handlers.
+// knowledgeProposals is the Knowledge Proposal review feature module (#300,
+// ADR-0052): the GM review surface for the pending queue an Agent's
+// remember_knowledge call files into. List renders each proposal (parsing the
+// jsonb write into a oneof), approve lands the write atomically, reject drops it,
+// and the similarity hint surfaces existing Nodes near a proposal's subject so
+// the GM merges rather than duplicates (similarity is a HINT — no auto-merge,
+// ADR-0052). The handlers resolve the single operator's active campaign
+// server-side (ADR-0039), like the KG Node handlers.
+type knowledgeProposals struct {
+	store  knowledgeProposalStore
+	active *activeCampaignSource
+	// embedder embeds a proposal's subject text for the ListSimilarKnowledge vector
+	// hint (#300, ADR-0011/0052). Nil (no embeddings provider wired, or a keyless
+	// deployment) makes the hint degrade silently to fulltext SearchNodes. Set once
+	// at boot before serving, so no lock is needed.
+	embedder Embedder
+}
+
+// knowledgeProposalStore is the narrow review-queue surface the module needs
+// (#300, ADR-0052); *storage.Store satisfies it: the pending list, the
+// single-proposal read the similarity hint keys off, the atomic approve/reject
+// writes, and the two similarity searches the hint runs.
+type knowledgeProposalStore interface {
+	ListPendingKnowledgeProposals(ctx context.Context, campaignID uuid.UUID) ([]storage.KnowledgeProposal, error)
+	GetPendingKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) (storage.KnowledgeProposal, error)
+	ApproveKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) error
+	RejectKnowledgeProposal(ctx context.Context, campaignID, id uuid.UUID) error
+	// SimilarNodes is the embedding-vector nearest-neighbour search; SearchNodes is
+	// the fulltext fallback the hint degrades to without an embedder (ADR-0011).
+	SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]storage.KGNode, error)
+	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+}
+
+// Embedder embeds short texts to query vectors for the Knowledge Proposal
+// similarity hint (#300, ADR-0052). The resolved embeddings provider satisfies it;
+// nil disables the vector path (the hint falls back to fulltext search).
+type Embedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
+}
 
 // similarEmbedTimeout bounds the ListSimilarKnowledge embedding call — the hint is
 // nice-to-have, so a slow provider must not hang the review surface; on timeout it
@@ -39,11 +71,11 @@ const similarNodesLimit = 5
 // oldest-first, each with its authoring Agent's name and its parsed write. An
 // unparseable jsonb row is still listed (write oneof left UNSET) so the GM can
 // reject it. No campaign is CodeNotFound; a storage failure is CodeInternal.
-func (s *CampaignServer) ListKnowledgeProposals(
+func (s *knowledgeProposals) ListKnowledgeProposals(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListKnowledgeProposalsRequest],
 ) (*connect.Response[managementv1.ListKnowledgeProposalsResponse], error) {
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -69,7 +101,7 @@ func (s *CampaignServer) ListKnowledgeProposals(
 // approved. An unparsable id is CodeInvalidArgument; a missing/already-reviewed id
 // is CodeNotFound; a refused write is CodeFailedPrecondition carrying the storage
 // reason verbatim so the GM sees exactly what to fix.
-func (s *CampaignServer) ApproveKnowledgeProposal(
+func (s *knowledgeProposals) ApproveKnowledgeProposal(
 	ctx context.Context,
 	req *connect.Request[managementv1.ApproveKnowledgeProposalRequest],
 ) (*connect.Response[managementv1.ApproveKnowledgeProposalResponse], error) {
@@ -78,7 +110,7 @@ func (s *CampaignServer) ApproveKnowledgeProposal(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid proposal id"))
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -105,7 +137,7 @@ func (s *CampaignServer) ApproveKnowledgeProposal(
 // RejectKnowledgeProposal drops a pending proposal without touching the KG. An
 // unparsable id is CodeInvalidArgument; a missing/already-reviewed id is
 // CodeNotFound.
-func (s *CampaignServer) RejectKnowledgeProposal(
+func (s *knowledgeProposals) RejectKnowledgeProposal(
 	ctx context.Context,
 	req *connect.Request[managementv1.RejectKnowledgeProposalRequest],
 ) (*connect.Response[managementv1.RejectKnowledgeProposalResponse], error) {
@@ -114,7 +146,7 @@ func (s *CampaignServer) RejectKnowledgeProposal(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid proposal id"))
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -141,7 +173,7 @@ func (s *CampaignServer) RejectKnowledgeProposal(
 // nearest-neighbour search; with no provider OR any failure (embed error/timeout)
 // it degrades SILENTLY to fulltext SearchNodes — the hint is best-effort and must
 // never fail the review.
-func (s *CampaignServer) ListSimilarKnowledge(
+func (s *knowledgeProposals) ListSimilarKnowledge(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListSimilarKnowledgeRequest],
 ) (*connect.Response[managementv1.ListSimilarKnowledgeResponse], error) {
@@ -150,7 +182,7 @@ func (s *CampaignServer) ListSimilarKnowledge(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid proposal id"))
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -186,7 +218,7 @@ func (s *CampaignServer) ListSimilarKnowledge(
 // similarNodes runs the vector nearest-neighbour search when an embedder is wired
 // and the embed succeeds; otherwise it degrades silently to fulltext SearchNodes.
 // A whitespace-only query short-circuits to no hits (SearchNodes would reject it).
-func (s *CampaignServer) similarNodes(ctx context.Context, campaignID uuid.UUID, queryText string) ([]storage.KGNode, error) {
+func (s *knowledgeProposals) similarNodes(ctx context.Context, campaignID uuid.UUID, queryText string) ([]storage.KGNode, error) {
 	if strings.TrimSpace(queryText) == "" {
 		return nil, nil
 	}

@@ -14,14 +14,30 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// Knowledge Graph Node handlers (#126, ADR-0008 v1.0) on CampaignServer: create
-// and list the campaign's wiki Nodes. Like the agent CRUD they resolve the single
-// operator's active campaign server-side (ADR-0039).
+// kgNodes is the Knowledge Graph Node feature module (#126, ADR-0008 v1.0):
+// CRUD + wiki search over the campaign's Nodes. Like the agent CRUD the handlers
+// resolve the single operator's active campaign server-side (ADR-0039).
+type kgNodes struct {
+	store  kgNodeStore
+	active *activeCampaignSource
+}
+
+// kgNodeStore is the narrow KG-Node surface the module needs (#126, #131);
+// *storage.Store satisfies it. Mutations are campaign-scoped (#342), so another
+// campaign's Nodes are never mutable.
+type kgNodeStore interface {
+	CreateNode(ctx context.Context, n storage.NewKGNode) (storage.KGNode, error)
+	ListNodes(ctx context.Context, campaignID uuid.UUID) ([]storage.KGNode, error)
+	UpdateNode(ctx context.Context, u storage.KGNodeUpdate) (storage.KGNode, error)
+	DeleteNode(ctx context.Context, campaignID, id uuid.UUID) error
+	// SearchNodes is the ranked fulltext wiki search (#131).
+	SearchNodes(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error)
+}
 
 // CreateNode adds a Knowledge Graph Node to the active campaign and returns it. An
 // UNSPECIFIED node_type or an empty name is CodeInvalidArgument; no campaign is
 // CodeNotFound; a storage failure is CodeInternal.
-func (s *CampaignServer) CreateNode(
+func (s *kgNodes) CreateNode(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateNodeRequest],
 ) (*connect.Response[managementv1.CreateNodeResponse], error) {
@@ -34,7 +50,7 @@ func (s *CampaignServer) CreateNode(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -60,11 +76,11 @@ func (s *CampaignServer) CreateNode(
 // ListNodes returns the active campaign's Knowledge Graph Nodes in the storage
 // display order (type, then case-insensitive name). No campaign is CodeNotFound;
 // a storage failure is CodeInternal.
-func (s *CampaignServer) ListNodes(
+func (s *kgNodes) ListNodes(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListNodesRequest],
 ) (*connect.Response[managementv1.ListNodesResponse], error) {
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -89,7 +105,7 @@ func (s *CampaignServer) ListNodes(
 // UpdateNode saves a Node's editor fields (name/body/gm_private) and returns the
 // updated Node. node_type is immutable, so it is never sent nor changed. An empty
 // name or an unparsable id is CodeInvalidArgument; a missing id is CodeNotFound.
-func (s *CampaignServer) UpdateNode(
+func (s *kgNodes) UpdateNode(
 	ctx context.Context,
 	req *connect.Request[managementv1.UpdateNodeRequest],
 ) (*connect.Response[managementv1.UpdateNodeResponse], error) {
@@ -105,7 +121,7 @@ func (s *CampaignServer) UpdateNode(
 	// Resolve the active campaign and scope the write to it (#342): the store's
 	// UPDATE matches (id, campaign_id), so a Node in another campaign is never
 	// mutable through this session — it reads back as CodeNotFound.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -133,7 +149,7 @@ func (s *CampaignServer) UpdateNode(
 
 // DeleteNode removes a Node by id. An unparsable id is CodeInvalidArgument; a
 // missing id is CodeNotFound; a storage failure is CodeInternal.
-func (s *CampaignServer) DeleteNode(
+func (s *kgNodes) DeleteNode(
 	ctx context.Context,
 	req *connect.Request[managementv1.DeleteNodeRequest],
 ) (*connect.Response[managementv1.DeleteNodeResponse], error) {
@@ -145,7 +161,7 @@ func (s *CampaignServer) DeleteNode(
 	// Resolve the active campaign and scope the delete to it (#342): the store's
 	// DELETE matches (id, campaign_id), so a Node in another campaign is never
 	// removable through this session — it reads back as CodeNotFound.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -174,7 +190,7 @@ const searchNodesLimit = 50
 // Nodes are INCLUDED (GM-facing search). An empty/whitespace query is
 // CodeInvalidArgument; no campaign is CodeNotFound; a storage failure is
 // CodeInternal.
-func (s *CampaignServer) SearchNodes(
+func (s *kgNodes) SearchNodes(
 	ctx context.Context,
 	req *connect.Request[managementv1.SearchNodesRequest],
 ) (*connect.Response[managementv1.SearchNodesResponse], error) {
@@ -182,7 +198,7 @@ func (s *CampaignServer) SearchNodes(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("query must not be empty"))
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

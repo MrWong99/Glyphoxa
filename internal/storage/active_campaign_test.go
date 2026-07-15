@@ -256,3 +256,52 @@ func TestUpdateCampaign(t *testing.T) {
 		t.Errorf("UpdateCampaign(random) = %v, want ErrNotFound", err)
 	}
 }
+
+// TestUpdateCampaignLanguageLeavesAgentVoiceUntouched is the DB half of the #268
+// decision: a Campaign Language edit mutates NOTHING downstream — no statement or
+// trigger on the campaign UPDATE rewrites agents.voice, so an Agent's persisted
+// voice blob stays byte-identical. The handler half is structural since #445 (the
+// rpc management store slice cannot even name an Agent write); this pins the SQL
+// layer, guarding against a future migration/trigger that would re-derive every
+// Agent's voice from the new language (the first-save seeding lives ONLY on the
+// agent-write path, #224).
+func TestUpdateCampaignLanguageLeavesAgentVoiceUntouched(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, _, campID := seedCampaign(t, dsn) // seeded in language "en", auto-Butler fired
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	// Give the auto-Butler a concrete voice via the agent-write path — the one
+	// place a language may legitimately seed voice defaults (#224).
+	butler, err := st.GetButler(ctx, campID)
+	if err != nil {
+		t.Fatalf("GetButler: %v", err)
+	}
+	seeded, err := st.UpdateAgent(ctx, storage.AgentUpdate{
+		ID: butler.ID, CampaignID: campID, Name: butler.Name, Title: butler.Title,
+		Persona: butler.Persona, AddressOnly: butler.AddressOnly, Aliases: butler.Aliases,
+		Voice: []byte(`{"provider_id":"elevenlabs","voice_id":"v-268","language":"en"}`),
+	})
+	if err != nil {
+		t.Fatalf("UpdateAgent(seed voice): %v", err)
+	}
+	if len(seeded.Voice) == 0 {
+		t.Fatalf("precondition: Butler voice not seeded, got %q", string(seeded.Voice))
+	}
+
+	// The change under test: Campaign Language en -> de.
+	if _, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{
+		ID: campID, Name: "Lost Mine", System: "dnd5e", Language: "de",
+	}); err != nil {
+		t.Fatalf("UpdateCampaign(lang en->de): %v", err)
+	}
+
+	after, err := st.GetAgent(ctx, butler.ID)
+	if err != nil {
+		t.Fatalf("GetAgent(after): %v", err)
+	}
+	if string(after.Voice) != string(seeded.Voice) {
+		t.Errorf("Butler voice changed on a language edit:\n before = %s\n after  = %s",
+			string(seeded.Voice), string(after.Voice))
+	}
+}

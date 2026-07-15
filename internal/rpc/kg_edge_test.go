@@ -8,16 +8,26 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
+
+// edgeClient stands up the CampaignService client with the KG-Edge slice and
+// the shared Active-Campaign resolution both served by the one fakeKGEdgeStore
+// (it embeds *fakeActive), the composition every test here exercises (#445).
+func edgeClient(t *testing.T, store *fakeKGEdgeStore) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClient(t, rpc.CampaignStores{Active: store, KGEdges: store})
+}
 
 func TestCreateEdge_MapsAndPersists(t *testing.T) {
 	t.Parallel()
 	campID := uuid.New()
 	from, to := uuid.New(), uuid.New()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campaign = storage.Campaign{ID: campID, Name: "Lost Mine"}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	resp, err := client.CreateEdge(context.Background(),
 		connect.NewRequest(&managementv1.CreateEdgeRequest{
@@ -46,9 +56,9 @@ func TestCreateEdge_MapsAndPersists(t *testing.T) {
 
 func TestCreateEdge_UnspecifiedTypeIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.CreateEdge(context.Background(),
 		connect.NewRequest(&managementv1.CreateEdgeRequest{
@@ -61,9 +71,9 @@ func TestCreateEdge_UnspecifiedTypeIsInvalidArgument(t *testing.T) {
 
 func TestCreateEdge_InvalidEndpointIdIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.CreateEdge(context.Background(),
 		connect.NewRequest(&managementv1.CreateEdgeRequest{
@@ -90,10 +100,10 @@ func TestCreateEdge_StorageErrorsMapToCodes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newFakeStore()
+			store := newFakeKGEdgeStore()
 			store.campaign = storage.Campaign{ID: uuid.New()}
 			store.edgeCreateErr = tc.storErr
-			client := crudClient(t, store)
+			client := edgeClient(t, store)
 
 			_, err := client.CreateEdge(context.Background(),
 				connect.NewRequest(&managementv1.CreateEdgeRequest{
@@ -109,9 +119,9 @@ func TestCreateEdge_StorageErrorsMapToCodes(t *testing.T) {
 
 func TestCreateEdge_NoCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.CreateEdge(context.Background(),
 		connect.NewRequest(&managementv1.CreateEdgeRequest{
@@ -125,8 +135,8 @@ func TestCreateEdge_NoCampaignIsNotFound(t *testing.T) {
 
 func TestDeleteEdge_Deletes(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
-	client := crudClient(t, store)
+	store := newFakeKGEdgeStore()
+	client := edgeClient(t, store)
 
 	if _, err := client.DeleteEdge(context.Background(),
 		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: uuid.NewString()})); err != nil {
@@ -136,7 +146,7 @@ func TestDeleteEdge_Deletes(t *testing.T) {
 
 func TestDeleteEdge_InvalidIdIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := edgeClient(t, newFakeKGEdgeStore())
 
 	_, err := client.DeleteEdge(context.Background(),
 		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: "nope"}))
@@ -147,9 +157,9 @@ func TestDeleteEdge_InvalidIdIsInvalidArgument(t *testing.T) {
 
 func TestDeleteEdge_NotFoundIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.edgeDeleteErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.DeleteEdge(context.Background(),
 		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: uuid.NewString()}))
@@ -162,10 +172,10 @@ func TestDeleteEdge_NotFoundIsNotFound(t *testing.T) {
 // resolved active campaign, so another campaign's Edge is never removable.
 func TestDeleteEdge_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	if _, err := client.DeleteEdge(context.Background(),
 		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: uuid.NewString()})); err != nil {
@@ -180,9 +190,9 @@ func TestDeleteEdge_ScopesToActiveCampaign(t *testing.T) {
 // scoped delete cannot resolve an owner and returns CodeNotFound.
 func TestDeleteEdge_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.DeleteEdge(context.Background(),
 		connect.NewRequest(&managementv1.DeleteEdgeRequest{Id: uuid.NewString()}))
@@ -199,7 +209,7 @@ func TestListNodeEdges_SplitsAndJoins(t *testing.T) {
 	node := uuid.New()
 	barrow := uuid.New()
 	cyra := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.edgesOut = []storage.KGEdgeWithNodes{{
 		KGEdge:   storage.KGEdge{ID: uuid.New(), FromNodeID: node, ToNodeID: barrow, Type: storage.KGEdgeResidesIn},
 		FromName: "Aldric", FromType: storage.KGNodeCharacter,
@@ -210,7 +220,7 @@ func TestListNodeEdges_SplitsAndJoins(t *testing.T) {
 		FromName: "Cyra", FromType: storage.KGNodeCharacter,
 		ToName: "Aldric", ToType: storage.KGNodeCharacter,
 	}}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	resp, err := client.ListNodeEdges(context.Background(),
 		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: node.String()}))
@@ -238,10 +248,10 @@ func TestListNodeEdges_SplitsAndJoins(t *testing.T) {
 // verified there — another campaign's Node is never listable through this session.
 func TestListNodeEdges_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	if _, err := client.ListNodeEdges(context.Background(),
 		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()})); err != nil {
@@ -257,10 +267,10 @@ func TestListNodeEdges_ScopesToActiveCampaign(t *testing.T) {
 // CodeNotFound, never a leaked edge list or an existence oracle.
 func TestListNodeEdges_CrossCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campaign = storage.Campaign{ID: uuid.New()}
 	store.nodeEdgesErr = storage.ErrNotFound // the scoped store refuses a foreign anchor
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.ListNodeEdges(context.Background(),
 		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()}))
@@ -273,9 +283,9 @@ func TestListNodeEdges_CrossCampaignIsNotFound(t *testing.T) {
 // the read cannot resolve an owning campaign and is CodeNotFound.
 func TestListNodeEdges_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.ListNodeEdges(context.Background(),
 		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()}))
@@ -286,7 +296,7 @@ func TestListNodeEdges_NoActiveCampaignIsNotFound(t *testing.T) {
 
 func TestListNodeEdges_InvalidIdIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := edgeClient(t, newFakeKGEdgeStore())
 
 	_, err := client.ListNodeEdges(context.Background(),
 		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: "bad"}))
@@ -297,9 +307,9 @@ func TestListNodeEdges_InvalidIdIsInvalidArgument(t *testing.T) {
 
 func TestListNodeEdges_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.nodeEdgesErr = errAny
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.ListNodeEdges(context.Background(),
 		connect.NewRequest(&managementv1.ListNodeEdgesRequest{NodeId: uuid.NewString()}))
@@ -312,9 +322,9 @@ func TestSetNodeAgent_LinksAndMapsAgentId(t *testing.T) {
 	t.Parallel()
 	node := uuid.New()
 	agent := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.setAgentNode = storage.KGNode{ID: node, Type: storage.KGNodeNPC, Name: "Bart"}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	resp, err := client.SetNodeAgent(context.Background(),
 		connect.NewRequest(&managementv1.SetNodeAgentRequest{
@@ -334,9 +344,9 @@ func TestSetNodeAgent_LinksAndMapsAgentId(t *testing.T) {
 func TestSetNodeAgent_EmptyAgentIdUnlinks(t *testing.T) {
 	t.Parallel()
 	node := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.setAgentNode = storage.KGNode{ID: node, Type: storage.KGNodeNPC, Name: "Bart"}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	resp, err := client.SetNodeAgent(context.Background(),
 		connect.NewRequest(&managementv1.SetNodeAgentRequest{NodeId: node.String(), AgentId: ""}))
@@ -358,8 +368,8 @@ func TestSetNodeAgent_InvalidIdsAreInvalidArgument(t *testing.T) {
 		{uuid.NewString(), "bad"},
 	}
 	for _, tc := range cases {
-		store := newFakeStore()
-		client := crudClient(t, store)
+		store := newFakeKGEdgeStore()
+		client := edgeClient(t, store)
 		_, err := client.SetNodeAgent(context.Background(),
 			connect.NewRequest(&managementv1.SetNodeAgentRequest{NodeId: tc.node, AgentId: tc.agent}))
 		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -383,9 +393,9 @@ func TestSetNodeAgent_StorageErrorsMapToCodes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newFakeStore()
+			store := newFakeKGEdgeStore()
 			store.setAgentErr = tc.storErr
-			client := crudClient(t, store)
+			client := edgeClient(t, store)
 
 			_, err := client.SetNodeAgent(context.Background(),
 				connect.NewRequest(&managementv1.SetNodeAgentRequest{
@@ -405,11 +415,11 @@ func TestSetNodeAgent_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
 	node := uuid.New()
 	agent := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	store.setAgentNode = storage.KGNode{ID: node, Type: storage.KGNodeNPC, Name: "Bart"}
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	if _, err := client.SetNodeAgent(context.Background(),
 		connect.NewRequest(&managementv1.SetNodeAgentRequest{NodeId: node.String(), AgentId: agent.String()})); err != nil {
@@ -424,9 +434,9 @@ func TestSetNodeAgent_ScopesToActiveCampaign(t *testing.T) {
 // the scoped link/unlink cannot resolve an owner and returns CodeNotFound.
 func TestSetNodeAgent_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := edgeClient(t, store)
 
 	_, err := client.SetNodeAgent(context.Background(),
 		connect.NewRequest(&managementv1.SetNodeAgentRequest{NodeId: uuid.NewString(), AgentId: uuid.NewString()}))
@@ -442,10 +452,11 @@ func TestCreateEdgeHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.forUser = durable
 	store.campaign = newer
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+	client := campaignClientAs(t, rpc.CampaignStores{Active: store, KGEdges: store},
+		storage.User{DiscordUserID: "999"}, uuid.Nil, nil)
 
 	if _, err := client.CreateEdge(context.Background(),
 		connect.NewRequest(&managementv1.CreateEdgeRequest{
@@ -470,11 +481,12 @@ func TestCreateEdgeHonorsLiveSession(t *testing.T) {
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGEdgeStore()
 	store.forUser = durable
 	store.campaign = newer
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+	client := campaignClientAs(t, rpc.CampaignStores{Active: store, KGEdges: store},
+		storage.User{DiscordUserID: "999"}, uuid.Nil, liveMgr(live.ID))
 
 	if _, err := client.CreateEdge(context.Background(),
 		connect.NewRequest(&managementv1.CreateEdgeRequest{

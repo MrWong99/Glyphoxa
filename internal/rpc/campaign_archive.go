@@ -13,29 +13,60 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// Campaign archive/delete lifecycle handlers (#269, decided on #265) on
-// CampaignServer. Archive is the primary flow; hard delete is only for
+// campaignArchive is the campaign archive/delete lifecycle feature module
+// (#269, decided on #265). Archive is the primary flow; hard delete is only for
 // already-archived campaigns. Archive and Delete refuse the campaign backing the
-// LIVE Voice Session (the same in-process liveCampaign truth resolveActiveCampaign
+// LIVE Voice Session (the same in-process live truth resolveActiveCampaign
 // consults, ADR-0039 — no second session-truth source). Error mapping mirrors the
 // campaign management handlers: ErrNotFound→CodeNotFound, ErrNotArchived→
 // CodeFailedPrecondition, an unparsable id→CodeInvalidArgument, generic
 // CodeInternal with a server-side slog.
+type campaignArchive struct {
+	store  campaignArchiveStore
+	active *activeCampaignSource
+	// clips sweeps a campaign's Session Highlight clips out of blob storage on hard
+	// delete (#308, ADR-0048): highlight rows cascade with the campaign, but the
+	// clip blobs have NO FK and must be dropped through the seam. Nil disables the
+	// sweep (web-only / no blob backend); set once at boot before serving.
+	clips HighlightClipSweeper
+}
+
+// campaignArchiveStore is the narrow archive-lifecycle surface the module needs
+// (#269); *storage.Store satisfies it. Delete cascades in one statement; Archive
+// clears any durable selection pointing at the campaign.
+type campaignArchiveStore interface {
+	ArchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	UnarchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	DeleteCampaign(ctx context.Context, id uuid.UUID) error
+	// DeleteCampaignWithJob hard-deletes AND enqueues a follow-up job atomically
+	// (#308): the campaign hard delete uses it to schedule the Highlight-clip blob
+	// sweep in the delete's own transaction, so the sweep exists iff the delete
+	// committed (no orphan sweep of a surviving campaign, no lost sweep on a crash).
+	DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error
+}
+
+// HighlightClipSweeper drops a campaign's Session Highlight clips through the blob
+// seam on hard delete (#308, ADR-0048). main.go wires it over
+// storage.ListCampaignHighlightClipKeys + blob.Delete. The keys are listed BEFORE
+// the campaign row delete (which cascades the highlight rows away) and the blobs
+// are dropped AFTER the delete succeeds, so a refused delete never orphans a live
+// campaign's clips.
+type HighlightClipSweeper interface {
+	CampaignClipKeys(ctx context.Context, campaignID uuid.UUID) ([]string, error)
+	DeleteClip(ctx context.Context, key string) error
+}
 
 // liveGuard refuses an operation on the campaign backing the LIVE Voice Session
 // (#265): the campaign that is currently voicing can be neither archived nor
-// deleted out from under it. It consults the SAME liveCampaign closure
+// deleted out from under it. It consults the SAME live closure
 // resolveActiveCampaign uses, so there is one source of session truth (ADR-0039).
 // It returns nil when no session is live, the source is unwired (keyless tests),
-// or a DIFFERENT campaign is live. Note the inherent TOCTOU: liveCampaign is
+// or a DIFFERENT campaign is live. Note the inherent TOCTOU: the live closure is
 // in-process manager state and a session could end (or start) in the millisecond
 // after this check — accepted for the single-operator web tier, where the window
 // is negligible and the DB cascade is still safe either way.
-func (s *CampaignServer) liveGuard(id uuid.UUID, verb string) error {
-	if s.liveCampaign == nil {
-		return nil
-	}
-	if lid, active := s.liveCampaign(); active && lid == id {
+func (s *campaignArchive) liveGuard(id uuid.UUID, verb string) error {
+	if lid, active := s.active.liveID(); active && lid == id {
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("campaign backs the live Voice Session and cannot be "+verb+" while it runs"))
 	}
@@ -47,7 +78,7 @@ func (s *CampaignServer) liveGuard(id uuid.UUID, verb string) error {
 // Voice Session (#269). It refuses the live session's campaign
 // (CodeFailedPrecondition) and an unknown id (CodeNotFound); the store write is
 // idempotent, so re-archiving is a no-op returning the same campaign.
-func (s *CampaignServer) ArchiveCampaign(
+func (s *campaignArchive) ArchiveCampaign(
 	ctx context.Context,
 	req *connect.Request[managementv1.ArchiveCampaignRequest],
 ) (*connect.Response[managementv1.ArchiveCampaignResponse], error) {
@@ -73,7 +104,7 @@ func (s *CampaignServer) ArchiveCampaign(
 // UnarchiveCampaign returns an archived campaign to the active set (#269). There
 // is no live-guard: a live session's campaign is never archived, so it can never
 // be a target here. An unknown id is CodeNotFound.
-func (s *CampaignServer) UnarchiveCampaign(
+func (s *campaignArchive) UnarchiveCampaign(
 	ctx context.Context,
 	req *connect.Request[managementv1.UnarchiveCampaignRequest],
 ) (*connect.Response[managementv1.UnarchiveCampaignResponse], error) {
@@ -99,7 +130,7 @@ func (s *CampaignServer) UnarchiveCampaign(
 // archive first), and an unknown id (CodeNotFound). The re-typed name confirmation
 // is a UI-only guard (the request carries only the id); the server precondition is
 // purely "already archived".
-func (s *CampaignServer) DeleteCampaign(
+func (s *campaignArchive) DeleteCampaign(
 	ctx context.Context,
 	req *connect.Request[managementv1.DeleteCampaignRequest],
 ) (*connect.Response[managementv1.DeleteCampaignResponse], error) {
