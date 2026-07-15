@@ -500,63 +500,21 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	runner := func(rctx context.Context, c wirenpc.Config) error {
 		return wirenpc.RunFromDB(rctx, c, pool, cipher)
 	}
-	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice)
-	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
-	// left 'running' (crash / failed end-write). No loop is live yet, so every
-	// such row is an orphan; done before the web tier serves so GetSession never
-	// reports a dead session as live. Web-only mode skips inside (it owns no
-	// rows). A failure here is a broken DB — fail the boot loudly.
-	if err := mgr.ReconcileOrphans(ctx); err != nil {
-		return fmt.Errorf("web: %w", err)
-	}
+	// The Manager's collaborators below (transcript projectors, highlight saver,
+	// recallers, knowledge Tools adapter) are its construction-time deps (#448),
+	// so they are built FIRST — against this pre-constructed View, the narrow
+	// active-session read they all consume — and NewManager then binds the View.
+	// A Manager cannot exist without its deps already wired, so the old "built
+	// first, back-wired after" ordering comments are gone with the setters.
+	sessions := session.NewView()
 
-	// The one-shot recap Engine (#272) is constructed ONCE here so both consumers can
-	// share it: the /glyphoxa recap slash command (#273, registered below) and the
-	// GenerateRecap RPC (#274, wired through managementMounts). It reads transcripts
-	// via the store, decrypts a BYOK LLM key with cipher, meters usage into the process
+	// The one-shot recap Engine (#272) is constructed ONCE here so its consumers
+	// can share it: the /glyphoxa recap slash command (#273, registered below),
+	// the GenerateRecap RPC (#274, wired through managementMounts), and the recap
+	// knowledge Tool (Deps.Tools below). It reads transcripts via the store,
+	// decrypts a BYOK LLM key with cipher, meters usage into the process
 	// metrics, and logs attribution — but never persists a recap (ADR-0040).
 	recapEngine := recap.NewEngine(store, cipher, metrics, log)
-
-	if withVoice {
-		// The GM admin/session commands (#108, ADR-0010): /glyphoxa use sets the
-		// durable Active Campaign; start/end drive the SAME in-process Manager the
-		// web Session screen uses, so the two surfaces share one session record and
-		// never diverge (AC4). Registered here (not in the presence block above)
-		// because they need the Manager, and BEFORE Ensure so they land in the one
-		// per-Guild registration alongside /roll. /glyphoxa search (#120) joins them:
-		// it resolves the Active Campaign through the SAME shared slash resolver
-		// (resolveActiveCampaign over the store + Manager), so it can never diverge
-		// from /glyphoxa start.
-		reg.Register(
-			presence.UseCommand(store),
-			presence.StartCommand(store, mgr),
-			presence.EndCommand(mgr),
-			presence.SearchCommand(store, mgr),
-			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
-			// Session via the SAME shared slash resolver, delivered per the invoker's
-			// choice (voiced/public/ephemeral, #271). The Manager is the ButlerVoicer
-			// (#365): the now-voiced Butler (ADR-0009 #299) speaks a `voiced` recap via
-			// SpeakAsButler → SayAs, so it lands as a KindButler transcript line; with no
-			// live session OR a voiceless Butler a voiced request degrades to public text.
-			presence.RecapCommand(store, mgr, recapEngine, mgr),
-			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
-			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
-			presence.MuteCommand(mgr, store),
-			presence.MuteAllCommand(mgr),
-			// /say <text> as:<agent> (#295, ADR-0010): GM puppeteering. The Manager is the
-			// SayControl (its SayAs publishes SpeakRequested on the shared bus, which the
-			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the
-			// voiced roster for the resolver + autocomplete.
-			presence.SayCommand(mgr, store),
-		)
-		// Bring the presence up at boot (AC: the commands appear with no Voice
-		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
-		// — it stays in the wait-state and the RPC refresher retries on the next save.
-		if err := pres.Ensure(ctx); err != nil {
-			log.Warn("presence: initial ensure failed; the slash-command surface "+
-				"will retry when Discord settings are next saved", "err", err)
-		}
-	}
 
 	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
 	// Character/GM display name for the relay + chunk prefix. It reads Characters
@@ -573,42 +531,38 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS")), log)
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
-	// process bus once and reads the active session from the manager (Snapshot).
+	// process bus once and reads the active session from the session View (#448).
 	// The store backs incremental line persistence + replay-on-reload (#74,
-	// ADR-0040); the manager finalizes the relay's writer queue on Stop (below).
-	relay := transcript.NewRelay(eventBus, mgr, store, log)
+	// ADR-0040); the manager finalizes the relay's writer queue on Stop
+	// (Deps.Transcript below).
+	relay := transcript.NewRelay(eventBus, sessions, store, log)
 	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
 	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
 	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
 	// SSE stream opens. The guarded mount table below declares TenantRequired
 	// to inject the tenant this check reads.
 	relay.SetTenantScope(store.VoiceSessionInTenant)
-	// Back-wire the finalizer so Stop drains the relay's writer queue and records
-	// the authoritative line_count (#74). Done after the relay exists because the
-	// relay needs the manager (Snapshot), so the manager is built first.
-	mgr.SetTranscript(relay)
 
 	// The Transcript Chunk writer (#104, ADR-0011) subscribes to the SAME process
 	// bus and folds utterances into 3–6-utterance chunks written with embedding
 	// NULL (the async embedding pipeline, #116, fills them later); it refreshes the
 	// embedding-backlog gauge from the DB after each write. The manager closes its
-	// open chunk on Stop / loop exit. This CHUNK grain is independent of the relay's
-	// line grain (ADR-0040). Voice-standalone mode does not chunk (same posture as
-	// line persistence).
-	chunker := transcript.NewChunker(eventBus, mgr, store, metrics, log, transcript.ChunkerConfig{})
+	// open chunk on Stop / loop exit (Deps.Chunker below). This CHUNK grain is
+	// independent of the relay's line grain (ADR-0040). Voice-standalone mode does
+	// not chunk (same posture as line persistence).
+	chunker := transcript.NewChunker(eventBus, sessions, store, metrics, log, transcript.ChunkerConfig{})
 	chunker.SetResolver(speakerResolver) // #281: resolved name as each human line's chunk prefix
-	mgr.SetChunkFlusher(chunker)
 
 	// Session Highlights persistence (#308, Epic 8, ADR-0051): the Saver is #307's
 	// detector Sink — it encodes each Trigger's tape snapshot to a clip (behind the
 	// blob seam), writes a 'candidate' highlight row, and on session end schedules
 	// the 7-day candidate purge job. It rides the SAME base voice config the manager
 	// copies per session (cfg.Highlights = the Saver), and the manager Begins/
-	// Finalizes it per session (beside transcript.Finalize). In web-only mode the
-	// manager starts no sessions, so it stays dormant; the RPC read side + clip serve
-	// (below) reach the same rows through Postgres regardless.
+	// Finalizes it per session (beside transcript.Finalize) — both via
+	// Deps.Highlights below. In web-only mode the manager starts no sessions, so it
+	// stays dormant; the RPC read side + clip serve (below) reach the same rows
+	// through Postgres regardless.
 	highlightSaver := highlight.NewSaver(store, blobStore, jobEnqueuer{store}, log)
-	mgr.SetHighlights(highlightSaver)
 	// Seed the backlog gauge from the DB at boot so it reads the true count before
 	// the first chunk is written (idempotent Set-from-COUNT, ADR-0032). A read
 	// failure logs and leaves the gauge at 0 rather than failing the boot.
@@ -616,6 +570,90 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("seed embedding-backlog gauge", "err", err)
 	} else {
 		metrics.SetEmbeddingBacklog(n)
+	}
+
+	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
+	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
+	// KG-facts recall it needs only the process store + the session View (for the
+	// active Campaign), no embeddings provider — so a keyless deployment still lets a
+	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
+	// the base voice config every session copies; in web-only mode the Manager starts
+	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
+	knowledgeAdapter := knowledge.New(store, store.PromptKG(), sessions)
+
+	// The Manager's construction-time deps (#448): the finalizers/pipelines it
+	// drives per session and the collaborators riding its base voice config — one
+	// immutable struct instead of six back-wired setters. Everything here was
+	// constructed against the View that NewManager binds below.
+	deps := session.Deps{
+		View:       sessions,
+		Transcript: relay,
+		Chunker:    chunker,
+		Highlights: highlightSaver,
+		// NPC KG-facts recall (#126, ADR-0008): the reserved Hot Context KG-facts
+		// slot, filled per turn from the active Campaign's gm-public Nodes.
+		// UNCONDITIONAL — unlike Memory below — because it needs no embeddings
+		// provider, only the process store (an indexed OLTP read) and the session
+		// View (the active Campaign). Gating it on the provider would silently lose
+		// the feature on keyless deployments. It owns no goroutine/subscription, so
+		// there is nothing to Close.
+		Facts: kgfacts.New(store.PromptKG(), sessions, metrics, log, kgfacts.Config{}),
+		Tools: tool.Deps{
+			Transcripts: knowledgeAdapter,
+			KG:          knowledgeAdapter,
+			KGW:         knowledgeAdapter,
+			Recap:       knowledge.NewRecap(recapEngine, store, sessions),
+		},
+	}
+
+	// Resolve the process embeddings provider ONCE and share it across the two
+	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
+	// backlog, and the NPC memory recaller (#122) embeds utterances for Hot Context
+	// retrieval. Resolving it twice would open two independent clients. A resolve
+	// failure (an unsupported provider OR a config-read error) is loud-but-non-fatal
+	// for BOTH: the backlog gauge exposes the permanent stall and NPC memory recall
+	// stays disabled (AC6 — Agent turns behave exactly as before), rather than
+	// crashing the process.
+	// embedProvider is hoisted out of the resolve branch so the Knowledge Proposal
+	// review surface's similarity hint (#300) can share the SAME resolved provider:
+	// nil (an unsupported provider or a config-read error) leaves the hint on its
+	// fulltext fallback, exactly as the backfill worker stalls loudly.
+	var embedProvider embeddings.Provider
+	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
+		log.Error("embeddings provider unavailable; embedding backfill and NPC memory recall disabled", "err", err)
+	} else {
+		embedProvider = provider
+		// Backfill worker (#116, ADR-0011): claims chunks written with embedding NULL,
+		// embeds their text, and UPDATEs each row — draining the gauge toward zero and
+		// making the chunks returnable by embedding-filtered retrieval. It needs only
+		// the DB + provider (not the voice loop), so it runs in web AND all mode. It
+		// rides the process signal ctx, so SIGTERM stops it and any in-flight provider
+		// call aborts with the same context.
+		go embedworker.New(store, provider, model, metrics, log, embedworker.Config{}).Run(ctx)
+
+		// NPC memory recall (#122, ADR-0011/0042): one recaller over the shared
+		// provider + the process store (ANN retriever, #119) + the session View
+		// (the active Campaign) + the process bus (STTPartial speculation). Wired as
+		// Deps.Memory so every manager-started session's Agent loops fill the
+		// reserved Hot Context memory slot; a slow/unavailable path degrades
+		// to no-memory within the turn budget. Bound to the run ctx — AfterFunc drops
+		// the bus subscription and stops the speculator on shutdown. In web-only mode
+		// the Manager starts no sessions, so the recaller stays dormant (bus idle).
+		// Set only in this branch so a keyless deployment leaves Memory a true nil
+		// (recall off), never a typed-nil interface.
+		recaller := recall.New(provider, store, sessions, eventBus, metrics, log, recall.Config{})
+		context.AfterFunc(ctx, recaller.Close)
+		deps.Memory = recaller
+	}
+
+	mgr := session.NewManager(store, runner, cfg, cipher, log, withVoice, deps)
+	// Boot-time reconciliation (#143): close voice_sessions rows a previous run
+	// left 'running' (crash / failed end-write). No loop is live yet, so every
+	// such row is an orphan; done before the web tier serves so GetSession never
+	// reports a dead session as live. Web-only mode skips inside (it owns no
+	// rows). A failure here is a broken DB — fail the boot loudly.
+	if err := mgr.ReconcileOrphans(ctx); err != nil {
+		return fmt.Errorf("web: %w", err)
 	}
 
 	// Background job runner (#286, ADR-0049): one DB-backed generic runner over the
@@ -670,9 +708,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 
 	// Boot-time retention backstop (#308, ADR-0051, the ReconcileOrphans/#184 spirit):
 	// a crash between a session ending and the Saver scheduling its 7-day candidate
-	// purge would strand those candidates. At boot, enqueue a purge for every ended
-	// session that has candidates but no live purge job. Loud-but-non-fatal: a failure
-	// logs and boot continues (the next boot retries).
+	// purge would strand those candidates. At boot — AFTER ReconcileOrphans above, so
+	// crash-orphaned sessions count as ended and their candidates are swept THIS
+	// boot, not the next — enqueue a purge for every ended session that has
+	// candidates but no live purge job. Loud-but-non-fatal: a failure logs and boot
+	// continues (the next boot retries).
 	if err := highlight.SweepMissingCandidatePurges(ctx, store, jobEnqueuer{store}, log); err != nil {
 		log.Warn("highlight purge backstop sweep failed at boot", "err", err)
 	}
@@ -688,67 +728,46 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		log.Warn("highlight enrichment reconciliation sweep failed at boot", "err", err)
 	}
 
-	// Resolve the process embeddings provider ONCE and share it across the two
-	// consumers (#122): the async backfill worker (#116) drains the NULL-embedding
-	// backlog, and the NPC memory recaller (#122) embeds utterances for Hot Context
-	// retrieval. Resolving it twice would open two independent clients. A resolve
-	// failure (an unsupported provider OR a config-read error) is loud-but-non-fatal
-	// for BOTH: the backlog gauge exposes the permanent stall and NPC memory recall
-	// stays disabled (AC6 — Agent turns behave exactly as before), rather than
-	// crashing the process.
-	// embedProvider is hoisted out of the resolve branch so the Knowledge Proposal
-	// review surface's similarity hint (#300) can share the SAME resolved provider:
-	// nil (an unsupported provider or a config-read error) leaves the hint on its
-	// fulltext fallback, exactly as the backfill worker stalls loudly.
-	var embedProvider embeddings.Provider
-	if provider, model, err := embedworker.ResolveProvider(ctx, store); err != nil {
-		log.Error("embeddings provider unavailable; embedding backfill and NPC memory recall disabled", "err", err)
-	} else {
-		embedProvider = provider
-		// Backfill worker (#116, ADR-0011): claims chunks written with embedding NULL,
-		// embeds their text, and UPDATEs each row — draining the gauge toward zero and
-		// making the chunks returnable by embedding-filtered retrieval. It needs only
-		// the DB + provider (not the voice loop), so it runs in web AND all mode. It
-		// rides the process signal ctx, so SIGTERM stops it and any in-flight provider
-		// call aborts with the same context.
-		go embedworker.New(store, provider, model, metrics, log, embedworker.Config{}).Run(ctx)
-
-		// NPC memory recall (#122, ADR-0011/0042): one recaller over the shared
-		// provider + the process store (ANN retriever, #119) + the session Manager
-		// (the active Campaign) + the process bus (STTPartial speculation). Set on the
-		// Manager's base voice config so every manager-started session's Agent loops
-		// fill the reserved Hot Context memory slot; a slow/unavailable path degrades
-		// to no-memory within the turn budget. Bound to the run ctx — AfterFunc drops
-		// the bus subscription and stops the speculator on shutdown. In web-only mode
-		// the Manager starts no sessions, so the recaller stays dormant (bus idle).
-		recaller := recall.New(provider, store, mgr, eventBus, metrics, log, recall.Config{})
-		context.AfterFunc(ctx, recaller.Close)
-		mgr.SetMemory(recaller)
+	if withVoice {
+		// The GM admin/session commands (#108, ADR-0010): /glyphoxa use sets the
+		// durable Active Campaign; start/end drive the SAME in-process Manager the
+		// web Session screen uses, so the two surfaces share one session record and
+		// never diverge (AC4). Registered here (not in the presence block above)
+		// because they need the Manager, and BEFORE Ensure so they land in the one
+		// per-Guild registration alongside /roll. /glyphoxa search (#120) joins them:
+		// it resolves the Active Campaign through the SAME shared slash resolver
+		// (resolveActiveCampaign over the store + Manager), so it can never diverge
+		// from /glyphoxa start.
+		reg.Register(
+			presence.UseCommand(store),
+			presence.StartCommand(store, mgr),
+			presence.EndCommand(mgr),
+			presence.SearchCommand(store, mgr),
+			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
+			// Session via the SAME shared slash resolver, delivered per the invoker's
+			// choice (voiced/public/ephemeral, #271). The Manager is the ButlerVoicer
+			// (#365): the now-voiced Butler (ADR-0009 #299) speaks a `voiced` recap via
+			// SpeakAsButler → SayAs, so it lands as a KindButler transcript line; with no
+			// live session OR a voiceless Butler a voiced request degrades to public text.
+			presence.RecapCommand(store, mgr, recapEngine, mgr),
+			// /glyphoxa mute <npc> + muteall (#211): the Manager is their SessionMuter
+			// and the mute view the live loop reads (NewManager wired cfg.Mutes = mgr).
+			presence.MuteCommand(mgr, store),
+			presence.MuteAllCommand(mgr),
+			// /say <text> as:<agent> (#295, ADR-0010): GM puppeteering. The Manager is the
+			// SayControl (its SayAs publishes SpeakRequested on the shared bus, which the
+			// live loop's DirectSpeech reactor renders in the NPC's Voice); store lists the
+			// voiced roster for the resolver + autocomplete.
+			presence.SayCommand(mgr, store),
+		)
+		// Bring the presence up at boot (AC: the commands appear with no Voice
+		// Session). Non-fatal: a bad or absent Bot token must not kill the web tier
+		// — it stays in the wait-state and the RPC refresher retries on the next save.
+		if err := pres.Ensure(ctx); err != nil {
+			log.Warn("presence: initial ensure failed; the slash-command surface "+
+				"will retry when Discord settings are next saved", "err", err)
+		}
 	}
-
-	// NPC KG-facts recall (#126, ADR-0008): the reserved Hot Context KG-facts slot,
-	// filled per turn from the active Campaign's gm-public Nodes. UNCONDITIONAL —
-	// OUTSIDE the embeddings-provider branch above — because it needs no embeddings
-	// provider, only the process store (an indexed OLTP read) and the session
-	// Manager (the active Campaign). Gating it on the provider would silently lose
-	// the feature on keyless deployments. It owns no goroutine/subscription, so
-	// there is nothing to Close.
-	mgr.SetFacts(kgfacts.New(store.PromptKG(), mgr, metrics, log, kgfacts.Config{}))
-
-	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
-	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
-	// KG-facts recall it needs only the process store + the session Manager (for the
-	// active Campaign), no embeddings provider — so a keyless deployment still lets a
-	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
-	// the base voice config every session copies; in web-only mode the Manager starts
-	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
-	knowledgeAdapter := knowledge.New(store, store.PromptKG(), mgr)
-	mgr.SetToolDeps(tool.Deps{
-		Transcripts: knowledgeAdapter,
-		KG:          knowledgeAdapter,
-		KGW:         knowledgeAdapter,
-		Recap:       knowledge.NewRecap(recapEngine, store, mgr),
-	})
 
 	// The web tier serves the auth-guarded Connect API under /api, the Discord
 	// OAuth carve-out under /auth (ADR-0015/0016), and the embedded SPA at /

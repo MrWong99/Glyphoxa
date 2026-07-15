@@ -14,7 +14,7 @@ func (m *Manager) SetEndTimeoutForTest(d time.Duration) {
 }
 
 // BaseFactsForTest returns the FactsRecaller threaded onto the base voice config,
-// so a test can assert SetFacts wired it (#126). Test-only.
+// so a test can assert Deps.Facts wired it (#126, #448). Test-only.
 func (m *Manager) BaseFactsForTest() agent.FactsRecaller {
 	return m.base.Facts
 }

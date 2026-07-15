@@ -85,7 +85,7 @@ func spendManager(t *testing.T, store session.Store, run session.LoopRunner, bus
 	t.Helper()
 	return session.NewManager(store, run,
 		wirenpc.Config{Token: "test-token", Bus: bus, StageMetrics: spy}, nil,
-		slog.New(slog.DiscardHandler), true)
+		slog.New(slog.DiscardHandler), true, session.Deps{})
 }
 
 // collectSpendCaps subscribes a collector for SpendCapReached events on bus.

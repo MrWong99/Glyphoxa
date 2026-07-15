@@ -180,8 +180,8 @@ func resolveAgent(roster []storage.Agent, input string) (agent storage.Agent, fo
 // now (ADR-0009 #299 amendment), but it stays Address-Only and mute is
 // matcher-owned and Character-only, so muting it would be an inert control — it is
 // neither offered by the autocomplete nor resolvable by name/UUID here. The
-// manager rejects it too (see session.SetAgentMute); this just keeps the /glyphoxa
-// surface from ever presenting a mute target that does nothing.
+// manager rejects it too (see session.LiveSession.SetAgentMute); this just keeps
+// the /glyphoxa surface from ever presenting a mute target that does nothing.
 func voiced(agents []storage.Agent) []storage.Agent {
 	out := make([]storage.Agent, 0, len(agents))
 	for _, a := range agents {
