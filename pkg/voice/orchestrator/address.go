@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -127,6 +129,24 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 	// below is retained belt-and-braces either way.
 	sam, speakerAware := d.matcher.(SpeakerAwareMatcher)
 	return voiceevent.On(bus, func(final voiceevent.STTFinal) {
+		// An empty or whitespace-only final routes NOWHERE (#434). The STT stage
+		// publishes empties by pinned contract — "downstream consumers, not this
+		// stage, decide" — and this detector is that consumer: the recognizer
+		// authoritatively heard nothing, so there is no utterance to address. Left
+		// unfiltered, the ambient heuristics (sole-NPC, last-speaker) would route
+		// the nothing and the Agent would speak unprompted off a noise burst —
+		// polluting its history with an empty user message and spending real
+		// LLM+TTS money. The empty final stays observable on the bus for
+		// metrics/diagnostics (and the Transcript keeps its own semantics); only
+		// address routing drops it. Logged so live sessions show how often noise
+		// crosses VAD onset yet transcribes to nothing.
+		if strings.TrimSpace(final.Text) == "" {
+			slog.Default().Info("orchestrator: empty STT final, routing nowhere",
+				slog.String("speaker", final.SpeakerID),
+				slog.String("turn", final.TurnID),
+			)
+			return
+		}
 		// Route via the SpeakerID-aware call when the matcher supports it (#256), so
 		// the matcher-side Butler GM-gate drops an ineligible Butler PRE-CAP — before
 		// the ensemble set below is built — then collect the survivors and decide the
