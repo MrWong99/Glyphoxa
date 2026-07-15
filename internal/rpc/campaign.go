@@ -135,21 +135,21 @@ func (s *CampaignServer) SetSessions(src activeSessionSource) {
 // (#281). Called once at boot before serving, so no lock is needed; nil-safe at the
 // call sites (invalidateSpeakers). A nil resolver leaves the hook off.
 func (s *CampaignServer) SetSpeakerInvalidator(inv SpeakerInvalidator) {
-	s.characterRoster.speakerInv = inv
+	s.speakerInv = inv
 }
 
 // SetEmbedder wires the embeddings provider the ListSimilarKnowledge vector hint
 // uses (#300). Called once at boot before serving; nil leaves the hint on the
 // fulltext fallback only.
 func (s *CampaignServer) SetEmbedder(e Embedder) {
-	s.knowledgeProposals.embedder = e
+	s.embedder = e
 }
 
 // SetHighlightClipSweeper wires the highlight-clip blob sweep the campaign hard
 // delete runs (#308). Called once at boot before serving; nil leaves the sweep
 // off (the highlight rows still cascade, only their blobs would linger).
 func (s *CampaignServer) SetHighlightClipSweeper(sw HighlightClipSweeper) {
-	s.campaignArchive.clips = sw
+	s.clips = sw
 }
 
 // campaignManagement is the campaign lifecycle feature module (#264, #222): the

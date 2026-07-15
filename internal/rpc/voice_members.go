@@ -22,7 +22,7 @@ type voiceMemberLister func(ctx context.Context) ([]presence.Member, error)
 // needed. Left nil on a keyless / bot-offline deployment, in which case
 // ListDiscordVoiceMembers returns an empty list.
 func (s *CampaignServer) SetMemberLister(l voiceMemberLister) {
-	s.characterRoster.memberLister = l
+	s.memberLister = l
 }
 
 // ListDiscordVoiceMembers returns the Discord Users currently in the operator's
