@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/busproject"
 	"github.com/MrWong99/Glyphoxa/internal/speaker"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -210,7 +211,8 @@ type turn struct {
 
 // Relay projects bus events into transcript lines and serves them over SSE +
 // JSON. Safe for concurrent use: the bus callback, the HTTP handlers and View
-// all take the same lock.
+// all take the same lock — r.mu, shared with the busproject scaffold that owns
+// the subscription, the session rollover, and the turn map (#447).
 type Relay struct {
 	sessions Sessions
 	store    LineStore       // persists projected lines (#74); nil disables persistence
@@ -218,26 +220,26 @@ type Relay struct {
 	scope    TenantScope     // tenant-ownership gate for the HTTP mounts (#439); nil = unscoped
 	log      *slog.Logger
 
-	mu       sync.Mutex
-	activeID string // current session id; "" when idle
-	// activeUUID / activeCampaignID mirror activeID as the typed FKs persistence
-	// needs; captured from the active session's Snapshot at rollover.
-	activeUUID       uuid.UUID
-	activeCampaignID uuid.UUID
-	buf              []Frame
-	lines            []Line
-	typing           Typing
-	connection       string // latest gateway connection state for the live session (#123); "" until the first transition
-	turns            map[string]*turn
-	nextSeq          uint64
-	humanSeq         uint64
-	subs             map[*subscriber]struct{}
+	// proj is the shared projection scaffold (#447): it attributes every bus
+	// event to the active session under r.mu (ONE Snapshot per event, #149),
+	// rolls the buffer over on a session change via startSession, and owns the
+	// per-turn coalescing map. The relay keeps only its fold rules.
+	proj *busproject.Projection[turn]
 
-	// writeCh is the non-blocking queue draining into the single writer goroutine
-	// (#74): emitLine tees each Line in here under r.mu, the bus contract forbids
-	// blocking so the send drops on overflow, and Finalize sends a flush barrier.
-	// nil when persistence is disabled (store == nil).
-	writeCh chan writeOp
+	mu         sync.Mutex
+	buf        []Frame
+	lines      []Line
+	typing     Typing
+	connection string // latest gateway connection state for the live session (#123); "" until the first transition
+	nextSeq    uint64
+	humanSeq   uint64
+	subs       map[*subscriber]struct{}
+
+	// queue is the non-blocking write queue draining into the single writer
+	// goroutine (#74): emitLine tees each Line in here under r.mu, the bus
+	// contract forbids blocking so the send drops on overflow, and Finalize
+	// sends a flush barrier. nil when persistence is disabled (store == nil).
+	queue *busproject.Queue[*storage.TranscriptLine]
 
 	// writeTimeout bounds each SSE frame write/flush (#148 Defect B): a client
 	// that stops reading makes the blocked write fail instead of parking the
@@ -265,7 +267,6 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 		sessions:     sessions,
 		store:        store,
 		log:          log,
-		turns:        map[string]*turn{},
 		subs:         map[*subscriber]struct{}{},
 		writeTimeout: defaultWriteTimeout,
 		closing:      make(chan struct{}),
@@ -274,10 +275,13 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 	// when persistence is enabled, so the live-only relay keeps its single-state
 	// behaviour and unit tests with a nil store spawn nothing.
 	if store != nil {
-		r.writeCh = make(chan writeOp, persistQueue)
-		go r.writeLoop()
+		r.queue = busproject.NewQueue(persistQueue, r.writeLine)
 	}
-	bus.Subscribe(r.project)
+	r.proj = busproject.New[turn](sessions, &r.mu, busproject.Hooks{
+		Fold:         r.fold,
+		StartSession: r.startSession,
+	})
+	r.proj.Subscribe(bus)
 	return r
 }
 
@@ -317,26 +321,13 @@ func (r *Relay) tenantScope() TenantScope {
 	return r.scope
 }
 
-// project is the bus callback: it attributes the event to the active session,
-// rolling the buffer over on a session change, and folds the event into the
-// transcript. It must not block (the bus delivers synchronously): all sends to
-// live subscribers are non-blocking.
-func (r *Relay) project(e voiceevent.Event) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// ONE Snapshot serves both the id comparison and the rollover's UUID/campaign
-	// capture (#149): the manager's mutex is independent of r.mu, so a second read
-	// could see the session already ended and leave the FKs pointing at the
-	// previous session (or uuid.Nil at process start).
-	vs, active := r.sessions.Snapshot()
-	if !active {
-		return // no active session — drop the event (ADR-0039)
-	}
-	if vs.ID.String() != r.activeID {
-		r.rollover(vs)
-	}
-
+// fold applies one attributed event to the transcript — the relay's projection
+// rules (ADR-0040: display text enters the line at TTSInvoked). The scaffold
+// has already taken the event's ONE session Snapshot (#149) and rolled the
+// buffer over on a session change; fold runs under r.mu and must not block
+// (the bus delivers synchronously): all sends to live subscribers are
+// non-blocking.
+func (r *Relay) fold(e voiceevent.Event) {
 	switch ev := e.(type) {
 	case voiceevent.VADSpeechStart:
 		// A human opened their mouth: warm the speaker resolver NOW (#281) so the
@@ -347,7 +338,7 @@ func (r *Relay) project(e voiceevent.Event) {
 		// TurnEnded, so without this the last agent line keeps the label through
 		// the following silence. Also correct for a barge (human over the Agent).
 		if r.resolver != nil && ev.SpeakerID != "" {
-			r.resolver.Warm(r.activeCampaignID, ev.SpeakerID)
+			r.resolver.Warm(r.proj.Session().CampaignID, ev.SpeakerID)
 		}
 		r.setTyping(r.liveTyping())
 	case voiceevent.STTFinal:
@@ -368,7 +359,7 @@ func (r *Relay) project(e voiceevent.Event) {
 		})
 	case voiceevent.AddressRouted:
 		// Records WHO answers this turn; no line yet (no text).
-		t := r.turn(ev.TurnID)
+		t := r.proj.Turn(ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.SpeakRequested:
 		// A GM /say (#295): like AddressRouted it records WHO speaks this turn (no line
@@ -376,7 +367,7 @@ func (r *Relay) project(e voiceevent.Event) {
 		// path below, so the /say line is assembled and persisted exactly like an LLM
 		// reply (ID "a:<turn>", NPC kind + pill) — no hand-crafted transcript row
 		// (ADR-0012/0040).
-		t := r.turn(ev.TurnID)
+		t := r.proj.Turn(ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.EnsembleLead:
 		// An Ensemble Turn's elected Lead (#301, ADR-0025): the Lead speaks under the
@@ -384,7 +375,7 @@ func (r *Relay) project(e voiceevent.Event) {
 		// the coalescing TTSInvoked line is attributed to the Lead (a:<turn>, its name +
 		// NPC pill). The losing candidates publish no EnsembleLead and no TTSInvoked, so
 		// they leave no line.
-		t := r.turn(ev.TurnID)
+		t := r.proj.Turn(ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.EnsembleReaction:
 		// An Ensemble Turn's Cross-talk Reaction (#302, ADR-0025): the reactor speaks
@@ -393,11 +384,11 @@ func (r *Relay) project(e voiceevent.Event) {
 		// lands as a SEPARATE line (a:<rID>, the reactor's name + NPC pill) beneath the
 		// Lead's rather than coalescing into it. A declined Reaction publishes no
 		// EnsembleReaction and no TTSInvoked, so it leaves no line.
-		t := r.turn(ev.TurnID)
+		t := r.proj.Turn(ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
-		t := r.turn(ev.TurnID)
+		t := r.proj.Turn(ev.TurnID)
 		if t.ended {
 			// A barge can deliver a sentence after TurnEnded; ignore it so the
 			// finalized reply is not clobbered (FIX 2). typing already cleared.
@@ -429,7 +420,7 @@ func (r *Relay) project(e voiceevent.Event) {
 		// Mark the turn finalized (keep the entry so a late sentence is dropped,
 		// FIX 2) and fall back to listening — correct for a barge that cut the
 		// Agent off mid-reply.
-		r.turn(ev.TurnID).ended = true
+		r.proj.Turn(ev.TurnID).ended = true
 		r.setTyping(r.liveTyping())
 	case voiceevent.MuteChanged:
 		// One Agent's mute flipped (#211): forward a "mute" frame so the web Voice
@@ -474,18 +465,16 @@ func (r *Relay) currentSessionID() string {
 	return vs.ID.String()
 }
 
-// rollover starts a fresh buffer for the newly-active session vs — the SAME
-// snapshot the caller compared ids against (#149), so the typed FKs persistence
-// needs can never belong to a different session than activeID — and seeds it
-// with the initial live/listening status frame, so a client connecting
-// mid-session replays a coherent state.
-func (r *Relay) rollover(vs storage.VoiceSession) {
-	r.activeID = vs.ID.String()
-	r.activeUUID = vs.ID
-	r.activeCampaignID = vs.CampaignID
+// startSession is the scaffold's rollover hook: it starts a fresh buffer for
+// the newly-active session — whose typed FKs the scaffold captured from the
+// SAME snapshot it compared ids against (#149), so persistence can never
+// attribute a line to a different session than the buffer — and seeds it with
+// the initial live/listening status frame, so a client connecting mid-session
+// replays a coherent state. Runs under r.mu; the scaffold has already reset
+// the turn map.
+func (r *Relay) startSession() {
 	r.buf = nil
 	r.lines = nil
-	r.turns = map[string]*turn{}
 	r.nextSeq = 0
 	r.humanSeq = 0
 	r.typing = r.liveTyping()
@@ -500,7 +489,7 @@ func (r *Relay) rollover(vs storage.VoiceSession) {
 func (r *Relay) endSession(id uuid.UUID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if id.String() != r.activeID {
+	if id.String() != r.proj.ActiveID() {
 		// The relay never rolled over to this session (zero bus events) — there is
 		// no buffer to close, and emitting here would inject a spurious idle frame
 		// into the CURRENT session's stream.
@@ -508,16 +497,6 @@ func (r *Relay) endSession(id uuid.UUID) {
 	}
 	r.typing = Typing{}
 	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "idle", Typing: Typing{}})})
-}
-
-// turn returns the coalescing state for a turn id, creating it on first sight.
-func (r *Relay) turn(id string) *turn {
-	t := r.turns[id]
-	if t == nil {
-		t = &turn{}
-		r.turns[id] = t
-	}
-	return t
 }
 
 // liveTyping is the indicator while a session is live but no Agent is mid-reply.
@@ -586,7 +565,7 @@ func (r *Relay) emit(f Frame) {
 func (r *Relay) View(id string) View {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.currentSessionID() != id || id != r.activeID {
+	if r.currentSessionID() != id || id != r.proj.ActiveID() {
 		return View{Lines: []Line{}, Status: "idle", Typing: Typing{}}
 	}
 	return View{
@@ -610,7 +589,7 @@ func copyLines(lines []Line) []Line {
 // reconnect/reload history for an ended session.
 func (r *Relay) snapshot(ctx context.Context, id string) View {
 	r.mu.Lock()
-	live := r.currentSessionID() == id && id == r.activeID
+	live := r.currentSessionID() == id && id == r.proj.ActiveID()
 	if live {
 		v := View{Lines: copyLines(r.lines), Status: "live", Typing: r.typing, Connection: r.connection}
 		r.mu.Unlock()
@@ -656,7 +635,7 @@ func (r *Relay) persistedView(ctx context.Context, id string) View {
 func (r *Relay) Frames(id string, afterSeq uint64) []Frame {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if id != r.activeID {
+	if id != r.proj.ActiveID() {
 		return nil
 	}
 	var out []Frame
@@ -678,7 +657,7 @@ func (r *Relay) resolveHuman(speakerID string) (string, Kind) {
 	if r.resolver == nil || speakerID == "" {
 		return "Player / DM", KindPlayer
 	}
-	res := r.resolver.Lookup(r.activeCampaignID, speakerID)
+	res := r.resolver.Lookup(r.proj.Session().CampaignID, speakerID)
 	kind := KindPlayer
 	if res.GM {
 		kind = KindGM

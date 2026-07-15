@@ -37,7 +37,7 @@ type subscriber struct {
 // so the send is non-blocking.
 func (r *Relay) push(f Frame) {
 	for s := range r.subs {
-		if s.id != r.activeID {
+		if s.id != r.proj.ActiveID() {
 			continue
 		}
 		select {
@@ -62,7 +62,7 @@ func (r *Relay) attach(id string, lastID uint64) (*subscriber, []Frame) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var replay []Frame
-	if id == r.activeID {
+	if id == r.proj.ActiveID() {
 		for _, f := range r.buf {
 			if f.Seq > lastID {
 				replay = append(replay, f)
