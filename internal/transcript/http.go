@@ -177,8 +177,9 @@ func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
 
 // authorizeTenant enforces the tenant-ownership gate (#439) on a session
 // endpoint. With no scope installed it is a no-op (unscoped, pre-#439
-// behavior). Otherwise the request must carry the tenant auth.RequireTenant
-// injected — a miss is a miswired mount (the #408 class) and rejects 401,
+// behavior). Otherwise the request must carry the tenant the TenantRequired
+// guarded mount (#446) injected — a miss is a miswired mount (the #408 class)
+// and rejects 401,
 // fail-closed. A session outside the tenant — including one that does not
 // exist at all, so absence and foreignness are indistinguishable — is 404,
 // matching the Highlight mounts' don't-reveal-existence posture. A check

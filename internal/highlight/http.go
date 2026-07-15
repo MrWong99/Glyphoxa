@@ -29,8 +29,8 @@ type ClipStore interface {
 type CampaignResolver func(ctx context.Context) (uuid.UUID, bool, error)
 
 // ClipServer serves a Highlight's audio clip over plain HTTP (#308/#309): GET
-// /api/v1/highlights/{id}/clip, mounted behind auth.RequireSession +
-// auth.RequireTenant (#408 — session AND tenant) beside the SSE relay (ADR-0015 —
+// /api/v1/highlights/{id}/clip, a TenantRequired row in the guarded mount
+// table (#408/#446 — session AND tenant) beside the SSE relay (ADR-0015 —
 // a byte stream, not a Connect unary). It loads the row
 // tenant-scoped, fetches the clip through the blob seam (ADR-0048), and streams
 // it with http.ServeContent so the browser <audio> scrubber's Range requests
@@ -52,10 +52,11 @@ func NewClipServer(store ClipStore, blobs blob.Store, resolve CampaignResolver, 
 }
 
 // ServeClip streams one Highlight's clip. CONTRACT (#408): the mount must be
-// "session AND tenant", not just session — auth.RequireSession authenticates the
-// operator, and auth.RequireTenant (composed inside it) resolves and injects the
-// tenant server-side. RequireSession ALONE injects only the user, so TenantID
-// misses and this handler 401s every request (the production bug #408 fixed). This
+// "session AND tenant", not just session — its table row declares
+// TenantRequired (#446), so the guard authenticates the operator AND resolves
+// and injects the tenant server-side. A session-only gate injects just the
+// user, so TenantID misses and this handler 401s every request (the
+// production bug #408 fixed). This
 // handler re-reads that injected tenant to scope the row load, so a foreign-tenant
 // id (or an unparsable one) is 404 — existence is never leaked. A missing blob is also 404
 // (the row and clip should agree, but a purge race must not 500). http.ServeContent
@@ -125,8 +126,8 @@ func (c *ClipServer) ServeClip(w http.ResponseWriter, req *http.Request) {
 }
 
 // ServeImage streams one Highlight's AI-generated image (#311), mirroring
-// ServeClip: GET /api/v1/highlights/{id}/image behind auth.RequireSession +
-// auth.RequireTenant (session AND tenant, per #408 — see ServeClip). It
+// ServeClip: GET /api/v1/highlights/{id}/image, a TenantRequired guarded
+// mount (session AND tenant, per #408 — see ServeClip). It
 // applies the same tenant + Active-Campaign 404 posture (existence never leaked)
 // and serves through http.ServeContent (Range/conditional). A Highlight with no
 // image yet (image_key == "") is 404 — the enrichment has not run, is not

@@ -18,8 +18,8 @@ import (
 // net/http endpoints mounted beside the SSE relay, NOT Connect RPCs (ADR-0015) —
 // the bundle is a file a human inspects, and a streamed gzip download / multipart
 // upload do not fit the Connect message-size model. The operator-only auth
-// posture (ADR-0041) is applied at the mount by wrapping in auth.RequireSession;
-// this type invents no auth of its own.
+// posture (ADR-0041) is applied at the mount via the guarded mount table
+// (auth.MustGuardMounts, #446); this type invents no auth of its own.
 //
 // #290 owns ServeExport (the GET download); #291 adds ServeImport (the POST
 // upload) to this same type.
@@ -34,9 +34,9 @@ type Handler struct {
 // transcript payload (ADR-0053 §1, default off). Archived campaigns are
 // exportable — a backup must still capture a campaign after it is archived.
 //
-// Tenant posture (#439): the mount composes auth.RequireSession +
-// auth.RequireTenant (session AND tenant, the post-#408 discipline), and this
-// handler 404s a campaign outside the injected tenant BEFORE any bytes are
+// Tenant posture (#439): the mount declares TenantRequired (session AND
+// tenant, the post-#408 discipline), and this handler 404s a campaign
+// outside the injected tenant BEFORE any bytes are
 // written — foreign and nonexistent campaigns are indistinguishable, matching
 // the Highlight mounts' don't-reveal-existence posture. A missing context
 // tenant is a miswired mount and rejects 401, fail-closed.
@@ -114,9 +114,10 @@ type importResponse struct {
 }
 
 // ServeImport ingests an uploaded campaign bundle: POST /api/v1/campaigns/import,
-// multipart form field "bundle". The mount wraps it in auth.RequireSession (401
-// gate + operator injected) THEN auth.RequireCSRF (403 double-submit, ADR-0016) —
-// this handler assumes both have passed and reads the operator from the context.
+// multipart form field "bundle". The guarded mount (#446) gates the session
+// (401 + operator injected) and, because POST is state-changing, the CSRF
+// double-submit (403, ADR-0016) — this handler assumes both have passed and
+// reads the operator from the context.
 //
 // The request body is capped by http.MaxBytesReader at [blob.MaxSize] (ADR-0048's
 // 32 MiB constant used purely as a request cap — blob.Store is NOT involved, the

@@ -143,7 +143,8 @@ var proxyHeaders = []string{"X-Forwarded-For", "X-Forwarded-Proto", "Forwarded"}
 // (ADR-0041 GLYPHOXA_DEV_MODE). It upserts the fixed synthetic operator
 // ([storage.DevOperatorDiscordID]), binds/creates its tenant, and mints a
 // session + CSRF token — the same row shape the OAuth callback produces — so the
-// existing interceptor stack + RequireSession + CSRF gate accept the injected
+// existing policy gate (the Connect stack and the guarded mount table, #446)
+// accepts the injected
 // cookies unchanged (see [devAuthMiddleware]). The store is the same
 // auth.OAuthStore the OAuth callback uses; now is injected for tests.
 func seedDevSession(ctx context.Context, store auth.OAuthStore, now func() time.Time) (sessionToken, csrfToken string, err error) {
@@ -213,8 +214,8 @@ func (d *devSessions) tokens(ctx context.Context) (session, csrf string, err err
 
 // devAuthMiddleware makes every request arrive already authenticated as the
 // dev operator (ADR-0041 GLYPHOXA_DEV_MODE). It stamps the glyphoxa_session
-// cookie (satisfying both the Connect auth interceptor and the plain-read
-// RequireSession guard) and BOTH the glyphoxa_csrf cookie AND a matching
+// cookie (satisfying the session check on both the Connect stack and the
+// guarded plain mounts, #446) and BOTH the glyphoxa_csrf cookie AND a matching
 // X-CSRF-Token header (satisfying the double-submit CSRF interceptor) onto every
 // inbound request, replacing any cookies the client sent. This reuses the whole
 // existing gate unchanged — nothing is special-cased downstream. Requests
