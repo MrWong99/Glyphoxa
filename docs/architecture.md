@@ -133,26 +133,26 @@ tree it is not a chain of early-returns but a **weighted scoring stack** of
 `Heuristic`s, each contributing to a per-Agent score; the highest score wins. What
 production actually runs is `address.DefaultHeuristics()`
 (`pkg/voice/address/matcher.go` — the roster builds the Matcher with `Heuristics`
-nil, which falls back to it), **five** heuristics, not four:
+nil, which falls back to it), **four** heuristics:
 
 | Heuristic | Weight | Mirrors ADR-0024 stage |
 |-----------|--------|------------------------|
 | `NameMatch` | 1.0 (decisive) | 1 — fuzzy name/alias: per-language phonetic encoder, then a Damerau-Levenshtein net, plus derived leading-consonant-truncation aliases (exact-only, utterance-initial) |
 | `LastAddressed` | 1.0 (decisive) | 2 — last-speaker continuation |
-| `RecentlyInterrupted` | 1.0 (decisive) | **none — not in ADR-0024** |
 | `ExpertOnRecentWord` | 0.5 (tie-break) | **none — not in ADR-0024** |
 | `SoleActiveNPC` | 1.0 (decisive) | 3 — single active non-Address-Only NPC fallback |
 
 Zero score ⇒ no target (ADR-0024 stage 4); the utterance is still transcribed. The
-two heuristics with no ADR-0024 stage both suppress themselves once any name matched,
-so they only reweight **unnamed** utterances:
+heuristic with no ADR-0024 stage suppresses itself once any name matched, so it only
+reweights **unnamed** utterances:
 
-- `RecentlyInterrupted` favors an Agent barged in on within the last 15 s — the
-  social "we cut them off but still expect them to finish" bias ADR-0027 explicitly
-  *deferred to v1.5+*, yet it is live in the default stack.
 - `ExpertOnRecentWord` would nudge toward an Agent whose Expertise keywords the table
   keeps saying — but it is **inert in production**: `matcherAgent`
   (`internal/wirenpc/roster.go`) never populates `Expertise`, so it always scores 0.
+- `RecentlyInterrupted` (the "we cut them off but still expect them to finish" bias)
+  exists as an opt-in heuristic but is **not** in the default stack (#442): its
+  signal source — `Matcher.NoteInterruption` from the barge path — is deferred to
+  v1.5+ per ADR-0027, so as a default it could never fire.
   It is dead weight in the shipped stack, not a behavior.
 
 This whole shape — a five-heuristic scoring stack where ADR-0024 documents a
@@ -757,7 +757,7 @@ disagreement is documented rather than discovered.
 | ADR-0012/0027: `was_interrupted`, `interrupted_by_user_id` | neither field exists | blocks on speaker attribution (§2.3, §2.6) |
 | ADR-0023: TTS matrix is ElevenLabs + OpenAI | ElevenLabs only | OpenAI TTS adapter not built |
 | ADR-0011: default embeddings via Ollama; ADR-0004 names more providers | `pkg/voice/embeddings/ollama` only | the only shipped embeddings adapter |
-| ADR-0024: a 4-stage address chain | a 5-heuristic scoring stack | `DefaultHeuristics` adds `RecentlyInterrupted` + `ExpertOnRecentWord` (§2.2) |
+| ADR-0024: a 4-stage address chain | a 4-heuristic scoring stack | `DefaultHeuristics` adds `ExpertOnRecentWord` (§2.2); `RecentlyInterrupted` is opt-in only (#442) |
 
 ## See also
 
