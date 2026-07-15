@@ -726,7 +726,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// Manager (the active Campaign). Gating it on the provider would silently lose
 	// the feature on keyless deployments. It owns no goroutine/subscription, so
 	// there is nothing to Close.
-	mgr.SetFacts(kgfacts.New(store, mgr, metrics, log, kgfacts.Config{}))
+	mgr.SetFacts(kgfacts.New(store.PromptKG(), mgr, metrics, log, kgfacts.Config{}))
 
 	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
 	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
@@ -735,7 +735,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
 	// the base voice config every session copies; in web-only mode the Manager starts
 	// no sessions, so the Tools stay dormant. SearchFacts drops gm_private (ADR-0008).
-	knowledgeAdapter := knowledge.New(store, mgr)
+	knowledgeAdapter := knowledge.New(store, store.PromptKG(), mgr)
 	mgr.SetToolDeps(tool.Deps{
 		Transcripts: knowledgeAdapter,
 		KG:          knowledgeAdapter,

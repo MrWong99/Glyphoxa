@@ -107,7 +107,7 @@ func TestSearchFactsUsesPublicSearchScoped(t *testing.T) {
 	store := &fakeStore{nodes: []storage.KGNode{
 		{Name: "Public Duke", Type: storage.KGNodeNPC, Body: "rules openly"},
 	}}
-	adapter := knowledge.New(store, liveSession(cid))
+	adapter := knowledge.New(store, store, liveSession(cid))
 
 	facts, err := adapter.SearchFacts(context.Background(), "duke", 5)
 	if err != nil {
@@ -123,7 +123,7 @@ func TestSearchFactsUsesPublicSearchScoped(t *testing.T) {
 
 // TestSearchFactsNoSessionErrors pins the no-active-session error path.
 func TestSearchFactsNoSessionErrors(t *testing.T) {
-	adapter := knowledge.New(&fakeStore{}, fakeSessions{live: false})
+	adapter := knowledge.New(&fakeStore{}, &fakeStore{}, fakeSessions{live: false})
 	if _, err := adapter.SearchFacts(context.Background(), "x", 5); !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("SearchFacts with no session = %v, want ErrNoActiveSession", err)
 	}
@@ -136,7 +136,7 @@ func TestSearchTranscriptCampaignScoped(t *testing.T) {
 	store := &fakeStore{lines: []storage.TranscriptLine{
 		{Who: "Bart", Kind: "npc", Text: "I remember."},
 	}}
-	adapter := knowledge.New(store, liveSession(cid))
+	adapter := knowledge.New(store, store, liveSession(cid))
 
 	hits, err := adapter.SearchTranscript(context.Background(), "remember", 5)
 	if err != nil {
@@ -149,7 +149,7 @@ func TestSearchTranscriptCampaignScoped(t *testing.T) {
 		t.Errorf("hits = %+v, want the one Bart line", hits)
 	}
 
-	idle := knowledge.New(store, fakeSessions{live: false})
+	idle := knowledge.New(store, store, fakeSessions{live: false})
 	if _, err := idle.SearchTranscript(context.Background(), "x", 5); !errors.Is(err, knowledge.ErrNoActiveSession) {
 		t.Errorf("SearchTranscript with no session = %v, want ErrNoActiveSession", err)
 	}
@@ -163,7 +163,7 @@ func TestOwnNodeFactsResolvesAgent(t *testing.T) {
 	store := &fakeStore{agentNodes: []storage.KGNode{
 		{Name: "Mara", Type: storage.KGNodeCharacter, Body: "owes you"},
 	}}
-	adapter := knowledge.New(store, liveSession(uuid.New()))
+	adapter := knowledge.New(store, store, liveSession(uuid.New()))
 
 	facts, err := adapter.OwnNodeFacts(context.Background(), aid.String())
 	if err != nil {
@@ -197,7 +197,7 @@ func TestOwnNodeResolvesLinkedNode(t *testing.T) {
 	aid := uuid.New()
 	nid := uuid.New()
 	store := &fakeStore{linkedNode: storage.KGNode{ID: nid, Name: "Bartholomew"}, linkedOK: true}
-	adapter := knowledge.New(store, liveSession(uuid.New()))
+	adapter := knowledge.New(store, store, liveSession(uuid.New()))
 
 	ref, ok, err := adapter.OwnNode(context.Background(), aid.String())
 	if err != nil || !ok {
@@ -228,7 +228,7 @@ func TestCreateProposalShapeAndScope(t *testing.T) {
 	cid := uuid.New()
 	aid := uuid.New()
 	store := &fakeStore{}
-	adapter := knowledge.New(store, liveSession(cid))
+	adapter := knowledge.New(store, store, liveSession(cid))
 
 	// The turn ctx is ALREADY cancelled (barge) when the write starts; the store's
 	// write ctx must NOT observe it (context.WithoutCancel).
@@ -264,7 +264,7 @@ func TestCreateProposalShapeAndScope(t *testing.T) {
 // TestCreateProposalNoSessionErrors pins the no-active-session error path for the
 // write seam.
 func TestCreateProposalNoSessionErrors(t *testing.T) {
-	adapter := knowledge.New(&fakeStore{}, fakeSessions{live: false})
+	adapter := knowledge.New(&fakeStore{}, &fakeStore{}, fakeSessions{live: false})
 	err := adapter.CreateProposal(context.Background(), uuid.New().String(),
 		tool.ProposedWrite{V: 1, Kind: "fact", Fact: "x"})
 	if !errors.Is(err, knowledge.ErrNoActiveSession) {

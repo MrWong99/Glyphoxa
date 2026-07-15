@@ -49,6 +49,15 @@ type Loop struct {
 	// called" recorder must learn about a RECOVERED pseudo-dice call, which never
 	// surfaced as a provider-native ToolCall.
 	OnPseudoCall func(ctx context.Context, name string, recovered bool)
+
+	// OnToolResult fires once per executed tool call with the [ToolResult] fed
+	// back to the model: name is the Tool's name, content the result text, isErr
+	// whether it is an error result. nil is a no-op. Like OnPseudoCall it is a
+	// wiring seam kept OUT of this vendor-agnostic package (ADR-0028): the
+	// agenttool bridge uses it to record the dice Tool's ACTUAL result so the
+	// invented-roll guard can verify a regenerated narration against what was
+	// really rolled (#438).
+	OnToolResult func(ctx context.Context, name, content string, isErr bool)
 }
 
 // NewLoop builds a Loop over provider and the Agent's grants. Both must be
@@ -170,6 +179,7 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 		results := make([]ToolResult, len(asst.ToolCalls))
 		for i, call := range asst.ToolCalls {
 			results[i] = l.execute(ctx, call)
+			l.fireToolResult(ctx, call.Name, results[i])
 		}
 		convo = append(convo, Message{Role: RoleTool, ToolResults: results})
 	}
@@ -235,6 +245,7 @@ func (l *Loop) Run(ctx context.Context, messages []Message) (string, error) {
 		results := make([]ToolResult, len(asst.ToolCalls))
 		for i, call := range asst.ToolCalls {
 			results[i] = l.execute(ctx, call)
+			l.fireToolResult(ctx, call.Name, results[i])
 		}
 		convo = append(convo, Message{Role: RoleTool, ToolResults: results})
 	}
@@ -335,5 +346,11 @@ func inlineEligible(t Tool) bool {
 func (l *Loop) firePseudoCall(ctx context.Context, name string, recovered bool) {
 	if l.OnPseudoCall != nil {
 		l.OnPseudoCall(ctx, name, recovered)
+	}
+}
+
+func (l *Loop) fireToolResult(ctx context.Context, name string, r ToolResult) {
+	if l.OnToolResult != nil {
+		l.OnToolResult(ctx, name, r.Content, r.IsError)
 	}
 }

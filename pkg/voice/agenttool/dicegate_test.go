@@ -32,6 +32,12 @@ func TestNeedsDice(t *testing.T) {
 		// \b-anchored prefix keeps inflections (rolls/rolling) armed.
 		{"en rolling", "en", "He keeps rolling his eyes.", true},
 
+		// --- English: common named-check phrasings (#438) — must arm dice. ---
+		{"en perception check", "en", "Make a perception check.", true},
+		{"en insight check", "en", "Give me an insight check on the merchant.", true},
+		{"en investigation check", "en", "I'd like an investigation check on the desk.", true},
+		{"en wisdom saving throw", "en", "Make a wisdom saving throw.", true},
+
 		// --- English: plain conversation — must NOT arm dice. ---
 		{"en room price", "en", "How much for a room and a pint?", false},
 		{"en greeting", "en", "Hello Bart, how are you?", false},
@@ -52,7 +58,13 @@ func TestNeedsDice(t *testing.T) {
 		{"de w20 notation", "de", "würfle zwei w20", true},
 		{"de bare notation", "de", "nimm zwei w20", true},
 		{"de Probe", "de", "mach eine Probe", true},
+		// German named checks are compounds on -probe, so the bare "probe" substring
+		// covers them all (#438) — pinned here so a keyword-set edit cannot drop them.
+		{"de Wahrnehmungsprobe", "de", "Mach eine Wahrnehmungsprobe.", true},
+		{"de Motiv-erkennen Probe", "de", "Würfle eine Probe auf Motiv erkennen.", true},
+		{"de Nachforschungen-Probe", "de", "Eine Nachforschungsprobe, bitte.", true},
 		{"de Rettungswurf", "de", "mach einen Rettungswurf gegen das Gift", true},
+		{"de Weisheitsrettungswurf", "de", "Mach einen Weisheitsrettungswurf.", true},
 		{"de Initiative", "de", "alle würfeln Initiative", true},
 		// werfen ("throw a die") verb family — imperative „wirf", „werfen" (#226).
 		{"de wirf imperative", "de", "Wirf noch einmal!", true},

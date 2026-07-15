@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // Knowledge Graph Node persistence (#126, ADR-0008 v1.0): the structured wiki /
@@ -17,16 +19,19 @@ import (
 
 // KGNodeType is a Knowledge Graph Node's type (CONTEXT.md "Node", ADR-0008). It
 // mirrors the kg_node_type Postgres enum; the value is immutable after create.
+// The values are compiler-linked to the single node-type vocabulary in
+// pkg/kgvocab (#449), which the remember_knowledge Tool's schema/validation and
+// the GM-facing label map also derive from.
 type KGNodeType string
 
 const (
-	KGNodeCharacter  KGNodeType = "character"
-	KGNodeNPC        KGNodeType = "npc"
-	KGNodeLocation   KGNodeType = "location"
-	KGNodeFaction    KGNodeType = "faction"
-	KGNodeItem       KGNodeType = "item"
-	KGNodePlotThread KGNodeType = "plot_thread"
-	KGNodeNote       KGNodeType = "note"
+	KGNodeCharacter  KGNodeType = kgvocab.NodeTypeCharacter
+	KGNodeNPC        KGNodeType = kgvocab.NodeTypeNPC
+	KGNodeLocation   KGNodeType = kgvocab.NodeTypeLocation
+	KGNodeFaction    KGNodeType = kgvocab.NodeTypeFaction
+	KGNodeItem       KGNodeType = kgvocab.NodeTypeItem
+	KGNodePlotThread KGNodeType = kgvocab.NodeTypePlotThread
+	KGNodeNote       KGNodeType = kgvocab.NodeTypeNote
 )
 
 // KGNode is one persisted Knowledge Graph Node in a Campaign. GMPrivate hides the
@@ -244,9 +249,8 @@ func (s *Store) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]KGNode
 // hint the GM review surface shows beside a Knowledge Proposal (#300, ADR-0052).
 // NULL-embedding rows are excluded (the partial HNSW index). Unlike the
 // prompt-facing searches this INCLUDES gm_private Nodes: it is GM-facing review
-// only, so the exclusion that guards NPC prompts does not apply here. NEVER reuse
-// this for NPC prompt assembly — it would leak GM secrets. k <= 0 is a caller bug
-// and errors. The query vector reuses encodeVector + a server-side ::vector cast,
+// only, and it is deliberately NOT part of [PromptKGView] — prompt assembly
+// cannot reach it (#450). k <= 0 is a caller bug and errors. The query vector reuses encodeVector + a server-side ::vector cast,
 // so storage carries no pgvector-go dependency.
 func (s *Store) SimilarNodes(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]KGNode, error) {
 	if k <= 0 {

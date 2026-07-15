@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // MaxProposalTextRunes caps the free-text (prose) fields a remember_knowledge
@@ -17,54 +19,22 @@ import (
 // handler, per-field, before the writer is ever called.
 const MaxProposalTextRunes = 2000
 
-// Proposal kinds (ADR-0052). fact/edge may be proposed own_node or campaign;
-// node (a brand-new wiki entry) is Butler-only (campaign scope).
-const (
-	proposalKindFact = "fact"
-	proposalKindEdge = "edge"
-	proposalKindNode = "node"
-)
-
-// proposalWriteVersion is the schema version stamped onto every ProposedWrite
-// (ADR-0052 "v":1), so a later shape change is detectable on the stored jsonb.
-const proposalWriteVersion = 1
-
-// relationValues is the closed set of Edge relations an Agent may propose,
-// mirroring the kg_edge relation vocabulary (ADR-0008). Exact lowercase
-// snake_case — the review surface and the eventual approved write depend on it.
-var relationValues = map[string]bool{
-	"resides_in":      true,
-	"member_of":       true,
-	"owns":            true,
-	"knows":           true,
-	"enemy_of":        true,
-	"ally_of":         true,
-	"parent_of":       true,
-	"participated_in": true,
-	"mentioned_in":    true,
-}
-
-// nodeTypeValues is the closed set of Node types a Butler may propose for a new
-// entry, mirroring storage.KGNodeType (ADR-0008). Exact lowercase snake_case.
-var nodeTypeValues = map[string]bool{
-	"character":   true,
-	"npc":         true,
-	"location":    true,
-	"faction":     true,
-	"item":        true,
-	"plot_thread": true,
-	"note":        true,
-}
+// The proposal kinds, the write version, and the closed relation / node-type
+// vocabularies all live in ONE place — pkg/kgvocab (#449) — consumed here by the
+// create path and by internal/storage (approve), internal/rpc (review), and the
+// label renderers, so the write contract cannot drift between its sides.
 
 // rememberKnowledgeInputSchema is the JSON Schema declared to the LLM. Scope is
 // NEVER an argument (ADR-0029: it lives in the grant, enforced in the handler);
 // the model only ever names WHAT it wants to remember, never on whose authority.
+// The enum lists are built from the kgvocab vocabulary at package init (#449), so
+// the declared schema and the handler's validation cannot diverge.
 var rememberKnowledgeInputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "kind": {
       "type": "string",
-      "enum": ["fact", "edge", "node"],
+      "enum": ` + enumJSON(kgvocab.KindFact, kgvocab.KindEdge, kgvocab.KindNode) + `,
       "description": "fact: a statement about an entity. edge: a relationship between two entities. node: a brand-new entry for the world."
     },
     "subject": {
@@ -77,7 +47,7 @@ var rememberKnowledgeInputSchema = json.RawMessage(`{
     },
     "relation": {
       "type": "string",
-      "enum": ["resides_in", "member_of", "owns", "knows", "enemy_of", "ally_of", "parent_of", "participated_in", "mentioned_in"],
+      "enum": ` + enumJSON(kgvocab.Relations()...) + `,
       "description": "The relationship type (kind=edge)."
     },
     "target": {
@@ -86,7 +56,7 @@ var rememberKnowledgeInputSchema = json.RawMessage(`{
     },
     "node_type": {
       "type": "string",
-      "enum": ["character", "npc", "location", "faction", "item", "plot_thread", "note"],
+      "enum": ` + enumJSON(kgvocab.NodeTypes()...) + `,
       "description": "The type of the new entry (kind=node)."
     },
     "name": {
@@ -100,6 +70,16 @@ var rememberKnowledgeInputSchema = json.RawMessage(`{
   },
   "required": ["kind"]
 }`)
+
+// enumJSON renders vals as the JSON array a schema enum declares — the seam that
+// derives the declared enums from the kgvocab vocabulary (#449).
+func enumJSON(vals ...string) string {
+	b, err := json.Marshal(vals)
+	if err != nil {
+		panic(err) // marshaling a []string cannot fail
+	}
+	return string(b)
+}
 
 // rememberArgs is the decoded LLM argument set. Scope is absent by design.
 type rememberArgs struct {
@@ -290,7 +270,7 @@ func withPendingEcho(lead string, pending []string) string {
 // body must be rejected the same way for a Butler and an NPC.
 func validateArgs(a rememberArgs) error {
 	switch a.Kind {
-	case proposalKindFact:
+	case kgvocab.KindFact:
 		if strings.TrimSpace(a.Fact) == "" {
 			return fmt.Errorf("remember_knowledge: a fact requires the 'fact' text")
 		}
@@ -300,8 +280,8 @@ func validateArgs(a rememberArgs) error {
 		if err := capName("subject", a.Subject); err != nil {
 			return err
 		}
-	case proposalKindEdge:
-		if !relationValues[a.Relation] {
+	case kgvocab.KindEdge:
+		if !kgvocab.ValidRelation(a.Relation) {
 			return fmt.Errorf("remember_knowledge: %q is not a known relation", a.Relation)
 		}
 		if strings.TrimSpace(a.Target) == "" {
@@ -313,11 +293,11 @@ func validateArgs(a rememberArgs) error {
 		if err := capName("target", a.Target); err != nil {
 			return err
 		}
-	case proposalKindNode:
+	case kgvocab.KindNode:
 		if strings.TrimSpace(a.Name) == "" {
 			return fmt.Errorf("remember_knowledge: a new entry requires a 'name'")
 		}
-		if !nodeTypeValues[a.NodeType] {
+		if !kgvocab.ValidNodeType(a.NodeType) {
 			return fmt.Errorf("remember_knowledge: %q is not a known node_type", a.NodeType)
 		}
 		if err := capText("name", a.Name); err != nil {
@@ -357,7 +337,7 @@ func capName(field, s string) error {
 // supplied, and an Agent with no linked entry is refused with the writer never
 // called.
 func (rk *RememberKnowledge) ownNodeWrite(ctx context.Context, a rememberArgs) (ProposedWrite, error) {
-	if a.Kind == proposalKindNode {
+	if a.Kind == kgvocab.KindNode {
 		return ProposedWrite{}, fmt.Errorf("remember_knowledge: you may not create new entries; you can only remember facts about yourself")
 	}
 	ref, ok, err := rk.dst.OwnNode(ctx, CallerID(ctx))
@@ -367,11 +347,11 @@ func (rk *RememberKnowledge) ownNodeWrite(ctx context.Context, a rememberArgs) (
 	if !ok {
 		return ProposedWrite{}, fmt.Errorf("remember_knowledge: you have no linked wiki entry to remember facts about")
 	}
-	w := ProposedWrite{V: proposalWriteVersion, Kind: a.Kind, NodeID: ref.ID, Subject: ref.Name}
+	w := ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: a.Kind, NodeID: ref.ID, Subject: ref.Name}
 	switch a.Kind {
-	case proposalKindFact:
+	case kgvocab.KindFact:
 		w.Fact = a.Fact
-	case proposalKindEdge:
+	case kgvocab.KindEdge:
 		w.Relation = a.Relation
 		w.Target = a.Target
 	}
@@ -382,22 +362,22 @@ func (rk *RememberKnowledge) ownNodeWrite(ctx context.Context, a rememberArgs) (
 // kinds are allowed, the subject is preserved from the args, and there is no
 // anchor node_id (the review surface resolves the subject by name).
 func campaignWrite(a rememberArgs) (ProposedWrite, error) {
-	w := ProposedWrite{V: proposalWriteVersion, Kind: a.Kind}
+	w := ProposedWrite{V: kgvocab.ProposalWriteVersion, Kind: a.Kind}
 	switch a.Kind {
-	case proposalKindFact:
+	case kgvocab.KindFact:
 		if strings.TrimSpace(a.Subject) == "" {
 			return ProposedWrite{}, fmt.Errorf("remember_knowledge: a fact requires a 'subject'")
 		}
 		w.Subject = a.Subject
 		w.Fact = a.Fact
-	case proposalKindEdge:
+	case kgvocab.KindEdge:
 		if strings.TrimSpace(a.Subject) == "" {
 			return ProposedWrite{}, fmt.Errorf("remember_knowledge: an edge requires a 'subject'")
 		}
 		w.Subject = a.Subject
 		w.Relation = a.Relation
 		w.Target = a.Target
-	case proposalKindNode:
+	case kgvocab.KindNode:
 		w.NodeType = a.NodeType
 		w.Name = a.Name
 		w.Body = a.Body

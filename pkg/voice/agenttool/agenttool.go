@@ -110,15 +110,21 @@ func consumeForcedChoice(ctx context.Context) (llm.ToolChoice, bool) {
 type calledToolsKey struct{}
 
 // calledTools is the per-turn recorder behind [calledToolsKey]: the adapter marks
-// every Tool the model emitted a call for; the guard queries it with [has]. Safe
-// for the loop's single goroutine plus the race detector.
+// every Tool the model emitted a call for, and the loop's OnToolResult wiring
+// records each executed Tool's result content (#438) so the regen guard can
+// verify a narration against what was actually rolled. The guard queries it with
+// [has] / [resultsFor]. Safe for the loop's single goroutine plus the race
+// detector.
 type calledTools struct {
-	mu    sync.Mutex
-	names map[string]bool
+	mu      sync.Mutex
+	names   map[string]bool
+	results map[string][]string
 }
 
 // newCalledTools builds an empty per-turn called-Tools recorder.
-func newCalledTools() *calledTools { return &calledTools{names: map[string]bool{}} }
+func newCalledTools() *calledTools {
+	return &calledTools{names: map[string]bool{}, results: map[string][]string{}}
+}
 
 // withCalledTools returns ctx carrying c, so the adapter records executed tool-call
 // names into it as the turn runs.
@@ -131,6 +137,15 @@ func (c *calledTools) has(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.names[name]
+}
+
+// resultsFor returns the executed-result contents recorded for name this turn
+// (#438) — the dice Tool's actual result lines the regen consistency check
+// verifies the narration against.
+func (c *calledTools) resultsFor(name string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.results[name]...)
 }
 
 // recordCalledTools marks every tool-call name in calls on the per-turn recorder
@@ -159,6 +174,21 @@ func markCalledTool(ctx context.Context, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.names[name] = true
+}
+
+// markToolResult records one executed Tool's result content on the per-turn
+// recorder ctx carries, if any (#438). An executed result implies the Tool was
+// called, so the name is marked too — the loop's OnToolResult wiring feeds this
+// regardless of whether the call was provider-native or pseudo-recovered.
+func markToolResult(ctx context.Context, name, content string) {
+	c, _ := ctx.Value(calledToolsKey{}).(*calledTools)
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.names[name] = true
+	c.results[name] = append(c.results[name], content)
 }
 
 // providerAdapter makes a streaming [llm.Provider] usable as the non-streaming
@@ -249,10 +279,14 @@ type attemptResult struct {
 // provider's tool_use_failed class and has NOT yet forwarded any prose is retried
 // once with the same tools+choice (no backoff); a second failure of the same class
 // regenerates tool-less (tools stay DECLARED, tool_choice none — the conversation
-// may hold prior tool_call/tool messages). A round that already forwarded a delta is
-// never retried (ADR-0044 mid-stream rule), and a ctx cancellation between attempts
-// aborts. Every malformed generation increments MalformedToolGen so provider flake
-// stays visible even when the turn fully recovers.
+// may hold prior tool_call/tool messages). If the tool-less attempt ALSO fails with
+// the same class (#427: some models call a tool despite tool_choice none) and the
+// conversation holds no prior tool messages, one final attempt strips the tool
+// declarations entirely; with prior tool messages the failure propagates. A round
+// that already forwarded a delta is never retried (ADR-0044 mid-stream rule), and a
+// ctx cancellation between attempts aborts. Every malformed generation increments
+// MalformedToolGen so provider flake stays visible even when the turn fully
+// recovers.
 func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, tools []tool.Decl, onText func(delta string) error) (tool.AssistantMessage, error) {
 	round := nextRound(ctx)
 	start := time.Now()
@@ -289,6 +323,29 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 					return a.abortBetweenAttempts(ctx, err)
 				}
 				res = a.attempt(ctx, messages, tools, llm.ToolChoice{Mode: llm.ToolChoiceNone}, onText)
+
+				if a.isToolSyntax(res) {
+					// Attempt 4 (#427): some models ignore tool_choice none and call a
+					// tool anyway, which the provider rejects at the wire — so the #398
+					// fallback itself failed. The third malformed generation is counted
+					// either way. When the conversation holds NO prior tool_call/tool
+					// messages, ONE final attempt is made with the tool declarations
+					// stripped entirely: with nothing declared there is nothing to call,
+					// so this failure class is impossible. With prior tool messages the
+					// error propagates as before — stripping the declarations there
+					// risks a provider 400 on the now-dangling tool references (the
+					// reason #420 kept tools declared on the none-attempt).
+					a.rec.MalformedToolGen(a.provName, observe.MalformedStreamError)
+					a.recordReportedUsage(res.haveUsage, res.usage)
+					if !hasToolHistory(messages) {
+						slog.Warn("agenttool: tool-less fallback still failed tool-syntax; regenerating with tools stripped",
+							"provider", string(a.provName), "round", round)
+						if err := ctx.Err(); err != nil {
+							return a.abortBetweenAttempts(ctx, err)
+						}
+						res = a.attempt(ctx, messages, nil, llm.ToolChoice{}, onText)
+					}
+				}
 			}
 		}
 	}
@@ -297,6 +354,20 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 	// invented-roll guard; a no-op unless this turn installed a [calledTools] set.
 	recordCalledTools(ctx, res.msg.ToolCalls)
 	return a.recordOutcome(ctx, round, start, messages, res)
+}
+
+// hasToolHistory reports whether the conversation already carries a tool_call or
+// tool-result message — the #427 guard condition: only a tool-history-free
+// conversation may have its tool declarations stripped on the final degrade
+// attempt (a prior tool reference with no matching declaration risks a provider
+// 400).
+func hasToolHistory(messages []tool.Message) bool {
+	for _, m := range messages {
+		if len(m.ToolCalls) > 0 || len(m.ToolResults) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // isToolSyntax reports whether res failed with the provider's tool-syntax class AND
@@ -625,6 +696,15 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 				markCalledTool(ctx, name)
 			}
 		}
+		// #438: record every executed Tool's result on the turn's recorder (a
+		// no-op without one) so the invented-roll guard can verify a forced
+		// regeneration's narration against the dice Tool's ACTUAL result. Error
+		// results are skipped — a refused roll yields no legitimate number.
+		l.OnToolResult = func(ctx context.Context, name, content string, isErr bool) {
+			if !isErr {
+				markToolResult(ctx, name, content)
+			}
+		}
 		return l
 	}
 	// Two loops over the same adapter: full grants, and grants with dice dropped.
@@ -708,20 +788,21 @@ func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText fu
 
 	// Post-hoc guard (Option C): dice was armed, the dice Tool was never actually
 	// called, and the reply narrates a numeric roll result → the model invented it.
-	// Regenerate ONCE with the dice Tool forced; the forced round's provider failures
-	// flow into the #398 policy (no new retry). The discarded draft is NEVER
-	// delivered — on a regeneration error the turn fails rather than speak the
-	// invented number (ADR-0030: a discarded draft must not surface).
+	// Regenerate with the dice Tool forced and the narration VERIFIED against the
+	// Tool's actual result (#438, see [Engine.regenWithForcedDice]); the forced
+	// rounds' provider failures flow into the #398 policy (no new retry). The
+	// discarded draft is NEVER delivered — on a regeneration error the turn fails
+	// rather than speak the invented number (ADR-0030: a discarded draft must not
+	// surface).
 	if !called.has(diceToolName) && claimsRollResult(text) {
 		e.rec.MalformedToolGen(e.provName, observe.MalformedRollClaim)
 		slog.Warn("agenttool: dice armed but model narrated an unrolled result; regenerating with forced dice tool",
 			"provider", string(e.provName))
-		forced := withForcedToolChoice(withRoundCounter(ctx), llm.ToolChoice{Mode: llm.ToolChoiceTool, Tool: diceToolName})
-		regen, rerr := e.full.Run(forced, msgs)
+		regen, rerr := e.regenWithForcedDice(ctx, msgs)
 		if rerr != nil {
 			return "", rerr
 		}
-		text = regen // deliver the regenerated reply as-is — the guard fires at most once
+		text = regen
 	}
 
 	// Deliver the (possibly regenerated) whole text once — same whole-text push the
@@ -733,6 +814,41 @@ func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText fu
 		}
 	}
 	return text, nil
+}
+
+// maxForcedRegens bounds the invented-roll escalation: the #399 forced
+// regeneration plus ONE #438 consistency retry — never an unbounded loop.
+const maxForcedRegens = 2
+
+// regenWithForcedDice re-runs the buffered turn with the dice Tool forced on the
+// opening round (#399) and verifies the regenerated narration against the dice
+// Tool's ACTUAL result (#438): a regen that claims a roll value contradicting
+// what the Tool returned — or that claims a value without the Tool having run at
+// all — is discarded and retried once; a second contradiction fails the turn
+// (ADR-0012/ADR-0030: a contradicting number must never be spoken, a discarded
+// draft must never surface). A claim-free regen, or one whose claim matches the
+// rolled result, is returned unchanged. Each attempt runs with a fresh
+// [calledTools] recorder so the consistency check sees only THAT attempt's rolls,
+// and each mismatch is counted on the bounded regen_mismatch label.
+func (e *Engine) regenWithForcedDice(ctx context.Context, msgs []tool.Message) (string, error) {
+	for attempt := 1; ; attempt++ {
+		called := newCalledTools()
+		forced := withForcedToolChoice(withCalledTools(withRoundCounter(ctx), called),
+			llm.ToolChoice{Mode: llm.ToolChoiceTool, Tool: diceToolName})
+		regen, err := e.full.Run(forced, msgs)
+		if err != nil {
+			return "", err
+		}
+		if rollClaimConsistent(regen, called.resultsFor(diceToolName)) {
+			return regen, nil
+		}
+		e.rec.MalformedToolGen(e.provName, observe.MalformedRegenMismatch)
+		slog.Warn("agenttool: forced regen narrated a roll contradicting the dice result; draft discarded",
+			"provider", string(e.provName), "attempt", attempt)
+		if attempt >= maxForcedRegens {
+			return "", errors.New("agenttool: regenerated reply kept contradicting the actual dice result")
+		}
+	}
 }
 
 // withDiceHardening returns messages with [diceHardeningInstruction] appended to

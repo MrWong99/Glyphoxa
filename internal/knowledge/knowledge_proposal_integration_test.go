@@ -80,7 +80,7 @@ func TestRememberKnowledge_OwnNodeProposal_RealDB(t *testing.T) {
 	store, pool, campaignID, agentID, nodeID := seedProposalWorld(t, dsn)
 	ctx := context.Background()
 
-	adapter := knowledge.New(store, staticSession{
+	adapter := knowledge.New(store, store.PromptKG(), staticSession{
 		sess: storage.VoiceSession{CampaignID: campaignID}, live: true,
 	})
 	rk := tool.NewRememberKnowledge(adapter)
@@ -160,7 +160,7 @@ func TestRememberKnowledge_DoubleRememberOneRow_RealDB(t *testing.T) {
 	store, _, campaignID, agentID, _ := seedProposalWorld(t, dsn)
 	ctx := context.Background()
 
-	adapter := knowledge.New(store, staticSession{
+	adapter := knowledge.New(store, store.PromptKG(), staticSession{
 		sess: storage.VoiceSession{CampaignID: campaignID}, live: true,
 	})
 	rk := tool.NewRememberKnowledge(adapter)

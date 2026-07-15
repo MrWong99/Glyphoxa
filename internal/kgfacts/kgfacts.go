@@ -30,6 +30,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 )
 
@@ -62,13 +63,20 @@ const factsHeader = "## What you know about the world"
 // in the agent's rendered block. Reserved in the block-budget accounting.
 const blockJoin = "\n\n"
 
-// Nodes is the narrow storage read kgfacts needs: the Agent's edge-aware Node
-// neighbourhood — its own linked Node plus its single-hop neighbours (both edge
-// directions), gm-public only, bounded (the prompt-injection read, #133).
-// *storage.Store satisfies it.
-type Nodes interface {
+// PromptKG is the prompt-facing KG read seam kgfacts needs (#450): the Agent's
+// edge-aware Node neighbourhood — its own linked Node plus its single-hop
+// neighbours (both edge directions), gm-public only, bounded (the
+// prompt-injection read, #133). It deliberately declares NO unfiltered KG read:
+// what this interface returns lands in an NPC's Hot Context, so gm_private
+// filtering is enforced by the seam (see the gm_private seam test in
+// internal/storage), not by call-site discipline. storage's PromptKG() view
+// satisfies it.
+type PromptKG interface {
 	AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]storage.KGNode, error)
 }
+
+// Compile-time assertion: the storage prompt view satisfies the seam.
+var _ PromptKG = storage.PromptKGView{}
 
 // Sessions is the narrow read kgfacts needs from the SessionManager: whether a
 // Voice Session is active this turn — the guard that keeps Facts a no-op when idle
@@ -102,17 +110,17 @@ func (c Config) withDefaults() Config {
 // subscription (unlike recall) — the read is inline per turn. Safe for concurrent
 // use (its deps are).
 type Recaller struct {
-	nodes    Nodes
+	nodes    PromptKG
 	sessions Sessions
 	metrics  Metrics
 	log      *slog.Logger
 	budget   time.Duration
 }
 
-// New builds a Recaller wired to the public-Node read, the session source (for the
-// active Campaign), and the metrics sink. Unlike recall it starts nothing and owns
-// no resources to release.
-func New(nodes Nodes, sessions Sessions, metrics Metrics, log *slog.Logger, cfg Config) *Recaller {
+// New builds a Recaller wired to the prompt-facing KG read seam (pass storage's
+// PromptKG() view), the session source (for the active Campaign), and the
+// metrics sink. Unlike recall it starts nothing and owns no resources to release.
+func New(nodes PromptKG, sessions Sessions, metrics Metrics, log *slog.Logger, cfg Config) *Recaller {
 	cfg = cfg.withDefaults()
 	if log == nil {
 		log = slog.Default()
@@ -231,27 +239,11 @@ func renderFact(n storage.KGNode) string {
 	return head + "\n" + body
 }
 
-// typeLabel maps a Node type onto its GM-facing label (#126 test contract). An
-// unknown type falls back to "Note" defensively (the DB enum keeps this exhaustive).
+// typeLabel maps a Node type onto its GM-facing label (#126 test contract) via
+// the single label map in pkg/kgvocab (#449); an unknown type falls back to
+// "Note" there.
 func typeLabel(t storage.KGNodeType) string {
-	switch t {
-	case storage.KGNodeCharacter:
-		return "Character"
-	case storage.KGNodeNPC:
-		return "NPC"
-	case storage.KGNodeLocation:
-		return "Location"
-	case storage.KGNodeFaction:
-		return "Faction"
-	case storage.KGNodeItem:
-		return "Item"
-	case storage.KGNodePlotThread:
-		return "Plot thread"
-	case storage.KGNodeNote:
-		return "Note"
-	default:
-		return "Note"
-	}
+	return kgvocab.NodeTypeLabel(string(t))
 }
 
 // truncateRunes trims s to at most max runes, appending an ellipsis when it cut —
