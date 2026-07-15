@@ -41,6 +41,16 @@ A barge-in tears down the **entire** Ensemble Turn (ADR-0025), not just the Lead
 - **Interrupted-Agent priority bias.** Address Detection (ADR-0024) gives a recently-interrupted Agent a small priority multiplier in the last-speaker-continuation stage, capturing the social fact that we cut someone off but still expect them to finish.
 - **Cosmetic fade-out** on hard cut (above).
 
+## Amendment: voiced-duration disarm + Gate-1 re-check at expiry (2026-07-15, #431/#432)
+
+Two defects from the 2026-07-14 review tightened the trigger's mechanics; the decision itself is unchanged.
+
+**Soft-overlap keys on the provisional end of voicing, not the segment boundary (#431).** The original wiring disarmed the confirm window only on `vad.speech_end` — which Silero emits a full min-silence hangover (production: 12 × 32ms = 384ms) *after* voicing stops. With the hangover longer than the window (250ms), the disarm could never precede timer expiry, so *every* voiced burst barged and Soft-overlap was unreachable — the fire-fast-at-onset design this ADR explicitly rejected, with a fixed 250ms delay bolted on. The VAD stage now also publishes the provisional in-utterance transitions `vad.voicing_stopped` (first sub-threshold frame — the speaker actually fell silent; the barge window disarms on it) and `vad.voicing_resumed` (voicing picked back up before the hangover elapsed, which fires no fresh `speech_start`; the window re-arms on it). "Continuous voiced speech" is thus measured on when voicing *stops*, not on when the hangover-delayed segment closes; the hangover keeps its one job — utterance merging for STT — and segmentation is untouched. `speech_end` still disarms as a fallback for VAD sources without provisional transitions. A timing test in `wirenpc` replays the production constants so a regression back into "disarm can never win" fails CI.
+
+**Gate 1 is re-validated when the window expires (#432).** Arming captures the *speaking turn's identity*, and the expiring timer yields the floor only if that same turn still holds it and is still audible (`Floor.SpeakingTurn` / `Floor.YieldTurn`). Previously the expiry called a bare `Floor.Yield`, cancelling whatever held the floor at that moment — including a new, pre-audio turn that took the floor mid-window, exactly the `no_audio` self-cancel class Gate 1 exists to prevent. The strict identity reading is deliberate: a *different* speaking turn that started mid-window is one the human had not heard when they began talking, so their speech is not an interruption of it; the human's next voicing onset arms a fresh window against it.
+
+The per-Agent confirm-window tunable promised above remains unimplemented (no config surface yet); deployments run the wirenpc default.
+
 ## Considered options
 
 - **Fire-fast at the 90ms capture onset** — rejected; every backchannel would kill the Agent mid-sentence. The second (confirm) knob exists precisely to separate capture from floor-yielding.

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voicetest"
 )
@@ -238,4 +239,227 @@ func TestBargeIn_SameSpeakerSoftOverlapDisarms(t *testing.T) {
 	if turnCtx.Err() != nil {
 		t.Fatal("a same-speaker soft-overlap backchannel must not cancel the turn")
 	}
+}
+
+// TestBargeIn_VoicingStoppedDisarms is the #431 core: the PROVISIONAL
+// voicing_stopped — published as soon as the speaker actually falls silent,
+// long before the hangover-delayed segment speech_end — disarms the window, so
+// a backchannel burst shorter than the window never cancels the Agent even
+// though its speech_end arrives (hangover) after the window would have fired.
+// The test waits out the window to prove the timer really was disarmed, not
+// merely not-yet-fired, then delivers the late speech_end as production would.
+func TestBargeIn_VoicingStoppedDisarms(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	turnCtx, release, _ := floor.Take(parent, "")
+	defer release()
+
+	const window = 60 * time.Millisecond
+	t.Cleanup(orchestrator.NewBargeIn(floor, window).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+	h.Bus.Publish(voiceevent.VADVoicingStopped{SpeakerID: "A"}) // the burst really ended
+
+	time.Sleep(3 * window) // the armed timer would have fired by now
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+	if turnCtx.Err() != nil {
+		t.Fatal("a voicing_stopped inside the window must disarm it: the burst was a soft-overlap backchannel")
+	}
+
+	// The segment-final speech_end lands only after the hangover — far too late
+	// to have been the disarm — and must stay a harmless no-op.
+	h.Bus.Publish(voiceevent.VADSpeechEnd{SpeakerID: "A"})
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+	if turnCtx.Err() != nil {
+		t.Fatal("the hangover-delayed speech_end must not cancel anything")
+	}
+}
+
+// TestBargeIn_VoicingResumedReArms pins the onset half of #431: a speaker who
+// pauses briefly (voicing_stopped disarms) and then KEEPS TALKING inside the
+// still-open utterance fires no fresh speech_start — voicing_resumed is the
+// only onset signal — so it must re-arm the window, and the now-continuous
+// speech must still barge the Agent.
+func TestBargeIn_VoicingResumedReArms(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	turnCtx, release, _ := floor.Take(parent, "")
+	defer release()
+
+	t.Cleanup(orchestrator.NewBargeIn(floor, 30*time.Millisecond).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+	h.Bus.Publish(voiceevent.VADVoicingStopped{SpeakerID: "A"}) // brief pause: disarm
+	h.Bus.Publish(voiceevent.VADVoicingResumed{SpeakerID: "A"}) // keeps talking: re-arm
+
+	voicetest.WaitEvent(t, h, 2*time.Second,
+		func(e voiceevent.BargeDetected) bool { return e.SpeakerID == "A" },
+		"barge.detected for A's resumed, sustained speech (voicing_resumed must re-arm the window)",
+	)
+	if turnCtx.Err() == nil {
+		t.Fatal("resumed sustained speech must cancel the turn")
+	}
+}
+
+// TestBargeIn_VoicingStoppedOtherSpeakerKeepsWindow extends the ADR-0050
+// per-speaker keying to the provisional transitions: B's voicing_stopped must
+// not disarm A's window — A's sustained interruption still fires.
+func TestBargeIn_VoicingStoppedOtherSpeakerKeepsWindow(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	turnCtx, release, _ := floor.Take(parent, "")
+	defer release()
+
+	t.Cleanup(orchestrator.NewBargeIn(floor, 40*time.Millisecond).Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+	h.Bus.Publish(voiceevent.VADVoicingStopped{SpeakerID: "B"}) // only B paused
+
+	voicetest.WaitEvent(t, h, 2*time.Second,
+		func(e voiceevent.BargeDetected) bool { return e.SpeakerID == "A" },
+		"barge.detected attributed to A (B's voicing_stopped must not disarm A's window)",
+	)
+	if turnCtx.Err() == nil {
+		t.Fatal("A's sustained interruption must cancel the turn")
+	}
+}
+
+// TestBargeIn_ExpiryAfterHolderChange_DoesNotCancelNewTurn is the #432
+// regression: Gate 1 must hold at window EXPIRY, not only at arm. The window
+// arms against speaking turn T1; T1 ends naturally inside the window and a
+// NEW turn T2 takes the floor, still silent in its pre-audio LLM phase. The
+// expiring timer must not cancel T2 — the human's overlapping speech was
+// aimed at T1, and killing a turn that has produced no audio is exactly the
+// `no_audio` self-cancel class ADR-0027's Gate 1 exists to prevent.
+func TestBargeIn_ExpiryAfterHolderChange_DoesNotCancelNewTurn(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+
+	const window = 60 * time.Millisecond
+	t.Cleanup(orchestrator.NewBargeIn(floor, window).Bind(t.Context(), h.Bus))
+
+	// T1 speaks; a participant starts talking over it: the window arms on T1.
+	parent1 := voiceevent.WithTurnID(context.Background(), "T1")
+	_, release1, _ := floor.Take(parent1, "")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+
+	// T1 finishes naturally inside the window; T2 takes the floor, pre-audio.
+	release1()
+	parent2 := voiceevent.WithTurnID(context.Background(), "T2")
+	turnCtx2, release2, _ := floor.Take(parent2, "")
+	defer release2()
+
+	time.Sleep(3 * window) // let the armed timer expire
+	if turnCtx2.Err() != nil {
+		t.Fatal("the expiring window armed on T1 must not cancel the new, not-yet-audible turn T2")
+	}
+	if !floor.Active() {
+		t.Fatal("T2 must still hold the floor")
+	}
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+	voicetest.AssertNoEvent[voiceevent.TurnEnded](t, h)
+}
+
+// TestBargeIn_ExpiryAfterHolderChange_SparesNewSpeakingTurn pins the STRICT
+// identity reading of the Gate-1 re-check (#432): even when the replacement
+// turn T2 has begun speaking by expiry, the window armed against T1 must not
+// cut it — the human started talking before they had heard a word of T2, so
+// their speech cannot have been an interruption of it. T2's own barge window
+// arms on the human's next voicing onset, not this stale one.
+func TestBargeIn_ExpiryAfterHolderChange_SparesNewSpeakingTurn(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+
+	const window = 60 * time.Millisecond
+	t.Cleanup(orchestrator.NewBargeIn(floor, window).Bind(t.Context(), h.Bus))
+
+	parent1 := voiceevent.WithTurnID(context.Background(), "T1")
+	_, release1, _ := floor.Take(parent1, "")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+
+	// T1 ends; T2 takes the floor AND becomes audible inside the window.
+	release1()
+	parent2 := voiceevent.WithTurnID(context.Background(), "T2")
+	turnCtx2, release2, _ := floor.Take(parent2, "")
+	defer release2()
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T2"})
+
+	time.Sleep(3 * window)
+	if turnCtx2.Err() != nil {
+		t.Fatal("a window armed on T1 must not cancel T2, even though T2 is speaking at expiry")
+	}
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+}
+
+// TestBargeIn_SoftOverlapBurst_StillTranscribed closes #431's remaining half:
+// the backchannel burst that must NOT barge must still run the normal
+// transcription path (Soft-overlap per CONTEXT.md is "transcribed and
+// committed normally — it just doesn't cancel the Agent"). A scripted VAD
+// drives the segmenter through start → voicing_stopped (disarm) → the
+// hangover → speech_end on the SAME bus a BargeIn is bound to: the turn
+// survives the window expiry, and the utterance still reaches the recognizer
+// and publishes its STTFinal.
+func TestBargeIn_SoftOverlapBurst_StillTranscribed(t *testing.T) {
+	h := voicetest.New(t)
+	rec := &recordingRecognizer{}
+	vadStage := orchestrator.NewVAD(h.Bus, &scriptedVAD{events: []vad.VADEventType{
+		vad.VADSpeechStart,    // burst onset: window arms
+		vad.VADVoicingStopped, // burst really ended: window disarms
+		vad.VADSpeechContinue, // hangover still counting
+		vad.VADSpeechEnd,      // segment closes: transcription dispatches
+	}})
+	sttStage := orchestrator.NewSTT(h.Bus, rec)
+	seg := orchestrator.NewSegmenter(vadStage, sttStage)
+
+	floor := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	turnCtx, release, _ := floor.Take(parent, "")
+	defer release()
+
+	const window = 50 * time.Millisecond
+	t.Cleanup(orchestrator.NewBargeIn(floor, window).Bind(t.Context(), h.Bus))
+	t.Cleanup(seg.Bind(t.Context(), h.Bus))
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"}) // the Agent is audibly speaking
+
+	feed(t, seg, 2)        // start + voicing_stopped: armed, then disarmed
+	time.Sleep(3 * window) // the window would have fired had the stop not disarmed it
+	feed(t, seg, 2)        // hangover frame + speech_end: the burst commits to STT
+
+	if err := seg.Flush(); err != nil {
+		t.Fatalf("seg.Flush: %v", err)
+	}
+	if got := len(rec.batches()); got != 1 {
+		t.Fatalf("recognizer saw %d segments, want 1: the soft-overlap burst must still be transcribed", got)
+	}
+	voicetest.AssertEventCount[voiceevent.STTFinal](t, h, 1)
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+	if turnCtx.Err() != nil {
+		t.Fatal("the soft-overlap burst must not cancel the Agent's turn")
+	}
+}
+
+// TestBargeIn_ExpiryOnFreeFloor_NoSpuriousEvent: the window arms on a speaking
+// turn which then ends naturally, leaving the floor free at expiry. Nothing is
+// cancelled and no BargeDetected/TurnEnded is announced (#432 AC3).
+func TestBargeIn_ExpiryOnFreeFloor_NoSpuriousEvent(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+
+	const window = 60 * time.Millisecond
+	t.Cleanup(orchestrator.NewBargeIn(floor, window).Bind(t.Context(), h.Bus))
+
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	_, release, _ := floor.Take(parent, "")
+	h.Bus.Publish(voiceevent.FirstOpus{TurnID: "T1"})
+	h.Bus.Publish(voiceevent.VADSpeechStart{SpeakerID: "A"})
+	release() // T1 finishes on its own; floor is free
+
+	time.Sleep(3 * window)
+	voicetest.AssertNoEvent[voiceevent.BargeDetected](t, h)
+	voicetest.AssertNoEvent[voiceevent.TurnEnded](t, h)
 }

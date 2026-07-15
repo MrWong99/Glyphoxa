@@ -168,6 +168,50 @@ func (f *Floor) Yield() (turnID string, yielded bool) {
 	return turnID, true
 }
 
+// YieldTurn cancels the turn holding the floor ONLY when turnID is that turn
+// AND it is audibly speaking ([Floor.Speaking]), reporting whether it did. It
+// is the barge fire path's Gate-1 re-check (#432, ADR-0027): the confirm
+// window captures the speaking holder's TurnID when it arms
+// ([Floor.SpeakingTurn]), and when the timer expires this re-validates that
+// the SAME turn still holds the floor and is still speaking. A holder change
+// inside the window — the speaking turn ended naturally and a new, not-yet-
+// audible turn took the floor — makes this a no-op: the human's overlapping
+// speech was aimed at a turn that no longer exists, and cancelling the new
+// turn would be exactly the pre-audio self-cancel Gate 1 exists to prevent
+// (`no_audio` turns must not be cancellable). An empty floor is likewise a
+// no-op. Mechanically identical to [Floor.Yield] once the guard passes.
+func (f *Floor) YieldTurn(turnID string) (yielded bool) {
+	f.mu.Lock()
+	if f.cancel == nil || f.holderTurn != turnID || !f.speaking {
+		f.mu.Unlock()
+		return false
+	}
+	c := f.cancel
+	f.cancel = nil
+	f.holderTurn = ""
+	f.holderAgent = ""
+	f.speaking = false
+	f.mu.Unlock()
+	c()
+	return true
+}
+
+// SpeakingTurn reports the TurnID of the floor's current holder when — and
+// only when — that holder is audibly speaking ([Floor.Speaking]). It is the
+// arm-time Gate-1 read of the [BargeIn] confirm window (#432): the captured
+// id is what [Floor.YieldTurn] re-validates at window expiry, so a barge can
+// only ever cancel the turn the human was actually talking over. speaking is
+// false when the floor is free or the holder is still in its silent pre-audio
+// phase (turnID is then empty). Point-in-time, like [Floor.Speaking].
+func (f *Floor) SpeakingTurn() (turnID string, speaking bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cancel == nil || !f.speaking {
+		return "", false
+	}
+	return f.holderTurn, true
+}
+
 // YieldAgent cancels the turn holding the floor ONLY when agentID is that turn's
 // target Agent, reporting the cut turn's TurnID and yielded=true; otherwise it is
 // a no-op reporting ("", false) and the floor is left untouched. It is the

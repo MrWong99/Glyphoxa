@@ -52,6 +52,40 @@ type VADSpeechEnd struct {
 // EventName implements [Event].
 func (VADSpeechEnd) EventName() string { return "vad.speech_end" }
 
+// VADVoicingStopped marks the PROVISIONAL end of voicing inside a still-open
+// utterance: the VAD saw its first sub-threshold frame after voiced frames,
+// but the end-of-speech hangover has not elapsed, so no [VADSpeechEnd] fires
+// yet. It is not a segment boundary — the Segmenter ignores it and keeps
+// buffering — but it is the earliest "the speaker actually fell silent"
+// signal, which the [BargeIn] confirm window disarms on (#431): under the
+// production hangover (longer than the confirm window) the segment-final
+// speech_end always arrives too late to disarm, so Soft-overlap (CONTEXT.md)
+// would otherwise be unreachable. SpeakerID attribution as in [VADSpeechEnd].
+type VADVoicingStopped struct {
+	At          time.Time
+	Probability float64
+	SpeakerID   string
+}
+
+// EventName implements [Event].
+func (VADVoicingStopped) EventName() string { return "vad.voicing_stopped" }
+
+// VADVoicingResumed marks voicing picking back up inside a still-open
+// utterance after a [VADVoicingStopped], before the hangover elapsed. Because
+// the utterance never closed, no fresh [VADSpeechStart] fires — this is the
+// only onset signal a mid-utterance resumption produces, and the [BargeIn]
+// reactor re-arms its confirm window on it (#431): a participant who pauses
+// briefly and then keeps talking over the Agent is still interrupting.
+// SpeakerID attribution as in [VADSpeechStart].
+type VADVoicingResumed struct {
+	At          time.Time
+	Probability float64
+	SpeakerID   string
+}
+
+// EventName implements [Event].
+func (VADVoicingResumed) EventName() string { return "vad.voicing_resumed" }
+
 // STTPartial is the MUTABLE interim hypothesis of the in-progress utterance
 // (ADR-0042/0020). Text REPLACES all previous partials for the same UtteranceID —
 // it is not cumulative. Only [STTFinal] reaches Address Detection and the

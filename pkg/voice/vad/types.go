@@ -24,4 +24,19 @@ const (
 
 	// VADSilence indicates no speech detected.
 	VADSilence
+
+	// VADVoicingStopped indicates voicing has provisionally paused inside a
+	// still-open utterance: the first sub-threshold frame after voiced frames,
+	// while the end-of-speech hangover is still counting down. It is NOT a
+	// segment boundary — the utterance stays open and either resumes
+	// (VADVoicingResumed) or ends for real (VADSpeechEnd) once the hangover
+	// elapses. It exists so latency-sensitive consumers (the barge-in confirm
+	// window, #431) can observe when a speaker actually fell silent without
+	// waiting out the hangover, whose job is utterance merging for STT.
+	VADVoicingStopped
+
+	// VADVoicingResumed indicates voicing picked back up inside the utterance
+	// after a VADVoicingStopped, before the hangover elapsed — so no new
+	// VADSpeechStart fires, but the speaker is audibly talking again.
+	VADVoicingResumed
 )

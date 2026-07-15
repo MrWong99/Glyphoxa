@@ -166,6 +166,41 @@ func TestVAD_TwoUtteranceTest_EmitsTwoSpeechStarts(t *testing.T) {
 	voicetest.AssertEventCount[voiceevent.VADSpeechStart](t, h, 2)
 }
 
+// TestVAD_PublishesVoicingTransitions pins the #431 publish path: the stage
+// republishes the session's provisional VADVoicingStopped / VADVoicingResumed
+// transitions onto the bus, stamped with the frame's Speaker() like every
+// other transition (ADR-0050) — these are what let the barge-in confirm
+// window observe the real end of voicing instead of the hangover-delayed
+// speech_end.
+func TestVAD_PublishesVoicingTransitions(t *testing.T) {
+	bus := voiceevent.NewBus()
+	var stopped []voiceevent.VADVoicingStopped
+	var resumed []voiceevent.VADVoicingResumed
+	voiceevent.On(bus, func(e voiceevent.VADVoicingStopped) { stopped = append(stopped, e) })
+	voiceevent.On(bus, func(e voiceevent.VADVoicingResumed) { resumed = append(resumed, e) })
+
+	stage := orchestrator.NewVAD(bus, &scriptedVAD{events: []vad.VADEventType{
+		vad.VADSpeechStart, vad.VADVoicingStopped, vad.VADVoicingResumed, vad.VADSpeechEnd,
+	}})
+
+	base, err := audio.NewFrame(make([]int16, 512), 16000, 32)
+	if err != nil {
+		t.Fatalf("audio.NewFrame: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := stage.Process(base.WithSpeaker("42")); err != nil {
+			t.Fatalf("frame %d: Process: %v", i, err)
+		}
+	}
+
+	if len(stopped) != 1 || stopped[0].SpeakerID != "42" {
+		t.Errorf("VADVoicingStopped = %+v, want exactly one with SpeakerID \"42\"", stopped)
+	}
+	if len(resumed) != 1 || resumed[0].SpeakerID != "42" {
+		t.Errorf("VADVoicingResumed = %+v, want exactly one with SpeakerID \"42\"", resumed)
+	}
+}
+
 // TestVAD_StampsSpeakerIDFromFrame pins that the VAD stage stamps each published
 // speech transition with the processed frame's Speaker() (ADR-0050): an attributed
 // frame yields VADSpeechStart/End carrying that SpeakerID, and an unattributed ("")

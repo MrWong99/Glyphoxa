@@ -26,7 +26,9 @@ import (
 // The wrapped session is synchronous and frame-driven; callers feed PCM
 // frames via [VAD.Process] in the audio loop. Per-frame "still speaking"
 // and "still silent" states are not republished — only the transitions
-// (speech_start, speech_end) cross the bus boundary.
+// (speech_start, speech_end, and the provisional voicing_stopped /
+// voicing_resumed pair inside an open utterance, #431) cross the bus
+// boundary.
 type VAD struct {
 	bus     *voiceevent.Bus
 	session vad.SessionHandle
@@ -80,8 +82,9 @@ func NewVAD(bus *voiceevent.Bus, session vad.SessionHandle, opts ...VADOption) *
 // Process feeds one PCM frame through the underlying VAD session and
 // republishes the per-frame transitions onto the bus: speech_start at the
 // onset of an utterance, speech_end when the speaker has been quiet for the
-// session's silence-frame threshold. Per-frame "still speaking" / "still
-// silent" states stay inside the session and are not published.
+// session's silence-frame threshold, and the provisional in-utterance
+// voicing_stopped / voicing_resumed pair (#431). Per-frame "still speaking" /
+// "still silent" states stay inside the session and are not published.
 func (v *VAD) Process(frame audio.Frame) error {
 	evt, err := v.session.ProcessFrame(frame)
 	if err != nil {
@@ -107,6 +110,21 @@ func (v *VAD) Process(frame audio.Frame) error {
 		})
 		// #125: stamp the fixed end-of-speech detection lag once per speech_end.
 		v.rec.VADHangover(v.hangover)
+	case vad.VADVoicingStopped:
+		// Provisional in-utterance voicing pause (#431): published so the barge-in
+		// confirm window can disarm at the real end of voicing instead of waiting
+		// out the hangover; the Segmenter does not subscribe to it.
+		v.bus.Publish(voiceevent.VADVoicingStopped{
+			At:          time.Now(),
+			Probability: evt.Probability,
+			SpeakerID:   speaker,
+		})
+	case vad.VADVoicingResumed:
+		v.bus.Publish(voiceevent.VADVoicingResumed{
+			At:          time.Now(),
+			Probability: evt.Probability,
+			SpeakerID:   speaker,
+		})
 	}
 	return nil
 }

@@ -419,8 +419,22 @@ func (s *session) step(prob float64) vad.VADEvent {
 				s.silenceCount = 0
 				return vad.VADEvent{Type: vad.VADSpeechEnd, Probability: prob}
 			}
-		} else {
+			if s.silenceCount == 1 {
+				// First sub-threshold frame after voiced frames: the speaker just
+				// fell silent, though the utterance stays open until the hangover
+				// elapses. Surfaced so the barge-in confirm window can disarm on the
+				// real end of voicing instead of the hangover-delayed speech_end
+				// (#431); segmentation semantics are untouched.
+				return vad.VADEvent{Type: vad.VADVoicingStopped, Probability: prob}
+			}
+			return vad.VADEvent{Type: vad.VADSpeechContinue, Probability: prob}
+		}
+		if s.silenceCount > 0 {
 			s.silenceCount = 0
+			// Voicing picked back up before the hangover elapsed: no new
+			// speech_start fires (the utterance never closed), so this is the
+			// only onset signal a mid-utterance resumption produces (#431).
+			return vad.VADEvent{Type: vad.VADVoicingResumed, Probability: prob}
 		}
 		return vad.VADEvent{Type: vad.VADSpeechContinue, Probability: prob}
 	}
