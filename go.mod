@@ -1,6 +1,6 @@
 module github.com/MrWong99/Glyphoxa
 
-go 1.26.0
+go 1.26.5
 
 require (
 	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
