@@ -435,3 +435,47 @@ func TestImportVoiceSessionNilEndReason(t *testing.T) {
 		t.Errorf("end_reason = %q, want nil", *got.EndReason)
 	}
 }
+
+// TestVoiceSessionInTenant pins the #439 ownership check: true only for a
+// session whose campaign belongs to the given tenant; a foreign tenant and a
+// nonexistent session both read false (indistinguishable, so the HTTP 404
+// posture never leaks existence).
+func TestVoiceSessionInTenant(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	vs, err := st.CreateVoiceSession(ctx, campaignID)
+	if err != nil {
+		t.Fatalf("CreateVoiceSession: %v", err)
+	}
+
+	own, err := st.VoiceSessionInTenant(ctx, tenantID, vs.ID)
+	if err != nil {
+		t.Fatalf("VoiceSessionInTenant(own): %v", err)
+	}
+	if !own {
+		t.Errorf("own-tenant session = false, want true")
+	}
+
+	foreignTenant, err := st.CreateTenant(ctx, "other-tenant")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	foreign, err := st.VoiceSessionInTenant(ctx, foreignTenant, vs.ID)
+	if err != nil {
+		t.Fatalf("VoiceSessionInTenant(foreign): %v", err)
+	}
+	if foreign {
+		t.Errorf("foreign-tenant session = true, want false")
+	}
+
+	missing, err := st.VoiceSessionInTenant(ctx, tenantID, uuid.New())
+	if err != nil {
+		t.Fatalf("VoiceSessionInTenant(missing): %v", err)
+	}
+	if missing {
+		t.Errorf("nonexistent session = true, want false")
+	}
+}

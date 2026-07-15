@@ -576,6 +576,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// ADR-0040); the manager finalizes the relay's writer queue on Stop (below).
 	relay := transcript.NewRelay(eventBus, mgr, store, log)
 	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
+	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
+	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
+	// SSE stream opens. The mounts below compose auth.RequireTenant to inject
+	// the tenant this check reads.
+	relay.SetTenantScope(store.VoiceSessionInTenant)
 	// Back-wire the finalizer so Stop drains the relay's writer queue and records
 	// the authoritative line_count (#74). Done after the relay exists because the
 	// relay needs the manager (Snapshot), so the manager is built first.
@@ -992,9 +997,12 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// the full /api/v1/... path, not the /api-stripped Connect method path.
 		// Go 1.22 method+wildcard patterns keep them off the Connect mounts
 		// (/api/glyphoxa.management.v1.*) and the SPA root. auth.RequireSession
-		// validates the glyphoxa_session cookie the EventSource/fetch send.
-		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeEvents))},
-		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, http.HandlerFunc(relay.ServeSnapshot))},
+		// validates the glyphoxa_session cookie the EventSource/fetch send; the
+		// mounts are session AND tenant (#439, the post-#408 discipline) — the
+		// relay's TenantScope (wired above) 404s a session outside the caller's
+		// Tenant before the SSE stream opens.
+		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(relay.ServeEvents)))},
+		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(relay.ServeSnapshot)))},
 		// Session Highlight clip (#308): operator-gated audio byte stream with Range.
 		// ServeClip/ServeImage require the tenant, so the mount is session AND tenant
 		// (#408): RequireTenant (inside RequireSession) resolves it server-side off the
@@ -1004,8 +1012,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 		// Session Highlight AI image (#311): operator-gated image byte stream, same
 		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
 		{Path: "GET /api/v1/highlights/{id}/image", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeImage)))},
-		// Campaign bundle export (#290): streamed gzip download, operator-gated.
-		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, http.HandlerFunc(bundleHandler.ServeExport))},
+		// Campaign bundle export (#290): streamed gzip download, operator-gated,
+		// session AND tenant (#439) — a foreign-tenant campaign id is 404.
+		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(bundleHandler.ServeExport)))},
 		// Campaign bundle import (#291): multipart upload, operator-gated, plus the
 		// plain-HTTP CSRF double-submit (ADR-0016) the SPA satisfies with the
 		// script-readable glyphoxa_csrf cookie — a state-changing POST outside the

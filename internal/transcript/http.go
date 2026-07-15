@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 )
 
 // defaultWriteTimeout bounds each SSE frame write/flush (#148 Defect B). Big
@@ -93,8 +95,15 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	id := req.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
+	sid, err := uuid.Parse(id)
+	if err != nil {
 		http.NotFound(w, req)
+		return
+	}
+	// Tenant scoping (#439) runs BEFORE the stream opens: a foreign-tenant
+	// session is a plain 404, never a half-opened event stream the browser's
+	// EventSource would retry against forever.
+	if !r.authorizeTenant(w, req, sid) {
 		return
 	}
 	fw := r.newFrameWriter(w)
@@ -150,8 +159,12 @@ func (r *Relay) ServeEvents(w http.ResponseWriter, req *http.Request) {
 // this route then claims with id="events". A 200 there would mask the broken URL.
 func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
+	sid, err := uuid.Parse(id)
+	if err != nil {
 		http.NotFound(w, req)
+		return
+	}
+	if !r.authorizeTenant(w, req, sid) {
 		return
 	}
 	view := r.snapshot(req.Context(), id)
@@ -160,6 +173,38 @@ func (r *Relay) ServeSnapshot(w http.ResponseWriter, req *http.Request) {
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		r.log.Warn("transcript: encode snapshot", "err", err)
 	}
+}
+
+// authorizeTenant enforces the tenant-ownership gate (#439) on a session
+// endpoint. With no scope installed it is a no-op (unscoped, pre-#439
+// behavior). Otherwise the request must carry the tenant auth.RequireTenant
+// injected — a miss is a miswired mount (the #408 class) and rejects 401,
+// fail-closed. A session outside the tenant — including one that does not
+// exist at all, so absence and foreignness are indistinguishable — is 404,
+// matching the Highlight mounts' don't-reveal-existence posture. A check
+// failure is 500: an infra error must neither open the door nor masquerade as
+// absence. Returns false when it wrote a response and the handler must stop.
+func (r *Relay) authorizeTenant(w http.ResponseWriter, req *http.Request, sid uuid.UUID) bool {
+	scope := r.tenantScope()
+	if scope == nil {
+		return true
+	}
+	tenantID, ok := auth.TenantID(req.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	owns, err := scope(req.Context(), tenantID, sid)
+	if err != nil {
+		r.log.Error("transcript: tenant scope check", "err", err, "session", sid)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	if !owns {
+		http.NotFound(w, req)
+		return false
+	}
+	return true
 }
 
 // frameWriter writes SSE frames bounded by a per-write deadline (#148 Defect

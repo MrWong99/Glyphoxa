@@ -53,11 +53,11 @@ func RequireSession(a Authenticator, next http.Handler) http.Handler {
 // interceptor proceeds tenantless and lets each handler fail on its own terms
 // (some Connect procedures are tenant-agnostic). These byte handlers ALWAYS need
 // a tenant, so a missing operator or an unresolved tenant rejects 401 here —
-// fail-fast with the same code the handler would return anyway. The other plain
-// mounts that do NOT read TenantID — the SSE relay + snapshot (relay.ServeEvents/
-// ServeSnapshot) and the bundle export/import (bundle.ServeExport/ServeImport,
-// which resolves the tenant off the session itself) — do NOT compose this wrapper
-// and stay unchanged.
+// fail-fast with the same code the handler would return anyway. Since #439 the
+// SSE relay + snapshot (relay.ServeEvents/ServeSnapshot) and the bundle export
+// (bundle.ServeExport) compose this wrapper too and 404 a resource outside the
+// injected tenant; the import POST (bundle.ServeImport) remains the one plain
+// mount without it — a write that resolves the tenant off the session itself.
 func RequireTenant(tr TenantResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, ok := CurrentUser(r.Context())
