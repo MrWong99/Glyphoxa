@@ -384,3 +384,93 @@ func TestFloor_SetHolderAgentRetargetsMuteCut(t *testing.T) {
 		t.Fatal("the retargeted mute cut must cancel the turn ctx")
 	}
 }
+
+// TestFloor_SpeakingTurn pins the arm-time Gate-1 read of the barge window
+// (#432): a free floor and a held-but-silent (pre-audio) holder both report
+// not-speaking, and only once the holder is marked speaking does its TurnID
+// come back — the id [Floor.YieldTurn] later re-validates at window expiry.
+func TestFloor_SpeakingTurn(t *testing.T) {
+	f := orchestrator.NewFloor()
+	if id, speaking := f.SpeakingTurn(); speaking || id != "" {
+		t.Fatalf("free floor: SpeakingTurn = (%q, %v), want (\"\", false)", id, speaking)
+	}
+
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	_, release, _ := f.Take(parent, "bart")
+	defer release()
+	if id, speaking := f.SpeakingTurn(); speaking || id != "" {
+		t.Fatalf("held-but-silent holder: SpeakingTurn = (%q, %v), want (\"\", false)", id, speaking)
+	}
+
+	f.MarkSpeaking("T1")
+	if id, speaking := f.SpeakingTurn(); !speaking || id != "T1" {
+		t.Fatalf("speaking holder: SpeakingTurn = (%q, %v), want (\"T1\", true)", id, speaking)
+	}
+}
+
+// TestFloor_YieldTurnCutsMatchingSpeakingHolder is the happy barge path: the
+// turn captured at arm time still holds the floor and is still speaking, so
+// YieldTurn cancels it and frees the floor.
+func TestFloor_YieldTurnCutsMatchingSpeakingHolder(t *testing.T) {
+	f := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	ctx, release, _ := f.Take(parent, "bart")
+	defer release()
+	f.MarkSpeaking("T1")
+
+	if !f.YieldTurn("T1") {
+		t.Fatal("YieldTurn(T1) must cut the speaking holder T1")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("YieldTurn must cancel the turn ctx")
+	}
+	if f.Active() {
+		t.Fatal("YieldTurn must free the floor")
+	}
+	if f.YieldTurn("T1") {
+		t.Fatal("a second YieldTurn(T1) must report false: the floor is free")
+	}
+}
+
+// TestFloor_YieldTurnSparesDifferentHolder is the #432 Gate-1 re-check: the
+// armed-on turn ended and a NEW turn holds the floor — YieldTurn for the old
+// id must be a no-op, even when the new holder is itself speaking.
+func TestFloor_YieldTurnSparesDifferentHolder(t *testing.T) {
+	f := orchestrator.NewFloor()
+	parent1 := voiceevent.WithTurnID(context.Background(), "T1")
+	_, release1, _ := f.Take(parent1, "bart")
+	f.MarkSpeaking("T1")
+	release1() // T1 ends naturally
+
+	parent2 := voiceevent.WithTurnID(context.Background(), "T2")
+	ctx2, release2, _ := f.Take(parent2, "bart")
+	defer release2()
+	f.MarkSpeaking("T2") // even audible: still not the armed-on turn
+
+	if f.YieldTurn("T1") {
+		t.Fatal("YieldTurn(T1) must be a no-op once T2 holds the floor")
+	}
+	if ctx2.Err() != nil {
+		t.Fatal("YieldTurn(T1) must not cancel T2's ctx")
+	}
+	if !f.Active() {
+		t.Fatal("T2 must still hold the floor")
+	}
+}
+
+// TestFloor_YieldTurnSparesSilentHolder: YieldTurn requires the holder to be
+// audibly speaking — a held-but-silent (pre-audio) turn is never barge-cut,
+// even under its own TurnID (the `no_audio` protection, ADR-0027).
+func TestFloor_YieldTurnSparesSilentHolder(t *testing.T) {
+	f := orchestrator.NewFloor()
+	parent := voiceevent.WithTurnID(context.Background(), "T1")
+	ctx, release, _ := f.Take(parent, "bart")
+	defer release()
+
+	if f.YieldTurn("T1") {
+		t.Fatal("YieldTurn must not cut a held-but-silent (pre-audio) holder")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the silent holder's ctx must stay alive")
+	}
+}

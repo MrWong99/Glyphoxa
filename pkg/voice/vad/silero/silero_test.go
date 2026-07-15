@@ -364,7 +364,8 @@ func TestProcessFrame_SilenceCountResetOnHighProb(t *testing.T) {
 		t.Fatalf("silenceCount = %d, want %d", sess.silenceCount, minSilence-1)
 	}
 
-	// One high-prob frame should reset silence count.
+	// One high-prob frame resets the silence count; the transition out of the
+	// provisional pause surfaces as VADVoicingResumed (#431).
 	m.mu.Lock()
 	m.prob = 0.9
 	m.mu.Unlock()
@@ -372,11 +373,20 @@ func TestProcessFrame_SilenceCountResetOnHighProb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProcessFrame: %v", err)
 	}
-	if evt.Type != vad.VADSpeechContinue {
-		t.Errorf("expected VADSpeechContinue, got %v", evt.Type)
+	if evt.Type != vad.VADVoicingResumed {
+		t.Errorf("expected VADVoicingResumed, got %v", evt.Type)
 	}
 	if sess.silenceCount != 0 {
 		t.Errorf("silenceCount = %d, want 0 after reset", sess.silenceCount)
+	}
+
+	// The frame after the resumption is plain ongoing speech again.
+	evt, err = sess.ProcessFrame(frame)
+	if err != nil {
+		t.Fatalf("ProcessFrame: %v", err)
+	}
+	if evt.Type != vad.VADSpeechContinue {
+		t.Errorf("expected VADSpeechContinue after resumption, got %v", evt.Type)
 	}
 }
 
@@ -667,8 +677,9 @@ func TestProcessFrame_StateTransitions(t *testing.T) {
 		{0.8, vad.VADSpeechStart},
 		// Ongoing speech.
 		{0.8, vad.VADSpeechContinue},
-		// Silence count builds up (below SilenceThreshold=0.35).
-		{0.1, vad.VADSpeechContinue},
+		// First sub-threshold frame (below SilenceThreshold=0.35): the speaker
+		// provisionally fell silent (#431); the hangover keeps counting.
+		{0.1, vad.VADVoicingStopped},
 		{0.1, vad.VADSpeechContinue},
 		// Speech ends on third consecutive low-prob frame.
 		{0.1, vad.VADSpeechEnd},
@@ -694,6 +705,96 @@ func TestProcessFrame_StateTransitions(t *testing.T) {
 		if evt.Type != s.wantType {
 			t.Errorf("step %d (prob=%.2f): got %v, want %v", i, s.prob, evt.Type, s.wantType)
 		}
+	}
+}
+
+// TestProcessFrame_VoicingPauseResumeCycle pins the provisional voicing
+// transitions (#431): inside one open utterance, every dip below the silence
+// threshold emits exactly one VADVoicingStopped on its first frame, and every
+// pickup before the hangover elapses emits exactly one VADVoicingResumed —
+// repeatedly, without ever closing the segment (no VADSpeechEnd, no fresh
+// VADSpeechStart). These are the signals the barge-in confirm window keys on:
+// stopped = the burst really ended (soft overlap, disarm), resumed = the
+// speaker is talking again (re-arm).
+func TestProcessFrame_VoicingPauseResumeCycle(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	const minSpeech, minSilence = 2, 5
+
+	m := &mockInferencer{prob: 0.9}
+	sess := makeSession(t, cfg, m, minSpeech, minSilence)
+	t.Cleanup(func() { _ = sess.Close() })
+
+	frame := silenceFrame(t, cfg)
+	setProb := func(p float32) {
+		m.mu.Lock()
+		m.prob = p
+		m.mu.Unlock()
+	}
+	next := func() vad.VADEventType {
+		t.Helper()
+		evt, err := sess.ProcessFrame(frame)
+		if err != nil {
+			t.Fatalf("ProcessFrame: %v", err)
+		}
+		return evt.Type
+	}
+
+	// Enter the speaking state.
+	for range minSpeech {
+		next()
+	}
+	if sess.state != stateSpeaking {
+		t.Fatalf("expected stateSpeaking, got %v", sess.state)
+	}
+
+	// Two pause/resume cycles, each shorter than the hangover.
+	for cycle := range 2 {
+		setProb(0.1)
+		if got := next(); got != vad.VADVoicingStopped {
+			t.Fatalf("cycle %d: first sub-threshold frame: got %v, want VADVoicingStopped", cycle, got)
+		}
+		if got := next(); got != vad.VADSpeechContinue {
+			t.Fatalf("cycle %d: second sub-threshold frame: got %v, want VADSpeechContinue (stopped fires once per pause)", cycle, got)
+		}
+		setProb(0.9)
+		if got := next(); got != vad.VADVoicingResumed {
+			t.Fatalf("cycle %d: first voiced frame after pause: got %v, want VADVoicingResumed", cycle, got)
+		}
+		if got := next(); got != vad.VADSpeechContinue {
+			t.Fatalf("cycle %d: frame after resumption: got %v, want VADSpeechContinue (resumed fires once per pickup)", cycle, got)
+		}
+	}
+	if sess.state != stateSpeaking {
+		t.Fatalf("utterance must still be open after pause/resume cycles, got state %v", sess.state)
+	}
+}
+
+// TestProcessFrame_MinSilenceOne_NoProvisionalStop pins the degenerate hangover:
+// with minSilenceFrames=1 the first sub-threshold frame IS the segment boundary,
+// so it emits VADSpeechEnd directly and never a provisional VADVoicingStopped.
+func TestProcessFrame_MinSilenceOne_NoProvisionalStop(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	m := &mockInferencer{prob: 0.9}
+	sess := makeSession(t, cfg, m, 2, 1)
+	t.Cleanup(func() { _ = sess.Close() })
+
+	frame := silenceFrame(t, cfg)
+	for range 2 { // enter speaking
+		sess.ProcessFrame(frame) //nolint:errcheck
+	}
+	m.mu.Lock()
+	m.prob = 0.1
+	m.mu.Unlock()
+	evt, err := sess.ProcessFrame(frame)
+	if err != nil {
+		t.Fatalf("ProcessFrame: %v", err)
+	}
+	if evt.Type != vad.VADSpeechEnd {
+		t.Errorf("minSilenceFrames=1: got %v, want VADSpeechEnd on the first sub-threshold frame", evt.Type)
 	}
 }
 
