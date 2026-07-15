@@ -437,3 +437,96 @@ func TestTee_LookaheadPublishesNoFirstAudio(t *testing.T) {
 		t.Fatalf("tee published %d FirstAudio for a look-ahead sentence, want 0 (owned by the playback source)", fa)
 	}
 }
+
+// TestTee_ErrTerminalChunkReachesOrchestratorOnly pins the #436 tee routing: a
+// terminal Err chunk (the mid-stream failure signal) is forwarded to the
+// orchestrator-side channel — so the dispatch layer sees the abnormal
+// termination — but is NEVER handed to the playback sink (it is a signal, not
+// audio) and never counts as the sentence's FirstAudio.
+func TestTee_ErrTerminalChunkReachesOrchestratorOnly(t *testing.T) {
+	streamErr := errors.New("provider dropped the socket")
+	inner := &fakeSynth{chunks: []tts.AudioChunk{chunk(1, 24000), {Err: streamErr}}}
+
+	played := make(chan []tts.AudioChunk, 1)
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go func() { played <- drainAll(chunks) }()
+	})
+
+	bus := voiceevent.NewBus()
+	var mu sync.Mutex
+	var firstAudio int
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		firstAudio++
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	out, err := tee.Synthesize(voiceevent.WithTurnID(context.Background(), "turn-err"), tts.SynthesizeRequest{Sentence: "dies mid-stream"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	got := drainAll(out)
+
+	if len(got) != 2 || got[1].Err == nil || !errors.Is(got[1].Err, streamErr) {
+		t.Fatalf("orchestrator side got %+v, want the audio chunk then the terminal Err chunk", got)
+	}
+	select {
+	case p := <-played:
+		if len(p) != 1 || p[0].Err != nil {
+			t.Fatalf("playback sink got %+v, want only the one real audio chunk (never the Err signal)", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("playback sink never drained")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if firstAudio != 1 {
+		t.Errorf("FirstAudio published %d times, want 1 (for the real chunk only)", firstAudio)
+	}
+}
+
+// TestTee_ErrTerminalAsFirstChunkPublishesNoFirstAudio pins that a stream dying
+// BEFORE any real audio (its only element is the terminal Err chunk) publishes
+// NO FirstAudio — a turn that produced no audio must not read as having spoken —
+// and hands the sink an empty (immediately closed) channel.
+func TestTee_ErrTerminalAsFirstChunkPublishesNoFirstAudio(t *testing.T) {
+	inner := &fakeSynth{chunks: []tts.AudioChunk{{Err: errors.New("died before first byte")}}}
+
+	played := make(chan []tts.AudioChunk, 1)
+	sink := wire.PlaybackSinkFunc(func(_ context.Context, chunks <-chan tts.AudioChunk) {
+		go func() { played <- drainAll(chunks) }()
+	})
+
+	bus := voiceevent.NewBus()
+	var mu sync.Mutex
+	var firstAudio int
+	voiceevent.On(bus, func(voiceevent.FirstAudio) {
+		mu.Lock()
+		firstAudio++
+		mu.Unlock()
+	})
+
+	tee := wire.NewTeeSynthesizer(inner, sink, bus)
+	out, err := tee.Synthesize(voiceevent.WithTurnID(context.Background(), "turn-dead"), tts.SynthesizeRequest{Sentence: "never speaks"})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	got := drainAll(out)
+	if len(got) != 1 || got[0].Err == nil {
+		t.Fatalf("orchestrator side got %+v, want only the terminal Err chunk", got)
+	}
+	select {
+	case p := <-played:
+		if len(p) != 0 {
+			t.Fatalf("playback sink got %+v, want no chunks", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("playback sink never drained")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if firstAudio != 0 {
+		t.Errorf("FirstAudio published %d times for an audio-less failed stream, want 0", firstAudio)
+	}
+}

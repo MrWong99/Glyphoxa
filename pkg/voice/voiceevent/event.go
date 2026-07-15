@@ -315,6 +315,23 @@ type TTSInvoked struct {
 // EventName implements [Event].
 func (TTSInvoked) EventName() string { return "tts.invoked" }
 
+// TTSStreamFailed marks a sentence whose synthesis stream terminated ABNORMALLY
+// mid-delivery (#436): the provider accepted the dispatch (its [TTSInvoked]
+// fired, possibly its FirstAudio too) but the stream died before the last chunk,
+// so the room heard at most a fragment. Published by the orchestrator TTS stage
+// under a live turn ctx only — a barge cutting the stream is the caller's cut,
+// not a failure, and publishes nothing here. Consumers use it to keep the
+// deliver-then-commit record honest: the Transcript Chunker retracts (or never
+// commits) the failed sentence so the Chunk grain agrees with Agent history,
+// which omits it (ADR-0012's bias — never record text the room did not hear).
+type TTSStreamFailed struct {
+	At     time.Time
+	TurnID string
+}
+
+// EventName implements [Event].
+func (TTSStreamFailed) EventName() string { return "tts.stream_failed" }
+
 // FirstAudio marks the moment the first synthesized [tts.AudioChunk] of a
 // sentence crosses the TeeSynthesizer→PlaybackPump boundary — "first audio handed
 // to the pump" (A3 hook 1). It is published by the wire tee, off its forward

@@ -375,3 +375,115 @@ func TestDefaultV3Settings_RoundTripsThroughJSON(t *testing.T) {
 		t.Fatalf("VoiceSettings did not round-trip: %+v", out.VoiceSettings)
 	}
 }
+
+// TestSynthesize_MidStreamFailure_EmitsTerminalErrChunk pins the #436 adapter
+// contract: a response body that dies mid-stream (the server promises more bytes
+// than it delivers, then drops the connection) surfaces as ONE terminal
+// [tts.AudioChunk] with Err set, after the successfully-read audio chunks and
+// immediately before the close — so the dispatch layer can refuse to commit the
+// truncated sentence.
+func TestSynthesize_MidStreamFailure_EmitsTerminalErrChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/pcm")
+		// Promise more than is written: the handler returning early makes the
+		// client's next read fail (unexpected EOF) — a provider dying mid-stream.
+		w.Header().Set("Content-Length", "8192")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 1024))
+	}))
+	defer srv.Close()
+
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL))
+	ch, err := c.Synthesize(context.Background(), tts.SynthesizeRequest{
+		Sentence: "hello",
+		Voice:    tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"},
+	})
+	if err != nil {
+		t.Fatalf("Synthesize: %v (the start succeeded; the failure is mid-stream)", err)
+	}
+
+	var audioBytes int
+	var terminal *tts.AudioChunk
+	for chunk := range ch {
+		if chunk.Err != nil {
+			if terminal != nil {
+				t.Fatal("more than one terminal Err chunk emitted")
+			}
+			cp := chunk
+			terminal = &cp
+			continue
+		}
+		if terminal != nil {
+			t.Fatal("audio chunk emitted AFTER the terminal Err chunk; Err must be the stream's last element")
+		}
+		audioBytes += len(chunk.PCM)
+	}
+	if terminal == nil {
+		t.Fatal("stream died mid-delivery but no terminal Err chunk was emitted (#436)")
+	}
+	if len(terminal.PCM) != 0 {
+		t.Errorf("terminal Err chunk carries %d PCM bytes, want none (it is a signal, not audio)", len(terminal.PCM))
+	}
+	if audioBytes != 1024 {
+		t.Errorf("audio bytes before the failure = %d, want the 1024 the server actually sent", audioBytes)
+	}
+}
+
+// TestSynthesize_ContextCancel_NoTerminalErrChunk pins the #436 carve-out: a ctx
+// cancellation (barge-in) closes the stream WITHOUT a terminal Err chunk — the
+// caller cut the stream deliberately, and reporting it as a provider failure
+// would turn every barge into a vendor fault.
+func TestSynthesize_ContextCancel_NoTerminalErrChunk(t *testing.T) {
+	released := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 1024))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		<-released
+	}))
+	defer srv.Close()
+	defer close(released)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := elevenlabs.New("k", elevenlabs.WithBaseURL(srv.URL))
+	ch, err := c.Synthesize(ctx, tts.SynthesizeRequest{
+		Sentence: "hello",
+		Voice:    tts.Voice{ProviderID: elevenlabs.ProviderID, VoiceID: "v"},
+	})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+
+	select {
+	case _, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed before first chunk arrived")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first chunk")
+	}
+	cancel()
+
+	done := make(chan struct{})
+	var sawErrChunk bool
+	go func() {
+		for chunk := range ch {
+			if chunk.Err != nil {
+				sawErrChunk = true
+			}
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel did not close after ctx cancel")
+	}
+	if sawErrChunk {
+		t.Error("a barge-cancelled stream emitted a terminal Err chunk; a caller cut is not a provider failure")
+	}
+}

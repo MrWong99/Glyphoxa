@@ -27,9 +27,11 @@ import (
 var ErrTextDelivered = errors.New("orchestrator: turn delivered as text")
 
 // ErrNotDelivered is the dispatch-callback signal (#362, ADR-0012) for a TTS
-// start-error under a LIVE turn ctx: the sentence was NOT delivered (its audio
-// never started), so the producer must NOT commit it — but the turn is still
-// alive, so the producer keeps going with later sentences. It is distinct from a
+// failure under a LIVE turn ctx — a start-error (the audio never started) or a
+// mid-stream stream failure (#436, the provider died after a fragment): either
+// way the sentence was NOT fully delivered, so the producer must NOT commit it —
+// but the turn is still alive, so the producer keeps going with later sentences.
+// It is distinct from a
 // ctx.Err() (barge/mute) return, which cuts the turn and STOPS the producer.
 // Producers classify it via [OutcomeOf] rather than errors.Is — the sentinel is
 // an implementation detail of this module's dispatch contract.
@@ -92,8 +94,8 @@ type turnRun struct {
 	// Cross-talk barge terminal keys on it (a barge before the first sentence
 	// interrupted nothing).
 	attempted bool
-	// ttsFailed: some sentence start-errored under a live ctx — sticky, so a
-	// turn that never recovers with audio terminates tts_error.
+	// ttsFailed: some sentence start-errored or failed mid-stream (#436) under a
+	// live ctx — sticky, so the turn terminates tts_error, never a silent success.
 	ttsFailed bool
 }
 
@@ -154,8 +156,10 @@ func (t *turnRun) run(dctx context.Context, rep Reply, notDelivered error, check
 		if cerr := checkCtx.Err(); cerr != nil {
 			return cerr
 		}
-		// Start-error under a LIVE ctx (#362): the sentence never produced audio,
-		// so it was NOT delivered — do not fire the hook, keep the turn alive.
+		// Start-error (#362) or mid-stream stream failure (#436) under a LIVE ctx:
+		// the sentence was not (fully) delivered — do not fire the hook, keep the
+		// turn alive. Either way the room did not hear this sentence's whole text,
+		// so per ADR-0012's under-report bias it must not commit.
 		t.ttsFailed = true
 		return notDelivered
 	}

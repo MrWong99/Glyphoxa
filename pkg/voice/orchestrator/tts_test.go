@@ -314,14 +314,93 @@ func (earlyCloseSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-cha
 
 func (earlyCloseSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
 
-// TestTTS_Dispatch_MidStreamCloseIsAcceptedBlindSpot documents the accepted
-// Synthesizer-contract blind spot (#239 review): a channel that delivers some
-// chunks then closes with no error — a streaming outage mid-synthesis — is
-// INVISIBLE at this seam. Dispatch sees a clean close, so it records outcome=ok and
-// NO provider_error. This is by design: the tts.Synthesizer channel-close carries
-// no error signal, so a truncated stream cannot be distinguished from a complete
-// one here. If that blind spot must be closed, it belongs in the adapter, not this
-// stage.
+// errTerminalSynth emits some audio chunks, then a terminal Err chunk (#436 —
+// the mid-stream failure signal), then closes. cancel, when non-nil, is called
+// before the terminal chunk so a test can simulate a barge racing the failure.
+type errTerminalSynth struct {
+	err    error
+	cancel context.CancelFunc
+}
+
+func (s errTerminalSynth) Synthesize(context.Context, tts.SynthesizeRequest) (<-chan tts.AudioChunk, error) {
+	ch := make(chan tts.AudioChunk, 3)
+	ch <- tts.AudioChunk{PCM: []byte{0, 0}}
+	ch <- tts.AudioChunk{PCM: []byte{0, 0}}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	ch <- tts.AudioChunk{Err: s.err}
+	close(ch)
+	return ch, nil
+}
+
+func (errTerminalSynth) AudioMarkupPrompt(tts.Voice) string { return "" }
+
+// TestTTS_Dispatch_MidStreamErrTerminalFails pins the #436 fix: a synthesis
+// stream that dies mid-delivery (terminal Err chunk) under a LIVE ctx is a
+// FAILED dispatch — Dispatch returns an error (so the turn module never commits
+// the half-heard sentence), records the vendor fault (provider_call error +
+// provider_error, no tts_total), and publishes [voiceevent.TTSStreamFailed] so
+// the Transcript Chunker retracts the sentence.
+func TestTTS_Dispatch_MidStreamErrTerminalFails(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	stage := orchestrator.NewTTS(h.Bus, errTerminalSynth{err: errors.New("websocket dropped")},
+		orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+	ctx := voiceevent.WithTurnID(context.Background(), "T436")
+	err := stage.Dispatch(ctx, "Half a sentence.", voicetest.LiveElevenLabsVoice())
+	if err == nil {
+		t.Fatal("Dispatch: expected an error for a mid-stream terminal Err chunk")
+	}
+
+	_, ttsTotals, _, calls, errs := spy.snapshot()
+	if len(ttsTotals) != 0 {
+		t.Errorf("tts_total recorded %v for a failed delivery, want none", ttsTotals)
+	}
+	want := providerCall{stage: observe.StageTTS, provider: observe.ProviderElevenLabs, outcome: observe.OutcomeError}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("provider_calls = %+v, want one %+v", calls, want)
+	}
+	if len(errs) != 1 {
+		t.Errorf("provider_errors = %+v, want exactly one (a mid-stream failure is a vendor fault)", errs)
+	}
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSStreamFailed) bool {
+		return e.TurnID == "T436"
+	}, "tts.stream_failed published for the failed sentence's turn")
+}
+
+// TestTTS_Dispatch_MidStreamErrDuringBargeIsCut pins the #401 carve-out: when the
+// turn ctx is CANCELLED by the time the stream ends (a barge racing a provider
+// hiccup), the cut owns the semantics — Dispatch returns nil exactly as for any
+// barge-cut stream, no fault is recorded, and no TTSStreamFailed is published.
+// The sentence-grain commit decision stays with the dispatch site's ctx re-check.
+func TestTTS_Dispatch_MidStreamErrDuringBargeIsCut(t *testing.T) {
+	h := voicetest.New(t)
+	spy := &metricsSpy{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stage := orchestrator.NewTTS(h.Bus, errTerminalSynth{err: errors.New("websocket dropped"), cancel: cancel},
+		orchestrator.WithTTSMetrics(spy, observe.ProviderElevenLabs))
+
+	if err := stage.Dispatch(ctx, "Barged anyway.", voicetest.LiveElevenLabsVoice()); err != nil {
+		t.Fatalf("Dispatch: %v (a barge-cut stream keeps its nil return; the ctx re-check owns the commit)", err)
+	}
+
+	_, _, _, _, errs := spy.snapshot()
+	if len(errs) != 0 {
+		t.Errorf("provider_errors = %+v on a barged stream, want none (the caller cut it)", errs)
+	}
+	voicetest.AssertNoEvent[voiceevent.TTSStreamFailed](t, h)
+}
+
+// TestTTS_Dispatch_MidStreamCloseIsAcceptedBlindSpot documents the remaining
+// LEGACY blind spot (#239 review, narrowed by #436): a channel that delivers some
+// chunks then closes with no error AND no terminal Err chunk — an adapter that
+// does not implement the #436 terminal-Err contract — still reads as a clean
+// completion here. Dispatch records outcome=ok and NO provider_error. Adapters
+// close the gap by emitting the terminal Err chunk (see tts.AudioChunk.Err);
+// this stage cannot distinguish a truncated no-signal stream from a complete one.
 func TestTTS_Dispatch_MidStreamCloseIsAcceptedBlindSpot(t *testing.T) {
 	h := voicetest.New(t)
 	spy := &metricsSpy{}
