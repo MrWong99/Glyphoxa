@@ -302,8 +302,8 @@ jobs:
           name: spa-dist
           path: internal/spa/dist
 
-      # buildx + layer caching keeps the slow native build (whisper.cpp +
-      # CGO) off the critical path on warm caches. This is a
+      # buildx + layer caching keeps the CGO image build off the critical
+      # path on warm caches. This is a
       # SEPARATE job from the fast `test` gate (ADR-0033): the heavy image build
       # must not slow an unrelated PR's unit feedback.
       - name: Set up Docker Buildx
@@ -396,7 +396,7 @@ jobs:
     name: deploy e2e (k3d smoke)
     # Wait for the `image` job so its cache-to (mode=max) has populated the gha
     # cache: this job's build is then a cache HIT (load layers, no recompile)
-    # rather than a second full native build of the slow whisper/libdave/CGO
+    # rather than a second full CGO image build
     # image. The serialization costs a little wall-time but halves the expensive
     # build per run. The real cluster e2e is issue #37's gate — deliberately a
     # SEPARATE job from the fast `test` suite (ADR-0033) so the heavy image build

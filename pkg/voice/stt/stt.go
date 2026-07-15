@@ -1,7 +1,8 @@
 // Package stt defines the Speech-to-Text provider surface consumed by the
 // orchestrator (ADR-0019).
 //
-// Real providers (Deepgram, whisper.cpp — see ADR-0004) and the cassette
+// Real providers (see the ADR-0004 matrix and its 2026-07-16 amendment on
+// local STT) and the cassette
 // replayer (see [github.com/MrWong99/Glyphoxa/pkg/voice/voicecassette]) both
 // implement [Recognizer]. The orchestrator's STT stage is provider-agnostic:
 // it forwards [audio.Frame]s and republishes the final transcript onto the
