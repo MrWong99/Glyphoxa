@@ -183,7 +183,7 @@ func TestDirectSpeech_UnknownVoiceEndsTurn(t *testing.T) {
 
 // TestDirectSpeech_MuteBypassed pins the GM-override semantics (#295): a target that
 // is MUTED for the LLM reply path still speaks a /say — the DirectSpeech reactor has
-// no mute gate, by design. Wired through the full Conversation (WithMute in effect)
+// no mute gate, by design. Wired through the full Conversation (Barge.Mutes in effect)
 // so the pin is behavioral, not just structural.
 func TestDirectSpeech_MuteBypassed(t *testing.T) {
 	h := voicetest.New(t)
@@ -193,12 +193,11 @@ func TestDirectSpeech_MuteBypassed(t *testing.T) {
 	ttsStage := orchestrator.NewTTS(h.Bus, synth)
 
 	muted := muteSet{"bart": true} // Bart is muted for the LLM/Replier path
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
-		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
-		orchestrator.WithBargeInCoalesce(10*time.Millisecond, 0),
-		orchestrator.WithMute(muted),
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }}),
+		orchestrator.WithBargeIn(orchestrator.Barge{Confirm: 10 * time.Millisecond, Mutes: muted}),
 		orchestrator.WithDirectSpeech(voiceOf("bart", bartVoice())),
-	)
+	))
 	t.Cleanup(conv.Register(t.Context()))
 
 	h.Bus.Publish(voiceevent.SpeakRequested{At: time.Now(), TurnID: "Ts", Target: sayTarget("bart", "Bart"), Text: "I still speak."})
@@ -223,11 +222,11 @@ func TestDirectSpeech_RegisterSharesBargeFloor(t *testing.T) {
 	sttStage := orchestrator.NewSTT(h.Bus, &recordingRecognizer{})
 	ttsStage := orchestrator.NewTTS(h.Bus, synth)
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
-		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
-		orchestrator.WithBargeInCoalesce(50*time.Millisecond, 0),
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }}),
+		orchestrator.WithBargeIn(orchestrator.Barge{Confirm: 50 * time.Millisecond}),
 		orchestrator.WithDirectSpeech(voiceOf("bart", bartVoice())),
-	)
+	))
 	t.Cleanup(conv.Register(t.Context()))
 
 	// Publish on a goroutine so a REGRESSION (nil floor → synchronous dispatch on the
@@ -262,7 +261,7 @@ func TestDirectSpeech_RegisterSharesBargeFloor(t *testing.T) {
 }
 
 // TestDirectSpeech_RegisterWiresGate pins the production spend-gate wiring (#295):
-// the DirectSpeech reactor built inside Register honors WithTurnGate. If the
+// the DirectSpeech reactor built inside Register honors Barge.Gate. If the
 // `ds.gate = c.gate` wiring regresses, a spend-capped /say would still dispatch —
 // this test (no dispatch, spend_cap TurnEnded) fails.
 func TestDirectSpeech_RegisterWiresGate(t *testing.T) {
@@ -272,12 +271,11 @@ func TestDirectSpeech_RegisterWiresGate(t *testing.T) {
 	sttStage := orchestrator.NewSTT(h.Bus, &recordingRecognizer{})
 	ttsStage := orchestrator.NewTTS(h.Bus, synth)
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
-		orchestrator.WithReplyStream(func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }),
-		orchestrator.WithBargeInCoalesce(50*time.Millisecond, 0),
-		orchestrator.WithTurnGate(denyGate{}),
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Stream: func(context.Context, voiceevent.AddressRouted, func(orchestrator.Reply) error) error { return nil }}),
+		orchestrator.WithBargeIn(orchestrator.Barge{Confirm: 50 * time.Millisecond, Gate: denyGate{}}),
 		orchestrator.WithDirectSpeech(voiceOf("bart", bartVoice())),
-	)
+	))
 	t.Cleanup(conv.Register(t.Context()))
 
 	h.Bus.Publish(voiceevent.SpeakRequested{At: time.Now(), TurnID: "Ts", Target: sayTarget("bart", "Bart"), Text: "Blocked."})

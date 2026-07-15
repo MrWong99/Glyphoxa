@@ -127,7 +127,7 @@ func routedTo(agentID, text string) voiceevent.AddressRouted {
 }
 
 // captureStreamEngine is a minimal agent.StreamingEngine that records the assembled
-// messages — the production reply path is streaming (WithReplyStream), so the AC2
+// messages — the production reply path is streaming (ReplyStrategy.Stream), so the AC2
 // divergence assertion exercises it rather than the batch fallback.
 type captureStreamEngine struct {
 	reply    string

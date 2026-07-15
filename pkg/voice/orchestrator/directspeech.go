@@ -60,7 +60,7 @@ type DirectSpeech struct {
 
 	// gate, when non-nil, is the live turn gate (#130): a session past its soft cap
 	// refuses the /say turn before taking the floor. Set by [Conversation.Register]
-	// from [WithTurnGate]; nil is the feature-off default. Not part of [NewDirectSpeech].
+	// from [Barge.Gate]; nil is the feature-off default. Not part of [NewDirectSpeech].
 	gate TurnGate
 }
 

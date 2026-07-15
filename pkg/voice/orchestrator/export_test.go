@@ -26,12 +26,12 @@ func (r *Replier) SetFloor(floor *Floor) { r.floor = floor }
 
 // SetMutes installs the live mute view on the replier for the mute-gate tests
 // (external test package, #211). Production wiring sets r.mutes inside
-// Conversation.Register from [WithMute].
+// Conversation.Register from [Barge.Mutes].
 func (r *Replier) SetMutes(v MuteView) { r.mutes = v }
 
 // SetGate installs the live turn gate on the replier for the spend-cap gate tests
 // (external test package, #130). Production wiring sets r.gate inside
-// Conversation.Register from [WithTurnGate].
+// Conversation.Register from [Barge.Gate].
 func (r *Replier) SetGate(g TurnGate) { r.gate = g }
 
 // Floor exposes the Conversation's barge-in floor built inside Register, so a test
@@ -46,17 +46,17 @@ func (d *DirectSpeech) SetFloor(floor *Floor) { d.floor = floor }
 
 // SetGate installs the live turn gate on the DirectSpeech reactor for the spend-cap
 // tests (external test package, #295/#130). Production wiring sets it inside
-// Conversation.Register from [WithTurnGate].
+// Conversation.Register from [Barge.Gate].
 func (d *DirectSpeech) SetGate(g TurnGate) { d.gate = g }
 
 // SetEnsemble installs the Ensemble Turn speaker on the replier for the ensemble
 // coordinator tests (external test package, #301). Production wiring sets
-// r.ensemble inside Conversation.Register from [WithEnsemble].
+// r.ensemble inside Conversation.Register from [Barge.Ensemble].
 func (r *Replier) SetEnsemble(s EnsembleSpeaker) { r.ensemble = s }
 
 // SetLookahead installs the pump look-ahead seam on the replier for the Cross-talk
 // Reaction pre-render tests (external test package, #375). Production wiring sets
-// r.lookahead inside Conversation.Register from [WithReactionLookahead].
+// r.lookahead inside Conversation.Register from [Barge.Lookahead].
 func (r *Replier) SetLookahead(p LookaheadPump) { r.lookahead = p }
 
 // SetErrorHandler installs onError on the segmenter for the off-loop STT error

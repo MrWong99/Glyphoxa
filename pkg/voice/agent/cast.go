@@ -79,7 +79,7 @@ func (c *Cast) lookup(agentID string) *Replier {
 // streaming reply path across the Cast: it looks up the Replier for
 // e.Target.AgentID and delegates to that Replier's streaming turn. A route for an
 // unknown (or removed) Agent dispatches nothing and returns nil. Install it with
-// [orchestrator.WithReplyStream] — it is the production strategy for a multi-NPC
+// [orchestrator.ReplyStrategy.Stream] — it is the production strategy for a multi-NPC
 // conversation.
 func (c *Cast) ReplyStream() orchestrator.StreamReplyFunc {
 	return func(ctx context.Context, e voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {

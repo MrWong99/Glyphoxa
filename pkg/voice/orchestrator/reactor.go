@@ -896,14 +896,14 @@ type Replier struct {
 	// only via the orchestrator wiring ([WithBargeIn]); not part of [NewReplier].
 	floor *Floor
 
-	// mutes, when non-nil, is the live mute view (#211, [WithMute]): a route whose
+	// mutes, when non-nil, is the live mute view (#211, [Barge.Mutes]): a route whose
 	// target Agent is muted is discarded before the floor is taken, so an
 	// addressed-but-muted Agent opens no turn — no floor churn, no LLM call, no
 	// TTS, no transcript line, and it can never supersede whoever holds the floor
 	// (AC3). Set only via the orchestrator wiring; not part of [NewReplier].
 	mutes MuteView
 
-	// gate, when non-nil, is the live turn gate (#130, [WithTurnGate]): once the
+	// gate, when non-nil, is the live turn gate (#130, [Barge.Gate]): once the
 	// session's estimated spend crosses the soft cap it refuses a NEW turn before
 	// the floor is taken — exactly like a muted route, but for the whole session. A
 	// SINGLE pre-check suffices (spend is monotonic, so no post-Take re-check like
@@ -911,17 +911,17 @@ type Replier struct {
 	// [NewReplier].
 	gate TurnGate
 
-	// ensemble, when non-nil, is the Ensemble Turn speaker ([WithEnsemble], #301,
+	// ensemble, when non-nil, is the Ensemble Turn speaker ([Barge.Ensemble], #301,
 	// ADR-0025): on a [voiceevent.EnsembleRouted] the replier fans the candidates
 	// out into parallel [EnsembleSpeaker.Draft]s, races them, and lets the first
 	// complete non-empty draft (the Lead) take the floor and speak. Nil degrades an
 	// EnsembleRouted to the top-scored single route ([Replier.handleRouted]). Set
 	// only via the orchestrator wiring; not part of [NewReplier]. It requires the
-	// barge-in floor (WithEnsemble panics at Register without it) — the whole
+	// barge-in floor (it lives on [Barge], so it cannot exist without one) — the whole
 	// ensemble is ONE floor-holding unit.
 	ensemble EnsembleSpeaker
 
-	// lookahead, when non-nil, is the pump pre-render seam ([WithReactionLookahead],
+	// lookahead, when non-nil, is the pump pre-render seam ([Barge.Lookahead],
 	// #375, ADR-0025): the Cross-talk Reaction's first sentence is synthesized during
 	// the Lead's playback and HELD in this pump's look-ahead lane, released at the
 	// Lead's end for a near-zero onset gap (or discarded on a barge). Nil is the

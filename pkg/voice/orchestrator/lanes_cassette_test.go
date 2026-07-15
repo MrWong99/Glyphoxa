@@ -109,10 +109,10 @@ func TestConversation_TwoSpeakerCassette_DistinctSpeakerIDs(t *testing.T) {
 
 	vadStage := orchestrator.NewVAD(h.Bus, defSess)
 	sttStage := orchestrator.NewSTT(h.Bus, rec)
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
 		orchestrator.WithSpeakerLanes(sileroLaneFactory(t, h.Bus)),
 		orchestrator.WithErrorHandler(func(err error) { t.Errorf("stage: %v", err) }),
-	)
+	))
 	t.Cleanup(conv.Register(t.Context()))
 
 	// Interleave the two speakers' frames frame-by-frame: the segmenter routes each to

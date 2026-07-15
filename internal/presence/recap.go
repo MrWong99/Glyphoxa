@@ -10,6 +10,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/discordmsg"
 	"github.com/MrWong99/Glyphoxa/internal/recap"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -275,7 +276,7 @@ func deliverRecap(ctx context.Context, ic *Interaction, butler ButlerVoicer, voi
 		// Could not voice it — deliver as public text, explaining the switch.
 		body = voicedDegradeHint + "\n\n" + text
 	}
-	parts := splitFollowups(body, discordMessageLimit)
+	parts := discordmsg.Split(body, discordMessageLimit)
 
 	if publicReply {
 		// The placeholder is ephemeral (we always Defer ephemerally) and a public recap
@@ -318,53 +319,6 @@ func normalizeDelivery(ic *Interaction) string {
 	default:
 		return deliveryEphemeral
 	}
-}
-
-// splitFollowups breaks text into ordered chunks each at most limit RUNES (never
-// bytes — German recaps), preferring to break on a newline, then a space, so a chunk
-// ends at a natural boundary rather than mid-word; only a single unbroken run longer
-// than limit is hard-cut. The boundary whitespace is dropped so it does not lead the
-// next chunk. Concatenating the chunks (re-inserting a single break) reproduces the
-// text in order. Never truncates: every rune is delivered (#271).
-func splitFollowups(text string, limit int) []string {
-	if limit <= 0 {
-		return []string{text}
-	}
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return []string{text}
-	}
-	var parts []string
-	for len(runes) > limit {
-		cut := limit
-		if i := lastBreakRune(runes, limit, '\n'); i > 0 {
-			cut = i
-		} else if i := lastBreakRune(runes, limit, ' '); i > 0 {
-			cut = i
-		}
-		parts = append(parts, string(runes[:cut]))
-		rest := runes[cut:]
-		// Drop the boundary whitespace we broke on (not a hard mid-run cut).
-		if cut < limit && len(rest) > 0 && (rest[0] == '\n' || rest[0] == ' ') {
-			rest = rest[1:]
-		}
-		runes = rest
-	}
-	if len(runes) > 0 {
-		parts = append(parts, string(runes))
-	}
-	return parts
-}
-
-// lastBreakRune returns the last index in [1, limit) where runes[i]==ch, or -1. The
-// lower bound of 1 avoids an empty leading chunk when a break sits at index 0.
-func lastBreakRune(runes []rune, limit int, ch rune) int {
-	for i := limit - 1; i > 0; i-- {
-		if runes[i] == ch {
-			return i
-		}
-	}
-	return -1
 }
 
 // recapSessionChoices builds the /glyphoxa recap `session` autocomplete: the Active

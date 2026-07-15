@@ -102,7 +102,7 @@ func runClipLive(t *testing.T, clip Clip, acc *Accumulator) {
 
 	tap := newRecorderTap()
 	target := voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}
-	conv := BuildConversation(RigConfig{
+	conv, err := BuildConversation(RigConfig{
 		Bus: h.Bus,
 		VAD: vadStage,
 		// Record stt_request through the SAME prod seam wirenpc uses (the STT stage's
@@ -115,6 +115,9 @@ func runClipLive(t *testing.T, clip Clip, acc *Accumulator) {
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),
 		Recorder: tap,
 	})
+	if err != nil {
+		t.Fatalf("BuildConversation: %v", err)
+	}
 
 	silence := silenceLike(t, frames)
 	d := NewDriver(conv, h, tap, acc, silence, 20)

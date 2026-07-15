@@ -500,11 +500,11 @@ func TestSTT_TTRPGIntro_TranscribesBothLanguages(t *testing.T) {
 			}
 
 			// Wire the whole reactive pipeline onto the bus in one call.
-			conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+			conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
 				orchestrator.WithDetector(detector),
-				orchestrator.WithReply(reply),
+				orchestrator.WithReply(orchestrator.ReplyStrategy{Whole: reply}),
 				orchestrator.WithErrorHandler(func(err error) { t.Errorf("reply dispatch: %v", err) }),
-			)
+			))
 			t.Cleanup(conv.Register(t.Context()))
 
 			for i, frame := range frames {
@@ -609,7 +609,7 @@ func TestTurnID_PropagatesThroughStages(t *testing.T) {
 }
 
 // TestTurnID_PropagatesThroughBargeInFloor is the production-path twin of
-// TestTurnID_PropagatesThroughStages: with WithBargeIn(0) the turn runs on the
+// TestTurnID_PropagatesThroughStages: with barge-in (zero confirm window) the turn runs on the
 // floor's per-turn context (a goroutine), not synchronously. The TurnID is
 // installed before Floor.Take, so it must survive the floor's WithCancel-derived
 // context and reach TTSInvoked — the only configuration that actually ships.
@@ -631,12 +631,12 @@ func TestTurnID_PropagatesThroughBargeInFloor(t *testing.T) {
 	// VAD stage is unused here (we drive STT directly), but the Conversation
 	// requires one; the scripted VAD with no script reports only silence.
 	vadStage := orchestrator.NewVAD(h.Bus, &scriptedVAD{})
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, ttsStage,
 		orchestrator.WithDetector(detector),
-		orchestrator.WithReply(reply),
-		orchestrator.WithBargeIn(0), // production wiring: turn runs on the floor goroutine
+		orchestrator.WithReply(orchestrator.ReplyStrategy{Whole: reply}),
+		orchestrator.WithBargeIn(orchestrator.Barge{}), // production wiring: turn runs on the floor goroutine
 		orchestrator.WithErrorHandler(func(err error) { t.Errorf("dispatch: %v", err) }),
-	)
+	))
 	t.Cleanup(conv.Register(t.Context()))
 
 	if err := sttStage.Transcribe(context.Background(), nil); err != nil {

@@ -15,11 +15,8 @@ type TurnGate interface {
 	AllowTurn() bool
 }
 
-// WithTurnGate wires the live turn gate into the conversation (#130). Register
-// stores it on the [Replier], which refuses a route whose new turn the gate denies
-// (beside the mute pre-check) before the floor is taken. A nil gate is the
-// feature-off default — voice standalone / the benchmark are byte-for-byte
-// unchanged.
-func WithTurnGate(g TurnGate) Option {
-	return func(c *Conversation) { c.gate = g }
-}
+// The live turn gate is wired into the conversation as [Barge.Gate] (#130,
+// #453): Register stores it on the [Replier], which refuses a route whose new
+// turn the gate denies (beside the mute pre-check) before the floor is taken. A
+// nil gate is the feature-off default — voice standalone / the benchmark are
+// byte-for-byte unchanged.

@@ -156,8 +156,8 @@ func TestConversation_StreamingUtterance_FinalFromCommit(t *testing.T) {
 	}
 	sm := orchestrator.NewStreamManager(&multiStreamRecognizer{streams: []*scriptedStream{stream}})
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
-		orchestrator.WithStreamingSTT(sm))
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+		orchestrator.WithStreamingSTT(sm)))
 	t.Cleanup(conv.Register(t.Context()))
 	if !sm.WaitStreamUp(2 * time.Second) {
 		t.Fatal("the eager dial never brought a session up; utterance 1 could not stream")
@@ -219,8 +219,8 @@ func TestConversation_StreamingCommitError_FallsBackToBatch(t *testing.T) {
 	}
 	sm := orchestrator.NewStreamManager(&multiStreamRecognizer{streams: []*scriptedStream{stream}})
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
-		orchestrator.WithStreamingSTT(sm))
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+		orchestrator.WithStreamingSTT(sm)))
 	t.Cleanup(conv.Register(t.Context()))
 	if !sm.WaitStreamUp(2 * time.Second) {
 		t.Fatal("eager dial never came up")
@@ -268,8 +268,8 @@ func TestConversation_MidUtteranceDeath_BatchThenReconnect(t *testing.T) {
 	rec := &multiStreamRecognizer{streams: []*scriptedStream{dying, healthy}}
 	sm := orchestrator.NewStreamManager(rec, orchestrator.WithStreamBackoff(time.Millisecond, 10*time.Millisecond))
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
-		orchestrator.WithStreamingSTT(sm))
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+		orchestrator.WithStreamingSTT(sm)))
 	t.Cleanup(conv.Register(t.Context()))
 	if !sm.WaitStreamUp(2 * time.Second) {
 		t.Fatal("eager dial never came up")
@@ -321,8 +321,8 @@ func TestConversation_EmptyCommit_PublishesEmptyFinal(t *testing.T) {
 	stream := &scriptedStream{committed: stt.CommitResult{Transcript: stt.Transcript{Text: ""}}}
 	sm := orchestrator.NewStreamManager(&multiStreamRecognizer{streams: []*scriptedStream{stream}})
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
-		orchestrator.WithStreamingSTT(sm))
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+		orchestrator.WithStreamingSTT(sm)))
 	t.Cleanup(conv.Register(t.Context()))
 	if !sm.WaitStreamUp(2 * time.Second) {
 		t.Fatal("eager dial never came up")
@@ -363,9 +363,9 @@ func TestConversation_PartialsNeverRoute(t *testing.T) {
 			address.Agent{Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}}),
 	)
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
 		orchestrator.WithStreamingSTT(sm),
-		orchestrator.WithDetector(detector))
+		orchestrator.WithDetector(detector)))
 	t.Cleanup(conv.Register(t.Context()))
 	if !sm.WaitStreamUp(2 * time.Second) {
 		t.Fatal("eager dial never came up")
@@ -413,8 +413,8 @@ func TestConversation_StreamedUtterance_RecordsOneSTTRequest(t *testing.T) {
 	sm := orchestrator.NewStreamManager(&multiStreamRecognizer{streams: []*scriptedStream{stream}},
 		orchestrator.WithStreamMetrics(spy, observe.ProviderElevenLabs))
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
-		orchestrator.WithStreamingSTT(sm))
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+		orchestrator.WithStreamingSTT(sm)))
 	t.Cleanup(conv.Register(t.Context()))
 	if !sm.WaitStreamUp(2 * time.Second) {
 		t.Fatal("eager dial never came up")
@@ -451,8 +451,8 @@ func TestConversation_NilStreamingSTT_IsBatchParity(t *testing.T) {
 		vad.VADSpeechStart, vad.VADSpeechContinue, vad.VADSpeechEnd,
 	}})
 
-	conv := orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
-		orchestrator.WithStreamingSTT(nil)) // nil is the no-streaming default
+	conv := mustConversation(orchestrator.NewConversation(h.Bus, vadStage, sttStage, nil,
+		orchestrator.WithStreamingSTT(nil))) // nil is the no-streaming default
 	t.Cleanup(conv.Register(t.Context()))
 
 	feedConv(t, conv, 4)

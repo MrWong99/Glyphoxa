@@ -18,15 +18,12 @@ type MuteView interface {
 	Muted(agentID string) bool
 }
 
-// WithMute wires the live mute view into the conversation (#211). Register stores
-// it on the [Replier] (so a muted addressee's route is discarded before the floor
-// is taken) and, when barge-in built the floor, binds a [MuteCut] reactor beside
+// The live mute view is wired into the conversation as [Barge.Mutes] (#211,
+// #453): Register stores it on the [Replier] (so a muted addressee's route is
+// discarded before the floor is taken) and binds a [MuteCut] reactor beside
 // [BargeIn] (so muting the speaking Agent cuts its turn). A nil view is the
 // feature-off default — voice standalone / the benchmark are byte-for-byte
 // unchanged.
-func WithMute(v MuteView) Option {
-	return func(c *Conversation) { c.mutes = v }
-}
 
 // MuteCut is the [Reactor] that cuts a speaking Agent's turn the moment it is
 // muted (#211, AC2). On a [voiceevent.MuteChanged] with Muted=true it asks the

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
@@ -18,58 +19,34 @@ import (
 //
 // Behaviour is configured with functional options at construction
 // ([WithDetector], [WithReply], [WithErrorHandler]); the stages themselves are
-// supplied by the caller, who owns their lifetime.
+// supplied by the caller, who owns their lifetime. Co-dependent features are
+// declared together (#453): the reply mode is one choice ([ReplyStrategy]) and
+// everything that rides the barge-in floor is one group ([Barge]), so their
+// interaction rules are validated once, inside [NewConversation] — never as a
+// mid-[Conversation.Register] panic.
 type Conversation struct {
 	bus *voiceevent.Bus
 	tts *TTS
 
-	seg         *Segmenter
-	detector    *AddressDetector
-	reply       ReplyFunc
-	replyStream StreamReplyFunc
-	onError     ErrorFunc
+	seg      *Segmenter
+	detector *AddressDetector
+	reply    ReplyStrategy
+	onError  ErrorFunc
 
-	// floor is non-nil when barge-in is enabled ([WithBargeIn]): the replier runs
-	// turns on it (async, cancelable) and a [BargeIn] reactor yields it on a human
-	// interruption. bargeConfirm is that reactor's confirm window (0 = instant).
-	// floorCoalesce is the floor's same-utterance coalesce window (0 = plain
-	// supersession); see [Floor] and [WithBargeInCoalesce].
-	floor         *Floor
-	bargeConfirm  time.Duration
-	floorCoalesce time.Duration
-	bargeEnabled  bool
-
-	// mutes is the live mute view ([WithMute], #211): nil = feature off. When set,
-	// Register gates the replier's routes on it and — when barge-in built the floor
-	// — binds a [MuteCut] reactor beside [BargeIn].
-	mutes MuteView
-
-	// gate is the live turn gate ([WithTurnGate], #130): nil = feature off. When
-	// set, Register installs it on the replier, which refuses a route whose new turn
-	// the gate denies (the spend soft cap) beside the mute pre-check.
-	gate TurnGate
+	// barge is the barge-in group ([WithBargeIn]): nil = no floor, synchronous
+	// replies. When set, Register builds the floor from its windows and wires
+	// every floor-riding feature it carries (see [Barge] for the interaction
+	// matrix). floor is that per-Register floor; the floor-sharing reactors
+	// (DirectSpeech, ClipReplay) read it after the reply path built it.
+	barge *Barge
+	floor *Floor
 
 	// voiceOf is the /say direct-speech voice lookup ([WithDirectSpeech], #295): nil
 	// = feature off. When set, Register binds a [DirectSpeech] reactor on
 	// SpeakRequested, sharing the barge-in floor (so a barge cancels a /say) and the
-	// turn gate. Deliberately independent of the mute view (GM puppeteering bypasses
-	// mute).
+	// barge group's turn gate. Deliberately independent of the mute view (GM
+	// puppeteering bypasses mute).
 	voiceOf VoiceLookup
-
-	// ensemble is the Ensemble Turn speaker ([WithEnsemble], #301): nil = feature
-	// off. When set, Register installs it on the replier, which runs a
-	// [voiceevent.EnsembleRouted] as a speculative fan-out + Lead race (ADR-0025).
-	// It REQUIRES barge-in (an ensemble is one floor-holding unit); Register panics
-	// if set without [WithBargeIn]/[WithBargeInCoalesce].
-	ensemble EnsembleSpeaker
-
-	// lookahead is the pump look-ahead seam ([WithReactionLookahead], #375): nil =
-	// feature off (the Cross-talk Reaction pre-renders TEXT only, onset gap = one
-	// cold TTS TTFB — the #302 legacy path). When set, the coordinator pre-renders
-	// the Reaction's first sentence's AUDIO during the Lead's playback and releases
-	// it at the Lead's end for a near-zero onset gap. Set only with an ensemble
-	// speaker; inert without one (only the ensemble path reacts).
-	lookahead LookaheadPump
 
 	// clipReplayLoad + clipReplaySink are the Highlight voice-replay seam
 	// ([WithClipReplay], #310): both nil = feature off. When set, Register binds a
@@ -78,6 +55,85 @@ type Conversation struct {
 	// gate — a replay spends no provider money.
 	clipReplayLoad ClipLoader
 	clipReplaySink ClipSink
+}
+
+// ReplyStrategy is the reply-mode choice: HOW the conversation answers a routed
+// utterance. Exactly one of Whole or Stream may be set — the two are mutually
+// exclusive, validated at [NewConversation] — and the zero value is "no reply"
+// (the conversation transcribes and routes but never speaks). Either mode
+// requires a non-nil TTS stage.
+type ReplyStrategy struct {
+	// Whole dispatches the turn's completion as a single reply once it is fully
+	// produced, wiring AddressRouted → TTS in one shot.
+	Whole ReplyFunc
+	// Stream dispatches the turn's sentences to TTS as they are produced (B1),
+	// so first audio begins after the first sentence rather than the whole
+	// completion. The production strategy is agent.Cast's ReplyStream.
+	Stream StreamReplyFunc
+}
+
+// enabled reports whether a reply mode was chosen at all.
+func (r ReplyStrategy) enabled() bool { return r.Whole != nil || r.Stream != nil }
+
+// Barge groups the barge-in floor (ADR-0027) with every feature whose wiring
+// rides it, so the whole interaction matrix lives — and is validated — in one
+// declared place (#453) instead of being scattered across independent options:
+//
+//   - Confirm/Coalesce shape the per-turn [Floor] the replier runs turns on;
+//     a [BargeIn] reactor yields it on a confirmed human interruption,
+//     cancelling the turn's TTS and playback.
+//   - Mutes gates the replier's routes (a muted addressee opens no turn) and —
+//     because the floor always exists inside this group — additionally binds a
+//     [MuteCut] reactor beside [BargeIn], so muting the Agent that is SPEAKING
+//     cuts its turn. Outside a barge group there is no floor to cut, which is
+//     why the mute view lives here.
+//   - Gate is installed on the replier (a new turn is refused once the spend
+//     soft cap is crossed, #130) and shared with [WithDirectSpeech] (a /say
+//     opens a turn too). [WithClipReplay] deliberately bypasses it — a replay
+//     spends no provider money.
+//   - Ensemble runs a multi-Agent route as a speculative fan-out + Lead race
+//     (ADR-0025, #301). An ensemble is ONE floor-holding unit, so the speaker
+//     exists only inside this group: ensemble-without-barge is unrepresentable.
+//     nil degrades an EnsembleRouted to the top-scored single route.
+//   - Lookahead pre-renders the Cross-talk Reaction's first sentence during
+//     the Lead's playback (#375). Only the ensemble path consumes it, so
+//     setting it without Ensemble is a construction error rather than a silent
+//     no-op.
+//
+// A barge group requires a reply strategy ([ReplyStrategy]): the floor and
+// everything above wire through the replier, so without one none of it can
+// take effect — validated at [NewConversation].
+type Barge struct {
+	// Confirm is how long continuous inbound speech must persist before it
+	// counts as a barge and yields the floor (0 yields instantly on onset). It
+	// must be > 0 against a live mic: with a shared VAD session the addressing
+	// user's own continued speech fires a fresh speech_start while the Agent
+	// holds the floor, and a zero window cancels the very turn it triggered
+	// (the 20s self-cancel of the latency investigation).
+	Confirm time.Duration
+	// Coalesce is the floor's same-utterance coalesce window (root cause #2 of
+	// the latency investigation): a [Floor.Take] arriving within it of the
+	// previous one AND routed to the same target agent is treated as the SAME
+	// utterance continuing and yields to the in-flight turn instead of
+	// superseding it, so a VAD over-split of one utterance cannot self-cancel
+	// its own first turn mid-synthesis; a take for a different agent inside the
+	// window supersedes as normal (#146). 0 keeps plain supersession.
+	Coalesce time.Duration
+	// Mutes is the live authoritative mute view (#211); nil = feature off (the
+	// replier gates nothing, no MuteCut is bound).
+	Mutes MuteView
+	// Gate is the live spend turn gate (#130, ADR-0046); nil = feature off (no
+	// caps configured — every new turn is allowed).
+	Gate TurnGate
+	// Ensemble is the Ensemble Turn speaker (#301); nil = feature off (an
+	// EnsembleRouted degrades to the top-scored single route). The production
+	// speaker is agent.Cast.
+	Ensemble EnsembleSpeaker
+	// Lookahead is the pump look-ahead seam (#375); nil = feature off (the
+	// Reaction pre-renders TEXT only — onset gap = one cold TTS TTFB, the #302
+	// legacy path). Requires Ensemble. The production pump is
+	// [wire.PlaybackPump].
+	Lookahead LookaheadPump
 }
 
 // LookaheadPump is the pump pre-render seam the Cross-talk Reaction coordinator
@@ -104,58 +160,24 @@ func WithDetector(d *AddressDetector) Option {
 	return func(c *Conversation) { c.detector = d }
 }
 
-// WithReply adds a reply reactor driven by fn, wiring AddressRouted → TTS. It
-// requires the conversation to have been given a non-nil TTS stage; Register
-// panics otherwise. Without it the conversation routes but never speaks.
-//
-// Mutually exclusive with [WithReplyStream]; setting both panics at Register.
-func WithReply(fn ReplyFunc) Option {
-	return func(c *Conversation) { c.reply = fn }
+// WithReply chooses the reply mode, wiring AddressRouted → TTS. Exactly one of
+// s.Whole or s.Stream may be set ([ReplyStrategy]); either requires the
+// conversation to have been given a non-nil TTS stage. Both rules are validated
+// by [NewConversation]. Without this option the conversation routes but never
+// speaks.
+func WithReply(s ReplyStrategy) Option {
+	return func(c *Conversation) { c.reply = s }
 }
 
-// WithReplyStream adds a streaming reply reactor (B1): the strategy dispatches a
-// turn's sentences to TTS as they are produced, so first audio begins after the
-// first sentence rather than the whole completion. Like [WithReply] it requires
-// a non-nil TTS stage. Mutually exclusive with [WithReply]; setting both panics
-// at Register.
-func WithReplyStream(fn StreamReplyFunc) Option {
-	return func(c *Conversation) { c.replyStream = fn }
-}
-
-// WithBargeIn enables human barge-in (ADR-0027): replies run on their own
-// goroutine under a cancelable per-turn floor, and a [BargeIn] reactor yields
-// that floor when a participant speaks while the Agent is talking — cancelling
-// the turn's TTS and playback. confirmWindow is how long continuous speech must
-// persist before it counts as a barge (0 yields instantly on onset). It requires
-// [WithReply]; without a replier there is no turn to interrupt.
-//
-// The floor uses plain supersession (no coalesce window); for the live loop,
-// where one utterance can VAD-split into several turns, prefer
-// [WithBargeInCoalesce] to keep one utterance mapped to one turn.
-func WithBargeIn(confirmWindow time.Duration) Option {
-	return func(c *Conversation) {
-		c.bargeConfirm = confirmWindow
-		c.floorCoalesce = 0
-		c.floor = nil // built in Register from the configured windows
-		c.bargeEnabled = true
-	}
-}
-
-// WithBargeInCoalesce is [WithBargeIn] plus a floor coalesce window (root cause
-// #2 of the latency investigation): a per-turn [Floor.Take] arriving within
-// coalesceWindow of the previous one AND routed to the same target agent is
-// treated as the SAME utterance continuing and yields to the in-flight turn
-// instead of superseding it (see [Floor]). This stops a VAD over-split of one
-// utterance from self-cancelling its own first turn mid-synthesis; a take for a
-// different agent inside the window supersedes as normal (#146). A zero
-// coalesceWindow is identical to [WithBargeIn].
-func WithBargeInCoalesce(confirmWindow, coalesceWindow time.Duration) Option {
-	return func(c *Conversation) {
-		c.bargeConfirm = confirmWindow
-		c.floorCoalesce = coalesceWindow
-		c.floor = nil // built in Register from the configured windows
-		c.bargeEnabled = true
-	}
+// WithBargeIn enables human barge-in (ADR-0027) and the floor-riding features
+// grouped on b: replies run on their own goroutine under a cancelable per-turn
+// floor, and a [BargeIn] reactor yields that floor when a participant speaks
+// while the Agent is talking — cancelling the turn's TTS and playback. See
+// [Barge] for the windows, the mute/gate/ensemble/lookahead wiring, and the
+// group's validation rules. It requires a reply strategy ([WithReply]); without
+// a replier there is no turn to interrupt.
+func WithBargeIn(b Barge) Option {
+	return func(c *Conversation) { c.barge = &b }
 }
 
 // WithStreamingSTT wires a streaming-STT transport (ADR-0042) into the segmenter:
@@ -193,52 +215,29 @@ func WithLaneStreamingSTT(f func(speakerID string) *StreamManager, maxLanes int)
 
 // WithDirectSpeech enables the GM /say direct-speech path (#295, ADR-0010): a
 // [DirectSpeech] reactor renders a [voiceevent.SpeakRequested] to TTS in the Agent's
-// Voice, looked up via voiceOf. It requires a non-nil TTS stage; Register panics
-// otherwise. The reactor shares the barge-in floor built for [WithReply] (so a human
-// barge cancels a /say) and honors [WithTurnGate], but deliberately bypasses the
-// mute view — /say is a GM override. A nil voiceOf is the feature-off default. It is
-// independent of [WithReply]: /say publishes SpeakRequested, never AddressRouted, so
-// it never wakes the LLM Replier (ADR-0024).
+// Voice, looked up via voiceOf. It requires a non-nil TTS stage (validated at
+// [NewConversation]). Its floor dependency is explicit and optional: it shares the
+// barge-in floor built for the reply path when a [Barge] group is set (so a human
+// barge cancels a /say) and runs floorless otherwise, and it honors the barge
+// group's [Barge.Gate] but deliberately bypasses the mute view — /say is a GM
+// override. A nil voiceOf is the feature-off default. It is independent of
+// [WithReply]: /say publishes SpeakRequested, never AddressRouted, so it never
+// wakes the LLM Replier (ADR-0024).
 func WithDirectSpeech(voiceOf VoiceLookup) Option {
 	return func(c *Conversation) { c.voiceOf = voiceOf }
-}
-
-// WithEnsemble enables Ensemble Turns (ADR-0025, #301): when one utterance
-// addresses two or more Agents the detector publishes a [voiceevent.EnsembleRouted],
-// and the replier fans the candidates out into parallel speculative Drafts, races
-// them, and lets the first complete non-empty draft (the Lead) take the floor and
-// speak — the losers' drafts are discarded (Reactions are #302). It REQUIRES
-// barge-in ([WithBargeIn]/[WithBargeInCoalesce]) — the whole ensemble is ONE
-// floor-holding unit, so a single barge tears the unit down (ADR-0027); Register
-// panics if the speaker is set without it. A nil speaker is the feature-off default,
-// where an EnsembleRouted degrades to the top-scored single route. The production
-// speaker is agent.Cast (which also drives [WithReplyStream]).
-func WithEnsemble(s EnsembleSpeaker) Option {
-	return func(c *Conversation) { c.ensemble = s }
-}
-
-// WithReactionLookahead enables the pump pre-render / look-ahead seam for the
-// Cross-talk Reaction onset gap (#375, ADR-0025): the coordinator synthesizes the
-// Reaction's first sentence's AUDIO during the Lead's playback and holds it in p's
-// look-ahead lane, releasing it at the Lead's end so the Reaction's onset gap is
-// near-zero instead of a cold TTS TTFB. A nil p is the feature-off default — the
-// Reaction still pre-renders its TEXT during the Lead's playback (the #302 legacy
-// path), just not its audio, so the wiring is safe to install unconditionally. It
-// only takes effect alongside [WithEnsemble]; without an ensemble speaker nothing
-// reacts. The production pump ([wire.PlaybackPump]) is the [LookaheadPump].
-func WithReactionLookahead(p LookaheadPump) Option {
-	return func(c *Conversation) { c.lookahead = p }
 }
 
 // WithClipReplay enables the Highlight voice-replay path (#310, ADR-0051): a
 // [ClipReplay] reactor plays a promoted Session Highlight's clip into the live
 // voice channel on a [voiceevent.ReplayRequested], loading the clip via load and
-// pushing its chunks to sink (the outbound playback path). It shares the barge-in
-// floor built for [WithReply] (so a human barge cancels a replay) but deliberately
-// carries NO turn gate — a replay is pre-recorded audio, zero provider spend. Both
-// load and sink must be non-nil for the feature; leaving either nil is the
-// feature-off default. Like [WithDirectSpeech] it is independent of the reply path:
-// ReplayRequested is its own event, so it never wakes the LLM Replier.
+// pushing its chunks to sink (the outbound playback path). Its floor dependency is
+// explicit and optional: it shares the barge-in floor when a [Barge] group is set
+// (so a human barge cancels a replay) and runs floorless otherwise, and it
+// deliberately carries NO turn gate — a replay is pre-recorded audio, zero
+// provider spend. Both load and sink must be non-nil for the feature; leaving
+// either nil is the feature-off default. Like [WithDirectSpeech] it is independent
+// of the reply path: ReplayRequested is its own event, so it never wakes the LLM
+// Replier.
 func WithClipReplay(load ClipLoader, sink ClipSink) Option {
 	return func(c *Conversation) {
 		c.clipReplayLoad = load
@@ -254,9 +253,16 @@ func WithErrorHandler(fn ErrorFunc) Option {
 }
 
 // NewConversation wires the stages into a conversation on bus. bus, vad, and stt
-// must be non-nil; ttsStage may be nil only when no [WithReply] option is given.
-// All non-nil arguments are owned by the caller.
-func NewConversation(bus *voiceevent.Bus, vad *VAD, stt *STT, ttsStage *TTS, opts ...Option) *Conversation {
+// must be non-nil; ttsStage may be nil only when neither [WithReply] nor
+// [WithDirectSpeech] is given. All non-nil arguments are owned by the caller.
+//
+// It is the single validation point for the option interaction rules (#453):
+// an invalid combination — both reply modes, a reply strategy or direct speech
+// without a TTS stage, a barge group without a reply strategy, a look-ahead
+// pump without an ensemble speaker — fails here with a descriptive error,
+// never as a [Conversation.Register]-time panic. (Combinations the groups make
+// unrepresentable, like ensemble-without-barge, cannot reach it at all.)
+func NewConversation(bus *voiceevent.Bus, vad *VAD, stt *STT, ttsStage *TTS, opts ...Option) (*Conversation, error) {
 	if bus == nil {
 		panic("orchestrator.NewConversation: bus must not be nil")
 	}
@@ -268,13 +274,42 @@ func NewConversation(bus *voiceevent.Bus, vad *VAD, stt *STT, ttsStage *TTS, opt
 	for _, o := range opts {
 		o(c)
 	}
-	return c
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// validate enforces the option interaction matrix at construction (#453). Every
+// rule here used to be a Register-time panic or per-option prose; the grouped
+// configs ([ReplyStrategy], [Barge]) make the rest unrepresentable.
+func (c *Conversation) validate() error {
+	if c.reply.Whole != nil && c.reply.Stream != nil {
+		return errors.New("orchestrator: ReplyStrategy.Whole and ReplyStrategy.Stream are mutually exclusive; set exactly one")
+	}
+	if c.reply.enabled() && c.tts == nil {
+		return errors.New("orchestrator: a reply strategy was set but no TTS stage was provided")
+	}
+	if c.voiceOf != nil && c.tts == nil {
+		return errors.New("orchestrator: WithDirectSpeech was set but no TTS stage was provided")
+	}
+	if c.barge != nil {
+		if !c.reply.enabled() {
+			return errors.New("orchestrator: WithBargeIn requires a reply strategy (WithReply); without a replier there is no turn to interrupt")
+		}
+		if c.barge.Lookahead != nil && c.barge.Ensemble == nil {
+			return errors.New("orchestrator: Barge.Lookahead requires Barge.Ensemble; only the ensemble Cross-talk Reaction consumes the look-ahead")
+		}
+	}
+	return nil
 }
 
 // Register installs the conversation's reactors on the bus and returns a single
 // teardown func. ctx governs the bound reactions and is the context handed to
 // the STT/TTS calls they trigger; teardown stays explicit via the returned
-// cancel (ADR-0026). Register must be called before [Conversation.Feed].
+// cancel (ADR-0026). Register must be called before [Conversation.Feed]. The
+// option interaction rules were already validated by [NewConversation], so
+// Register only wires.
 func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	// The segmenter transcribes off the audio loop (#24), so its recognizer errors
 	// have no caller to return to; route them to the same handler the replier uses.
@@ -284,60 +319,35 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	if c.detector != nil {
 		reactors = append(reactors, c.detector)
 	}
-	if c.reply != nil && c.replyStream != nil {
-		panic("orchestrator.Conversation.Register: WithReply and WithReplyStream are mutually exclusive")
-	}
-	// Ensemble Turn speaker (#301, ADR-0025) REQUIRES the barge-in floor — an ensemble
-	// is one floor-holding unit. Validate UNCONDITIONALLY (before the reply-strategy
-	// branch), so WithEnsemble without barge-in is a loud wiring error even when no
-	// reply strategy is set, not a silent no-op.
-	if c.ensemble != nil && !c.bargeEnabled {
-		panic("orchestrator.Conversation.Register: WithEnsemble requires WithBargeIn or WithBargeInCoalesce")
-	}
-	if c.reply != nil || c.replyStream != nil {
-		if c.tts == nil {
-			panic("orchestrator.Conversation.Register: a reply strategy was set but no TTS stage was provided")
-		}
+	if c.reply.enabled() {
 		var replier *Replier
-		if c.replyStream != nil {
-			replier = NewStreamReplier(c.tts, c.replyStream, c.onError)
+		if c.reply.Stream != nil {
+			replier = NewStreamReplier(c.tts, c.reply.Stream, c.onError)
 		} else {
-			replier = NewReplier(c.tts, c.reply, c.onError)
+			replier = NewReplier(c.tts, c.reply.Whole, c.onError)
 		}
-		// Live mute view (#211): the replier discards a muted addressee's route
-		// before taking the floor, so an addressed-but-muted Agent opens no turn.
-		// Independent of barge-in; nil is the feature-off default.
-		replier.mutes = c.mutes
-		// Live turn gate (#130): the replier refuses a NEW turn once the session's
-		// estimated spend crosses the soft cap. Independent of barge-in and mute; nil
-		// is the feature-off default.
-		replier.gate = c.gate
-		// Ensemble Turn speaker (#301, ADR-0025): the replier runs a multi-Agent
-		// EnsembleRouted as a speculative fan-out + Lead race. The barge-in requirement
-		// is validated above (unconditionally); here just install it.
-		replier.ensemble = c.ensemble
-		// Pump look-ahead seam (#375, ADR-0025): the Cross-talk Reaction pre-renders its
-		// first sentence's audio during the Lead's playback via this pump lane. Nil is
-		// the feature-off default (TEXT-only pre-render, #302 legacy path).
-		replier.lookahead = c.lookahead
-		if c.bargeEnabled {
-			// Barge-in mode: the replier runs turns on the floor, and the BargeIn
-			// reactor yields it on a human interruption. Bind BargeIn before the
-			// replier so a speech_start is evaluated for a yield ahead of any new
-			// turn it might otherwise route. The floor is built here (not at option
-			// time) so the coalesce window — possibly set by a later option — is in
-			// effect.
-			if c.floorCoalesce > 0 {
-				c.floor = NewFloorWithCoalesce(c.floorCoalesce)
+		if c.barge != nil {
+			// The barge group ([Barge]) wires as one unit: the live mute view (#211,
+			// route gating), the turn gate (#130, spend soft cap), the Ensemble Turn
+			// speaker (#301) and its look-ahead pump (#375) all land on the replier,
+			// and the floor is built from the group's windows. Bind BargeIn before
+			// the replier so a speech_start is evaluated for a yield ahead of any new
+			// turn it might otherwise route.
+			replier.mutes = c.barge.Mutes
+			replier.gate = c.barge.Gate
+			replier.ensemble = c.barge.Ensemble
+			replier.lookahead = c.barge.Lookahead
+			if c.barge.Coalesce > 0 {
+				c.floor = NewFloorWithCoalesce(c.barge.Coalesce)
 			} else {
 				c.floor = NewFloor()
 			}
 			replier.floor = c.floor
-			reactors = append(reactors, NewBargeIn(c.floor, c.bargeConfirm))
+			reactors = append(reactors, NewBargeIn(c.floor, c.barge.Confirm))
 			// Mute cut (#211): muting the Agent that is speaking cuts its floor. Bound
 			// beside BargeIn (before the replier) on the same floor; only when a mute
 			// view is wired.
-			if c.mutes != nil {
+			if c.barge.Mutes != nil {
 				reactors = append(reactors, NewMuteCut(c.floor))
 			}
 		}
@@ -345,16 +355,15 @@ func (c *Conversation) Register(ctx context.Context) (cancel func()) {
 	}
 	// GM /say direct speech (#295): a DirectSpeech reactor on SpeakRequested, sharing
 	// the barge-in floor (built above for the reply path, so a barge cancels a /say)
-	// and the turn gate. Bound AFTER the replier so a SpeakRequested and an
-	// AddressRouted never contend — they are distinct events on distinct turns. It
-	// requires a TTS stage; nil voiceOf is the feature-off default.
+	// and the barge group's turn gate. Bound AFTER the replier so a SpeakRequested
+	// and an AddressRouted never contend — they are distinct events on distinct
+	// turns. nil voiceOf is the feature-off default.
 	if c.voiceOf != nil {
-		if c.tts == nil {
-			panic("orchestrator.Conversation.Register: WithDirectSpeech was set but no TTS stage was provided")
-		}
 		ds := NewDirectSpeech(c.tts, c.voiceOf, c.onError)
 		ds.floor = c.floor // shared with the barge path (nil when barge-in is off)
-		ds.gate = c.gate
+		if c.barge != nil {
+			ds.gate = c.barge.Gate
+		}
 		reactors = append(reactors, ds)
 	}
 	// Highlight voice replay (#310): a ClipReplay reactor on ReplayRequested, sharing

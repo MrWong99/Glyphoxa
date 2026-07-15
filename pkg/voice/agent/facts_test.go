@@ -135,7 +135,7 @@ func (e *captureStreamEngine) GenerateStream(_ context.Context, msgs []llm.Messa
 }
 
 // TestStreamTurn_InjectsFacts pins that the STREAMING turn path (the one
-// production wires via WithReplyStream) also consults the FactsRecaller and folds
+// production wires via ReplyStrategy.Stream) also consults the FactsRecaller and folds
 // the facts block into the system prompt — a batch-only wiring would silently
 // ship nothing here.
 func TestStreamTurn_InjectsFacts(t *testing.T) {

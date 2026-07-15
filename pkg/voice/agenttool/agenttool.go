@@ -39,7 +39,7 @@ import (
 // fresh per-turn round counter (an *int starting at 0). The adapter reads and
 // increments it per [tool.Provider.Generate] call so round_index is scoped to
 // one turn — never a field on the shared [providerAdapter], which would bleed
-// across the concurrent turns barge-in (ADR-0027, WithBargeIn(0)) allows.
+// across the concurrent turns barge-in (ADR-0027, a zero barge confirm window) allows.
 type roundCounterKey struct{}
 
 // withRoundCounter returns ctx carrying a fresh per-turn round counter.

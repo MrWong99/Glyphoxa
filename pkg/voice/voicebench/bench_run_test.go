@@ -107,7 +107,7 @@ func runClipThroughRig(t *testing.T, clip Clip, acc *Accumulator) {
 	tap := newRecorderTap()
 
 	target := voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}
-	conv := BuildConversation(RigConfig{
+	conv, err := BuildConversation(RigConfig{
 		Bus:      h.Bus,
 		VAD:      vadStage,
 		STT:      orchestrator.NewSTT(h.Bus, stubRecognizer{text: "another ale, innkeeper"}),
@@ -117,6 +117,9 @@ func runClipThroughRig(t *testing.T, clip Clip, acc *Accumulator) {
 		Detector: orchestrator.NewAddressDetector(alwaysRoute{target: target}),
 		Recorder: tap,
 	})
+	if err != nil {
+		t.Fatalf("BuildConversation: %v", err)
+	}
 
 	// One silence frame sized to the clip framing, appended to provoke speech-end.
 	silence := silenceLike(t, frames)

@@ -533,7 +533,7 @@ func TestReplyStream_NotAddressed_NoDispatch(t *testing.T) {
 // Scope note: the second turn is fired AFTER the first turn's goroutine has fully
 // unwound (the <-done barrier), so this pins the committed CONTENT
 // deterministically. It does NOT exercise the production interleaving where
-// WithBargeIn(0) lets turn 2 route while turn 1 is still committing — there,
+// a zero barge confirm window lets turn 2 route while turn 1 is still committing — there,
 // turn-1 unwind (~a few statements after cancel) precedes turn-2 routing
 // (STT→address→bus fan-out) in practice, but ordering is not guaranteed by
 // construction (only r.mu's mutual exclusion is). If a real ordering bug ever
@@ -1102,7 +1102,7 @@ func TestReply_TurnTimeout_AppliesDeadlineAndPropagatesCtx(t *testing.T) {
 
 // TestReplyStream_TurnTimeout_AppliesDeadlineAndPropagatesCtx is the streaming
 // twin of TestReply_TurnTimeout_*: the production path wires ReplyStream
-// (orchestrator.WithReplyStream), and the Gemini client has no overall HTTP
+// (orchestrator.ReplyStrategy.Stream), and the Gemini client has no overall HTTP
 // timeout by design, so the per-turn deadline MUST be applied here too — without
 // it a thinking-then-stalling completion runs unbounded and never produces first
 // audio (the survivorship-biased latency the 20s live test hit).
