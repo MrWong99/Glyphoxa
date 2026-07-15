@@ -37,11 +37,11 @@ func (s *spyInvalidator) calls() []uuid.UUID {
 // resolutions so the live relay re-resolves future lines with the new mapping.
 func TestCharacterMutations_InvalidateSpeakers(t *testing.T) {
 	campaign := storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	store := newFakeStore()
+	store := newFakeCharacterStore()
 	store.campaign = campaign
 	spy := &spyInvalidator{}
 
-	srv := rpc.NewCampaignServer(store)
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Characters: store})
 	srv.SetSpeakerInvalidator(spy)
 
 	ctx := context.Background()
@@ -79,9 +79,9 @@ func TestCharacterMutations_InvalidateSpeakers(t *testing.T) {
 // TestCharacterMutations_NilInvalidatorSafe: with no invalidator wired (feature
 // off / no live resolver) the mutations must not panic.
 func TestCharacterMutations_NilInvalidatorSafe(t *testing.T) {
-	store := newFakeStore()
+	store := newFakeCharacterStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	srv := rpc.NewCampaignServer(store) // no SetSpeakerInvalidator
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Characters: store}) // no SetSpeakerInvalidator
 
 	ctx := context.Background()
 	resp, err := srv.CreateCharacter(ctx, connect.NewRequest(&managementv1.CreateCharacterRequest{

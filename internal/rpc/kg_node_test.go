@@ -8,14 +8,31 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
+// kgNodeClient composes a CampaignServer over just the KG-Node slice (#445):
+// one fakeKGNodeStore serves both Active (via the embedded *fakeActive) and
+// KGNodes.
+func kgNodeClient(t *testing.T, store *fakeKGNodeStore) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClient(t, rpc.CampaignStores{Active: store, KGNodes: store})
+}
+
+// kgNodeClientAs is kgNodeClient plus an injected authenticated user and an
+// optional live Voice Session source, for the #222 scope-resolution tests.
+func kgNodeClientAs(t *testing.T, store *fakeKGNodeStore, user storage.User, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClientAs(t, rpc.CampaignStores{Active: store, KGNodes: store}, user, uuid.Nil, sessions)
+}
+
 func TestCreateNode_MapsAndPersists(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	resp, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{
@@ -51,9 +68,9 @@ func TestCreateNode_MapsAndPersists(t *testing.T) {
 
 func TestCreateNode_TrimsName(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	resp, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{
@@ -74,9 +91,9 @@ func TestCreateNode_TrimsName(t *testing.T) {
 
 func TestCreateNode_UnspecifiedTypeIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{Name: "x"})) // type unset = UNSPECIFIED
@@ -87,9 +104,9 @@ func TestCreateNode_UnspecifiedTypeIsInvalidArgument(t *testing.T) {
 
 func TestCreateNode_EmptyNameIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{
@@ -102,10 +119,10 @@ func TestCreateNode_EmptyNameIsInvalidArgument(t *testing.T) {
 
 func TestCreateNode_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.nodeCreateErr = errAny
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{
@@ -119,14 +136,14 @@ func TestCreateNode_StorageErrorIsInternal(t *testing.T) {
 func TestListNodes_MapsInStorageOrder(t *testing.T) {
 	t.Parallel()
 	campID := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: campID, Name: "Lost Mine"}
 	// The storage layer owns the ordering; the handler must preserve it 1:1.
 	store.nodes = []storage.KGNode{
 		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodeLocation, Name: "Barrow"},
 		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodeNote, Name: "Rumor", Body: "hush", GMPrivate: true},
 	}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	resp, err := client.ListNodes(context.Background(),
 		connect.NewRequest(&managementv1.ListNodesRequest{}))
@@ -147,9 +164,9 @@ func TestListNodes_MapsInStorageOrder(t *testing.T) {
 
 func TestListNodes_NoCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.ListNodes(context.Background(),
 		connect.NewRequest(&managementv1.ListNodesRequest{}))
@@ -160,10 +177,10 @@ func TestListNodes_NoCampaignIsNotFound(t *testing.T) {
 
 func TestListNodes_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.nodeListErr = errAny
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.ListNodes(context.Background(),
 		connect.NewRequest(&managementv1.ListNodesRequest{}))
@@ -175,11 +192,11 @@ func TestListNodes_StorageErrorIsInternal(t *testing.T) {
 func TestUpdateNode_MapsAndPersists(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.nodes = []storage.KGNode{
 		{ID: id, CampaignID: uuid.New(), Type: storage.KGNodeLocation, Name: "Harbor", Body: "old"},
 	}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	resp, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{
@@ -205,9 +222,9 @@ func TestUpdateNode_MapsAndPersists(t *testing.T) {
 func TestUpdateNode_TrimsName(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "old"}}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	resp, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: id.String(), Name: "  Alice  "}))
@@ -225,9 +242,9 @@ func TestUpdateNode_TrimsName(t *testing.T) {
 func TestUpdateNode_EmptyNameIsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "x"}}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: id.String(), Name: "   "}))
@@ -238,8 +255,8 @@ func TestUpdateNode_EmptyNameIsInvalidArgument(t *testing.T) {
 
 func TestUpdateNode_InvalidIdIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
-	client := crudClient(t, store)
+	store := newFakeKGNodeStore()
+	client := kgNodeClient(t, store)
 
 	_, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: "not-a-uuid", Name: "x"}))
@@ -250,8 +267,8 @@ func TestUpdateNode_InvalidIdIsInvalidArgument(t *testing.T) {
 
 func TestUpdateNode_NotFoundIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore() // no nodes seeded
-	client := crudClient(t, store)
+	store := newFakeKGNodeStore() // no nodes seeded
+	client := kgNodeClient(t, store)
 
 	_, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: uuid.NewString(), Name: "x"}))
@@ -265,9 +282,9 @@ func TestUpdateNode_NotFoundIsNotFound(t *testing.T) {
 // CodeNotFound rather than mutating by bare id.
 func TestUpdateNode_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: uuid.NewString(), Name: "x"}))
@@ -278,9 +295,9 @@ func TestUpdateNode_NoActiveCampaignIsNotFound(t *testing.T) {
 
 func TestUpdateNode_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.nodeUpdateErr = errAny
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: uuid.NewString(), Name: "x"}))
@@ -292,9 +309,9 @@ func TestUpdateNode_StorageErrorIsInternal(t *testing.T) {
 func TestDeleteNode_Deletes(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "gone soon"}}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	if _, err := client.DeleteNode(context.Background(),
 		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: id.String()})); err != nil {
@@ -307,8 +324,8 @@ func TestDeleteNode_Deletes(t *testing.T) {
 
 func TestDeleteNode_InvalidIdIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
-	client := crudClient(t, store)
+	store := newFakeKGNodeStore()
+	client := kgNodeClient(t, store)
 
 	_, err := client.DeleteNode(context.Background(),
 		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: "nope"}))
@@ -319,8 +336,8 @@ func TestDeleteNode_InvalidIdIsInvalidArgument(t *testing.T) {
 
 func TestDeleteNode_NotFoundIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
-	client := crudClient(t, store)
+	store := newFakeKGNodeStore()
+	client := kgNodeClient(t, store)
 
 	_, err := client.DeleteNode(context.Background(),
 		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: uuid.NewString()}))
@@ -331,9 +348,9 @@ func TestDeleteNode_NotFoundIsNotFound(t *testing.T) {
 
 func TestDeleteNode_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.nodeDeleteErr = errAny
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.DeleteNode(context.Background(),
 		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: uuid.NewString()}))
@@ -348,11 +365,11 @@ func TestDeleteNode_StorageErrorIsInternal(t *testing.T) {
 func TestUpdateNode_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "old"}}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	if _, err := client.UpdateNode(context.Background(),
 		connect.NewRequest(&managementv1.UpdateNodeRequest{Id: id.String(), Name: "New"})); err != nil {
@@ -368,11 +385,11 @@ func TestUpdateNode_ScopesToActiveCampaign(t *testing.T) {
 func TestDeleteNode_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	store.nodes = []storage.KGNode{{ID: id, Type: storage.KGNodeNote, Name: "gone soon"}}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	if _, err := client.DeleteNode(context.Background(),
 		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: id.String()})); err != nil {
@@ -387,9 +404,9 @@ func TestDeleteNode_ScopesToActiveCampaign(t *testing.T) {
 // scoped delete cannot resolve an owner and returns CodeNotFound.
 func TestDeleteNode_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.DeleteNode(context.Background(),
 		connect.NewRequest(&managementv1.DeleteNodeRequest{Id: uuid.NewString()}))
@@ -400,9 +417,9 @@ func TestDeleteNode_NoActiveCampaignIsNotFound(t *testing.T) {
 
 func TestSearchNodes_EmptyQueryIsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	for _, q := range []string{"", "   "} {
 		_, err := client.SearchNodes(context.Background(),
@@ -420,7 +437,7 @@ func TestSearchNodes_EmptyQueryIsInvalidArgument(t *testing.T) {
 func TestSearchNodes_PreservesRankOrderAndIncludesPrivate(t *testing.T) {
 	t.Parallel()
 	campID := uuid.New()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: campID, Name: "Lost Mine"}
 	// Storage owns the relevance ranking; the handler must preserve it 1:1 and must
 	// NOT drop the gm_private match (GM-facing search).
@@ -429,7 +446,7 @@ func TestSearchNodes_PreservesRankOrderAndIncludesPrivate(t *testing.T) {
 		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodePlotThread, Name: "The dragon's true name", GMPrivate: true},
 		{ID: uuid.New(), CampaignID: campID, Type: storage.KGNodeNote, Name: "Rumor", Body: "a dragon"},
 	}
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	resp, err := client.SearchNodes(context.Background(),
 		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "dragon"}))
@@ -457,9 +474,9 @@ func TestSearchNodes_PreservesRankOrderAndIncludesPrivate(t *testing.T) {
 
 func TestSearchNodes_NoCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campErr = storage.ErrNotFound
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.SearchNodes(context.Background(),
 		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "x"}))
@@ -470,10 +487,10 @@ func TestSearchNodes_NoCampaignIsNotFound(t *testing.T) {
 
 func TestSearchNodes_StorageErrorIsInternal(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.nodeSearchErr = errAny
-	client := crudClient(t, store)
+	client := kgNodeClient(t, store)
 
 	_, err := client.SearchNodes(context.Background(),
 		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "x"}))
@@ -490,10 +507,10 @@ func TestCreateNodeHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.forUser = durable
 	store.campaign = newer
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+	client := kgNodeClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
 
 	if _, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{
@@ -516,10 +533,10 @@ func TestListNodesHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.forUser = durable
 	store.campaign = newer
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+	client := kgNodeClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
 
 	if _, err := client.ListNodes(context.Background(),
 		connect.NewRequest(&managementv1.ListNodesRequest{})); err != nil {
@@ -538,10 +555,10 @@ func TestSearchNodesHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.forUser = durable
 	store.campaign = newer
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
+	client := kgNodeClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
 
 	if _, err := client.SearchNodes(context.Background(),
 		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "vault"})); err != nil {
@@ -561,11 +578,11 @@ func TestCreateNodeHonorsLiveSession(t *testing.T) {
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.forUser = durable
 	store.campaign = newer
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+	client := kgNodeClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
 
 	if _, err := client.CreateNode(context.Background(),
 		connect.NewRequest(&managementv1.CreateNodeRequest{
@@ -589,11 +606,11 @@ func TestListNodesHonorsLiveSession(t *testing.T) {
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.forUser = durable
 	store.campaign = newer
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+	client := kgNodeClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
 
 	if _, err := client.ListNodes(context.Background(),
 		connect.NewRequest(&managementv1.ListNodesRequest{})); err != nil {
@@ -612,11 +629,11 @@ func TestSearchNodesHonorsLiveSession(t *testing.T) {
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeKGNodeStore()
 	store.forUser = durable
 	store.campaign = newer
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
-	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
+	client := kgNodeClientAs(t, store, storage.User{DiscordUserID: "999"}, liveMgr(live.ID))
 
 	if _, err := client.SearchNodes(context.Background(),
 		connect.NewRequest(&managementv1.SearchNodesRequest{Query: "vault"})); err != nil {

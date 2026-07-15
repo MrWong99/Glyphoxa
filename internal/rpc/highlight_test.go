@@ -175,7 +175,7 @@ func newHighlightClientEnq(t *testing.T, tenantID uuid.UUID, hstore rpc.Highligh
 	return managementv1connect.NewSessionServiceClient(http.DefaultClient, httpSrv.URL, connect.WithProtoJSON())
 }
 
-// campaignStore returns a fakeSessionStore whose resolved Active Campaign is
+// campaignSessionStore returns a fakeSessionStore whose resolved Active Campaign is
 // campaignID and that owns the given voice sessions (each mapped to campaignID), so
 // the highlight RPCs' cross-campaign checks have a session to look up.
 func campaignSessionStore(campaignID uuid.UUID, sessionIDs ...uuid.UUID) *fakeSessionStore {

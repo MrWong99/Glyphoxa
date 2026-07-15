@@ -16,7 +16,7 @@ import (
 // appears here automatically and no language is hardcoded outside phonetic.go.
 // It is a pure read over the default registry: no store, no auth scope, and no
 // failure path.
-func (s *CampaignServer) ListSupportedLanguages(
+func (s *campaignManagement) ListSupportedLanguages(
 	_ context.Context,
 	_ *connect.Request[managementv1.ListSupportedLanguagesRequest],
 ) (*connect.Response[managementv1.ListSupportedLanguagesResponse], error) {

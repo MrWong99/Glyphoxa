@@ -14,11 +14,31 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
-// Campaign-screen CRUD handlers (#71) on CampaignServer: the roster read plus
-// agent create/update/delete over the polymorphic agents table (ADR-0009).
-// Reads/writes resolve the single operator's active campaign server-side, the
-// same single-tenant pass-through GetActiveCampaign uses (ADR-0039); per-tenant
-// scoping fills in behind the X-Tenant-Id interceptor later.
+// agentRoster is the Campaign-screen Agent CRUD feature module (#71): the
+// roster read plus agent create/update/delete over the polymorphic agents table
+// (ADR-0009). Reads/writes resolve the single operator's active campaign
+// server-side, the same single-tenant pass-through GetActiveCampaign uses
+// (ADR-0039); per-tenant scoping fills in behind the X-Tenant-Id interceptor
+// later.
+type agentRoster struct {
+	store  agentStore
+	active *activeCampaignSource
+}
+
+// agentStore is the narrow roster + Agent CRUD surface the module needs (#71);
+// *storage.Store satisfies it, so the handlers unit-test keyless with a fake.
+type agentStore interface {
+	// GetButler + CharacterAgents are the ordered roster read (the Butler is
+	// auto-created with the campaign, ADR-0009).
+	GetButler(ctx context.Context, campaignID uuid.UUID) (storage.Agent, error)
+	CharacterAgents(ctx context.Context, campaignID uuid.UUID) ([]storage.Agent, error)
+	// GetAgent backs the create read-back and UpdateAgent's campaign-scoped
+	// pre-read (#356) that preserves persisted voice tuning (#224).
+	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
+	CreateAgent(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
+	UpdateAgent(ctx context.Context, a storage.AgentUpdate) (storage.Agent, error)
+	DeleteAgent(ctx context.Context, campaignID, id uuid.UUID) error
+}
 
 // GetCampaignRoster returns the active campaign with its ordered roster: the
 // Butler first, then the Character NPCs. The campaign is resolved live-first
@@ -27,11 +47,11 @@ import (
 // actually voicing, not a durable selection changed mid-session (#222). No
 // campaign yields CodeNotFound; a missing Butler is an ADR-0009 invariant
 // violation (logged, CodeInternal).
-func (s *CampaignServer) GetCampaignRoster(
+func (s *agentRoster) GetCampaignRoster(
 	ctx context.Context,
 	_ *connect.Request[managementv1.GetCampaignRosterRequest],
 ) (*connect.Response[managementv1.GetCampaignRosterResponse], error) {
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -72,11 +92,11 @@ func (s *CampaignServer) GetCampaignRoster(
 // /glyphoxa use selection → most-recent fallback), the SAME resolution the roster
 // read uses, so mid-session a new NPC lands in the campaign the screen shows —
 // never a silent cross-campaign write (#222).
-func (s *CampaignServer) CreateAgent(
+func (s *agentRoster) CreateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateAgentRequest],
 ) (*connect.Response[managementv1.CreateAgentResponse], error) {
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -116,7 +136,7 @@ func (s *CampaignServer) CreateAgent(
 // UpdateAgent saves an agent's editor fields and returns the updated agent. The
 // store force-keeps a Butler's role and Address-Only (ADR-0009 / ADR-0024). An
 // unparsable id is CodeInvalidArgument; a missing id is CodeNotFound.
-func (s *CampaignServer) UpdateAgent(
+func (s *agentRoster) UpdateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.UpdateAgentRequest],
 ) (*connect.Response[managementv1.UpdateAgentResponse], error) {
@@ -128,7 +148,7 @@ func (s *CampaignServer) UpdateAgent(
 	// Resolve the active campaign the SAME live-first way the roster/create paths do
 	// (#222/#229) — its language seeds a first-save voice default (#224). Reusing the
 	// unified resolver avoids a second, divergent campaign-resolution path.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -179,7 +199,7 @@ func (s *CampaignServer) UpdateAgent(
 
 // DeleteAgent removes a Character NPC. Deleting the Butler is CodeFailedPrecondition
 // (ADR-0009); an unparsable id is CodeInvalidArgument; a missing id is CodeNotFound.
-func (s *CampaignServer) DeleteAgent(
+func (s *agentRoster) DeleteAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.DeleteAgentRequest],
 ) (*connect.Response[managementv1.DeleteAgentResponse], error) {
@@ -192,7 +212,7 @@ func (s *CampaignServer) DeleteAgent(
 	// DELETE matches (id, campaign_id), so an Agent in another campaign is never
 	// removable through this session — it reads back as CodeNotFound, and the Butler
 	// guard still fires for the active campaign's own Butler.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

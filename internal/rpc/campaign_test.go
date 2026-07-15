@@ -3,8 +3,6 @@ package rpc_test
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -13,12 +11,12 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// fakeReader is a keyless, deterministic campaignReader for the default gate.
+// fakeReader is a keyless, deterministic active-campaign resolver for the
+// default gate — it implements only the shared resolver slice (#445).
 // forUser/forUserErr back the durable /glyphoxa use selection the profile-first
 // resolution reads first (#222); campaign is the most-recent fallback.
 type fakeReader struct {
@@ -46,139 +44,14 @@ func (f fakeReader) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, e
 	return f.campaign, f.err
 }
 
-// The campaign management half of campaignStore (#264) is unused by the
-// GetActiveCampaign tests; stub it so fakeReader still satisfies the widened
-// interface. The management handlers exercise it via fakeCampaignStore.
-func (fakeReader) ListCampaigns(context.Context) ([]storage.Campaign, error) {
-	return nil, nil
-}
-func (fakeReader) CreateCampaign(context.Context, storage.NewCampaign) (uuid.UUID, error) {
-	return uuid.Nil, nil
-}
-func (fakeReader) UpdateCampaign(context.Context, storage.CampaignUpdate) (storage.Campaign, error) {
-	return storage.Campaign{}, nil
-}
-func (fakeReader) SetActiveCampaign(context.Context, string, uuid.UUID) error {
-	return nil
-}
-
-// The archive lifecycle half of campaignStore (#269) is unused by the
-// GetActiveCampaign tests; stub it so fakeReader still satisfies the widened
-// interface. The archive handlers exercise it via fakeCampaignStore.
-func (fakeReader) ListAllCampaigns(context.Context) ([]storage.Campaign, error) {
-	return nil, nil
-}
-func (fakeReader) ArchiveCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
-	return storage.Campaign{}, nil
-}
-func (fakeReader) UnarchiveCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
-	return storage.Campaign{}, nil
-}
-func (fakeReader) DeleteCampaign(context.Context, uuid.UUID) error {
-	return nil
-}
-func (fakeReader) DeleteCampaignWithJob(context.Context, uuid.UUID, string, []byte) error {
-	return nil
-}
-
-// The roster + CRUD half of campaignStore is unused by the GetActiveCampaign
-// tests; stub it so fakeReader still satisfies the widened interface. The CRUD
-// handlers have their own fake (campaign_crud_test.go).
-func (fakeReader) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {
-	return storage.Agent{}, storage.ErrNotFound
-}
-func (fakeReader) CharacterAgents(context.Context, uuid.UUID) ([]storage.Agent, error) {
-	return nil, nil
-}
-func (fakeReader) GetAgent(context.Context, uuid.UUID) (storage.Agent, error) {
-	return storage.Agent{}, storage.ErrNotFound
-}
-func (fakeReader) CreateAgent(context.Context, storage.NewAgent) (uuid.UUID, error) {
-	return uuid.Nil, nil
-}
-func (fakeReader) UpdateAgent(context.Context, storage.AgentUpdate) (storage.Agent, error) {
-	return storage.Agent{}, storage.ErrNotFound
-}
-func (fakeReader) DeleteAgent(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
-}
-func (fakeReader) CreateNode(context.Context, storage.NewKGNode) (storage.KGNode, error) {
-	return storage.KGNode{}, nil
-}
-func (fakeReader) ListNodes(context.Context, uuid.UUID) ([]storage.KGNode, error) {
-	return nil, nil
-}
-func (fakeReader) UpdateNode(context.Context, storage.KGNodeUpdate) (storage.KGNode, error) {
-	return storage.KGNode{}, nil
-}
-func (fakeReader) DeleteNode(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
-}
-func (fakeReader) CreateEdge(context.Context, storage.NewKGEdge) (storage.KGEdge, error) {
-	return storage.KGEdge{}, nil
-}
-func (fakeReader) DeleteEdge(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
-}
-func (fakeReader) NodeEdges(context.Context, uuid.UUID, uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
-	return nil, nil, nil
-}
-func (fakeReader) SetNodeAgent(context.Context, uuid.UUID, uuid.UUID, uuid.NullUUID) (storage.KGNode, error) {
-	return storage.KGNode{}, nil
-}
-func (fakeReader) SearchNodes(context.Context, uuid.UUID, string, int) ([]storage.KGNode, error) {
-	return nil, nil
-}
-func (fakeReader) ListPendingKnowledgeProposals(context.Context, uuid.UUID) ([]storage.KnowledgeProposal, error) {
-	return nil, nil
-}
-func (fakeReader) GetPendingKnowledgeProposal(context.Context, uuid.UUID, uuid.UUID) (storage.KnowledgeProposal, error) {
-	return storage.KnowledgeProposal{}, nil
-}
-func (fakeReader) ApproveKnowledgeProposal(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
-}
-func (fakeReader) RejectKnowledgeProposal(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
-}
-func (fakeReader) SimilarNodes(context.Context, uuid.UUID, []float32, int) ([]storage.KGNode, error) {
-	return nil, nil
-}
-func (fakeReader) ListToolGrants(context.Context, uuid.UUID) ([]storage.ToolGrant, error) {
-	return nil, nil
-}
-func (fakeReader) UpsertToolGrant(context.Context, storage.NewToolGrant) error {
-	return nil
-}
-func (fakeReader) DeleteToolGrant(context.Context, uuid.UUID, string) error {
-	return nil
-}
-func (fakeReader) ListCharacters(context.Context, uuid.UUID) ([]storage.Character, error) {
-	return nil, nil
-}
-func (fakeReader) CreateCharacter(context.Context, storage.NewCharacter) (uuid.UUID, error) {
-	return uuid.Nil, nil
-}
-func (fakeReader) UpdateCharacter(context.Context, storage.CharacterUpdate) (storage.Character, error) {
-	return storage.Character{}, nil
-}
-func (fakeReader) DeleteCharacter(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
-}
-
-// newClient stands up the CampaignServer handler behind an httptest server and
-// returns a Connect-JSON client for it. WithProtoJSON forces the JSON codec on
-// the wire (the default is binary proto), so this also asserts the RPC is
-// reachable over Connect-JSON.
+// newClient stands up a CampaignServer composed from only the Active resolver
+// slice (the GetActiveCampaign RPC touches no other slice, #445) behind an
+// httptest server and returns a Connect-JSON client for it. WithProtoJSON
+// forces the JSON codec on the wire (the default is binary proto), so this
+// also asserts the RPC is reachable over Connect-JSON.
 func newClient(t *testing.T, reader fakeReader) managementv1connect.CampaignServiceClient {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(reader).Handler())
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
-	)
+	return campaignClient(t, rpc.CampaignStores{Active: reader})
 }
 
 // newClientAs is newClient plus an injected authenticated operator, so the
@@ -186,21 +59,7 @@ func newClient(t *testing.T, reader fakeReader) managementv1connect.CampaignServ
 // (#222). A zero user injects nothing (the legacy no-user path).
 func newClientAs(t *testing.T, reader fakeReader, user storage.User) managementv1connect.CampaignServiceClient {
 	t.Helper()
-	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			if user.DiscordUserID != "" {
-				ctx = auth.WithUser(ctx, user)
-			}
-			return next(ctx, req)
-		}
-	})
-	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(reader).Handler(connect.WithInterceptors(inject)))
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
-	)
+	return campaignClientAs(t, rpc.CampaignStores{Active: reader}, user, uuid.Nil, nil)
 }
 
 // TestGetActiveCampaignHonorsDurableSelection is #222: the Session-screen header

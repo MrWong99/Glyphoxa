@@ -32,7 +32,7 @@ func (s *CampaignServer) SetMemberLister(l voiceMemberLister) {
 // and never an error, so the picker degrades to free-text snowflake entry
 // (ADR-0003). No privileged intent is used — the members come from the
 // voice-state cache the Bot already receives.
-func (s *CampaignServer) ListDiscordVoiceMembers(
+func (s *characterRoster) ListDiscordVoiceMembers(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListDiscordVoiceMembersRequest],
 ) (*connect.Response[managementv1.ListDiscordVoiceMembersResponse], error) {

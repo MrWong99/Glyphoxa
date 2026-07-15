@@ -13,20 +13,61 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// Player Character (PC) CRUD handlers (#276, E4) on CampaignServer. Like the Agent
-// CRUD they resolve the single operator's active campaign server-side (ADR-0039),
-// so another campaign's Characters are never returned nor mutable. discord_user_id
-// is mandatory (ADR-0003) and must be a Discord snowflake; a Discord User plays at
-// most one Character per campaign, so a duplicate is CodeAlreadyExists and a
-// rebind is an ordinary update of that column.
+// characterRoster is the Player Character (PC) feature module (#276, E4): the
+// PC CRUD plus the Players panel's voice-member picker (#279). Like the Agent
+// CRUD the PC handlers resolve the single operator's active campaign server-side
+// (ADR-0039), so another campaign's Characters are never returned nor mutable.
+// discord_user_id is mandatory (ADR-0003) and must be a Discord snowflake; a
+// Discord User plays at most one Character per campaign, so a duplicate is
+// CodeAlreadyExists and a rebind is an ordinary update of that column.
+type characterRoster struct {
+	store  characterStore
+	active *activeCampaignSource
+	// speakerInv drops a campaign's cached speaker→name resolutions after a Character
+	// mutation (#281, ADR-0039 in-proc direct-method invalidation), so the live relay
+	// re-resolves future lines with the new mapping. Nil disables (feature off / no
+	// live resolver); set once at boot before serving.
+	speakerInv SpeakerInvalidator
+	// memberLister lists the Discord Users currently in the operator's voice
+	// channel for the Players panel picker (#279). Nil until SetMemberLister wires
+	// it (a keyless / bot-offline deployment leaves it nil); the handler then
+	// returns an empty list so the UI falls back to free-text snowflake entry. Set
+	// once at boot before serving, so no lock is needed.
+	memberLister voiceMemberLister
+}
+
+// characterStore is the narrow Player Character surface the module needs
+// (#276); *storage.Store satisfies it. All writes are campaign-scoped (#342),
+// so another campaign's Characters are never mutable.
+type characterStore interface {
+	ListCharacters(ctx context.Context, campaignID uuid.UUID) ([]storage.Character, error)
+	CreateCharacter(ctx context.Context, c storage.NewCharacter) (uuid.UUID, error)
+	UpdateCharacter(ctx context.Context, c storage.CharacterUpdate) (storage.Character, error)
+	DeleteCharacter(ctx context.Context, campaignID, id uuid.UUID) error
+}
+
+// SpeakerInvalidator drops a campaign's cached speaker→name resolutions. The live
+// *speaker.Resolver satisfies it; the Character CRUD handlers call it on
+// create/update/delete so a rebind takes effect on the next projected line (#281).
+type SpeakerInvalidator interface {
+	InvalidateCampaign(campaignID uuid.UUID)
+}
+
+// invalidateSpeakers drops a campaign's cached speaker resolutions after a
+// Character mutation, if a resolver is wired (#281). Nil-safe.
+func (s *characterRoster) invalidateSpeakers(campaignID uuid.UUID) {
+	if s.speakerInv != nil {
+		s.speakerInv.InvalidateCampaign(campaignID)
+	}
+}
 
 // ListCharacters returns the active campaign's Player Characters in storage
 // display order. No campaign is CodeNotFound; a storage failure is CodeInternal.
-func (s *CampaignServer) ListCharacters(
+func (s *characterRoster) ListCharacters(
 	ctx context.Context,
 	_ *connect.Request[managementv1.ListCharactersRequest],
 ) (*connect.Response[managementv1.ListCharactersResponse], error) {
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -52,7 +93,7 @@ func (s *CampaignServer) ListCharacters(
 // empty name or a non-snowflake discord_user_id is CodeInvalidArgument; a Discord
 // User already playing a Character in the campaign is CodeAlreadyExists; no
 // campaign is CodeNotFound.
-func (s *CampaignServer) CreateCharacter(
+func (s *characterRoster) CreateCharacter(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateCharacterRequest],
 ) (*connect.Response[managementv1.CreateCharacterResponse], error) {
@@ -63,7 +104,7 @@ func (s *CampaignServer) CreateCharacter(
 		return nil, err
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -104,7 +145,7 @@ func (s *CampaignServer) CreateCharacter(
 // update (it stays required). An unparsable id, empty name, or non-snowflake
 // discord_user_id is CodeInvalidArgument; an unknown id is CodeNotFound; a
 // collision with another Character's Discord User is CodeAlreadyExists.
-func (s *CampaignServer) UpdateCharacter(
+func (s *characterRoster) UpdateCharacter(
 	ctx context.Context,
 	req *connect.Request[managementv1.UpdateCharacterRequest],
 ) (*connect.Response[managementv1.UpdateCharacterResponse], error) {
@@ -122,7 +163,7 @@ func (s *CampaignServer) UpdateCharacter(
 	// Resolve the active campaign and scope the write to it (#342): the store's
 	// UPDATE matches (id, campaign_id), so a Character in another campaign is never
 	// mutable through this operator's session — it reads back as CodeNotFound.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -158,7 +199,7 @@ func (s *CampaignServer) UpdateCharacter(
 // DeleteCharacter removes a Player Character by id. An unparsable id is
 // CodeInvalidArgument; a missing id is CodeNotFound; a storage failure is
 // CodeInternal.
-func (s *CampaignServer) DeleteCharacter(
+func (s *characterRoster) DeleteCharacter(
 	ctx context.Context,
 	req *connect.Request[managementv1.DeleteCharacterRequest],
 ) (*connect.Response[managementv1.DeleteCharacterResponse], error) {
@@ -170,7 +211,7 @@ func (s *CampaignServer) DeleteCharacter(
 	// Resolve the active campaign and scope the delete to it (#342): the store's
 	// DELETE matches (id, campaign_id), so another campaign's Character is never
 	// removable through this session — it reads back as CodeNotFound.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

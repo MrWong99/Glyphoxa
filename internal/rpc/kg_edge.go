@@ -14,16 +14,32 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// Knowledge Graph Edge handlers (#132, ADR-0008 v1.0 + amendment) on
-// CampaignServer: create/delete typed directional Edges, list a Node's incident
+// kgEdges is the Knowledge Graph Edge feature module (#132, ADR-0008 v1.0 +
+// amendment): create/delete typed directional Edges, list a Node's incident
 // Edges split by direction, and link/unlink an NPC Node's "voiced by" Agent. The
 // active campaign is resolved server-side (single operator, ADR-0039).
+type kgEdges struct {
+	store  kgEdgeStore
+	active *activeCampaignSource
+}
+
+// kgEdgeStore is the narrow KG-Edge surface the module needs (#132);
+// *storage.Store satisfies it. Every method is campaign-scoped (#342/#356), so
+// another campaign's Edges are neither readable nor mutable.
+type kgEdgeStore interface {
+	CreateEdge(ctx context.Context, e storage.NewKGEdge) (storage.KGEdge, error)
+	DeleteEdge(ctx context.Context, campaignID, id uuid.UUID) error
+	// NodeEdges returns a Node's incident Edges with joined endpoint name/type.
+	NodeEdges(ctx context.Context, campaignID, nodeID uuid.UUID) (outgoing, incoming []storage.KGEdgeWithNodes, err error)
+	// SetNodeAgent links/unlinks an NPC Node's "voiced by" Agent.
+	SetNodeAgent(ctx context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error)
+}
 
 // CreateEdge adds a typed Edge between two same-campaign Nodes. An UNSPECIFIED
 // edge_type or an unparsable endpoint id is CodeInvalidArgument; an invalid
 // (type, from, to) combination or a self-edge is CodeInvalidArgument; a duplicate
 // is CodeAlreadyExists; a missing OR cross-campaign endpoint is CodeNotFound.
-func (s *CampaignServer) CreateEdge(
+func (s *kgEdges) CreateEdge(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateEdgeRequest],
 ) (*connect.Response[managementv1.CreateEdgeResponse], error) {
@@ -41,7 +57,7 @@ func (s *CampaignServer) CreateEdge(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("edge type must be specified"))
 	}
 
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -70,7 +86,7 @@ func (s *CampaignServer) CreateEdge(
 
 // DeleteEdge removes a typed Edge by id. An unparsable id is CodeInvalidArgument;
 // a missing id is CodeNotFound.
-func (s *CampaignServer) DeleteEdge(
+func (s *kgEdges) DeleteEdge(
 	ctx context.Context,
 	req *connect.Request[managementv1.DeleteEdgeRequest],
 ) (*connect.Response[managementv1.DeleteEdgeResponse], error) {
@@ -81,7 +97,7 @@ func (s *CampaignServer) DeleteEdge(
 	// Resolve the active campaign and scope the delete to it (#342): the store's
 	// DELETE matches (id, campaign_id), so an Edge in another campaign is never
 	// removable through this session — it reads back as CodeNotFound.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -107,7 +123,7 @@ func (s *CampaignServer) DeleteEdge(
 // joined endpoint name, incl. gm_private ones) is returned, leaking neither the
 // KG nor an existence oracle. No active campaign is CodeNotFound; a storage
 // failure is CodeInternal.
-func (s *CampaignServer) ListNodeEdges(
+func (s *kgEdges) ListNodeEdges(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListNodeEdgesRequest],
 ) (*connect.Response[managementv1.ListNodeEdgesResponse], error) {
@@ -115,7 +131,7 @@ func (s *CampaignServer) ListNodeEdges(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid node id"))
 	}
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
@@ -141,7 +157,7 @@ func (s *CampaignServer) ListNodeEdges(
 // unlinks. An unparsable node/agent id is CodeInvalidArgument; linking a non-NPC
 // Node is CodeInvalidArgument; an Agent already voicing another Node is
 // CodeAlreadyExists; a missing OR cross-campaign Node/Agent is CodeNotFound.
-func (s *CampaignServer) SetNodeAgent(
+func (s *kgEdges) SetNodeAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.SetNodeAgentRequest],
 ) (*connect.Response[managementv1.SetNodeAgentResponse], error) {
@@ -165,7 +181,7 @@ func (s *CampaignServer) SetNodeAgent(
 	// so another campaign's Node is never re-voiced nor unlinked through this
 	// session — and a link's Agent must also belong to the active campaign. A
 	// cross-campaign Node/Agent reads back as CodeNotFound.
-	c, err := s.activeCampaign(ctx)
+	c, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))

@@ -3,10 +3,6 @@ package rpc_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -14,534 +10,16 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	ttseleven "github.com/MrWong99/Glyphoxa/pkg/voice/tts/elevenlabs"
 )
 
-// errAny is an opaque storage failure the fake returns to force the Internal path.
-var errAny = errors.New("kg fake failure")
-
-// fakeCampaignStore is a small in-memory campaignStore for the CRUD handlers'
-// keyless unit tests. Error hooks (campErr/butlerErr/…) force the failure paths;
-// the agents map backs GetAgent/Create/Update/Delete so happy paths round-trip
-// without a database.
-type fakeCampaignStore struct {
-	campaign  storage.Campaign
-	campErr   error
-	butler    storage.Agent
-	butlerErr error
-	chars     []storage.Agent
-	charsErr  error
-
-	// forUser/forUserErr back the durable /glyphoxa use selection the profile-first
-	// resolution reads first (#222); campaign is the most-recent fallback.
-	forUser    storage.Campaign
-	forUserErr error
-	// campaignsByID backs GetCampaign, the live-first roster path's per-id load
-	// (#222); getCampaignErr forces its failure path.
-	campaignsByID  map[uuid.UUID]storage.Campaign
-	getCampaignErr error
-
-	// Campaign management state (#264): campaignList backs ListCampaigns;
-	// createdCampaigns records CreateCampaign inputs (created rows also land in
-	// campaignsByID so a read-back resolves); updatedCampaigns records
-	// UpdateCampaign inputs; setActiveCalls records SetActiveCampaign inputs. The
-	// *Err hooks force each failure path.
-	campaignList      []storage.Campaign
-	listCampaignErr   error
-	createdCampaigns  []storage.NewCampaign
-	createCampaignErr error
-	updatedCampaigns  []storage.CampaignUpdate
-	updateCampaignErr error
-	setActiveCalls    []setActiveCall
-	setActiveErr      error
-	// Archive lifecycle state (#269): allCampaignList backs ListAllCampaigns;
-	// archiveCalls/unarchiveCalls/deleteCalls record the ids each handler passed;
-	// the *Result campaigns are returned on the happy path, and the *Err hooks force
-	// each failure path (e.g. storage.ErrNotFound, storage.ErrNotArchived).
-	allCampaignList   []storage.Campaign
-	listAllErr        error
-	archiveCalls      []uuid.UUID
-	archiveResult     storage.Campaign
-	archiveErr        error
-	unarchiveCalls    []uuid.UUID
-	unarchiveResult   storage.Campaign
-	unarchiveErr      error
-	deleteCalls       []uuid.UUID
-	deleteCampaignErr error
-	deleteJobKind     string // the follow-up job kind DeleteCampaignWithJob enqueued (#308)
-	deleteJobPayload  []byte // the follow-up job payload (the clip keys to sweep)
-	// listNodesCampaign/searchNodesCampaign record the campaign id ListNodes /
-	// SearchNodes resolved so the scope precedence can be asserted (#222).
-	listNodesCampaign   uuid.UUID
-	searchNodesCampaign uuid.UUID
-
-	agents    map[uuid.UUID]storage.Agent
-	createErr error
-	updateErr error
-	deleteErr error
-	nextColor int
-	// updateAgentCampaign/deleteAgentCampaign record the campaign id the agent
-	// mutations were scoped to (#342), so a unit test can assert the handler passed
-	// the resolved active campaign down to storage.
-	updateAgentCampaign uuid.UUID
-	deleteAgentCampaign uuid.UUID
-
-	created []storage.NewAgent
-
-	// KG Node state (#126, #129): nodes backs ListNodes/Update/Delete; nodesCreated
-	// records the storage inputs; the *Err hooks force each failure path.
-	nodes         []storage.KGNode
-	nodesCreated  []storage.NewKGNode
-	nodeCreateErr error
-	nodeListErr   error
-	nodeUpdateErr error
-	nodeDeleteErr error
-	// updateNodeCampaign/deleteNodeCampaign record the campaign id the KG-Node
-	// mutations were scoped to (#342), so a unit test can assert the handler passed
-	// the resolved active campaign down to storage.
-	updateNodeCampaign uuid.UUID
-	deleteNodeCampaign uuid.UUID
-
-	// KG Edge state (#132): edgesCreated records CreateEdge inputs; edgesOut/edgesIn
-	// back NodeEdges; setAgentCalls records SetNodeAgent inputs; setAgentNode is the
-	// happy-path node it returns (with AgentID overridden per call); the *Err hooks
-	// force each failure path.
-	edgesCreated  []storage.NewKGEdge
-	edgeCreateErr error
-	edgeDeleteErr error
-	edgesOut      []storage.KGEdgeWithNodes
-	edgesIn       []storage.KGEdgeWithNodes
-	nodeEdgesErr  error
-	// nodeEdgesCampaign records the campaign id ListNodeEdges resolved (#356), so a
-	// unit test can assert the read was scoped to the active campaign.
-	nodeEdgesCampaign uuid.UUID
-	setAgentCalls     []setAgentCall
-	setAgentNode      storage.KGNode
-	setAgentErr       error
-	// deleteEdgeCampaign/setAgentCampaign record the campaign id the Edge-delete /
-	// voiced-by link were scoped to (#342), so a unit test can assert the handler
-	// passed the resolved active campaign down.
-	deleteEdgeCampaign uuid.UUID
-	setAgentCampaign   uuid.UUID
-
-	// KG Node search state (#131): searchResults is returned verbatim so the
-	// handler's 1:1 rank-order mapping is asserted; searchQuery/searchLimit/searchCalls
-	// record what reached storage; nodeSearchErr forces the Internal path.
-	searchResults []storage.KGNode
-	searchQuery   string
-	searchLimit   int
-	searchCalls   int
-	nodeSearchErr error
-
-	// Tool Grant state (#117): grants maps agent_id → tool_name → config blob (nil
-	// = no scope), backing the upsert/delete/list round-trip; the *Err hooks force
-	// each failure path.
-	grants         map[uuid.UUID]map[string]json.RawMessage
-	grantListErr   error
-	grantUpsertErr error
-	grantDeleteErr error
-
-	// Knowledge Proposal review state (#300): pendingProposals backs the list read;
-	// getProposal/getProposalErr back GetPendingKnowledgeProposal; approve/reject
-	// record calls and force error paths; similarResults/similarErr back SimilarNodes
-	// and similarQueryVec records the vector it was queried with.
-	pendingProposals      []storage.KnowledgeProposal
-	listProposalsErr      error
-	listProposalsCampaign uuid.UUID
-	getProposal           storage.KnowledgeProposal
-	getProposalErr        error
-	getProposalCampaign   uuid.UUID
-	approveErr            error
-	approveCalls          []uuid.UUID
-	approveCampaign       uuid.UUID
-	rejectErr             error
-	rejectCalls           []uuid.UUID
-	rejectCampaign        uuid.UUID
-	similarResults        []storage.KGNode
-	similarErr            error
-	similarCalls          int
-	similarQueryVec       []float32
-
-	// Player Character state (#276): characters backs ListCharacters/Update/Delete;
-	// charsCreated records CreateCharacter inputs; charsListCampaign records the
-	// campaign id ListCharacters resolved (scope assertion); the *Err hooks force
-	// each failure path (e.g. storage.ErrConflict, storage.ErrNotFound).
-	characters        []storage.Character
-	charsCreated      []storage.NewCharacter
-	charsListCampaign uuid.UUID
-	charCreateErr     error
-	charListErr       error
-	charUpdateErr     error
-	charDeleteErr     error
-	// charUpdateCampaign/charDeleteCampaign record the campaign id the Character
-	// mutations were scoped to (#342): the handler resolves the active campaign and
-	// passes it down, so another campaign's Character is never mutable.
-	charUpdateCampaign uuid.UUID
-	charDeleteCampaign uuid.UUID
-}
-
-// setAgentCall records one SetNodeAgent invocation for assertions.
-type setAgentCall struct {
-	nodeID  uuid.UUID
-	agentID uuid.NullUUID
-}
-
-// setActiveCall records one SetActiveCampaign invocation for assertions (#264).
-type setActiveCall struct {
-	discordUserID string
-	campaignID    uuid.UUID
-}
-
-func newFakeStore() *fakeCampaignStore {
-	return &fakeCampaignStore{
-		agents:        map[uuid.UUID]storage.Agent{},
-		campaignsByID: map[uuid.UUID]storage.Campaign{},
-	}
-}
-
-func (f *fakeCampaignStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
-	return f.campaign, f.campErr
-}
-
-func (f *fakeCampaignStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
-	if f.forUserErr != nil {
-		return storage.Campaign{}, f.forUserErr
-	}
-	if f.forUser.ID == uuid.Nil {
-		return storage.Campaign{}, storage.ErrNotFound
-	}
-	return f.forUser, nil
-}
-
-func (f *fakeCampaignStore) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
-	if f.getCampaignErr != nil {
-		return storage.Campaign{}, f.getCampaignErr
-	}
-	c, ok := f.campaignsByID[id]
-	if !ok {
-		return storage.Campaign{}, storage.ErrNotFound
-	}
-	return c, nil
-}
-
-func (f *fakeCampaignStore) ListCampaigns(context.Context) ([]storage.Campaign, error) {
-	return f.campaignList, f.listCampaignErr
-}
-
-func (f *fakeCampaignStore) CreateCampaign(_ context.Context, c storage.NewCampaign) (uuid.UUID, error) {
-	if f.createCampaignErr != nil {
-		return uuid.Nil, f.createCampaignErr
-	}
-	f.createdCampaigns = append(f.createdCampaigns, c)
-	id := uuid.New()
-	// Land the row so CreateCampaign's read-back (GetCampaign) resolves it.
-	f.campaignsByID[id] = storage.Campaign{
-		ID:       id,
-		TenantID: c.TenantID,
-		Name:     c.Name,
-		System:   c.System,
-		Language: c.Language,
-	}
-	return id, nil
-}
-
-func (f *fakeCampaignStore) UpdateCampaign(_ context.Context, c storage.CampaignUpdate) (storage.Campaign, error) {
-	if f.updateCampaignErr != nil {
-		return storage.Campaign{}, f.updateCampaignErr
-	}
-	f.updatedCampaigns = append(f.updatedCampaigns, c)
-	existing, ok := f.campaignsByID[c.ID]
-	if !ok {
-		return storage.Campaign{}, storage.ErrNotFound
-	}
-	existing.Name = c.Name
-	existing.System = c.System
-	existing.Language = c.Language
-	if c.TapeArmed != nil { // optional: nil leaves it unchanged (COALESCE semantics)
-		existing.TapeArmed = *c.TapeArmed
-	}
-	f.campaignsByID[c.ID] = existing
-	return existing, nil
-}
-
-func (f *fakeCampaignStore) SetActiveCampaign(_ context.Context, discordUserID string, campaignID uuid.UUID) error {
-	if f.setActiveErr != nil {
-		return f.setActiveErr
-	}
-	f.setActiveCalls = append(f.setActiveCalls, setActiveCall{discordUserID: discordUserID, campaignID: campaignID})
-	return nil
-}
-
-func (f *fakeCampaignStore) ListAllCampaigns(context.Context) ([]storage.Campaign, error) {
-	return f.allCampaignList, f.listAllErr
-}
-
-func (f *fakeCampaignStore) ArchiveCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
-	f.archiveCalls = append(f.archiveCalls, id)
-	if f.archiveErr != nil {
-		return storage.Campaign{}, f.archiveErr
-	}
-	return f.archiveResult, nil
-}
-
-func (f *fakeCampaignStore) UnarchiveCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
-	f.unarchiveCalls = append(f.unarchiveCalls, id)
-	if f.unarchiveErr != nil {
-		return storage.Campaign{}, f.unarchiveErr
-	}
-	return f.unarchiveResult, nil
-}
-
-func (f *fakeCampaignStore) DeleteCampaign(_ context.Context, id uuid.UUID) error {
-	f.deleteCalls = append(f.deleteCalls, id)
-	return f.deleteCampaignErr
-}
-
-func (f *fakeCampaignStore) DeleteCampaignWithJob(_ context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error {
-	f.deleteCalls = append(f.deleteCalls, id)
-	if f.deleteCampaignErr != nil {
-		// Delete refused inside the tx: nothing committed, so no job is recorded — the
-		// real store enqueues in the SAME tx that rolls back.
-		return f.deleteCampaignErr
-	}
-	f.deleteJobKind = jobKind
-	f.deleteJobPayload = jobPayload
-	return nil
-}
-
-func (f *fakeCampaignStore) GetButler(context.Context, uuid.UUID) (storage.Agent, error) {
-	return f.butler, f.butlerErr
-}
-
-func (f *fakeCampaignStore) CharacterAgents(context.Context, uuid.UUID) ([]storage.Agent, error) {
-	return f.chars, f.charsErr
-}
-
-func (f *fakeCampaignStore) GetAgent(_ context.Context, id uuid.UUID) (storage.Agent, error) {
-	a, ok := f.agents[id]
-	if !ok {
-		return storage.Agent{}, storage.ErrNotFound
-	}
-	return a, nil
-}
-
-func (f *fakeCampaignStore) CreateAgent(_ context.Context, a storage.NewAgent) (uuid.UUID, error) {
-	if f.createErr != nil {
-		return uuid.Nil, f.createErr
-	}
-	f.created = append(f.created, a)
-	id := uuid.New()
-	f.agents[id] = storage.Agent{
-		ID:           id,
-		CampaignID:   a.CampaignID,
-		Role:         a.Role,
-		Name:         a.Name,
-		Title:        a.Title,
-		Persona:      a.Persona,
-		Voice:        a.Voice,
-		AddressOnly:  a.AddressOnly,
-		SpeakerColor: f.nextColor,
-		Aliases:      a.Aliases,
-	}
-	f.nextColor++
-	return id, nil
-}
-
-func (f *fakeCampaignStore) UpdateAgent(_ context.Context, u storage.AgentUpdate) (storage.Agent, error) {
-	f.updateAgentCampaign = u.CampaignID
-	if f.updateErr != nil {
-		return storage.Agent{}, f.updateErr
-	}
-	a, ok := f.agents[u.ID]
-	if !ok {
-		return storage.Agent{}, storage.ErrNotFound
-	}
-	a.Name = u.Name
-	a.Title = u.Title
-	a.Persona = u.Persona
-	a.Voice = u.Voice
-	a.AddressOnly = u.AddressOnly
-	a.Aliases = u.Aliases
-	f.agents[u.ID] = a
-	return a, nil
-}
-
-func (f *fakeCampaignStore) DeleteAgent(_ context.Context, campaignID, id uuid.UUID) error {
-	f.deleteAgentCampaign = campaignID
-	if f.deleteErr != nil {
-		return f.deleteErr
-	}
-	if _, ok := f.agents[id]; !ok {
-		return storage.ErrNotFound
-	}
-	delete(f.agents, id)
-	return nil
-}
-
-func (f *fakeCampaignStore) CreateNode(_ context.Context, n storage.NewKGNode) (storage.KGNode, error) {
-	if f.nodeCreateErr != nil {
-		return storage.KGNode{}, f.nodeCreateErr
-	}
-	f.nodesCreated = append(f.nodesCreated, n)
-	created := storage.KGNode{
-		ID:         uuid.New(),
-		CampaignID: n.CampaignID,
-		Type:       n.Type,
-		Name:       n.Name,
-		Body:       n.Body,
-		GMPrivate:  n.GMPrivate,
-	}
-	f.nodes = append(f.nodes, created)
-	return created, nil
-}
-
-func (f *fakeCampaignStore) ListNodes(_ context.Context, campaignID uuid.UUID) ([]storage.KGNode, error) {
-	f.listNodesCampaign = campaignID
-	return f.nodes, f.nodeListErr
-}
-
-func (f *fakeCampaignStore) UpdateNode(_ context.Context, u storage.KGNodeUpdate) (storage.KGNode, error) {
-	f.updateNodeCampaign = u.CampaignID
-	if f.nodeUpdateErr != nil {
-		return storage.KGNode{}, f.nodeUpdateErr
-	}
-	for i := range f.nodes {
-		if f.nodes[i].ID == u.ID {
-			f.nodes[i].Name = u.Name
-			f.nodes[i].Body = u.Body
-			f.nodes[i].GMPrivate = u.GMPrivate
-			return f.nodes[i], nil
-		}
-	}
-	return storage.KGNode{}, storage.ErrNotFound
-}
-
-func (f *fakeCampaignStore) DeleteNode(_ context.Context, campaignID, id uuid.UUID) error {
-	f.deleteNodeCampaign = campaignID
-	if f.nodeDeleteErr != nil {
-		return f.nodeDeleteErr
-	}
-	for i := range f.nodes {
-		if f.nodes[i].ID == id {
-			f.nodes = append(f.nodes[:i], f.nodes[i+1:]...)
-			return nil
-		}
-	}
-	return storage.ErrNotFound
-}
-
-func (f *fakeCampaignStore) CreateEdge(_ context.Context, e storage.NewKGEdge) (storage.KGEdge, error) {
-	if f.edgeCreateErr != nil {
-		return storage.KGEdge{}, f.edgeCreateErr
-	}
-	f.edgesCreated = append(f.edgesCreated, e)
-	return storage.KGEdge{
-		ID:         uuid.New(),
-		CampaignID: e.CampaignID,
-		FromNodeID: e.FromNodeID,
-		ToNodeID:   e.ToNodeID,
-		Type:       e.Type,
-	}, nil
-}
-
-func (f *fakeCampaignStore) DeleteEdge(_ context.Context, campaignID, _ uuid.UUID) error {
-	f.deleteEdgeCampaign = campaignID
-	return f.edgeDeleteErr
-}
-
-func (f *fakeCampaignStore) NodeEdges(_ context.Context, campaignID, _ uuid.UUID) ([]storage.KGEdgeWithNodes, []storage.KGEdgeWithNodes, error) {
-	f.nodeEdgesCampaign = campaignID
-	return f.edgesOut, f.edgesIn, f.nodeEdgesErr
-}
-
-func (f *fakeCampaignStore) SetNodeAgent(_ context.Context, campaignID, nodeID uuid.UUID, agentID uuid.NullUUID) (storage.KGNode, error) {
-	f.setAgentCampaign = campaignID
-	if f.setAgentErr != nil {
-		return storage.KGNode{}, f.setAgentErr
-	}
-	f.setAgentCalls = append(f.setAgentCalls, setAgentCall{nodeID: nodeID, agentID: agentID})
-	n := f.setAgentNode
-	n.ID = nodeID
-	n.AgentID = agentID
-	return n, nil
-}
-
-func (f *fakeCampaignStore) SearchNodes(_ context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.KGNode, error) {
-	f.searchCalls++
-	f.searchNodesCampaign = campaignID
-	f.searchQuery = query
-	f.searchLimit = limit
-	if f.nodeSearchErr != nil {
-		return nil, f.nodeSearchErr
-	}
-	return f.searchResults, nil
-}
-
-func (f *fakeCampaignStore) ListToolGrants(_ context.Context, agentID uuid.UUID) ([]storage.ToolGrant, error) {
-	if f.grantListErr != nil {
-		return nil, f.grantListErr
-	}
-	var out []storage.ToolGrant
-	for tool, cfg := range f.grants[agentID] {
-		out = append(out, storage.ToolGrant{AgentID: agentID, ToolName: tool, Config: cfg})
-	}
-	return out, nil
-}
-
-func (f *fakeCampaignStore) UpsertToolGrant(_ context.Context, g storage.NewToolGrant) error {
-	if f.grantUpsertErr != nil {
-		return f.grantUpsertErr
-	}
-	if f.grants == nil {
-		f.grants = map[uuid.UUID]map[string]json.RawMessage{}
-	}
-	if f.grants[g.AgentID] == nil {
-		f.grants[g.AgentID] = map[string]json.RawMessage{}
-	}
-	f.grants[g.AgentID][g.ToolName] = g.Config
-	return nil
-}
-
-func (f *fakeCampaignStore) DeleteToolGrant(_ context.Context, agentID uuid.UUID, toolName string) error {
-	if f.grantDeleteErr != nil {
-		return f.grantDeleteErr
-	}
-	if _, ok := f.grants[agentID][toolName]; !ok {
-		return storage.ErrNotFound
-	}
-	delete(f.grants[agentID], toolName)
-	return nil
-}
-
-// crudClient stands up the full CampaignService handler over an httptest server
-// and returns a Connect-JSON client.
-func crudClient(t *testing.T, store *fakeCampaignStore) managementv1connect.CampaignServiceClient {
+// crudClient stands up the CampaignService handler over the Agent-roster fake
+// (the Active + Agents slices, #445) and returns a Connect-JSON client.
+func crudClient(t *testing.T, store *fakeAgentStore) managementv1connect.CampaignServiceClient {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
-	)
-}
-
-// crudClientWithEmbedder is crudClient with a wired Embedder so the
-// ListSimilarKnowledge vector path (#300) is exercised.
-func crudClientWithEmbedder(t *testing.T, store *fakeCampaignStore, emb rpc.Embedder) managementv1connect.CampaignServiceClient {
-	t.Helper()
-	srv := rpc.NewCampaignServer(store)
-	srv.SetEmbedder(emb)
-	mux := http.NewServeMux()
-	mux.Handle(srv.Handler())
-	s := httptest.NewServer(mux)
-	t.Cleanup(s.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, s.URL, connect.WithProtoJSON(),
-	)
+	return campaignClient(t, rpc.CampaignStores{Active: store, Agents: store})
 }
 
 // crudClientAs is crudClient plus an injected authenticated operator (so the
@@ -549,34 +27,16 @@ func crudClientWithEmbedder(t *testing.T, store *fakeCampaignStore, emb rpc.Embe
 // #222) and an optional live Voice Session source (so the roster/mute panel's
 // live-first scope can be exercised). A zero user injects nothing; a nil
 // sessions leaves the server with no live source.
-func crudClientAs(t *testing.T, store *fakeCampaignStore, user storage.User, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
+func crudClientAs(t *testing.T, store *fakeAgentStore, user storage.User, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
 	t.Helper()
-	srv := rpc.NewCampaignServer(store)
-	if sessions != nil {
-		srv.SetSessions(sessions)
-	}
-	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			if user.DiscordUserID != "" {
-				ctx = auth.WithUser(ctx, user)
-			}
-			return next(ctx, req)
-		}
-	})
-	mux := http.NewServeMux()
-	mux.Handle(srv.Handler(connect.WithInterceptors(inject)))
-	s := httptest.NewServer(mux)
-	t.Cleanup(s.Close)
-	return managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, s.URL, connect.WithProtoJSON(),
-	)
+	return campaignClientAs(t, rpc.CampaignStores{Active: store, Agents: store}, user, uuid.Nil, sessions)
 }
 
 func TestGetCampaignRoster_Order(t *testing.T) {
 	t.Parallel()
 
 	campID := uuid.New()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.campaign = storage.Campaign{ID: campID, Name: "Lost Mine", System: "dnd5e", Language: "en"}
 	store.butler = storage.Agent{ID: uuid.New(), CampaignID: campID, Role: storage.AgentRoleButler, Name: "Glyphoxa", AddressOnly: true, SpeakerColor: 0}
 	store.chars = []storage.Agent{
@@ -613,7 +73,7 @@ func TestGetCampaignRoster_Order(t *testing.T) {
 
 func TestGetCampaignRoster_NoCampaign(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.campErr = storage.ErrNotFound
 	client := crudClient(t, store)
 
@@ -628,7 +88,7 @@ func TestGetCampaignRoster_ButlerMissingIsInternal(t *testing.T) {
 	t.Parallel()
 	// A campaign with no Butler is an ADR-0009 invariant violation, not a client
 	// error: it maps to Internal, not NotFound.
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.butlerErr = storage.ErrNotFound
 	client := crudClient(t, store)
@@ -640,11 +100,11 @@ func TestGetCampaignRoster_ButlerMissingIsInternal(t *testing.T) {
 	}
 }
 
-// rosterStore builds a fake whose Butler + one Character resolve for ANY campaign
-// id (the fake ignores the id on those reads), so the roster tests can assert
-// purely on which campaign GetCampaignRoster resolved.
-func rosterStore() *fakeCampaignStore {
-	store := newFakeStore()
+// rosterStore builds an Agent fake whose Butler + one Character resolve for ANY
+// campaign id (the fake ignores the id on those reads), so the roster tests can
+// assert purely on which campaign GetCampaignRoster resolved.
+func rosterStore() *fakeAgentStore {
+	store := newFakeAgentStore()
 	store.butler = storage.Agent{ID: uuid.New(), Role: storage.AgentRoleButler, Name: "Glyphoxa", AddressOnly: true}
 	store.chars = []storage.Agent{{ID: uuid.New(), Role: storage.AgentRoleCharacter, Name: "Ana"}}
 	return store
@@ -729,7 +189,7 @@ func TestCreateAgentHonorsDurableSelection(t *testing.T) {
 	t.Parallel()
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.forUser = durable
 	store.campaign = newer
 	client := crudClientAs(t, store, storage.User{DiscordUserID: "999"}, nil)
@@ -746,13 +206,6 @@ func TestCreateAgentHonorsDurableSelection(t *testing.T) {
 	}
 }
 
-// liveMgr returns a fakeSessionManager reporting an active Voice Session bound to
-// campaignID — the live-first input every CampaignService surface resolves through
-// (#222). The Manager enforces single-active, so one live campaign is enough.
-func liveMgr(campaignID uuid.UUID) *fakeSessionManager {
-	return &fakeSessionManager{active: true, current: storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID}}
-}
-
 // TestGetActiveCampaignHonorsLiveSession is #222 finding 2: the header resolves the
 // LIVE Voice Session's campaign (L), not the durable selection (D) or the newest
 // (N), so it never names a different campaign than the roster/transcript on the
@@ -762,7 +215,7 @@ func TestGetActiveCampaignHonorsLiveSession(t *testing.T) {
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.forUser = durable
 	store.campaign = newer
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
@@ -787,7 +240,7 @@ func TestCreateAgentHonorsLiveSession(t *testing.T) {
 	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
 	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
 	newer := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Newer N"}
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.forUser = durable
 	store.campaign = newer
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live}
@@ -842,7 +295,7 @@ func TestGetCampaignRosterLiveCampaignMissingIsNotFound(t *testing.T) {
 
 func TestCreateAgent_IsCharacterWithColor(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.campaign = storage.Campaign{ID: uuid.New(), Name: "Lost Mine"}
 	store.nextColor = 2
 	client := crudClient(t, store)
@@ -875,7 +328,7 @@ func TestCreateAgent_IsCharacterWithColor(t *testing.T) {
 
 func TestCreateAgent_NoCampaign(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.campErr = storage.ErrNotFound
 	client := crudClient(t, store)
 
@@ -888,7 +341,7 @@ func TestCreateAgent_NoCampaign(t *testing.T) {
 
 func TestUpdateAgent_InvalidID(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := crudClient(t, newFakeAgentStore())
 
 	_, err := client.UpdateAgent(context.Background(),
 		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: "not-a-uuid", Name: "x"}))
@@ -899,7 +352,7 @@ func TestUpdateAgent_InvalidID(t *testing.T) {
 
 func TestUpdateAgent_NotFound(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := crudClient(t, newFakeAgentStore())
 
 	_, err := client.UpdateAgent(context.Background(),
 		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: uuid.New().String(), Name: "x"}))
@@ -910,7 +363,7 @@ func TestUpdateAgent_NotFound(t *testing.T) {
 
 func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	id := uuid.New()
 	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Old", SpeakerColor: 3}
 	client := crudClient(t, store)
@@ -943,7 +396,7 @@ func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 // clobbered the whole blob to {"voice_id":…} and the NPC went silent.
 func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	campID := uuid.New()
 	store.campaign = storage.Campaign{ID: campID, Language: "de"}
 	id := uuid.New()
@@ -988,7 +441,7 @@ func TestUpdateAgent_PreservesExistingVoiceTuning(t *testing.T) {
 // same ErrNotFound discipline as the scoped store UPDATE (#353).
 func TestUpdateAgent_CrossCampaignPreReadIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	// The Agent exists, but in ANOTHER campaign, with a tuned voice that must not leak.
@@ -1020,7 +473,7 @@ func TestUpdateAgent_CrossCampaignPreReadIsNotFound(t *testing.T) {
 
 func TestDeleteAgent_ButlerIsFailedPrecondition(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.deleteErr = storage.ErrButlerUndeletable
 	client := crudClient(t, store)
 
@@ -1033,7 +486,7 @@ func TestDeleteAgent_ButlerIsFailedPrecondition(t *testing.T) {
 
 func TestDeleteAgent_NotFound(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := crudClient(t, newFakeAgentStore())
 
 	_, err := client.DeleteAgent(context.Background(),
 		connect.NewRequest(&managementv1.DeleteAgentRequest{Id: uuid.New().String()}))
@@ -1044,7 +497,7 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 
 func TestDeleteAgent_InvalidID(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := crudClient(t, newFakeAgentStore())
 
 	_, err := client.DeleteAgent(context.Background(),
 		connect.NewRequest(&managementv1.DeleteAgentRequest{Id: "nope"}))
@@ -1055,7 +508,7 @@ func TestDeleteAgent_InvalidID(t *testing.T) {
 
 func TestDeleteAgent_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	id := uuid.New()
 	store.agents[id] = storage.Agent{ID: id, Role: storage.AgentRoleCharacter, Name: "Doomed"}
 	client := crudClient(t, store)
@@ -1074,7 +527,7 @@ func TestDeleteAgent_HappyPath(t *testing.T) {
 // and a cross-campaign write is refused server-side.
 func TestUpdateAgent_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	id := uuid.New()
@@ -1094,7 +547,7 @@ func TestUpdateAgent_ScopesToActiveCampaign(t *testing.T) {
 // resolved active campaign, so another campaign's Agent is never removable.
 func TestDeleteAgent_ScopesToActiveCampaign(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	id := uuid.New()
@@ -1115,7 +568,7 @@ func TestDeleteAgent_ScopesToActiveCampaign(t *testing.T) {
 // rather than deleting by bare id.
 func TestDeleteAgent_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeAgentStore()
 	store.campErr = storage.ErrNotFound
 	client := crudClient(t, store)
 

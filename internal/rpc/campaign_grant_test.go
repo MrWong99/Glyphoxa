@@ -3,8 +3,6 @@ package rpc_test
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -17,9 +15,25 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
+// grantStores composes the Tool-Grant slice plus the shared active-campaign
+// resolver (#445) — one fakeGrantStore serves both fields because it embeds
+// *fakeActive, which is all the grant RPCs under test resolve through.
+func grantStores(store *fakeGrantStore) rpc.CampaignStores {
+	return rpc.CampaignStores{Active: store, Grants: store}
+}
+
+// grantClient is campaignClient over the grant composition — the plumbing the
+// former crudClient(t, fakeCampaignStore) call sites in this file used.
+func grantClient(t *testing.T, store *fakeGrantStore) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClient(t, grantStores(store))
+}
+
 // registerAgent seeds a bare Agent row so the grant handlers' existence pre-check
 // (issue #215) passes; these tests only need the Agent to exist, not its fields.
-func registerAgent(store *fakeCampaignStore) uuid.UUID {
+// The Agent's zero CampaignID matches the fake's zero active campaign, so the
+// ownership check (#342/#356) resolves it as in-campaign.
+func registerAgent(store *fakeGrantStore) uuid.UUID {
 	id := uuid.New()
 	store.agents[id] = storage.Agent{ID: id}
 	return id
@@ -34,9 +48,9 @@ func registerAgent(store *fakeCampaignStore) uuid.UUID {
 // transcript_search do not.
 func TestListToolGrants_CatalogWithState(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	// No grant rows: every built-in is listed but not granted.
 	resp, err := client.ListToolGrants(context.Background(),
@@ -100,7 +114,7 @@ func TestListToolGrants_CatalogWithState(t *testing.T) {
 // missing-Agent mapping.
 func TestToolGrant_GhostAgentNotFound(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore()) // empty store → no Agent exists
+	client := grantClient(t, newFakeGrantStore()) // empty store → no Agent exists
 	ghost := uuid.New().String()
 
 	_, listErr := client.ListToolGrants(context.Background(),
@@ -122,13 +136,13 @@ func TestToolGrant_GhostAgentNotFound(t *testing.T) {
 // CodeNotFound and nothing is written.
 func TestUpdateToolGrant_CrossCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	// The Agent exists, but in ANOTHER campaign.
 	foreignAgent := uuid.New()
 	store.agents[foreignAgent] = storage.Agent{ID: foreignAgent, CampaignID: uuid.New()}
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	_, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
@@ -143,10 +157,10 @@ func TestUpdateToolGrant_CrossCampaignIsNotFound(t *testing.T) {
 // campaign the grant write cannot resolve an owning campaign and is CodeNotFound.
 func TestUpdateToolGrant_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	store.campErr = storage.ErrNotFound
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	_, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
@@ -163,13 +177,13 @@ func TestUpdateToolGrant_NoActiveCampaignIsNotFound(t *testing.T) {
 // active campaign, so a mismatch is CodeNotFound, not a leaked catalog.
 func TestListToolGrants_CrossCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	activeID := uuid.New()
 	store.campaign = storage.Campaign{ID: activeID}
 	// The Agent exists, but in ANOTHER campaign.
 	foreignAgent := uuid.New()
 	store.agents[foreignAgent] = storage.Agent{ID: foreignAgent, CampaignID: uuid.New()}
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	_, err := client.ListToolGrants(context.Background(),
 		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: foreignAgent.String()}))
@@ -182,10 +196,10 @@ func TestListToolGrants_CrossCampaignIsNotFound(t *testing.T) {
 // campaign the read cannot resolve an owning campaign and is CodeNotFound.
 func TestListToolGrants_NoActiveCampaignIsNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	store.campErr = storage.ErrNotFound
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	_, err := client.ListToolGrants(context.Background(),
 		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: agentID.String()}))
@@ -196,7 +210,7 @@ func TestListToolGrants_NoActiveCampaignIsNotFound(t *testing.T) {
 
 func TestListToolGrants_InvalidAgentID(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := grantClient(t, newFakeGrantStore())
 	_, err := client.ListToolGrants(context.Background(),
 		connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: "not-a-uuid"}))
 	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -209,9 +223,9 @@ func TestListToolGrants_InvalidAgentID(t *testing.T) {
 // AC2 persist-and-reload contract at the handler seam.
 func TestUpdateToolGrant_ToggleRoundTrips(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	on, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
@@ -247,9 +261,9 @@ func TestUpdateToolGrant_ToggleRoundTrips(t *testing.T) {
 // no scope editor (AC3): the API is scope-capable regardless of the Tool's editor.
 func TestUpdateToolGrant_ConfigRoundTrips(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 
 	scope := `{"scope":"self"}`
 	resp, err := client.UpdateToolGrant(context.Background(),
@@ -287,7 +301,7 @@ func assertScopeSelf(t *testing.T, cfg string) {
 
 func TestUpdateToolGrant_UnknownToolRejected(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := grantClient(t, newFakeGrantStore())
 	_, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
 			AgentId: uuid.New().String(), ToolName: "not_a_tool", Granted: true,
@@ -299,9 +313,9 @@ func TestUpdateToolGrant_UnknownToolRejected(t *testing.T) {
 
 func TestUpdateToolGrant_InvalidConfigRejected(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 	_, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
 			AgentId: agentID.String(), ToolName: "dice", Granted: true, Config: "{not json",
@@ -313,7 +327,7 @@ func TestUpdateToolGrant_InvalidConfigRejected(t *testing.T) {
 
 func TestUpdateToolGrant_InvalidAgentID(t *testing.T) {
 	t.Parallel()
-	client := crudClient(t, newFakeStore())
+	client := grantClient(t, newFakeGrantStore())
 	_, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{AgentId: "nope", ToolName: "dice", Granted: true}))
 	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -326,9 +340,9 @@ func TestUpdateToolGrant_InvalidAgentID(t *testing.T) {
 // errors.
 func TestUpdateToolGrant_RevokeIsIdempotent(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeGrantStore()
 	agentID := registerAgent(store)
-	client := crudClient(t, store)
+	client := grantClient(t, store)
 	if _, err := client.UpdateToolGrant(context.Background(),
 		connect.NewRequest(&managementv1.UpdateToolGrantRequest{
 			AgentId: agentID.String(), ToolName: "dice", Granted: false,
@@ -351,13 +365,9 @@ func (denyAuth) AuthenticateSession(context.Context, string) (storage.User, erro
 // side-effect-free exempts it from CSRF, not from auth.
 func TestToolGrant_AuthGatesBothLikeSiblings(t *testing.T) {
 	t.Parallel()
-	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(newFakeStore()).Handler(
+	client := campaignClientServe(t, rpc.NewCampaignServerWith(grantStores(newFakeGrantStore())),
 		connect.WithInterceptors(auth.NewAuthInterceptor(denyAuth{})),
-	))
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+	)
 	ctx := context.Background()
 
 	_, listErr := client.ListToolGrants(ctx, connect.NewRequest(&managementv1.ListToolGrantsRequest{AgentId: uuid.New().String()}))
@@ -378,13 +388,9 @@ func TestToolGrant_AuthGatesBothLikeSiblings(t *testing.T) {
 // is exempt and reaches the handler.
 func TestToolGrant_CSRFGuardsMutationNotRead(t *testing.T) {
 	t.Parallel()
-	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(newFakeStore()).Handler(
+	client := campaignClientServe(t, rpc.NewCampaignServerWith(grantStores(newFakeGrantStore())),
 		connect.WithInterceptors(auth.NewCSRFInterceptor()),
-	))
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+	)
 	ctx := context.Background()
 
 	// The write is CSRF-guarded — no token → PermissionDenied, like the sibling.

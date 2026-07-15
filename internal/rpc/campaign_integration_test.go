@@ -1,24 +1,23 @@
 //go:build integration
 
-// This test drives the CampaignService handler against a real *storage.Store
-// backed by a testcontainers Postgres, end to end over Connect-JSON. It is
-// tag-isolated behind `integration` so the default `go test ./...` stays
-// Docker-free (ADR-0021 / ADR-0033). The Postgres harness is duplicated here in
+// The shared Postgres harness for internal/rpc's integration suites: the
+// pgvector testcontainer + the seeded store the suites drive real handlers
+// against, tag-isolated behind `integration` so the default `go test ./...`
+// stays Docker-free (ADR-0021 / ADR-0033). The harness is duplicated here in
 // miniature because internal/storage's harness_test.go is package-private to
-// storage_test.
+// storage_test. The plain GetActiveCampaign round-trip that used to live here
+// is unit coverage now (#445) — the handlers' mapping is proven keyless over
+// per-feature fakes, and only SQL-shaped behavior stays DB-bound.
 
 package rpc_test
 
 import (
 	"context"
 	"database/sql"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -26,9 +25,6 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
-	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
-	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -109,43 +105,4 @@ func seedStore(t *testing.T, dsn string) (st *storage.Store, campaignID uuid.UUI
 		t.Fatalf("insert campaign: %v", err)
 	}
 	return storage.New(pool), campaignID
-}
-
-func TestGetActiveCampaign_Integration(t *testing.T) {
-	dsn := startPostgres(t)
-	store, campaignID := seedStore(t, dsn)
-
-	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	client := managementv1connect.NewCampaignServiceClient(
-		http.DefaultClient, srv.URL, connect.WithProtoJSON(),
-	)
-
-	resp, err := client.GetActiveCampaign(
-		context.Background(),
-		connect.NewRequest(&managementv1.GetActiveCampaignRequest{}),
-	)
-	if err != nil {
-		t.Fatalf("GetActiveCampaign: %v", err)
-	}
-
-	got := resp.Msg.GetCampaign()
-	if got == nil {
-		t.Fatal("response campaign is nil")
-	}
-	if got.GetId() != campaignID.String() {
-		t.Errorf("id = %q, want %q", got.GetId(), campaignID.String())
-	}
-	if got.GetName() != "Lost Mine" {
-		t.Errorf("name = %q, want %q", got.GetName(), "Lost Mine")
-	}
-	if got.GetSystem() != "dnd5e" {
-		t.Errorf("system = %q, want %q", got.GetSystem(), "dnd5e")
-	}
-	if got.GetLanguage() != "en" {
-		t.Errorf("language = %q, want %q", got.GetLanguage(), "en")
-	}
 }

@@ -10,20 +10,29 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
+// archiveClient composes the slices the archive panel drives — Active +
+// Campaigns + Archive, all served by the one fakeArchiveStore (#445) — behind
+// campaignClientAs with the given operator, tenant, and live-session source.
+func archiveClient(t *testing.T, store *fakeArchiveStore, user storage.User, tenantID uuid.UUID, sessions *fakeSessionManager) managementv1connect.CampaignServiceClient {
+	t.Helper()
+	return campaignClientAs(t, rpc.CampaignStores{Active: store, Campaigns: store, Archive: store}, user, tenantID, sessions)
+}
+
 // TestArchiveCampaign_HappyPath: a valid, non-live campaign archives and the
 // archived_at timestamp maps onto the wire.
 func TestArchiveCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	id := uuid.New()
 	archivedAt := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	store.archiveResult = storage.Campaign{ID: id, TenantID: uuid.New(), Name: "Old One", ArchivedAt: &archivedAt}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	resp, err := client.ArchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: id.String()}))
@@ -40,7 +49,7 @@ func TestArchiveCampaign_HappyPath(t *testing.T) {
 
 func TestArchiveCampaign_InvalidID(t *testing.T) {
 	t.Parallel()
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, newFakeArchiveStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 	_, err := client.ArchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: "nope"}))
 	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -50,9 +59,9 @@ func TestArchiveCampaign_InvalidID(t *testing.T) {
 
 func TestArchiveCampaign_UnknownIDNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.archiveErr = storage.ErrNotFound
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 	_, err := client.ArchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: uuid.New().String()}))
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
@@ -65,8 +74,8 @@ func TestArchiveCampaign_UnknownIDNotFound(t *testing.T) {
 func TestArchiveCampaign_LiveSessionRefused(t *testing.T) {
 	t.Parallel()
 	live := uuid.New()
-	store := newFakeStore()
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live))
+	store := newFakeArchiveStore()
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live))
 
 	_, err := client.ArchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: live.String()}))
@@ -85,9 +94,9 @@ func TestArchiveCampaign_OtherCampaignWhileLiveAllowed(t *testing.T) {
 	t.Parallel()
 	live := uuid.New()
 	other := uuid.New()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.archiveResult = storage.Campaign{ID: other, Name: "Other"}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live))
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live))
 
 	if _, err := client.ArchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.ArchiveCampaignRequest{Id: other.String()})); err != nil {
@@ -102,10 +111,10 @@ func TestArchiveCampaign_OtherCampaignWhileLiveAllowed(t *testing.T) {
 // (archived_at unset) with no live-guard.
 func TestUnarchiveCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	id := uuid.New()
 	store.unarchiveResult = storage.Campaign{ID: id, Name: "Back"}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	resp, err := client.UnarchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.UnarchiveCampaignRequest{Id: id.String()}))
@@ -122,9 +131,9 @@ func TestUnarchiveCampaign_HappyPath(t *testing.T) {
 
 func TestUnarchiveCampaign_UnknownIDNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.unarchiveErr = storage.ErrNotFound
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 	_, err := client.UnarchiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.UnarchiveCampaignRequest{Id: uuid.New().String()}))
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
@@ -135,9 +144,9 @@ func TestUnarchiveCampaign_UnknownIDNotFound(t *testing.T) {
 // TestDeleteCampaign_HappyPath: a valid, archived, non-live campaign deletes.
 func TestDeleteCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	id := uuid.New()
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	if _, err := client.DeleteCampaign(context.Background(),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
@@ -171,10 +180,10 @@ func (f *fakeClipSweeper) DeleteClip(_ context.Context, key string) error {
 // highlight clip through the blob seam (#308, ADR-0048).
 func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	id := uuid.New()
 	sweeper := &fakeClipSweeper{keys: []string{"k1", "k2"}}
-	srv := rpc.NewCampaignServer(store)
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
 	if _, err := srv.DeleteCampaign(context.Background(),
@@ -194,10 +203,10 @@ func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
 // (#308, ADR-0049) — the backstop that survives a crash after the row cascade.
 func TestDeleteCampaign_EnqueuesDurableClipSweep(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	id := uuid.New()
 	sweeper := &fakeClipSweeper{keys: []string{"k1", "k2"}}
-	srv := rpc.NewCampaignServer(store)
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
 	if _, err := srv.DeleteCampaign(context.Background(),
@@ -223,9 +232,9 @@ func TestDeleteCampaign_EnqueuesDurableClipSweep(t *testing.T) {
 // plain delete path (no sweep job to enqueue).
 func TestDeleteCampaign_NoClipsNoJob(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	sweeper := &fakeClipSweeper{} // no keys
-	srv := rpc.NewCampaignServer(store)
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
 	if _, err := srv.DeleteCampaign(context.Background(),
@@ -244,10 +253,10 @@ func TestDeleteCampaign_NoClipsNoJob(t *testing.T) {
 // drop any clips (the campaign is still live).
 func TestDeleteCampaign_RefusedKeepsClips(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.deleteCampaignErr = storage.ErrNotArchived
 	sweeper := &fakeClipSweeper{keys: []string{"k1"}}
-	srv := rpc.NewCampaignServer(store)
+	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
 	_, err := srv.DeleteCampaign(context.Background(),
@@ -262,7 +271,7 @@ func TestDeleteCampaign_RefusedKeepsClips(t *testing.T) {
 
 func TestDeleteCampaign_InvalidID(t *testing.T) {
 	t.Parallel()
-	client := mgmtClient(t, newFakeStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, newFakeArchiveStore(), storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 	_, err := client.DeleteCampaign(context.Background(),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: "nope"}))
 	if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
@@ -274,9 +283,9 @@ func TestDeleteCampaign_InvalidID(t *testing.T) {
 // FailedPrecondition (archive first, #265).
 func TestDeleteCampaign_NotArchivedRefused(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.deleteCampaignErr = storage.ErrNotArchived
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 	_, err := client.DeleteCampaign(context.Background(),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()}))
 	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
@@ -286,9 +295,9 @@ func TestDeleteCampaign_NotArchivedRefused(t *testing.T) {
 
 func TestDeleteCampaign_UnknownIDNotFound(t *testing.T) {
 	t.Parallel()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.deleteCampaignErr = storage.ErrNotFound
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 	_, err := client.DeleteCampaign(context.Background(),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()}))
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
@@ -301,8 +310,8 @@ func TestDeleteCampaign_UnknownIDNotFound(t *testing.T) {
 func TestDeleteCampaign_LiveSessionRefused(t *testing.T) {
 	t.Parallel()
 	live := uuid.New()
-	store := newFakeStore()
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live))
+	store := newFakeArchiveStore()
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live))
 
 	_, err := client.DeleteCampaign(context.Background(),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: live.String()}))
@@ -320,13 +329,13 @@ func TestDeleteCampaign_LiveSessionRefused(t *testing.T) {
 func TestListCampaigns_IncludeArchivedRouting(t *testing.T) {
 	t.Parallel()
 	archivedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.campaignList = []storage.Campaign{{ID: uuid.New(), Name: "Active"}}
 	store.allCampaignList = []storage.Campaign{
 		{ID: uuid.New(), Name: "Active"},
 		{ID: uuid.New(), Name: "Archived", ArchivedAt: &archivedAt},
 	}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	// Default (false) → active only.
 	activeResp, err := client.ListCampaigns(context.Background(),
@@ -363,9 +372,9 @@ func TestSetActiveCampaign_ArchivedRefused(t *testing.T) {
 	t.Parallel()
 	archivedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
 	id := uuid.New()
-	store := newFakeStore()
+	store := newFakeArchiveStore()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{id: {ID: id, Name: "Archived", ArchivedAt: &archivedAt}}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := archiveClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
 
 	_, err := client.SetActiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.SetActiveCampaignRequest{CampaignId: id.String()}))

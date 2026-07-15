@@ -14,7 +14,8 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
-// Campaign management handlers (#264, Epic 2/8) on CampaignServer: list, create,
+// Campaign management handlers (#264, Epic 2/8) on the campaignManagement module:
+// list, create,
 // update, and durable-select the operator's campaigns. They follow the same error
 // mapping the agent CRUD uses (ErrNotFound→CodeNotFound, empty name→
 // CodeInvalidArgument, generic CodeInternal with a server-side slog). Reads are
@@ -24,7 +25,7 @@ import (
 // name-then-id ordering). By default only ACTIVE campaigns are returned; when
 // include_archived is set the archived ones are included too — the archive-
 // management panel's view (#269). A storage failure is CodeInternal.
-func (s *CampaignServer) ListCampaigns(
+func (s *campaignManagement) ListCampaigns(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListCampaignsRequest],
 ) (*connect.Response[managementv1.ListCampaignsResponse], error) {
@@ -52,7 +53,7 @@ func (s *CampaignServer) ListCampaigns(
 // auto-Butler trigger fires on the insert, so the new campaign gets its Butler
 // (with the dice grant) as a database invariant. The created row is read back so
 // the response carries the server-assigned id and timestamps.
-func (s *CampaignServer) CreateCampaign(
+func (s *campaignManagement) CreateCampaign(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateCampaignRequest],
 ) (*connect.Response[managementv1.CreateCampaignResponse], error) {
@@ -93,7 +94,7 @@ func (s *CampaignServer) CreateCampaign(
 // non-empty (CodeInvalidArgument). System/Language are written opaquely, exactly
 // as stored today — no validation, no vocabulary curation (that is the settings
 // editor slice's call). An unknown id is CodeNotFound.
-func (s *CampaignServer) UpdateCampaign(
+func (s *campaignManagement) UpdateCampaign(
 	ctx context.Context,
 	req *connect.Request[managementv1.UpdateCampaignRequest],
 ) (*connect.Response[managementv1.UpdateCampaignResponse], error) {
@@ -135,7 +136,7 @@ func (s *CampaignServer) UpdateCampaign(
 // The resolved campaign is read back through the shared live-first policy, so while
 // a Voice Session is live its campaign still wins (#222) and the returned campaign
 // may differ from the one just selected.
-func (s *CampaignServer) SetActiveCampaign(
+func (s *campaignManagement) SetActiveCampaign(
 	ctx context.Context,
 	req *connect.Request[managementv1.SetActiveCampaignRequest],
 ) (*connect.Response[managementv1.SetActiveCampaignResponse], error) {
@@ -179,7 +180,7 @@ func (s *CampaignServer) SetActiveCampaign(
 
 	// Return the resolved Active Campaign via the one shared live-first policy, so
 	// this surface agrees with GetActiveCampaign/GetCampaignRoster/ListNodes (#222).
-	resolved, err := s.activeCampaign(ctx)
+	resolved, err := s.active.resolve(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("no active campaign"))
