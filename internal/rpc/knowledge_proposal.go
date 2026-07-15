@@ -14,14 +14,10 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 )
-
-// proposalWriteVersion mirrors the storage/tool ProposedWrite schema version
-// (ADR-0052 "v":1). A row whose version differs is unreadable and listed with an
-// unset write oneof.
-const proposalWriteVersion = 1
 
 // Knowledge Proposal review handlers (#300, ADR-0052) on CampaignServer: the GM
 // review surface for the pending queue an Agent's remember_knowledge call files
@@ -224,11 +220,11 @@ func similarityQueryText(raw json.RawMessage) string {
 		return ""
 	}
 	switch w.Kind {
-	case "fact":
+	case kgvocab.KindFact:
 		return w.Subject + ": " + w.Fact
-	case "edge":
+	case kgvocab.KindEdge:
 		return w.Subject + " " + w.Relation + " " + w.Target
-	case "node":
+	case kgvocab.KindNode:
 		return w.Name + "\n\n" + w.Body
 	default:
 		return ""
@@ -248,27 +244,27 @@ func toProtoKnowledgeProposal(p storage.KnowledgeProposal) *managementv1.Knowled
 	}
 
 	var w tool.ProposedWrite
-	if err := json.Unmarshal(p.ProposedWrite, &w); err != nil || w.V != proposalWriteVersion {
+	if err := json.Unmarshal(p.ProposedWrite, &w); err != nil || w.V != kgvocab.ProposalWriteVersion {
 		slog.Default().Warn("KnowledgeProposal: unparseable proposed_write; listing with unset write",
 			"proposal_id", p.ID, "err", err)
 		return out // write oneof left unset → UI renders "unreadable — reject"
 	}
 
 	switch w.Kind {
-	case "fact":
+	case kgvocab.KindFact:
 		out.Write = &managementv1.KnowledgeProposal_Fact{Fact: &managementv1.ProposedFact{
 			NodeId:  w.NodeID,
 			Subject: w.Subject,
 			Fact:    w.Fact,
 		}}
-	case "edge":
+	case kgvocab.KindEdge:
 		out.Write = &managementv1.KnowledgeProposal_Edge{Edge: &managementv1.ProposedEdge{
 			NodeId:   w.NodeID,
 			Subject:  w.Subject,
 			Relation: toProtoEdgeType(storage.KGEdgeType(w.Relation)),
 			Target:   w.Target,
 		}}
-	case "node":
+	case kgvocab.KindNode:
 		out.Write = &managementv1.KnowledgeProposal_Node{Node: &managementv1.ProposedNode{
 			NodeType: toProtoNodeType(storage.KGNodeType(w.NodeType)),
 			Name:     w.Name,

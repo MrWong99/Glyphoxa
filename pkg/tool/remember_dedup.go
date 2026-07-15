@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/MrWong99/Glyphoxa/internal/textnorm"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // Write-time dedup for remember_knowledge (#411, ADR-0052 mechanism a): before a
@@ -21,11 +22,11 @@ import (
 // and punctuation here do not matter.
 func ProposalSalient(w ProposedWrite) string {
 	switch w.Kind {
-	case proposalKindFact:
+	case kgvocab.KindFact:
 		return w.Fact
-	case proposalKindEdge:
+	case kgvocab.KindEdge:
 		return strings.TrimSpace(w.Relation + " " + w.Target)
-	case proposalKindNode:
+	case kgvocab.KindNode:
 		return strings.TrimSpace(w.Name + " " + w.Body)
 	default:
 		return strings.TrimSpace(w.Fact + " " + w.Name + " " + w.Body)
@@ -45,7 +46,7 @@ func ProposalTargetKey(w ProposedWrite) string {
 	if s := textnorm.Normalize(w.Subject); s != "" {
 		return "subj:" + s
 	}
-	if w.Kind == proposalKindNode {
+	if w.Kind == kgvocab.KindNode {
 		if n := textnorm.Normalize(w.Name); n != "" {
 			return "name:" + n
 		}

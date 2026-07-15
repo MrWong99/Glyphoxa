@@ -30,6 +30,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 )
 
@@ -231,27 +232,11 @@ func renderFact(n storage.KGNode) string {
 	return head + "\n" + body
 }
 
-// typeLabel maps a Node type onto its GM-facing label (#126 test contract). An
-// unknown type falls back to "Note" defensively (the DB enum keeps this exhaustive).
+// typeLabel maps a Node type onto its GM-facing label (#126 test contract) via
+// the single label map in pkg/kgvocab (#449); an unknown type falls back to
+// "Note" there.
 func typeLabel(t storage.KGNodeType) string {
-	switch t {
-	case storage.KGNodeCharacter:
-		return "Character"
-	case storage.KGNodeNPC:
-		return "NPC"
-	case storage.KGNodeLocation:
-		return "Location"
-	case storage.KGNodeFaction:
-		return "Faction"
-	case storage.KGNodeItem:
-		return "Item"
-	case storage.KGNodePlotThread:
-		return "Plot thread"
-	case storage.KGNodeNote:
-		return "Note"
-	default:
-		return "Note"
-	}
+	return kgvocab.NodeTypeLabel(string(t))
 }
 
 // truncateRunes trims s to at most max runes, appending an ellipsis when it cut —

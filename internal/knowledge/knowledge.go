@@ -26,6 +26,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/textnorm"
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -174,27 +175,10 @@ func toFacts(nodes []storage.KGNode) []tool.KGFact {
 	return out
 }
 
-// typeLabel maps a Node type onto its GM-facing label, mirroring kgfacts. An
-// unknown type falls back to "Note" (the DB enum keeps this exhaustive).
+// typeLabel maps a Node type onto its GM-facing label via the single label map
+// in pkg/kgvocab (#449); an unknown type falls back to "Note" there.
 func typeLabel(t storage.KGNodeType) string {
-	switch t {
-	case storage.KGNodeCharacter:
-		return "Character"
-	case storage.KGNodeNPC:
-		return "NPC"
-	case storage.KGNodeLocation:
-		return "Location"
-	case storage.KGNodeFaction:
-		return "Faction"
-	case storage.KGNodeItem:
-		return "Item"
-	case storage.KGNodePlotThread:
-		return "Plot thread"
-	case storage.KGNodeNote:
-		return "Note"
-	default:
-		return "Note"
-	}
+	return kgvocab.NodeTypeLabel(string(t))
 }
 
 // proposalWriteTimeout bounds the cancel-immune proposal INSERT: ADR-0052 barge

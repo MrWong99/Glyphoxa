@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
 )
 
@@ -165,25 +166,23 @@ func (s *Store) ApproveKnowledgeProposal(ctx context.Context, campaignID, id uui
 		if err := json.Unmarshal(raw, &w); err != nil {
 			return &ProposalBlockedError{Reason: "unreadable proposal — reject it"}
 		}
-		if w.V != proposalWriteVersion {
+		// The approve side checks the SAME version and kind identifiers the create
+		// side stamped — both from pkg/kgvocab (#449), so they cannot drift.
+		if w.V != kgvocab.ProposalWriteVersion {
 			return &ProposalBlockedError{Reason: "unreadable proposal — reject it"}
 		}
 		switch w.Kind {
-		case "fact":
+		case kgvocab.KindFact:
 			return tx.applyProposedFact(ctx, campaignID, w)
-		case "edge":
+		case kgvocab.KindEdge:
 			return tx.applyProposedEdge(ctx, campaignID, w)
-		case "node":
+		case kgvocab.KindNode:
 			return tx.applyProposedNode(ctx, campaignID, w)
 		default:
 			return &ProposalBlockedError{Reason: "unreadable proposal — reject it"}
 		}
 	})
 }
-
-// proposalWriteVersion mirrors tool's stamped schema version (ADR-0052 "v":1). An
-// approved row whose version differs is unreadable and must be rejected.
-const proposalWriteVersion = 1
 
 // applyProposedFact appends the proposal's fact sentence to the target Node's body
 // (blank body → the fact alone; non-blank → separated by a blank line) and resets

@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // Knowledge Graph Edge persistence (#132, ADR-0008 v1.0 + 2026-07-04 amendment):
@@ -28,19 +30,21 @@ var ErrInvalidEdge = errors.New("storage: invalid edge")
 var ErrConflict = errors.New("storage: conflict")
 
 // KGEdgeType is a Knowledge Graph Edge's type (CONTEXT.md "Edge", ADR-0008). It
-// mirrors the kg_edge_type Postgres enum.
+// mirrors the kg_edge_type Postgres enum. The values are compiler-linked to the
+// single relation vocabulary in pkg/kgvocab (#449), which the remember_knowledge
+// Tool's schema/validation also derives from.
 type KGEdgeType string
 
 const (
-	KGEdgeResidesIn      KGEdgeType = "resides_in"
-	KGEdgeMemberOf       KGEdgeType = "member_of"
-	KGEdgeOwns           KGEdgeType = "owns"
-	KGEdgeKnows          KGEdgeType = "knows"
-	KGEdgeEnemyOf        KGEdgeType = "enemy_of"
-	KGEdgeAllyOf         KGEdgeType = "ally_of"
-	KGEdgeParentOf       KGEdgeType = "parent_of"
-	KGEdgeParticipatedIn KGEdgeType = "participated_in"
-	KGEdgeMentionedIn    KGEdgeType = "mentioned_in"
+	KGEdgeResidesIn      KGEdgeType = kgvocab.RelationResidesIn
+	KGEdgeMemberOf       KGEdgeType = kgvocab.RelationMemberOf
+	KGEdgeOwns           KGEdgeType = kgvocab.RelationOwns
+	KGEdgeKnows          KGEdgeType = kgvocab.RelationKnows
+	KGEdgeEnemyOf        KGEdgeType = kgvocab.RelationEnemyOf
+	KGEdgeAllyOf         KGEdgeType = kgvocab.RelationAllyOf
+	KGEdgeParentOf       KGEdgeType = kgvocab.RelationParentOf
+	KGEdgeParticipatedIn KGEdgeType = kgvocab.RelationParticipatedIn
+	KGEdgeMentionedIn    KGEdgeType = kgvocab.RelationMentionedIn
 )
 
 // KGEdge is one persisted typed directional Edge between two Nodes in a Campaign.

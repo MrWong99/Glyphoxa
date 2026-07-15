@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 )
 
 // Knowledge Graph Node persistence (#126, ADR-0008 v1.0): the structured wiki /
@@ -17,16 +19,19 @@ import (
 
 // KGNodeType is a Knowledge Graph Node's type (CONTEXT.md "Node", ADR-0008). It
 // mirrors the kg_node_type Postgres enum; the value is immutable after create.
+// The values are compiler-linked to the single node-type vocabulary in
+// pkg/kgvocab (#449), which the remember_knowledge Tool's schema/validation and
+// the GM-facing label map also derive from.
 type KGNodeType string
 
 const (
-	KGNodeCharacter  KGNodeType = "character"
-	KGNodeNPC        KGNodeType = "npc"
-	KGNodeLocation   KGNodeType = "location"
-	KGNodeFaction    KGNodeType = "faction"
-	KGNodeItem       KGNodeType = "item"
-	KGNodePlotThread KGNodeType = "plot_thread"
-	KGNodeNote       KGNodeType = "note"
+	KGNodeCharacter  KGNodeType = kgvocab.NodeTypeCharacter
+	KGNodeNPC        KGNodeType = kgvocab.NodeTypeNPC
+	KGNodeLocation   KGNodeType = kgvocab.NodeTypeLocation
+	KGNodeFaction    KGNodeType = kgvocab.NodeTypeFaction
+	KGNodeItem       KGNodeType = kgvocab.NodeTypeItem
+	KGNodePlotThread KGNodeType = kgvocab.NodeTypePlotThread
+	KGNodeNote       KGNodeType = kgvocab.NodeTypeNote
 )
 
 // KGNode is one persisted Knowledge Graph Node in a Campaign. GMPrivate hides the
