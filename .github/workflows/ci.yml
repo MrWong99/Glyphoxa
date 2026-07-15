@@ -145,7 +145,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
 
       # Restore the generated stubs (produced once by the `proto` job) BEFORE
@@ -193,7 +193,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
 
       # Restore the generated stubs before any go build/test (gen/ is gitignored).
@@ -227,7 +227,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
 
       # Restore the generated stubs before any go build/test (gen/ is gitignored).
@@ -498,7 +498,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
 
       # Restore the generated stubs before the lint run (gen/ is gitignored;
