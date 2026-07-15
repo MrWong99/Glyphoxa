@@ -20,13 +20,13 @@ type ExportOptions struct {
 }
 
 // Export serializes one Campaign into a [Bundle] (ADR-0053). It reads EXCLUSIVELY
-// through the storage layer's allowlisted read paths — GetCampaign, ListAgents,
-// per-agent ListToolGrants, ListNodes, ListEdges, ListCharacters, and (only when
+// through the [ExportStore] seam — GetCampaign, ListAgents, per-agent
+// ListToolGrants, ListNodes, ListEdges, ListCharacters, and (only when
 // opts.IncludeHistory) ListVoiceSessions + ListTranscriptLines +
 // ListTranscriptChunks. It NEVER touches provider_config, deployment_config,
 // users, or auth sessions: the secrets-exclusion property (ADR-0053 §2) holds by
-// construction because the bundle types carry no field for a secret and this
-// function reads no table that stores one.
+// construction because the bundle types carry no field for a secret and the
+// seam carries no method that reads a table storing one.
 //
 // Every entity reference in the produced bundle is the SOURCE row's UUID string
 // (ADR-0053 §4): agent ids, node ids, edge endpoints, and history session/agent
@@ -36,7 +36,7 @@ type ExportOptions struct {
 // voice carries the canonical shape minus provider bindings (the FK
 // voice_provider_config_id is an Agent column this never reads). A voice column
 // that does not parse is a hard error, never a silently dropped voice (#224).
-func Export(ctx context.Context, st *storage.Store, campaignID uuid.UUID, opts ExportOptions) (*Bundle, error) {
+func Export(ctx context.Context, st ExportStore, campaignID uuid.UUID, opts ExportOptions) (*Bundle, error) {
 	campaign, err := st.GetCampaign(ctx, campaignID)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: export: get campaign %s: %w", campaignID, err)
@@ -140,7 +140,7 @@ func Export(ctx context.Context, st *storage.Store, campaignID uuid.UUID, opts E
 
 // exportGrants reads one Agent's persisted Tool Grants and maps them to bundle
 // grains. Config is carried verbatim (nil when the grant narrows nothing).
-func exportGrants(ctx context.Context, st *storage.Store, agentID uuid.UUID) ([]Grant, error) {
+func exportGrants(ctx context.Context, st ExportStore, agentID uuid.UUID) ([]Grant, error) {
 	rows, err := st.ListToolGrants(ctx, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: export: list grants for agent %s: %w", agentID, err)
@@ -182,7 +182,7 @@ func exportVoice(raw []byte) ([]byte, error) {
 // (ListTranscriptChunks is called with includeVectors=false, ADR-0053 §3) — the
 // destination re-embeds. ListVoiceSessions has no all-rows overload, so the cap
 // is math.MaxInt32: a backup pulls every session, and no campaign approaches it.
-func exportHistory(ctx context.Context, st *storage.Store, campaignID uuid.UUID) (*History, error) {
+func exportHistory(ctx context.Context, st ExportStore, campaignID uuid.UUID) (*History, error) {
 	sessions, err := st.ListVoiceSessions(ctx, campaignID, math.MaxInt32)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: export: list voice sessions: %w", err)

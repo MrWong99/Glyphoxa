@@ -132,7 +132,7 @@ func runSeedBundle(ctx context.Context, log *slog.Logger, path string) error {
 		return fmt.Errorf("seed: check campaign %q: %w", b.Campaign.Name, err)
 	}
 
-	res, err := bundle.Import(ctx, st, tenantID, b)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tenantID, b)
 	if err != nil {
 		return fmt.Errorf("seed: import bundle: %w", err)
 	}

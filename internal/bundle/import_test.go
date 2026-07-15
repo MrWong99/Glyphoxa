@@ -48,7 +48,7 @@ func TestImportRefusesNewerVersion(t *testing.T) {
 		FormatVersion: bundle.FormatVersion + 1,
 		Campaign:      bundle.Campaign{Name: "From The Future", System: "dnd5e", Language: "en"},
 	}
-	_, err := bundle.Import(ctx, st, tid, b)
+	_, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b)
 	if !errors.Is(err, bundle.ErrNewerFormat) {
 		t.Fatalf("Import err = %v, want ErrNewerFormat", err)
 	}
@@ -67,7 +67,7 @@ func TestImportMinimalCampaign(t *testing.T) {
 		FormatVersion: bundle.FormatVersion,
 		Campaign:      bundle.Campaign{Name: "Bare Campaign", System: "dnd5e", Language: "en"},
 	}
-	res, err := bundle.Import(ctx, st, tid, b)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -112,13 +112,16 @@ func TestImportButlerMerge(t *testing.T) {
 			Name: "Butler Merge", System: "dnd5e", Language: "en",
 			Agents: []bundle.Agent{{
 				ID: "butler-ref", Role: "butler", Name: "Alfred", Title: "The Butler",
-				Persona: "Impeccably dry.", Voice: voice, AddressOnly: true,
+				// AddressOnly deliberately false: the storage layer force-keeps a
+				// Butler's address_only true (ADR-0024), and this proves the pin
+				// through the real import path rather than merely echoing the bundle.
+				Persona: "Impeccably dry.", Voice: voice, AddressOnly: false,
 				Aliases: []string{"Al"},
 				Grants:  []bundle.Grant{{ToolName: "rules_lookup"}},
 			}},
 		},
 	}
-	res, err := bundle.Import(ctx, st, tid, b)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -148,7 +151,7 @@ func TestImportButlerMerge(t *testing.T) {
 		t.Errorf("butler fields not merged: %+v", butler)
 	}
 	if !butler.AddressOnly {
-		t.Error("butler address_only not pinned true")
+		t.Error("butler address_only not pinned true against the bundle's false (ADR-0024)")
 	}
 	if butler.VoiceProviderConfigID.Valid || butler.LLMProviderConfigID.Valid {
 		t.Error("butler provider FKs not NULL")
@@ -180,7 +183,7 @@ func TestImportRoundTrip(t *testing.T) {
 	}
 
 	dst, tid := freshTenant(t)
-	res, err := bundle.Import(ctx, dst, tid, b)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: dst}, tid, b)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -299,11 +302,11 @@ func TestImportTwiceMakesTwoCampaigns(t *testing.T) {
 	}
 
 	dst, tid := freshTenant(t)
-	first, err := bundle.Import(ctx, dst, tid, b)
+	first, err := bundle.Import(ctx, bundle.PGStore{Store: dst}, tid, b)
 	if err != nil {
 		t.Fatalf("Import #1: %v", err)
 	}
-	second, err := bundle.Import(ctx, dst, tid, b)
+	second, err := bundle.Import(ctx, bundle.PGStore{Store: dst}, tid, b)
 	if err != nil {
 		t.Fatalf("Import #2: %v", err)
 	}
@@ -326,7 +329,7 @@ func TestImportMidBundleFailureRollsBack(t *testing.T) {
 			Edges: []bundle.Edge{{From: "n1", To: "ghost", Type: "resides_in"}},
 		},
 	}
-	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+	if _, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b); err == nil {
 		t.Fatal("Import with unknown edge ref succeeded; want error")
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Doomed Import"); !errors.Is(err, storage.ErrNotFound) {
@@ -352,7 +355,7 @@ func TestImportRejectsSecondButler(t *testing.T) {
 			},
 		},
 	}
-	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+	if _, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b); err == nil {
 		t.Fatal("Import with two butlers succeeded; want error")
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Two Butlers"); !errors.Is(err, storage.ErrNotFound) {
@@ -377,7 +380,7 @@ func TestImportRejectsDuplicateNodeRef(t *testing.T) {
 			},
 		},
 	}
-	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+	if _, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b); err == nil {
 		t.Fatal("Import with duplicate node ref succeeded; want error")
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Dup Node"); !errors.Is(err, storage.ErrNotFound) {
@@ -402,7 +405,7 @@ func TestImportRejectsDuplicateAgentRef(t *testing.T) {
 			},
 		},
 	}
-	if _, err := bundle.Import(ctx, st, tid, b); err == nil {
+	if _, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, b); err == nil {
 		t.Fatal("Import with duplicate agent ref succeeded; want error")
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Dup Agent"); !errors.Is(err, storage.ErrNotFound) {
@@ -434,7 +437,7 @@ func TestImportSessionWithLines(t *testing.T) {
 			}}},
 		},
 	}
-	res, err := bundle.Import(ctx, st, tid, bnd)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -492,7 +495,7 @@ func TestImportCoercesNonTerminalSession(t *testing.T) {
 			}}},
 		},
 	}
-	res, err := bundle.Import(ctx, st, tid, bnd)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -539,7 +542,7 @@ func TestImportChunksRemapAndEmbedNull(t *testing.T) {
 			}}},
 		},
 	}
-	res, err := bundle.Import(ctx, st, tid, bnd)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -611,7 +614,7 @@ func TestImportedChunksEmbedAndRecall(t *testing.T) {
 			}}},
 		},
 	}
-	res, err := bundle.Import(ctx, st, tid, bnd)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -725,7 +728,7 @@ func TestImportRoundTripWithHistory(t *testing.T) {
 	}
 
 	dst, tid := freshTenant(t)
-	res, err := bundle.Import(ctx, dst, tid, b)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: dst}, tid, b)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -810,7 +813,7 @@ func TestImportHistoryRollsBackWithPart1(t *testing.T) {
 			}}},
 		},
 	}
-	if _, err := bundle.Import(ctx, st, tid, bnd); err == nil {
+	if _, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd); err == nil {
 		t.Fatal("Import with bad edge succeeded; want error")
 	}
 	if _, err := st.FindCampaignByName(ctx, tid, "Doomed History"); !errors.Is(err, storage.ErrNotFound) {
@@ -847,7 +850,7 @@ func TestImportWarnsOnDroppedParticipantRefs(t *testing.T) {
 			}}},
 		},
 	}
-	res, err := bundle.Import(ctx, st, tid, bnd)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -892,7 +895,7 @@ func TestImportSilentWhenNoDroppedRefs(t *testing.T) {
 			}}},
 		},
 	}
-	if _, err := bundle.Import(ctx, st, tid, bnd); err != nil {
+	if _, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd); err != nil {
 		t.Fatalf("Import: %v", err)
 	}
 	if buf.Len() != 0 {
@@ -911,7 +914,7 @@ func TestImportHistorylessBundleUnchanged(t *testing.T) {
 		FormatVersion: bundle.FormatVersion,
 		Campaign:      bundle.Campaign{Name: "No History", System: "dnd5e", Language: "en"},
 	}
-	res, err := bundle.Import(ctx, st, tid, bnd)
+	res, err := bundle.Import(ctx, bundle.PGStore{Store: st}, tid, bnd)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
