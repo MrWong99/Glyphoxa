@@ -3,7 +3,7 @@
 
 export CGO_ENABLED := 1
 
-.PHONY: build test lint vet fmt check clean whisper-libs refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
+.PHONY: build test lint vet fmt check clean refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
 
 # Build voice engine
 build:
@@ -44,40 +44,6 @@ fmt:
 check: fmt vet test
 	@echo "All checks passed ✓"
 
-# Build whisper.cpp static library for local CGO compilation.
-# After running this, set the environment before other targets:
-#   export C_INCLUDE_PATH=/tmp/whisper-install/include
-#   export LIBRARY_PATH=/tmp/whisper-install/lib
-#   export CGO_ENABLED=1
-WHISPER_SRC  := /tmp/whisper-src
-WHISPER_DEST := /tmp/whisper-install
-
-whisper-libs:
-	@if [ -f "$(WHISPER_DEST)/include/whisper.h" ]; then \
-		echo "whisper.cpp already built at $(WHISPER_DEST)"; \
-	else \
-		echo "Cloning whisper.cpp..."; \
-		git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git $(WHISPER_SRC); \
-		echo "Building whisper.cpp..."; \
-		cmake -B $(WHISPER_SRC)/build -S $(WHISPER_SRC) \
-			-DCMAKE_BUILD_TYPE=Release \
-			-DBUILD_SHARED_LIBS=OFF \
-			-DGGML_NATIVE=ON \
-			-DWHISPER_BUILD_TESTS=OFF \
-			-DWHISPER_BUILD_SERVER=OFF; \
-		cmake --build $(WHISPER_SRC)/build --config Release -j$$(nproc); \
-		mkdir -p $(WHISPER_DEST)/include $(WHISPER_DEST)/lib; \
-		cp $(WHISPER_SRC)/include/whisper.h $(WHISPER_DEST)/include/; \
-		cp -r $(WHISPER_SRC)/ggml/include/* $(WHISPER_DEST)/include/ 2>/dev/null || true; \
-		find $(WHISPER_SRC)/build -name '*.a' -exec cp {} $(WHISPER_DEST)/lib/ \;; \
-		echo "whisper.cpp installed to $(WHISPER_DEST)"; \
-	fi
-	@echo ""
-	@echo "Run the following to enable whisper CGO builds:"
-	@echo "  export C_INCLUDE_PATH=$(WHISPER_DEST)/include"
-	@echo "  export LIBRARY_PATH=$(WHISPER_DEST)/lib"
-	@echo "  export CGO_ENABLED=1"
-
 # Refresh the embedded Silero VAD ONNX model from upstream. Run when bumping
 # silero versions; commit the updated file and the new SHA-256 in
 # pkg/voice/vad/silero/data/README.md.
@@ -114,9 +80,8 @@ clean:
 
 # --- Container image (ADR-0034) --------------------------------------------
 # One multi-stage image for the single binary; `mode`/config are runtime args.
-# The native build (whisper.cpp + CGO) is SLOW on a cold layer cache — expect
-# several minutes on first build. (libopus and libdave are gone: the codec and
-# DAVE are pure Go since the pion/opus + dave-go migration.)
+# The only native piece left is CGO for the ONNX/silero binding (the codec,
+# DAVE, and the retired whisper.cpp build are gone — see ADR-0004 amendment).
 DOCKER_IMAGE ?= glyphoxa:smoke
 
 # Depends on `proto`: gen/ is gitignored and NOT generated inside the image

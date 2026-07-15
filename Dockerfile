@@ -6,8 +6,8 @@
 # channel, etc.) are supplied at RUNTIME via args/env — there are no per-mode
 # images. The build stage compiles the live binary with the production tags
 # (`opus dave` — both pure Go since the pion/opus + dave-go migration; CGO
-# remains only for the ONNX/silero binding) after building the whisper.cpp
-# static lib, exactly as the Makefile / CI do. The runtime stage is a slim glibc
+# remains only for the ONNX/silero binding), exactly as the Makefile / CI do.
+# The runtime stage is a slim glibc
 # base (distroless deferred, ADR-0034) carrying the binary plus its one native
 # runtime dep: a bundled libonnxruntime (the version the Silero VAD pins in
 # pkg/voice/vad/silero/runtime.go — dlopen'd at runtime, not linked).
@@ -42,35 +42,14 @@ ARG ONNX_VERSION
 ENV CGO_ENABLED=1
 
 # Build/runtime native deps:
-#   - cmake/git/build-essential: build whisper.cpp (static).
+#   - build-essential: the C compiler CGO needs for the ONNX/silero binding.
 #   - curl/unzip: fetch the ONNX runtime tarball.
 RUN apt-get update && apt-get install -y --no-install-recommends \
 		ca-certificates \
-		git \
-		cmake \
 		build-essential \
 		curl \
 		unzip \
 	&& rm -rf /var/lib/apt/lists/*
-
-# --- whisper.cpp static library (mirrors Makefile `whisper-libs`) ----------
-# Static (BUILD_SHARED_LIBS=OFF) so the .a is linked into the binary; nothing
-# from whisper needs to ship in the runtime image. GGML_NATIVE=OFF here (unlike
-# the Makefile's ON): the image must run on hosts other than the builder, so we
-# must NOT bake in -march=native instructions the runtime CPU may lack.
-ARG WHISPER_DEST=/tmp/whisper-install
-RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git /tmp/whisper-src \
-	&& cmake -B /tmp/whisper-src/build -S /tmp/whisper-src \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DBUILD_SHARED_LIBS=OFF \
-		-DGGML_NATIVE=OFF \
-		-DWHISPER_BUILD_TESTS=OFF \
-		-DWHISPER_BUILD_SERVER=OFF \
-	&& cmake --build /tmp/whisper-src/build --config Release -j"$(nproc)" \
-	&& mkdir -p "${WHISPER_DEST}/include" "${WHISPER_DEST}/lib" \
-	&& cp /tmp/whisper-src/include/whisper.h "${WHISPER_DEST}/include/" \
-	&& cp -r /tmp/whisper-src/ggml/include/* "${WHISPER_DEST}/include/" \
-	&& find /tmp/whisper-src/build -name '*.a' -exec cp {} "${WHISPER_DEST}/lib/" \;
 
 # --- ONNX Runtime (the exact version the Silero VAD pins) ------------------
 # Bundled so GLYPHOXA_ONNX_LIB can point at it and the VAD never reaches the
@@ -99,11 +78,9 @@ RUN go mod download
 # gen/, so this COPY brings them in; the go build below then compiles them.
 COPY . .
 
-# Compile the live binary with the production tags and the whisper env the
-# Makefile + .goreleaser.yml use. Both tags are pure Go now; CGO stays on for
-# the ONNX/silero binding. ldflags `-s -w` strip debug info, matching goreleaser.
-ENV C_INCLUDE_PATH=${WHISPER_DEST}/include
-ENV LIBRARY_PATH=${WHISPER_DEST}/lib
+# Compile the live binary with the production tags. Both tags are pure Go;
+# CGO stays on for the ONNX/silero binding. ldflags `-s -w` strip debug info,
+# matching goreleaser.
 RUN go build -tags "opus dave" -ldflags "-s -w" \
 		-o /out/glyphoxa ./cmd/glyphoxa
 

@@ -14,7 +14,6 @@ builds:
       - -tags=opus,dave
     env:
       - CGO_ENABLED=1
-      - CGO_CFLAGS=-I/tmp/whisper/include
     goos:
       - linux
     goarch:
@@ -26,13 +25,11 @@ builds:
         env:
           - CC=x86_64-linux-gnu-gcc
           - CXX=x86_64-linux-gnu-g++
-          - CGO_LDFLAGS=-L/tmp/whisper/amd64/lib
       - goos: linux
         goarch: arm64
         env:
           - CC=aarch64-linux-gnu-gcc
           - CXX=aarch64-linux-gnu-g++
-          - CGO_LDFLAGS=-L/tmp/whisper/arm64/lib -lm
     ldflags:
       - -s -w
 
