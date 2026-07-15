@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -578,8 +580,8 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	relay.SetResolver(speakerResolver) // #281: resolve who/GM per line (nil-safe, off if unset)
 	// #439: the snapshot/SSE mounts are tenant-scoped — a session outside the
 	// caller's Tenant is 404 (session → campaign → tenant), enforced before the
-	// SSE stream opens. The mounts below compose auth.RequireTenant to inject
-	// the tenant this check reads.
+	// SSE stream opens. The guarded mount table below declares TenantRequired
+	// to inject the tenant this check reads.
 	relay.SetTenantScope(store.VoiceSessionInTenant)
 	// Back-wire the finalizer so Stop drains the relay's writer queue and records
 	// the authoritative line_count (#74). Done after the relay exists because the
@@ -790,7 +792,8 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// operator on every request and pin the bind to loopback, so a dev instance
 	// needs no OAuth and a mis-set flag in production is structurally unreachable.
 	// Wrapping the mounts + SPA root routes every request through the existing
-	// interceptor stack / RequireSession / CSRF gate already authenticated. This
+	// policy gate (the Connect interceptor stack and the guarded mount table,
+	// #446) already authenticated. This
 	// replaces the manual DB-session-insert dev flow.
 	if dev {
 		forced, wrap, err := enableDevMode(ctx, store, store, webAddr, log, time.Now)
@@ -871,10 +874,32 @@ func (s highlightClipSweeper) DeleteClip(ctx context.Context, key string) error 
 	return s.blobs.Delete(ctx, key)
 }
 
+// plainMountPolicy is the declarative auth table for every plain (non-Connect)
+// mount (#446): each pattern's tenant posture, enforced by auth.MustGuardMounts
+// with the same auth.Policy the Connect stack runs. Every row is operator-gated
+// (session, ADR-0041) and CSRF derives from the method (POST ⇒ double-submit,
+// ADR-0016), so the tenant mode is the one explicit per-mount decision.
+//
+// TestPlainMountPolicy pins these declarations: downgrading a byte mount's
+// posture (the #408 regression shape — e.g. clip losing TenantRequired) fails
+// the suite, so a change here must be made deliberately, in both places.
+var plainMountPolicy = map[string]auth.TenantMode{
+	// The SSE relay + snapshot and the byte streams (clip/image/export) all
+	// need the caller's Tenant to scope their reads (#439): session AND tenant.
+	"GET /api/v1/sessions/{id}/events":  auth.TenantRequired,
+	"GET /api/v1/sessions/{id}":         auth.TenantRequired,
+	"GET /api/v1/highlights/{id}/clip":  auth.TenantRequired,
+	"GET /api/v1/highlights/{id}/image": auth.TenantRequired,
+	"GET /api/v1/campaigns/{id}/export": auth.TenantRequired,
+	// TenantNone: ServeImport resolves the tenant off the session itself
+	// (#291); the POST method already makes the guard demand the CSRF pair.
+	"POST /api/v1/campaigns/import": auth.TenantNone,
+}
+
 // relay serves the live transcript over SSE + a JSON snapshot (#73, ADR-0014):
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
-// /api/v1/sessions/{id}[/events], each guarded by auth.RequireSession (the
-// Connect interceptor chain does not cover them).
+// /api/v1/sessions/{id}[/events], each a row in the guarded mount table
+// (#446 — the Connect interceptor chain does not cover them).
 func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
@@ -895,8 +920,13 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	authServer := auth.NewAuthServer(store, log)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
-	// TenantResolver (TenantForUser); GetCurrentUser is the only public procedure.
-	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
+	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):
+	// the Connect interceptor stack and the plain-mount table below are thin
+	// adapters over the same auth.Policy, so the session/CSRF/tenant gate
+	// cannot drift between them again (#408). GetCurrentUser is the only
+	// public procedure.
+	policy := auth.NewPolicy(store, store)
+	stack := policy.Stack(managementv1connect.AuthServiceGetCurrentUserProcedure)
 
 	campaignSrv := rpc.NewCampaignServer(store)
 	// While a session is live, the roster/mute panel scopes to that session's
@@ -972,9 +1002,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	sessionPath, sessionHandler := sessionSrv.Handler(stack.HandlerOptions()...)
 
 	// Session Highlight clip serve (#308/#309): GET /api/v1/highlights/{id}/clip, a
-	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated by
-	// auth.RequireSession. Tenant-scoped row load + blob.Get + http.ServeContent
-	// (Range → scrub).
+	// plain net/http byte stream (ADR-0015) beside the SSE relay, operator-gated
+	// via the guarded mount table. Tenant-scoped row load + blob.Get +
+	// http.ServeContent (Range → scrub).
 	// The clip route scopes to the Active Campaign server-side (#308), sharing the
 	// SessionServer's read-side resolution so a foreign-campaign clip id is 404 just
 	// like the Highlight RPCs.
@@ -982,47 +1012,75 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 
 	// The campaign-bundle transport (#290, ADR-0053) is a PLAIN net/http mount
 	// beside the SSE relay, not a Connect service (ADR-0015): a streamed gzip
-	// download does not fit Connect's message model. Operator-only via
-	// auth.RequireSession, the same gate the relay reads (ADR-0041). The GET export
-	// (#290) and the POST import (#291) share this handler.
+	// download does not fit Connect's message model. Operator-only via the
+	// guarded mount table, the same gate the relay reads (ADR-0041). The GET
+	// export (#290) and the POST import (#291) share this handler.
 	bundleHandler := &bundle.Handler{Store: store, Log: log}
 
-	return []web.Mount{
+	// The plain (non-Connect) mounts bind their handlers here; their auth
+	// posture is declared separately in [plainMountPolicy] (#446), and the two
+	// maps are zipped below. MustGuardMounts enforces the result with the SAME
+	// policy the Connect stack runs and panics the boot on an under-declared
+	// row — a mount can no longer silently compose the wrapper subset that
+	// shipped #408.
+	plainHandlers := map[string]http.Handler{
+		// The SSE relay + snapshot are PLAIN mounts (not web.APIMount): they want
+		// the full /api/v1/... path, not the /api-stripped Connect method path.
+		// Go 1.22 method+wildcard patterns keep them off the Connect mounts
+		// (/api/glyphoxa.management.v1.*) and the SPA root. Session AND tenant
+		// (#439, the post-#408 discipline) — the relay's TenantScope (wired
+		// above) 404s a session outside the caller's Tenant before the SSE
+		// stream opens.
+		"GET /api/v1/sessions/{id}/events": http.HandlerFunc(relay.ServeEvents),
+		"GET /api/v1/sessions/{id}":        http.HandlerFunc(relay.ServeSnapshot),
+		// Session Highlight clip (#308): operator-gated audio byte stream with
+		// Range. ServeClip/ServeImage require the tenant (#408), resolved
+		// server-side off the operator; without it TenantID always missed and
+		// every request 401'd.
+		"GET /api/v1/highlights/{id}/clip": http.HandlerFunc(clipServer.ServeClip),
+		// Session Highlight AI image (#311): operator-gated image byte stream, same
+		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
+		"GET /api/v1/highlights/{id}/image": http.HandlerFunc(clipServer.ServeImage),
+		// Campaign bundle export (#290): streamed gzip download, operator-gated,
+		// session AND tenant (#439) — a foreign-tenant campaign id is 404.
+		"GET /api/v1/campaigns/{id}/export": http.HandlerFunc(bundleHandler.ServeExport),
+		// Campaign bundle import (#291): multipart upload, operator-gated; the
+		// POST method makes the guard demand the CSRF double-submit (ADR-0016)
+		// the SPA satisfies with the script-readable glyphoxa_csrf cookie.
+		"POST /api/v1/campaigns/import": http.HandlerFunc(bundleHandler.ServeImport),
+	}
+	if len(plainHandlers) != len(plainMountPolicy) {
+		panic(fmt.Sprintf("plain mounts and plainMountPolicy disagree: %d handlers, %d policy rows — every plain mount must declare its posture (#446)",
+			len(plainHandlers), len(plainMountPolicy)))
+	}
+	rows := make([]auth.GuardedMount, 0, len(plainHandlers))
+	for _, pattern := range slices.Sorted(maps.Keys(plainHandlers)) {
+		// A handler missing from plainMountPolicy yields the zero TenantMode,
+		// which MustGuardMounts rejects loudly.
+		rows = append(rows, auth.GuardedMount{
+			Pattern: pattern,
+			Tenant:  plainMountPolicy[pattern],
+			Handler: plainHandlers[pattern],
+		})
+	}
+	guarded := auth.MustGuardMounts(policy, rows)
+
+	mounts := []web.Mount{
 		web.APIMount(campaignPath, campaignHandler),
 		web.APIMount(authPath, authHandler),
 		web.APIMount(providerPath, providerHandler),
 		web.APIMount(voicePath, voiceHandler),
 		web.APIMount(sessionPath, sessionHandler),
-		// The SSE relay + snapshot are PLAIN mounts (not web.APIMount): they want
-		// the full /api/v1/... path, not the /api-stripped Connect method path.
-		// Go 1.22 method+wildcard patterns keep them off the Connect mounts
-		// (/api/glyphoxa.management.v1.*) and the SPA root. auth.RequireSession
-		// validates the glyphoxa_session cookie the EventSource/fetch send; the
-		// mounts are session AND tenant (#439, the post-#408 discipline) — the
-		// relay's TenantScope (wired above) 404s a session outside the caller's
-		// Tenant before the SSE stream opens.
-		{Path: "GET /api/v1/sessions/{id}/events", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(relay.ServeEvents)))},
-		{Path: "GET /api/v1/sessions/{id}", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(relay.ServeSnapshot)))},
-		// Session Highlight clip (#308): operator-gated audio byte stream with Range.
-		// ServeClip/ServeImage require the tenant, so the mount is session AND tenant
-		// (#408): RequireTenant (inside RequireSession) resolves it server-side off the
-		// operator — the plain-HTTP mirror of the Connect tenant interceptor. Without it
-		// TenantID always missed and every request 401'd.
-		{Path: "GET /api/v1/highlights/{id}/clip", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeClip)))},
-		// Session Highlight AI image (#311): operator-gated image byte stream, same
-		// tenant + Active-Campaign 404 posture as the clip; no image yet → 404.
-		{Path: "GET /api/v1/highlights/{id}/image", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(clipServer.ServeImage)))},
-		// Campaign bundle export (#290): streamed gzip download, operator-gated,
-		// session AND tenant (#439) — a foreign-tenant campaign id is 404.
-		{Path: "GET /api/v1/campaigns/{id}/export", Handler: auth.RequireSession(store, auth.RequireTenant(store, http.HandlerFunc(bundleHandler.ServeExport)))},
-		// Campaign bundle import (#291): multipart upload, operator-gated, plus the
-		// plain-HTTP CSRF double-submit (ADR-0016) the SPA satisfies with the
-		// script-readable glyphoxa_csrf cookie — a state-changing POST outside the
-		// Connect chain needs it (RequireSession alone gates only the session).
-		{Path: "POST /api/v1/campaigns/import", Handler: auth.RequireSession(store, auth.RequireCSRF(http.HandlerFunc(bundleHandler.ServeImport)))},
-		{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
-		{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
 	}
+	for _, g := range guarded {
+		mounts = append(mounts, web.Mount{Path: g.Pattern, Handler: g.Handler})
+	}
+	return append(mounts,
+		// The OAuth redirects are the login carve-out (ADR-0015): public by
+		// design, no session to require yet.
+		web.Mount{Path: "/auth/discord/login", Handler: http.HandlerFunc(oauth.Login)},
+		web.Mount{Path: "/auth/discord/callback", Handler: http.HandlerFunc(oauth.Callback)},
+	)
 }
 
 // runWebTier starts the web API server on ctx and blocks until it has fully shut

@@ -304,8 +304,9 @@ type TenantScope func(ctx context.Context, tenantID, sessionID uuid.UUID) (bool,
 // SetTenantScope wires the tenant-ownership check (#439) after construction,
 // mirroring SetResolver so NewRelay call sites stay byte-identical. With a
 // scope installed, ServeSnapshot and ServeEvents 404 any session outside the
-// request's Tenant (auth.RequireTenant injects it) — the same don't-reveal
-// posture as the Highlight mounts — and the SSE rejection happens before the
+// request's Tenant (the TenantRequired guarded mount injects it) — the same
+// don't-reveal posture as the Highlight mounts — and the SSE rejection
+// happens before the
 // stream opens. nil leaves the endpoints unscoped (voice-standalone builds,
 // unit-test relays). Called once at boot; guarded by r.mu.
 func (r *Relay) SetTenantScope(scope TenantScope) {

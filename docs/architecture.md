@@ -433,7 +433,15 @@ The carve-outs are plain `net/http`, deliberately outside Connect (ADR-0015):
 - `GET /api/v1/sessions/{id}` — the snapshot (`transcript.Relay.ServeSnapshot`)
 - `/auth/discord/login`, `/auth/discord/callback` — OAuth redirects
 
-Both session reads are wrapped in `auth.RequireSession`. Connect server-streaming
+Every plain mount except the OAuth redirects is a row in the guarded mount
+table (`auth.MustGuardMounts`): one transport-agnostic policy
+(`auth.Policy`) makes the session/CSRF/tenant decisions for BOTH the Connect
+interceptor stack and these plain mounts, and each row declares its tenant
+posture explicitly — an undeclared row fails the boot. The table replaced
+per-mount hand-composition of `auth.RequireSession`/`RequireTenant`/
+`RequireCSRF`, whose drift shipped #408 (clip/image mounts composed
+session-only, so they 401'd in production while the Connect RPCs passed on
+the same cookie). Connect server-streaming
 lacks EventSource semantics (`Last-Event-ID`, proxy compatibility); the browser has
 no bidirectional need on the Session screen, so WebSocket was rejected. SSE frames
 call `queryClient.setQueryData(...)` to amend the cached snapshot rather than
