@@ -75,7 +75,7 @@ func laneFrame(t *testing.T, speaker string, value int16) audio.Frame {
 }
 
 // laneVADFactory returns a factory building a contentVAD-backed lane VAD on bus,
-// counting the close funcs invoked (so a reap test proves the ONNX session is
+// counting the close funcs invoked (so a reap test proves the VAD session is
 // released). err, when set, is returned instead — the degraded path.
 func laneVADFactory(bus *voiceevent.Bus, closes *int, err error) (orchestrator.LaneVADFactory, *sync.Mutex) {
 	return laneVADFactoryH(bus, closes, err, 0)
@@ -355,7 +355,7 @@ func mkSamples(v int16) []int16 {
 
 // TestSegmenter_LaneIdleReap is step 6: a lane idle past the TTL is reaped — its
 // buffered utterance flushed (not dropped), its VAD close() called — and the default
-// lane is never reaped (ADR-0050 lane lifecycle; risk (b) ONNX release).
+// lane is never reaped (ADR-0050 lane lifecycle; risk (b) VAD release).
 func TestSegmenter_LaneIdleReap(t *testing.T) {
 	bus := voiceevent.NewBus()
 	rec := &recordingRecognizer{}
@@ -389,7 +389,7 @@ func TestSegmenter_LaneIdleReap(t *testing.T) {
 	gotCloses := closes
 	cmu.Unlock()
 	if gotCloses != 1 {
-		t.Errorf("lane VAD close() called %d times, want 1 (reaped lane's ONNX session released)", gotCloses)
+		t.Errorf("lane VAD close() called %d times, want 1 (reaped lane's VAD session released)", gotCloses)
 	}
 	// The reaped lane's buffered utterance was flushed, not dropped.
 	batches := rec.batches()
@@ -405,7 +405,7 @@ func TestSegmenter_LaneIdleReap(t *testing.T) {
 // quiet table ticks the silence clock every 32 ms forever. Because processLane no
 // longer refreshes lastSeen (only attributed frames via laneFor do), the lanes MUST
 // still age past the idle TTL and be reaped DESPITE the continuous silence — otherwise
-// each departed speaker's ONNX inferencer and stream slot leak for the session.
+// each departed speaker's VAD inferencer and stream slot leak for the session.
 func TestSegmenter_LanesReapUnderContinuousSilence(t *testing.T) {
 	bus := voiceevent.NewBus()
 	rec := &recordingRecognizer{}
@@ -442,7 +442,7 @@ func TestSegmenter_LanesReapUnderContinuousSilence(t *testing.T) {
 	gotCloses := closes
 	cmu.Unlock()
 	if gotCloses != 2 {
-		t.Errorf("lane VAD close() called %d times, want 2 (both departed speakers' ONNX sessions released)", gotCloses)
+		t.Errorf("lane VAD close() called %d times, want 2 (both departed speakers' VAD sessions released)", gotCloses)
 	}
 }
 
@@ -559,14 +559,14 @@ func TestSegmenter_FlushDrainsAllLanes(t *testing.T) {
 // teardown must set a terminal `closed` flag FIRST (same defect class as the fixed #157
 // Manager closed flag): once teardown has begun, a still-running Feed must NOT resurrect
 // a reaped lane — laneFor sees closed and funnels to the default lane, so every
-// factory-built lane's ONNX session is closed exactly once (creates == closes) and no
+// factory-built lane's VAD session is closed exactly once (creates == closes) and no
 // non-default lane survives (LaneCount == 1). Run under `go test -race`.
 func TestSegmenter_TeardownRaceWithFeed(t *testing.T) {
 	bus := voiceevent.NewBus()
 	rec := &recordingRecognizer{}
 
 	// Count factory-built VADs created vs closed: a resurrected lane created AFTER
-	// teardown would never be closed (leaked ONNX inferencer), so creates > closes.
+	// teardown would never be closed (leaked VAD inferencer), so creates > closes.
 	var cmu sync.Mutex
 	creates, closes := 0, 0
 	factory := orchestrator.LaneVADFactory(func() (*orchestrator.VAD, func(), error) {

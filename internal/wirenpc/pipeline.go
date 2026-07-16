@@ -206,14 +206,12 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open VAD session: %w", err)
 	}
-	// cleanup releases ONLY the per-cycle VAD session (its ONNX inferencer), which
-	// a reconnect cycle (issue #44) would otherwise leak on every loop. It must
-	// NOT close the engine: silero.Engine wraps the process-global ONNX
-	// environment (initialised once via sync.Once and never re-initialised), so
-	// engine.Close() → DestroyEnvironment would tear ONNX down for the whole
-	// process — the next cycle's NewSession would fail and the NPC would go
-	// permanently deaf after the first Discord drop. The engine is a singleton: it
-	// lives for the process and is never closed here. session.Close is idempotent.
+	// cleanup releases ONLY the per-cycle VAD session, which a reconnect cycle
+	// (issue #44) would otherwise leak on every loop. It must NOT close the
+	// engine: silero.Engine fronts the process-global parsed model (a
+	// sync.Once singleton since the pure-Go forward pass, #468), and the
+	// engine-is-a-singleton discipline predates that — it lives for the
+	// process and is never closed here. session.Close is idempotent.
 	cleanup := func() {
 		_ = vadSession.Close()
 	}
@@ -229,8 +227,8 @@ func buildConversation(d conversationDeps) (*orchestrator.Conversation, *Roster,
 	// stream (codec stamps Frame.UserID) opens its own VAD lane, so utterances are
 	// segmented and attributed per speaker. The lane factory builds a fresh Silero
 	// session PER lane from the SAME process-global engine (NewSession is cheap; the
-	// engine is the ONNX singleton, never re-created) and its close releases that
-	// lane's ONNX inferencer on reap (risk (b)). The default lane keeps vadSession;
+	// engine is a process singleton, never re-created) and its close releases that
+	// lane's inferencer on reap (risk (b)). The default lane keeps vadSession;
 	// the factory builds only the non-default lanes.
 	laneVADFactory := func() (*orchestrator.VAD, func(), error) {
 		sess, err := engine.NewSession(vad.Config{
@@ -423,7 +421,7 @@ func engineFactory(provider llm.Provider, reg *tool.Registry, language string, s
 // AND the wired recognizer implements [stt.StreamingRecognizer], else nil (the
 // byte-for-byte batch default). It is the selection seam (ADR-0042, issue #180):
 // keeping it a small pure function lets the gating be unit-tested without standing
-// up the whole Silero/ONNX pipeline. The provider label is elevenlabs (the only
+// up the whole Silero VAD pipeline. The provider label is elevenlabs (the only
 // streaming STT adapter in the MVP matrix, ADR-0039).
 func buildStreamManager(recognizer stt.Recognizer, streaming bool, stageMetrics observe.StageRecorder, log *slog.Logger) *orchestrator.StreamManager {
 	if !streaming {

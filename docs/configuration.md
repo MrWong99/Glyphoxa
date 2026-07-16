@@ -33,8 +33,8 @@ The fastest way to a running instance is **Docker Compose** (§9) or the
 
 ## 1. Prerequisites
 
-- **Go 1.26+** and a C toolchain — the build runs with `CGO_ENABLED=1`
-  (Makefile).
+- **Go 1.26+** — the whole stack is pure Go (`CGO_ENABLED=0`, Makefile): no C
+  toolchain, and the binary is fully static.
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go
   binary embeds; without it you get a blank placeholder page (see §3).
 - **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs
@@ -255,10 +255,6 @@ DISCORD_OAUTH_CLIENT_ID=CHANGE_ME
 DISCORD_OAUTH_CLIENT_SECRET=CHANGE_ME
 DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
 GLYPHOXA_OPERATOR_IDS=000000000000000000
-# Uncomment ONLY if you preinstalled the ONNX Runtime at this path — the value is
-# used verbatim with no existence check, so a wrong/missing path breaks the VAD.
-# Left commented, the VAD auto-downloads to /var/cache/glyphoxa on first use.
-# GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
 EOF
 sudo chmod 0600 /etc/glyphoxa/env    # holds secrets
 
@@ -275,15 +271,12 @@ curl -fsS http://127.0.0.1:8080/     # SPA served → login screen reachable
 
 Validate the unit file itself (no host state needed) with
 `systemd-analyze verify deploy/glyphoxa.service`. The unit is hardened
-(`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp`). The
-service user has no home, so `ProtectHome=true` would block the Silero VAD's
-default `$HOME/.cache` download of the ONNX Runtime: the unit therefore sets
-`XDG_CACHE_HOME` to a systemd-managed `CacheDirectory` (`/var/cache/glyphoxa`).
-Pointing `GLYPHOXA_ONNX_LIB` at a preinstalled `libonnxruntime.so` (as the env
-file above does) skips that download entirely — recommended if you run the voice
-loop. `/etc/glyphoxa/env` is required (no `-` prefix on `EnvironmentFile`): a
-missing file fails the unit up front rather than crash-looping the binary on
-absent secrets.
+(`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`, `PrivateTmp`); the
+binary is fully static and self-contained (the Silero VAD runs as a pure-Go
+forward pass embedded in it — nothing is downloaded or cached at runtime), so
+no writable cache directory is needed. `/etc/glyphoxa/env` is required (no `-`
+prefix on `EnvironmentFile`): a missing file fails the unit up front rather
+than crash-looping the binary on absent secrets.
 
 ## Session highlights (rollover tape)
 
@@ -335,7 +328,6 @@ used provider needs are required.
 | `GLYPHOXA_OPERATOR_IDS` | `web`/`all` | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). Empty, separators-only, or non-numeric entries ⇒ fatal. |
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
-| `GLYPHOXA_ONNX_LIB` | optional | Explicit path to the ONNX Runtime lib for the Silero VAD. |
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
 | `GEMINI_API_KEY` | if Gemini used | LLM / S2S provider key. |

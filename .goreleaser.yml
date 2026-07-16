@@ -8,28 +8,19 @@ builds:
   - id: glyphoxa
     main: ./cmd/glyphoxa
     binary: glyphoxa
-    # opus + dave are pure Go (pion/opus + dave-go); no libopus/libdave to
-    # cross-compile against anymore. CGO stays on for the ONNX/silero binding.
+    # The whole stack is pure Go: opus + dave since the pion/opus + dave-go
+    # migration (#467), the Silero VAD since the bespoke pure-Go forward pass
+    # (#468). CGO_ENABLED=0 gives fully static binaries and native
+    # cross-compilation — no per-arch C toolchains.
     flags:
       - -tags=opus,dave
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     goos:
       - linux
     goarch:
       - amd64
       - arm64
-    overrides:
-      - goos: linux
-        goarch: amd64
-        env:
-          - CC=x86_64-linux-gnu-gcc
-          - CXX=x86_64-linux-gnu-g++
-      - goos: linux
-        goarch: arm64
-        env:
-          - CC=aarch64-linux-gnu-gcc
-          - CXX=aarch64-linux-gnu-g++
     ldflags:
       - -s -w
 

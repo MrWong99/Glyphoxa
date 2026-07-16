@@ -886,7 +886,7 @@ func TestFatalLoopErrorRecordsFailed(t *testing.T) {
 func TestPlainLoopErrorRecordsFailedLoopError(t *testing.T) {
 	store := newFakeStore()
 	mgr := newManager(t, store, func(context.Context, wirenpc.Config) error {
-		return errors.New("silero: onnx init failed")
+		return errors.New("silero: vad init failed")
 	}, true)
 
 	vs, err := mgr.Start(context.Background(), uuid.New(), uuid.New())

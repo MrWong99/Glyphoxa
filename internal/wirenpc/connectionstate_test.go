@@ -19,7 +19,7 @@ import (
 // publishes connection.state{connecting} BEFORE the provider is consulted, returns
 // the classified *FatalError (no retry), and publishes a terminal
 // connection.state{failed} carrying the readable reason on cfg.Bus. The provider
-// error short-circuits before any Discord/ONNX work, so the test needs no network.
+// error short-circuits before any Discord/VAD work, so the test needs no network.
 func TestRun_PublishesConnectingThenFailedOnFatalClient(t *testing.T) {
 	bus := voiceevent.NewBus()
 

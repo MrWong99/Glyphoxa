@@ -123,7 +123,7 @@ type Segmenter struct {
 	// closed flag). Bind's returned cancel sets it FIRST under mu; laneFor and
 	// dispatchTranscription check it. Once set, a still-running Process (an audio loop
 	// that has not yet stopped) can no longer resurrect a reaped lane — its frames
-	// funnel to the default lane — so every factory-built lane's ONNX session is closed
+	// funnel to the default lane — so every factory-built lane's VAD session is closed
 	// exactly once by teardown and none leaks (#343).
 	closed bool
 	bus    *voiceevent.Bus
@@ -154,7 +154,7 @@ type Segmenter struct {
 type lane struct {
 	id       string // the lane's SpeakerID ("" = default lane)
 	vad      *VAD
-	closeVAD func() // releases the factory-built VAD's ONNX session; nil for the default lane
+	closeVAD func() // releases the factory-built VAD's Silero session; nil for the default lane
 
 	listening bool
 	buf       []audio.Frame
@@ -175,7 +175,7 @@ type lane struct {
 }
 
 // LaneVADFactory builds a fresh Speaker Lane VAD plus its close func (which
-// releases the ONNX session so a reaped lane does not leak an inferencer, ADR-0050
+// releases the Silero session so a reaped lane does not leak an inferencer, ADR-0050
 // risk (b)). It returns an error the [Segmenter] degrades on: the speaker's frames
 // fall back to the default lane rather than dropping.
 type LaneVADFactory func() (v *VAD, close func(), err error)
@@ -353,7 +353,7 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 	return func() {
 		unsubStart()
 		unsubEnd()
-		// Tear down every lane's stream and every FACTORY-built lane's VAD (the ONNX
+		// Tear down every lane's stream and every FACTORY-built lane's VAD (the Silero
 		// session — ADR-0050 risk (b)). The default lane's VAD is caller-owned and is
 		// NOT closed here. Under mu we CAPTURE each lane's cancel/close funcs, null them,
 		// and drop the non-default lanes from the map — so a concurrent reap sweep (still
@@ -366,7 +366,7 @@ func (s *Segmenter) Bind(ctx context.Context, bus *voiceevent.Bus) (cancel func(
 		s.mu.Lock()
 		// Flip the terminal flag FIRST (mirrors #157: Shutdown sets closed before it
 		// unwinds), so a Process racing this teardown sees closed in laneFor and cannot
-		// re-open a lane we are about to close — no resurrection, no leaked ONNX session.
+		// re-open a lane we are about to close — no resurrection, no leaked VAD session.
 		s.closed = true
 		tds := make([]teardown, 0, len(s.lanes))
 		for id, ln := range s.lanes {
@@ -544,7 +544,7 @@ func (s *Segmenter) laneFor(sp string) (*lane, error) {
 	// the retry AND the repeat onError (finding 3 — the factory was retried and
 	// onError fired ~31×/s before this). Once teardown has flipped closed, funnel to
 	// the default lane too — a stopping audio loop must not resurrect a reaped lane and
-	// leak a fresh ONNX session teardown will never close (#343).
+	// leak a fresh VAD session teardown will never close (#343).
 	if sp == "" || s.laneVADFactory == nil || s.degraded[sp] || s.closed {
 		return s.lanes[""], nil
 	}
@@ -589,7 +589,7 @@ func (s *Segmenter) newLaneVAD() (v *VAD, closeVAD func(), err error) {
 // reapIdleLanes closes every non-default lane idle past laneIdleTTL, on the
 // amortised [laneReapSweepEvery] cadence (ADR-0050 lane lifecycle). A reaped lane's
 // still-buffered utterance is FLUSHED (dispatched, not dropped), its stream cancelled
-// and its VAD's ONNX session closed (risk (b)). The default lane is never reaped.
+// and its VAD's Silero session closed (risk (b)). The default lane is never reaped.
 func (s *Segmenter) reapIdleLanes() {
 	s.mu.Lock()
 	s.sweepCalls++

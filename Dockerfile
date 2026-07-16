@@ -5,63 +5,31 @@
 # There is ONE image. `mode` and all config (Postgres URL, provider keys, guild/
 # channel, etc.) are supplied at RUNTIME via args/env — there are no per-mode
 # images. The build stage compiles the live binary with the production tags
-# (`opus dave` — both pure Go since the pion/opus + dave-go migration; CGO
-# remains only for the ONNX/silero binding), exactly as the Makefile / CI do.
-# The runtime stage is a slim glibc
-# base (distroless deferred, ADR-0034) carrying the binary plus its one native
-# runtime dep: a bundled libonnxruntime (the version the Silero VAD pins in
-# pkg/voice/vad/silero/runtime.go — dlopen'd at runtime, not linked).
-# GLYPHOXA_ONNX_LIB points at that bundled lib so the VAD never downloads a
-# runtime at container start.
+# (`opus dave`) and CGO_ENABLED=0: the whole stack is pure Go since the
+# pion/opus + dave-go migration (#467) and the bespoke pure-Go Silero VAD
+# forward pass (#468), so the binary is fully static. The runtime stage is
+# FROM scratch (ADR-0034 amendment): the static binary plus CA certificates —
+# no libc, no shared libs, no ldconfig, no shell.
 #
-# The embedded Silero model (pkg/voice/vad/silero/data/silero_vad.onnx) and the
-# SQL migrations (internal/storage/migrations/*.sql) are go:embed'd into the
-# binary — they need no separate runtime files.
+# The embedded Silero model (pkg/voice/vad/silero/data/silero_vad_op18_ifless.onnx),
+# the SQL migrations (internal/storage/migrations/*.sql), and the SPA bundle
+# are go:embed'd into the binary — they need no separate runtime files.
 
 # ---------------------------------------------------------------------------
 # Build args — pinned versions live here so a bump is one obvious edit.
-# ONNX_VERSION MUST match onnxRuntimeVersion in pkg/voice/vad/silero/runtime.go;
-# the smoke test fails loudly if the bundled lib is missing, but it cannot tell
-# you the version drifted, so keep these in lockstep.
 # ---------------------------------------------------------------------------
 # Pinned to the exact patch go.mod requires (go-version-file equivalent for the
 # image build; golang:1.26-trixie can lag a fresh patch release behind go.dev).
 ARG GO_VERSION=1.26.5
-ARG ONNX_VERSION=1.26.0
 
 # ===========================================================================
-# Stage: build — compile the live binary + gather the native runtime deps.
-# Debian trixie (glibc 2.41) so the CGO toolchain and the runtime base agree on
-# libc. (trixie is no longer FORCED by anything — the prebuilt libdave that
-# pinned GLIBC_2.38 is gone with the dave-go migration — it is simply the
-# current stable matching the runtime stage below.)
+# Stage: build — compile the fully static live binary.
 # ===========================================================================
 FROM golang:${GO_VERSION}-trixie AS build
-ARG ONNX_VERSION
 
-ENV CGO_ENABLED=1
-
-# Build/runtime native deps:
-#   - build-essential: the C compiler CGO needs for the ONNX/silero binding.
-#   - curl/unzip: fetch the ONNX runtime tarball.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-		ca-certificates \
-		build-essential \
-		curl \
-		unzip \
-	&& rm -rf /var/lib/apt/lists/*
-
-# --- ONNX Runtime (the exact version the Silero VAD pins) ------------------
-# Bundled so GLYPHOXA_ONNX_LIB can point at it and the VAD never reaches the
-# network at container start (ADR-0034). Pulled from the same Microsoft release
-# pkg/voice/vad/silero/runtime.go resolves; we keep just the lib/ payload.
-RUN curl -fsSL \
-		"https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz" \
-		-o /tmp/onnxruntime.tgz \
-	&& mkdir -p /opt/onnxruntime/lib \
-	&& tar -xzf /tmp/onnxruntime.tgz -C /tmp \
-	&& cp -P /tmp/onnxruntime-linux-x64-${ONNX_VERSION}/lib/libonnxruntime.so* /opt/onnxruntime/lib/ \
-	&& rm /tmp/onnxruntime.tgz
+# CGO off end-to-end (#468): no C toolchain, nothing to apt-get. The base
+# image's ca-certificates are copied into the runtime stage below.
+ENV CGO_ENABLED=0
 
 WORKDIR /src
 
@@ -78,48 +46,38 @@ RUN go mod download
 # gen/, so this COPY brings them in; the go build below then compiles them.
 COPY . .
 
-# Compile the live binary with the production tags. Both tags are pure Go;
-# CGO stays on for the ONNX/silero binding. ldflags `-s -w` strip debug info,
-# matching goreleaser.
+# Compile the live binary with the production tags — all pure Go. ldflags
+# `-s -w` strip debug info, matching goreleaser.
 RUN go build -tags "opus dave" -ldflags "-s -w" \
 		-o /out/glyphoxa ./cmd/glyphoxa
 
+# Fail the build immediately if a CGO dependency ever creeps back in: a static
+# binary is the load-bearing property that lets the runtime stage be scratch.
+RUN ldd /out/glyphoxa 2>&1 | grep -q 'not a dynamic executable'
+
 # ===========================================================================
-# Stage: runtime — slim glibc base carrying the binary + its one native dep.
-# trixie-slim matches the build stage's glibc.
+# Stage: runtime — FROM scratch (ADR-0034 amendment, #468): the static binary
+# plus only what genuinely cannot be embedded.
 # ===========================================================================
-FROM debian:trixie-slim AS runtime
-ARG ONNX_VERSION
+FROM scratch AS runtime
 
-# Runtime-only system deps: just ca-certificates so outbound TLS to the
-# providers works. No build tooling, no -dev packages — the codec and DAVE are
-# pure Go; the only native lib is the dlopen'd ONNX runtime below.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-		ca-certificates \
-	&& rm -rf /var/lib/apt/lists/*
+# CA certificates so outbound TLS to the providers works. The only file the
+# image carries besides the binary — tzdata is not needed (the app never does
+# zone-local time math) and there is no libc to configure.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-# Bundled ONNX runtime (lib + its versioned soname symlinks).
-COPY --from=build /opt/onnxruntime/lib/ /usr/local/lib/
-
-# Refresh the dynamic linker cache so /usr/local/lib libs resolve without
-# LD_LIBRARY_PATH. The smoke test's `ldd` assertion verifies this worked.
-RUN ldconfig
-
-# The binary itself. On $PATH so `glyphoxa <mode>` / `glyphoxa migrate` just work.
+# The binary itself, at the conventional path (also what container-smoke.sh
+# extracts and asserts on).
 COPY --from=build /out/glyphoxa /usr/local/bin/glyphoxa
 
-# Point the Silero VAD at the bundled runtime so it never downloads one at start
-# (ADR-0034). ensureRuntime() short-circuits on this env var.
-ENV GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
-
-# Run as a non-root user (uid/gid 65532, the conventional "nonroot" id). The app
-# needs no write access to its own files at runtime; config comes from env.
-RUN groupadd --gid 65532 glyphoxa \
-	&& useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin glyphoxa
+# Run as a non-root user (uid/gid 65532, the conventional "nonroot" id).
+# Numeric — scratch has no /etc/passwd, and none is needed: the app looks up
+# no user database and needs no home directory (config comes from env).
 USER 65532:65532
 
 # Entry is the binary; `mode` and config are args/env at runtime (ADR-0034).
-# Default to `all` mode per ADR-0005 (the self-host default); override with e.g.
+# Absolute path — scratch has no shell and no guaranteed $PATH. Default to
+# `all` mode per ADR-0005 (the self-host default); override with e.g.
 # `docker run … glyphoxa -mode voice -guild … -channel …` or `glyphoxa migrate up`.
-ENTRYPOINT ["glyphoxa"]
+ENTRYPOINT ["/usr/local/bin/glyphoxa"]
 CMD ["-mode", "all"]

@@ -40,12 +40,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Cache ONNX runtime
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/glyphoxa/onnxruntime
-          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
-
       # Live record run — drives the real ElevenLabs API and rewrites the
       # cassette in-place. Cassette diff is not committed back; this job
       # verifies the workflow still works end-to-end.

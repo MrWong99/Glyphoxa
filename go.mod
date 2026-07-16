@@ -11,7 +11,6 @@ require (
 	github.com/pressly/goose/v3 v3.27.2
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
-	github.com/yalue/onnxruntime_go v1.31.0
 	gopkg.in/Regis24GmbH/go-phonetics.v3 v3.0.2
 	gopkg.in/yaml.v3 v3.0.1
 )
