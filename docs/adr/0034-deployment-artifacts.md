@@ -31,3 +31,19 @@ libdave's glibc 2.38 requirement (kept as current stable). The
 distroless/scratch deferral above should be revisited once the ONNX/CGO
 dependency falls (tracked as the pure-Go Silero forward-pass follow-up): with
 it gone the binary can build `CGO_ENABLED=0`, statically linked, `FROM scratch`.
+
+**Amendment (2026-07-16, #468 pure-Go Silero — the runtime stage is `FROM scratch`):**
+the deferral above is resolved. The Silero VAD now runs as a bespoke pure-Go
+forward pass of the upstream "op18 ifless" export (embedded via go:embed, like
+the migrations and the SPA), so the last CGO dependency is gone: the binary
+builds `CGO_ENABLED=0`, statically linked. The runtime stage is `FROM scratch`
+carrying exactly two files — the static binary and the CA bundle
+(`/etc/ssl/certs/ca-certificates.crt`, copied from the build stage for outbound
+provider TLS). No glibc base, no shared libs, no ldconfig, no shell; tzdata is
+not included (the app does no zone-local time math) and the non-root user is
+the numeric `USER 65532:65532` (scratch has no /etc/passwd; none is needed).
+`GLYPHOXA_ONNX_LIB` and the runtime download/dlopen machinery are deleted, the
+Helm chart's `voice.onnxLib` value with them. The container smoke test now
+asserts the static property directly (ldd: "not a dynamic executable", no
+`/bin/sh` in the image) and CI's fast gate builds the production binary
+`CGO_ENABLED=0` to keep the property from regressing.

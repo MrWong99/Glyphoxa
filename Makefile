@@ -1,7 +1,9 @@
 # Glyphoxa Makefile
-# Requires: Go 1.26+, CGO_ENABLED=1
+# Requires: Go 1.26+. The whole stack is pure Go (#467 codec/DAVE, #468 VAD):
+# CGO stays off so every build is statically linked and trivially
+# cross-compilable.
 
-export CGO_ENABLED := 1
+export CGO_ENABLED := 0
 
 .PHONY: build test lint vet fmt check clean refresh-silero-model install-lint proto proto-check proto-lint spa docker-build docker-smoke docker-smoke-test helm-lint helm-test helm-validate helm-validate-test
 
@@ -45,17 +47,22 @@ check: fmt vet test
 	@echo "All checks passed ✓"
 
 # Refresh the embedded Silero VAD ONNX model from upstream. Run when bumping
-# silero versions; commit the updated file and the new SHA-256 in
-# pkg/voice/vad/silero/data/README.md.
-SILERO_MODEL_URL := https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
-SILERO_MODEL_DST := pkg/voice/vad/silero/data/silero_vad.onnx
+# silero versions; commit the updated file, the new SHA-256 in
+# pkg/voice/vad/silero/data/README.md, AND regenerated goldens
+# (scripts/gen-silero-golden.py) — the golden equivalence test is the
+# acceptance gate for any model change (#468). The pure-Go forward pass
+# consumes the op18 "ifless" export; the legacy opset-16 export (nested Ifs,
+# LSTM op) is NOT loadable by it.
+SILERO_MODEL_URL := https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad_op18_ifless.onnx
+SILERO_MODEL_DST := pkg/voice/vad/silero/data/silero_vad_op18_ifless.onnx
 
 refresh-silero-model:
 	curl -fsSL "$(SILERO_MODEL_URL)" -o "$(SILERO_MODEL_DST)"
 	@echo "Updated $(SILERO_MODEL_DST)"
 	@echo "New SHA-256:"
 	@sha256sum "$(SILERO_MODEL_DST)"
-	@echo "Update the SHA-256 in pkg/voice/vad/silero/data/README.md before committing."
+	@echo "Update the SHA-256 in pkg/voice/vad/silero/data/README.md and regenerate"
+	@echo "the goldens (scripts/gen-silero-golden.py) before committing."
 
 # Protobuf code generation via buf.
 # Install: go install github.com/bufbuild/buf/cmd/buf@latest
@@ -80,8 +87,8 @@ clean:
 
 # --- Container image (ADR-0034) --------------------------------------------
 # One multi-stage image for the single binary; `mode`/config are runtime args.
-# The only native piece left is CGO for the ONNX/silero binding (the codec,
-# DAVE, and the retired whisper.cpp build are gone — see ADR-0004 amendment).
+# Fully pure Go since #468 (the ONNX/silero CGO binding is gone): the runtime
+# stage is FROM scratch carrying the static binary + CA certs.
 DOCKER_IMAGE ?= glyphoxa:smoke
 
 # Depends on `proto`: gen/ is gitignored and NOT generated inside the image
@@ -102,9 +109,9 @@ spa:
 	cd web && npm ci && npm run build
 
 # Run the container smoke test (issue #31) against $(DOCKER_IMAGE). Asserts the
-# CLI works, ldd resolves every native dep, the bundled ONNX runtime exists, the
-# process is non-root, and the embedded web root is the real console (#114).
-# Build the image first (make docker-build).
+# CLI works, the binary is fully static (#468), the image is scratch-minimal
+# with CA certs, the process is non-root, and the embedded web root is the
+# real console (#114). Build the image first (make docker-build).
 docker-smoke:
 	./scripts/container-smoke.sh $(DOCKER_IMAGE)
 

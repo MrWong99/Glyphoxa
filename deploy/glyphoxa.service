@@ -19,11 +19,6 @@
 #        DISCORD_OAUTH_CLIENT_SECRET=...
 #        DISCORD_OAUTH_REDIRECT_URL=http://your-host:8080/auth/discord/callback
 #        GLYPHOXA_OPERATOR_IDS=000000000000000000
-#      Optional — commented by default. The value is used verbatim with NO
-#      existence check, so set it ONLY if you actually preinstalled the lib:
-#        # GLYPHOXA_ONNX_LIB=/usr/local/lib/libonnxruntime.so
-#      Left unset, the Silero VAD auto-downloads the ONNX Runtime to the
-#      CacheDirectory (/var/cache/glyphoxa) on the first Voice Session.
 #   4. Install this file to /etc/systemd/system/glyphoxa.service, then:
 #        systemctl daemon-reload && systemctl enable --now glyphoxa
 #        systemctl status glyphoxa   # smoke check: active (running)
@@ -48,24 +43,15 @@ Group=glyphoxa
 # and leaves it crash-looping on the boot preflight naming each missing var.
 EnvironmentFile=/etc/glyphoxa/env
 
-# The Silero VAD caches a downloaded ONNX Runtime under $XDG_CACHE_HOME (Go's
-# os.UserCacheDir). The service user has no home and ProtectHome=true blocks
-# $HOME/.cache anyway, so point the cache at a systemd-managed, service-owned
-# directory (CacheDirectory creates /var/cache/glyphoxa, mode 0755, owned by the
-# service user). Set GLYPHOXA_ONNX_LIB in the env file to a preinstalled lib to
-# skip the download entirely (then this cache stays unused).
-CacheDirectory=glyphoxa
-Environment=XDG_CACHE_HOME=/var/cache/glyphoxa
-
 ExecStart=/usr/local/bin/glyphoxa -mode all
 Restart=on-failure
 RestartSec=5
 
 # --- Hardening -------------------------------------------------------------
-# The app needs no write access to the system beyond its cache dir: config comes
-# from the env file. ProtectSystem=full keeps /usr, /boot, /etc read-only;
-# CacheDirectory carves out the one writable path (/var/cache/glyphoxa) the VAD
-# needs, so ProtectHome=true can stay on.
+# The app needs no write access to the system at all: config comes from the env
+# file, and since #468 the binary is fully static and self-contained (the
+# Silero VAD is a pure-Go forward pass — nothing is downloaded or cached at
+# runtime). ProtectSystem=full keeps /usr, /boot, /etc read-only.
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true

@@ -25,9 +25,9 @@ joining one Discord guild+channel and giving the seeded NPC a live voice loop.
   can't get the pod killed); readiness targets /readyz (a DB ping — 200 only when
   the schema is current and reachable). The port is advertised for Prometheus via
   prometheus.io/* pod annotations (annotation-based discovery; no operator CRD).
-- GLYPHOXA_ONNX_LIB is set by the image (#31 Dockerfile points it at the bundled
-  libonnxruntime), so the pod relies on that by default and only overrides it
-  when voice.onnxLib is set.
+- The Silero VAD is a pure-Go forward pass embedded in the binary (#468): no
+  ONNX runtime library, no GLYPHOXA_ONNX_LIB, nothing fetched or dlopen'd at
+  boot.
 */}}
 {{- if .Values.voice.enabled }}
 {{- $metricsAddr := printf ":%d" (int .Values.voice.metricsPort) }}
@@ -78,9 +78,9 @@ spec:
           image: {{ include "glyphoxa.voice.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.voice.securityContext }}
-          # Hardened by default (overridable). The image runs as USER 65532 (#31)
-          # and GLYPHOXA_ONNX_LIB points at the bundled lib so the VAD never
-          # downloads/writes a runtime at boot — so a locked-down context holds.
+          # Hardened by default (overridable). The image runs as USER 65532
+          # (#31, scratch since #468) and the pure-Go VAD is embedded in the
+          # binary, so nothing writes at boot — a locked-down context holds.
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -128,11 +128,6 @@ spec:
             # JSON logs for cluster log aggregation (ADR-0032).
             - name: GLYPHOXA_LOG_FORMAT
               value: json
-            {{- with .Values.voice.onnxLib }}
-            # Override the image's bundled libonnxruntime path only when set.
-            - name: GLYPHOXA_ONNX_LIB
-              value: {{ . | quote }}
-            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.voice.metricsPort }}

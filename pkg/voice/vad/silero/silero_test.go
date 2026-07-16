@@ -34,6 +34,9 @@ type mockInferencer struct {
 
 	closed   bool
 	closeErr error
+
+	// resets counts reset invocations.
+	resets int
 }
 
 func (m *mockInferencer) infer(samples []float32, sr int64, state []float32) (float32, []float32, error) {
@@ -63,6 +66,12 @@ func (m *mockInferencer) close() error {
 	defer m.mu.Unlock()
 	m.closed = true
 	return m.closeErr
+}
+
+func (m *mockInferencer) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resets++
 }
 
 func (m *mockInferencer) callAt(i int) inferCall {
@@ -223,37 +232,37 @@ func TestValidateConfig_SpeechThresholdOutOfRange(t *testing.T) {
 			name: "invalid chunk size for 16kHz",
 			cfg: vad.Config{
 				SampleRate:       16000,
-				FrameSizeMs:      30, // 16000*30/1000 = 480, not in {512,1024,1536}
+				FrameSizeMs:      30, // 16000*30/1000 = 480, not 512
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.3,
 			},
 			wantErr: true,
 		},
 		{
-			name: "valid 8kHz 64ms",
+			name: "valid 8kHz 32ms",
 			cfg: vad.Config{
 				SampleRate:       8000,
-				FrameSizeMs:      64, // 8000*64/1000 = 512, valid
+				FrameSizeMs:      32, // 8000*32/1000 = 256, the trained 8 kHz window
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.3,
 			},
 			wantErr: false,
 		},
 		{
-			name: "valid 8kHz 96ms",
+			name: "oversized chunk for 16kHz",
 			cfg: vad.Config{
-				SampleRate:       8000,
-				FrameSizeMs:      96, // 8000*96/1000 = 768, valid
+				SampleRate:       16000,
+				FrameSizeMs:      64, // 1024 samples: crashed at inference time on the old ORT stack, now a config error
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.3,
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "invalid chunk size for 8kHz",
 			cfg: vad.Config{
 				SampleRate:       8000,
-				FrameSizeMs:      50, // 8000*50/1000 = 400, not in {256,512,768}
+				FrameSizeMs:      50, // 8000*50/1000 = 400, not 256
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.3,
 			},
@@ -474,16 +483,6 @@ func TestWithMinSilenceFrames(t *testing.T) {
 	}
 }
 
-func TestWithONNXLibPath(t *testing.T) {
-	t.Parallel()
-
-	e := &Engine{}
-	WithONNXLibPath("/opt/onnx/lib")(e)
-	if e.onnxLibPath != "/opt/onnx/lib" {
-		t.Errorf("onnxLibPath = %q, want %q", e.onnxLibPath, "/opt/onnx/lib")
-	}
-}
-
 // ─── Close with inferencer error ────────────────────────────────────────
 
 func TestClose_InferencerError(t *testing.T) {
@@ -492,7 +491,7 @@ func TestClose_InferencerError(t *testing.T) {
 	cfg := validConfig()
 	m := &mockInferencer{
 		prob:     0.1,
-		closeErr: fmt.Errorf("onnx cleanup failed"),
+		closeErr: fmt.Errorf("inferencer cleanup failed"),
 	}
 	sess := makeSession(t, cfg, m, 3, 15)
 
@@ -528,10 +527,10 @@ func TestNewSession_ValidConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "16kHz_64ms",
+			name: "16kHz_equal_thresholds",
 			cfg: vad.Config{
 				SampleRate:       16000,
-				FrameSizeMs:      64,
+				FrameSizeMs:      32,
 				SpeechThreshold:  0.5,
 				SilenceThreshold: 0.5,
 			},
@@ -880,6 +879,12 @@ func TestReset_ClearsState(t *testing.T) {
 		if v != 0 {
 			t.Errorf("lstmState[%d] after Reset: %v, want 0", i, v)
 		}
+	}
+
+	// The inferencer's own recurrent state must have been reset too — the real
+	// engine keeps LSTM state and audio context inside the inferencer.
+	if m.resets != 1 {
+		t.Errorf("inferencer resets after Reset: %d, want 1", m.resets)
 	}
 
 	// The next frame after Reset should start counting again from scratch.

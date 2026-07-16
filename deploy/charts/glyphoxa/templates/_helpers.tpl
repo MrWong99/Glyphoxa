@@ -121,8 +121,8 @@ appVersion so an unset tag still pins a matching image.
 {{/*
 The voice Deployment's image. It defaults to the shared [glyphoxa.image] (one
 image, ADR-0034) but lets voice.image.repository/tag override either field
-independently — handy for pinning the voice pod to a build with the native opus/
-ONNX tags without moving the migrate/seed Jobs.
+independently — handy for pinning the voice pod to a different build without
+moving the migrate/seed Jobs.
 */}}
 {{- define "glyphoxa.voice.image" -}}
 {{- $repo := .Values.voice.image.repository | default .Values.image.repository -}}

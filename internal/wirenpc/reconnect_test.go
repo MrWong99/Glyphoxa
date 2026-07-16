@@ -127,7 +127,7 @@ func TestRunWithReconnect_ResetsBackoffAfterHealthySession(t *testing.T) {
 // TestRunWithReconnect_ImmediatePostJoinFailureKeepsBackoffGrowing pins the
 // issue-#141 fix: a cycle that JOINS successfully (connected() fires) but then
 // fails immediately — the codec-less build's ErrCodecUnavailable, a persistent
-// VAD/ONNX init failure — must count as a connect failure, NOT a healthy
+// VAD init failure — must count as a connect failure, NOT a healthy
 // session. The delays must keep growing exponentially to the cap; a reset here
 // would hammer Discord's voice join at 1 Hz forever (the exact failure mode
 // the #45 backoff was written to prevent). Uses the production

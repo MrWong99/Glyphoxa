@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 #
 # container-smoke.sh — the executable acceptance spec for the Glyphoxa OCI image
-# (issue #31, ADR-0034). Runs against an already-built image and asserts the
-# image is actually runnable: the CLI works, every native dependency the live
-# build links is resolvable inside the container, the bundled ONNX runtime is
-# present (so the Silero VAD never reaches the network at start, ADR-0034), and
-# the process is a non-root user.
+# (issue #31, ADR-0034; scratch image since #468). Runs against an already-built
+# image and asserts the image is actually runnable AND minimal: the CLI works,
+# the binary is fully static (CGO_ENABLED=0 — issue #468's acceptance
+# criterion), the image is genuinely scratch (no shell), CA certificates are
+# present for outbound TLS, and the process is a non-root user.
+#
+# The image has no shell, so assertions that used to run inside the container
+# now run on the HOST against the binary extracted via `docker cp`.
 #
 # Usage: scripts/container-smoke.sh [IMAGE]
 #   IMAGE defaults to "glyphoxa:smoke" (what `make docker-build` tags).
@@ -15,8 +18,6 @@ set -euo pipefail
 
 IMAGE="${1:-glyphoxa:smoke}"
 
-# Resolve the binary path and onnx-lib path once from the image's own config so
-# the assertions don't hard-code a layout the Dockerfile might change later.
 BIN_PATH="/usr/local/bin/glyphoxa"
 
 pass=0
@@ -28,18 +29,31 @@ bad() {
 	fail=$((fail + 1))
 }
 
-# run_in_image runs a command inside a throwaway container of $IMAGE, overriding
-# the entrypoint so we can invoke arbitrary shell assertions. Returns the
-# command's own exit status.
-run_in_image() {
-	docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c "$*"
+# Extraction scratchpad: a throwaway container of $IMAGE we `docker cp` from.
+# Populated lazily by extract_from_image; removed by the EXIT trap.
+EXTRACT_DIR="$(mktemp -d)"
+EXTRACT_CTR=""
+extract_cleanup() {
+	[ -n "$EXTRACT_CTR" ] && docker rm -f "$EXTRACT_CTR" >/dev/null 2>&1 || true
+	rm -rf "$EXTRACT_DIR"
+}
+trap extract_cleanup EXIT
+
+# extract_from_image SRC DST copies a path out of the (never-started) container
+# onto the host. Works for scratch images — no shell needed. Returns non-zero
+# if the path does not exist in the image.
+extract_from_image() {
+	if [ -z "$EXTRACT_CTR" ]; then
+		EXTRACT_CTR="$(docker create "$IMAGE")"
+	fi
+	docker cp "$EXTRACT_CTR:$1" "$2" >/dev/null 2>&1
 }
 
 # assert_spa is the embedded-console gate (#114, ADR-0034 amendment "the SPA
 # bundle is context-fed"). The image must serve the REAL Vite build at the web
 # root, not the committed placeholder index.html. The SPA is go:embed'd INTO the
-# binary (internal/spa/dist), so it is not a file on disk to stat — instead we
-# grep the binary for the distinguishing bytes:
+# binary (internal/spa/dist), so we grep the extracted binary for the
+# distinguishing bytes:
 #   - a real build overwrites index.html to reference a content-hashed bundle
 #     (/assets/index-<hash>.js|css), and go:embed bakes those bytes in;
 #   - the placeholder is a single <div id="root"> line with NO /assets/.
@@ -48,12 +62,17 @@ run_in_image() {
 # placeholder fails as loudly as a missing one.
 assert_spa() {
 	printf '[5] embedded web root is the real console, not the placeholder\n'
-	if run_in_image "grep -aEq '/assets/index-[A-Za-z0-9_-]+\.js' $BIN_PATH"; then
+	local bin="$EXTRACT_DIR/glyphoxa-spa"
+	if ! extract_from_image "$BIN_PATH" "$bin"; then
+		bad "could not extract $BIN_PATH from the image"
+		return
+	fi
+	if grep -aEq '/assets/index-[A-Za-z0-9_-]+\.js' "$bin"; then
 		ok 'binary embeds a hashed /assets/index-*.js reference (real console)'
 	else
 		bad 'no hashed /assets/ reference in the binary — embedded web root is the placeholder, not a real console build'
 	fi
-	if run_in_image "grep -aqF '<!doctype html><html><body><div id=\"root\"></div></body></html>' $BIN_PATH"; then
+	if grep -aqF '<!doctype html><html><body><div id="root"></div></body></html>' "$bin"; then
 		bad 'binary still contains the committed placeholder index.html one-liner (a real build must overwrite it)'
 	else
 		ok 'committed placeholder index.html one-liner is absent'
@@ -81,7 +100,7 @@ fi
 
 # SMOKE_ONLY=spa runs ONLY the embedded-console gate and exits. scripts/
 # container-smoke-test.sh uses this to point the gate at tiny placeholder/real
-# fixture images without the full native runtime the other checks assert.
+# fixture images without a full image build.
 if [ "${SMOKE_ONLY:-}" = "spa" ]; then
 	assert_spa
 	summary
@@ -102,73 +121,59 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. ldd on the binary resolves EVERY shared lib — no "not found".
-#    Since the pion/opus + dave-go migration the binary has NO link-time native
-#    deps beyond glibc (libopus and libdave are gone). libonnxruntime is
-#    deliberately NOT here: the Silero VAD dlopen()s it at runtime via
-#    ort.SetSharedLibraryPath($GLYPHOXA_ONNX_LIB) — it is never link-time linked,
-#    so it correctly does not appear in `ldd glyphoxa`. Its resolvability is
-#    asserted separately in step 3 (ldd on the .so itself), which is the check
-#    that actually predicts whether the runtime dlopen will succeed.
+# 2. The binary is fully static (issue #468 acceptance criterion): ldd on the
+#    extracted binary must report "not a dynamic executable". A static binary
+#    is the load-bearing property that lets the runtime stage be scratch —
+#    any CGO regression (a new native binding) fails here first.
 # ---------------------------------------------------------------------------
-printf '[2] ldd on the binary resolves every linked library (no "not found")\n'
-ldd_out="$(run_in_image "ldd $BIN_PATH" 2>&1)" || true
-note "ldd output:"
-printf '%s\n' "$ldd_out" | sed 's/^/      /'
-if printf '%s\n' "$ldd_out" | grep -qi 'not found'; then
-	bad 'ldd reported an unresolved shared library ("not found")'
+printf '[2] the binary is statically linked (ldd: "not a dynamic executable")\n'
+BIN_LOCAL="$EXTRACT_DIR/glyphoxa"
+if ! extract_from_image "$BIN_PATH" "$BIN_LOCAL"; then
+	bad "could not extract $BIN_PATH from the image"
 else
-	ok 'ldd reported no "not found" entries'
-fi
-# Inverse assertion: the former link-time deps must be GONE. If either name
-# reappears in ldd, a native linkage crept back in and the pure-Go migration
-# regressed.
-for lib in libopus libdave; do
-	if printf '%s\n' "$ldd_out" | grep -q "$lib"; then
-		bad "ldd links $lib (pure-Go migration regressed: no native codec/DAVE linkage expected)"
+	ldd_out="$(ldd "$BIN_LOCAL" 2>&1)" || true
+	note "ldd output:"
+	printf '%s\n' "$ldd_out" | sed 's/^/      /'
+	if printf '%s\n' "$ldd_out" | grep -qi 'not a dynamic executable'; then
+		ok 'ldd reports "not a dynamic executable" (fully static)'
 	else
-		ok "ldd does not link $lib"
-	fi
-done
-
-# ---------------------------------------------------------------------------
-# 3. The bundled ONNX runtime: $GLYPHOXA_ONNX_LIB is set in the image config (so
-#    the VAD short-circuits its download path — ADR-0034: no network fetch at
-#    container start), the file exists, AND its OWN shared-lib deps all resolve
-#    so the runtime dlopen() won't fail with "not found".
-# ---------------------------------------------------------------------------
-printf '[3] bundled ONNX runtime is set, present, and itself fully resolvable\n'
-onnx_lib="$(run_in_image 'printf "%s" "$GLYPHOXA_ONNX_LIB"')" || true
-if [ -z "$onnx_lib" ]; then
-	bad 'GLYPHOXA_ONNX_LIB is not set in the image config'
-else
-	note "GLYPHOXA_ONNX_LIB=$onnx_lib"
-	if run_in_image "test -e \"\$GLYPHOXA_ONNX_LIB\""; then
-		ok "ONNX runtime exists at \$GLYPHOXA_ONNX_LIB"
-	else
-		bad "no file at \$GLYPHOXA_ONNX_LIB ($onnx_lib)"
-	fi
-	onnx_ldd="$(run_in_image 'ldd "$GLYPHOXA_ONNX_LIB"' 2>&1)" || true
-	note "ldd \$GLYPHOXA_ONNX_LIB:"
-	printf '%s\n' "$onnx_ldd" | sed 's/^/      /'
-	if printf '%s\n' "$onnx_ldd" | grep -qi 'not found'; then
-		bad 'the bundled libonnxruntime has an unresolved dependency ("not found")'
-	else
-		ok 'libonnxruntime resolves all its own shared libs'
+		bad 'binary is dynamically linked — the pure-Go/CGO_ENABLED=0 migration (#468) regressed'
 	fi
 fi
 
 # ---------------------------------------------------------------------------
-# 4. The process runs as a non-root uid.
+# 3. The image is genuinely scratch-minimal: no shell to run (defense in
+#    depth — nothing to pivot to inside the container), and the CA bundle is
+#    present so outbound TLS to the providers works.
 # ---------------------------------------------------------------------------
-printf '[4] process runs as a non-root uid\n'
-uid="$(run_in_image 'id -u')" || true
-note "container uid: ${uid:-<unknown>}"
-if [ -n "${uid:-}" ] && [ "$uid" -ne 0 ]; then
-	ok "runs as non-root uid ($uid)"
+printf '[3] scratch minimalism: no shell, CA certificates present\n'
+if docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c 'true' >/dev/null 2>&1; then
+	bad 'image contains /bin/sh — expected a scratch runtime stage with no shell'
 else
-	bad "runs as root (uid=$uid) — expected a non-root user"
+	ok 'image has no /bin/sh (scratch runtime)'
 fi
+if extract_from_image /etc/ssl/certs/ca-certificates.crt "$EXTRACT_DIR/ca-certificates.crt"; then
+	ok 'CA bundle present at /etc/ssl/certs/ca-certificates.crt'
+else
+	bad 'no CA bundle at /etc/ssl/certs/ca-certificates.crt — outbound TLS to providers would fail'
+fi
+
+# ---------------------------------------------------------------------------
+# 4. The process runs as a non-root uid. The image has no `id` to exec, so
+#    assert the image CONFIG: a numeric non-zero USER is what the kubelet and
+#    dockerd enforce at start.
+# ---------------------------------------------------------------------------
+printf '[4] image config sets a non-root user\n'
+img_user="$(docker image inspect --format '{{.Config.User}}' "$IMAGE")" || true
+note "image config User: ${img_user:-<unset>}"
+case "${img_user%%:*}" in
+'' | 0 | root)
+	bad "image runs as root (User=${img_user:-<unset>}) — expected a non-root numeric user"
+	;;
+*)
+	ok "image config sets non-root user ($img_user)"
+	;;
+esac
 
 # ---------------------------------------------------------------------------
 # 5. The embedded web root is the REAL console build, not the placeholder (#114).
@@ -197,6 +202,7 @@ TESTDATA_DIR="$(cd "$(dirname "$0")/testdata" && pwd)"
 seed_cleanup() {
 	docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
 	docker network rm "$SMOKE_NET" >/dev/null 2>&1 || true
+	extract_cleanup
 }
 trap seed_cleanup EXIT
 

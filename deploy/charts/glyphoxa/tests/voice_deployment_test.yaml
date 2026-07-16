@@ -205,25 +205,14 @@ tests:
                 name: RELEASE-NAME-glyphoxa-db
                 key: app-secret
 
-  - it: relies on the image's bundled GLYPHOXA_ONNX_LIB by default
-    # The image already sets GLYPHOXA_ONNX_LIB to its bundled libonnxruntime path
-    # (#31 Dockerfile), so the chart does not override it by default.
+  - it: never sets GLYPHOXA_ONNX_LIB (pure-Go VAD since #468)
+    # The Silero VAD is a pure-Go forward pass embedded in the binary — there is
+    # no ONNX runtime library to point at, so the env var must not reappear.
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: GLYPHOXA_ONNX_LIB
-
-  - it: lets the operator override GLYPHOXA_ONNX_LIB when needed
-    set:
-      voice:
-        onnxLib: /custom/lib/libonnxruntime.so
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: GLYPHOXA_ONNX_LIB
-            value: /custom/lib/libonnxruntime.so
 
   - it: exposes the metrics port as a named container port
     asserts:
@@ -287,7 +276,7 @@ tests:
 
   - it: sets resource requests and limits
     # A long-lived serving pod must declare requests+limits so the scheduler can
-    # place it and the kubelet can cap it (the ONNX VAD + audio path are not free).
+    # place it and the kubelet can cap it (the Silero VAD + audio path are not free).
     asserts:
       - isNotNullOrEmpty:
           path: spec.template.spec.containers[0].resources.requests.cpu

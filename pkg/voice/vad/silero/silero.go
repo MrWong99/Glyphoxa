@@ -1,22 +1,23 @@
 // Package silero implements the vad.Engine interface using the Silero VAD v5
-// ONNX model via the yalue/onnxruntime_go binding.
+// model with a bespoke pure-Go forward pass (#468) — no ONNX Runtime, no CGO,
+// no shared libraries.
 //
-// The Silero VAD v5 model is embedded in the binary at build time (see
-// embed.go). The ONNX Runtime shared library (libonnxruntime.so) is resolved
-// on first use: GLYPHOXA_ONNX_LIB env var → per-user cache → download from the
-// official Microsoft release with SHA-256 verification. See runtime.go.
+// The Silero VAD v5 "op18 ifless" ONNX export is embedded in the binary at
+// build time (see embed.go). At engine creation the model's protobuf is parsed
+// once (onnx.go); each session compiles the branch for its sample rate into a
+// static execution plan (graph.go) and runs it per frame with zero
+// allocations.
 //
-// The Silero VAD v5 model supports sample rates of 8000 Hz and 16000 Hz only.
-// Each session maintains independent LSTM hidden state and a speech/silence
-// state machine, making the Engine safe for concurrent use across sessions.
+// The model supports 8000 Hz and 16000 Hz, with exactly one valid chunk size
+// each (256 and 512 samples — the window the model was trained on). Each
+// session maintains independent LSTM hidden state and a speech/silence state
+// machine, making the Engine safe for concurrent use across sessions.
 package silero
 
 import (
 	"fmt"
 	"math"
 	"sync"
-
-	ort "github.com/yalue/onnxruntime_go"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/audio"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/vad"
@@ -35,28 +36,34 @@ var supportedSampleRates = map[int]struct{}{
 	16000: {},
 }
 
-// validChunkSizes lists the accepted sample counts per frame for each sample
-// rate. Using an unsupported chunk size causes the model to produce near-zero
-// probabilities without returning an error.
+// validChunkSizes lists the accepted sample count per frame for each sample
+// rate: the exact window the model was trained on (512 samples at 16 kHz,
+// 256 at 8 kHz). Earlier revisions also advertised 2× and 3× multiples, but
+// those never worked: the previous ONNX-Runtime stack failed at inference
+// time on them, so rejecting them at config validation is strictly an
+// improvement (config error instead of a per-frame runtime error).
 var validChunkSizes = map[int]map[int]struct{}{
-	8000:  {256: {}, 512: {}, 768: {}},
-	16000: {512: {}, 1024: {}, 1536: {}},
+	8000:  {256: {}},
+	16000: {512: {}},
 }
 
-// initOnce guards the single ONNX Runtime environment initialisation.
-var (
-	initOnce sync.Once
-	initErr  error
-)
+// parsedModel lazily parses the embedded ONNX model exactly once per process.
+// Parse errors are persistent, matching the previous runtime-init behavior.
+var parsedModel = sync.OnceValues(func() (*onnxModel, error) {
+	return parseONNXModel(modelBytes)
+})
 
 // inferencer runs a single frame through the Silero model.
 //
-// The interface exists so tests can inject a mock implementation without
-// requiring an ONNX Runtime installation.
+// The interface exists so tests can inject a mock implementation and observe
+// the session state machine in isolation.
 type inferencer interface {
 	// infer takes audio samples and LSTM state, returns speech probability and
 	// the updated state for the next frame.
 	infer(samples []float32, sr int64, state []float32) (prob float32, stateN []float32, err error)
+	// reset clears the inferencer's recurrent state (LSTM state and audio
+	// context) so the next frame starts from a clean slate.
+	reset()
 	// close releases any resources held by the inferencer.
 	close() error
 }
@@ -76,29 +83,20 @@ func WithMinSilenceFrames(n int) Option {
 	return func(e *Engine) { e.minSilenceFrames = n }
 }
 
-// WithONNXLibPath overrides the path to the shared ONNX Runtime library
-// (e.g. "/usr/lib/libonnxruntime.so"). When unset, the runtime is resolved by
-// ensureRuntime: GLYPHOXA_ONNX_LIB env var, then the per-user cache, then a
-// pinned download from the official Microsoft release.
-func WithONNXLibPath(path string) Option {
-	return func(e *Engine) { e.onnxLibPath = path }
-}
-
-// Engine is a vad.Engine backed by the Silero VAD v5 ONNX model. It is safe
-// for concurrent use: multiple goroutines may call NewSession simultaneously
-// to create independent sessions.
+// Engine is a vad.Engine backed by the Silero VAD v5 model. It is safe for
+// concurrent use: multiple goroutines may call NewSession simultaneously to
+// create independent sessions.
 type Engine struct {
 	minSpeechFrames  int
 	minSilenceFrames int
-	onnxLibPath      string
 }
 
 // New creates a new Silero VAD Engine using the embedded model. Options can
 // override the defaults.
 //
-// The ONNX Runtime environment is initialised lazily on the first call and
-// shared for the lifetime of the process. Initialisation errors are persistent:
-// if the first call fails, all subsequent calls return the same error.
+// The embedded model is parsed lazily on the first call and shared for the
+// lifetime of the process. Parse errors are persistent: if the first call
+// fails, all subsequent calls return the same error.
 func New(opts ...Option) (*Engine, error) {
 	e := &Engine{
 		minSpeechFrames:  3,
@@ -108,33 +106,16 @@ func New(opts ...Option) (*Engine, error) {
 		o(e)
 	}
 
-	// Initialise the ONNX Runtime environment exactly once per process.
-	initOnce.Do(func() {
-		libPath := e.onnxLibPath
-		if libPath == "" {
-			p, err := ensureRuntime()
-			if err != nil {
-				initErr = err
-				return
-			}
-			libPath = p
-		}
-		ort.SetSharedLibraryPath(libPath)
-		initErr = ort.InitializeEnvironment()
-	})
-	if initErr != nil {
-		return nil, fmt.Errorf("silero: initialize ONNX Runtime: %w", initErr)
+	if _, err := parsedModel(); err != nil {
+		return nil, fmt.Errorf("silero: parse embedded model: %w", err)
 	}
-
 	return e, nil
 }
 
-// Close destroys the shared ONNX Runtime environment. It should only be called
-// once all sessions created by this process have been closed.
+// Close releases engine resources. The pure-Go engine holds none — the parsed
+// model is a process-wide read-only singleton — so Close is a no-op kept for
+// interface stability with earlier ONNX-Runtime-backed revisions.
 func (e *Engine) Close() error {
-	if err := ort.DestroyEnvironment(); err != nil {
-		return fmt.Errorf("silero: destroy ONNX environment: %w", err)
-	}
 	return nil
 }
 
@@ -149,7 +130,7 @@ func (e *Engine) NewSession(cfg vad.Config) (vad.SessionHandle, error) {
 	}
 
 	chunkSize := cfg.SampleRate * cfg.FrameSizeMs / 1000
-	inf, err := newONNXInferencer(modelBytes, cfg.SampleRate, chunkSize)
+	inf, err := newGoInferencer(cfg.SampleRate, chunkSize)
 	if err != nil {
 		return nil, fmt.Errorf("silero: create inferencer: %w", err)
 	}
@@ -196,127 +177,65 @@ func contextSize(sampleRate int) int {
 	return 64 // 16 kHz
 }
 
-// onnxInferencer implements inferencer using onnxruntime_go. All tensors are
-// pre-allocated once and reused across frames via AdvancedSession, matching
-// the approach used by known-working Silero VAD Go bindings.
-type onnxInferencer struct {
-	sess          *ort.AdvancedSession
-	inputTensor   *ort.Tensor[float32]
-	stateTensor   *ort.Tensor[float32]
-	srTensor      *ort.Tensor[int64]
-	outTensor     *ort.Tensor[float32]
-	stateNTensor  *ort.Tensor[float32]
-	context       []float32 // context from previous frame
-	effectiveSize int       // chunkSize + contextSize
-	chunkSize     int
+// goInferencer implements inferencer with the bespoke pure-Go forward pass.
+// The compiled program owns all tensor buffers; a frame run performs no
+// allocations.
+type goInferencer struct {
+	prog      *program
+	context   []float32 // trailing samples of the previous frame
+	chunkSize int
 }
 
-// newONNXInferencer creates an onnxInferencer from the given model bytes.
-// The sampleRate and chunkSize determine tensor shapes and context buffer size.
-func newONNXInferencer(modelData []byte, sampleRate, chunkSize int) (*onnxInferencer, error) {
+// newGoInferencer compiles the embedded model's branch for the given sample
+// rate into an executable program sized for chunkSize-sample frames.
+func newGoInferencer(sampleRate, chunkSize int) (*goInferencer, error) {
+	model, err := parsedModel()
+	if err != nil {
+		return nil, fmt.Errorf("parse embedded model: %w", err)
+	}
 	ctxSize := contextSize(sampleRate)
-	effectiveSize := chunkSize + ctxSize
-
-	inputTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, int64(effectiveSize)))
+	prog, err := compileProgram(model, sampleRate, ctxSize+chunkSize)
 	if err != nil {
-		return nil, fmt.Errorf("create input tensor: %w", err)
+		return nil, err
 	}
-	stateTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 128))
-	if err != nil {
-		inputTensor.Destroy() //nolint:errcheck
-		return nil, fmt.Errorf("create state tensor: %w", err)
-	}
-	srTensor, err := ort.NewTensor(ort.NewShape(1), []int64{int64(sampleRate)})
-	if err != nil {
-		inputTensor.Destroy() //nolint:errcheck
-		stateTensor.Destroy() //nolint:errcheck
-		return nil, fmt.Errorf("create sr tensor: %w", err)
-	}
-	outTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1, 1))
-	if err != nil {
-		inputTensor.Destroy() //nolint:errcheck
-		stateTensor.Destroy() //nolint:errcheck
-		srTensor.Destroy()    //nolint:errcheck
-		return nil, fmt.Errorf("create output tensor: %w", err)
-	}
-	stateNTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(2, 1, 128))
-	if err != nil {
-		inputTensor.Destroy() //nolint:errcheck
-		stateTensor.Destroy() //nolint:errcheck
-		srTensor.Destroy()    //nolint:errcheck
-		outTensor.Destroy()   //nolint:errcheck
-		return nil, fmt.Errorf("create stateN tensor: %w", err)
-	}
-
-	sess, err := ort.NewAdvancedSessionWithONNXData(
-		modelData,
-		[]string{"input", "state", "sr"},
-		[]string{"output", "stateN"},
-		[]ort.Value{inputTensor, stateTensor, srTensor},
-		[]ort.Value{outTensor, stateNTensor},
-		nil,
-	)
-	if err != nil {
-		inputTensor.Destroy()  //nolint:errcheck
-		stateTensor.Destroy()  //nolint:errcheck
-		srTensor.Destroy()     //nolint:errcheck
-		outTensor.Destroy()    //nolint:errcheck
-		stateNTensor.Destroy() //nolint:errcheck
-		return nil, fmt.Errorf("create ONNX session from embedded model (%d bytes): %w", len(modelData), err)
-	}
-
-	return &onnxInferencer{
-		sess:          sess,
-		inputTensor:   inputTensor,
-		stateTensor:   stateTensor,
-		srTensor:      srTensor,
-		outTensor:     outTensor,
-		stateNTensor:  stateNTensor,
-		context:       make([]float32, ctxSize),
-		effectiveSize: effectiveSize,
-		chunkSize:     chunkSize,
+	return &goInferencer{
+		prog:      prog,
+		context:   make([]float32, ctxSize),
+		chunkSize: chunkSize,
 	}, nil
 }
 
-// infer runs a single audio frame through the Silero VAD v5 model.
-// The samples slice must contain exactly chunkSize float32 values.
-// The state and stateN parameters are ignored — state is managed internally
-// via pre-bound tensors. They are kept for interface compatibility.
-func (o *onnxInferencer) infer(samples []float32, _ int64, _ []float32) (float32, []float32, error) {
-	// Fill the input tensor: [context | new samples].
-	data := o.inputTensor.GetData()
-	clear(data)
-	copy(data, o.context)
-	copy(data[len(o.context):], samples)
-
-	if err := o.sess.Run(); err != nil {
-		return 0, nil, fmt.Errorf("run ONNX session: %w", err)
+// infer runs a single audio frame through the model. The samples slice must
+// contain exactly chunkSize float32 values. The state and stateN parameters
+// are unused — recurrent state is managed internally — and kept for interface
+// compatibility with the mock inferencer.
+func (g *goInferencer) infer(samples []float32, _ int64, _ []float32) (float32, []float32, error) {
+	if len(samples) != g.chunkSize {
+		return 0, nil, fmt.Errorf("frame has %d samples, want %d", len(samples), g.chunkSize)
 	}
 
-	prob := o.outTensor.GetData()[0]
+	// Fill the model input: [context | new samples].
+	in := g.prog.input.f
+	copy(in, g.context)
+	copy(in[len(g.context):], samples)
 
-	// Copy stateN → state for the next frame.
-	copy(o.stateTensor.GetData(), o.stateNTensor.GetData())
+	g.prog.run()
 
 	// Save the last contextSize samples for the next frame.
-	copy(o.context, data[len(data)-len(o.context):])
+	copy(g.context, in[len(in)-len(g.context):])
 
-	return prob, nil, nil
+	return g.prog.output.f[0], nil, nil
 }
 
-// close releases all ONNX resources.
-func (o *onnxInferencer) close() error {
-	var firstErr error
-	for _, d := range []interface{ Destroy() error }{
-		o.sess, o.inputTensor, o.stateTensor, o.srTensor, o.outTensor, o.stateNTensor,
-	} {
-		if err := d.Destroy(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		return fmt.Errorf("destroy ONNX resources: %w", firstErr)
-	}
+// reset clears the LSTM state and the inter-frame audio context.
+func (g *goInferencer) reset() {
+	g.prog.reset()
+	clear(g.context)
+}
+
+// close releases resources. The pure-Go inferencer holds only Go memory, so
+// this is a no-op.
+func (g *goInferencer) close() error {
 	return nil
 }
 
@@ -385,7 +304,7 @@ func (s *session) ProcessFrame(frame audio.Frame) (vad.VADEvent, error) {
 		return vad.VADEvent{}, fmt.Errorf("silero: inference: %w", err)
 	}
 
-	// The real onnxInferencer manages state internally and returns nil.
+	// The real goInferencer manages state internally and returns nil.
 	// The mock inferencer returns a non-nil stateN for test verification.
 	if stateN != nil {
 		s.lstmState = stateN
@@ -443,13 +362,14 @@ func (s *session) step(prob float64) vad.VADEvent {
 	return vad.VADEvent{Type: vad.VADSilence, Probability: prob}
 }
 
-// Reset clears all accumulated detection state. The LSTM state is zeroed
-// and the speech/silence counters are reset. The session remains open and
-// ready for new frames.
+// Reset clears all accumulated detection state: the inferencer's recurrent
+// state (LSTM state and audio context) and the speech/silence counters. The
+// session remains open and ready for new frames.
 func (s *session) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.inf.reset()
 	for i := range s.lstmState {
 		s.lstmState[i] = 0
 	}
@@ -458,7 +378,7 @@ func (s *session) Reset() {
 	s.silenceCount = 0
 }
 
-// Close releases the ONNX session resources. After Close, ProcessFrame returns
+// Close releases the session resources. After Close, ProcessFrame returns
 // an error. Calling Close more than once is safe and returns nil.
 func (s *session) Close() error {
 	s.mu.Lock()

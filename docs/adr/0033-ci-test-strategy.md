@@ -33,7 +33,14 @@ Sprint 2's benchmark harness (`pkg/voice/voicebench`, Epic C) adds a `//go:build
 `dave` tags are pure Go now (github.com/pion/opus, github.com/thomas-vilte/dave-go);
 the audio CI job no longer installs libopus or libdave (`make dave-libs` is
 gone) and the `nolibopusfile` companion tag is retired. The job itself remains —
-it still owns the tagged builds, the opus-tagged tests, and the keyless-but-CGO
-cassette benchmark (the Silero VAD's ONNX binding is still cgo) — and the `dave`
-tag is now compiled there too, since that costs nothing. References to
-"installs libopus/libdave" above are historical.
+it still owns the tagged builds, the opus-tagged tests, and the keyless
+cassette benchmark — and the `dave` tag is now compiled there too, since that
+costs nothing. References to "installs libopus/libdave" above are historical.
+
+**Amendment (2026-07-16, #468 pure-Go Silero):** the Silero VAD's ONNX/cgo
+binding is gone — the VAD is a bespoke pure-Go forward pass, so the entire
+suite (cassette benchmark included) runs with `CGO_ENABLED=0` and CI needs no
+ONNX Runtime download/cache. The audio job remains for wall-time isolation of
+the tagged builds and the benchmark, not for any native toolchain. The fast
+`test` job now also asserts the production binary links statically
+("not a dynamic executable"), keeping the scratch image buildable.

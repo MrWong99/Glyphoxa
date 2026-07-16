@@ -5,7 +5,7 @@ name: llm-ttft-live
 # RAW provider time-to-first-content-token (no STT/TTS/orchestrator) so a
 # response_latency breach can be attributed to Groq itself vs. the pipeline.
 #
-# Unlike bench-live.yml it needs neither CGO/libopus nor the ONNX VAD — it is a
+# Unlike bench-live.yml it needs neither the audio stack nor the Silero VAD — it is a
 # pure `-tags=live` LLM call — so it is cheap to dispatch whenever the nightly
 # latency gate reds. It does NOT gate: the test only fails if Groq produces no
 # samples at all (key/quota dead); the verdict is the printed p50/p95/p99 TTFT
@@ -45,7 +45,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The TTFT probe is a pure live LLM call: no opus/CGO, no VAD. It prints the
+      # The TTFT probe is a pure live LLM call: no audio stack, no VAD. It prints the
       # per-tier TTFT + total-latency distribution and only fails if no sample
       # lands (a dead key/quota), so the run log carries the diagnostic verdict.
       - name: Live Groq TTFT distribution

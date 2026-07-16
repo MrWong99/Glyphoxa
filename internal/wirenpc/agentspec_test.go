@@ -532,13 +532,15 @@ func TestLoadSeededNPCs_HydratesToolGrants(t *testing.T) {
 }
 
 // TestBuildConversation_CleanupDoesNotDestroyEngine guards issue #44's reconnect
-// loop against a regression that destroys the process-global Silero/ONNX
-// environment. cleanup() must release only the per-cycle VAD session, NEVER the
-// shared engine: silero.Engine wraps an ONNX environment initialised once and
-// never re-initialised, so closing it would tear ONNX down for the whole process
-// and every later reconnect's NewSession would fail — the NPC would go
-// permanently deaf after the first Discord drop. Build → cleanup → build again
-// (mimicking one reconnect cycle) must both succeed. Real Silero, so integration.
+// loop against a regression that breaks the process-global Silero engine.
+// cleanup() must release only the per-cycle VAD session, NEVER the shared
+// engine: silero.Engine is a process singleton (historically it wrapped the
+// once-initialised ONNX environment; since #468 it fronts the once-parsed
+// embedded model), so the engine-lives-for-the-process discipline stands —
+// a cleanup that broke it would fail every later reconnect's NewSession and
+// leave the NPC permanently deaf after the first Discord drop. Build →
+// cleanup → build again (mimicking one reconnect cycle) must both succeed.
+// Real Silero, so integration.
 func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 	npcs := []npcSpec{hardcodedNPC()}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -558,7 +560,7 @@ func TestBuildConversation_CleanupDoesNotDestroyEngine(t *testing.T) {
 		bus: voiceevent.NewBus(), log: log, npcs: npcs, synth: ttseleven.New(""),
 	})
 	if err != nil {
-		t.Fatalf("second buildConversation after cleanup: %v — cleanup destroyed the shared ONNX env?", err)
+		t.Fatalf("second buildConversation after cleanup: %v — cleanup broke the shared Silero engine?", err)
 	}
 	if conv2 == nil {
 		t.Fatal("second buildConversation returned a nil Conversation")

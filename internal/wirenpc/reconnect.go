@@ -18,7 +18,7 @@ type reconnectPolicy struct {
 	factor  float64
 	// healthyAfter is how long a cycle must serve after connected() fires before
 	// it counts as a healthy session and resets the backoff to initial. A cycle
-	// that joins but fails sooner (codec-less build, broken ONNX init — issue
+	// that joins but fails sooner (codec-less build, broken VAD init — issue
 	// #141) is a connect failure: the delay keeps growing to its cap instead of
 	// retrying the Discord voice join at 1 Hz forever. Zero means reset on join.
 	healthyAfter time.Duration

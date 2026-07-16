@@ -7,11 +7,9 @@ you need to get started.
 
 ### Prerequisites
 
-- **Go 1.26+** with CGo enabled (`CGO_ENABLED=1`)
+- **Go 1.26+** — the whole stack is pure Go (`CGO_ENABLED=0`): no C toolchain, no native libraries (the codec, DAVE, and the Silero VAD are all Go)
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go binary embeds (see the SPA step below)
 - **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs under `gen/` are generated, not committed
-- **libopus** — `apt install libopus-dev` (Debian/Ubuntu) · `pacman -S opus` (Arch) · `brew install opus` (macOS)
-- **ONNX Runtime** — shared library from [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases) (for Silero VAD)
 
 The full self-host setup (Postgres/pgvector, the `.env` template, Discord OAuth)
 lives in [docs/configuration.md](docs/configuration.md); the build steps below
@@ -56,13 +54,14 @@ unavailable` on the first frame. For an **audible** (and encrypted) live run,
 build with the audio tags:
 
 ```bash
-CGO_ENABLED=1 go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
+go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
 ```
 
 - `opus` — real Opus↔PCM codec (else the stub: no audio).
 - `dave` — real DAVE/MLS encryption (mandatory on production Discord; else unencrypted).
 
-(CGO_ENABLED=1 is still required — the Silero VAD's ONNX binding is cgo.)
+(All pure Go — the build is `CGO_ENABLED=0` and statically linked; the Silero
+VAD's bespoke forward pass needs no ONNX Runtime, #468.)
 
 See [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md) for the full
 `voice`-mode runbook.

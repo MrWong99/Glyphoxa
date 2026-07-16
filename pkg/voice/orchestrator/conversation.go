@@ -195,7 +195,7 @@ func WithStreamingSTT(sm *StreamManager) Option {
 // are transcribed and attributed independently. A nil f (or leaving this option
 // unset) keeps the segmenter single-lane forever, byte-identical to the pre-lane
 // pipeline. The default (unattributed) lane always exists; f builds only the
-// non-default lanes and its close func releases each lane's ONNX session on reap.
+// non-default lanes and its close func releases each lane's VAD session on reap.
 func WithSpeakerLanes(f LaneVADFactory) Option {
 	return func(c *Conversation) { c.seg.laneVADFactory = f }
 }

@@ -30,8 +30,8 @@ build with the audio tags** (see Build below).
 
 - **A Discord bot** with the **message content** and **voice** privileges, added
   to your test server, currently in (or able to join) a voice channel.
-- **CGO** toolchain (`CGO_ENABLED=1`, a C compiler): Silero VAD uses ONNX
-  Runtime via cgo. This is the canonical build mode (see `Makefile`).
+- **No native toolchain**: the whole stack is pure Go (`CGO_ENABLED=0`, see
+  `Makefile`) — the Silero VAD runs as a bespoke pure-Go forward pass (#468).
 - **Provider API keys** (BYOK, ADR-0004), supplied as environment variables —
   never compiled in. The live LLM is **Groq** (`providers.llm.name "groq"`, model
   `openai/gpt-oss-120b`, the #424 default; there is no Anthropic key). The binary reads, at
@@ -61,11 +61,11 @@ need `dave`.
 # Default build: codec + DAVE are stubs. The pipeline constructs and the gateway
 # connects, but the audio loop exits with `wire: audio codec unavailable` on the
 # first inbound frame — useful for wiring checks, NOT audible.
-CGO_ENABLED=1 go build -o glyphoxa ./cmd/glyphoxa
+go build -o glyphoxa ./cmd/glyphoxa
 
-# Audible + encrypted live run. No native prereqs — both tags are pure Go.
-# (CGO_ENABLED=1 is still required: the Silero VAD's ONNX binding is cgo.)
-CGO_ENABLED=1 go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
+# Audible + encrypted live run. No native prereqs — everything is pure Go,
+# including the Silero VAD (#468); builds are CGO_ENABLED=0 and static.
+go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
 ```
 
 - `opus` — real Opus↔PCM codec (else the stub: no audio).

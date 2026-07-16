@@ -157,19 +157,22 @@ jobs:
           name: gen
           path: gen
 
-      # pkg/voice/vad/silero downloads libonnxruntime.so on first use and
-      # extracts it under $XDG_CACHE_HOME/glyphoxa/onnxruntime/<version>.
-      # Caching saves ~30 MB and the GitHub-runner → upstream round-trip on
-      # every run. Keyed on the silero runtime.go file so a version bump
-      # invalidates automatically.
-      - name: Cache ONNX runtime
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/glyphoxa/onnxruntime
-          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
-
       - name: Build
         run: go build ./...
+
+      # The pure-Go guarantee (#468): the production binary must build with
+      # CGO_ENABLED=0 and link fully statically — that property is what lets
+      # the container image be FROM scratch. Any new CGO dependency fails
+      # here, on the fast PR gate, before it reaches the image build.
+      - name: Static build assertion (CGO_ENABLED=0)
+        run: |
+          CGO_ENABLED=0 go build -tags "opus dave" -o /tmp/glyphoxa-static ./cmd/glyphoxa
+          if ! ldd /tmp/glyphoxa-static 2>&1 | grep -q 'not a dynamic executable'; then
+            echo "FAIL: binary is dynamically linked — a CGO dependency crept back in:"
+            ldd /tmp/glyphoxa-static
+            exit 1
+          fi
+          echo "binary is fully static"
 
       - name: Vet (default)
         run: go vet ./...
@@ -203,12 +206,6 @@ jobs:
           name: gen
           path: gen
 
-      - name: Cache ONNX runtime
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/glyphoxa/onnxruntime
-          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
-
       # The DB tests (ADR-0033, `//go:build integration`) stand up a real
       # Postgres via testcontainers — the ubuntu-latest runner ships a Docker
       # daemon, which testcontainers-go drives directly (no `services:` block
@@ -218,7 +215,7 @@ jobs:
         run: go test -race -tags=integration ./...
 
   audio:
-    name: audio / CGO (opus + bench)
+    name: audio (opus + bench)
     needs: [proto]
     runs-on: ubuntu-latest
     steps:
@@ -236,12 +233,6 @@ jobs:
         with:
           name: gen
           path: gen
-
-      - name: Cache ONNX runtime
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/glyphoxa/onnxruntime
-          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
 
       # The opus codec (`//go:build opus`) and the DAVE build (`//go:build dave`)
       # are pure Go since the pion/opus + dave-go migration — no system libopus,
@@ -264,11 +255,11 @@ jobs:
         run: go test -race -tags "opus" ./internal/mixdown/... ./pkg/voice/wire/...
 
       # The cassette-tier latency benchmark (Epic C): real silero VAD + codec,
-      # cassettes for the network providers — keyless (no secrets, ADR-0021) but
-      # CGO (silero/ONNX), so it runs HERE, not in the default PR gate (ADR-0033
-      # addendum). It replays the corpus and diffs each stage's p95 against the
-      # committed baseline (Report.CheckRegression); absolute SLOs are the live
-      # tier's job.
+      # cassettes for the network providers — keyless (no secrets, ADR-0021).
+      # The VAD is pure Go since #468 (no ONNX Runtime, no CGO), but the bench
+      # stays HERE, off the default PR gate (ADR-0033 addendum), for wall-time.
+      # It replays the corpus and diffs each stage's p95 against the committed
+      # baseline (Report.CheckRegression); absolute SLOs are the live tier's job.
       - name: Cassette latency benchmark (regression gate)
         run: go test -race -tags "bench opus" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
 
@@ -302,7 +293,7 @@ jobs:
           name: spa-dist
           path: internal/spa/dist
 
-      # buildx + layer caching keeps the CGO image build off the critical
+      # buildx + layer caching keeps the image build off the critical
       # path on warm caches. This is a
       # SEPARATE job from the fast `test` gate (ADR-0033): the heavy image build
       # must not slow an unrelated PR's unit feedback.
@@ -321,11 +312,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # The executable acceptance spec for issue #31: migrate --help exits 0;
-      # ldd resolves every linked lib (no "not found"; the only native dep left
-      # is the dlopen'd libonnxruntime, asserted separately); the bundled ONNX
-      # runtime exists at $GLYPHOXA_ONNX_LIB; and the process runs as a
-      # non-root uid.
+      # The executable acceptance spec for issue #31 (scratch image since
+      # #468): migrate --help exits 0; the binary is fully static (ldd: "not a
+      # dynamic executable"); the image has no shell but does carry CA certs;
+      # and the image config sets a non-root user.
       - name: Container smoke test
         run: ./scripts/container-smoke.sh glyphoxa:smoke
 
@@ -396,8 +386,7 @@ jobs:
     name: deploy e2e (k3d smoke)
     # Wait for the `image` job so its cache-to (mode=max) has populated the gha
     # cache: this job's build is then a cache HIT (load layers, no recompile)
-    # rather than a second full CGO image build
-    # image. The serialization costs a little wall-time but halves the expensive
+    # rather than a second full image build. The serialization costs a little wall-time but halves the expensive
     # build per run. The real cluster e2e is issue #37's gate — deliberately a
     # SEPARATE job from the fast `test` suite (ADR-0033) so the heavy image build
     # + cluster spin-up never slows unit feedback.

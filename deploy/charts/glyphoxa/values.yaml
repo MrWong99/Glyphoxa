@@ -121,18 +121,13 @@ voice:
     repository: ""
     tag: ""
 
-  # Override the image's bundled GLYPHOXA_ONNX_LIB only if the libonnxruntime
-  # path differs from the #31 image default (/usr/local/lib/libonnxruntime.so).
-  # Empty leaves the image's own ENV in force.
-  onnxLib: ""
-
   # The voice node's metrics-only HTTP listener (ADR-0032): /metrics for scraping
   # plus the /healthz liveness and /readyz readiness probes (#33). The port is
   # named `metrics` on the container and advertised via prometheus.io/* pod
   # annotations for annotation-based scrape discovery (no operator CRD required).
   metricsPort: 9090
 
-  # Resource requests/limits for the long-lived serving pod. The ONNX VAD and the
+  # Resource requests/limits for the long-lived serving pod. The Silero VAD and the
   # audio path are not free, so both are set; tune for your cluster.
   resources:
     requests:
@@ -143,8 +138,9 @@ voice:
       memory: 1Gi
 
   # Container securityContext for the voice container, hardened by default and
-  # overridable. The image runs as USER 65532 (#31) and the bundled ONNX runtime
-  # means the VAD never writes at boot, so the locked-down defaults hold —
+  # overridable. The image runs as USER 65532 (#31, scratch since #468) and the
+  # VAD is embedded in the binary (pure Go), so nothing writes at boot and the
+  # locked-down defaults hold —
   # readOnlyRootFilesystem included: the k3d e2e confirmed the pod boots to
   # /readyz=200 with a read-only rootfs (no boot-time write to /tmp or elsewhere).
   # Set to {} (in a values file) to disable, or override individual fields for a
@@ -258,7 +254,7 @@ web:
   metricsPort: 9090
 
   # Resource requests/limits for the serving pod. Lighter than voice by default
-  # (no ONNX VAD / audio path in web-only Mode); tune up for `all` Mode, which
+  # (no VAD / audio path in web-only Mode); tune up for `all` Mode, which
   # runs the voice loop in-process.
   resources:
     requests:

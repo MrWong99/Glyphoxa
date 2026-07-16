@@ -37,12 +37,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Cache ONNX runtime
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/glyphoxa/onnxruntime
-          key: onnxruntime-${{ runner.os }}-${{ hashFiles('pkg/voice/vad/silero/runtime.go') }}
-
       # The live tier needs real silero VAD + codec (opus) AND real vendor keys
       # (live). GX_BENCH_OUT names the JSON report the next step uploads. The
       # test asserts CheckSLO and fails the run on an over-budget headline span.
