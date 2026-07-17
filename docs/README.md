@@ -20,10 +20,22 @@ Start here — these describe the system as it ships today.
 - **[quickstart-gm.md](quickstart-gm.md)** — GM quickstart: from a fresh clone
   to a talking Character NPC in a Discord voice channel.
 
+### [deploy/](deploy/) — hosted-deployment runbooks (ADR-0054)
+
+Running Glyphoxa **for others**, beyond the single-machine self-host:
+
+- **[deploy/k3s-proxmox.md](deploy/k3s-proxmox.md)** — the Helm chart on a k3s
+  cluster in a Proxmox VM, exposed via DynDNS with Let's Encrypt TLS.
+- **[deploy/cloud-providers.md](deploy/cloud-providers.md)** — moving that
+  deployment to a paid cloud: provider suggestions and cost estimates.
+- **[deploy/saas-operations.md](deploy/saas-operations.md)** — subscription
+  Plans, platform keys, and the cost/revenue report
+  (`glyphoxa billing`).
+
 ### [adr/](adr/) — Architecture Decision Records
 
-The 53 ADRs (`0001`…`0053`) recording the decisions behind the system, from
-multi-GM self-hosting through the Campaign Bundle format. Where an ADR and the
+The 54 ADRs (`0001`…`0054`) recording the decisions behind the system, from
+multi-GM self-hosting through the SaaS billing foundation. Where an ADR and the
 shipped tree disagree, `architecture.md` follows the tree and says so.
 
 ### [agents/](agents/) — agent & contributor conventions

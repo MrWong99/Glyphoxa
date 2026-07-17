@@ -1,0 +1,96 @@
+{{/*
+Plans-sync hook Job (ADR-0054) — syncs the declarative plan catalog into the DB.
+
+It runs `glyphoxa billing plans-sync -file /etc/glyphoxa/plans/plans.json` ONCE
+per install/upgrade as a Helm pre-install/pre-upgrade hook, after the migrate
+(-5) and seed (-4) hooks so the plan/tenant_subscription tables exist, and
+before any serving workload. The sync is an upsert-by-slug (idempotent), so the
+pre-upgrade run neither errors nor duplicates plans on a chart bump; with
+`plans.archiveMissing` it also archives tiers removed from the catalog (never
+deletes — subscriptions reference them, ADR-0054).
+
+Mirrors the seed hook's structure: before-hook-creation delete policy, the
+pg_isready initContainer when the in-cluster Postgres is enabled, and the
+database URL from the app Secret. It does NOT read GLYPHOXA_SECRET — the plan
+catalog carries no credentials.
+*/}}
+{{- if .Values.plans.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "glyphoxa.plans.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: plans
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ .Values.plans.hookWeight | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "glyphoxa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: plans
+    spec:
+      restartPolicy: Never
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "glyphoxa.postgres.image" . }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              until pg_isready -h {{ include "glyphoxa.postgres.fullname" . }} -p {{ .Values.postgres.service.port }} -U {{ .Values.database.user | quote }};
+              do echo "waiting for postgres at {{ include "glyphoxa.postgres.fullname" . }}:{{ .Values.postgres.service.port }}"; sleep 2; done
+      {{- end }}
+      containers:
+        - name: plans-sync
+          image: {{ include "glyphoxa.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - billing
+            - plans-sync
+            - -file
+            - /etc/glyphoxa/plans/plans.json
+            {{- if .Values.plans.archiveMissing }}
+            - -archive-missing
+            {{- end }}
+          env:
+            - name: GLYPHOXA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "glyphoxa.secretName" . }}
+                  key: database-url
+          volumeMounts:
+            - name: plans-catalog
+              mountPath: /etc/glyphoxa/plans
+              readOnly: true
+          {{- with .Values.plans.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: plans-catalog
+          configMap:
+            name: {{ include "glyphoxa.plans.fullname" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,29 @@
+{{/*
+Plan-catalog ConfigMap (ADR-0054) — the declarative subscription-tier catalog
+the plans-sync hook Job feeds to `glyphoxa billing plans-sync`.
+
+The catalog is authored directly in values (`plans.catalog`, YAML) and rendered
+to the JSON shape the CLI parses, so tiers live in the same values file (or
+GitOps overlay) as the rest of the deploy — editing a price is a `helm upgrade`,
+no image or code change (the tiers-are-config requirement).
+
+Hook + weight: pre-install,pre-upgrade at the plans Job's weight minus one, so
+the ConfigMap exists before the Job that mounts it runs (Helm orders hooks by
+weight; nothing needs to "complete" for a ConfigMap).
+*/}}
+{{- if .Values.plans.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "glyphoxa.plans.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: plans
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ sub (int .Values.plans.hookWeight) 1 | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  plans.json: |
+    {{- toPrettyJson .Values.plans.catalog | nindent 4 }}
+{{- end }}

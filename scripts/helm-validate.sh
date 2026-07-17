@@ -133,6 +133,15 @@ validate_path ingress-cert-manager \
   --set ingress.certManager.clusterIssuer=letsencrypt-prod \
   --set web.oauth.redirectUrl=null
 
+# The plan-catalog render path (ADR-0054): plans.enabled with a catalog entry
+# must produce a schema-valid ConfigMap + hook Job alongside the defaults.
+validate_path plans-sync \
+  --set plans.enabled=true \
+  --set-string plans.catalog.plans[0].slug=all-inclusive \
+  --set-string 'plans.catalog.plans[0].display_name=All Inclusive' \
+  --set plans.catalog.plans[0].monthly_price_usd=20 \
+  --set-string plans.catalog.plans[0].key_source=platform
+
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
 # them or the migrate hook and the app parse a different credential than the

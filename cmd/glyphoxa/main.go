@@ -102,6 +102,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "billing":
+			if err := RunBilling(context.Background(), os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		}
 	}
 
@@ -590,6 +596,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		Transcript: relay,
 		Chunker:    chunker,
 		Highlights: highlightSaver,
+		// Durable Usage Ledger (ADR-0054): every manager-started session's metered
+		// usage lands in the usage_ledger table at loop exit, attributed to its
+		// Tenant — the cost side of the SaaS billing report. Attribution only;
+		// gating stays with the spend meter (ADR-0046).
+		Usage: store,
 		// NPC KG-facts recall (#126, ADR-0008): the reserved Hot Context KG-facts
 		// slot, filled per turn from the active Campaign's gm-public Nodes.
 		// UNCONDITIONAL — unlike Memory below — because it needs no embeddings

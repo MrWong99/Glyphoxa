@@ -82,6 +82,29 @@ const (
 	defaultSTTPerHour = 1.00
 )
 
+// EstimateLLMUSD estimates the USD cost of one completion's tokens from the
+// static price map, exported for the Usage Ledger (ADR-0054). Same figures the
+// Meter accumulates; an unknown (provider, model) silently uses the conservative
+// default — the live Meter owns the warn-once, the ledger just prices.
+func EstimateLLMUSD(provider observe.Provider, model string, inputTokens, outputTokens int) float64 {
+	usd, _ := llmCostUSD(provider, model, inputTokens, outputTokens)
+	return usd
+}
+
+// EstimateTTSUSD estimates the USD cost of chars submitted to a TTS synthesizer
+// (exported for the Usage Ledger, ADR-0054).
+func EstimateTTSUSD(provider observe.Provider, chars int) float64 {
+	usd, _ := ttsCostUSD(provider, chars)
+	return usd
+}
+
+// EstimateSTTUSD estimates the USD cost of audio submitted to an STT recognizer
+// (exported for the Usage Ledger, ADR-0054).
+func EstimateSTTUSD(provider observe.Provider, d time.Duration) float64 {
+	usd, _ := sttCostUSD(provider, d)
+	return usd
+}
+
 // llmCostUSD estimates the USD cost of one completion's tokens. known is false
 // when the (provider, model) key had no entry and the conservative default was
 // used (the caller warns once).

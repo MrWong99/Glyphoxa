@@ -1,0 +1,176 @@
+suite: plans-sync hook Job + catalog ConfigMap
+# The plan catalog (ADR-0054) ships as declarative chart values: a ConfigMap
+# renders `plans.catalog` to the plans.json shape and a hook Job feeds it to
+# `glyphoxa billing plans-sync`, ordered after migrate (-5) and seed (-4) so the
+# plan tables exist. OFF by default — a pure-BYOK self-host renders neither.
+templates:
+  - templates/plans-sync-job.yaml
+  - templates/plans-configmap.yaml
+tests:
+  - it: renders nothing when plans are disabled (the default)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the Job and ConfigMap when enabled
+    set:
+      plans:
+        enabled: true
+        catalog:
+          plans:
+            - slug: all-inclusive
+              display_name: All Inclusive
+              monthly_price_usd: 20
+              key_source: platform
+              included_usage_usd: 15
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-glyphoxa-plans
+
+  - it: renders the catalog values as JSON in the ConfigMap
+    set:
+      plans:
+        enabled: true
+        catalog:
+          plans:
+            - slug: all-inclusive
+              display_name: All Inclusive
+              monthly_price_usd: 20
+              key_source: platform
+    template: templates/plans-configmap.yaml
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - matchRegex:
+          path: data["plans.json"]
+          pattern: '"slug": "all-inclusive"'
+      - matchRegex:
+          path: data["plans.json"]
+          pattern: '"key_source": "platform"'
+
+  - it: is a pre-install AND pre-upgrade hook ordered after migrate and seed
+    # plans-sync at -3 sorts after migrate (-5) and seed (-4) — the plan tables
+    # must exist — yet ahead of the serving workloads at weight 0. The ConfigMap
+    # renders one weight earlier so the Job can mount it.
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-3"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+
+  - it: orders the ConfigMap one hook-weight ahead of the Job
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-4"
+
+  - it: runs `glyphoxa billing plans-sync` against the mounted catalog
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - billing
+            - plans-sync
+            - -file
+            - /etc/glyphoxa/plans/plans.json
+      - equal:
+          path: spec.template.spec.volumes[0].configMap.name
+          value: RELEASE-NAME-glyphoxa-plans
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /etc/glyphoxa/plans
+
+  - it: appends -archive-missing only when opted in
+    set:
+      plans:
+        enabled: true
+        archiveMissing: true
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - billing
+            - plans-sync
+            - -file
+            - /etc/glyphoxa/plans/plans.json
+            - -archive-missing
+
+  - it: sources GLYPHOXA_DATABASE_URL from the DB Secret and reads NO app-secret
+    # The catalog carries no credentials, so unlike the seed hook this Job must
+    # not mount GLYPHOXA_SECRET.
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: database-url
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: app-secret
+
+  - it: waits for the in-cluster Postgres before syncing
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[-1]
+          pattern: pg_isready.*RELEASE-NAME-glyphoxa-postgres
+
+  - it: skips the wait initContainer against an external database
+    set:
+      plans:
+        enabled: true
+      postgres:
+        enabled: false
+      database:
+        url: postgres://u:p@external.example.com:5432/glyphoxa?sslmode=require
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: never restarts a completed plans-sync pod
+    set:
+      plans:
+        enabled: true
+    template: templates/plans-sync-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never
