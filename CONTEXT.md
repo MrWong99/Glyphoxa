@@ -90,6 +90,17 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **MCP Server** | An out-of-process backing that exposes one or more Tools over the Model Context Protocol (stdio or streamable-HTTP). A Tool source differentiated from built-ins by running in a separate process; pays serialization/IPC cost in exchange for isolation and third-party extensibility. | External tool, Plugin, MCP Tool |
 | **Hot Context** | The recent-Transcript + KG-facts + Persona bundle assembled per-utterance to prime an Agent's LLM call (target <50ms). | Context, Prompt context |
 
+## Billing & SaaS
+
+| Term | Definition | Aliases to avoid |
+|------|------------|------------------|
+| **Plan** | A subscription tier in the deployment's catalog: slug (stable handle), monthly price, Key Source, optional included-usage allowance, and an extensible limits bag. Synced as data from the operator's declarative catalog (ADR-0054); archived, never deleted. | Tier (reserved for prose only), Package, SKU |
+| **Plan Catalog** | The operator's declarative JSON (or Helm values) list of Plans, synced into the DB via `glyphoxa billing plans-sync` / the chart's plans hook Job. | Pricing table, Config |
+| **Subscription** | A Tenant's binding to a Plan, snapshotting the Plan's slug and monthly price at bind time; at most one active per Tenant, with ended rows as history. The revenue record. | Membership, License |
+| **Key Source** | Where a Plan's provider keys come from: `byok` (the Tenant's own keys, ADR-0004) or `platform` (the deployment's env keys, included in the price). | Key mode, Pooling |
+| **Platform Keys** | The deployment-operated provider credentials (env `*_API_KEY`) serving `platform`-Plan Tenants via the existing env-fallback path (ADR-0039/0054). | Pooled keys, Shared keys, Operator keys (prose ok) |
+| **Usage Ledger** | The durable per-Tenant record of metered provider usage: daily buckets per (component, provider, model) with quantities and a priced ESTIMATE, flushed at Voice Session end (`usage_ledger`). The cost side of billing; never a gate, never billing truth. | Billing log, Meter (the in-memory ADR-0046 accumulator), Invoice |
+
 ## Process & Deployment
 
 | Term | Definition | Aliases to avoid |
@@ -101,6 +112,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 ## Relationships
 
 - A **Tenant** has many **Members** with a **Member Role**, many **Campaigns**, many linked **Guilds**, and one or more **Provider Configs** per **Component**.
+- A **Tenant** has at most one active **Subscription**, which references a **Plan** and snapshots its price; a Tenant's metered usage accumulates in the **Usage Ledger**.
 - A **Campaign** has one **GM** (a Member of its Tenant), many **Characters**, one **Knowledge Graph**, exactly one **Butler**,many **Character NPCs**, and many **Transcripts**.
 - A **Character** belongs to exactly one **Campaign** and is bound to exactly one **Discord User**; the Discord User may also be a **Linked Player**.
 - A **Character NPC** belongs to exactly one **Campaign**.
@@ -135,5 +147,6 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 - **"Bot"** refers to the *single* Glyphoxa Discord bot identity (one token, shared across all Tenants). Don't say "the Tenant's bot" — say "the Bot acting on behalf of the Tenant."
 - **"Worker"** is a v1 term for what v2 calls a **Voice Instance**. Do not use "worker" in v2 — it implies the gateway/worker split that was explicitly removed.
 - **"Role"** is overloaded between **Member Role** (`owner`/`admin`/`gm`) and **Agent Role** (`butler`/`character`). Always qualify.
+- **"Tier"** in prose means a **Plan** (the subscription catalog entry); the schema/API term is always Plan. Never use "tier" for a **Member Role** (already an alias to avoid there).
 - **"Player role"** is *not* a Member Role — Players are not Tenant Members. Don't add `player` to the Member Role enum.
 - **"Barge-in" vs "Cross-talk"** — **Barge-in** is a *human* interrupting a speaking Agent (VAD-triggered via the Barge-in Confirm Window; cancels the Agent's whole turn — see ADR-0026). **Cross-talk** is one Agent's already-delivered text being fed to another addressed Agent during an Ensemble Turn — the second Agent has not spoken yet, so nothing is interrupted. Never use "barge-in" for the Agent-to-Agent case, and never use "cross-talk" for a human interruption.

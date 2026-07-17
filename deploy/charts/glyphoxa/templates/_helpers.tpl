@@ -60,6 +60,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-seed" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "glyphoxa.plans.fullname" -}}
+{{- printf "%s-plans" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "glyphoxa.voice.fullname" -}}
 {{- printf "%s-voice" (include "glyphoxa.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}

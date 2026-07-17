@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/billing"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
@@ -100,6 +101,14 @@ type Store interface {
 	GetTenantSpendCaps(ctx context.Context, tenantID uuid.UUID) (storage.SpendCaps, error)
 }
 
+// UsageWriter persists a session's accumulated Usage Ledger rows at loop exit
+// (ADR-0054). It is a SEPARATE optional seam from [Store] — a deployment that
+// wires no UsageWriter (voice-standalone, tests) records no durable usage, and
+// nothing else changes. [*storage.Store] satisfies it (AddUsage).
+type UsageWriter interface {
+	AddUsage(ctx context.Context, rows []storage.UsageRow) error
+}
+
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
 // returns the authoritative persisted line_count (#74, ADR-0040). The Manager
 // calls it on Stop / loop exit BEFORE EndVoiceSession so the recorded count
@@ -166,6 +175,11 @@ type activeSession struct {
 	// Tenant configured at least one cap at Start. It is the cfg.Gate and rides the
 	// teed StageMetrics, and backs Manager.Spend(). Dies with the session.
 	meter *spend.Meter
+	// ledger is the session's durable Usage Ledger sink (ADR-0054), non-nil only
+	// when the Manager was wired a UsageWriter. It rides the teed StageMetrics
+	// beside the meter (attribution only, never a gate) and is flushed into the
+	// usage_ledger table at loop exit.
+	ledger *billing.Ledger
 	// endReasonOverride records a deliberate policy end_reason for a session that
 	// ended cleanly (status 'ended') rather than by a fault — set by the hard-cap
 	// trip before it cancels the run ctx (#130). runLoop reads it under Manager.mu
@@ -189,6 +203,7 @@ type Manager struct {
 	transcript TranscriptFinalizer // finalizes persisted lines on Stop (#74); nil keeps line_count at 0
 	chunker    ChunkFinalizer      // closes the open Transcript Chunk on Stop (#104); nil = no chunking
 	highlights Highlighter         // persists Session Highlights + schedules purge on Stop (#308); nil = highlights off
+	usage      UsageWriter         // persists the Usage Ledger at loop exit (ADR-0054); nil = no durable usage
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
@@ -252,6 +267,11 @@ type Deps struct {
 	// registered but unavailable at Execute (the prompt/loop still behave, the
 	// model just gets an "unavailable" tool result).
 	Tools tool.Deps
+	// Usage, when non-nil, persists each session's accumulated Usage Ledger rows
+	// at loop exit (ADR-0054): per-Tenant durable usage for SaaS cost attribution.
+	// [*storage.Store] satisfies it. nil = no durable usage (voice-standalone /
+	// test posture), byte-for-byte today's behavior.
+	Usage UsageWriter
 	// View, when non-nil, is bound to the new Manager so the collaborators above —
 	// constructed against it BEFORE the Manager existed — read this Manager's
 	// active session. Binding inside NewManager is what makes the wiring order
@@ -284,6 +304,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		transcript: deps.Transcript,
 		chunker:    deps.Chunker,
 		highlights: deps.Highlights,
+		usage:      deps.Usage,
 		log:        log,
 		enabled:    enabled,
 		endTimeout: endTimeout,
@@ -423,6 +444,22 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		as.meter = meter
 	}
 
+	// Usage Ledger (ADR-0054): when a UsageWriter is wired, the session's metered
+	// usage is additionally bucketed per (day, component, provider, model) for
+	// durable per-Tenant cost attribution — flushed at loop exit, never a gate.
+	// It tees onto whatever StageMetrics already is (the recorder, or the
+	// recorder+meter tee above — TeeUsage composes), so the capture points are
+	// unchanged. No UsageWriter ⇒ no ledger, byte-for-byte today's behavior.
+	if m.usage != nil {
+		ledger := billing.NewLedger(tenantID, nil)
+		base := cfg.StageMetrics
+		if base == nil {
+			base = observe.Discard{}
+		}
+		cfg.StageMetrics = observe.TeeUsage(base, ledger)
+		as.ledger = ledger
+	}
+
 	// Bind the Highlights pipeline to this session before the loop (and its
 	// detector) can fire a Trigger (#308): Begin records the owning ids the Saver
 	// stamps onto every candidate row + its blob key. Finalize (runLoop) unbinds and
@@ -558,6 +595,18 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 			m.log.Warn("flush transcript chunk before end", "err", err, "voice_session", as.session.ID)
 		}
 		chunkCancel()
+	}
+
+	// Flush the session's Usage Ledger into the usage_ledger table (ADR-0054).
+	// Best-effort with its OWN budget, like the finalizers above: a flush failure
+	// loses only this session's usage attribution (an estimates-only ledger) and
+	// never blocks the row from ending.
+	if as.ledger != nil {
+		usageCtx, usageCancel := context.WithTimeout(base, m.endTimeout)
+		if err := as.ledger.Flush(usageCtx, m.usage.AddUsage); err != nil {
+			m.log.Warn("flush usage ledger before end", "err", err, "voice_session", as.session.ID)
+		}
+		usageCancel()
 	}
 
 	// A hard-cap trip records a deliberate end_reason override before it cancels the

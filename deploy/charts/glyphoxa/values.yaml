@@ -84,6 +84,47 @@ seed:
   hookWeight: -4
   resources: {}
 
+# Plan-catalog sync hook Job (ADR-0054): the SaaS subscription tiers as
+# declarative chart values, synced into the DB by `glyphoxa billing plans-sync`
+# on every install/upgrade. OFF by default — a pure-BYOK self-host needs no
+# plans. Enabling it makes tiers pure config: edit `catalog`, `helm upgrade`,
+# done. Tenants are bound to plans with `glyphoxa billing subscribe`, and cost/
+# revenue read out via `glyphoxa billing report` (docs/deploy/saas-operations.md).
+plans:
+  enabled: false
+  # -3 sorts AFTER migrate (-5) and seed (-4), so the plan tables exist and any
+  # demo data is in place, yet still ahead of the serving workloads at weight 0.
+  # The catalog ConfigMap renders at this weight minus one.
+  hookWeight: -3
+  # Archive plans absent from the catalog on sync (never deletes — running
+  # subscriptions keep resolving their plan). Leave false to let removed tiers
+  # linger active until explicitly archived.
+  archiveMissing: false
+  resources: {}
+  # The catalog itself, in the `glyphoxa billing plans-sync` JSON shape
+  # (authored as YAML here, rendered to JSON in the ConfigMap). slug is the
+  # stable handle syncs upsert by; key_source 'platform' marks a tier whose
+  # subscription includes provider usage on the DEPLOYMENT's keys (the
+  # elevenLabsApiKey/groqApiKey/geminiApiKey values above — ADR-0054), 'byok'
+  # (the default) a tier where Tenants bring their own. included_usage_usd is
+  # the monthly estimated-USD allowance a platform tier includes; limits is a
+  # free-form knob bag consumers read known keys from. Example:
+  #   catalog:
+  #     plans:
+  #       - slug: byok-free
+  #         display_name: BYOK Free
+  #         monthly_price_usd: 0
+  #       - slug: all-inclusive
+  #         display_name: All Inclusive
+  #         description: Groq + ElevenLabs usage included
+  #         monthly_price_usd: 20
+  #         key_source: platform
+  #         included_usage_usd: 15
+  #         limits:
+  #           max_campaigns: 10
+  catalog:
+    plans: []
+
 # Voice-mode Deployment (#36): the single image run as `glyphoxa -mode voice`,
 # joining one Discord guild+channel and giving the seeded NPC a live voice loop.
 # It is a plain (non-hook) workload, so it applies after the migrate (-5) and

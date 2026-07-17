@@ -340,4 +340,5 @@ used provider needs are required.
 - [ADR-0016](adr/0016-cookies-discord-only-oauth.md) — cookies + Discord-only OAuth.
 - [ADR-0004](adr/0004-byok-provider-key-matrix.md) — BYOK provider key matrix.
 - [ADR-0034](adr/0034-deployment-artifacts.md) — deployment artifacts (container/Helm).
+- [deploy/k3s-proxmox.md](deploy/k3s-proxmox.md) — hosting Glyphoxa on a k3s cluster (Proxmox home lab, DynDNS + TLS); [deploy/saas-operations.md](deploy/saas-operations.md) — subscription Plans, platform keys, and the `glyphoxa billing` cost/revenue surface (ADR-0054).
 - [docs/agents/live-npc-run.md](agents/live-npc-run.md) — the `voice`-mode live NPC run guide.

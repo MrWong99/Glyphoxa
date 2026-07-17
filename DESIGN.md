@@ -61,6 +61,7 @@ Resume-from-here doc for the interactive design grilling. Decisions are recorded
 | [0051](docs/adr/0051-rollover-tape-consent-retention.md) | Rollover tape: all-participant consent, bounded retention, GM-gated sharing | #303 |
 | [0052](docs/adr/0052-kg-write-proposals.md) | Agent KG writes land as GM-reviewed Knowledge Proposals | #298 |
 | [0053](docs/adr/0053-campaign-bundle-format.md) | Campaign Bundle: versioned gzipped-JSON export with mandatory secrets exclusion | #287 |
+| [0054](docs/adr/0054-saas-plans-platform-keys-usage-ledger.md) | SaaS foundation: Plans as synced data, Subscriptions with price snapshots, Usage Ledger, platform keys | SaaS request 2026-07-17 |
 
 ## Open questions
 
