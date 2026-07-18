@@ -1,7 +1,11 @@
 # Glyphoxa Makefile
-# Requires: Go 1.26+. The whole stack is pure Go (#467 codec/DAVE, #468 VAD):
-# CGO stays off so every build is statically linked and trivially
-# cross-compilable.
+# Requires: Go 1.26+. The default (untagged) build is pure Go: CGO stays off
+# so it is statically linked and trivially cross-compilable. The exception is
+# the `opus` build tag — the outbound Opus encoder links system libopus via
+# CGO (ADR-0034 amendment 2026-07-19) and must be paired with
+# `nolibopusfile`, so audible builds need pkg-config + libopus-dev and
+# CGO_ENABLED=1 (see CONTRIBUTING.md; the Dockerfile links it statically).
+# No target below uses the opus tag, so the export holds for all of them.
 
 export CGO_ENABLED := 0
 

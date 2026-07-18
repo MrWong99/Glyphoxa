@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 // DefaultMaxRounds caps how many tool-call rounds [Loop.Run] will execute
@@ -13,9 +14,48 @@ import (
 // text-only Generate does not count against it.
 const DefaultMaxRounds = 8
 
-// ErrMaxRoundsExceeded is returned by [Loop.Run] when the Provider keeps
-// emitting tool_calls past [Loop.MaxRounds] without ever returning final text.
+// ErrMaxRoundsExceeded is returned by [Loop.Run] when the forced final-answer
+// round produced no prose — the degrade path's hard stop, not its first resort,
+// reached from either trigger: the Provider kept emitting tool_calls past
+// [Loop.MaxRounds], or the no-progress short-circuit fired after
+// [noProgressRounds] consecutive all-error rounds. The wrapping error names the
+// actual trigger ("(N rounds)" vs "(no-progress after N all-error rounds)") so
+// logs point at the right failure; errors.Is matches both.
 var ErrMaxRoundsExceeded = errors.New("tool: max tool-call rounds exceeded")
+
+// noProgressRounds is the no-progress short-circuit bound: after this many
+// CONSECUTIVE rounds whose executed ToolResults were ALL errors (a model
+// grinding on an unavailable/failing tool — the live 8-round NPC silence), the
+// loop stops burning budget and jumps straight to the final-answer round.
+const noProgressRounds = 2
+
+// budgetExhaustedNote is the error-ToolResult content fed back for each tool
+// call of the round that exhausts [Loop.MaxRounds]: the calls are refused, and
+// the model is told to answer in prose on the final-answer round that follows.
+const budgetExhaustedNote = "tool budget exhausted; answer in prose without calling tools"
+
+// finalAnswerRoundKey marks the ctx of the loop's ONE forced final-answer
+// generation (see [IsFinalAnswerRound]).
+type finalAnswerRoundKey struct{}
+
+// withFinalAnswerRound returns ctx carrying the final-answer-round marker for
+// the single generation [Loop.finalAnswer] issues; every regular round runs
+// under the unmarked parent ctx.
+func withFinalAnswerRound(ctx context.Context) context.Context {
+	return context.WithValue(ctx, finalAnswerRoundKey{}, true)
+}
+
+// IsFinalAnswerRound reports whether ctx carries the loop's final-answer-round
+// marker: the ONE forced tool-less generation [Loop.Run]/[Loop.RunStream] issue
+// when the round budget is exhausted (or the no-progress short-circuit fires)
+// with the model still emitting tool calls. It is the seam the wiring bridge
+// (agenttool) reads to send tool_choice none while keeping the Tools DECLARED —
+// the conversation holds prior tool_call/tool messages, and stripping the
+// declarations risks a provider 400 on the dangling references (#420/#427).
+func IsFinalAnswerRound(ctx context.Context) bool {
+	marked, _ := ctx.Value(finalAnswerRoundKey{}).(bool)
+	return marked
+}
 
 // Loop is the generic tool-use loop (ADR-0028): it drives an LLM [Provider]
 // through tool calls — Generate → tool_call → execute → feed the tool-role
@@ -39,9 +79,11 @@ type Loop struct {
 	// OnPseudoCall fires once per pseudo-XML tool call (issue #410) found in an
 	// assistant message's text — the malformed `<function=…>…</function>` syntax
 	// some models emit as plain content instead of a real tool_call. recovered is
-	// true when the call parsed and named a granted Tool (it will run as a real
-	// round); false when it was stripped without executing (ungranted or
-	// unparseable). nil is a no-op. It is the observability seam kept OUT of this
+	// true when the call parsed, named a granted Tool, AND the round still had
+	// budget (it will run as a real round); false when it was stripped without
+	// executing — ungranted, unparseable, ineligible, or found on a round whose
+	// calls are budget-refused / dropped (the over-budget and final-answer
+	// rounds), where nothing can run. nil is a no-op. It is the observability seam kept OUT of this
 	// vendor/metric-agnostic package (ADR-0028): the wiring layer supplies a
 	// callback that increments a counter. ctx is the turn's context.Context (the
 	// same one Run/RunStream execute under), so a wiring-layer callback can also
@@ -134,6 +176,7 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 
 	decls := l.grants.Declarations()
 
+	failedRounds := 0 // consecutive all-error rounds (no-progress tracker)
 	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -160,14 +203,15 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 			}
 		}
 
-		l.recoverPseudoCalls(ctx, round, &asst)
+		l.recoverPseudoCalls(ctx, round, maxRounds, &asst)
 
 		if len(asst.ToolCalls) == 0 {
 			return asst.Text, nil
 		}
 
 		if round >= maxRounds {
-			return "", fmt.Errorf("%w (%d rounds)", ErrMaxRoundsExceeded, maxRounds)
+			convo = appendBudgetExhausted(convo, asst)
+			return l.finalAnswer(ctx, round+1, maxRounds, 0, convo, decls, streamer, onText)
 		}
 
 		convo = append(convo, Message{
@@ -177,11 +221,24 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 		})
 
 		results := make([]ToolResult, len(asst.ToolCalls))
+		allErrors := true
 		for i, call := range asst.ToolCalls {
 			results[i] = l.execute(ctx, call)
 			l.fireToolResult(ctx, call.Name, results[i])
+			if !results[i].IsError {
+				allErrors = false
+			}
 		}
 		convo = append(convo, Message{Role: RoleTool, ToolResults: results})
+
+		if !allErrors {
+			failedRounds = 0
+			continue
+		}
+		if failedRounds++; failedRounds >= noProgressRounds {
+			l.warnNoProgress(failedRounds)
+			return l.finalAnswer(ctx, round+1, maxRounds, failedRounds, convo, decls, streamer, onText)
+		}
 	}
 }
 
@@ -200,6 +257,12 @@ func (l *Loop) RunStream(ctx context.Context, messages []Message, onText func(de
 // error does not abort: it is fed back to the model as an error [ToolResult] so
 // the model can recover — the only hard stops are ctx cancellation, a Provider
 // error, and [ErrMaxRoundsExceeded].
+//
+// Degrade path (the tool-budget silence fix): a model that keeps tool-calling
+// to the round budget — or that burns [noProgressRounds] consecutive rounds
+// whose executed results were ALL errors — no longer fails the turn outright.
+// The loop forces ONE extra, marked generation (see [IsFinalAnswerRound]) whose
+// prose is the answer; only an EMPTY final answer returns ErrMaxRoundsExceeded.
 func (l *Loop) Run(ctx context.Context, messages []Message) (string, error) {
 	maxRounds := l.MaxRounds
 	if maxRounds <= 0 {
@@ -212,6 +275,7 @@ func (l *Loop) Run(ctx context.Context, messages []Message) (string, error) {
 
 	decls := l.grants.Declarations()
 
+	failedRounds := 0 // consecutive all-error rounds (no-progress tracker)
 	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -225,14 +289,15 @@ func (l *Loop) Run(ctx context.Context, messages []Message) (string, error) {
 		// Scrub + recover any pseudo-XML tool calls the model emitted as text
 		// (issue #410): clean the spoken text and promote parseable granted calls
 		// to real ToolCalls before the tool-round decision below.
-		l.recoverPseudoCalls(ctx, round, &asst)
+		l.recoverPseudoCalls(ctx, round, maxRounds, &asst)
 
 		if len(asst.ToolCalls) == 0 {
 			return asst.Text, nil
 		}
 
 		if round >= maxRounds {
-			return "", fmt.Errorf("%w (%d rounds)", ErrMaxRoundsExceeded, maxRounds)
+			convo = appendBudgetExhausted(convo, asst)
+			return l.finalAnswer(ctx, round+1, maxRounds, 0, convo, decls, nil, nil)
 		}
 
 		// Record the assistant's tool_call turn, then the tool-role results.
@@ -243,12 +308,109 @@ func (l *Loop) Run(ctx context.Context, messages []Message) (string, error) {
 		})
 
 		results := make([]ToolResult, len(asst.ToolCalls))
+		allErrors := true
 		for i, call := range asst.ToolCalls {
 			results[i] = l.execute(ctx, call)
 			l.fireToolResult(ctx, call.Name, results[i])
+			if !results[i].IsError {
+				allErrors = false
+			}
 		}
 		convo = append(convo, Message{Role: RoleTool, ToolResults: results})
+
+		if !allErrors {
+			failedRounds = 0
+			continue
+		}
+		if failedRounds++; failedRounds >= noProgressRounds {
+			l.warnNoProgress(failedRounds)
+			return l.finalAnswer(ctx, round+1, maxRounds, failedRounds, convo, decls, nil, nil)
+		}
 	}
+}
+
+// warnNoProgress logs the no-progress short-circuit: without it the burned
+// rounds left ZERO log lines (the live 8-round silent turns).
+func (l *Loop) warnNoProgress(failedRounds int) {
+	slog.Warn("tool: consecutive all-error tool rounds; forcing a tool-less final answer",
+		"rounds", failedRounds)
+}
+
+// appendBudgetExhausted records the over-budget assistant tool-call turn plus
+// one [budgetExhaustedNote] error result per call — the calls are refused, NOT
+// executed, so [Loop.OnToolResult] does not fire for them. The returned convo
+// is what the final-answer round generates under.
+func appendBudgetExhausted(convo []Message, asst AssistantMessage) []Message {
+	convo = append(convo, Message{
+		Role:      RoleAssistant,
+		Text:      asst.Text,
+		ToolCalls: asst.ToolCalls,
+	})
+	results := make([]ToolResult, len(asst.ToolCalls))
+	for i, call := range asst.ToolCalls {
+		results[i] = errResult(call.ID, budgetExhaustedNote)
+	}
+	return append(convo, Message{Role: RoleTool, ToolResults: results})
+}
+
+// finalAnswer issues the loop's ONE forced final-answer generation: the ctx is
+// marked ([IsFinalAnswerRound]) so the wiring layer can disarm tool_choice while
+// keeping the Tools declared, and any tool calls the model STILL emits are
+// dropped un-executed in favour of its prose. Only an empty final answer
+// returns [ErrMaxRoundsExceeded] — the pre-degrade hard stop, worded by the
+// trigger that got here: failedRounds > 0 is the no-progress short-circuit
+// (that many consecutive all-error rounds), 0 is round-budget exhaustion —
+// so the surfaced error never claims the full budget was burned when the loop
+// stopped after 2 rounds. streamer/onText select the streaming path
+// ([Loop.RunStream]); both nil is the batch path.
+func (l *Loop) finalAnswer(ctx context.Context, round, maxRounds, failedRounds int, convo []Message, decls []Decl, streamer StreamingProvider, onText func(delta string) error) (string, error) {
+	ctx = withFinalAnswerRound(ctx)
+
+	var asst AssistantMessage
+	var err error
+	if streamer != nil {
+		// Same scrubber discipline as the regular streaming rounds: pseudo-XML
+		// tool-call syntax never reaches TTS live.
+		var sc *streamScrubber
+		streamText := onText
+		if onText != nil {
+			sc = &streamScrubber{out: onText}
+			streamText = sc.Write
+		}
+		asst, err = streamer.GenerateStream(ctx, convo, decls, streamText)
+		if err == nil && sc != nil {
+			err = sc.Flush()
+		}
+	} else {
+		asst, err = l.provider.Generate(ctx, convo, decls)
+	}
+	if err != nil {
+		return "", fmt.Errorf("tool: provider generate (final-answer round %d): %w", round, err)
+	}
+
+	// Strip-only pseudo-XML scrub: nothing executes on this round, so a granted
+	// pseudo-call is NOT promoted (recovered=false keeps the metric honest —
+	// OnPseudoCall's recovered=true promises the call will actually run).
+	if clean, matches := ExtractPseudoCalls(asst.Text); len(matches) > 0 {
+		asst.Text = clean
+		for _, m := range matches {
+			l.firePseudoCall(ctx, m.Name, false)
+			slog.Warn("tool: stripped pseudo-XML tool call from the final-answer round",
+				"tool", m.Name, "recovered", false)
+		}
+	}
+
+	if len(asst.ToolCalls) > 0 {
+		slog.Warn("tool: final-answer round still emitted tool calls; dropping them for its prose",
+			"calls", len(asst.ToolCalls))
+	}
+	if strings.TrimSpace(asst.Text) == "" {
+		if failedRounds > 0 {
+			return "", fmt.Errorf("%w (no-progress after %d all-error rounds)", ErrMaxRoundsExceeded, failedRounds)
+		}
+		return "", fmt.Errorf("%w (%d rounds)", ErrMaxRoundsExceeded, maxRounds)
+	}
+	return asst.Text, nil
 }
 
 // execute runs one tool_call under the Agent's grants and returns the
@@ -263,7 +425,11 @@ func (l *Loop) execute(ctx context.Context, call ToolCall) ToolResult {
 	if !ok {
 		// The model named a Tool it is not granted (or that is unregistered).
 		// It should never happen since we only declare granted Tools, but a
-		// hallucinated name is fed back as an error, not trusted.
+		// hallucinated name is fed back as an error, not trusted — and logged:
+		// a model grinding rounds on an unavailable name used to burn the whole
+		// budget with ZERO log lines.
+		slog.Warn("tool: model called an unavailable tool; feeding back an error result",
+			"tool", call.Name)
 		return errResult(call.ID, fmt.Sprintf("tool %q is not available", call.Name))
 	}
 
@@ -301,14 +467,21 @@ func errResult(callID, msg string) ToolResult {
 //
 // round seeds the synthetic ToolCall IDs ("pseudo-<round>-<i>") so a recovered
 // call correlates to its tool-role result exactly like a provider-issued call.
-func (l *Loop) recoverPseudoCalls(ctx context.Context, round int, asst *AssistantMessage) {
+//
+// A round at or past maxRounds is strip-only: that round's tool calls are about
+// to be budget-refused ([appendBudgetExhausted]), never executed, so promoting a
+// pseudo-call there would break OnPseudoCall's recovered=true promise that the
+// call will actually run — and would let a never-run Tool look "called" to the
+// wiring layer's per-turn recorder (the #399 invented-roll leak). Same
+// discipline as [Loop.finalAnswer]'s own strip-only scrub.
+func (l *Loop) recoverPseudoCalls(ctx context.Context, round, maxRounds int, asst *AssistantMessage) {
 	clean, matches := ExtractPseudoCalls(asst.Text)
 	if len(matches) == 0 {
 		return
 	}
 	asst.Text = clean
 	for i, m := range matches {
-		if m.Args != nil {
+		if round < maxRounds && m.Args != nil {
 			// Recover only if the call will ACTUALLY execute: granted, registered,
 			// and eligible for inline execution (read-only or proposal-mediated,
 			// ADR-0030/0052). A granted-but-refused call is metered as NOT
@@ -323,8 +496,9 @@ func (l *Loop) recoverPseudoCalls(ctx context.Context, round int, asst *Assistan
 				continue
 			}
 		}
-		// Ungranted, unparseable, or ineligible: strip-only. The intent is lost
-		// but the leak is contained, and the occurrence is logged + metered.
+		// Ungranted, unparseable, ineligible, or over-budget: strip-only. The
+		// intent is lost but the leak is contained, and the occurrence is
+		// logged + metered.
 		l.firePseudoCall(ctx, m.Name, false)
 		slog.Warn("tool: stripped un-recoverable pseudo-XML tool call from assistant text",
 			"tool", m.Name, "recovered", false)

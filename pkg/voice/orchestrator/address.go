@@ -173,9 +173,11 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 				(final.SpeakerID == "" || !d.isGM(final.SpeakerID)) {
 				continue
 			}
-			// Carry the turn correlation id (A3) from the utterance onto each
-			// routing decision it produced; the matcher does not know about it.
+			// Carry the turn correlation id (A3) and the Speaker Lane attribution
+			// (ADR-0050) from the utterance onto each routing decision it
+			// produced; the matcher does not know about either.
 			routed.TurnID = final.TurnID
+			routed.SpeakerID = final.SpeakerID
 			survivors = append(survivors, routed)
 		}
 		switch len(survivors) {
@@ -192,10 +194,11 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 				targets[i] = s.Target
 			}
 			bus.Publish(voiceevent.EnsembleRouted{
-				At:      survivors[0].At,
-				Text:    final.Text,
-				TurnID:  final.TurnID,
-				Targets: targets,
+				At:        survivors[0].At,
+				Text:      final.Text,
+				TurnID:    final.TurnID,
+				SpeakerID: final.SpeakerID,
+				Targets:   targets,
 			})
 		}
 	})

@@ -190,6 +190,28 @@ tests:
             name: GLYPHOXA_LOG_FORMAT
             value: json
 
+  - it: omits GLYPHOXA_OLLAMA_URL when ollamaUrl is unset
+    # Same conditional as the web Deployment: no override, no env emitted.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OLLAMA_URL
+          any: true
+
+  - it: emits GLYPHOXA_OLLAMA_URL when ollamaUrl names an external Ollama server
+    # Mirrored from the web Deployment for split-mode parity (one endpoint of
+    # record from one shared value): the container ships no local Ollama, so
+    # the binary's loopback default can never work in-cluster (ADR-0011).
+    set:
+      ollamaUrl: http://host.k3d.internal:11434
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OLLAMA_URL
+            value: http://host.k3d.internal:11434
+
   - it: does NOT carry GLYPHOXA_SECRET
     # Voice never decrypts the sealed provider_config: loadSeededNPC takes no
     # cipher and the adapters read real keys from their own env vars. The cipher

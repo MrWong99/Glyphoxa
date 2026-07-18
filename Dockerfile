@@ -5,11 +5,13 @@
 # There is ONE image. `mode` and all config (Postgres URL, provider keys, guild/
 # channel, etc.) are supplied at RUNTIME via args/env — there are no per-mode
 # images. The build stage compiles the live binary with the production tags
-# (`opus dave`) and CGO_ENABLED=0: the whole stack is pure Go since the
-# pion/opus + dave-go migration (#467) and the bespoke pure-Go Silero VAD
-# forward pass (#468), so the binary is fully static. The runtime stage is
-# FROM scratch (ADR-0034 amendment): the static binary plus CA certificates —
-# no libc, no shared libs, no ldconfig, no shell.
+# (`opus dave nolibopusfile`). The outbound Opus encoder is libopus again
+# (hraban/opus via CGO — pion/opus's encoder is below speech-quality parity,
+# ADR-0034 amendment 2026-07-19), so CGO is ON, but libopus and libc are linked
+# STATICALLY (-extldflags "-static") and the binary stays fully static. The
+# runtime stage is therefore still FROM scratch (ADR-0034 amendment): the
+# static binary plus CA certificates — no libc, no shared libs, no ldconfig,
+# no shell.
 #
 # The embedded Silero model (pkg/voice/vad/silero/data/silero_vad_op18_ifless.onnx),
 # the SQL migrations (internal/storage/migrations/*.sql), and the SPA bundle
@@ -27,9 +29,18 @@ ARG GO_VERSION=1.26.5
 # ===========================================================================
 FROM golang:${GO_VERSION}-trixie AS build
 
-# CGO off end-to-end (#468): no C toolchain, nothing to apt-get. The base
+# CGO on for the libopus outbound encoder (the only native dependency); the
+# link below is fully static so the runtime stage stays scratch. The base
 # image's ca-certificates are copied into the runtime stage below.
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=1
+
+# libopus headers + static archive (libopus-dev ships libopus.a) and pkg-config
+# so hraban/opus's `#cgo pkg-config: opus` resolves. The golang base image
+# already carries gcc/libc-dev.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		pkg-config \
+		libopus-dev \
+	&& rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
@@ -46,12 +57,18 @@ RUN go mod download
 # gen/, so this COPY brings them in; the go build below then compiles them.
 COPY . .
 
-# Compile the live binary with the production tags — all pure Go. ldflags
-# `-s -w` strip debug info, matching goreleaser.
-RUN go build -tags "opus dave" -ldflags "-s -w" \
+# Compile the live binary with the production tags. `nolibopusfile` keeps
+# hraban/opus from also requiring libopusfile (unused). `netgo osusergo` force
+# the pure-Go net/user resolvers: statically linked glibc getaddrinfo would
+# dlopen NSS libraries that do not exist in a scratch image, silently breaking
+# DNS. -extldflags "-static" links libopus/libc statically (`-lm` last resolves
+# libopus.a's libm references); `-s -w` strip debug info, matching goreleaser.
+RUN go build -tags "opus dave nolibopusfile netgo osusergo" \
+		-ldflags '-s -w -extldflags "-static -lm"' \
 		-o /out/glyphoxa ./cmd/glyphoxa
 
-# Fail the build immediately if a CGO dependency ever creeps back in: a static
+# Fail the build immediately if the binary is not fully static (a dynamically
+# linked libopus, or a new CGO dependency outside the static link): a static
 # binary is the load-bearing property that lets the runtime stage be scratch.
 RUN ldd /out/glyphoxa 2>&1 | grep -q 'not a dynamic executable'
 

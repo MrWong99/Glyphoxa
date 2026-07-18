@@ -113,13 +113,16 @@ func TestPlaybackSource_RecordsCodecEncodePerFrame(t *testing.T) {
 }
 
 // encodeOpus encodes mono int16 PCM at rate into 20 ms Opus packets, the shape
-// Discord delivers. Used to synthesize inbound frames for DecodeInbound.
+// Discord delivers (pion's encoder, standing in for a Discord client). Used to
+// synthesize inbound frames for DecodeInbound.
 func encodeOpus(t *testing.T, pcm []int16, rate int) [][]byte {
 	t.Helper()
+	// Discord's standard voice bitrate; only shapes the synthesized fixtures.
+	const inboundBitrate = 64000
 	enc, err := opus.NewEncoder(
 		opus.WithSampleRate(rate),
 		opus.WithChannels(1),
-		opus.WithBitrate(playbackBitrate),
+		opus.WithBitrate(inboundBitrate),
 		opus.WithApplication(opus.ApplicationVoIP),
 	)
 	if err != nil {

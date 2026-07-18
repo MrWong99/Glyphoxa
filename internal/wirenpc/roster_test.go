@@ -816,6 +816,128 @@ func TestRosterDepsForLive_TextSinkOnButlerOnly(t *testing.T) {
 	}
 }
 
+// TestRosterDepsForLive_SpeakerNameThreaded pins the transcript-names wiring: the
+// conversationDeps' speakerName resolver reaches every NPC's [agent.Config], so a
+// routed utterance carrying a SpeakerID commits as a "<Name>: <text>" user line.
+func TestRosterDepsForLive_SpeakerNameThreaded(t *testing.T) {
+	synth := &recordingSynth{}
+	engineFor := func(npcSpec) agent.Engine { return scriptEngine{line: "What'll it be?"} }
+	log := slog.New(slog.DiscardHandler)
+	namer := func(speakerID string) string {
+		if speakerID == "111" {
+			return "Artusas"
+		}
+		return ""
+	}
+
+	deps := rosterDepsForLive(conversationDeps{log: log, speakerName: namer}, engineFor, synth, 16)
+	r := deps.replierFor(specFor("npc-bart", "Bart", ""))
+	route := voiceevent.AddressRouted{At: time.Now(), Text: "a round of ale", SpeakerID: "111",
+		Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: voiceevent.AgentRoleCharacter, Name: "Bart"}}
+	if err := r.ReplyStream()(context.Background(), route, func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+
+	hist := r.HistorySnapshot()
+	if len(hist) == 0 || hist[0].Text != "Artusas: a round of ale" {
+		t.Fatalf("committed user line = %+v, want \"Artusas: a round of ale\" first (speakerName not threaded)", hist)
+	}
+}
+
+// captureEngine is a stub [agent.StreamingEngine] that records the messages it
+// is handed, so a test can inspect the assembled system prompt.
+type captureEngine struct {
+	line     string
+	captured []llm.Message
+}
+
+func (e *captureEngine) Generate(_ context.Context, msgs []llm.Message) (string, error) {
+	e.captured = msgs
+	return e.line, nil
+}
+
+func (e *captureEngine) GenerateStream(_ context.Context, msgs []llm.Message, onText func(string) error) (string, error) {
+	e.captured = msgs
+	if onText != nil {
+		if err := onText(e.line); err != nil {
+			return e.line, err
+		}
+	}
+	return e.line, nil
+}
+
+// TestRosterDepsForLive_SpeakerRosterThreaded pins the table-roster wiring: the
+// conversationDeps' playerCharacters (the campaign's bound Characters) and the
+// SIBLING NPC names from d.npcs reach every NPC's [agent.Config], so the system
+// prompt carries the speaker-attribution section — with the NPC's own name
+// excluded from its fellow-NPC list.
+func TestRosterDepsForLive_SpeakerRosterThreaded(t *testing.T) {
+	synth := &recordingSynth{}
+	eng := &captureEngine{line: "Hallo."}
+	engineFor := func(npcSpec) agent.Engine { return eng }
+	log := slog.New(slog.DiscardHandler)
+	namer := func(speakerID string) string {
+		if speakerID == "111" {
+			return "Artusas"
+		}
+		return ""
+	}
+	npcs := []npcSpec{specFor("npc-lukas", "Lukas", ""), specFor("npc-mehra", "Mehra", "")}
+
+	deps := rosterDepsForLive(conversationDeps{
+		log:              log,
+		speakerName:      namer,
+		npcs:             npcs,
+		playerCharacters: []string{"Artusas"},
+	}, engineFor, synth, 16)
+
+	r := deps.replierFor(npcs[0]) // Lukas's Replier
+	route := voiceevent.AddressRouted{At: time.Now(), Text: "wie geht's?", SpeakerID: "111",
+		Target: voiceevent.AddressTarget{AgentID: "npc-lukas", AgentRole: voiceevent.AgentRoleCharacter, Name: "Lukas"}}
+	if err := r.ReplyStream()(context.Background(), route, func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+
+	if len(eng.captured) == 0 {
+		t.Fatal("engine captured no messages")
+	}
+	sys := eng.captured[0].Text
+	if !strings.Contains(sys, "Player characters at the table (each played by a human): Artusas.") {
+		t.Errorf("player characters not threaded into the system prompt:\n%q", sys)
+	}
+	// The fellow-NPC list is the OTHER npcs — Lukas's own name excluded.
+	if !strings.Contains(sys, "Fellow NPCs (AI-played like you; a user-line prefix never refers to them): Mehra.") {
+		t.Errorf("sibling NPC names not threaded (want Mehra only, self excluded):\n%q", sys)
+	}
+}
+
+// TestRosterDepsForLive_NoSpeakerName_NoRosterSection pins the standalone-path
+// guard: with no speakerName resolver (env-only voice / bench), the NPC list in
+// d.npcs must NOT produce a speaker-attribution section — user lines carry no
+// prefix there, so the prompt stays byte-identical to the pre-roster path.
+func TestRosterDepsForLive_NoSpeakerName_NoRosterSection(t *testing.T) {
+	synth := &recordingSynth{}
+	eng := &captureEngine{line: "Aye."}
+	engineFor := func(npcSpec) agent.Engine { return eng }
+	log := slog.New(slog.DiscardHandler)
+	npcs := []npcSpec{specFor("npc-bart", "Bart", ""), specFor("npc-greta", "Greta", "")}
+
+	deps := rosterDepsForLive(conversationDeps{log: log, npcs: npcs}, engineFor, synth, 16)
+	r := deps.replierFor(npcs[0])
+	route := voiceevent.AddressRouted{At: time.Now(), Text: "a room please", SpeakerID: "111",
+		Target: voiceevent.AddressTarget{AgentID: "npc-bart", AgentRole: voiceevent.AgentRoleCharacter, Name: "Bart"}}
+	if err := r.ReplyStream()(context.Background(), route, func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+
+	if len(eng.captured) == 0 {
+		t.Fatal("engine captured no messages")
+	}
+	if sys := eng.captured[0].Text; strings.Contains(sys, "## Who is speaking") {
+		t.Errorf("speaker-attribution section rendered without a speakerName resolver:\n%q", sys)
+	}
+}
+
 // TestRoster_ButlerGateThreadedIntoMatcher pins the #299 wiring: rosterDeps.butlerGate
 // reaches the Matcher's ButlerGMGate, so a non-GM naming the Butler routes nowhere
 // while the GM's identical utterance reaches it — enforced matcher-side (pre-cap).

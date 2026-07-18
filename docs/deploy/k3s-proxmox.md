@@ -168,6 +168,12 @@ elevenLabsApiKey: ""
 geminiApiKey: ""
 groqApiKey: ""
 
+# Embeddings (semantic memory, L2): the image ships no Ollama and defaults to
+# loopback, so point this at a reachable Ollama server serving
+# nomic-embed-text — otherwise L2 stalls with a WARN loop (everything else
+# keeps working). See docs/configuration.md, "Environment variable reference".
+ollamaUrl: "http://<ollama-host>:11434"
+
 database:
   password: "<generate a real one; URL-safe characters>"
 

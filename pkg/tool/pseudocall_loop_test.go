@@ -33,6 +33,7 @@ func (p *scriptedStreamingProvider) GenerateStream(ctx context.Context, messages
 	// bookkeeping, then stream its reply text in chunks.
 	p.seenMessages = append(p.seenMessages, messages)
 	p.seenDecls = append(p.seenDecls, tools)
+	p.seenFinal = append(p.seenFinal, IsFinalAnswerRound(ctx))
 	if p.calls >= len(p.steps) {
 		p.t.Fatalf("scriptedStreamingProvider: unexpected GenerateStream call %d", p.calls+1)
 	}
@@ -277,6 +278,51 @@ func TestRunStreamRecoversPseudoCall(t *testing.T) {
 	}
 	if len(rec.names) != 1 || rec.names[0] != "dice" || !rec.recovered[0] {
 		t.Errorf("OnPseudoCall = %+v/%+v, want (dice,true)", rec.names, rec.recovered)
+	}
+}
+
+// TestLoopOverBudgetPseudoCallStrippedNotRecovered pins the budget edge of the
+// #410 recovery: a pseudo-XML call on the round that exhausts MaxRounds can
+// never execute (that round's tool calls are budget-refused, not run), so it
+// must be stripped with recovered=false — promoting it would break
+// OnPseudoCall's recovered=true promise ("it will run as a real round") and let
+// a never-run Tool look "called" to the wiring layer's per-turn recorder, the
+// #399 invented-roll leak.
+func TestLoopOverBudgetPseudoCallStrippedNotRecovered(t *testing.T) {
+	rec := &pseudoRecorder{}
+	p := &scriptedProvider{
+		t: t,
+		steps: []scriptStep{
+			// Round 0: a native dice call, executed.
+			{reply: AssistantMessage{ToolCalls: []ToolCall{
+				{ID: "c0", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":6}`)},
+			}}},
+			// Round 1 (over-budget, MaxRounds=1): the model emits its dice call as
+			// pseudo-XML text. Strip-only — the clean prose is the answer.
+			{reply: AssistantMessage{Text: `One more! <function=dice {"count":1,"sides":6}</function>`}},
+		},
+	}
+	loop := diceLoop(t, p)
+	loop.MaxRounds = 1
+	loop.OnPseudoCall = rec.hook
+	var executed int
+	loop.OnToolResult = func(context.Context, string, string, bool) { executed++ }
+
+	final, err := loop.Run(context.Background(), []Message{{Role: RoleUser, Text: "roll"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final != "One more!" {
+		t.Errorf("final = %q, want the stripped prose returned as the answer", final)
+	}
+	if p.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (a stripped over-budget pseudo-call must not force another round)", p.calls)
+	}
+	if len(rec.names) != 1 || rec.names[0] != "dice" || rec.recovered[0] {
+		t.Errorf("OnPseudoCall = %+v/%+v, want one (dice,false) — an over-budget pseudo-call never runs", rec.names, rec.recovered)
+	}
+	if executed != 1 {
+		t.Errorf("executed tool results = %d, want 1 (round 0 only; the over-budget pseudo-call never executes)", executed)
 	}
 }
 

@@ -24,7 +24,7 @@ func TestReplier_Draft_IsPure(t *testing.T) {
 
 	before := r.HistorySnapshot()
 
-	draft, err := r.Draft(t.Context(), "Hail, Bart.")
+	draft, err := r.Draft(t.Context(), "", "Hail, Bart.")
 	if err != nil {
 		t.Fatalf("Draft errored: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestReplier_Draft_CancelledCtxErrorsAndCommitsNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	draft, err := r.Draft(ctx, "Hail, Bart.")
+	draft, err := r.Draft(ctx, "", "Hail, Bart.")
 	if err == nil {
 		t.Fatal("Draft on a cancelled ctx must return an error")
 	}
@@ -93,7 +93,7 @@ func TestReplier_SpeakDraft_CommitsUserMsgAndDelivered(t *testing.T) {
 		return nil
 	}
 
-	delivered, err := r.SpeakDraft(t.Context(), "Hail, Bart.", "First sentence. Second sentence.", dispatch)
+	delivered, err := r.SpeakDraft(t.Context(), "", "Hail, Bart.", "First sentence. Second sentence.", dispatch)
 	if err != nil {
 		t.Fatalf("SpeakDraft errored: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestReplier_SpeakDraft_ZeroDeliveredCommitsNothing(t *testing.T) {
 	t.Run("all sentences start-error", func(t *testing.T) {
 		r := draftReplier()
 		dispatch := func(orchestrator.Reply) error { return orchestrator.ErrNotDelivered }
-		delivered, err := r.SpeakDraft(t.Context(), "Hail, Bart.", "First. Second.", dispatch)
+		delivered, err := r.SpeakDraft(t.Context(), "", "Hail, Bart.", "First. Second.", dispatch)
 		if err != nil {
 			t.Fatalf("SpeakDraft errored: %v", err)
 		}
@@ -142,7 +142,7 @@ func TestReplier_SpeakDraft_ZeroDeliveredCommitsNothing(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel() // barge before anything dispatched
 		dispatch := func(orchestrator.Reply) error { return ctx.Err() }
-		delivered, err := r.SpeakDraft(ctx, "Hail, Bart.", "First. Second.", dispatch)
+		delivered, err := r.SpeakDraft(ctx, "", "Hail, Bart.", "First. Second.", dispatch)
 		if err != nil {
 			t.Fatalf("SpeakDraft on a barge must not surface an error: %v", err)
 		}
@@ -172,7 +172,7 @@ func TestReplier_SpeakDraft_CutMidDraftCommitsDeliveredOnly(t *testing.T) {
 		return nil
 	}
 
-	delivered, err := r.SpeakDraft(ctx, "Hail, Bart.", "First. Second. Third.", dispatch)
+	delivered, err := r.SpeakDraft(ctx, "", "Hail, Bart.", "First. Second. Third.", dispatch)
 	if err != nil {
 		t.Fatalf("SpeakDraft on a barge must not surface an error: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestReplier_SpeakDraft_StartErrorSkipsSentenceAndContinues(t *testing.T) {
 		return nil // delivered
 	}
 
-	delivered, err := r.SpeakDraft(t.Context(), "Hail, Bart.", "First. Second.", dispatch)
+	delivered, err := r.SpeakDraft(t.Context(), "", "Hail, Bart.", "First. Second.", dispatch)
 	if err != nil {
 		t.Fatalf("SpeakDraft errored on a start-error sentinel: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestReplier_SpeakReaction_StartErrorSkipsSentenceAndContinues(t *testing.T)
 		return nil
 	}
 
-	delivered, err := r.SpeakReaction(t.Context(), "Bart, thoughts?", "Greta", "We ride.", "Aye. Indeed.", dispatch)
+	delivered, err := r.SpeakReaction(t.Context(), "", "Bart, thoughts?", "Greta", "We ride.", "Aye. Indeed.", dispatch)
 	if err != nil {
 		t.Fatalf("SpeakReaction errored on a start-error sentinel: %v", err)
 	}

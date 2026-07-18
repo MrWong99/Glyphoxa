@@ -152,6 +152,20 @@ type conversationDeps struct {
 	memory agent.MemoryRecaller
 	facts  agent.FactsRecaller
 
+	// speakerName resolves a route's SpeakerID to the human speaker's display
+	// name for the agent-facing transcript (the transcript-names seam); it is
+	// set as [agent.Config.SpeakerName] on every NPC's loop. Must be cache-only
+	// and never block; nil disables attribution (byte-identical prompt).
+	speakerName func(speakerID string) string
+
+	// playerCharacters are the campaign's bound player-character names
+	// ([agent.Config.PlayerCharacters]): together with the sibling NPC names
+	// derived from npcs, they render the system prompt's speaker-attribution
+	// section so the model can read the speakerName prefixes. Loaded beside the
+	// roster (RunFromDB, once per session start); empty — with speakerName also
+	// nil on the env-only paths — keeps the prompt byte-identical.
+	playerCharacters []string
+
 	// mutes is the live per-Agent mute view (#211) and gate the live spend
 	// turn gate (#130); nil is each feature's off default.
 	mutes orchestrator.MuteView

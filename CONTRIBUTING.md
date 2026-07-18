@@ -7,7 +7,7 @@ you need to get started.
 
 ### Prerequisites
 
-- **Go 1.26+** — the whole stack is pure Go (`CGO_ENABLED=0`): no C toolchain, no native libraries (the codec, DAVE, and the Silero VAD are all Go)
+- **Go 1.26+** — the default build is pure Go (`CGO_ENABLED=0`): no C toolchain, no native libraries. Only **audible** builds (`-tags opus`) additionally need `gcc`, `pkg-config`, and `libopus-dev` — the outbound Opus encoder links libopus via CGO (ADR-0034 amendment 2026-07-19); DAVE and the Silero VAD stay pure Go
 - **Node.js 20+ and npm** — the operator console is a Vite/React bundle the Go binary embeds (see the SPA step below)
 - **[buf](https://buf.build/docs/installation)** — the Connect/protobuf stubs under `gen/` are generated, not committed
 
@@ -47,21 +47,27 @@ Order matters: `make proto` → `make spa` → `make build`, exactly as
 
 #### Audible local runs (voice mode)
 
-The audio codec (pion/opus) and DAVE/MLS encryption (dave-go) are pure Go,
-selected by build tags — no native libraries to install. A default build links
-stubs — the pipeline wires up but the audio loop exits with `wire: audio codec
-unavailable` on the first frame. For an **audible** (and encrypted) live run,
-build with the audio tags:
+The audio codec and DAVE/MLS encryption (dave-go) are selected by build tags.
+A default build links stubs — the pipeline wires up but the audio loop exits
+with `wire: audio codec unavailable` on the first frame. For an **audible**
+(and encrypted) live run, install `pkg-config` + `libopus-dev` (the outbound
+Opus encoder is hraban/opus, CGO — ADR-0034 amendment 2026-07-19) and build
+with the audio tags:
 
 ```bash
-go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
+CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
 ```
 
-- `opus` — real Opus↔PCM codec (else the stub: no audio).
-- `dave` — real DAVE/MLS encryption (mandatory on production Discord; else unencrypted).
+- `opus` — real Opus↔PCM codec (else the stub: no audio). Implies CGO +
+  system libopus; `CGO_ENABLED=1` is required whenever `opus` is set.
+- `nolibopusfile` — always pair it with `opus`: it keeps hraban/opus from also
+  demanding libopusfile, which the codec never uses.
+- `dave` — real DAVE/MLS encryption (mandatory on production Discord; else unencrypted). Pure Go.
 
-(All pure Go — the build is `CGO_ENABLED=0` and statically linked; the Silero
-VAD's bespoke forward pass needs no ONNX Runtime, #468.)
+(Everything else stays pure Go — the untagged default build is `CGO_ENABLED=0`,
+and the Silero VAD's bespoke forward pass needs no ONNX Runtime, #468. The
+container image links libopus statically so the runtime stays scratch — see
+the Dockerfile.)
 
 See [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md) for the full
 `voice`-mode runbook.

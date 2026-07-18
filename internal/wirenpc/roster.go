@@ -239,6 +239,21 @@ func (r *Roster) setMutedLocked(agentID string, muted bool) {
 	r.matcher.SetMuted(agentID, muted)
 }
 
+// siblingNames returns the display names of every NPC in npcs EXCEPT the one
+// with agentID — the [agent.Config.FellowNPCs] list for that NPC's prompt, so an
+// NPC never lists itself among its fellows. nil for a lone NPC (the agent then
+// renders only the player half of the section, or none at all).
+func siblingNames(npcs []npcSpec, agentID string) []string {
+	var names []string
+	for _, n := range npcs {
+		if n.agentID == agentID {
+			continue
+		}
+		names = append(names, n.name)
+	}
+	return names
+}
+
 // rosterDepsForLive builds the production rosterDeps: every NPC's Replier is
 // constructed from a per-NPC engine (engineFor), so each NPC carries its own
 // hydrated GrantSet (#113) while still sharing one Groq client and Registry under
@@ -247,7 +262,17 @@ func (r *Roster) setMutedLocked(agentID string, muted bool) {
 // shared NPC memory recaller (#122) and d.facts the shared KG-facts recaller
 // (#126); every NPC's loop consults the SAME recallers, which scope by the
 // addressed AgentID / active Campaign per turn. A nil memory/facts disables that
-// slot (the prompt stays byte-identical). d.language is the Campaign Language
+// slot (the prompt stays byte-identical). d.speakerName is the shared speaker
+// display-name resolver (the transcript-names seam): every NPC's loop prefixes
+// its user lines "<Name>: <text>" through it; nil disables attribution.
+// d.playerCharacters (the campaign's bound Characters) plus each NPC's SIBLING
+// names from d.npcs feed the prompt's speaker-attribution section
+// ([agent.Config.PlayerCharacters]/[agent.Config.FellowNPCs]) so the model can
+// read those prefixes; like the roster itself, both reflect the SESSION-START
+// membership — a Character created or an NPC added mid-session appears on the
+// next session (re)start, and the agent renders no section when d.speakerName
+// is nil (env-only paths: prompt byte-identical).
+// d.language is the Campaign Language
 // selecting the Matcher's phonetic encoder (#199).
 // d.gmSpeaker is the Butler GM-address predicate (#299): it becomes the Matcher's
 // Config.ButlerGMGate so a non-GM naming the Butler is dropped matcher-side (#256).
@@ -275,12 +300,15 @@ func rosterDepsForLive(d conversationDeps, engineFor func(npcSpec) agent.Engine,
 					Markdown: spec.persona,
 					Voice:    spec.voice,
 				},
-				Engine:       engineFor(spec),
-				Synthesizer:  synth,
-				HistoryTurns: historyTurns,
-				Memory:       d.memory,
-				Facts:        d.facts,
-				TextSink:     textSink,
+				Engine:           engineFor(spec),
+				Synthesizer:      synth,
+				HistoryTurns:     historyTurns,
+				Memory:           d.memory,
+				Facts:            d.facts,
+				SpeakerName:      d.speakerName,
+				PlayerCharacters: d.playerCharacters,
+				FellowNPCs:       siblingNames(d.npcs, spec.agentID),
+				TextSink:         textSink,
 				OnError: func(err error) {
 					d.log.Warn("agent reply failed", "npc", spec.name, "err", err)
 				},

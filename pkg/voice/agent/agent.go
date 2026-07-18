@@ -169,10 +169,11 @@ type Config struct {
 
 	// TurnTimeout bounds one turn's LLM work (including any tool-use rounds a
 	// tool-backed Engine runs). The turn's context is cancelled when it elapses,
-	// unwinding the in-flight provider call, and the turn yields no reply (the
-	// deadline error goes to OnError). Zero applies [DefaultTurnTimeout];
-	// negative disables the deadline (the turn is still cancellable via the
-	// caller's ctx, e.g. barge-in).
+	// unwinding the in-flight provider call; the deadline error goes to OnError
+	// and the turn speaks the canned [Config.FallbackLine] (the caller's ctx is
+	// still live — a hung provider is a terminal failure, not a barge). Zero
+	// applies [DefaultTurnTimeout]; negative disables the deadline (the turn is
+	// still cancellable via the caller's ctx, e.g. barge-in).
 	TurnTimeout time.Duration
 
 	// Memory recalls the Hot Context memory chunks injected into the system prompt
@@ -188,6 +189,42 @@ type Config struct {
 	// the turn: a slow/unavailable path degrades to nil. nil disables facts — the
 	// slot stays empty and the prompt is byte-identical to the pre-facts behavior.
 	Facts FactsRecaller
+
+	// SpeakerName resolves a route's SpeakerID (the ADR-0050 Speaker Lane
+	// attribution) to the human speaker's display name, so the utterance enters
+	// the conversation as "<Name>: <text>" — the same "Who: text" language the
+	// Transcript Chunker records (#281) — and multiple humans' turns stay
+	// distinguishable in Hot Context. It MUST be cache-only and never block (it
+	// runs on the turn's hot path; the live binary wires the speaker.Resolver's
+	// non-blocking Lookup, warmed on VADSpeechStart). A "" result — resolver
+	// miss or unattributed lane — labels the line "Player / DM", matching the
+	// relay/chunker fallback. nil disables attribution entirely: the user line
+	// is the bare utterance, byte-identical to the pre-seam prompt (the
+	// MemoryRecaller seam pattern — pkg/voice stays free of internal/ imports).
+	// Memory recall stays keyed on the RAW utterance either way (ADR-0042: the
+	// speculative-recall match compares against unprefixed STT text).
+	SpeakerName func(speakerID string) string
+
+	// PlayerCharacters are the display names of the Campaign's bound player
+	// characters — the humans at the table, named as the SpeakerName resolver
+	// labels their user lines. With a SpeakerName resolver wired and at least one
+	// of PlayerCharacters/FellowNPCs set, the system prompt appends a short
+	// speaker-attribution section (see [Replier.systemPrompt]) explaining the
+	// "Name: text" user-line prefix and listing who is human vs. NPC — otherwise
+	// the model's persona prior wins over the prefix and it misattributes
+	// speakers (an NPC persona hard-coding a relationship reads every line as
+	// that person). Unset (with FellowNPCs also unset, or SpeakerName nil) the
+	// prompt is byte-identical to the pre-roster path. Plain data, wired like
+	// SpeakerName (the MemoryRecaller seam pattern — pkg/voice stays free of
+	// internal/ imports); loaded at session start, like the roster itself.
+	PlayerCharacters []string
+
+	// FellowNPCs are the display names of the OTHER Agents in the scene (this
+	// Persona's name excluded). Listed in the speaker-attribution section so a
+	// name collision — an NPC named like a human's display name — cannot be
+	// misread: a user-line prefix always names a human, never one of these. See
+	// [Config.PlayerCharacters] for the section's gating and compat contract.
+	FellowNPCs []string
 
 	// TextSink, when non-nil, gives this Agent a text-delivery channel for its
 	// replies (the Butler's in-voice text answers, #299 / #297 decision 2). With a
@@ -209,6 +246,23 @@ type Config struct {
 	// zero value is a valid retries-on policy (defaults), so the retry is on unless a
 	// caller narrows it.
 	Retry retry.Policy
+
+	// FallbackLine is the canned sentence spoken when a turn's Engine fails
+	// TERMINALLY (provider outage, truncation, a hang killed by the turn's own
+	// [Config.TurnTimeout] deadline, an exhausted tool budget with no prose):
+	// after OnError, the turn dispatches this one line in the Persona's Voice so
+	// the room hears something instead of dead air, and reports the turn
+	// delivered rather than abandoned. It is NEVER committed to history — it is
+	// not the model's words. Empty selects [DefaultFallbackLine]. It is never
+	// spoken on a barge/ctx-cancel of the CALLER's turn ctx (a superseded turn
+	// stays silent — the turn's own TurnTimeout expiry is a terminal failure,
+	// not a barge, and DOES speak), never once a sentence dispatch was ATTEMPTED
+	// (the room may already have heard partial audio — a delivered sentence, or
+	// a #436 mid-stream TTS failure's fragment), and never for a voiceless
+	// Persona (empty VoiceID must not reach TTS). On an Ensemble Turn whose
+	// every candidate Draft failed terminally, the coordinator speaks the
+	// top-scored candidate's line via [Cast.SpeakFallback].
+	FallbackLine string
 }
 
 // DefaultTurnTimeout is the per-turn LLM deadline applied when
@@ -216,6 +270,11 @@ type Config struct {
 // conversational terms anyway; the deadline exists so a hung provider can never
 // wedge the reply path forever.
 const DefaultTurnTimeout = 60 * time.Second
+
+// DefaultFallbackLine is the spoken fallback applied when [Config.FallbackLine]
+// is empty: the in-character stall an Agent utters when its Engine failed
+// terminally and there is no reply text to speak.
+const DefaultFallbackLine = "Hm... give me a moment, my thoughts wandered."
 
 // Replier is the stateful Agent loop. Each addressed utterance appends a user
 // message and the assistant's reply to a running conversation, so the recent
@@ -276,10 +335,82 @@ func (r *Replier) Reply() orchestrator.ReplyFunc {
 		if e.Target.AgentID != r.cfg.Persona.AgentID {
 			return nil // not addressed to this Agent
 		}
-		ctx, cancel := r.withTurnTimeout(ctx)
+		// Keep the PRE-timeout parent (#473 review): the fallback gates judge
+		// silence by ITS liveness — a barge/supersede cancels the parent (a
+		// superseded turn stays silent), while the turn's own TurnTimeout expiry
+		// cancels only the child, and a hung provider killed by the deadline is a
+		// terminal failure the room should hear the canned stall for.
+		parent := ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := r.withTurnTimeout(parent)
 		defer cancel()
-		return r.turn(ctx, e.Text)
+		return r.turn(ctx, parent, e.SpeakerID, e.Text)
 	}
+}
+
+// unknownSpeakerLabel is the user-line attribution for a speaker the SpeakerName
+// resolver cannot name (cold cache, unmapped speaker, or the unattributed default
+// lane) — the same generic-human label the SSE relay and Transcript Chunker use
+// (#281), so the prompt and the recorded transcript speak one language.
+const unknownSpeakerLabel = "Player / DM"
+
+// userLine renders one human utterance as the user message Hot Context carries:
+// "<Name>: <text>" when a [Config.SpeakerName] resolver is wired (the
+// transcript-names seam, mirroring the chunker's "Who: text" grain), the bare
+// text when it is nil — byte-identical to the pre-seam prompt. The prefix is a
+// history/prompt concern ONLY: memory recall and the text-modality decision keep
+// keying on the raw utterance.
+func (r *Replier) userLine(speakerID, text string) string {
+	if r.cfg.SpeakerName == nil {
+		return text
+	}
+	name := r.cfg.SpeakerName(speakerID)
+	if name == "" {
+		name = unknownSpeakerLabel
+	}
+	return name + ": " + text
+}
+
+// fallbackLine returns the terminal-error utterance: [Config.FallbackLine], or
+// [DefaultFallbackLine] when unset.
+func (r *Replier) fallbackLine() string {
+	if r.cfg.FallbackLine != "" {
+		return r.cfg.FallbackLine
+	}
+	return DefaultFallbackLine
+}
+
+// fallbackReply is the batch-path spoken fallback for a terminal Engine error:
+// one Reply carrying the canned line in the Persona's Voice, with NO
+// OnDelivered hook — the line is not the model's words and never enters
+// history. ctx is the caller's PRE-timeout turn ctx (#473 review): a cancelled
+// one (barge/supersede) or a voiceless Persona yields nil, preserving the barge
+// silence and the voiceless-never-reaches-TTS guarantee — while the turn's own
+// TurnTimeout expiry, which cancels only the timeout child, still speaks.
+func (r *Replier) fallbackReply(ctx context.Context) []orchestrator.Reply {
+	if ctx.Err() != nil || r.cfg.Persona.Voice.VoiceID == "" {
+		return nil
+	}
+	return []orchestrator.Reply{{Sentence: r.fallbackLine(), Voice: r.cfg.Persona.Voice}}
+}
+
+// speakFallback dispatches the canned fallback line for a terminal Engine error
+// on a dispatch-driven turn, reporting whether it was spoken — false under a
+// cancelled ctx (a barged turn stays silent) or for a voiceless Persona (an
+// empty VoiceID must never reach TTS), in which case the caller propagates the
+// original error. ctx is the caller's PRE-timeout turn ctx (#473 review), so the
+// turn's own TurnTimeout expiry — which cancels only the timeout child, and
+// whose dispatch runs under the still-live outer turn — still speaks the line.
+// Best-effort: a rejected dispatch is not re-driven (the reactor already
+// recorded the TTS failure), and the line is never committed to history.
+func (r *Replier) speakFallback(ctx context.Context, dispatch func(orchestrator.Reply) error) bool {
+	if ctx.Err() != nil || r.cfg.Persona.Voice.VoiceID == "" {
+		return false
+	}
+	_ = dispatch(orchestrator.Reply{Sentence: r.fallbackLine(), Voice: r.cfg.Persona.Voice})
+	return true
 }
 
 // withTurnTimeout bounds one turn's work with [Config.TurnTimeout] (zero applies
@@ -310,19 +441,23 @@ func (r *Replier) withTurnTimeout(ctx context.Context) (context.Context, context
 }
 
 // turn runs one Agent turn for the given utterance text: it appends the user
-// message, assembles Hot Context (system prompt + bounded history), hands it to
-// the [Engine] for the final text, records the assistant reply, and returns it
-// as a single [orchestrator.Reply] in the Agent's Voice. An empty completion or
-// an Engine error yields no reply (the error is reported via OnError).
-func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
+// message (speaker-attributed via [Replier.userLine]), assembles Hot Context
+// (system prompt + bounded history), hands it to the [Engine] for the final
+// text, records the assistant reply, and returns it as a single
+// [orchestrator.Reply] in the Agent's Voice. An empty completion yields no
+// reply; an Engine error is reported via OnError and speaks the canned
+// fallback. parent is the caller's PRE-timeout turn ctx, the fallback's
+// silence gate (#473 review).
+func (r *Replier) turn(ctx, parent context.Context, speakerID, text string) []orchestrator.Reply {
 	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
+	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: r.userLine(speakerID, text)})
 	r.trimHistoryLocked()
 	r.mu.Unlock()
 
 	// Recall + facts run BETWEEN the two lock sections, never under r.mu: they are
 	// network-/DB-adjacent and must not hold the loop's lock across the call
-	// (ADR-0042). Both respect ctx, so a barge cancels them.
+	// (ADR-0042). Both respect ctx, so a barge cancels them. Recall keys on the
+	// RAW utterance, never the attributed line (the speculative-recall match).
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
 
@@ -335,7 +470,10 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 		if r.cfg.OnError != nil {
 			r.cfg.OnError(err)
 		}
-		return nil
+		// Terminal engine error: speak the canned fallback instead of dead air.
+		// The gate is the PARENT ctx: nil under a barge cancel (a superseded turn
+		// stays silent), spoken when only the turn's own TurnTimeout expired.
+		return r.fallbackReply(parent)
 	}
 	reply = strings.TrimSpace(reply)
 	if reply == "" {
@@ -369,19 +507,32 @@ func (r *Replier) turn(ctx context.Context, text string) []orchestrator.Reply {
 // It honors ctx (bounded by [Config.TurnTimeout] like the LLM turn) and consults
 // Memory/Facts under it, so a barge tearing down the whole ensemble unwinds every
 // in-flight draft.
-func (r *Replier) Draft(ctx context.Context, text string) (string, error) {
+func (r *Replier) Draft(ctx context.Context, speakerID, text string) (string, error) {
+	return r.draftWithLine(ctx, r.userLine(speakerID, text), text)
+}
+
+// draftWithLine is [Replier.Draft] with the speaker-attributed user line already
+// resolved — the [Cast]'s Ensemble Turn entry point (#473 review): the Cast
+// resolves the line ONCE per (turn, Agent) at Draft time and reuses the SAME
+// string for the turn's Speak/React/SpeakReaction, so the committed history can
+// never drift from the prompt the draft reasoned over when [Config.SpeakerName]'s
+// live cache warms (or empties) mid-turn. text stays the RAW utterance — memory
+// recall keys on it (ADR-0042), never the attributed line.
+func (r *Replier) draftWithLine(ctx context.Context, userLine, text string) (string, error) {
 	ctx, cancel := r.withTurnTimeout(ctx)
 	defer cancel()
 
 	// Snapshot the history and append the user message on the COPY — Draft must not
-	// touch the loop's live history (purity).
+	// touch the loop's live history (purity). The candidate reasons over the same
+	// speaker-attributed line SpeakDraft would commit, so prompt and record agree.
 	r.mu.Lock()
 	history := append(make([]llm.Message, 0, len(r.history)+1), r.history...)
 	r.mu.Unlock()
-	history = append(history, llm.Message{Role: llm.RoleUser, Text: text})
+	history = append(history, llm.Message{Role: llm.RoleUser, Text: userLine})
 	history = trimHistory(history, r.cfg.HistoryTurns)
 
 	// Recall + facts run under ctx, never mutating loop state (they never did).
+	// Recall keys on the RAW utterance (ADR-0042), not the attributed line.
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
 
@@ -407,9 +558,10 @@ func (r *Replier) Draft(ctx context.Context, text string) (string, error) {
 // drain, and the sentences forwarded before the cut are committed while the rest
 // are dropped. It returns the delivered text; a ctx-cancel is the expected barge
 // path, not a failure, so it returns a nil error there.
-func (r *Replier) SpeakDraft(ctx context.Context, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	// A Lead draft's modality decision keys on the very utterance it commits.
-	return r.speakDraftModality(ctx, userText, userText, draft, dispatch)
+func (r *Replier) SpeakDraft(ctx context.Context, speakerID, userText, draft string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
+	// The committed user message is the speaker-attributed line (the same one
+	// Draft reasoned over); the modality decision keys on the RAW utterance.
+	return r.speakDraftModality(ctx, r.userLine(speakerID, userText), userText, draft, dispatch)
 }
 
 // ReactsAsText reports whether this Agent would deliver its Cross-talk Reaction
@@ -518,16 +670,28 @@ type deliveredText struct {
 	voice            tts.Voice
 	onFirstDelivered func()
 	spoken           strings.Builder
+
+	// attempted: some dispatch reached the synthesizer — audio MAY exist even
+	// when nothing committed, because [orchestrator.ErrNotDelivered] covers a
+	// #436 mid-stream TTS failure where a fragment already played, not only a
+	// start-error. It mirrors turnRun.attempted (set past the pre-dispatch cut
+	// check; a SentenceCut here means the turn ctx died, which the fallback's own
+	// ctx gate already excludes). The terminal-error fallback keys on it: the
+	// canned line must never follow audio the room may already have heard, and
+	// d.text() alone under-counts (it holds only COMMITTED sentences).
+	attempted bool
 }
 
 func (d *deliveredText) emit(sentence string) error {
 	err := d.dispatch(orchestrator.Reply{Sentence: sentence, Voice: d.voice})
 	switch orchestrator.OutcomeOf(err) {
 	case orchestrator.SentenceNotDelivered:
+		d.attempted = true
 		return nil // skip this sentence's commit; the turn is alive, keep producing
 	case orchestrator.SentenceCut:
 		return err // stop the drain; nothing more is committed
 	}
+	d.attempted = true
 	if d.onFirstDelivered != nil {
 		d.onFirstDelivered()
 		d.onFirstDelivered = nil
@@ -575,15 +739,27 @@ func crossTalkUserText(userText, leadName, leadText string) string {
 // completion OR the [crossTalkSilence] sentinel returns "", nil — the Agent declines
 // to react. It honors ctx (bounded by [Config.TurnTimeout]) so a barge tearing the
 // whole ensemble down unwinds an in-flight reaction generation.
-func (r *Replier) React(ctx context.Context, userText, leadName, leadText string) (string, error) {
+func (r *Replier) React(ctx context.Context, speakerID, userText, leadName, leadText string) (string, error) {
+	return r.reactWithLine(ctx, r.userLine(speakerID, userText), userText, leadName, leadText)
+}
+
+// reactWithLine is [Replier.React] with the speaker-attributed user line already
+// resolved — the [Cast]'s entry point (#473 review, see [Replier.draftWithLine]):
+// the composite the reactor reasons over is built from the line pinned at Draft
+// time, so SpeakReaction can commit the identical composite even when the
+// SpeakerName cache changes mid-turn. userText stays the RAW utterance for
+// memory recall (ADR-0042).
+func (r *Replier) reactWithLine(ctx context.Context, userLine, userText, leadName, leadText string) (string, error) {
 	ctx, cancel := r.withTurnTimeout(ctx)
 	defer cancel()
 
 	// Snapshot + append the composite user message on the COPY (purity, as Draft).
+	// The composite's utterance half carries the speaker attribution (the Lead's
+	// half is already name-attributed by construction).
 	r.mu.Lock()
 	history := append(make([]llm.Message, 0, len(r.history)+1), r.history...)
 	r.mu.Unlock()
-	history = append(history, llm.Message{Role: llm.RoleUser, Text: crossTalkUserText(userText, leadName, leadText)})
+	history = append(history, llm.Message{Role: llm.RoleUser, Text: crossTalkUserText(userLine, leadName, leadText)})
 	history = trimHistory(history, r.cfg.HistoryTurns)
 
 	// Recall keys on the raw utterance (the memory the Agent brings to the moment),
@@ -626,8 +802,8 @@ func isSilenceSentinel(reply string) bool {
 // voiced reactor to text via a keyword match ("Post it on the tavern board.", finding
 // 3). It returns the delivered text; a ctx-cancel (a barge cutting the reaction
 // mid-playback) commits only the sentences spoken before the cut.
-func (r *Replier) SpeakReaction(ctx context.Context, userText, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
-	return r.speakDraftModality(ctx, crossTalkUserText(userText, leadName, leadText), userText, reaction, dispatch)
+func (r *Replier) SpeakReaction(ctx context.Context, speakerID, userText, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (delivered string, err error) {
+	return r.speakDraftModality(ctx, crossTalkUserText(r.userLine(speakerID, userText), leadName, leadText), userText, reaction, dispatch)
 }
 
 // ReplyStream returns the [orchestrator.StreamReplyFunc] that drives this loop
@@ -647,9 +823,15 @@ func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
 		// path: production wires this path, and without it a thinking-then-stalling
 		// provider completion runs unbounded (the Gemini client has no overall HTTP
 		// timeout by design), so a wedged turn would never produce first audio.
-		ctx, cancel := r.withTurnTimeout(ctx)
+		// The PRE-timeout parent is kept as the fallback gates' silence judge
+		// (#473 review, see [Replier.Reply]).
+		parent := ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := r.withTurnTimeout(parent)
 		defer cancel()
-		return r.streamTurn(ctx, e.Text, dispatch)
+		return r.streamTurn(ctx, parent, e.SpeakerID, e.Text, dispatch)
 	}
 }
 
@@ -662,14 +844,19 @@ func (r *Replier) ReplyStream() orchestrator.StreamReplyFunc {
 // pump is committed to the conversation history. A turn cut mid-stream by a
 // barge-in records what Bart already said, not the untruncated completion he
 // would have said — so the next turn's Hot Context reflects what the user heard.
-func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orchestrator.Reply) error) error {
+//
+// parent is the caller's PRE-timeout turn ctx: the terminal-error branch judges
+// barge silence by ITS liveness, so the turn's own TurnTimeout expiry still
+// reports OnError and speaks the fallback (#473 review).
+func (r *Replier) streamTurn(ctx, parent context.Context, speakerID, text string, dispatch func(orchestrator.Reply) error) error {
 	r.mu.Lock()
-	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: text})
+	r.history = append(r.history, llm.Message{Role: llm.RoleUser, Text: r.userLine(speakerID, text)})
 	r.trimHistoryLocked()
 	r.mu.Unlock()
 
 	// Recall + facts between the lock sections (see [Replier.turn]): outside r.mu,
 	// under ctx, each degrading to nothing rather than stalling the streaming turn.
+	// Recall keys on the RAW utterance, never the attributed line (ADR-0042).
 	mem := r.recall(ctx, text)
 	facts := r.facts(ctx)
 
@@ -682,13 +869,13 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 	// text-modality answer posts via the sink with zero TTS dispatch; a spoken one
 	// is sentence-split and dispatched. See [Replier.textModalityTurn].
 	if r.cfg.TextSink != nil {
-		return r.textModalityTurn(ctx, text, messages, dispatch)
+		return r.textModalityTurn(ctx, parent, text, messages, dispatch)
 	}
 
 	streamer, ok := r.engine.(StreamingEngine)
 	if !ok {
 		// Non-streaming engine: fall back to one completion, then dispatch it whole.
-		return r.fallbackTurn(ctx, messages, dispatch)
+		return r.fallbackTurn(ctx, parent, messages, dispatch)
 	}
 
 	// Deliver-then-commit via the shared emitter (ADR-0012, #444): a sentence
@@ -722,11 +909,23 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 
 	r.commitSpoken(d.text())
 
-	// A cancellation is the expected barge-in path, not a turn failure: report
-	// only a genuine engine error.
-	if genErr != nil && ctx.Err() == nil {
+	// A cancellation of the CALLER's turn ctx is the expected barge-in path, not
+	// a turn failure: report only a genuine engine error — which includes the
+	// turn's OWN TurnTimeout expiry (the parent stays live; a hung provider is a
+	// terminal failure, not a barge — #473 review).
+	if genErr != nil && parent.Err() == nil {
 		if r.cfg.OnError != nil {
 			r.cfg.OnError(genErr)
+		}
+		// Terminal engine error before ANY dispatch was ATTEMPTED: speak the
+		// canned fallback and report the turn delivered (nil) rather than
+		// abandoned. Once a dispatch was attempted the room MAY have heard audio
+		// — a delivered sentence, or a #436 mid-stream TTS failure's fragment
+		// (ErrNotDelivered, which commits nothing) — so no canned line is
+		// appended; gating on the committed text alone would speak after a
+		// partial reply (#473 review).
+		if !d.attempted && r.speakFallback(parent, dispatch) {
+			return nil
 		}
 		return genErr
 	}
@@ -735,12 +934,22 @@ func (r *Replier) streamTurn(ctx context.Context, text string, dispatch func(orc
 
 // fallbackTurn handles a streaming reply when the engine cannot stream: it runs
 // one completion and dispatches the whole reply as a single sentence, mirroring
-// the batch [Replier.turn] so a non-streaming engine still speaks.
-func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
+// the batch [Replier.turn] so a non-streaming engine still speaks. parent is
+// the caller's PRE-timeout turn ctx, the fallback's silence gate (#473 review).
+func (r *Replier) fallbackTurn(ctx, parent context.Context, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	reply, err := r.engine.Generate(ctx, messages)
 	if err != nil {
-		if ctx.Err() == nil && r.cfg.OnError != nil {
-			r.cfg.OnError(err)
+		if parent.Err() == nil {
+			if r.cfg.OnError != nil {
+				r.cfg.OnError(err)
+			}
+			// Terminal engine error — including the turn's own TurnTimeout expiry
+			// (the parent stays live): speak the canned fallback and report the
+			// turn delivered (nil) instead of dead air. A barge cancel (or a
+			// voiceless Persona) propagates the error as before.
+			if r.speakFallback(parent, dispatch) {
+				return nil
+			}
 		}
 		return err
 	}
@@ -781,12 +990,24 @@ func (r *Replier) fallbackTurn(ctx context.Context, messages []llm.Message, disp
 // the reactor publishes a TurnEnded(text_delivered) terminal event: a text turn
 // dispatches no TTS and reaches no first audio, so without this signal the
 // metrics TTL sweep would miscount a delivered answer as abandoned. The spoken
-// branch stays silent on success (first audio is its terminal signal).
-func (r *Replier) textModalityTurn(ctx context.Context, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
+// branch stays silent on success (first audio is its terminal signal). parent
+// is the caller's PRE-timeout turn ctx, the fallback's silence gate (#473
+// review).
+func (r *Replier) textModalityTurn(ctx, parent context.Context, utterance string, messages []llm.Message, dispatch func(orchestrator.Reply) error) error {
 	answer, err := r.engine.Generate(ctx, messages)
 	if err != nil {
-		if ctx.Err() == nil && r.cfg.OnError != nil {
-			r.cfg.OnError(err)
+		if parent.Err() == nil {
+			if r.cfg.OnError != nil {
+				r.cfg.OnError(err)
+			}
+			// Terminal engine error — including the turn's own TurnTimeout expiry
+			// (the parent stays live): a VOICED Butler speaks the canned fallback
+			// (delivered, nil); a voiceless one has no Voice to speak it with —
+			// speakFallback refuses (empty VoiceID never reaches TTS) and the
+			// error propagates as before.
+			if r.speakFallback(parent, dispatch) {
+				return nil
+			}
 		}
 		return err
 	}
@@ -963,10 +1184,13 @@ func (r *Replier) hotContextLocked(mem Memory, facts []string) []llm.Message {
 // systemPrompt builds the system prompt from the Hot Context inputs in slot order:
 // the Persona, the KG-facts block (the reserved facts slot, ADR-0008/#126), the
 // recalled memory block (ADR-0011/0042/0012 — both touch the SYSTEM prompt only),
-// and the Voice's provider-specific audio-markup instruction from
-// [tts.Synthesizer.AudioMarkupPrompt] (required by ADR-0022). Empty facts AND a
-// zero mem omit their blocks entirely, leaving the prompt byte-identical to the
-// pre-facts/pre-memory path (#126 / AC6).
+// the speaker-attribution section (the table roster — see [Config.PlayerCharacters];
+// rendered ONLY when a SpeakerName resolver is wired, since it describes the
+// "Name: text" prefix that resolver produces), and the Voice's provider-specific
+// audio-markup instruction from [tts.Synthesizer.AudioMarkupPrompt] (required by
+// ADR-0022). Empty facts AND a zero mem AND an unset roster omit their blocks
+// entirely, leaving the prompt byte-identical to the
+// pre-facts/pre-memory/pre-roster path (#126 / AC6).
 func (r *Replier) systemPrompt(mem Memory, facts []string) string {
 	var b strings.Builder
 	if p := strings.TrimSpace(r.cfg.Persona.Markdown); p != "" {
@@ -983,6 +1207,14 @@ func (r *Replier) systemPrompt(mem Memory, facts []string) string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(block)
+	}
+	if r.cfg.SpeakerName != nil {
+		if block := speakerRosterBlock(r.cfg.PlayerCharacters, r.cfg.FellowNPCs); block != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(block)
+		}
 	}
 	if markup := r.cfg.Synthesizer.AudioMarkupPrompt(r.cfg.Persona.Voice); markup != "" {
 		if b.Len() > 0 {
@@ -1036,6 +1268,36 @@ func memoryBlock(mem Memory) string {
 			b.WriteString(c)
 		}
 	}
+	return b.String()
+}
+
+// speakerRosterBlock renders the speaker-attribution section: the "Name: text"
+// user-line convention (the prefix — not persona or memories — identifies the
+// human addressing the NPC), the player characters as the humans at the table,
+// the fellow NPCs by name (so an NPC named like a human's display name cannot be
+// misread as the speaker), and the generic [unknownSpeakerLabel]. Kept to a few
+// lines — this rides every voice turn's prompt. An empty roster (no players AND
+// no fellow NPCs) yields "" so the block is dropped entirely (the byte-identical
+// guarantee); the caller additionally gates on a wired SpeakerName resolver,
+// without which no prefix exists for the section to describe.
+func speakerRosterBlock(players, npcs []string) string {
+	if len(players) == 0 && len(npcs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Who is speaking\n\n")
+	b.WriteString(`Each user line begins with the name of the HUMAN speaking it, as "Name: text". This prefix — not your persona, your memories, or past conversation — tells you who is addressing you.`)
+	if len(players) > 0 {
+		b.WriteString("\nPlayer characters at the table (each played by a human): ")
+		b.WriteString(strings.Join(players, ", "))
+		b.WriteString(".")
+	}
+	if len(npcs) > 0 {
+		b.WriteString("\nFellow NPCs (AI-played like you; a user-line prefix never refers to them): ")
+		b.WriteString(strings.Join(npcs, ", "))
+		b.WriteString(".")
+	}
+	b.WriteString("\nLines prefixed \"" + unknownSpeakerLabel + "\" come from an unidentified human.")
 	return b.String()
 }
 

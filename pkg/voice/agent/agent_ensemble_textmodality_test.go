@@ -24,7 +24,7 @@ func TestReplier_SpeakDraft_VoicelessButler_DeliversTextNoDispatch(t *testing.T)
 		return nil
 	})
 
-	delivered, err := r.SpeakDraft(t.Context(), "Glyphoxa, roll two d6", "Nine.", func(orchestrator.Reply) error {
+	delivered, err := r.SpeakDraft(t.Context(), "", "Glyphoxa, roll two d6", "Nine.", func(orchestrator.Reply) error {
 		dispatched++
 		return nil
 	})
@@ -59,7 +59,7 @@ func TestReplier_SpeakDraft_LongAnswer_DeliversText(t *testing.T) {
 		return nil
 	})
 
-	delivered, err := r.SpeakDraft(t.Context(), "Glyphoxa, recap last session", long, func(orchestrator.Reply) error {
+	delivered, err := r.SpeakDraft(t.Context(), "", "Glyphoxa, recap last session", long, func(orchestrator.Reply) error {
 		dispatched++
 		return nil
 	})
@@ -86,7 +86,7 @@ func TestReplier_SpeakDraft_ShortVoicedAnswer_Spoken(t *testing.T) {
 	})
 
 	var got []string
-	delivered, err := r.SpeakDraft(t.Context(), "Glyphoxa, roll two d6", "Two sixes. Total nine.", func(rep orchestrator.Reply) error {
+	delivered, err := r.SpeakDraft(t.Context(), "", "Glyphoxa, roll two d6", "Two sixes. Total nine.", func(rep orchestrator.Reply) error {
 		got = append(got, rep.Sentence)
 		return nil
 	})
@@ -115,7 +115,7 @@ func TestReplier_SpeakDraft_TextSink_PostError_NotCommitted(t *testing.T) {
 		return postErr
 	})
 
-	delivered, err := r.SpeakDraft(t.Context(), "Glyphoxa, roll two d6", "Nine.", func(orchestrator.Reply) error {
+	delivered, err := r.SpeakDraft(t.Context(), "", "Glyphoxa, roll two d6", "Nine.", func(orchestrator.Reply) error {
 		t.Fatal("a text-modality answer must not dispatch TTS")
 		return nil
 	})
@@ -146,7 +146,7 @@ func TestReplier_SpeakReaction_VoicelessButler_DeliversTextNoDispatch(t *testing
 		return nil
 	})
 
-	delivered, err := r.SpeakReaction(t.Context(), "Bart, Glyphoxa — thoughts?", "Bart", "We ride at dawn.", "A fine plan.", func(orchestrator.Reply) error {
+	delivered, err := r.SpeakReaction(t.Context(), "", "Bart, Glyphoxa — thoughts?", "Bart", "We ride at dawn.", "A fine plan.", func(orchestrator.Reply) error {
 		dispatched++
 		return nil
 	})
@@ -174,7 +174,7 @@ func TestReplier_SpeakReaction_ModalityKeysOnRawUtterance(t *testing.T) {
 	})
 
 	var got []string
-	_, err := r.SpeakReaction(t.Context(), "Bart, Glyphoxa — thoughts?", "Bart", "Post it on the tavern board.", "Aye, a fine idea.", func(rep orchestrator.Reply) error {
+	_, err := r.SpeakReaction(t.Context(), "", "Bart, Glyphoxa — thoughts?", "Bart", "Post it on the tavern board.", "Aye, a fine idea.", func(rep orchestrator.Reply) error {
 		got = append(got, rep.Sentence)
 		return nil
 	})
