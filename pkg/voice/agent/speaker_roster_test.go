@@ -54,7 +54,7 @@ func TestSystemPrompt_SpeakerRoster_Section(t *testing.T) {
 	iMemory := strings.Index(sys, "I served him ale.")
 	iSpeaker := strings.Index(sys, "## Who is speaking")
 	iMarkup := strings.Index(sys, sentinelMarkup)
-	if !(iPersona < iMemory && iMemory < iSpeaker && iSpeaker < iMarkup) {
+	if iPersona >= iMemory || iMemory >= iSpeaker || iSpeaker >= iMarkup {
 		t.Errorf("slot order wrong (want persona<memory<speaker<markup): persona=%d memory=%d speaker=%d markup=%d\n%q",
 			iPersona, iMemory, iSpeaker, iMarkup, sys)
 	}
