@@ -12,7 +12,9 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **GM** | A Member with `gm` Member Role; runs and owns Campaigns within their Tenant. | Game Master (spelled out — "GM" is canonical), Dungeon Master |
 | **Operator** | The allowlisted Discord User a self-host deployment grants web-tier access to; bound to exactly one Tenant (claims the seeded one or gets a fresh one). In the v1.0 single-operator web tier the Operator fills every Member Role at once. | Admin, Owner (unqualified), First user |
 | **Player** | A human at the table whose Character is bound to a Discord User ID; not a Tenant Member. | Participant, Attendee, Guest |
-| **Linked Player** | A Player who has signed in via Discord OAuth, linking their `linked_user_id` on a Character; gains player-tier web app access scoped to their Characters. | Registered player, Account-linked player |
+| **Linked Player** | A Player who has signed in via Discord OAuth, linking their `linked_user_id` on a Character; gains player-tier web app access scoped to their Characters, at a Player Access Level (ADR-0056). | Registered player, Account-linked player |
+| **Player Invitation** | A GM-minted, expiring, optionally single-use link (`/join/<token>`) that lets a Player authenticate via Discord OAuth and become a Linked Player at a granted Player Access Level (ADR-0056). Never call it an "invite" unqualified — that collides with Discord guild invites (ADR-0047). | Invite (unqualified), Share link, Membership invitation |
+| **Player Access Level** | The per-link grant on a Player Invitation deciding what a Linked Player may see: `own-character`, `campaign-highlights`, or `campaign-transcripts` (the last gated by the Campaign's share toggle). Not a Member Role. | Access level (unqualified), Role, Permission tier |
 | **Discord User** | An identity in Discord, identified by Discord snowflake; the universal handle for Players regardless of account-linking status. | User, Account |
 | **Character** | A Player's player-character (PC) within a Campaign; carries `discord_user_id` (mandatory) and `linked_user_id` (nullable). | PC (use only in user-facing copy) |
 
@@ -106,6 +108,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | Term | Definition | Aliases to avoid |
 |------|------------|------------------|
 | **Mode** | The role a binary process plays: `all` (default), `web`, or `voice`. | Profile, Role (Member/Agent Role only) |
+| **Admission Mode** | How a deployment admits web identities: `allowlist` (the ADR-0041 operator allowlist; default) or `open` (self-signup founds a fresh Tenant, ADR-0055). A Player Invitation may additionally admit where enabled (ADR-0056). Distinct from Mode (the process role). | Signup mode, Registration, Access mode |
 | **Voice Instance** | A process running in `voice` Mode that claims and hosts Voice Sessions via the `voice_sessions` Postgres table. | Worker (v1 term, deprecated in v2) |
 | **Web Instance** | A process running in `web` Mode that serves the web app and admin API. | Server, Web server |
 
@@ -115,6 +118,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 - A **Tenant** has at most one active **Subscription**, which references a **Plan** and snapshots its price; a Tenant's metered usage accumulates in the **Usage Ledger**.
 - A **Campaign** has one **GM** (a Member of its Tenant), many **Characters**, one **Knowledge Graph**, exactly one **Butler**,many **Character NPCs**, and many **Transcripts**.
 - A **Character** belongs to exactly one **Campaign** and is bound to exactly one **Discord User**; the Discord User may also be a **Linked Player**.
+- A **Player Invitation** is minted by a **Campaign**'s **GM** for a **Character** (or the whole Campaign) at a **Player Access Level**; accepting it makes the Player a **Linked Player**.
 - A **Character NPC** belongs to exactly one **Campaign**.
 - A **Voice Session** binds (**Guild**, voice channel, **GM**, **Campaign**) and is hosted by exactly one **Voice Instance**.
 - A **Transcript** belongs to exactly one **Voice Session** and transitively to one **Campaign**.
@@ -148,5 +152,6 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 - **"Worker"** is a v1 term for what v2 calls a **Voice Instance**. Do not use "worker" in v2 — it implies the gateway/worker split that was explicitly removed.
 - **"Role"** is overloaded between **Member Role** (`owner`/`admin`/`gm`) and **Agent Role** (`butler`/`character`). Always qualify.
 - **"Tier"** in prose means a **Plan** (the subscription catalog entry); the schema/API term is always Plan. Never use "tier" for a **Member Role** (already an alias to avoid there).
-- **"Player role"** is *not* a Member Role — Players are not Tenant Members. Don't add `player` to the Member Role enum.
+- **"Player role"** is *not* a Member Role — Players are not Tenant Members. Don't add `player` to the Member Role enum. A **Player Access Level** is also not a Member Role — it scopes a **Linked Player**'s reads, never Tenant administration.
+- **"Invite"** is unsafe unqualified — Discord guild invites (`internal/discordinvite`, ADR-0047, `discord.com/invite/{code}`) vs **Player Invitations** (ADR-0056, `/join/<token>`). Always qualify.
 - **"Barge-in" vs "Cross-talk"** — **Barge-in** is a *human* interrupting a speaking Agent (VAD-triggered via the Barge-in Confirm Window; cancels the Agent's whole turn — see ADR-0026). **Cross-talk** is one Agent's already-delivered text being fed to another addressed Agent during an Ensemble Turn — the second Agent has not spoken yet, so nothing is interrupted. Never use "barge-in" for the Agent-to-Agent case, and never use "cross-talk" for a human interruption.

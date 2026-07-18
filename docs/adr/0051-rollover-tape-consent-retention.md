@@ -21,4 +21,4 @@ Epic 8 persists room audio for the first time. Discord voice is DAVE E2E-encrypt
 
 ## Relationship to other ADRs
 
-ADR-0006 (DAVE — why expectations are E2EE-shaped), ADR-0050 (per-speaker lanes that make exclusion possible), ADR-0048 (blob lifecycle hooks that implement deletion), decisions on #305 (curation model producing candidates) and #310 (delivery obeying the sharing posture).
+ADR-0006 (DAVE — why expectations are E2EE-shaped), ADR-0050 (per-speaker lanes that make exclusion possible), ADR-0048 (blob lifecycle hooks that implement deletion), decisions on #305 (curation model producing candidates) and #310 (delivery obeying the sharing posture). **ADR-0056 (2026-07-18)** extends the sharing posture in-instance: a Linked Player's viewing of promoted Highlights and (GM-opt-in) transcript text is gated by the explicit GM actions of Player Invitation + per-Campaign share toggle; Highlight Candidates stay GM-only, capture consent here is untouched, and transcript *text* visibility — outside this ADR's audio scope — is decided there.

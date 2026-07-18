@@ -10,7 +10,7 @@ ADR-0019/ADR-0039 deferred speaker attribution; Epic 4 needs it. Discord already
 - **Cross-talk and Soft-overlap**: overlapping speech transcribes correctly on each speaker's own lane; a Soft-overlap backchannel becomes a short, correctly-attributed line on its own lane. This is the whole point — attribution errors would bake permanently into Transcript Lines and immutable Chunks.
 - **The silence clock (#91/#147) stays speaker-agnostic**: session silence = no lane speaking (OR over lane activity). No per-speaker endpointing changes.
 - **SLO posture (ADR-0033)**: per-utterance latency is unchanged (same STT calls); the added cost is per-lane VAD compute and, in streaming mode, capped concurrent connections. No SLO relaxation.
-- **GM identity for downstream consumers stays operator-allowlist membership** (ADR-0010/0041). There is no per-session GM binding in the schema; consumers must not invent one — a GM-allowlisted `SpeakerID` routes to the KindGM lane (#281).
+- **GM identity for downstream consumers stays operator-allowlist membership** (ADR-0010/0041). There is no per-session GM binding in the schema; consumers must not invent one — a GM-allowlisted `SpeakerID` routes to the KindGM lane (#281). *Amended by ADR-0055 (2026-07-18): with self-signup, GM identity becomes tenant-bound (the Tenant's operator/Member binding) instead of env-allowlist membership, at every consumer of this clause; the no-per-session-GM-binding rule stands unchanged.*
 
 ## Considered and rejected
 
