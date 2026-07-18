@@ -237,11 +237,20 @@ func runVoice(log *slog.Logger, cfg wirenpc.Config, hardcoded bool, metrics *obs
 	// operator's /glyphoxa use selection first, else the most-recently-created
 	// campaign — so the standalone node and all-mode voice the SAME campaign. A
 	// fresh, empty DB fails loudly with an actionable message.
-	active, err := resolveStandaloneCampaign(ctx, storage.New(pool))
+	st := storage.New(pool)
+	active, err := resolveStandaloneCampaign(ctx, st)
 	if err != nil {
 		return err
 	}
 	cfg.CampaignID = active.ID
+
+	// Butler GM-only voice-address gate (#280, ADR-0024): arm the previously
+	// nil/fail-open standalone gate from the shared GM identity (ADR-0055) —
+	// see [armVoiceGMGate]. Note one deliberate side effect of arming: an
+	// UNATTRIBUTED (empty-SpeakerID) utterance naming the Butler no longer
+	// routes — the armed gate fails closed on an empty SpeakerID (ADR-0024),
+	// where the old nil gate let it through.
+	cfg.GMSpeaker = armVoiceGMGate(ctx, st, os.Getenv, log)
 
 	// Standalone voice mode wires no knowledge-Tool sources (cfg.ToolDeps stays
 	// zero): the transcript_search / kg_query built-ins are still registered and
@@ -394,6 +403,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		return mixdown.DecodeWAV(data)
 	}
 
+	// The operator allowlist is parsed ONCE and shared by the boot sweep and the
+	// GM-identity fallback below (one source of truth; dev mode usually has none).
+	allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
+
 	// Boot-time session sweep (ADR-0041 amendment, issue #184): the allowlist
 	// gates only NEW logins at the OAuth callback, so sessions issued before the
 	// gate existed — or before a snowflake was removed — would stay valid for up
@@ -402,7 +415,6 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// allowlisted (including leftover GLYPHOXA_DEV_MODE sessions). Dev mode has
 	// no allowlist and skips the sweep.
 	if !dev {
-		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
 		revoked, err := store.RevokeSessionsOutsideAllowlist(ctx, allow.IDs())
 		if err != nil {
 			return fmt.Errorf("web: revoke sessions outside the operator allowlist: %w", err)
@@ -412,6 +424,26 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 				"count", revoked)
 		}
 	}
+
+	// GM identity (ADR-0055, amending ADR-0050's allowlist-membership clause):
+	// the tenant-operator binding union the env allowlist, snapshot-cached so the
+	// three GM consumers below (Butler voice gate, slash-command gate, transcript
+	// GM labels) never block on the DB. A failed boot load degrades to the
+	// allowlist alone — never a boot failure.
+	gmID := auth.NewGMIdentity(store, allow, log)
+	if err := gmID.Refresh(ctx); err != nil {
+		log.Warn("web: loading tenant-operator GM bindings failed; GM identity falls back to GLYPHOXA_OPERATOR_IDS alone until the next refresh", "err", err)
+	}
+
+	// Platform-key entitlement (ADR-0054 seam (a), ADR-0055): the ONE
+	// construction point every tenant-facing key resolution shares (voice
+	// sessions, recap, image enrichment). `allowlist` Admission Mode grants
+	// every tenant the env fallback — the ADR-0039 hybrid policy unchanged.
+	// When `open` mode lands, THIS is the line that swaps in
+	// llmbuild.SubscriptionKeyGate{Subs: store} (plus the RPC-tier gap named in
+	// internal/llmbuild/entitlement.go).
+	keyEnt := llmbuild.PlatformKeyEntitlement(llmbuild.EnvFallbackAllowed{})
+	cfg.KeyEntitlement = keyEnt
 
 	// The BYOK credential cipher (ADR-0004) is best-effort at boot: without
 	// $GLYPHOXA_SECRET the web tier still serves (Configuration reads work), but
@@ -464,20 +496,20 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	var pres *presence.Presence
 	var reg *presence.Registry
 	if withVoice {
-		allow := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
-		// Butler GM-only voice-address gate (#280, ADR-0024/ADR-0050): arm the
-		// AddressDetector's Butler gate with GM identity — the same allowlist that
-		// guards the web login and the slash-command surface, reused (not
-		// re-parsed) so the GM is one server-side source of truth. Dev mode
-		// admits every speaker (mirrors dev auto-auth). Set on the base config
-		// BEFORE the Manager copies it, so every manager-started Voice Session
-		// inherits the gate. Only the voice-driving `all` mode reaches here; the
-		// env-only voice/bench paths leave it nil.
-		cfg.GMSpeaker = gmSpeakerGate(dev, allow)
-		if !dev && allow.Len() == 0 {
-			log.Warn("butler voice-address gate armed with empty allowlist; Butler unaddressable by voice")
+		// Butler GM-only voice-address gate (#280, ADR-0024): arm the
+		// AddressDetector's Butler gate with GM identity — the same checker that
+		// guards the slash-command surface and the transcript GM labels, reused
+		// (not re-built) so the GM is one server-side source of truth
+		// (ADR-0055). Dev mode admits every speaker (mirrors dev auto-auth). Set
+		// on the base config BEFORE the Manager copies it, so every
+		// manager-started Voice Session inherits the gate. Only the
+		// voice-driving `all` mode reaches here; the env-only bench path leaves
+		// it nil (standalone voice mode arms its own — see runVoice).
+		cfg.GMSpeaker = gmSpeakerGate(dev, gmID.IsGM)
+		if !dev && gmID.Empty() {
+			log.Warn("butler voice-address gate armed with no GM identity source (no tenant-operator binding, empty allowlist); Butler unaddressable by voice")
 		}
-		gate := presence.NewGate(allow, func() string {
+		gate := presence.NewGate(gmID, func() string {
 			if pres == nil {
 				return ""
 			}
@@ -520,21 +552,20 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// knowledge Tool (Deps.Tools below). It reads transcripts via the store,
 	// decrypts a BYOK LLM key with cipher, meters usage into the process
 	// metrics, and logs attribution — but never persists a recap (ADR-0040).
-	recapEngine := recap.NewEngine(store, cipher, metrics, log)
+	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
 
 	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
 	// Character/GM display name for the relay + chunk prefix. It reads Characters
 	// from the store and, for an unmapped speaker, falls back to the Discord guild
 	// display name via the standing presence (web-only replicas have no presence, so
 	// the namer stays a true nil interface — no guild fallback, generic label). GM
-	// is the operator allowlist (ADR-0050/0041). Shared by the relay, chunker, and
-	// the Character CRUD invalidation hook.
+	// is the shared GM-identity checker (ADR-0055). Shared by the relay, chunker,
+	// and the Character CRUD invalidation hook.
 	var speakerNamer speaker.MemberNamer
 	if pres != nil {
 		speakerNamer = pres
 	}
-	speakerResolver := speaker.NewResolver(store, speakerNamer,
-		auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS")), log)
+	speakerResolver := speaker.NewResolver(store, speakerNamer, gmID, log)
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
 	// process bus once and reads the active session from the session View (#448).
@@ -698,7 +729,9 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		} else if !errors.Is(cerr, storage.ErrNotFound) {
 			return nil, "", cerr
 		}
-		key, kerr := llmbuild.ResolveKey(cipher, cfgPtr, storage.ComponentImage)
+		// Gated resolve (ADR-0054 seam (a)): an entitlement refusal errors HERE,
+		// before the env fallback below can spend the deployment's GEMINI key.
+		key, kerr := llmbuild.ResolveKeyGated(fctx, keyEnt, tenantID, cipher, cfgPtr, storage.ComponentImage)
 		if kerr != nil {
 			return nil, "", kerr // saved key without cipher = loud error (ADR-0039)
 		}
@@ -947,7 +980,7 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// snowflake is absent is denied a session before any Tenant write.
 	allowlist := auth.ParseOperatorAllowlist(os.Getenv("GLYPHOXA_OPERATOR_IDS"))
 	oauth := auth.NewOAuth(store, discord, "/", allowlist, log)
-	authServer := auth.NewAuthServer(store, log)
+	authServer := auth.NewAuthServer(store, store, log)
 
 	// The store satisfies both Authenticator (AuthenticateSession) and
 	// TenantResolver (TenantForUser). ONE policy gates both transports (#446):

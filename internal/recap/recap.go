@@ -97,6 +97,7 @@ type Engine struct {
 	metrics     observe.StageRecorder
 	log         *slog.Logger
 	newProvider ProviderFactory
+	keyEnt      llmbuild.PlatformKeyEntitlement
 }
 
 // Option customises an [Engine].
@@ -107,6 +108,16 @@ type Option func(*Engine)
 // is [llmbuild.New].
 func WithProviderFactory(f func(providerID, apiKey string) (llm.Provider, error)) Option {
 	return func(e *Engine) { e.newProvider = f }
+}
+
+// WithKeyEntitlement gates the recap's LLM-key env fallback behind the tenant's
+// platform-key entitlement (ADR-0054 seam (a), ADR-0055): the no-config /
+// "env"-placeholder resolution — which would silently spend the deployment's
+// GROQ_API_KEY — is refused for a tenant the entitlement does not grant. The
+// default (unset) grants everything: the `allowlist`-Admission-Mode posture,
+// where the ADR-0039 hybrid policy stands.
+func WithKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) Option {
+	return func(e *Engine) { e.keyEnt = ent }
 }
 
 // NewEngine builds a recap Engine. cipher decrypts a BYOK LLM key (nil is fine for
@@ -178,7 +189,7 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	if err != nil {
 		return Result{}, err
 	}
-	key, err := llmbuild.ResolveKey(e.cipher, cfg, storage.ComponentLLM)
+	key, err := llmbuild.ResolveKeyGated(ctx, e.keyEnt, campaign.TenantID, e.cipher, cfg, storage.ComponentLLM)
 	if err != nil {
 		return Result{}, err
 	}

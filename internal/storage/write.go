@@ -362,6 +362,23 @@ func (s *Store) FindTenantByName(ctx context.Context, name string) (Tenant, erro
 	return t, nil
 }
 
+// GetTenant returns the Tenant with the given id, or ErrNotFound. The
+// AuthService's GetCurrentUser uses it to serve the bound Tenant's display name
+// (ADR-0055).
+func (s *Store) GetTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
+	var t Tenant
+	err := s.db.QueryRow(ctx,
+		`SELECT id, name, created_at, updated_at FROM tenant WHERE id = $1`, id).
+		Scan(&t.ID, &t.Name, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tenant{}, ErrNotFound
+	}
+	if err != nil {
+		return Tenant{}, fmt.Errorf("storage: get tenant %s: %w", id, err)
+	}
+	return t, nil
+}
+
 // FirstTenant returns the earliest-created Tenant, or ErrNotFound when the DB
 // holds none. The `glyphoxa seed -bundle` path uses it to land a bundle beside
 // an already-provisioned Tenant instead of minting a duplicate one (ADR-0053):

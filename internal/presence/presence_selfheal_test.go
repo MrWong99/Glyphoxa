@@ -8,7 +8,6 @@ import (
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
@@ -32,7 +31,7 @@ func TestClientProviderReEnsuresAfterFailure(t *testing.T) {
 		t.Fatalf("crypto.New: %v", err)
 	}
 	store := &fakePresenceStore{dep: savedTokenDep(t, cipher, "G1", "tok")}
-	reg := NewRegistry(NewGate(auth.ParseOperatorAllowlist(""), fixedGuild("")), nil)
+	reg := NewRegistry(NewGate(gms(), fixedGuild("")), nil)
 	reg.Register(Command{Path: "roll", Description: "Roll dice"})
 	p := New(store, cipher, reg, "", nil)
 
@@ -78,7 +77,7 @@ func TestEnsureClearsCommandsWhenGuildRemoved(t *testing.T) {
 		t.Fatalf("crypto.New: %v", err)
 	}
 	store := &fakePresenceStore{dep: savedTokenDep(t, cipher, "G1", "tok")}
-	reg := NewRegistry(NewGate(auth.ParseOperatorAllowlist(""), fixedGuild("")), nil)
+	reg := NewRegistry(NewGate(gms(), fixedGuild("")), nil)
 	reg.Register(Command{Path: "roll", Description: "Roll dice"})
 	p := New(store, cipher, reg, "", nil)
 

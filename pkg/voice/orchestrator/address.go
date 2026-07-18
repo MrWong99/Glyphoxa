@@ -57,11 +57,12 @@ type SpeakerAwareMatcher interface {
 // standalone, in a hand-picked subset via [Bind], or bundled by a [Conversation].
 type AddressDetector struct {
 	matcher TargetMatcher
-	// isGM reports whether a SpeakerID belongs to the operator allowlist — the
-	// deterministic GM identity per ADR-0050 (allowlist membership, not a
-	// per-session binding). Nil means the Butler GM-address gate is off: every
-	// Butler route publishes as before, the byte-for-byte default for the
-	// voice-standalone and bench paths and every pre-gate call site.
+	// isGM reports whether a SpeakerID belongs to a Game Master — the
+	// deterministic GM identity per ADR-0050 (not a per-session binding),
+	// resolved since ADR-0055 from the tenant-operator binding union the env
+	// allowlist rather than allowlist membership alone. Nil means the Butler
+	// GM-address gate is off: every Butler route publishes as before, the
+	// byte-for-byte default for the bench path and every pre-gate call site.
 	isGM func(speakerID string) bool
 }
 
@@ -72,10 +73,11 @@ type DetectorOption func(*AddressDetector)
 
 // WithButlerGMGate enforces ADR-0024's Butler GM-only voice-address: a
 // Butler-addressed utterance publishes only when its [voiceevent.STTFinal]
-// SpeakerID is a GM per isGM (operator-allowlist membership, ADR-0050 /
-// ADR-0041). Utterances from a non-allowlisted or empty SpeakerID are dropped
-// (fail closed) — the route goes nowhere, the matcher is not re-invoked for a
-// fallback, and Character NPC routing is untouched.
+// SpeakerID is a GM per isGM (GM identity per ADR-0050/ADR-0055 — the
+// tenant-operator binding union the env allowlist). Utterances from a non-GM
+// or empty SpeakerID are dropped (fail closed) — the route goes nowhere, the
+// matcher is not re-invoked for a fallback, and Character NPC routing is
+// untouched.
 //
 // A nil isGM leaves the gate off (the default). The Butler identity check is an
 // orchestration concern kept out of the pure text matcher (ADR-0024): the
@@ -164,9 +166,9 @@ func (d *AddressDetector) Bind(_ context.Context, bus *voiceevent.Bus) (cancel f
 		var survivors []voiceevent.AddressRouted
 		for _, routed := range routes {
 			// Butler GM-only address gate (ADR-0024): drop a Butler route whose
-			// SpeakerID is not an allowlisted GM (empty fails closed). Fail
-			// closed means the utterance routes nowhere — the matcher is not
-			// re-invoked for a fallback. Character routes are never gated.
+			// SpeakerID is not a GM (empty fails closed). Fail closed means
+			// the utterance routes nowhere — the matcher is not re-invoked for
+			// a fallback. Character routes are never gated.
 			if d.isGM != nil && routed.Target.AgentRole == voiceevent.AgentRoleButler &&
 				(final.SpeakerID == "" || !d.isGM(final.SpeakerID)) {
 				continue

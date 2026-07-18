@@ -30,13 +30,16 @@ type providerKeys struct {
 }
 
 // resolveKey resolves ONE component's API key under the hybrid BYOK policy
-// (ADR-0039).
+// (ADR-0039), behind the platform-key entitlement seam (ADR-0054 gate (a),
+// ADR-0055).
 //
-// It is a one-line delegate to [llmbuild.ResolveKey]: the resolver was moved
-// verbatim into internal/llmbuild (#272) so the Recap engine shares the same BYOK
-// credential resolution as the live voice loop, under identical semantics.
-func resolveKey(cipher *crypto.Cipher, cfg *storage.ProviderConfig, component storage.Component) (string, error) {
-	return llmbuild.ResolveKey(cipher, cfg, component)
+// It is a one-line delegate to [llmbuild.ResolveKeyGated]: the resolver was
+// moved verbatim into internal/llmbuild (#272) so the Recap engine shares the
+// same BYOK credential resolution as the live voice loop, under identical
+// semantics. A nil ent (the allowlist posture wired today) keeps the plain
+// [llmbuild.ResolveKey] behavior byte-identical.
+func resolveKey(ctx context.Context, ent llmbuild.PlatformKeyEntitlement, tenantID uuid.UUID, cipher *crypto.Cipher, cfg *storage.ProviderConfig, component storage.Component) (string, error) {
+	return llmbuild.ResolveKeyGated(ctx, ent, tenantID, cipher, cfg, component)
 }
 
 // ResolveDiscordToken resolves the Discord bot token a UI-started session drives
@@ -68,19 +71,20 @@ func ResolveDiscordToken(cipher *crypto.Cipher, last4 string, ciphertext []byte,
 }
 
 // resolveProviderKeys resolves all three components a voice session needs.
-// Any single component's decryption failure fails the whole resolution (AC2):
-// a misconfigured key surfaces at boot, never as a half-configured session that
-// silently falls back to ENV for the broken half.
-func resolveProviderKeys(cipher *crypto.Cipher, llmCfg, ttsCfg, sttCfg *storage.ProviderConfig) (providerKeys, error) {
-	llm, err := resolveKey(cipher, llmCfg, storage.ComponentLLM)
+// Any single component's decryption failure — or entitlement refusal (ADR-0054
+// gate (a)) — fails the whole resolution (AC2): a misconfigured key surfaces at
+// boot, never as a half-configured session that silently falls back to ENV for
+// the broken half.
+func resolveProviderKeys(ctx context.Context, ent llmbuild.PlatformKeyEntitlement, tenantID uuid.UUID, cipher *crypto.Cipher, llmCfg, ttsCfg, sttCfg *storage.ProviderConfig) (providerKeys, error) {
+	llm, err := resolveKey(ctx, ent, tenantID, cipher, llmCfg, storage.ComponentLLM)
 	if err != nil {
 		return providerKeys{}, err
 	}
-	tts, err := resolveKey(cipher, ttsCfg, storage.ComponentTTS)
+	tts, err := resolveKey(ctx, ent, tenantID, cipher, ttsCfg, storage.ComponentTTS)
 	if err != nil {
 		return providerKeys{}, err
 	}
-	stt, err := resolveKey(cipher, sttCfg, storage.ComponentSTT)
+	stt, err := resolveKey(ctx, ent, tenantID, cipher, sttCfg, storage.ComponentSTT)
 	if err != nil {
 		return providerKeys{}, err
 	}
@@ -90,10 +94,11 @@ func resolveProviderKeys(cipher *crypto.Cipher, llmCfg, ttsCfg, sttCfg *storage.
 // resolveSessionKeys is the DB-side seam [RunFromDB] drives: it reads the
 // Tenant's STT Provider Config by Component (STT is not Agent-joined, unlike the
 // LLM/TTS configs the primary agent's LoadedAgent already carries) and resolves
-// all three keys against cipher. A missing STT config is treated as an env
-// fallback, not an error. ElevenLabs STT shares the TTS key in the demo seed,
-// but the bind is read per-Component for correctness.
-func resolveSessionKeys(ctx context.Context, st *storage.Store, tenantID uuid.UUID, primary storage.LoadedAgent, cipher *crypto.Cipher) (providerKeys, error) {
+// all three keys against cipher, behind the tenant's platform-key entitlement
+// (Config.KeyEntitlement; nil = the allowlist posture). A missing STT config is
+// treated as an env fallback, not an error. ElevenLabs STT shares the TTS key
+// in the demo seed, but the bind is read per-Component for correctness.
+func resolveSessionKeys(ctx context.Context, st *storage.Store, tenantID uuid.UUID, primary storage.LoadedAgent, cipher *crypto.Cipher, ent llmbuild.PlatformKeyEntitlement) (providerKeys, error) {
 	var sttCfg *storage.ProviderConfig
 	pc, err := st.GetProviderConfigByComponent(ctx, tenantID, storage.ComponentSTT)
 	switch {
@@ -104,5 +109,5 @@ func resolveSessionKeys(ctx context.Context, st *storage.Store, tenantID uuid.UU
 	default:
 		sttCfg = &pc
 	}
-	return resolveProviderKeys(cipher, primary.LLMConfig, primary.TTSConfig, sttCfg)
+	return resolveProviderKeys(ctx, ent, tenantID, cipher, primary.LLMConfig, primary.TTSConfig, sttCfg)
 }

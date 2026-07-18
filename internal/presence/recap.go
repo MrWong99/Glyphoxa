@@ -83,7 +83,8 @@ var (
 	_ RecapEngine = (*recap.Engine)(nil)
 )
 
-// RecapCommand builds `/glyphoxa recap` (ADR-0010: GM-only, operator-allowlisted).
+// RecapCommand builds `/glyphoxa recap` (ADR-0010: GM-only per the Gate's
+// GMChecker, ADR-0055).
 // With no options it recaps the LATEST ENDED Voice Session of the operator's Active
 // Campaign — resolved by the SHARED strict slash resolver (ADR-0009: live session's
 // campaign → durable /glyphoxa use selection → fail; no most-recently-created

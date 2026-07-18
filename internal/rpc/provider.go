@@ -571,6 +571,12 @@ func (s *ProviderServer) resolveBotToken(ctx context.Context, tenantID uuid.UUID
 // openKey applies the hybrid decision to one (last4, ciphertext) pair, mirroring
 // VoiceServer.openKey: an unsaved/placeholder last4 -> "", a real key with no
 // cipher -> FailedPrecondition, otherwise the decrypted plaintext.
+//
+// PHASE-B GAP (ADR-0054 seam (a), ADR-0055): the "" env fallback for provider
+// keys is ungated by llmbuild's PlatformKeyEntitlement; it must be gated before
+// `open` Admission Mode ships — see internal/llmbuild/entitlement.go. (The
+// Discord bot token resolved through here is deployment infrastructure, not a
+// Platform provider key, and stays outside the entitlement.)
 func (s *ProviderServer) openKey(last4 string, ciphertext []byte) (string, error) {
 	if !isSaved(last4) {
 		return "", nil

@@ -79,7 +79,7 @@ func TestDevModeAutoAuthEndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	stack := auth.NewStack(store, store, managementv1connect.AuthServiceGetCurrentUserProcedure)
-	authServer := auth.NewAuthServer(store, nil)
+	authServer := auth.NewAuthServer(store, store, nil)
 	mux := http.NewServeMux()
 	mux.Handle(authServer.Handler(stack.HandlerOptions()...))
 	// The whole tier is wrapped exactly as runWeb wraps its mounts in dev-mode:

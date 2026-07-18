@@ -2,12 +2,14 @@ package recap
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
@@ -277,4 +279,68 @@ func TestDedupSessions(t *testing.T) {
 	if len(res.SessionIDs) != 1 || res.SessionIDs[0] != sid {
 		t.Errorf("SessionIDs = %v, want [%s] deduped", res.SessionIDs, sid)
 	}
+}
+
+// TestRecapKeyEntitlementRefused is the ADR-0054 entitlement seam (a) on the
+// off-session recap path (ADR-0055): with a refusing entitlement (an open-mode
+// BYOK tenant without a platform subscription), the no-config env-default path
+// fails clearly instead of silently spending the deployment's GROQ_API_KEY,
+// while a tenant with a real saved BYOK key recaps unchanged.
+func TestRecapKeyEntitlementRefused(t *testing.T) {
+	cipher := newCipher(t)
+	tenantID := uuid.New()
+	refuse := &refusingEntitlement{}
+
+	// No Provider Config anywhere: the env-default hole, refused.
+	st := newFakeStore()
+	butler := storage.Agent{Role: storage.AgentRoleButler, Persona: "The Keeper."}
+	sid := seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+	eng := NewEngine(st, cipher, observe.Discard{}, nil,
+		WithProviderFactory(func(_, _ string) (llm.Provider, error) {
+			t.Fatal("provider must not be built when the entitlement refuses")
+			return nil, nil
+		}),
+		WithKeyEntitlement(refuse))
+	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
+		t.Fatalf("Recap(no config, refused entitlement) err = %v, want ErrNoPlatformKeyEntitlement", err)
+	}
+	// The entitlement must be consulted for the CAMPAIGN'S tenant — the id the
+	// real SubscriptionKeyGate would look up — not uuid.Nil or the campaign id.
+	if refuse.consultedFor != tenantID {
+		t.Errorf("entitlement consulted for %s, want the campaign's tenant %s", refuse.consultedFor, tenantID)
+	}
+
+	// A real saved BYOK key: the gate never trips.
+	st = newFakeStore()
+	cfg := storage.ProviderConfig{ID: uuid.New(), Provider: "anthropic", Model: "claude-x"}
+	ct, err := cipher.Seal([]byte("sk-byok-key-9999"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	cfg.CredentialsCiphertext, cfg.CredentialsLast4 = ct, "9999"
+	st.configs[cfg.ID] = cfg
+	butler = storage.Agent{Role: storage.AgentRoleButler, Persona: "The Keeper.", LLMProviderConfigID: uuid.NullUUID{UUID: cfg.ID, Valid: true}}
+	sid = seedSession(st, tenantID, uuid.New(), "English", butler, time.Now(), sampleLines())
+	var gotKey string
+	eng = NewEngine(st, cipher, observe.Discard{}, nil,
+		WithProviderFactory(func(_, apiKey string) (llm.Provider, error) {
+			gotKey = apiKey
+			return &stubProvider{text: "A recap."}, nil
+		}),
+		WithKeyEntitlement(refuse))
+	if _, err := eng.Recap(context.Background(), []uuid.UUID{sid}); err != nil {
+		t.Fatalf("Recap(BYOK key, refused entitlement): %v", err)
+	}
+	if gotKey != "sk-byok-key-9999" {
+		t.Errorf("key = %q, want the decrypted BYOK key", gotKey)
+	}
+}
+
+// refusingEntitlement denies every tenant the platform env fallback and records
+// which tenant it was consulted for.
+type refusingEntitlement struct{ consultedFor uuid.UUID }
+
+func (r *refusingEntitlement) PlatformKeyAllowed(_ context.Context, tenantID uuid.UUID) (bool, error) {
+	r.consultedFor = tenantID
+	return false, nil
 }

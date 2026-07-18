@@ -70,7 +70,7 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	// A decryption failure (e.g. a real saved key with the wrong/absent cipher)
 	// is fatal here, before any Discord connection — the operator sees a clear
 	// error instead of an NPC that silently ran on the wrong (env) key.
-	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, cipher)
+	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, cipher, cfg.KeyEntitlement)
 	if err != nil {
 		return err
 	}

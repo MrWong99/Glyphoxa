@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/disgoorg/disgo/discord"
-
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 )
 
 // replyKind names the responder method a recorded message came through, so a test can
@@ -96,8 +94,8 @@ type fakeOpts struct {
 func (f fakeOpts) OptString(name string) (string, bool) { v, ok := f.s[name]; return v, ok }
 func (f fakeOpts) OptInt(name string) (int, bool)       { v, ok := f.i[name]; return v, ok }
 
-func testRegistry(guild string, allow string) *Registry {
-	return NewRegistry(NewGate(auth.ParseOperatorAllowlist(allow), fixedGuild(guild)), nil)
+func testRegistry(guild string, gmID string) *Registry {
+	return NewRegistry(NewGate(gms(gmID), fixedGuild(guild)), nil)
 }
 
 func TestDefinitionsMergeFlatAndGroup(t *testing.T) {

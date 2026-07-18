@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -254,31 +255,42 @@ func TestDevMode(t *testing.T) {
 }
 
 // TestGMSpeakerGate pins the Butler GM-address gate predicate wiring (#280,
-// ADR-0024/ADR-0050): dev mode auto-authorizes every speaker as GM (mirroring
-// the dev auto-auth operator), and otherwise the gate is operator-allowlist
-// membership — fail-closed on an empty SpeakerID and on a speaker off the list.
+// ADR-0024; GM identity per ADR-0055): dev mode auto-authorizes every speaker
+// as GM (mirroring the dev auto-auth operator), and otherwise the gate is the
+// GM-identity checker's verdict — fail-closed on an empty SpeakerID and on a
+// speaker it does not recognize.
 func TestGMSpeakerGate(t *testing.T) {
-	allow := auth.ParseOperatorAllowlist("111,222")
+	isGM := func(id string) bool { return id == "111" || id == "222" }
 
 	// Dev mode: every speaker is the operator, so the gate admits all — including
-	// an empty SpeakerID and an id not on any allowlist.
-	dev := gmSpeakerGate(true, allow)
+	// an empty SpeakerID and an id no checker would recognize.
+	dev := gmSpeakerGate(true, isGM)
 	for _, id := range []string{"111", "999", ""} {
 		if !dev(id) {
 			t.Errorf("dev gmSpeakerGate(%q) = false, want true (dev auto-authorizes every speaker)", id)
 		}
 	}
 
-	// Non-dev: allowlist membership, fail closed off the list and on empty.
-	prod := gmSpeakerGate(false, allow)
+	// Non-dev: the checker's verdict, fail closed on unknown and on empty.
+	prod := gmSpeakerGate(false, isGM)
 	if !prod("111") {
-		t.Error("gmSpeakerGate(false).(\"111\") = false, want true (on the allowlist)")
+		t.Error("gmSpeakerGate(false).(\"111\") = false, want true (a GM)")
 	}
 	if prod("999") {
-		t.Error("gmSpeakerGate(false).(\"999\") = true, want false (off the allowlist)")
+		t.Error("gmSpeakerGate(false).(\"999\") = true, want false (not a GM)")
 	}
 	if prod("") {
 		t.Error("gmSpeakerGate(false).(\"\") = true, want false (empty SpeakerID never a GM)")
+	}
+
+	// The empty-SpeakerID drop is the GATE's own guard, not the checker's: even
+	// a checker that admits everything must not make "" a GM.
+	permissive := gmSpeakerGate(false, func(string) bool { return true })
+	if permissive("") {
+		t.Error("gmSpeakerGate(false, admit-all).(\"\") = true, want false (the gate itself fails closed on empty)")
+	}
+	if !permissive("999") {
+		t.Error("gmSpeakerGate(false, admit-all).(\"999\") = false, want the checker's verdict for non-empty ids")
 	}
 }
 
@@ -502,5 +514,63 @@ func TestEnableDevMode(t *testing.T) {
 	wrap(protected).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/x/events", nil))
 	if !reached || rec.Code != http.StatusOK {
 		t.Errorf("cookieless request was not auto-authenticated: reached=%v code=%d", reached, rec.Code)
+	}
+}
+
+// listerFunc adapts a func to auth.TenantOperatorLister for gate-arming tests.
+type listerFunc func(context.Context) ([]string, error)
+
+func (f listerFunc) ListTenantOperatorDiscordIDs(ctx context.Context) ([]string, error) {
+	return f(ctx)
+}
+
+// TestArmVoiceGMGate pins the standalone voice node's Butler GM-gate arming
+// (ADR-0055): the fail-open this closes was runVoice leaving cfg.GMSpeaker nil,
+// so the armed gate must NEVER be nil, must admit the tenant-bound operator and
+// the env-allowlisted snowflake (the union), and must fail closed on strangers,
+// empty SpeakerIDs, an empty identity union, and a failed binding load (which
+// degrades to the allowlist, never to fail-open). Dev mode admits every speaker.
+func TestArmVoiceGMGate(t *testing.T) {
+	ctx := context.Background()
+	bound := listerFunc(func(context.Context) ([]string, error) { return []string{"111"}, nil })
+	env := envMap(map[string]string{"GLYPHOXA_OPERATOR_IDS": "222"})
+
+	gate := armVoiceGMGate(ctx, bound, env, nil)
+	if gate == nil {
+		t.Fatal("armVoiceGMGate = nil — the fail-open ADR-0055 closes")
+	}
+	if !gate("111") {
+		t.Error("tenant-bound operator denied, want admitted")
+	}
+	if !gate("222") {
+		t.Error("env-allowlisted snowflake denied, want admitted (union)")
+	}
+	if gate("999") || gate("") {
+		t.Error("stranger or empty SpeakerID admitted, want fail-closed")
+	}
+
+	// No identity source at all: armed and closed, not nil/fail-open.
+	empty := listerFunc(func(context.Context) ([]string, error) { return nil, nil })
+	gate = armVoiceGMGate(ctx, empty, envMap(map[string]string{}), nil)
+	if gate == nil || gate("111") {
+		t.Error("empty-union gate must be armed and deny everyone")
+	}
+
+	// A failed binding load degrades to the allowlist alone — never fail-open.
+	broken := listerFunc(func(context.Context) ([]string, error) { return nil, errors.New("db down") })
+	gate = armVoiceGMGate(ctx, broken, env, nil)
+	if !gate("222") {
+		t.Error("allowlisted snowflake denied after a failed binding load, want the allowlist fallback")
+	}
+	if gate("111") {
+		t.Error("bound-only snowflake admitted though the binding load failed, want denied")
+	}
+
+	// Dev mode admits every speaker (mirrors the web tier's dev auto-auth).
+	gate = armVoiceGMGate(ctx, bound, envMap(map[string]string{"GLYPHOXA_DEV_MODE": "1"}), nil)
+	for _, id := range []string{"111", "999", ""} {
+		if !gate(id) {
+			t.Errorf("dev gate(%q) = false, want admit-all", id)
+		}
 	}
 }

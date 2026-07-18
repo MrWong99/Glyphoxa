@@ -135,7 +135,7 @@ func driftMatrix() []driftCell {
 func connectAdapter(t *testing.T, authn auth.Authenticator, tenants auth.TenantResolver) managementv1connect.AuthServiceClient {
 	t.Helper()
 	stack := auth.NewStack(authn, tenants)
-	server := auth.NewAuthServer(&fakeDeleter{}, nil)
+	server := auth.NewAuthServer(&fakeDeleter{}, fakeNamer{}, nil)
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)

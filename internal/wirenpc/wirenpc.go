@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/tape"
 	"github.com/MrWong99/Glyphoxa/pkg/tool"
@@ -315,15 +316,28 @@ type Config struct {
 	ClipReplayLoader orchestrator.ClipLoader
 
 	// GMSpeaker reports whether a Discord SpeakerID belongs to a Game Master —
-	// operator-allowlist membership per ADR-0050/ADR-0041, the deterministic GM
-	// identity with no per-session binding. When non-nil it arms the Butler
-	// GM-only voice-address gate (ADR-0024): a Butler-addressed utterance routes
-	// only from an allowlisted SpeakerID, and fails closed on any other or empty
-	// one; Character NPC routing is untouched. The live binary sets it to the
-	// parsed OperatorAllowlist's membership check (cmd/glyphoxa); nil is the
-	// feature-off default (voice standalone / the benchmark), so the gate is
-	// absent and every Butler route publishes as before.
+	// the tenant-operator binding union the env allowlist per ADR-0055 (amending
+	// ADR-0050's allowlist-membership clause; the deterministic GM identity with
+	// no per-session binding stands). When non-nil it arms the Butler GM-only
+	// voice-address gate (ADR-0024): a Butler-addressed utterance routes only
+	// from a GM SpeakerID, and fails closed on any other or empty one; Character
+	// NPC routing is untouched. The predicate must never block — it runs inside
+	// address detection; the live binary sets it to auth.GMIdentity's
+	// snapshot-cached check (cmd/glyphoxa, web/all AND standalone voice mode).
+	// nil is the feature-off default (the -hardcoded no-DB smoke path / the
+	// benchmark), so the gate is absent and every Butler route publishes as
+	// before.
 	GMSpeaker func(speakerID string) bool
+
+	// KeyEntitlement gates the session's provider-key env fallback behind the
+	// tenant's platform-key entitlement (ADR-0054 seam (a), ADR-0055): a
+	// resolution landing on "" (no Provider Config row, or the seeded "env"
+	// placeholder) is refused for a tenant the entitlement does not grant,
+	// instead of silently spending the deployment's *_API_KEY Platform Keys.
+	// nil (default, and the composition root's `allowlist`-Admission-Mode
+	// wiring today) grants everything — the ADR-0039 hybrid policy unchanged.
+	// `open` mode swaps in llmbuild.SubscriptionKeyGate when it lands.
+	KeyEntitlement llmbuild.PlatformKeyEntitlement
 }
 
 // npcNames returns the NPCs' display names for a log line.

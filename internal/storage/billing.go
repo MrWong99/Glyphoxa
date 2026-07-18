@@ -251,6 +251,25 @@ func (s *Store) ActiveSubscription(ctx context.Context, tenantID uuid.UUID) (Sub
 	return sub, nil
 }
 
+// TenantHasPlatformKeySource reports whether an ACTIVE subscription on a
+// key_source='platform' Plan backs the tenant — the ADR-0054 entitlement-seam
+// read behind llmbuild.SubscriptionKeyGate (ADR-0055 gate (a)). A BYOK plan, an
+// ended subscription, no subscription, or an unknown tenant are all plainly
+// false, never an error: absence of entitlement is the expected common case.
+func (s *Store) TenantHasPlatformKeySource(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(ctx,
+		`SELECT EXISTS(
+		     SELECT 1 FROM tenant_subscription ts
+		       JOIN plan p ON p.id = ts.plan_id
+		      WHERE ts.tenant_id = $1 AND ts.ended_at IS NULL
+		        AND p.key_source = 'platform')`, tenantID).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("storage: platform key-source check for tenant %s: %w", tenantID, err)
+	}
+	return ok, nil
+}
+
 // AddUsage upsert-accumulates ledger rows: an existing (tenant, day, component,
 // provider, model) bucket has the quantities and estimate ADDED, a new bucket is
 // inserted. Idempotence is NOT promised — the flush path must not double-send —

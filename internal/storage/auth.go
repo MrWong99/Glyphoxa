@@ -346,3 +346,37 @@ func (s *Store) TenantForUser(ctx context.Context, userID uuid.UUID) (uuid.UUID,
 	}
 	return id, nil
 }
+
+// ListTenantOperatorDiscordIDs returns the DISTINCT Discord snowflakes bound as
+// tenant operators (tenant.operator_user_id → users.discord_user_id), sorted
+// for determinism — the interim GM-identity source (ADR-0055, amending
+// ADR-0050's allowlist-membership clause). auth.GMIdentity snapshots it;
+// unbound tenants and unbound users simply don't appear (the env-allowlist
+// fallback covers the NULL-binding migration edge). The synthetic dev operator
+// ([DevOperatorDiscordID]) is excluded: it can never match a real Discord
+// speaker or interaction user, so on a dev-touched DB it would only make the
+// GM set look non-empty — suppressing the "Butler unaddressable" boot warning
+// — while admitting nobody. An empty result is not an error.
+func (s *Store) ListTenantOperatorDiscordIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT DISTINCT u.discord_user_id
+		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
+		  WHERE u.discord_user_id <> $1
+		  ORDER BY u.discord_user_id`, DevOperatorDiscordID)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list tenant operator discord ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("storage: scan tenant operator discord id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list tenant operator discord ids: %w", err)
+	}
+	return ids, nil
+}
