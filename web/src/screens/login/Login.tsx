@@ -1,5 +1,7 @@
 import { Dices } from "lucide-react";
+import { useQuery } from "@connectrpc/connect-query";
 
+import { AuthService, AdmissionMode } from "@gen/glyphoxa/management/v1/management_pb";
 import { Button } from "@/components/ui/Button";
 
 import "./login.css";
@@ -14,7 +16,17 @@ import "./login.css";
 // callback bounces a Discord User who is not on GLYPHOXA_OPERATOR_IDS back here
 // with ?error=not_authorized. The banner is non-leaky — it never echoes the
 // rejected account's id. A normal first visit renders unchanged.
+//
+// The lede frames signup per the deployment's Admission Mode (ADR-0055):
+// GetAdmissionMode is public (there is no session yet on this screen), and only
+// an explicit `open` answer switches the copy to self-signup framing — while
+// the probe is loading or errored the screen fail-safes to today's allowlist
+// framing rather than advertising a signup the deployment may not allow. Only
+// the copy changes: the OAuth start anchor stays exactly as is in both modes.
 export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
+  const { data } = useQuery(AuthService.method.getAdmissionMode, {}, { retry: false });
+  const open = data?.admissionMode === AdmissionMode.OPEN;
+
   return (
     <div className="gx-login">
       <div className="gx-login__card">
@@ -22,7 +34,11 @@ export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
           <Dices size={24} />
         </span>
         <h1 className="gx-login__wordmark gx-gradient-text">Glyphoxa</h1>
-        <p className="gx-login__lede">Sign in to run your table.</p>
+        <p className="gx-login__lede">
+          {open
+            ? "Sign in with Discord — your first sign-in creates your own table."
+            : "Sign in to run your table."}
+        </p>
 
         {notAuthorized && (
           <p className="gx-login__error" role="alert">

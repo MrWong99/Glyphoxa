@@ -9,6 +9,7 @@ import {
 import { AppShell } from "@/components/AppShell";
 import { AuthGate } from "@/app/AuthGate";
 import { Login } from "@/screens/login/Login";
+import { CreateTenant } from "@/screens/onboarding/CreateTenant";
 import { Configuration } from "@/screens/configuration/Configuration";
 import { Campaign } from "@/screens/campaign/Campaign";
 import { Session } from "@/screens/session/Session";
@@ -41,6 +42,18 @@ const loginRoute = createRoute({
     const { error } = loginRoute.useSearch();
     return <Login notAuthorized={error === "not_authorized"} />;
   },
+});
+
+// /onboarding/create-tenant — the ADR-0055 open-mode name-your-Tenant step. The
+// OAuth callback 302s a FRESH open-mode signup here (onboardingRedirect in
+// internal/auth/oauth.go), so the path is a Go↔TS contract pinned by
+// router.test.tsx. A top-level sibling of /login: it lives OUTSIDE the tenant
+// shell, so no AppShell chrome and no AuthGate (the screen runs its own session
+// probe and bounces an unauthenticated visit to /login itself).
+const onboardingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/onboarding/create-tenant",
+  component: CreateTenant,
 });
 
 // "/" → the default tenant's Configuration (boot flow stand-in for this stage).
@@ -104,6 +117,7 @@ const screenRoute = createRoute({
 export const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
+  onboardingRoute,
   tenantRoute.addChildren([tenantIndexRoute, screenRoute]),
 ]);
 

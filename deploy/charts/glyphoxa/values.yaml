@@ -259,6 +259,27 @@ web:
     redirectUrl: ""
   operatorIds: ""
 
+  # Admission Mode (ADR-0055): who may complete the Discord OAuth login.
+  # `allowlist` (the default) is exactly ADR-0041 — only the operatorIds
+  # snowflakes above are admitted, and a non-empty list is required. `open`
+  # admits ANY Discord User who completes OAuth: each signup founds a fresh
+  # Tenant (create-only — a stranger can never claim the operator's seeded
+  # Tenant), and the allowlist above is RE-SCOPED to the deployment's
+  # platform-administration list rather than the admission gate, so it may then
+  # be empty (the pod boots with a loud "no platform admins" warning). The
+  # OAuth credentials above stay REQUIRED in both modes — OAuth is the signup
+  # mechanism. Must be `allowlist` or `open`; any other value fails the render
+  # (the binary refuses to boot on an ambiguous posture).
+  admissionMode: allowlist
+
+  # The Plan slug every open-mode signup is bound to at Tenant creation
+  # (GLYPHOXA_SIGNUP_PLAN_SLUG, ADR-0055). REQUIRED when admissionMode is
+  # `open` — the render fails fast, mirroring the binary's fatal open-mode boot
+  # preflight — and it must name a synced, non-archived plan: include it in
+  # `plans.catalog` above with plans.enabled=true so the plans-sync hook has
+  # put it in the DB before the web pod boots. Ignored in `allowlist` mode.
+  signupPlanSlug: ""
+
   # Single replica for v1.0 (ADR-0039): the self-host web tier holds sessions
   # in-process, and cross-pod session control is deferred, so this is pinned to
   # one pod. The update strategy tracks the Mode: `web` uses RollingUpdate (no

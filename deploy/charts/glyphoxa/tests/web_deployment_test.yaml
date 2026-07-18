@@ -234,6 +234,29 @@ tests:
                 name: RELEASE-NAME-glyphoxa-db
                 key: operator-ids
 
+  - it: sources the Admission Mode and the signup plan slug from the Secret
+    # The ADR-0055 pair: GLYPHOXA_ADMISSION_MODE flips between the allowlist
+    # gate and open self-signup, and GLYPHOXA_SIGNUP_PLAN_SLUG names the Plan
+    # every open-mode signup binds to. Sourced from the Secret (not inline env)
+    # so the checksum/secret annotation rolls the pod when the posture changes.
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_ADMISSION_MODE
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: admission-mode
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_SIGNUP_PLAN_SLUG
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-glyphoxa-db
+                key: signup-plan-slug
+
   - it: emits JSON logs in the cluster
     asserts:
       - contains:

@@ -101,7 +101,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Subscription** | A Tenant's binding to a Plan, snapshotting the Plan's slug and monthly price at bind time; at most one active per Tenant, with ended rows as history. The revenue record. | Membership, License |
 | **Key Source** | Where a Plan's provider keys come from: `byok` (the Tenant's own keys, ADR-0004) or `platform` (the deployment's env keys, included in the price). | Key mode, Pooling |
 | **Platform Keys** | The deployment-operated provider credentials (env `*_API_KEY`) serving `platform`-Plan Tenants via the existing env-fallback path (ADR-0039/0054). | Pooled keys, Shared keys, Operator keys (prose ok) |
-| **Usage Ledger** | The durable per-Tenant record of metered provider usage: daily buckets per (component, provider, model) with quantities and a priced ESTIMATE, flushed at Voice Session end (`usage_ledger`). The cost side of billing; never a gate, never billing truth. | Billing log, Meter (the in-memory ADR-0046 accumulator), Invoice |
+| **Usage Ledger** | The durable per-Tenant record of metered provider usage: daily buckets per (component, provider, model) with quantities and a priced ESTIMATE, flushed at Voice Session end (`usage_ledger`). The cost side of billing; never a gate, never billing truth. The `open`-mode monthly allowance gate (ADR-0055) is a separate spend-meter-style mechanism that READS it. | Billing log, Meter (the in-memory ADR-0046 accumulator), Invoice |
 
 ## Process & Deployment
 
@@ -109,6 +109,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 |------|------------|------------------|
 | **Mode** | The role a binary process plays: `all` (default), `web`, or `voice`. | Profile, Role (Member/Agent Role only) |
 | **Admission Mode** | How a deployment admits web identities: `allowlist` (the ADR-0041 operator allowlist; default) or `open` (self-signup founds a fresh Tenant, ADR-0055). A Player Invitation may additionally admit where enabled (ADR-0056). Distinct from Mode (the process role). | Signup mode, Registration, Access mode |
+| **Suspension** | The `open`-Admission-Mode revocation mechanism (ADR-0055): `users.suspended_at`, enforced by the per-request session re-check on the next request. Non-destructive — sessions survive dormant and unsuspending restores them. Distinct from the allowlist boot sweep, which runs only in `allowlist` Admission Mode. | Ban, Deactivation, Lockout |
 | **Voice Instance** | A process running in `voice` Mode that claims and hosts Voice Sessions via the `voice_sessions` Postgres table. | Worker (v1 term, deprecated in v2) |
 | **Web Instance** | A process running in `web` Mode that serves the web app and admin API. | Server, Web server |
 

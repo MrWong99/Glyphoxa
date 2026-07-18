@@ -142,6 +142,22 @@ validate_path plans-sync \
   --set plans.catalog.plans[0].monthly_price_usd=20 \
   --set-string plans.catalog.plans[0].key_source=platform
 
+# The open-admission render path (ADR-0055): web.admissionMode=open relaxes the
+# operator-allowlist requirement — the list becomes the platform-admin roster
+# and may be empty (rendered as an empty operator-ids key) — and requires a
+# signup plan slug instead. That relaxed branch of the Secret + web Deployment
+# must still be schema-valid. The slug names a plans.catalog entry (the binary's
+# boot preflight requires a synced, non-archived plan), so sync a matching
+# catalog alongside.
+validate_path open-admission \
+  --set web.admissionMode=open \
+  --set-string web.signupPlanSlug=byok-free \
+  --set-string web.operatorIds="" \
+  --set plans.enabled=true \
+  --set-string plans.catalog.plans[0].slug=byok-free \
+  --set-string 'plans.catalog.plans[0].display_name=BYOK Free' \
+  --set plans.catalog.plans[0].monthly_price_usd=0
+
 # Reserved-character credentials (issue #151): the same raw values feed
 # POSTGRES_USER/POSTGRES_PASSWORD, so the assembled DSN must percent-encode
 # them or the migrate hook and the app parse a different credential than the
