@@ -74,6 +74,11 @@ func New(providerID, apiKey string) (llm.Provider, error) {
 // [New] keyed off cfg.Provider; the returned model is cfg.Model (empty lets the
 // adapter pick its default per [llm.Request.Model]). A nil cfg resolves to Groq
 // with an empty env-fallback key and an empty model (the deployment default).
+//
+// FromConfig is UNGATED by the platform-key entitlement (ADR-0054 seam (a)):
+// it is for self-host/deployment-level contexts only. A caller resolving on
+// behalf of a tenant must use [ResolveKeyGated] instead, or a BYOK tenant
+// silently spends the deployment's env keys.
 func FromConfig(cipher *crypto.Cipher, cfg *storage.ProviderConfig) (p llm.Provider, model string, err error) {
 	key, err := ResolveKey(cipher, cfg, storage.ComponentLLM)
 	if err != nil {

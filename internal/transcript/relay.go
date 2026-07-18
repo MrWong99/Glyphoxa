@@ -46,7 +46,8 @@ const (
 )
 
 // Kind classifies a transcript line's speaker. Humans resolve to player or gm from
-// their Speaker Lane's SpeakerID (#281, ADR-0050): a GM-allowlisted snowflake lands
+// their Speaker Lane's SpeakerID (#281, ADR-0050 as amended by ADR-0055): a GM
+// snowflake (tenant-bound operator or env-allowlisted, per the GMChecker) lands
 // in the gm lane, everyone else in player; an unattributed or resolver-off line
 // stays in the anonymous player lane. Agent replies map to npc/butler.
 type Kind string
@@ -345,7 +346,7 @@ func (r *Relay) fold(e voiceevent.Event) {
 	case voiceevent.STTFinal:
 		// A human utterance — one line per STTFinal. who/Kind resolve from the
 		// Speaker Lane's snowflake (#281): a mapped Character or guild display name
-		// with the GM lane for allowlisted speakers, falling back to the
+		// with the GM lane for GM speakers (ADR-0055), falling back to the
 		// byte-identical anonymous "Player / DM" / KindPlayer label when the resolver
 		// is off, the speaker is unattributed, or the name is unresolved.
 		r.humanSeq++
@@ -651,7 +652,7 @@ func (r *Relay) Frames(id string, afterSeq uint64) []Frame {
 // resolveHuman maps a human utterance's SpeakerID to its rendered who + Kind
 // (#281). With no resolver or an empty SpeakerID it is the pre-#281 anonymous lane
 // exactly ("Player / DM", KindPlayer). Otherwise a cache-only Lookup supplies the
-// name (Character > guild display > "") and the GM flag: an allowlisted speaker
+// name (Character > guild display > "") and the GM flag: a GM speaker (ADR-0055)
 // lands in the KindGM lane even when unmapped (name falls back to the generic
 // label), and a resolved name replaces the generic label. Caller holds r.mu.
 func (r *Relay) resolveHuman(speakerID string) (string, Kind) {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -79,9 +78,27 @@ const (
 	guestID  = "333333333333333333"
 )
 
-func newTestResolver(t *testing.T, chars CharacterLookup, namer MemberNamer, allowIDs string) *Resolver {
+// fakeGM is a scripted GMChecker: the listed snowflakes are GMs.
+type fakeGM map[string]struct{}
+
+func gmSet(ids ...string) fakeGM {
+	s := fakeGM{}
+	for _, id := range ids {
+		if id != "" {
+			s[id] = struct{}{}
+		}
+	}
+	return s
+}
+
+func (f fakeGM) IsGM(discordUserID string) bool {
+	_, ok := f[discordUserID]
+	return ok
+}
+
+func newTestResolver(t *testing.T, chars CharacterLookup, namer MemberNamer, gmIDs ...string) *Resolver {
 	t.Helper()
-	return NewResolver(chars, namer, auth.ParseOperatorAllowlist(allowIDs), nil)
+	return NewResolver(chars, namer, gmSet(gmIDs...), nil)
 }
 
 func TestResolverWarmThenLookupCharacterName(t *testing.T) {
@@ -155,7 +172,7 @@ func TestResolverNamerErrorNegativeCachedThenExpires(t *testing.T) {
 func TestResolverNilNamerNegativeOnMiss(t *testing.T) {
 	campaign := uuid.New()
 	chars := &fakeChars{byKey: map[string]storage.Character{}}
-	r := NewResolver(chars, nil, auth.ParseOperatorAllowlist(""), nil) // web-only mode: no guild fallback
+	r := NewResolver(chars, nil, gmSet(), nil) // web-only mode: no guild fallback
 
 	r.Warm(campaign, guestID)
 	r.wg.Wait()
@@ -167,7 +184,7 @@ func TestResolverNilNamerNegativeOnMiss(t *testing.T) {
 
 func TestResolverGMFlagIndependentOfName(t *testing.T) {
 	campaign := uuid.New()
-	// gmUser is on the allowlist AND maps to a Character; kiraUser maps but is not GM.
+	// gmUser is a GM per the checker AND maps to a Character; kiraUser maps but is not GM.
 	chars := &fakeChars{byKey: map[string]storage.Character{
 		campaign.String() + "/" + gmUser:   {Name: "Dungeon Master", CampaignID: campaign, DiscordUserID: gmUser},
 		campaign.String() + "/" + kiraUser: {Name: "Kira", CampaignID: campaign, DiscordUserID: kiraUser},
@@ -185,11 +202,11 @@ func TestResolverGMFlagIndependentOfName(t *testing.T) {
 		t.Fatalf("player Lookup = %+v, want GM=false Name=Kira", got)
 	}
 
-	// Unmapped GM: no Character, no guild name — still GM by allowlist membership.
+	// Unmapped GM: no Character, no guild name — still GM by the checker's verdict.
 	unmappedGM := "999999999999999999"
 	r2 := newTestResolver(t, &fakeChars{byKey: map[string]storage.Character{}}, &fakeNamer{}, unmappedGM)
 	if got := r2.Lookup(campaign, unmappedGM); !got.GM {
-		t.Fatalf("unmapped GM Lookup = %+v, want GM=true (allowlist membership, no name needed)", got)
+		t.Fatalf("unmapped GM Lookup = %+v, want GM=true (GMChecker verdict, no name needed)", got)
 	}
 }
 

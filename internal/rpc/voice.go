@@ -596,6 +596,12 @@ func degraded(provider string, err error) *managementv1.ProviderHealth {
 // resolveComponentKey resolves a component's BYOK key under the hybrid policy:
 // no row / "env" placeholder -> "" (adapter env fallback); a real saved key ->
 // decrypted plaintext; a saved key with no cipher -> FailedPrecondition.
+//
+// PHASE-B GAP (ADR-0054 seam (a), ADR-0055): the "" env fallback here spends
+// the deployment's Platform Keys (health pings, catalogs, TTS preview) without
+// consulting llmbuild's PlatformKeyEntitlement. Fine while every principal is
+// allowlist-admitted; MUST be gated before `open` Admission Mode ships — see
+// internal/llmbuild/entitlement.go.
 func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUID, component storage.Component) (string, error) {
 	cfg, err := s.store.GetProviderConfigByComponent(ctx, tenantID, component)
 	if errors.Is(err, storage.ErrNotFound) {

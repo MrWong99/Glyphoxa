@@ -9,7 +9,7 @@ A multi-tenant TTRPG voice-and-knowledge platform: AI agents (Butler and Charact
 | **Tenant** | The top-level isolation boundary; owns Campaigns, Members, linked Guilds, and Provider Configs. | Organization, Org, Workspace |
 | **Member** | A user authenticated via Discord OAuth and bound to a Tenant by a Member Role. | Tenant user, Account holder |
 | **Member Role** | A Member's permissions within their Tenant: `owner`, `admin`, `gm`. | Permission, Tier, Role (unqualified) |
-| **GM** | A Member with `gm` Member Role; runs and owns Campaigns within their Tenant. | Game Master (spelled out — "GM" is canonical), Dungeon Master |
+| **GM** | A Member with `gm` Member Role; runs and owns Campaigns within their Tenant. Until `tenant_members` lands, GM identity resolves as the Tenant-bound operator (`tenant.operator_user_id`) union the env allowlist (ADR-0055 interim). | Game Master (spelled out — "GM" is canonical), Dungeon Master |
 | **Operator** | The allowlisted Discord User a self-host deployment grants web-tier access to; bound to exactly one Tenant (claims the seeded one or gets a fresh one). In the v1.0 single-operator web tier the Operator fills every Member Role at once. | Admin, Owner (unqualified), First user |
 | **Player** | A human at the table whose Character is bound to a Discord User ID; not a Tenant Member. | Participant, Attendee, Guest |
 | **Linked Player** | A Player who has signed in via Discord OAuth, linking their `linked_user_id` on a Character; gains player-tier web app access scoped to their Characters, at a Player Access Level (ADR-0056). | Registered player, Account-linked player |

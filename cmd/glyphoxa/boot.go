@@ -72,7 +72,10 @@ func requireWebEnv(getenv func(string) string) error {
 // disable the auth bypass must get it disabled, not enabled; ADR-0041 intends an
 // explicit dev opt-IN. When on, the Web Instance boots without OAuth,
 // auto-authenticates every request as the dev operator, and binds to loopback
-// only (see [enableDevMode]).
+// only (see [enableDevMode]). Since the Butler GM gate armed in standalone
+// voice mode (ADR-0055), the flag ALSO means "every voice speaker is GM" on a
+// `-mode voice` node — the same admit-all posture the web tier's dev gate has
+// always had, now consistently applied.
 func devMode(getenv func(string) string) bool {
 	switch strings.ToLower(strings.TrimSpace(getenv("GLYPHOXA_DEV_MODE"))) {
 	case "", "0", "false", "no", "off":
@@ -82,19 +85,48 @@ func devMode(getenv func(string) string) bool {
 }
 
 // gmSpeakerGate builds the SpeakerID→GM predicate arming the Butler GM-only
-// voice-address gate (#280, ADR-0024/ADR-0050). In dev mode every speaker is the
+// voice-address gate (#280, ADR-0024). In dev mode every speaker is the
 // synthetic operator, so the gate admits all — mirroring the dev auto-auth that
 // treats every request as the seeded operator ([enableDevMode]). Otherwise the
-// GM identity is operator-allowlist membership (ADR-0041): allow.Contains is
-// fail-closed on an empty SpeakerID and on any snowflake off the list. An empty
-// allowlist yields a gate that admits nobody (Butler unaddressable by voice);
-// the caller warns on that, as boot refusal already guarantees a non-empty
-// allowlist in non-dev web/all mode.
-func gmSpeakerGate(dev bool, allow auth.OperatorAllowlist) func(string) bool {
+// GM identity is the checker's verdict — auth.GMIdentity's tenant-operator
+// binding union the env allowlist (ADR-0055, amending ADR-0050's
+// allowlist-membership clause) — fail-closed on an empty SpeakerID and on any
+// snowflake it does not recognize. A checker with no identity source admits
+// nobody (Butler unaddressable by voice); the callers warn on that.
+func gmSpeakerGate(dev bool, isGM func(string) bool) func(string) bool {
 	if dev {
 		return func(string) bool { return true }
 	}
-	return allow.Contains
+	return func(speakerID string) bool {
+		return speakerID != "" && isGM(speakerID)
+	}
+}
+
+// armVoiceGMGate builds the standalone voice node's Butler GM-address gate
+// (#280, ADR-0024; extracted from runVoice so the arming is testable, like
+// [resolveStandaloneCampaign]). The node used to leave the gate nil — absent,
+// every speaker able to address the Butler as GM (the fail-open the
+// self-signup design note flagged; ADR-0055). It arms from the same GM
+// identity the web tier uses: the tenant-operator binding union
+// GLYPHOXA_OPERATOR_IDS (a voice node often has no allowlist env — the DB
+// binding from the operator's web login carries it). Dev mode admits every
+// speaker, mirroring the web tier; otherwise the returned gate is NEVER nil
+// and fails closed on unknown or empty SpeakerIDs — including when no GM
+// identity source exists at all (warned: the Butler is then unaddressable).
+// A failed binding load degrades to the allowlist alone, never to fail-open.
+func armVoiceGMGate(ctx context.Context, bindings auth.TenantOperatorLister, getenv func(string) string, log *slog.Logger) func(string) bool {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	dev := devMode(getenv)
+	gmID := auth.NewGMIdentity(bindings, auth.ParseOperatorAllowlist(getenv("GLYPHOXA_OPERATOR_IDS")), log)
+	if err := gmID.Refresh(ctx); err != nil {
+		log.Warn("voice: loading tenant-operator GM bindings failed; Butler GM addressing falls back to GLYPHOXA_OPERATOR_IDS alone until the next refresh", "err", err)
+	}
+	if !dev && gmID.Empty() {
+		log.Warn("butler voice-address gate armed with no GM identity source: the Butler is unaddressable by voice — log into the web UI once (binds the tenant operator) or set GLYPHOXA_OPERATOR_IDS on this node")
+	}
+	return gmSpeakerGate(dev, gmID.IsGM)
 }
 
 // sttStreaming reports whether the GLYPHOXA_STT_STREAMING opt-in enables the

@@ -75,7 +75,8 @@ type Config struct {
 	// the full Ensemble Turn set (ADR-0025).
 	MaxTargets int
 	// ButlerGMGate reports whether a SpeakerID may voice-address the Butler
-	// (ADR-0024 GM-only rule; #280 identity, ADR-0050 allowlist membership). When
+	// (ADR-0024 GM-only rule; #280 identity, GM per ADR-0050/ADR-0055 — the
+	// tenant-operator binding union the env allowlist). When
 	// non-nil it arms the matcher-side Butler eligibility drop: on
 	// [Matcher.TargetMatchFrom], a Butler-role candidate is removed from the
 	// scored set BEFORE scoring, the MaxTargets cap, and lastAddressed whenever the

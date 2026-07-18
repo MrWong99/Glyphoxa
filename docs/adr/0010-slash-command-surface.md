@@ -17,7 +17,7 @@ Permission checks are server-side against `tenant_members.role`; Discord's comma
 
 - **The command surface lives on one standing shared disgo client.** The `bot.Client` moves out of the per-session `wirenpc` wiring into a boot-owned presence component, created lazily once a Bot token exists in `deployment_config` (the token arrives via the web UI, so "no token yet" is a wait-state, not a crash) and rebuilt when the token changes. The voice `Manager` and the interaction handlers share this one gateway connection — no second client per Voice Session.
 - **Commands register per-Guild** (the configured `guild_id`), idempotently at presence start; global registration is deferred with the multi-tenant tier.
-- **v1.0 permission mapping:** the `tenant_members.role` check named above does not exist yet. Until it does, "GM only" means *the invoking Discord User's snowflake is on the operator allowlist* (`GLYPHOXA_OPERATOR_IDS`, ADR-0041). `/roll` stays anyone-in-the-configured-Guild as decided above — the server-side check for it validates the interaction's Guild, not the user.
+- **v1.0 permission mapping:** the `tenant_members.role` check named above does not exist yet. Until it does, "GM only" means *the invoking Discord User's snowflake is on the operator allowlist* (`GLYPHOXA_OPERATOR_IDS`, ADR-0041). `/roll` stays anyone-in-the-configured-Guild as decided above — the server-side check for it validates the interaction's Guild, not the user. *Amended by ADR-0055 (2026-07-18): "GM only" now means the invoking snowflake passes the GM-identity checker — a tenant-bound operator (`tenant.operator_user_id`) or an allowlisted snowflake — pending `tenant_members.role`.*
 
 ## Amendment: `/glyphoxa recap` (2026-07-09, #273)
 

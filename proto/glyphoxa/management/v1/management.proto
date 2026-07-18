@@ -792,9 +792,9 @@ service AuthService {
   rpc Logout(LogoutRequest) returns (LogoutResponse);
 }
 
-// User is the signed-in operator's display identity (ADR-0016). It deliberately
-// omits the internal user id and Discord user id — the SPA only renders the
-// name, role, and avatar in the sidebar.
+// User is the signed-in operator's identity (ADR-0016). It carries the internal
+// user id (ADR-0055 — the onboarding/self-signup surface needs it) but still
+// deliberately omits the Discord user id, which no SPA surface renders.
 message User {
   // name is the operator's display name (Discord global name or username).
   string name = 1;
@@ -802,16 +802,25 @@ message User {
   string role = 2;
   // avatar is an absolute avatar image URL, or empty when none is set.
   string avatar = 3;
+  // id is the internal user UUID (ADR-0055).
+  string id = 4;
 }
 
 // GetCurrentUserRequest is the (empty) request for GetCurrentUser; the operator
 // is resolved server-side from the session cookie.
 message GetCurrentUserRequest {}
 
-// GetCurrentUserResponse carries the signed-in operator's identity.
+// GetCurrentUserResponse carries the signed-in operator's identity plus their
+// resolved Tenant (ADR-0055 — grown for the onboarding surface).
 message GetCurrentUserResponse {
   // user is the signed-in operator.
   User user = 1;
+  // tenant_id is the operator's bound Tenant UUID, resolved server-side
+  // (ADR-0039 pass-through) — empty when no Tenant is bound yet.
+  string tenant_id = 2;
+  // tenant_name is the bound Tenant's display name — empty when no Tenant is
+  // bound yet.
+  string tenant_name = 3;
 }
 
 // LogoutRequest is the (empty) request for Logout; the session to delete is

@@ -48,11 +48,11 @@ type Command struct {
 	Description string
 	Options     []discord.ApplicationCommandOption
 	// GMOnly false = anyone in the configured Guild (Gate.CheckGuild only); true
-	// = operator-allowlisted GM (Gate.CheckGM).
+	// = a GM per the Gate's GMChecker (Gate.CheckGM, ADR-0055).
 	GMOnly bool
 	Handle Handler
 	// Autocomplete is optional. A GM-only command returns empty choices to a
-	// non-operator so a command's option names never leak (handled by dispatch).
+	// non-GM so a command's option names never leak (handled by dispatch).
 	Autocomplete AutocompleteHandler
 }
 

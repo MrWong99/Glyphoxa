@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/speaker"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -182,7 +181,7 @@ func TestResolve_RebindPropagatesToNextLine(t *testing.T) {
 	chars := &fakeCharLookup{byKey: map[string]storage.Character{
 		campaign.String() + "/" + kiraSpeaker: {Name: "Kira", CampaignID: campaign, DiscordUserID: kiraSpeaker},
 	}}
-	res := speaker.NewResolver(chars, nil, auth.ParseOperatorAllowlist(""), nil)
+	res := speaker.NewResolver(chars, nil, nil, nil) // nil GMChecker: nobody is GM here
 
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), campaign: campaign, active: true}

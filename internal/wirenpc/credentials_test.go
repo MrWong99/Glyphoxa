@@ -1,10 +1,15 @@
 package wirenpc
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
@@ -70,7 +75,7 @@ func TestResolveKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveKey(tt.cipher, tt.cfg, storage.ComponentLLM)
+			got, err := resolveKey(context.Background(), nil, uuid.Nil, tt.cipher, tt.cfg, storage.ComponentLLM)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("resolveKey() error = nil, want error containing %q — a real saved key must never resolve to a silent empty key (AC2)", tt.wantErr)
@@ -159,7 +164,7 @@ func TestResolveProviderKeys(t *testing.T) {
 	tts := sealedConfig(t, cipher, "tts-key-bbbb")
 
 	// STT unbound -> env fallback ("") while LLM/TTS decrypt — the hybrid mix.
-	keys, err := resolveProviderKeys(cipher, llm, tts, nil)
+	keys, err := resolveProviderKeys(context.Background(), nil, uuid.Nil, cipher, llm, tts, nil)
 	if err != nil {
 		t.Fatalf("resolveProviderKeys: %v", err)
 	}
@@ -174,7 +179,55 @@ func TestResolveProviderKeys(t *testing.T) {
 	}
 
 	// A real key the cipher cannot open fails the whole resolution (AC2).
-	if _, err := resolveProviderKeys(nil, llm, tts, nil); err == nil {
+	if _, err := resolveProviderKeys(context.Background(), nil, uuid.Nil, nil, llm, tts, nil); err == nil {
 		t.Fatal("resolveProviderKeys(nil cipher, real keys) = nil error, want a clear failure (AC2)")
 	}
+}
+
+// TestResolveProviderKeysEntitlementRefused is the ADR-0054 seam (a) at the
+// session boundary (ADR-0055): with a refusing entitlement (an open-mode BYOK
+// tenant, no platform subscription), an env-fallback component — unbound OR the
+// seeded "env" placeholder — fails the WHOLE resolution clearly, while a session
+// whose three components all carry real BYOK keys still starts. A nil
+// entitlement (allowlist posture) keeps the hybrid mix byte-identical.
+func TestResolveProviderKeysEntitlementRefused(t *testing.T) {
+	cipher := newUnitCipher(t)
+	tenant := uuid.New()
+	llm := sealedConfig(t, cipher, "llm-key-aaaa")
+	tts := sealedConfig(t, cipher, "tts-key-bbbb")
+	stt := sealedConfig(t, cipher, "stt-key-cccc")
+	refuse := refusingEntitlement{}
+
+	// All three components on real BYOK keys: the gate never trips.
+	keys, err := resolveProviderKeys(context.Background(), refuse, tenant, cipher, llm, tts, stt)
+	if err != nil {
+		t.Fatalf("resolveProviderKeys(all BYOK, refused entitlement): %v", err)
+	}
+	if keys.llm != "llm-key-aaaa" || keys.tts != "tts-key-bbbb" || keys.stt != "stt-key-cccc" {
+		t.Errorf("keys = %+v, want all three decrypted", keys)
+	}
+
+	// One unbound component (STT nil -> env fallback) is refused.
+	if _, err := resolveProviderKeys(context.Background(), refuse, tenant, cipher, llm, tts, nil); !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
+		t.Errorf("unbound STT with refused entitlement err = %v, want ErrNoPlatformKeyEntitlement", err)
+	}
+
+	// The seeded "env" placeholder is the same hole, same refusal.
+	envCfg := &storage.ProviderConfig{CredentialsLast4: llmbuild.EnvPlaceholderLast4}
+	if _, err := resolveProviderKeys(context.Background(), refuse, tenant, cipher, envCfg, tts, stt); !errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement) {
+		t.Errorf("env-placeholder LLM with refused entitlement err = %v, want ErrNoPlatformKeyEntitlement", err)
+	}
+
+	// nil entitlement: the ADR-0039 hybrid fallback, untouched.
+	keys, err = resolveProviderKeys(context.Background(), nil, tenant, cipher, llm, tts, nil)
+	if err != nil || keys.stt != "" {
+		t.Errorf("nil entitlement = (%+v, %v), want STT \"\" env fallback, no error", keys, err)
+	}
+}
+
+// refusingEntitlement denies every tenant the platform env fallback.
+type refusingEntitlement struct{}
+
+func (refusingEntitlement) PlatformKeyAllowed(context.Context, uuid.UUID) (bool, error) {
+	return false, nil
 }

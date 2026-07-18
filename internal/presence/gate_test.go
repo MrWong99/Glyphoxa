@@ -3,8 +3,6 @@ package presence
 import (
 	"errors"
 	"testing"
-
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 )
 
 const (
@@ -16,8 +14,26 @@ const (
 
 func fixedGuild(id string) func() string { return func() string { return id } }
 
+// gmList is a scripted GMChecker: the listed snowflakes are GMs.
+type gmList map[string]struct{}
+
+func gms(ids ...string) gmList {
+	s := gmList{}
+	for _, id := range ids {
+		if id != "" {
+			s[id] = struct{}{}
+		}
+	}
+	return s
+}
+
+func (g gmList) IsGM(discordUserID string) bool {
+	_, ok := g[discordUserID]
+	return ok
+}
+
 func TestGateCheckGuild(t *testing.T) {
-	g := NewGate(auth.ParseOperatorAllowlist(""), fixedGuild(testGuild))
+	g := NewGate(gms(), fixedGuild(testGuild))
 
 	if err := g.CheckGuild(testGuild); err != nil {
 		t.Errorf("CheckGuild(configured) = %v, want nil", err)
@@ -33,23 +49,23 @@ func TestGateCheckGuild(t *testing.T) {
 func TestGateCheckGuildWaitState(t *testing.T) {
 	// No configured Guild yet (presence wait-state): deny everything, even a
 	// well-formed Guild id.
-	g := NewGate(auth.ParseOperatorAllowlist(operatorID), fixedGuild(""))
+	g := NewGate(gms(operatorID), fixedGuild(""))
 	if err := g.CheckGuild(testGuild); !errors.Is(err, ErrWrongGuild) {
 		t.Errorf("CheckGuild while unconfigured = %v, want ErrWrongGuild", err)
 	}
 }
 
 func TestGateCheckGM(t *testing.T) {
-	g := NewGate(auth.ParseOperatorAllowlist(operatorID), fixedGuild(testGuild))
+	g := NewGate(gms(operatorID), fixedGuild(testGuild))
 
 	if err := g.CheckGM(testGuild, operatorID); err != nil {
-		t.Errorf("CheckGM(operator in guild) = %v, want nil", err)
+		t.Errorf("CheckGM(GM in guild) = %v, want nil", err)
 	}
 	if err := g.CheckGM(testGuild, strangerID); !errors.Is(err, ErrNotOperator) {
 		t.Errorf("CheckGM(stranger in guild) = %v, want ErrNotOperator", err)
 	}
-	// Wrong Guild fails on the Guild check before the operator check.
+	// Wrong Guild fails on the Guild check before the GM check.
 	if err := g.CheckGM(otherGuild, operatorID); !errors.Is(err, ErrWrongGuild) {
-		t.Errorf("CheckGM(operator wrong guild) = %v, want ErrWrongGuild", err)
+		t.Errorf("CheckGM(GM wrong guild) = %v, want ErrWrongGuild", err)
 	}
 }

@@ -252,3 +252,50 @@ func TestAddUsageAccumulatesAndReports(t *testing.T) {
 		t.Fatalf("empty AddUsage: %v", err)
 	}
 }
+
+// TestTenantHasPlatformKeySource is the ADR-0054 entitlement-seam read (ADR-0055
+// gate (a)): true only while an ACTIVE subscription on a key_source='platform'
+// Plan backs the tenant — a BYOK plan, an ended platform subscription, no
+// subscription at all, and an unknown tenant are all false (never an error).
+func TestTenantHasPlatformKeySource(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantID, _ := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+
+	if _, err := st.SyncPlans(ctx, billingSpecs(), false); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// No subscription at all, and a tenant that does not exist: false, no error.
+	if ok, err := st.TenantHasPlatformKeySource(ctx, tenantID); err != nil || ok {
+		t.Fatalf("unsubscribed = (%v, %v), want (false, nil)", ok, err)
+	}
+	if ok, err := st.TenantHasPlatformKeySource(ctx, uuid.New()); err != nil || ok {
+		t.Fatalf("unknown tenant = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	// A BYOK plan grants nothing.
+	if _, err := st.SetTenantPlan(ctx, tenantID, "byok-free"); err != nil {
+		t.Fatalf("subscribe byok: %v", err)
+	}
+	if ok, err := st.TenantHasPlatformKeySource(ctx, tenantID); err != nil || ok {
+		t.Fatalf("byok plan = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	// Switching to the platform plan grants (SetTenantPlan ends the byok row).
+	if _, err := st.SetTenantPlan(ctx, tenantID, "all-inclusive"); err != nil {
+		t.Fatalf("subscribe platform: %v", err)
+	}
+	if ok, err := st.TenantHasPlatformKeySource(ctx, tenantID); err != nil || !ok {
+		t.Fatalf("platform plan = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	// Cancelling ends the entitlement.
+	if err := st.EndTenantPlan(ctx, tenantID); err != nil {
+		t.Fatalf("end plan: %v", err)
+	}
+	if ok, err := st.TenantHasPlatformKeySource(ctx, tenantID); err != nil || ok {
+		t.Fatalf("ended platform plan = (%v, %v), want (false, nil)", ok, err)
+	}
+}

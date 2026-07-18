@@ -21,7 +21,7 @@ CREATE TABLE users (
     -- at upsert time so the SPA renders it directly.
     avatar           text NOT NULL DEFAULT '',
     -- role is a free-text label for now (e.g. 'operator'); the tenant_members
-    -- role matrix (ADR-0018) is deferred (ADR-0039).
+    -- role matrix (ADR-0002) is deferred (ADR-0039).
     role             text NOT NULL DEFAULT 'operator',
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now()

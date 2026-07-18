@@ -107,7 +107,7 @@ func TestRunFromDB_DecryptsSavedKeys(t *testing.T) {
 		t.Fatalf("loadSeededNPCs tenant = %s, want %s", gotCampaign.TenantID, tenantID)
 	}
 
-	keys, err := resolveSessionKeys(ctx, st, tenantID, primary, cipher)
+	keys, err := resolveSessionKeys(ctx, st, tenantID, primary, cipher, nil)
 	if err != nil {
 		t.Fatalf("resolveSessionKeys: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestRunFromDB_EnvPlaceholderFallsBack(t *testing.T) {
 	}
 
 	// A nil cipher is deliberate: the env-placeholder path must not need one.
-	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, nil)
+	keys, err := resolveSessionKeys(ctx, st, campaign.TenantID, primary, nil, nil)
 	if err != nil {
 		t.Fatalf("resolveSessionKeys on env placeholders: %v (must fall back to ENV, not error)", err)
 	}

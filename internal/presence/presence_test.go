@@ -10,7 +10,6 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/gorilla/websocket"
 
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
@@ -56,7 +55,7 @@ func seededPresence(t *testing.T) (p *Presence, builds *[]*bot.Client, closed *[
 		DiscordBotTokenCiphertext: ct,
 		DiscordBotTokenLast4:      crypto.Last4("tok-A"),
 	}}
-	reg := NewRegistry(NewGate(auth.ParseOperatorAllowlist(""), fixedGuild("")), nil)
+	reg := NewRegistry(NewGate(gms(), fixedGuild("")), nil)
 	reg.Register(Command{Path: "roll", Description: "Roll dice"})
 	p = New(store, cipher, reg, "", nil)
 
@@ -190,7 +189,7 @@ func TestPresenceEnsureLifecycle(t *testing.T) {
 	}
 
 	store := &fakePresenceStore{err: storage.ErrNotFound}
-	reg := NewRegistry(NewGate(auth.ParseOperatorAllowlist(""), fixedGuild("")), nil)
+	reg := NewRegistry(NewGate(gms(), fixedGuild("")), nil)
 	reg.Register(Command{Path: "roll", Description: "Roll dice"})
 	wantDefs := len(reg.Definitions())
 

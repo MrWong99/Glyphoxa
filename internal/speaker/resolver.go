@@ -20,7 +20,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -50,11 +49,21 @@ type MemberNamer interface {
 	MemberDisplayName(ctx context.Context, discordUserID string) (string, error)
 }
 
+// GMChecker reports whether a Discord snowflake is a GM. It must never block —
+// Lookup calls it inside the relay/chunker's synchronous bus callbacks
+// (ADR-0040). *auth.GMIdentity satisfies it: the tenant-operator binding union
+// the env allowlist (ADR-0055, amending ADR-0050's allowlist-membership
+// clause), served from a cached snapshot.
+type GMChecker interface {
+	IsGM(discordUserID string) bool
+}
+
 // Resolution is the resolved identity for a Speaker Lane snowflake. Name is the
 // Character name when mapped, else the guild display name, else "" (unresolved or
-// a failed fetch — the caller keeps its generic label). GM is allowlist
-// membership, computed inline on every Lookup and never cached, so a grant change
-// takes effect on the next boot's parsed allowlist without a cache flush.
+// a failed fetch — the caller keeps its generic label). GM is the GMChecker's
+// verdict, computed on every Lookup against its own snapshot (never cached
+// here), so a binding change takes effect on the checker's freshness terms
+// without a name-cache flush.
 type Resolution struct {
 	Name string
 	GM   bool
@@ -79,7 +88,7 @@ type entry struct {
 type Resolver struct {
 	chars   CharacterLookup
 	members MemberNamer
-	allow   auth.OperatorAllowlist
+	gm      GMChecker
 	log     *slog.Logger
 	now     func() time.Time
 
@@ -91,15 +100,16 @@ type Resolver struct {
 }
 
 // NewResolver builds a Resolver. members may be nil (web-only mode: no guild
-// fallback). log nil defaults to a discarding logger.
-func NewResolver(chars CharacterLookup, members MemberNamer, allow auth.OperatorAllowlist, log *slog.Logger) *Resolver {
+// fallback). gm must be non-blocking (see [GMChecker]); nil labels nobody GM.
+// log nil defaults to a discarding logger.
+func NewResolver(chars CharacterLookup, members MemberNamer, gm GMChecker, log *slog.Logger) *Resolver {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Resolver{
 		chars:    chars,
 		members:  members,
-		allow:    allow,
+		gm:       gm,
 		log:      log,
 		now:      time.Now,
 		cache:    map[key]entry{},
@@ -189,14 +199,14 @@ func (r *Resolver) resolve(k key) (string, time.Duration) {
 }
 
 // Lookup returns the cached Resolution for a speaker. It NEVER blocks or does I/O:
-// GM is computed inline from the allowlist, and Name is served only from a fresh
+// GM is the non-blocking GMChecker's verdict, and Name is served only from a fresh
 // cache entry (a cold or expired entry yields Name ""). The caller keeps its
 // generic label when Name is "".
 func (r *Resolver) Lookup(campaignID uuid.UUID, speakerID string) Resolution {
-	res := Resolution{GM: r.allow.Contains(speakerID)}
 	if speakerID == "" {
-		return res
+		return Resolution{}
 	}
+	res := Resolution{GM: r.gm != nil && r.gm.IsGM(speakerID)}
 	r.mu.Lock()
 	if e, ok := r.cache[key{campaign: campaignID, speaker: speakerID}]; ok && r.now().Before(e.expires) {
 		res.Name = e.name
