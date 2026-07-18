@@ -20,7 +20,7 @@ import (
 // idempotence — the audit trail of when it was first archived).
 func TestArchiveCampaign(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
@@ -30,7 +30,7 @@ func TestArchiveCampaign(t *testing.T) {
 	}
 
 	before := time.Now()
-	archived, err := st.ArchiveCampaign(ctx, campaignID)
+	archived, err := st.ArchiveCampaign(ctx, tenantID, campaignID)
 	if err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestArchiveCampaign(t *testing.T) {
 
 	// Re-archiving keeps the original timestamp (COALESCE idempotence).
 	firstTS := *archived.ArchivedAt
-	rearchived, err := st.ArchiveCampaign(ctx, campaignID)
+	rearchived, err := st.ArchiveCampaign(ctx, tenantID, campaignID)
 	if err != nil {
 		t.Fatalf("ArchiveCampaign (re-archive): %v", err)
 	}
@@ -57,7 +57,7 @@ func TestArchiveCampaign(t *testing.T) {
 	}
 
 	// An unknown id is ErrNotFound.
-	if _, err := st.ArchiveCampaign(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("ArchiveCampaign(random) = %v, want ErrNotFound", err)
 	}
 }
@@ -77,7 +77,7 @@ func TestArchivedExcludedFromResolution(t *testing.T) {
 
 	// Archive the most-recently-created one; it must leave the default list but
 	// stay in the archive-inclusive list.
-	if _, err := st.ArchiveCampaign(ctx, second); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, second); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestArchivedExcludedFromResolution(t *testing.T) {
 	}
 
 	// Archive the last active campaign too → nothing resolves.
-	if _, err := st.ArchiveCampaign(ctx, first); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, first); err != nil {
 		t.Fatalf("ArchiveCampaign(first): %v", err)
 	}
 	if _, err := st.GetActiveCampaign(ctx); !errors.Is(err, storage.ErrNotFound) {
@@ -138,18 +138,18 @@ func TestGetActiveCampaignForUserNeverReturnsArchived(t *testing.T) {
 // campaign to ListCampaigns (#269).
 func TestUnarchiveCampaign(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
-	if _, err := st.ArchiveCampaign(ctx, campaignID); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
 	if got, _ := st.ListCampaigns(ctx); len(got) != 0 {
 		t.Fatalf("after archive, ListCampaigns len = %d, want 0", len(got))
 	}
 
-	un, err := st.UnarchiveCampaign(ctx, campaignID)
+	un, err := st.UnarchiveCampaign(ctx, tenantID, campaignID)
 	if err != nil {
 		t.Fatalf("UnarchiveCampaign: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestUnarchiveCampaign(t *testing.T) {
 	}
 
 	// An unknown id is ErrNotFound.
-	if _, err := st.UnarchiveCampaign(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.UnarchiveCampaign(ctx, tenantID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("UnarchiveCampaign(random) = %v, want ErrNotFound", err)
 	}
 }
@@ -237,7 +237,7 @@ func TestDeleteCampaignCascade(t *testing.T) {
 	seedHighlight(t, st, tenantID, sessionID, campaignID, storage.HighlightCandidate)
 
 	// Delete before archiving is refused; the row survives.
-	if err := st.DeleteCampaign(ctx, campaignID); !errors.Is(err, storage.ErrNotArchived) {
+	if err := st.DeleteCampaign(ctx, tenantID, campaignID); !errors.Is(err, storage.ErrNotArchived) {
 		t.Fatalf("DeleteCampaign(non-archived) = %v, want ErrNotArchived", err)
 	}
 	if _, err := st.GetCampaign(ctx, campaignID); err != nil {
@@ -245,10 +245,10 @@ func TestDeleteCampaignCascade(t *testing.T) {
 	}
 
 	// Archive, then hard-delete for real.
-	if _, err := st.ArchiveCampaign(ctx, campaignID); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
-	if err := st.DeleteCampaign(ctx, campaignID); err != nil {
+	if err := st.DeleteCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("DeleteCampaign(archived): %v", err)
 	}
 
@@ -276,10 +276,9 @@ func TestDeleteCampaignCascade(t *testing.T) {
 			t.Errorf("%s rows after cascade delete = %d, want 0", tc.name, n)
 		}
 	}
-	_ = tenantID
 
 	// An unknown id is ErrNotFound.
-	if err := st.DeleteCampaign(ctx, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
+	if err := st.DeleteCampaign(ctx, tenantID, uuid.New()); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("DeleteCampaign(random) = %v, want ErrNotFound", err)
 	}
 }
@@ -290,7 +289,7 @@ func TestDeleteCampaignCascade(t *testing.T) {
 // surviving campaign.
 func TestDeleteCampaignWithJob_Atomic(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
@@ -306,7 +305,7 @@ func TestDeleteCampaignWithJob_Atomic(t *testing.T) {
 	}
 
 	// Not archived → refused, and NO job enqueued (the tx rolled back).
-	if err := st.DeleteCampaignWithJob(ctx, campaignID, kind, payload); !errors.Is(err, storage.ErrNotArchived) {
+	if err := st.DeleteCampaignWithJob(ctx, tenantID, campaignID, kind, payload); !errors.Is(err, storage.ErrNotArchived) {
 		t.Fatalf("DeleteCampaignWithJob(non-archived) = %v, want ErrNotArchived", err)
 	}
 	if n := countJobs(); n != 0 {
@@ -314,10 +313,10 @@ func TestDeleteCampaignWithJob_Atomic(t *testing.T) {
 	}
 
 	// Archive, then delete-with-job for real → campaign gone AND one job enqueued.
-	if _, err := st.ArchiveCampaign(ctx, campaignID); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
-	if err := st.DeleteCampaignWithJob(ctx, campaignID, kind, payload); err != nil {
+	if err := st.DeleteCampaignWithJob(ctx, tenantID, campaignID, kind, payload); err != nil {
 		t.Fatalf("DeleteCampaignWithJob(archived): %v", err)
 	}
 	if _, err := st.GetCampaign(ctx, campaignID); !errors.Is(err, storage.ErrNotFound) {

@@ -30,11 +30,11 @@ import (
 
 func TestToolGrants_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, _ := seedStore(t, dsn) // campaign → auto-Butler with a seeded dice grant
+	store, tenantID, _ := seedStoreTenant(t, dsn) // campaign → auto-Butler with a seeded dice grant
 	ctx := context.Background()
 
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
+	mux.Handle(rpc.NewCampaignServer(store).Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-grant"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
@@ -123,11 +123,11 @@ func TestToolGrants_Integration(t *testing.T) {
 // the follow-up adds).
 func TestToolGrants_GhostAgent_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, _ := seedStore(t, dsn)
+	store, tenantID, _ := seedStoreTenant(t, dsn)
 	ctx := context.Background()
 
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
+	mux.Handle(rpc.NewCampaignServer(store).Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-grant"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
@@ -168,7 +168,7 @@ func TestToolGrants_GhostAgent_Integration(t *testing.T) {
 // revoke), and B's seeded grant rows are left untouched.
 func TestToolGrants_CrossCampaign_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, campaignA := seedStore(t, dsn) // A + its auto-Butler (seeded dice grant)
+	store, tenantID, campaignA := seedStoreTenant(t, dsn) // A + its auto-Butler (seeded dice grant)
 	ctx := context.Background()
 
 	// A second campaign B under the same tenant, with its own auto-Butler.
@@ -191,7 +191,7 @@ func TestToolGrants_CrossCampaign_Integration(t *testing.T) {
 	srv := rpc.NewCampaignServer(store)
 	srv.SetSessions(liveMgr(campaignA))
 	mux := http.NewServeMux()
-	mux.Handle(srv.Handler())
+	mux.Handle(srv.Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-grant"))))
 	s := httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, s.URL, connect.WithProtoJSON())

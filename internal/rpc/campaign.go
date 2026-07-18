@@ -165,15 +165,18 @@ type campaignManagement struct {
 // needs (#264); *storage.Store satisfies it, so the handlers unit-test keyless
 // with a fake.
 type campaignManagementStore interface {
-	// ListCampaigns is the name-ordered ACTIVE-only picker list; ListAllCampaigns
-	// is the archive-inclusive variant the include_archived flag routes to (#269).
-	ListCampaigns(ctx context.Context) ([]storage.Campaign, error)
-	ListAllCampaigns(ctx context.Context) ([]storage.Campaign, error)
+	// ListCampaignsInTenant is the tenant-scoped name-ordered ACTIVE-only picker
+	// list; ListAllCampaignsInTenant is the archive-inclusive variant the
+	// include_archived flag routes to (#269). Both scope to auth.TenantID(ctx) so the
+	// picker shows only the caller's own campaigns (#473).
+	ListCampaignsInTenant(ctx context.Context, tenantID uuid.UUID) ([]storage.Campaign, error)
+	ListAllCampaignsInTenant(ctx context.Context, tenantID uuid.UUID) ([]storage.Campaign, error)
 	// CreateCampaign is the tenant-scoped create (the ADR-0009 auto-Butler trigger
-	// fires on the insert); GetCampaign backs its read-back and SetActiveCampaign's
-	// pre-write validation.
+	// fires on the insert); GetCampaignInTenant backs its read-back and
+	// SetActiveCampaign's pre-write validation, both scoped so a cross-tenant id
+	// resolves to NotFound (#473).
 	CreateCampaign(ctx context.Context, c storage.NewCampaign) (uuid.UUID, error)
-	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+	GetCampaignInTenant(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
 	UpdateCampaign(ctx context.Context, c storage.CampaignUpdate) (storage.Campaign, error)
 	// SetActiveCampaign records the durable /glyphoxa use selection shared with the
 	// slash-command surface (migration 00014).

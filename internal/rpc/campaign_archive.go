@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
@@ -35,14 +36,17 @@ type campaignArchive struct {
 // (#269); *storage.Store satisfies it. Delete cascades in one statement; Archive
 // clears any durable selection pointing at the campaign.
 type campaignArchiveStore interface {
-	ArchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	UnarchiveCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	DeleteCampaign(ctx context.Context, id uuid.UUID) error
+	// All four are TENANT-SCOPED (#473): they match (id, tenant_id), so a
+	// foreign-tenant id is invisible and yields ErrNotFound — a cross-tenant archive
+	// or destructive delete can never land. The handlers thread auth.TenantID(ctx).
+	ArchiveCampaign(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
+	UnarchiveCampaign(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
+	DeleteCampaign(ctx context.Context, tenantID, id uuid.UUID) error
 	// DeleteCampaignWithJob hard-deletes AND enqueues a follow-up job atomically
 	// (#308): the campaign hard delete uses it to schedule the Highlight-clip blob
 	// sweep in the delete's own transaction, so the sweep exists iff the delete
 	// committed (no orphan sweep of a surviving campaign, no lost sweep on a crash).
-	DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error
+	DeleteCampaignWithJob(ctx context.Context, tenantID, id uuid.UUID, jobKind string, jobPayload []byte) error
 }
 
 // HighlightClipSweeper drops a campaign's Session Highlight clips through the blob
@@ -86,11 +90,15 @@ func (s *campaignArchive) ArchiveCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	}
 	if err := s.liveGuard(id, "archived"); err != nil {
 		return nil, err
 	}
 
-	c, err := s.store.ArchiveCampaign(ctx, id)
+	c, err := s.store.ArchiveCampaign(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
@@ -112,8 +120,12 @@ func (s *campaignArchive) UnarchiveCampaign(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
 	}
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	}
 
-	c, err := s.store.UnarchiveCampaign(ctx, id)
+	c, err := s.store.UnarchiveCampaign(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))
@@ -137,6 +149,10 @@ func (s *campaignArchive) DeleteCampaign(
 	id, err := uuid.Parse(req.Msg.GetId())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid campaign id"))
+	}
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
 	}
 	if err := s.liveGuard(id, "deleted"); err != nil {
 		return nil, err
@@ -167,9 +183,9 @@ func (s *campaignArchive) DeleteCampaign(
 			slog.Default().Error("DeleteCampaign: marshal clip sweep payload failed", "campaign_id", id, "err", merr)
 			return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
 		}
-		deleteErr = s.store.DeleteCampaignWithJob(ctx, id, highlight.JobKindSweepCampaignClips, payload)
+		deleteErr = s.store.DeleteCampaignWithJob(ctx, tenantID, id, highlight.JobKindSweepCampaignClips, payload)
 	} else {
-		deleteErr = s.store.DeleteCampaign(ctx, id)
+		deleteErr = s.store.DeleteCampaign(ctx, tenantID, id)
 	}
 	if deleteErr != nil {
 		switch {

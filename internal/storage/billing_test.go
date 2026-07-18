@@ -148,6 +148,11 @@ func TestSubscriptionLifecycle(t *testing.T) {
 	if _, err := st.SetTenantPlan(ctx, tenantID, "no-such-plan"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("unknown slug err = %v, want ErrNotFound", err)
 	}
+	// An unknown TENANT (a valid, non-archived plan) trips the subscription's
+	// tenant FK; the doc promises ErrNotFound, not a raw wrapped error (#473).
+	if _, err := st.SetTenantPlan(ctx, uuid.New(), "all-inclusive"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("unknown tenant err = %v, want ErrNotFound", err)
+	}
 
 	// Cancel.
 	if err := st.EndTenantPlan(ctx, tenantID); err != nil {

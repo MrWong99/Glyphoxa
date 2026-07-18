@@ -32,7 +32,7 @@ import (
 // before any write, and B's NPC is left byte-for-byte untouched.
 func TestUpdateAgent_CrossCampaign_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, campaignA := seedStore(t, dsn)
+	store, tenantID, campaignA := seedStoreTenant(t, dsn)
 	ctx := context.Background()
 
 	a, err := store.GetActiveCampaign(ctx) // == A, carries the tenant id
@@ -65,7 +65,7 @@ func TestUpdateAgent_CrossCampaign_Integration(t *testing.T) {
 	srv := rpc.NewCampaignServer(store)
 	srv.SetSessions(liveMgr(campaignA))
 	mux := http.NewServeMux()
-	mux.Handle(srv.Handler())
+	mux.Handle(srv.Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-crud"))))
 	s := httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	client := managementv1connect.NewCampaignServiceClient(http.DefaultClient, s.URL, connect.WithProtoJSON())
@@ -91,10 +91,10 @@ func TestUpdateAgent_CrossCampaign_Integration(t *testing.T) {
 
 func TestCampaignCRUD_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, _ := seedStore(t, dsn) // seedStore inserts a campaign → auto-Butler fires
+	store, tenantID, _ := seedStoreTenant(t, dsn) // seedStore inserts a campaign → auto-Butler fires
 
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
+	mux.Handle(rpc.NewCampaignServer(store).Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-crud"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(

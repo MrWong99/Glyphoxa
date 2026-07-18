@@ -39,27 +39,50 @@ type fakeActive struct {
 
 	campaignsByID  map[uuid.UUID]storage.Campaign
 	getCampaignErr error
+
+	// resolveTenant records the last tenant id threaded into a scoped resolver read
+	// (#473), so a test asserts the ctx tenant reached storage.
+	resolveTenant uuid.UUID
 }
 
 func newFakeActive() *fakeActive {
 	return &fakeActive{campaignsByID: map[uuid.UUID]storage.Campaign{}}
 }
 
-func (f *fakeActive) GetActiveCampaign(context.Context) (storage.Campaign, error) {
-	return f.campaign, f.campErr
+// The resolver reads are tenant-scoped (#473). resolveTenant records the LAST
+// tenant id the handler threaded down, so a test asserts the ctx tenant reached
+// storage; foreignTenant, when set, makes the scoped reads enforce isolation —
+// a campaign whose TenantID differs from the requested (non-nil) tenant reads back
+// as ErrNotFound, exactly as the real WHERE tenant_id guard would.
+func (f *fakeActive) scopedOut(c storage.Campaign, tenantID uuid.UUID) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
+	if tenantID != uuid.Nil && c.TenantID != uuid.Nil && c.TenantID != tenantID {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
+	return c, nil
 }
 
-func (f *fakeActive) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+func (f *fakeActive) GetActiveCampaignInTenant(_ context.Context, tenantID uuid.UUID) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
+	if f.campErr != nil {
+		return storage.Campaign{}, f.campErr
+	}
+	return f.scopedOut(f.campaign, tenantID)
+}
+
+func (f *fakeActive) GetActiveCampaignForUserInTenant(_ context.Context, tenantID uuid.UUID, _ string) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
 	if f.forUserErr != nil {
 		return storage.Campaign{}, f.forUserErr
 	}
 	if f.forUser.ID == uuid.Nil {
 		return storage.Campaign{}, storage.ErrNotFound
 	}
-	return f.forUser, nil
+	return f.scopedOut(f.forUser, tenantID)
 }
 
-func (f *fakeActive) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+func (f *fakeActive) GetCampaignInTenant(_ context.Context, tenantID, id uuid.UUID) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
 	if f.getCampaignErr != nil {
 		return storage.Campaign{}, f.getCampaignErr
 	}
@@ -67,7 +90,7 @@ func (f *fakeActive) GetCampaign(_ context.Context, id uuid.UUID) (storage.Campa
 	if !ok {
 		return storage.Campaign{}, storage.ErrNotFound
 	}
-	return c, nil
+	return f.scopedOut(c, tenantID)
 }
 
 // setActiveCall records one SetActiveCampaign invocation for assertions (#264).
@@ -87,6 +110,7 @@ type fakeManagementStore struct {
 
 	campaignList      []storage.Campaign
 	listCampaignErr   error
+	listTenant        uuid.UUID
 	createdCampaigns  []storage.NewCampaign
 	createCampaignErr error
 	updatedCampaigns  []storage.CampaignUpdate
@@ -101,7 +125,8 @@ func newFakeManagementStore() *fakeManagementStore {
 	return &fakeManagementStore{fakeActive: newFakeActive()}
 }
 
-func (f *fakeManagementStore) ListCampaigns(context.Context) ([]storage.Campaign, error) {
+func (f *fakeManagementStore) ListCampaignsInTenant(_ context.Context, tenantID uuid.UUID) ([]storage.Campaign, error) {
+	f.listTenant = tenantID
 	return f.campaignList, f.listCampaignErr
 }
 
@@ -131,6 +156,10 @@ func (f *fakeManagementStore) UpdateCampaign(_ context.Context, c storage.Campai
 	if !ok {
 		return storage.Campaign{}, storage.ErrNotFound
 	}
+	// Tenant scoping (#473): a foreign-tenant update is invisible → ErrNotFound.
+	if c.TenantID != uuid.Nil && existing.TenantID != uuid.Nil && existing.TenantID != c.TenantID {
+		return storage.Campaign{}, storage.ErrNotFound
+	}
 	existing.Name = c.Name
 	existing.System = c.System
 	existing.Language = c.Language
@@ -149,7 +178,8 @@ func (f *fakeManagementStore) SetActiveCampaign(_ context.Context, discordUserID
 	return nil
 }
 
-func (f *fakeManagementStore) ListAllCampaigns(context.Context) ([]storage.Campaign, error) {
+func (f *fakeManagementStore) ListAllCampaignsInTenant(_ context.Context, tenantID uuid.UUID) ([]storage.Campaign, error) {
+	f.listTenant = tenantID
 	return f.allCampaignList, f.listAllErr
 }
 
@@ -163,12 +193,15 @@ type fakeArchiveStore struct {
 	*fakeManagementStore
 
 	archiveCalls      []uuid.UUID
+	archiveTenant     uuid.UUID
 	archiveResult     storage.Campaign
 	archiveErr        error
 	unarchiveCalls    []uuid.UUID
+	unarchiveTenant   uuid.UUID
 	unarchiveResult   storage.Campaign
 	unarchiveErr      error
 	deleteCalls       []uuid.UUID
+	deleteTenant      uuid.UUID
 	deleteCampaignErr error
 	deleteJobKind     string
 	deleteJobPayload  []byte
@@ -178,7 +211,8 @@ func newFakeArchiveStore() *fakeArchiveStore {
 	return &fakeArchiveStore{fakeManagementStore: newFakeManagementStore()}
 }
 
-func (f *fakeArchiveStore) ArchiveCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+func (f *fakeArchiveStore) ArchiveCampaign(_ context.Context, tenantID, id uuid.UUID) (storage.Campaign, error) {
+	f.archiveTenant = tenantID
 	f.archiveCalls = append(f.archiveCalls, id)
 	if f.archiveErr != nil {
 		return storage.Campaign{}, f.archiveErr
@@ -186,7 +220,8 @@ func (f *fakeArchiveStore) ArchiveCampaign(_ context.Context, id uuid.UUID) (sto
 	return f.archiveResult, nil
 }
 
-func (f *fakeArchiveStore) UnarchiveCampaign(_ context.Context, id uuid.UUID) (storage.Campaign, error) {
+func (f *fakeArchiveStore) UnarchiveCampaign(_ context.Context, tenantID, id uuid.UUID) (storage.Campaign, error) {
+	f.unarchiveTenant = tenantID
 	f.unarchiveCalls = append(f.unarchiveCalls, id)
 	if f.unarchiveErr != nil {
 		return storage.Campaign{}, f.unarchiveErr
@@ -194,12 +229,14 @@ func (f *fakeArchiveStore) UnarchiveCampaign(_ context.Context, id uuid.UUID) (s
 	return f.unarchiveResult, nil
 }
 
-func (f *fakeArchiveStore) DeleteCampaign(_ context.Context, id uuid.UUID) error {
+func (f *fakeArchiveStore) DeleteCampaign(_ context.Context, tenantID, id uuid.UUID) error {
+	f.deleteTenant = tenantID
 	f.deleteCalls = append(f.deleteCalls, id)
 	return f.deleteCampaignErr
 }
 
-func (f *fakeArchiveStore) DeleteCampaignWithJob(_ context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error {
+func (f *fakeArchiveStore) DeleteCampaignWithJob(_ context.Context, tenantID, id uuid.UUID, jobKind string, jobPayload []byte) error {
+	f.deleteTenant = tenantID
 	f.deleteCalls = append(f.deleteCalls, id)
 	if f.deleteCampaignErr != nil {
 		// Delete refused inside the tx: nothing committed, so no job is recorded — the

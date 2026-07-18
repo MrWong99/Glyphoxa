@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -25,6 +26,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -74,6 +76,14 @@ func startPostgres(t *testing.T) string {
 // seedStore migrates the schema and inserts a single campaign, returning a
 // Store over the DB plus the seeded campaign's id.
 func seedStore(t *testing.T, dsn string) (st *storage.Store, campaignID uuid.UUID) {
+	st, _, campaignID = seedStoreTenant(t, dsn)
+	return st, campaignID
+}
+
+// seedStoreTenant is seedStore that also returns the seeded tenant id — needed now
+// the RPC tier is tenant-scoped (#473): a test must inject the SEEDED tenant (not a
+// random one) so the scoped resolver resolves the seeded campaign.
+func seedStoreTenant(t *testing.T, dsn string) (st *storage.Store, tenantID, campaignID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -92,7 +102,6 @@ func seedStore(t *testing.T, dsn string) (st *storage.Store, campaignID uuid.UUI
 	}
 	t.Cleanup(pool.Close)
 
-	var tenantID uuid.UUID
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO tenant (name) VALUES ('Acme TTRPG') RETURNING id`).
 		Scan(&tenantID); err != nil {
@@ -104,5 +113,21 @@ func seedStore(t *testing.T, dsn string) (st *storage.Store, campaignID uuid.UUI
 		Scan(&campaignID); err != nil {
 		t.Fatalf("insert campaign: %v", err)
 	}
-	return storage.New(pool), campaignID
+	return storage.New(pool), tenantID, campaignID
+}
+
+// tenantOperatorInterceptor injects the resolved tenant + an operator into the RPC
+// context, the way the auth interceptor stack does (ADR-0039). Integration tests
+// that mount a bare CampaignServer use it so the tenant-scoped handlers (#473)
+// resolve the seeded tenant's campaign.
+func tenantOperatorInterceptor(tenantID uuid.UUID, discordUserID string) connect.Interceptor {
+	return connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			ctx = auth.WithTenant(ctx, tenantID)
+			if discordUserID != "" {
+				ctx = auth.WithUser(ctx, storage.User{ID: uuid.New(), DiscordUserID: discordUserID})
+			}
+			return next(ctx, req)
+		}
+	})
 }

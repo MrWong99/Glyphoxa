@@ -70,7 +70,7 @@ func TestTapeConsentRoundTrip(t *testing.T) {
 // UpdateCampaign that leaves it nil does NOT disarm it (optional-field semantics).
 func TestUpdateCampaignTapeArmed(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
@@ -86,7 +86,7 @@ func TestUpdateCampaignTapeArmed(t *testing.T) {
 	// Arm it.
 	armed := true
 	updated, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{
-		ID: campaignID, Name: c.Name, System: c.System, Language: c.Language,
+		TenantID: tenantID, ID: campaignID, Name: c.Name, System: c.System, Language: c.Language,
 		TapeArmed: &armed,
 	})
 	if err != nil {
@@ -98,7 +98,7 @@ func TestUpdateCampaignTapeArmed(t *testing.T) {
 
 	// A subsequent update that leaves TapeArmed nil must not disarm it.
 	updated, err = st.UpdateCampaign(ctx, storage.CampaignUpdate{
-		ID: campaignID, Name: "Renamed", System: c.System, Language: c.Language,
+		TenantID: tenantID, ID: campaignID, Name: "Renamed", System: c.System, Language: c.Language,
 	})
 	if err != nil {
 		t.Fatalf("UpdateCampaign (rename): %v", err)
@@ -110,7 +110,7 @@ func TestUpdateCampaignTapeArmed(t *testing.T) {
 	// Disarm explicitly.
 	disarmed := false
 	updated, err = st.UpdateCampaign(ctx, storage.CampaignUpdate{
-		ID: campaignID, Name: updated.Name, System: c.System, Language: c.Language,
+		TenantID: tenantID, ID: campaignID, Name: updated.Name, System: c.System, Language: c.Language,
 		TapeArmed: &disarmed,
 	})
 	if err != nil {
@@ -124,10 +124,10 @@ func TestUpdateCampaignTapeArmed(t *testing.T) {
 	if err := st.UpsertTapeConsent(ctx, campaignID, "111"); err != nil {
 		t.Fatalf("UpsertTapeConsent: %v", err)
 	}
-	if _, err := st.ArchiveCampaign(ctx, campaignID); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
-	if err := st.DeleteCampaign(ctx, campaignID); err != nil {
+	if err := st.DeleteCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("DeleteCampaign: %v", err)
 	}
 	if _, err := st.GetCampaign(ctx, campaignID); err == nil {

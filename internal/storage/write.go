@@ -54,6 +54,11 @@ func (s *Store) CreateCampaign(ctx context.Context, c NewCampaign) (uuid.UUID, e
 // are not settable here. System/Language are written verbatim as opaque free-text
 // strings (no validation at this layer), mirroring how they are stored on create.
 type CampaignUpdate struct {
+	// TenantID is the owning Tenant the write is scoped to (#473): the UPDATE matches
+	// (id, tenant_id), so a campaign in another Tenant is invisible and yields
+	// ErrNotFound — a cross-tenant rename is refused, never a permission error that
+	// would confirm the id exists. The RPC handler fills it from auth.TenantID(ctx).
+	TenantID uuid.UUID
 	ID       uuid.UUID
 	Name     string
 	System   string
@@ -65,10 +70,10 @@ type CampaignUpdate struct {
 }
 
 // UpdateCampaign writes a campaign's name/system/language (and tape_armed when set)
-// and bumps updated_at, returning the updated row. A missing id yields ErrNotFound
-// (the RPC layer maps it to Connect CodeNotFound). Like the other campaign
-// reads/writes it is scoped by id alone — single-operator today; tenant scoping
-// fills in behind the X-Tenant-Id pass-through later (ADR-0039).
+// and bumps updated_at, returning the updated row. It is TENANT-SCOPED (#473): the
+// UPDATE matches (id, tenant_id), so a foreign-tenant id is invisible and yields
+// ErrNotFound (the RPC layer maps it to Connect CodeNotFound) — a cross-tenant
+// write can never land.
 func (s *Store) UpdateCampaign(ctx context.Context, c CampaignUpdate) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE campaign SET
@@ -77,15 +82,15 @@ func (s *Store) UpdateCampaign(ctx context.Context, c CampaignUpdate) (Campaign,
 		    language = $4,
 		    tape_armed = COALESCE($5, tape_armed),
 		    updated_at = now()
-		  WHERE id = $1
+		  WHERE id = $1 AND tenant_id = $6
 		 RETURNING `+campaignColumns,
-		c.ID, c.Name, c.System, c.Language, c.TapeArmed)
+		c.ID, c.Name, c.System, c.Language, c.TapeArmed, c.TenantID)
 	updated, err := scanCampaign(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound
 	}
 	if err != nil {
-		return Campaign{}, fmt.Errorf("storage: update campaign %s: %w", c.ID, err)
+		return Campaign{}, fmt.Errorf("storage: update campaign %s in tenant %s: %w", c.ID, c.TenantID, err)
 	}
 	return updated, nil
 }

@@ -11,14 +11,16 @@ import (
 )
 
 // activeCampaignResolver is the narrow store surface the Active Campaign
-// resolution reads: the LIVE Voice Session's campaign by id, the logged-in
-// operator's durable /glyphoxa use selection, and the most-recently-created
-// campaign as the legacy fallback. *storage.Store and the handler fakes satisfy
-// it.
+// resolution reads, ALL tenant-scoped (#473): the LIVE Voice Session's campaign by
+// id within the tenant, the logged-in operator's durable /glyphoxa use selection
+// within the tenant, and the tenant's most-recently-created campaign as the
+// fallback. Every method takes the caller's tenant so a stranger can never resolve
+// another tenant's campaign onto a campaign-scoped surface (self-signup design
+// §0a). *storage.Store and the handler fakes satisfy it.
 type activeCampaignResolver interface {
-	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
-	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
+	GetCampaignInTenant(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
+	GetActiveCampaignForUserInTenant(ctx context.Context, tenantID uuid.UUID, discordUserID string) (storage.Campaign, error)
+	GetActiveCampaignInTenant(ctx context.Context, tenantID uuid.UUID) (storage.Campaign, error)
 }
 
 // resolveActiveCampaign resolves the operator's Active Campaign with ONE policy
@@ -47,14 +49,23 @@ type activeCampaignResolver interface {
 // session whose campaign row vanished: this surface propagates the store error,
 // presence falls through to the durable selection rather than fail the command.
 // Change the policy only after deciding it for all three.
+//
+// Every read is TENANT-SCOPED to auth.TenantID(ctx) (#473): the live campaign, the
+// durable selection, and the most-recent fallback all refuse a campaign outside the
+// caller's tenant, so a stranger who pointed their durable selection at a foreign
+// campaign (or whose live id is foreign) resolves to ErrNotFound rather than
+// pivoting every campaign-scoped surface onto the victim tenant (self-signup design
+// §0a). The RPC interceptor stack always injects a tenant; a request with none
+// resolves against the nil tenant and matches nothing (fail closed).
 func resolveActiveCampaign(ctx context.Context, live func() (uuid.UUID, bool), store activeCampaignResolver) (storage.Campaign, error) {
+	tenantID, _ := auth.TenantID(ctx)
 	if live != nil {
 		if id, active := live(); active {
-			return store.GetCampaign(ctx, id)
+			return store.GetCampaignInTenant(ctx, tenantID, id)
 		}
 	}
 	if u, ok := auth.CurrentUser(ctx); ok && u.DiscordUserID != "" {
-		c, err := store.GetActiveCampaignForUser(ctx, u.DiscordUserID)
+		c, err := store.GetActiveCampaignForUserInTenant(ctx, tenantID, u.DiscordUserID)
 		if err == nil {
 			return c, nil
 		}
@@ -63,7 +74,7 @@ func resolveActiveCampaign(ctx context.Context, live func() (uuid.UUID, bool), s
 		}
 		// No durable selection yet — fall back to the implicit default.
 	}
-	return store.GetActiveCampaign(ctx)
+	return store.GetActiveCampaignInTenant(ctx, tenantID)
 }
 
 // activeCampaignSource is the ONE Active-Campaign resolution every CampaignServer
