@@ -162,6 +162,27 @@ func (s *Store) ListPlans(ctx context.Context) ([]Plan, error) {
 	return plans, nil
 }
 
+// GetPlanBySlug returns the plan with slug, archived or not — the read stays
+// faithful and the caller decides whether archived is a refusal (the ADR-0055
+// open-mode boot preflight does exactly that). ErrNotFound for an unknown slug.
+func (s *Store) GetPlanBySlug(ctx context.Context, slug string) (Plan, error) {
+	var p Plan
+	err := s.db.QueryRow(ctx,
+		`SELECT id, slug, display_name, description, monthly_price_usd,
+		        key_source, included_usage_usd, limits, archived, created_at, updated_at
+		   FROM plan WHERE slug = $1`, slug).
+		Scan(&p.ID, &p.Slug, &p.DisplayName, &p.Description,
+			&p.MonthlyPriceUSD, &p.KeySource, &p.IncludedUsageUSD, &p.Limits,
+			&p.Archived, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Plan{}, ErrNotFound
+	}
+	if err != nil {
+		return Plan{}, fmt.Errorf("storage: get plan %q: %w", slug, err)
+	}
+	return p, nil
+}
+
 // SetTenantPlan subscribes a Tenant to the plan with slug, snapshotting the
 // plan's current slug + monthly price onto the new subscription row. Any active
 // subscription is ended first (its EndedAt set), so the partial unique index
@@ -268,6 +289,45 @@ func (s *Store) TenantHasPlatformKeySource(ctx context.Context, tenantID uuid.UU
 		return false, fmt.Errorf("storage: platform key-source check for tenant %s: %w", tenantID, err)
 	}
 	return ok, nil
+}
+
+// TenantIncludedUsageUSD returns the monthly usage allowance of the Tenant's
+// ACTIVE subscription's plan, joined LIVE from the plan row (catalog edits to
+// the allowance apply immediately — subscriptions snapshot only slug + price).
+// nil means no gate applies: no active subscription, or a plan with no
+// configured allowance (NULL — every BYOK plan, by catalog validation). This
+// is one of the two reads behind the ADR-0055 monthly allowance gate (b); the
+// gating decision itself lives outside storage.
+func (s *Store) TenantIncludedUsageUSD(ctx context.Context, tenantID uuid.UUID) (*float64, error) {
+	var included *float64
+	err := s.db.QueryRow(ctx,
+		`SELECT p.included_usage_usd
+		   FROM tenant_subscription ts
+		   JOIN plan p ON p.id = ts.plan_id
+		  WHERE ts.tenant_id = $1 AND ts.ended_at IS NULL`, tenantID).Scan(&included)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: included usage for tenant %s: %w", tenantID, err)
+	}
+	return included, nil
+}
+
+// TenantMonthUsageUSD sums the Usage Ledger's estimated USD for the tenant over
+// days in [from, to) — the BillingReport window convention. A tenant with no
+// rows sums to zero. The ledger stays attribution-only (ADR-0054): this is a
+// plain read the allowance gate consumes, not a gate.
+func (s *Store) TenantMonthUsageUSD(ctx context.Context, tenantID uuid.UUID, from, to time.Time) (float64, error) {
+	var sum float64
+	err := s.db.QueryRow(ctx,
+		`SELECT COALESCE(SUM(estimated_usd), 0) FROM usage_ledger
+		  WHERE tenant_id = $1 AND day >= $2::date AND day < $3::date`,
+		tenantID, from, to).Scan(&sum)
+	if err != nil {
+		return 0, fmt.Errorf("storage: month usage for tenant %s: %w", tenantID, err)
+	}
+	return sum, nil
 }
 
 // AddUsage upsert-accumulates ledger rows: an existing (tenant, day, component,

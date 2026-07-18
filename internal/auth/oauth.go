@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -35,23 +36,32 @@ const stateCookieTTL = 10 * time.Minute
 type OAuth struct {
 	store    OAuthStore
 	discord  DiscordOAuth
-	allow    OperatorAllowlist // the mandatory operator gate (ADR-0041)
+	adm      Admission // the admission policy (ADR-0041 allowlist / ADR-0055 open)
 	ttl      time.Duration
 	redirect string // where the callback sends the browser after login
 	now      func() time.Time
 	log      *slog.Logger
 }
 
-// notAuthorizedRedirect is where the callback sends a Discord User who is not on
-// the operator allowlist: the login screen with a non-leaky not_authorized
-// signal (ADR-0041). This is the only redirect that carries an ?error= param —
-// bad-state/missing-code still fail with http.Error.
+// notAuthorizedRedirect is where the callback sends a Discord User it refuses —
+// off the allowlist in allowlist mode (ADR-0041), or suspended in open mode
+// (ADR-0055): the login screen with a non-leaky not_authorized signal. This is
+// the only redirect that carries an ?error= param — bad-state/missing-code
+// still fail with http.Error.
 const notAuthorizedRedirect = "/login?error=not_authorized"
 
+// onboardingRedirect is where a FRESH signup lands after the callback: the
+// name-your-Tenant onboarding step (ADR-0055). The path is a Go↔SPA contract —
+// web/src/app/router.tsx mounts the matching route.
+const onboardingRedirect = "/onboarding/create-tenant"
+
 // NewOAuth builds the OAuth handlers. appRedirect is the post-login destination
-// (the SPA root, "/"). allow is the mandatory operator allowlist (ADR-0041): a
-// Discord User whose snowflake is absent is denied a session at the callback.
-func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, allow OperatorAllowlist, log *slog.Logger) *OAuth {
+// (the SPA root, "/"). adm is the admission policy: in allowlist mode a Discord
+// User whose snowflake is absent from the allowlist is denied a session at the
+// callback (ADR-0041); in open mode such a User is admitted via the create-only
+// signup transaction instead (ADR-0055). Allowlisted Users keep the
+// claim-or-create login path in BOTH modes.
+func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, adm Admission, log *slog.Logger) *OAuth {
 	if appRedirect == "" {
 		appRedirect = "/"
 	}
@@ -61,7 +71,7 @@ func NewOAuth(store OAuthStore, discord DiscordOAuth, appRedirect string, allow 
 	return &OAuth{
 		store:    store,
 		discord:  discord,
-		allow:    allow,
+		adm:      adm,
 		ttl:      defaultSessionTTL,
 		redirect: appRedirect,
 		now:      time.Now,
@@ -119,11 +129,22 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The mandatory operator allowlist is THE gate (ADR-0041). Reject a Discord
-	// User whose snowflake is absent BEFORE any UpsertUser / ResolveOperatorTenant
-	// / CreateSession — no session, no Tenant write, no auto-created Tenant — and
-	// bounce to the login screen with a non-leaky not_authorized signal.
-	if !o.allow.Contains(du.ID) {
+	// Admission (ADR-0041 / ADR-0055). An allowlisted User proceeds on the
+	// claim-or-create login path in BOTH modes. A stranger forks by mode: in
+	// open mode they are admitted through the create-only signup transaction;
+	// in allowlist mode (or an open mode misconfigured without a provisioner —
+	// fail closed) they are rejected BEFORE any UpsertUser /
+	// ResolveOperatorTenant / CreateSession — no session, no Tenant write, no
+	// auto-created Tenant — and bounced to the login screen with a non-leaky
+	// not_authorized signal.
+	if !o.adm.Allowlist.Contains(du.ID) {
+		if o.adm.open() {
+			o.signup(w, r, du)
+			return
+		}
+		if o.adm.Mode == AdmissionOpen {
+			o.log.Error("oauth callback: open admission without a signup provisioner — failing closed to allowlist posture")
+		}
 		o.log.Warn("oauth callback: rejected non-allowlisted Discord user", "discord_user_id", du.ID)
 		http.Redirect(w, r, notAuthorizedRedirect, http.StatusFound)
 		return
@@ -176,6 +197,64 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
 	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
 	http.Redirect(w, r, o.redirect, http.StatusFound)
+}
+
+// signup admits a non-allowlisted Discord User in open mode (ADR-0055) through
+// the ONE all-or-nothing provisioning transaction: user upsert → (first visit)
+// create-only Tenant founding + default-Plan bind → session mint. A fresh
+// founder lands on the name-your-Tenant onboarding step; a returning signup
+// goes straight to the app. A suspended user gets the same non-leaky
+// not_authorized bounce as an allowlist rejection.
+func (o *OAuth) signup(w http.ResponseWriter, r *http.Request, du DiscordUser) {
+	sessionToken, err := newToken()
+	if err != nil {
+		o.log.Error("oauth signup: mint session token", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	csrfToken, err := newToken()
+	if err != nil {
+		o.log.Error("oauth signup: mint csrf token", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	expires := o.now().Add(o.ttl)
+	res, err := o.adm.Signup.ProvisionSignup(r.Context(), storage.SignupParams{
+		User: storage.UpsertUserParams{
+			DiscordUserID: du.ID,
+			Name:          du.DisplayName(),
+			Avatar:        du.AvatarURL,
+		},
+		TenantName: du.DisplayName() + "'s Table",
+		PlanSlug:   o.adm.SignupPlanSlug,
+		Session: storage.NewSession{
+			Token:     sessionToken,
+			ExpiresAt: expires,
+			IP:        clientIP(r),
+			UA:        r.UserAgent(),
+		},
+	})
+	if errors.Is(err, storage.ErrUserSuspended) {
+		o.log.Warn("oauth signup: rejected suspended Discord user", "discord_user_id", du.ID)
+		http.Redirect(w, r, notAuthorizedRedirect, http.StatusFound)
+		return
+	}
+	if err != nil {
+		o.log.Error("oauth signup: provision", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	secure := requestSecure(r)
+	http.SetCookie(w, sessionCookie(sessionToken, secure, expires))
+	http.SetCookie(w, csrfCookie(csrfToken, secure, expires))
+	http.SetCookie(w, clearCookie(stateCookieName, true, secure))
+	dest := o.redirect
+	if res.Created {
+		dest = onboardingRedirect
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
 }
 
 // clientIP extracts the best-effort client IP for the session audit row,

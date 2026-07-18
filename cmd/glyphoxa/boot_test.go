@@ -78,7 +78,7 @@ func TestRequireWebEnv(t *testing.T) {
 	}
 
 	// Fully configured → boots cleanly (AC3).
-	if err := requireWebEnv(envMap(all)); err != nil {
+	if err := requireWebEnv(envMap(all), false); err != nil {
 		t.Fatalf("requireWebEnv with a full config returned %v, want nil", err)
 	}
 
@@ -94,7 +94,7 @@ func TestRequireWebEnv(t *testing.T) {
 			env[k] = v
 		}
 		delete(env, missing)
-		err := requireWebEnv(envMap(env))
+		err := requireWebEnv(envMap(env), false)
 		if err == nil {
 			t.Fatalf("requireWebEnv missing %s returned nil, want a fatal error", missing)
 		}
@@ -110,7 +110,7 @@ func TestRequireWebEnv(t *testing.T) {
 		"DISCORD_OAUTH_REDIRECT_URL":  "https://x/cb",
 		"GLYPHOXA_OPERATOR_IDS":       "   ",
 	}
-	if err := requireWebEnv(envMap(blank)); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_OPERATOR_IDS") {
+	if err := requireWebEnv(envMap(blank), false); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_OPERATOR_IDS") {
 		t.Errorf("requireWebEnv with a whitespace allowlist returned %v, want an error naming GLYPHOXA_OPERATOR_IDS", err)
 	}
 
@@ -123,7 +123,7 @@ func TestRequireWebEnv(t *testing.T) {
 		sepOnly[k] = v
 	}
 	sepOnly["GLYPHOXA_OPERATOR_IDS"] = " , ,, "
-	if err := requireWebEnv(envMap(sepOnly)); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_OPERATOR_IDS") {
+	if err := requireWebEnv(envMap(sepOnly), false); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_OPERATOR_IDS") {
 		t.Errorf("requireWebEnv with a separators-only allowlist returned %v, want an error naming GLYPHOXA_OPERATOR_IDS", err)
 	}
 	malformed := map[string]string{}
@@ -131,12 +131,12 @@ func TestRequireWebEnv(t *testing.T) {
 		malformed[k] = v
 	}
 	malformed["GLYPHOXA_OPERATOR_IDS"] = "MrWong99, 770000000000000000"
-	if err := requireWebEnv(envMap(malformed)); err == nil || !strings.Contains(err.Error(), "MrWong99") {
+	if err := requireWebEnv(envMap(malformed), false); err == nil || !strings.Contains(err.Error(), "MrWong99") {
 		t.Errorf("requireWebEnv with a non-snowflake entry returned %v, want an error naming the bad entry", err)
 	}
 
 	// Nothing set → every variable is named.
-	err := requireWebEnv(envMap(map[string]string{}))
+	err := requireWebEnv(envMap(map[string]string{}), false)
 	if err == nil {
 		t.Fatal("requireWebEnv with an empty env returned nil, want a fatal error")
 	}
@@ -149,6 +149,234 @@ func TestRequireWebEnv(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("empty-env error %q does not name %s", err, want)
 		}
+	}
+}
+
+// TestRequireWebEnv_OpenMode pins the ADR-0055 relaxation: `open` Admission
+// Mode drops ONLY the allowlist presence/non-emptiness branches — DISCORD_OAUTH_*
+// stays mandatory (OAuth is the signup mechanism) and a malformed non-empty
+// allowlist still refuses (a broken platform-admin list is the same
+// silent-lock-out trap in both modes).
+func TestRequireWebEnv_OpenMode(t *testing.T) {
+	oauthOnly := map[string]string{
+		"DISCORD_OAUTH_CLIENT_ID":     "cid",
+		"DISCORD_OAUTH_CLIENT_SECRET": "secret",
+		"DISCORD_OAUTH_REDIRECT_URL":  "https://x/cb",
+	}
+
+	// No allowlist at all: fine in open mode (warned at boot, not refused).
+	if err := requireWebEnv(envMap(oauthOnly), true); err != nil {
+		t.Fatalf("open mode with no allowlist returned %v, want nil", err)
+	}
+	// Separators-only: also fine in open mode (parses to zero entries).
+	sep := map[string]string{}
+	for k, v := range oauthOnly {
+		sep[k] = v
+	}
+	sep["GLYPHOXA_OPERATOR_IDS"] = " , ,, "
+	if err := requireWebEnv(envMap(sep), true); err != nil {
+		t.Fatalf("open mode with a separators-only allowlist returned %v, want nil", err)
+	}
+
+	// OAuth stays mandatory in open mode.
+	for _, missing := range []string{"DISCORD_OAUTH_CLIENT_ID", "DISCORD_OAUTH_CLIENT_SECRET", "DISCORD_OAUTH_REDIRECT_URL"} {
+		env := map[string]string{}
+		for k, v := range oauthOnly {
+			env[k] = v
+		}
+		delete(env, missing)
+		if err := requireWebEnv(envMap(env), true); err == nil || !strings.Contains(err.Error(), missing) {
+			t.Errorf("open mode missing %s returned %v, want an error naming it", missing, err)
+		}
+	}
+
+	// A malformed NON-EMPTY platform-admin list still refuses in open mode.
+	bad := map[string]string{}
+	for k, v := range oauthOnly {
+		bad[k] = v
+	}
+	bad["GLYPHOXA_OPERATOR_IDS"] = "MrWong99"
+	if err := requireWebEnv(envMap(bad), true); err == nil || !strings.Contains(err.Error(), "MrWong99") {
+		t.Errorf("open mode with a malformed allowlist returned %v, want an error naming the bad entry", err)
+	}
+}
+
+// TestAdmissionModeEnv pins the env half of the ADR-0055 posture switch: unset
+// is NOT an error (the DB record then carries), but an unparsable value is a
+// loud refusal — never a silent default.
+func TestAdmissionModeEnv(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantMode auth.AdmissionMode
+		wantSet  bool
+		wantErr  bool
+	}{
+		{"", "", false, false},
+		{"  ", "", false, false},
+		{"allowlist", auth.AdmissionAllowlist, true, false},
+		{"open", auth.AdmissionOpen, true, false},
+		{" OPEN ", auth.AdmissionOpen, true, false},
+		{"opne", "", true, true},
+		{"1", "", true, true},
+	}
+	for _, c := range cases {
+		mode, set, err := admissionModeEnv(envMap(map[string]string{"GLYPHOXA_ADMISSION_MODE": c.raw}))
+		if (err != nil) != c.wantErr || set != c.wantSet || mode != c.wantMode {
+			t.Errorf("admissionModeEnv(%q) = (%q, %v, %v), want (%q, %v, err=%v)",
+				c.raw, mode, set, err, c.wantMode, c.wantSet, c.wantErr)
+		}
+	}
+}
+
+// fakeSettings is an in-memory admissionSettings recording posture writes.
+type fakeSettings struct {
+	posture string
+	getErr  error
+	recErr  error
+	records []string
+}
+
+func (f *fakeSettings) GetAdmissionPosture(context.Context) (string, error) {
+	if f.getErr != nil {
+		return "", f.getErr
+	}
+	if f.posture == "" {
+		return "", storage.ErrNotFound
+	}
+	return f.posture, nil
+}
+
+func (f *fakeSettings) RecordAdmissionPosture(_ context.Context, mode string) error {
+	if f.recErr != nil {
+		return f.recErr
+	}
+	f.records = append(f.records, mode)
+	f.posture = mode
+	return nil
+}
+
+// TestResolveAdmissionMode pins the effective-posture resolution (ADR-0055):
+// env wins when set; an unset env falls back to the DB record (the
+// rollback-trap mitigation); neither defaults to allowlist; the effective
+// posture is recorded; an unknown persisted posture with no env override
+// refuses to boot.
+func TestResolveAdmissionMode(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	ctx := context.Background()
+
+	t.Run("fresh deploy defaults to allowlist and records it", func(t *testing.T) {
+		st := &fakeSettings{}
+		mode, err := resolveAdmissionMode(ctx, st, envMap(nil), log)
+		if err != nil || mode != auth.AdmissionAllowlist {
+			t.Fatalf("= (%q, %v), want allowlist", mode, err)
+		}
+		if len(st.records) != 1 || st.records[0] != "allowlist" {
+			t.Fatalf("records = %v, want the default posture recorded", st.records)
+		}
+	})
+
+	t.Run("env open wins and is recorded", func(t *testing.T) {
+		st := &fakeSettings{posture: "allowlist"}
+		mode, err := resolveAdmissionMode(ctx, st, envMap(map[string]string{"GLYPHOXA_ADMISSION_MODE": "open"}), log)
+		if err != nil || mode != auth.AdmissionOpen {
+			t.Fatalf("= (%q, %v), want open", mode, err)
+		}
+		if st.posture != "open" {
+			t.Fatalf("persisted posture = %q, want open", st.posture)
+		}
+	})
+
+	t.Run("unset env falls back to the persisted open posture", func(t *testing.T) {
+		// The rollback-trap mitigation: a config change that LOSES the env var
+		// must not flip an open deployment back to allowlist (and mass-revoke
+		// every signup at the sweep).
+		st := &fakeSettings{posture: "open"}
+		mode, err := resolveAdmissionMode(ctx, st, envMap(nil), log)
+		if err != nil || mode != auth.AdmissionOpen {
+			t.Fatalf("= (%q, %v), want the persisted open posture", mode, err)
+		}
+		if len(st.records) != 0 {
+			t.Fatalf("records = %v, want none (posture unchanged)", st.records)
+		}
+	})
+
+	t.Run("explicit env allowlist over persisted open is the lock-down", func(t *testing.T) {
+		st := &fakeSettings{posture: "open"}
+		mode, err := resolveAdmissionMode(ctx, st, envMap(map[string]string{"GLYPHOXA_ADMISSION_MODE": "allowlist"}), log)
+		if err != nil || mode != auth.AdmissionAllowlist {
+			t.Fatalf("= (%q, %v), want allowlist (lock-down)", mode, err)
+		}
+		if st.posture != "allowlist" {
+			t.Fatalf("persisted posture = %q, want allowlist", st.posture)
+		}
+	})
+
+	t.Run("unknown persisted posture with no env refuses to boot", func(t *testing.T) {
+		st := &fakeSettings{posture: "invite-only"}
+		if _, err := resolveAdmissionMode(ctx, st, envMap(nil), log); err == nil ||
+			!strings.Contains(err.Error(), "invite-only") {
+			t.Fatalf("= %v, want a refusal naming the unknown posture", err)
+		}
+	})
+
+	t.Run("invalid env value refuses to boot", func(t *testing.T) {
+		st := &fakeSettings{}
+		if _, err := resolveAdmissionMode(ctx, st, envMap(map[string]string{"GLYPHOXA_ADMISSION_MODE": "opne"}), log); err == nil {
+			t.Fatal("want a refusal on an unparsable env posture")
+		}
+	})
+
+	t.Run("posture read/record failures are fatal", func(t *testing.T) {
+		if _, err := resolveAdmissionMode(ctx, &fakeSettings{getErr: errors.New("db down")}, envMap(nil), log); err == nil {
+			t.Fatal("want a fatal error on a posture read failure")
+		}
+		if _, err := resolveAdmissionMode(ctx, &fakeSettings{recErr: errors.New("db down")}, envMap(nil), log); err == nil {
+			t.Fatal("want a fatal error on a posture record failure")
+		}
+	})
+}
+
+// fakePlanGetter scripts GetPlanBySlug for the signup-plan preflight.
+type fakePlanGetter struct {
+	plans map[string]storage.Plan
+	err   error
+}
+
+func (f *fakePlanGetter) GetPlanBySlug(_ context.Context, slug string) (storage.Plan, error) {
+	if f.err != nil {
+		return storage.Plan{}, f.err
+	}
+	p, ok := f.plans[slug]
+	if !ok {
+		return storage.Plan{}, storage.ErrNotFound
+	}
+	return p, nil
+}
+
+// TestSignupPlanPreflight pins the ADR-0055 open-mode boot gate: an empty,
+// unknown, or archived signup plan slug refuses the boot with an actionable
+// message — never a runtime signup failure after OAuth.
+func TestSignupPlanPreflight(t *testing.T) {
+	ctx := context.Background()
+	plans := &fakePlanGetter{plans: map[string]storage.Plan{
+		"byok-free": {Slug: "byok-free"},
+		"legacy":    {Slug: "legacy", Archived: true},
+	}}
+
+	if err := signupPlanPreflight(ctx, plans, "byok-free"); err != nil {
+		t.Fatalf("live plan: %v, want nil", err)
+	}
+	if err := signupPlanPreflight(ctx, plans, ""); err == nil || !strings.Contains(err.Error(), "GLYPHOXA_SIGNUP_PLAN_SLUG") {
+		t.Errorf("empty slug: %v, want an error naming the env var", err)
+	}
+	if err := signupPlanPreflight(ctx, plans, "nope"); err == nil || !strings.Contains(err.Error(), "plans-sync") {
+		t.Errorf("unknown slug: %v, want an error pointing at plans-sync", err)
+	}
+	if err := signupPlanPreflight(ctx, plans, "legacy"); err == nil || !strings.Contains(err.Error(), "archived") {
+		t.Errorf("archived slug: %v, want an archived refusal", err)
+	}
+	if err := signupPlanPreflight(ctx, &fakePlanGetter{err: errors.New("db down")}, "byok-free"); err == nil {
+		t.Error("store failure: want a fatal error")
 	}
 }
 

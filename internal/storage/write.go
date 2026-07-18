@@ -379,6 +379,25 @@ func (s *Store) GetTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
 	return t, nil
 }
 
+// RenameTenant sets the Tenant's display name — the ADR-0055 onboarding step
+// ("name your Tenant") for a freshly signed-up founder. Validation (non-empty,
+// length) lives at the RPC; storage stays faithful. ErrNotFound for an unknown
+// tenant.
+func (s *Store) RenameTenant(ctx context.Context, id uuid.UUID, name string) (Tenant, error) {
+	var t Tenant
+	err := s.db.QueryRow(ctx,
+		`UPDATE tenant SET name = $2, updated_at = now() WHERE id = $1
+		 RETURNING id, name, created_at, updated_at`, id, name).
+		Scan(&t.ID, &t.Name, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tenant{}, ErrNotFound
+	}
+	if err != nil {
+		return Tenant{}, fmt.Errorf("storage: rename tenant %s: %w", id, err)
+	}
+	return t, nil
+}
+
 // FirstTenant returns the earliest-created Tenant, or ErrNotFound when the DB
 // holds none. The `glyphoxa seed -bundle` path uses it to land a bundle beside
 // an already-provisioned Tenant instead of minting a duplicate one (ADR-0053):

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -27,6 +28,12 @@ type TenantNamer interface {
 	GetTenant(ctx context.Context, id uuid.UUID) (storage.Tenant, error)
 }
 
+// TenantRenamer writes a Tenant's display name — the RenameTenant onboarding
+// step (ADR-0055). *storage.Store satisfies it via RenameTenant.
+type TenantRenamer interface {
+	RenameTenant(ctx context.Context, id uuid.UUID, name string) (storage.Tenant, error)
+}
+
 // AuthServer implements the Connect AuthService (ADR-0016 / ADR-0039): it reads
 // the operator the auth interceptor resolved into the context and tears the
 // session down on logout. The interceptor stack ([NewStack]) does the cookie
@@ -34,18 +41,22 @@ type TenantNamer interface {
 type AuthServer struct {
 	sessions SessionDeleter
 	tenants  TenantNamer
+	renamer  TenantRenamer
+	mode     AdmissionMode
 	log      *slog.Logger
 }
 
 var _ managementv1connect.AuthServiceHandler = (*AuthServer)(nil)
 
-// NewAuthServer builds an AuthServer over the session store and the tenant
-// reader (the GetCurrentUser tenant name, ADR-0055).
-func NewAuthServer(sessions SessionDeleter, tenants TenantNamer, log *slog.Logger) *AuthServer {
+// NewAuthServer builds an AuthServer over the session store, the tenant reader
+// (the GetCurrentUser tenant name, ADR-0055), the tenant renamer (the
+// onboarding step), and the deployment's effective Admission Mode served to the
+// login screen. A zero mode serves allowlist — the fail-safe default posture.
+func NewAuthServer(sessions SessionDeleter, tenants TenantNamer, renamer TenantRenamer, mode AdmissionMode, log *slog.Logger) *AuthServer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &AuthServer{sessions: sessions, tenants: tenants, log: log}
+	return &AuthServer{sessions: sessions, tenants: tenants, renamer: renamer, mode: mode, log: log}
 }
 
 // GetCurrentUser returns the signed-in operator's identity — display fields,
@@ -105,6 +116,55 @@ func (s *AuthServer) Logout(
 	resp.Header().Add("Set-Cookie", clearCookie(SessionCookieName, true, secure).String())
 	resp.Header().Add("Set-Cookie", clearCookie(CSRFCookieName, false, secure).String())
 	return resp, nil
+}
+
+// GetAdmissionMode returns the deployment's effective Admission Mode
+// (ADR-0055) so the login screen can frame self-signup in open mode. Like
+// GetCurrentUser it is in the interceptor stack's public set — the login
+// screen has no session yet — and it deliberately carries nothing but the
+// posture enum.
+func (s *AuthServer) GetAdmissionMode(
+	_ context.Context,
+	_ *connect.Request[managementv1.GetAdmissionModeRequest],
+) (*connect.Response[managementv1.GetAdmissionModeResponse], error) {
+	mode := managementv1.AdmissionMode_ADMISSION_MODE_ALLOWLIST
+	if s.mode == AdmissionOpen {
+		mode = managementv1.AdmissionMode_ADMISSION_MODE_OPEN
+	}
+	return connect.NewResponse(&managementv1.GetAdmissionModeResponse{AdmissionMode: mode}), nil
+}
+
+// RenameTenant sets the caller's bound Tenant display name — the ADR-0055
+// name-your-Tenant onboarding step. The Tenant is resolved server-side from
+// the session (ADR-0039); a caller with no bound Tenant yet fails with
+// CodeFailedPrecondition. The name is required (CodeInvalidArgument when
+// blank).
+func (s *AuthServer) RenameTenant(
+	ctx context.Context,
+	req *connect.Request[managementv1.RenameTenantRequest],
+) (*connect.Response[managementv1.RenameTenantResponse], error) {
+	name := strings.TrimSpace(req.Msg.GetName())
+	if name == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
+	}
+	tid, ok := TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("no tenant bound"))
+	}
+	switch ten, err := s.renamer.RenameTenant(ctx, tid, name); {
+	case errors.Is(err, storage.ErrNotFound):
+		// The tenant vanished between the interceptor's resolution and this
+		// write — a deletion race.
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("tenant not found"))
+	case err != nil:
+		s.log.Error("rename tenant", "tenant_id", tid, "err", err)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	default:
+		return connect.NewResponse(&managementv1.RenameTenantResponse{
+			TenantId:   ten.ID.String(),
+			TenantName: ten.Name,
+		}), nil
+	}
 }
 
 // Handler builds the Connect HTTP handler for AuthService and returns the path +

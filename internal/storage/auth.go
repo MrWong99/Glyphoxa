@@ -78,6 +78,26 @@ func (s *Store) GetUserByDiscordID(ctx context.Context, discordUserID string) (U
 	return u, nil
 }
 
+// SetUserSuspended stamps or clears users.suspended_at by Discord snowflake —
+// the open-mode revocation mechanism (ADR-0055). Suspension is enforced by
+// AuthenticateSession's per-request re-check, so it takes effect immediately
+// without deleting sessions; clearing it restores access with the same tokens.
+// Idempotent per direction; ErrNotFound for an unknown user.
+func (s *Store) SetUserSuspended(ctx context.Context, discordUserID string, suspended bool) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE users
+		    SET suspended_at = CASE WHEN $2 THEN COALESCE(suspended_at, now()) END,
+		        updated_at = now()
+		  WHERE discord_user_id = $1`, discordUserID, suspended)
+	if err != nil {
+		return fmt.Errorf("storage: set suspended for %q: %w", discordUserID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetActiveCampaign records the operator's durable Active Campaign choice (#108,
 // ADR-0009) on the users row keyed by Discord snowflake. It UPSERTS the row so a
 // GM who drives the slash-command surface before ever logging into the web tier
@@ -218,7 +238,12 @@ func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error
 // AuthenticateSession validates a session token and returns the owning user. It
 // bumps last_seen_at as a side effect of a successful, non-expired lookup, in a
 // single round trip. A missing or expired token yields ErrNotFound — the RPC
-// layer maps that to CodeUnauthenticated.
+// layer maps that to CodeUnauthenticated. A SUSPENDED owner yields the same
+// ErrNotFound: this is the ADR-0055 per-request authorization re-check, and it
+// lives in this query because every gated request on both transports funnels
+// through here — suspension takes effect on the very next request with zero
+// extra round trips. The session row is not deleted (suspension is
+// non-destructive; unsuspending restores the same token).
 func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, error) {
 	row := s.db.QueryRow(ctx,
 		`WITH s AS (
@@ -228,7 +253,8 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 		 )
 		 SELECT u.id, u.discord_user_id, u.name, u.avatar, u.role,
 		        u.created_at, u.updated_at
-		   FROM users u JOIN s ON s.user_id = u.id`, token)
+		   FROM users u JOIN s ON s.user_id = u.id
+		  WHERE u.suspended_at IS NULL`, token)
 	u, err := scanUser(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound

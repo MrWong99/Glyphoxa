@@ -80,13 +80,31 @@ func (e errNamer) GetTenant(context.Context, uuid.UUID) (storage.Tenant, error) 
 	return storage.Tenant{}, e.err
 }
 
+// fakeRenamer is a scripted TenantRenamer recording the write it was handed.
+type fakeRenamer struct {
+	gotID   uuid.UUID
+	gotName string
+	err     error
+}
+
+func (f *fakeRenamer) RenameTenant(_ context.Context, id uuid.UUID, name string) (storage.Tenant, error) {
+	f.gotID, f.gotName = id, name
+	if f.err != nil {
+		return storage.Tenant{}, f.err
+	}
+	return storage.Tenant{ID: id, Name: name}, nil
+}
+
 // newAuthClientWith stands up the AuthService handler behind the real
 // interceptor stack and an httptest server, with fully caller-chosen fakes.
-// GetCurrentUser is the only public (unauthenticated-reachable) procedure.
-func newAuthClientWith(t *testing.T, authn auth.Authenticator, del auth.SessionDeleter, tr auth.TenantResolver, namer auth.TenantNamer) managementv1connect.AuthServiceClient {
+// Mirroring the production stack, GetCurrentUser and GetAdmissionMode are the
+// public (unauthenticated-reachable) procedures.
+func newAuthClientWith(t *testing.T, authn auth.Authenticator, del auth.SessionDeleter, tr auth.TenantResolver, namer auth.TenantNamer, ren auth.TenantRenamer, mode auth.AdmissionMode) managementv1connect.AuthServiceClient {
 	t.Helper()
-	stack := auth.NewStack(authn, tr, managementv1connect.AuthServiceGetCurrentUserProcedure)
-	server := auth.NewAuthServer(del, namer, slog.Default())
+	stack := auth.NewStack(authn, tr,
+		managementv1connect.AuthServiceGetCurrentUserProcedure,
+		managementv1connect.AuthServiceGetAdmissionModeProcedure)
+	server := auth.NewAuthServer(del, namer, ren, mode, slog.Default())
 	mux := http.NewServeMux()
 	mux.Handle(server.Handler(stack.HandlerOptions()...))
 	srv := httptest.NewServer(mux)
@@ -103,7 +121,7 @@ func newAuthClient(t *testing.T, authn auth.Authenticator, del auth.SessionDelet
 	namer := fakeNamer{tenants: map[uuid.UUID]storage.Tenant{
 		tenantID: {ID: tenantID, Name: authTestTenantName},
 	}}
-	return newAuthClientWith(t, authn, del, fakeTenant{id: tenantID}, namer), tenantID
+	return newAuthClientWith(t, authn, del, fakeTenant{id: tenantID}, namer, &fakeRenamer{}, auth.AdmissionAllowlist), tenantID
 }
 
 func TestGetCurrentUser_ValidCookie(t *testing.T) {
@@ -224,6 +242,132 @@ func TestLogout_Authenticated_DeletesAndClears(t *testing.T) {
 	}
 }
 
+// TestGetAdmissionMode pins the login screen's unauthenticated posture probe
+// (ADR-0055): reachable with NO session, mirroring the wired mode, defaulting
+// to allowlist.
+func TestGetAdmissionMode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		mode auth.AdmissionMode
+		want managementv1.AdmissionMode
+	}{
+		{"allowlist", auth.AdmissionAllowlist, managementv1.AdmissionMode_ADMISSION_MODE_ALLOWLIST},
+		{"open", auth.AdmissionOpen, managementv1.AdmissionMode_ADMISSION_MODE_OPEN},
+		{"zero value fails safe to allowlist", "", managementv1.AdmissionMode_ADMISSION_MODE_ALLOWLIST},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			client := newAuthClientWith(t, fakeAuthN{}, &fakeDeleter{},
+				fakeTenant{err: storage.ErrNotFound}, fakeNamer{}, &fakeRenamer{}, c.mode)
+			// Deliberately NO session cookie: the login screen probes before auth.
+			resp, err := client.GetAdmissionMode(context.Background(),
+				connect.NewRequest(&managementv1.GetAdmissionModeRequest{}))
+			if err != nil {
+				t.Fatalf("GetAdmissionMode unauthenticated: %v", err)
+			}
+			if got := resp.Msg.GetAdmissionMode(); got != c.want {
+				t.Errorf("admission mode = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestRenameTenant covers the ADR-0055 onboarding rename: guarded like every
+// state-changing procedure (auth + CSRF), tenant resolved server-side, name
+// validated, and the deletion race surfaced as CodeNotFound.
+func TestRenameTenant(t *testing.T) {
+	t.Parallel()
+	op := operator()
+	authn := fakeAuthN{users: map[string]storage.User{validToken: op}}
+	authedReq := func(name string) *connect.Request[managementv1.RenameTenantRequest] {
+		req := connect.NewRequest(&managementv1.RenameTenantRequest{Name: name})
+		req.Header().Set("Cookie", auth.SessionCookieName+"="+validToken+"; "+auth.CSRFCookieName+"="+csrfValue)
+		req.Header().Set("X-CSRF-Token", csrfValue)
+		return req
+	}
+
+	t.Run("renames the bound tenant", func(t *testing.T) {
+		t.Parallel()
+		tenantID := uuid.New()
+		ren := &fakeRenamer{}
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{id: tenantID}, fakeNamer{}, ren, auth.AdmissionOpen)
+		resp, err := client.RenameTenant(context.Background(), authedReq("  Curse of Strahd  "))
+		if err != nil {
+			t.Fatalf("RenameTenant: %v", err)
+		}
+		if ren.gotID != tenantID || ren.gotName != "Curse of Strahd" {
+			t.Errorf("renamer got (%s, %q), want (%s, trimmed name)", ren.gotID, ren.gotName, tenantID)
+		}
+		if resp.Msg.GetTenantId() != tenantID.String() || resp.Msg.GetTenantName() != "Curse of Strahd" {
+			t.Errorf("response = %+v", resp.Msg)
+		}
+	})
+
+	t.Run("blank name -> InvalidArgument", func(t *testing.T) {
+		t.Parallel()
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{id: uuid.New()}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionOpen)
+		_, err := client.RenameTenant(context.Background(), authedReq("   "))
+		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+			t.Fatalf("code = %v, want CodeInvalidArgument", got)
+		}
+	})
+
+	t.Run("no bound tenant -> FailedPrecondition", func(t *testing.T) {
+		t.Parallel()
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{err: storage.ErrNotFound}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionOpen)
+		_, err := client.RenameTenant(context.Background(), authedReq("X"))
+		if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+			t.Fatalf("code = %v, want CodeFailedPrecondition", got)
+		}
+	})
+
+	t.Run("tenant deleted mid-request -> NotFound", func(t *testing.T) {
+		t.Parallel()
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{id: uuid.New()}, fakeNamer{}, &fakeRenamer{err: storage.ErrNotFound}, auth.AdmissionOpen)
+		_, err := client.RenameTenant(context.Background(), authedReq("X"))
+		if got := connect.CodeOf(err); got != connect.CodeNotFound {
+			t.Fatalf("code = %v, want CodeNotFound", got)
+		}
+	})
+
+	t.Run("unauthenticated -> Unauthenticated", func(t *testing.T) {
+		t.Parallel()
+		ren := &fakeRenamer{}
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{id: uuid.New()}, fakeNamer{}, ren, auth.AdmissionOpen)
+		_, err := client.RenameTenant(context.Background(),
+			connect.NewRequest(&managementv1.RenameTenantRequest{Name: "X"}))
+		if got := connect.CodeOf(err); got != connect.CodeUnauthenticated {
+			t.Fatalf("code = %v, want CodeUnauthenticated", got)
+		}
+		if ren.gotName != "" {
+			t.Error("renamer ran for an unauthenticated call")
+		}
+	})
+
+	t.Run("missing CSRF -> PermissionDenied", func(t *testing.T) {
+		t.Parallel()
+		ren := &fakeRenamer{}
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{id: uuid.New()}, fakeNamer{}, ren, auth.AdmissionOpen)
+		req := connect.NewRequest(&managementv1.RenameTenantRequest{Name: "X"})
+		req.Header().Set("Cookie", auth.SessionCookieName+"="+validToken+"; "+auth.CSRFCookieName+"="+csrfValue)
+		_, err := client.RenameTenant(context.Background(), req)
+		if got := connect.CodeOf(err); got != connect.CodePermissionDenied {
+			t.Fatalf("code = %v, want CodePermissionDenied", got)
+		}
+		if ren.gotName != "" {
+			t.Error("renamer ran despite CSRF failure")
+		}
+	})
+}
+
 // TestGetCurrentUser_TenantBranches pins the three non-happy tenant branches
 // GetCurrentUser grew (ADR-0055): (a) an operator with no resolvable tenant gets
 // empty tenant fields, not an error; (b) a tenant that vanished between the
@@ -242,7 +386,7 @@ func TestGetCurrentUser_TenantBranches(t *testing.T) {
 	t.Run("no bound tenant -> empty fields", func(t *testing.T) {
 		t.Parallel()
 		client := newAuthClientWith(t, authn, &fakeDeleter{},
-			fakeTenant{err: storage.ErrNotFound}, fakeNamer{})
+			fakeTenant{err: storage.ErrNotFound}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionAllowlist)
 		resp, err := client.GetCurrentUser(context.Background(), authedReq())
 		if err != nil {
 			t.Fatalf("GetCurrentUser(tenantless): %v", err)
@@ -260,7 +404,7 @@ func TestGetCurrentUser_TenantBranches(t *testing.T) {
 		t.Parallel()
 		tenantID := uuid.New()
 		client := newAuthClientWith(t, authn, &fakeDeleter{},
-			fakeTenant{id: tenantID}, fakeNamer{}) // namer knows no tenants -> ErrNotFound
+			fakeTenant{id: tenantID}, fakeNamer{}, &fakeRenamer{}, auth.AdmissionAllowlist) // namer knows no tenants -> ErrNotFound
 		resp, err := client.GetCurrentUser(context.Background(), authedReq())
 		if err != nil {
 			t.Fatalf("GetCurrentUser(deletion race): %v", err)
@@ -276,7 +420,7 @@ func TestGetCurrentUser_TenantBranches(t *testing.T) {
 	t.Run("tenant read failure -> CodeInternal", func(t *testing.T) {
 		t.Parallel()
 		client := newAuthClientWith(t, authn, &fakeDeleter{},
-			fakeTenant{id: uuid.New()}, errNamer{err: errors.New("db down")})
+			fakeTenant{id: uuid.New()}, errNamer{err: errors.New("db down")}, &fakeRenamer{}, auth.AdmissionAllowlist)
 		_, err := client.GetCurrentUser(context.Background(), authedReq())
 		if got := connect.CodeOf(err); got != connect.CodeInternal {
 			t.Fatalf("code = %v, want CodeInternal on a tenant read failure", got)
