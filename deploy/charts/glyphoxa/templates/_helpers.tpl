@@ -170,15 +170,21 @@ cross-template `include` of the whole Secret file is not visible to a
 single-template helm-unittest suite, but a named partial always is. Keys are
 unindented here; the caller applies `nindent 2`. The DB + cipher keys are
 unconditional; the shared credential keys are gated on voice-or-web and the web
-OAuth keys on web, each `required` under its gate so a deploy can never start
-with an empty credential. The one deliberate exception is `operator-ids`
+OAuth keys on web. The bot token and the OAuth keys are `required` under their
+gates so a deploy can never start without a working gateway login. The three
+provider keys are NOT required: they are only the env fallback of the hybrid
+BYOK policy (ADR-0004/ADR-0039) — a BYOK deployment leaves them empty and
+Tenants bring their own keys via Provider Configs; only a deployment providing
+managed provider usage (platform keys, ADR-0054) fills them. They still always
+render under the gate, possibly empty, because the voice/web Deployments
+reference them by secretKeyRef unconditionally — omitting the keys would
+dead-end the pods at CreateContainerConfigError. `operator-ids` follows the
+same render-but-maybe-empty shape with a mode-conditional requirement
 (ADR-0055): `required` only in the `allowlist` Admission Mode, where it is the
-admission gate; in `open` mode it is the platform-admin list and may be empty —
-but the KEY still renders (as "") because the web Deployment's secretKeyRef
-would fail pod start on a missing key. `open` mode instead requires a non-blank
-signup plan slug (trimmed, exactly like the binary's fatal open-mode boot
-preflight); the slug value itself is passed through verbatim — the binary trims
-it again on read.
+admission gate; in `open` mode it is the platform-admin list and may be empty.
+`open` mode instead requires a non-blank signup plan slug (trimmed, exactly
+like the binary's fatal open-mode boot preflight); the slug value itself is
+passed through verbatim — the binary trims it again on read.
 */}}
 {{- define "glyphoxa.secretStringData" -}}
 database-url: {{ include "glyphoxa.databaseURL" . | quote }}
@@ -188,9 +194,9 @@ database: {{ .Values.database.name | quote }}
 app-secret: {{ required "appSecret is required: a base64-encoded 32-byte credential-cipher key (ADR-0004) the seed Job uses to seal placeholder provider credentials. Generate one with `openssl rand -base64 32`." .Values.appSecret | quote }}
 {{- if or .Values.voice.enabled .Values.web.enabled }}
 discord-bot-token: {{ required "discordBotToken is required when voice.enabled or web.enabled: the Discord bot token the voice pod joins the gateway with (and the web tier's base session bot)." .Values.discordBotToken | quote }}
-elevenlabs-api-key: {{ required "elevenLabsApiKey is required when voice.enabled or web.enabled: the ElevenLabs API key the STT/TTS adapters read." .Values.elevenLabsApiKey | quote }}
-gemini-api-key: {{ required "geminiApiKey is required when voice.enabled or web.enabled: the Gemini API key." .Values.geminiApiKey | quote }}
-groq-api-key: {{ required "groqApiKey is required when voice.enabled or web.enabled: the Groq API key the LLM adapter reads." .Values.groqApiKey | quote }}
+elevenlabs-api-key: {{ .Values.elevenLabsApiKey | quote }}
+gemini-api-key: {{ .Values.geminiApiKey | quote }}
+groq-api-key: {{ .Values.groqApiKey | quote }}
 {{- end }}
 {{- if .Values.web.enabled }}
 discord-oauth-client-id: {{ required "web.oauth.clientId is required when web.enabled: the Discord OAuth application's Client ID (ADR-0016/0039). A Web Instance refuses to boot without a usable login (ADR-0041)." .Values.web.oauth.clientId | quote }}
