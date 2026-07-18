@@ -790,6 +790,49 @@ service AuthService {
   // Logout deletes the server-side session row and clears the session + CSRF
   // cookies. It is state-changing, so the auth + CSRF interceptors guard it.
   rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // GetAdmissionMode returns the deployment's effective Admission Mode
+  // (ADR-0055) so the login screen can frame self-signup in `open` mode. It is
+  // a deployment-posture read carrying no tenant or session data and — like
+  // GetCurrentUser — is reachable unauthenticated: the login screen has no
+  // session yet.
+  rpc GetAdmissionMode(GetAdmissionModeRequest) returns (GetAdmissionModeResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // RenameTenant sets the display name of the signed-in founder's bound Tenant
+  // — the ADR-0055 name-your-Tenant onboarding step (and later plain renames).
+  // State-changing, so the auth + CSRF interceptors guard it; fails with
+  // CodeFailedPrecondition when no Tenant is bound to the caller yet.
+  rpc RenameTenant(RenameTenantRequest) returns (RenameTenantResponse);
+}
+
+// AdmissionMode mirrors the ADR-0055 deployment admission posture.
+enum AdmissionMode {
+  ADMISSION_MODE_UNSPECIFIED = 0;
+  // The ADR-0041 operator allowlist is the sole admission gate (the default).
+  ADMISSION_MODE_ALLOWLIST = 1;
+  // Any Discord User completing OAuth is admitted; signup founds a fresh
+  // Tenant (ADR-0055 create-only provisioning).
+  ADMISSION_MODE_OPEN = 2;
+}
+
+// GetAdmissionModeRequest is the (empty) request for GetAdmissionMode.
+message GetAdmissionModeRequest {}
+
+// GetAdmissionModeResponse carries the deployment's effective Admission Mode.
+message GetAdmissionModeResponse {
+  AdmissionMode admission_mode = 1;
+}
+
+// RenameTenantRequest carries the new Tenant display name. The Tenant itself is
+// resolved server-side from the session (ADR-0039 — never from the client).
+message RenameTenantRequest {
+  string name = 1;
+}
+
+// RenameTenantResponse returns the renamed Tenant.
+message RenameTenantResponse {
+  string tenant_id = 1;
+  string tenant_name = 2;
 }
 
 // User is the signed-in operator's identity (ADR-0016). It carries the internal

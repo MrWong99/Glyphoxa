@@ -54,6 +54,13 @@
   text-align: left;
 }
 
+/* The onboarding create-tenant card (ADR-0055) reuses this card; its name
+   field spans the card like the buttons do, with left-aligned label/hint. */
+.gx-login__field {
+  width: 100%;
+  text-align: left;
+}
+
 .gx-login__soon {
   display: flex;
   flex-direction: column;

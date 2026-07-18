@@ -88,6 +88,23 @@ message instead — mirroring the snowflake guard's fail-fast philosophy.
 {{- end }}
 
 {{/*
+Validate the Admission Mode (ADR-0055). `allowlist` is exactly ADR-0041: only
+the operator allowlist may complete a login. `open` admits any Discord User who
+completes OAuth — each signup founds a fresh Tenant, and the allowlist becomes
+the platform-administration list rather than the admission gate. The binary
+refuses to boot on an unparsable GLYPHOXA_ADMISSION_MODE, so — like
+[glyphoxa.web.mode] — reject a bad value at render time with an actionable
+message instead of deploying a pod that dies on its boot preflight.
+*/}}
+{{- define "glyphoxa.web.admissionMode" -}}
+{{- if or (eq . "allowlist") (eq . "open") -}}
+{{- . -}}
+{{- else -}}
+{{- fail (printf "web.admissionMode must be \"allowlist\" or \"open\", got %q — \"allowlist\" admits only the web.operatorIds snowflakes (ADR-0041); \"open\" admits any Discord User who completes OAuth (self-signup, ADR-0055)." .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Render a Discord snowflake ID (guild/channel) as an exact string, rejecting any
 non-string value with an actionable error.
 
@@ -161,7 +178,13 @@ Tenants bring their own keys via Provider Configs; only a deployment providing
 managed provider usage (platform keys, ADR-0054) fills them. They still always
 render under the gate, possibly empty, because the voice/web Deployments
 reference them by secretKeyRef unconditionally — omitting the keys would
-dead-end the pods at CreateContainerConfigError.
+dead-end the pods at CreateContainerConfigError. `operator-ids` follows the
+same render-but-maybe-empty shape with a mode-conditional requirement
+(ADR-0055): `required` only in the `allowlist` Admission Mode, where it is the
+admission gate; in `open` mode it is the platform-admin list and may be empty.
+`open` mode instead requires a non-blank signup plan slug (trimmed, exactly
+like the binary's fatal open-mode boot preflight); the slug value itself is
+passed through verbatim — the binary trims it again on read.
 */}}
 {{- define "glyphoxa.secretStringData" -}}
 database-url: {{ include "glyphoxa.databaseURL" . | quote }}
@@ -179,7 +202,21 @@ groq-api-key: {{ .Values.groqApiKey | quote }}
 discord-oauth-client-id: {{ required "web.oauth.clientId is required when web.enabled: the Discord OAuth application's Client ID (ADR-0016/0039). A Web Instance refuses to boot without a usable login (ADR-0041)." .Values.web.oauth.clientId | quote }}
 discord-oauth-client-secret: {{ required "web.oauth.clientSecret is required when web.enabled: the Discord OAuth application's Client Secret." .Values.web.oauth.clientSecret | quote }}
 discord-oauth-redirect-url: {{ include "glyphoxa.web.oauthRedirectURL" . | quote }}
-operator-ids: {{ required "web.operatorIds is required when web.enabled: a comma/whitespace-separated list of Discord User snowflakes (the operator allowlist, ADR-0041). A Web Instance refuses to boot without at least one." .Values.web.operatorIds | quote }}
+{{- $admissionMode := include "glyphoxa.web.admissionMode" .Values.web.admissionMode }}
+{{- if eq $admissionMode "open" }}
+{{- /* Trimmed, like the binary's boot preflight (signupPlanPreflight trims
+before its empty check): a whitespace-only slug would slip past a naive
+non-empty guard here yet still fatally refuse at boot — the whole point of
+this guard is to catch that at render time instead. */}}
+{{- if not (.Values.web.signupPlanSlug | default "" | trim) }}
+{{- fail "open admission needs a signup plan (ADR-0055): every open-mode signup is bound to a default Plan at Tenant creation, and the web pod's boot preflight is fatal without one. Set web.signupPlanSlug to a plan slug and include that plan in plans.catalog (plans.enabled=true) so the plans-sync hook syncs it before the pod boots." }}
+{{- end }}
+operator-ids: {{ .Values.web.operatorIds | default "" | quote }}
+{{- else }}
+operator-ids: {{ required "web.operatorIds is required when web.enabled: a comma/whitespace-separated list of Discord User snowflakes (the operator allowlist, ADR-0041). A Web Instance refuses to boot without at least one. (In the `open` Admission Mode — web.admissionMode, ADR-0055 — the list is the platform-admin roster instead and may be empty.)" .Values.web.operatorIds | quote }}
+{{- end }}
+admission-mode: {{ $admissionMode | quote }}
+signup-plan-slug: {{ .Values.web.signupPlanSlug | default "" | quote }}
 {{- end }}
 {{- end }}
 

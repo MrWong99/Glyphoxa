@@ -18,16 +18,21 @@ import (
 // the fallback — INCLUDING the no-config-row path, which resolves to "" exactly
 // like the seeded "env" placeholder — for a tenant the entitlement does not
 // grant. In `allowlist` Admission Mode the hybrid policy (ADR-0039) is
-// untouched: the composition root wires [EnvFallbackAllowed] (or nil) until
-// `open` mode lands and swaps in [SubscriptionKeyGate].
+// untouched: the composition root wires [EnvFallbackAllowed] (or nil); in
+// `open` Admission Mode it swaps in [SubscriptionKeyGate] (cmd/glyphoxa runWeb,
+// the one construction point).
 //
-// Gated so far: the live voice session (wirenpc resolveSessionKeys), the Recap
-// engine, and the Highlight image factory (cmd/glyphoxa). KNOWN PHASE-B GAP:
-// the RPC tier's own hybrid resolution — VoiceServer.resolveComponentKey /
-// openKey (internal/rpc/voice.go: provider health pings, model/voice catalogs,
-// TTS preview) and ProviderServer.openKey (internal/rpc/provider.go) — still
-// env-falls-back ungated; those surfaces spend Platform Keys too and MUST
-// consult the entitlement before `open` mode admits its first stranger.
+// Gated everywhere on the web/all path (the phase-B inventory is closed): the
+// live voice session (wirenpc resolveSessionKeys), the Recap engine, the
+// Highlight image factory (cmd/glyphoxa), and the RPC tier's provider-key
+// resolution (VoiceServer.resolveComponentKey — provider health pings,
+// model/voice catalogs, TTS preview). ProviderServer.openKey is closed by
+// construction: its only caller resolves the Discord Bot token, which is
+// deployment infrastructure and deliberately outside the entitlement (as are
+// VoiceServer.resolveDiscordToken and the presence/highlight token paths).
+// The STANDALONE voice node (-mode voice) wires no entitlement by design: it
+// is the single-operator self-host posture (deployment-scoped keys, tenant-
+// free reads) and is not part of an open-admission SaaS deployment.
 
 // ErrNoPlatformKeyEntitlement marks an env-fallback key resolution refused
 // because the tenant has no platform-key entitlement (ADR-0054 gate (a)): a

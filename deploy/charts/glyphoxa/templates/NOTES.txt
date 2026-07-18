@@ -63,8 +63,15 @@ crashlooping. The channel join itself is the manual, live-credential check.
 {{- if .Values.web.enabled }}
 
 Reach the operator console: port-forward the web Service and open the root in a
-browser (the SPA), then complete the Discord OAuth login. A Discord User must be
-on GLYPHOXA_OPERATOR_IDS to obtain a session (ADR-0041).
+browser (the SPA), then complete the Discord OAuth login.
+{{- if eq (include "glyphoxa.web.admissionMode" .Values.web.admissionMode) "open" }}
+Admission Mode is `open` (ADR-0055): ANY Discord User may complete signup and
+found their own Tenant, bound to the {{ .Values.web.signupPlanSlug | quote }} Plan
+(keep that slug in plans.catalog). GLYPHOXA_OPERATOR_IDS is the
+platform-administration list, not the admission gate.
+{{- else }}
+A Discord User must be on GLYPHOXA_OPERATOR_IDS to obtain a session (ADR-0041).
+{{- end }}
 
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "glyphoxa.web.fullname" . }}
   kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "glyphoxa.web.fullname" . }} 8080:{{ .Values.web.service.port }}

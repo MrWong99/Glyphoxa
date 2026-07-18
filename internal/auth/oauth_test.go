@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -39,6 +40,7 @@ type fakeOAuthStore struct {
 	created     storage.NewSession
 	userID      uuid.UUID
 	tenantID    uuid.UUID
+	suspendedAt *time.Time
 	upsertCalls int
 	resolveN    int
 	createCalls int
@@ -47,7 +49,7 @@ type fakeOAuthStore struct {
 func (f *fakeOAuthStore) UpsertUser(_ context.Context, p storage.UpsertUserParams) (storage.User, error) {
 	f.upsertCalls++
 	f.upserted = p
-	return storage.User{ID: f.userID, DiscordUserID: p.DiscordUserID, Name: p.Name, Avatar: p.Avatar, Role: "operator"}, nil
+	return storage.User{ID: f.userID, DiscordUserID: p.DiscordUserID, Name: p.Name, Avatar: p.Avatar, Role: "operator", SuspendedAt: f.suspendedAt}, nil
 }
 
 func (f *fakeOAuthStore) ResolveOperatorTenant(_ context.Context, userID uuid.UUID) (storage.Tenant, error) {
@@ -65,7 +67,7 @@ func (f *fakeOAuthStore) CreateSession(_ context.Context, n storage.NewSession) 
 func TestOAuthLogin_RedirectsAndSetsState(t *testing.T) {
 	t.Parallel()
 	disc := &fakeDiscord{authBase: "https://discord/authorize"}
-	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.ParseOperatorAllowlist(""), nil)
+	o := auth.NewOAuth(&fakeOAuthStore{}, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, nil)
 
 	rec := httptest.NewRecorder()
 	o.Login(rec, httptest.NewRequest(http.MethodGet, "/auth/discord/login", nil))
@@ -102,7 +104,7 @@ func TestOAuthCallback_IssuesSessionCookie(t *testing.T) {
 	disc := &fakeDiscord{user: auth.DiscordUser{ID: "77", Username: "sora", GlobalName: "Sora Vance", AvatarURL: "https://cdn/a.png"}}
 	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
 	// The fake user's snowflake IS on the allowlist (multi-value, whitespace-tolerant).
-	o := auth.NewOAuth(store, disc, "/", auth.ParseOperatorAllowlist("42, 77 99"), nil)
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("42, 77 99")}, nil)
 
 	// A valid callback presents the state cookie matching the state param + a code.
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
@@ -158,7 +160,7 @@ func TestOAuthCallback_IssuesSessionCookie(t *testing.T) {
 func TestOAuthCallback_BadState_Rejected(t *testing.T) {
 	t.Parallel()
 	store := &fakeOAuthStore{}
-	o := auth.NewOAuth(store, &fakeDiscord{}, "/", auth.ParseOperatorAllowlist(""), nil)
+	o := auth.NewOAuth(store, &fakeDiscord{}, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("")}, nil)
 
 	// State cookie does not match the state param.
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?code=c&state=mismatch", nil)
@@ -184,7 +186,7 @@ func TestOAuthCallback_NotAllowlisted_Rejected(t *testing.T) {
 	disc := &fakeDiscord{user: auth.DiscordUser{ID: "999", Username: "stranger", GlobalName: "Stranger"}}
 	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New()}
 	// Allowlist holds other snowflakes; "999" is absent.
-	o := auth.NewOAuth(store, disc, "/", auth.ParseOperatorAllowlist("42, 77"), nil)
+	o := auth.NewOAuth(store, disc, "/", auth.Admission{Allowlist: auth.ParseOperatorAllowlist("42, 77")}, nil)
 
 	form := url.Values{"code": {"the-code"}, "state": {"st-1"}}
 	req := httptest.NewRequest(http.MethodGet, "/auth/discord/callback?"+form.Encode(), nil)

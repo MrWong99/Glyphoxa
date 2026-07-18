@@ -55,6 +55,11 @@ var (
 	// terminal closed state and refuses new work (#157) — no store write, no loop.
 	// Mapped to CodeUnavailable.
 	ErrManagerClosed = errors.New("session: the session manager is shut down")
+	// ErrAllowanceExhausted is returned by Start when the Tenant's plan carries a
+	// monthly usage allowance (ADR-0055 gate (b)) and the month-to-date estimate
+	// has already spent it. Mapped to CodeResourceExhausted. A deliberate policy
+	// refusal, not a fault — and an estimate, never billing truth (ADR-0046).
+	ErrAllowanceExhausted = errors.New("session: the plan's monthly usage allowance is exhausted")
 	// ErrDiscordTokenUndecryptable is returned by Start when a real saved Bot token
 	// cannot be decrypted — booted without $GLYPHOXA_SECRET (nil cipher) or a
 	// ciphertext the cipher won't open (#87). The underlying actionable detail is
@@ -107,6 +112,12 @@ type Store interface {
 // nothing else changes. [*storage.Store] satisfies it (AddUsage).
 type UsageWriter interface {
 	AddUsage(ctx context.Context, rows []storage.UsageRow) error
+}
+
+// AllowanceChecker snapshots a tenant's monthly plan allowance at Start
+// (ADR-0055 gate (b)). [spend.PlanAllowance] satisfies it; nil = no gate.
+type AllowanceChecker interface {
+	AllowanceState(ctx context.Context, tenantID uuid.UUID) (spend.AllowanceState, error)
 }
 
 // TranscriptFinalizer drains the live transcript's writer queue for a session and
@@ -193,6 +204,12 @@ type activeSession struct {
 // prefixes #123 uses so the Session screen renders a readable cause.
 const spendHardReason = "spend_cap_hard: estimated spend crossed the hard cap"
 
+// allowanceHardReason is spendHardReason's sibling for a session ended because
+// the PLAN's monthly allowance ran out mid-session (ADR-0055 gate (b)) rather
+// than a tenant-set cap — a distinct prefix so operators can tell the two
+// policy stops apart.
+const allowanceHardReason = "allowance_exhausted: estimated spend crossed the plan's monthly allowance"
+
 // Manager owns at most one live voice session at a time (the single-active
 // guard). It is safe for concurrent use.
 type Manager struct {
@@ -204,6 +221,7 @@ type Manager struct {
 	chunker    ChunkFinalizer      // closes the open Transcript Chunk on Stop (#104); nil = no chunking
 	highlights Highlighter         // persists Session Highlights + schedules purge on Stop (#308); nil = highlights off
 	usage      UsageWriter         // persists the Usage Ledger at loop exit (ADR-0054); nil = no durable usage
+	allowance  AllowanceChecker    // the Start-time plan-allowance gate (ADR-0055 gate (b)); nil = no gate
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
@@ -272,6 +290,13 @@ type Deps struct {
 	// [*storage.Store] satisfies it. nil = no durable usage (voice-standalone /
 	// test posture), byte-for-byte today's behavior.
 	Usage UsageWriter
+	// Allowance, when non-nil, is the monthly plan-allowance gate (ADR-0055 gate
+	// (b)) consulted at Start: an exhausted allowance refuses the start
+	// (ErrAllowanceExhausted) and a remaining one tightens the session's hard
+	// cap, riding the ADR-0046 meter wholesale. The composition root wires
+	// [spend.PlanAllowance] only in `open` Admission Mode; nil (allowlist /
+	// self-host / voice-standalone) is a no-op — byte-for-byte today's behavior.
+	Allowance AllowanceChecker
 	// View, when non-nil, is bound to the new Manager so the collaborators above —
 	// constructed against it BEFORE the Manager existed — read this Manager's
 	// active session. Binding inside NewManager is what makes the wiring order
@@ -305,6 +330,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		chunker:    deps.Chunker,
 		highlights: deps.Highlights,
 		usage:      deps.Usage,
+		allowance:  deps.Allowance,
 		log:        log,
 		enabled:    enabled,
 		endTimeout: endTimeout,
@@ -402,6 +428,27 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 		return storage.VoiceSession{}, fmt.Errorf("session: load spend caps: %w", err)
 	}
 
+	// Plan-allowance gate (ADR-0055 gate (b)), snapshot beside the caps: when a
+	// checker is wired (`open` Admission Mode) and the plan carries an
+	// allowance, an exhausted one refuses the start outright and a remaining
+	// one tightens this session's hard cap below. Like the caps read, it runs
+	// BEFORE the insert so a failure never strands a 'running' row (#433), and
+	// a read failure fails the start CLOSED. The month-to-date figure is the
+	// flushed ledger only — the running session's own spend is exactly what the
+	// tightened meter bounds. Concurrent-session caveat: each Start snapshots
+	// the same remainder (the D0/D6 concurrency epic inherits this, noted).
+	var allowanceRemaining *float64
+	if m.allowance != nil {
+		state, err := m.allowance.AllowanceState(ctx, tenantID)
+		if err != nil {
+			return storage.VoiceSession{}, fmt.Errorf("session: load plan allowance: %w", err)
+		}
+		if state.Exhausted() {
+			return storage.VoiceSession{}, ErrAllowanceExhausted
+		}
+		allowanceRemaining = state.RemainingUSD()
+	}
+
 	vs, err := m.store.CreateVoiceSession(ctx, campaignID)
 	if err != nil {
 		return storage.VoiceSession{}, fmt.Errorf("session: create voice session: %w", err)
@@ -433,8 +480,18 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// StageMetrics, so the meter reads the same usage calls #127 records with ZERO
 	// new pipeline plumbing — and is the turn gate. No caps ⇒ nil meter, no tee, no
 	// gate: byte-for-byte today's behavior.
-	if caps := (spend.Caps{SoftUSD: storeCaps.SoftUSD, HardUSD: storeCaps.HardUSD}); caps.SoftUSD != nil || caps.HardUSD != nil {
-		meter := spend.NewMeter(caps, m.log, m.softCapTrip(as), m.hardCapTrip(as))
+	// The plan allowance rides the same meter (ADR-0055 gate (b)): a remaining
+	// allowance below the tenant's own hard cap (or with no tenant cap at all)
+	// BECOMES the hard cap, and the end_reason then names the allowance, not
+	// the cap. Equal values read as the tenant's own cap.
+	caps := spend.Caps{SoftUSD: storeCaps.SoftUSD, HardUSD: storeCaps.HardUSD}
+	hardReason := spendHardReason
+	if allowanceRemaining != nil && (caps.HardUSD == nil || *allowanceRemaining < *caps.HardUSD) {
+		caps.HardUSD = allowanceRemaining
+		hardReason = allowanceHardReason
+	}
+	if caps.SoftUSD != nil || caps.HardUSD != nil {
+		meter := spend.NewMeter(caps, m.log, m.softCapTrip(as), m.hardCapTrip(as, hardReason))
 		base := cfg.StageMetrics
 		if base == nil {
 			base = observe.Discard{}
@@ -494,7 +551,7 @@ func (m *Manager) softCapTrip(as *activeSession) func() {
 // OUTSIDE Manager.mu — the relay's SpendCapReached handler calls Snapshot (Manager.mu),
 // so publishing under the lock would deadlock. Guarded by m.active == as so a trip
 // arriving after the session already rolled over is a no-op.
-func (m *Manager) hardCapTrip(as *activeSession) func() {
+func (m *Manager) hardCapTrip(as *activeSession, reason string) func() {
 	return func() {
 		go func() {
 			m.mu.Lock()
@@ -502,7 +559,7 @@ func (m *Manager) hardCapTrip(as *activeSession) func() {
 				m.mu.Unlock()
 				return // this session already ended / rolled over
 			}
-			as.endReasonOverride = spendHardReason
+			as.endReasonOverride = reason
 			cancel := as.cancel
 			bus := m.base.Bus
 			m.mu.Unlock()

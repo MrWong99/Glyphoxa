@@ -29,6 +29,15 @@ undecided and gets its own ADR; the design note scopes both shapes.
   mandatory in both modes (OAuth is the signup mechanism), and only the
   allowlist-nonempty boot requirement is relaxed in `open` mode (empty list logs
   a loud "no platform admins" warning).
+  *Implementation note (2026-07-18): the DB record protects against env-var
+  loss ONLY under an ADR-0055-aware binary (env unset → the persisted posture
+  carries; the effective posture is recorded only after the open-mode boot
+  preflights pass, so a flip that refuses to boot is never persisted). It
+  CANNOT reach a pre-0055 binary: rolling an `open` deployment back across the
+  0055 boundary still boots allowlist posture and evicts every signup's
+  session at the sweep — the residual risk stands and is called out in the
+  operations runbook (`docs/deploy/saas-operations.md`); do not roll an open
+  deployment back across this boundary expecting signups to survive.*
 - **Provisioning in `open` mode is create-only.** A signup always founds a fresh
   Tenant; it never runs `ResolveOperatorTenant`'s claim-earliest-unbound path, so
   a stranger can never claim the operator's seeded Tenant — ADR-0041's rejection

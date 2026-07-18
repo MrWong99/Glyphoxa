@@ -2,22 +2,31 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/session"
+	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
 // webEnvVars are the environment variables a web/all-Mode Web Instance must have
 // to boot with a usable login (ADR-0041): the three Discord OAuth credentials AND
-// a non-empty operator allowlist. The allowlist is mandatory — a login that
-// authenticates but authorizes nobody is not a login.
+// a non-empty operator allowlist. The allowlist is mandatory in `allowlist`
+// Admission Mode — a login that authenticates but authorizes nobody is not a
+// login. In `open` Admission Mode (ADR-0055) OAuth IS the signup mechanism and
+// stays required, but the allowlist-nonempty requirement is relaxed: an empty
+// list is a deployment with no platform admins, warned loudly at boot rather
+// than refused.
 var webEnvVars = []string{
 	"DISCORD_OAUTH_CLIENT_ID",
 	"DISCORD_OAUTH_CLIENT_SECRET",
@@ -33,17 +42,35 @@ var webEnvVars = []string{
 // operability gate: without OAuth nobody can obtain a session, so a login-less
 // Web Instance is a deploy that looks healthy but cannot be logged into — it must
 // fail loud. getenv is injected so the helper is table-testable.
-func requireWebEnv(getenv func(string) string) error {
+//
+// open relaxes ONLY the allowlist branches (ADR-0055): presence and
+// non-emptiness of GLYPHOXA_OPERATOR_IDS stop being required (the list is then
+// the platform-admin list, not the admission gate) while a malformed non-empty
+// value still refuses — a broken platform-admin list silently locking the
+// operator out is the same trap in both modes. Callers pass the ENV-resolved
+// posture: requireWebEnv runs before any DB, so a persisted-only `open`
+// posture (env var lost) still demands the allowlist — conservative by design.
+func requireWebEnv(getenv func(string) string, open bool) error {
 	var missing []string
 	for _, k := range webEnvVars {
+		if open && k == "GLYPHOXA_OPERATOR_IDS" {
+			continue
+		}
 		if strings.TrimSpace(getenv(k)) == "" {
 			missing = append(missing, k)
 		}
 	}
 	if len(missing) > 0 {
+		hint := ""
+		if slices.Contains(missing, "GLYPHOXA_OPERATOR_IDS") {
+			// The allowlist refusal must name the open-mode escape: on a
+			// deployment whose PERSISTED posture is open, losing the env pair
+			// lands exactly here, and "invent an allowlist" is the wrong fix.
+			hint = "; if this deployment runs open admission (ADR-0055), set GLYPHOXA_ADMISSION_MODE=open instead of an allowlist"
+		}
 		return fmt.Errorf("web/all mode refuses to boot without a usable login (ADR-0041): "+
 			"missing or empty %s — set them, or set GLYPHOXA_DEV_MODE=1 for an insecure "+
-			"loopback-only dev instance", strings.Join(missing, ", "))
+			"loopback-only dev instance%s", strings.Join(missing, ", "), hint)
 	}
 
 	// Present is not enough for the allowlist: parse it exactly like the runtime
@@ -51,17 +78,192 @@ func requireWebEnv(getenv func(string) string) error {
 	// HERE instead of booting the deploy nobody can log into that this preflight
 	// exists to prevent.
 	allow := auth.ParseOperatorAllowlist(getenv("GLYPHOXA_OPERATOR_IDS"))
-	if allow.Len() == 0 {
+	if !open && allow.Len() == 0 {
 		return fmt.Errorf("web/all mode refuses to boot without a usable login (ADR-0041): " +
 			"GLYPHOXA_OPERATOR_IDS contains no operator IDs (separators only) — set at " +
-			"least one Discord User snowflake, or set GLYPHOXA_DEV_MODE=1 for an " +
-			"insecure loopback-only dev instance")
+			"least one Discord User snowflake, set GLYPHOXA_DEV_MODE=1 for an " +
+			"insecure loopback-only dev instance, or — if this deployment runs open " +
+			"admission (ADR-0055) — set GLYPHOXA_ADMISSION_MODE=open")
 	}
 	if bad := allow.Malformed(); len(bad) > 0 {
 		return fmt.Errorf("web/all mode refuses to boot without a usable login (ADR-0041): "+
 			"GLYPHOXA_OPERATOR_IDS entries are not Discord User snowflakes (digits only): "+
 			"%s — such an entry can never match a login, which would silently lock the "+
 			"operator out", strings.Join(bad, ", "))
+	}
+	return nil
+}
+
+// admissionModeEnv reads the operator-facing Admission Mode switch,
+// GLYPHOXA_ADMISSION_MODE (ADR-0055). Unset is NOT an error — the resolved
+// posture then falls back to the DB record ([resolveAdmissionMode]) — but an
+// unparsable value is a loud boot refusal, never a silent default: a typo'd
+// posture must not run allowlist-locked (mass-revoking signups) or open by
+// accident.
+func admissionModeEnv(getenv func(string) string) (mode auth.AdmissionMode, set bool, err error) {
+	raw := strings.TrimSpace(getenv("GLYPHOXA_ADMISSION_MODE"))
+	if raw == "" {
+		return "", false, nil
+	}
+	m, err := auth.ParseAdmissionMode(raw)
+	if err != nil {
+		return "", true, fmt.Errorf("web/all mode refuses to boot on an ambiguous admission posture (ADR-0055): GLYPHOXA_ADMISSION_MODE: %w", err)
+	}
+	return m, true, nil
+}
+
+// admissionSettings is the persisted-posture surface [resolveAdmissionMode]
+// needs. *storage.Store satisfies it.
+type admissionSettings interface {
+	GetAdmissionPosture(ctx context.Context) (string, error)
+	RecordAdmissionPosture(ctx context.Context, mode string) error
+}
+
+// admissionResolution is the outcome of [resolveAdmissionMode]: the effective
+// posture plus what the DB currently records, so [record] can persist the
+// posture AFTER the open-mode preflights pass — a flip to `open` that never
+// survives its own preflight must not become the deployment's recorded state
+// (it would make the failed flip sticky across a config revert).
+type admissionResolution struct {
+	Effective     auth.AdmissionMode
+	persisted     string
+	havePersisted bool
+}
+
+// resolveAdmissionMode resolves the deployment's EFFECTIVE Admission Mode
+// (ADR-0055) — a pure read, no DB write: the env var is the operator-facing
+// switch and wins when set; when unset the DB-persisted posture carries — so a
+// config change that silently drops the env var cannot flip an open deployment
+// back to allowlist posture and mass-revoke every signup's session at the boot
+// sweep. With neither, the default is allowlist (exactly ADR-0041). An
+// unparsable PERSISTED posture with no env override refuses to boot: it means
+// a newer binary recorded a vocabulary this one does not know, and guessing
+// between "sweep everyone" and "admit everyone" is not a rollback strategy —
+// the operator breaks the tie by setting GLYPHOXA_ADMISSION_MODE explicitly.
+func resolveAdmissionMode(ctx context.Context, settings admissionSettings, getenv func(string) string) (admissionResolution, error) {
+	envMode, envSet, err := admissionModeEnv(getenv)
+	if err != nil {
+		return admissionResolution{}, err
+	}
+	persisted, err := settings.GetAdmissionPosture(ctx)
+	havePersisted := err == nil
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return admissionResolution{}, fmt.Errorf("web: read admission posture: %w", err)
+	}
+
+	effective := auth.AdmissionAllowlist
+	switch {
+	case envSet:
+		effective = envMode
+	case havePersisted:
+		m, err := auth.ParseAdmissionMode(persisted)
+		if err != nil {
+			return admissionResolution{}, fmt.Errorf("web/all mode refuses to boot on an ambiguous admission posture (ADR-0055): "+
+				"the recorded posture %q is unknown to this binary (a newer binary wrote it?) and "+
+				"GLYPHOXA_ADMISSION_MODE is unset — set it explicitly to break the tie", persisted)
+		}
+		effective = m
+	}
+	return admissionResolution{Effective: effective, persisted: persisted, havePersisted: havePersisted}, nil
+}
+
+// record persists the effective posture (versioned and visible, ADR-0055) and
+// logs transitions loudly — especially open → allowlist, the deliberate
+// lock-down (the sweep then evicts every signup, as ADR-0041's amendment
+// intends). Called AFTER the boot's open-mode preflights so a flip that
+// refuses to boot is never recorded.
+func (r admissionResolution) record(ctx context.Context, settings admissionSettings, log *slog.Logger) error {
+	if !r.havePersisted || r.persisted != string(r.Effective) {
+		if err := settings.RecordAdmissionPosture(ctx, string(r.Effective)); err != nil {
+			return fmt.Errorf("web: record admission posture: %w", err)
+		}
+	}
+	switch {
+	case r.havePersisted && r.persisted == string(auth.AdmissionOpen) && r.Effective == auth.AdmissionAllowlist:
+		log.Warn("admission posture flipped open -> allowlist: LOCK-DOWN — the boot sweep will now revoke every non-allowlisted session (ADR-0055)")
+	case r.havePersisted && r.persisted == string(auth.AdmissionAllowlist) && r.Effective == auth.AdmissionOpen:
+		log.Info("admission posture flipped allowlist -> open: self-signup is live (ADR-0055)")
+	}
+	return nil
+}
+
+// sessionSweeper is the revocation write [sweepAllowlistSessions] needs.
+// *storage.Store satisfies it.
+type sessionSweeper interface {
+	RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserIDs []string) (int64, error)
+}
+
+// sweepAllowlistSessions is the boot-time session sweep DECISION (ADR-0041
+// amendment #184, split by Admission Mode per ADR-0055), extracted so the
+// posture logic is unit-testable: the sweep runs only on a non-dev
+// `allowlist`-posture boot. In `open` mode it must not run — it would log out
+// every signup on every restart; revocation there is suspension-based. Dev
+// mode has no allowlist and skips it. A sweep failure is a FATAL boot error
+// (unchanged); revocations log a Warn.
+func sweepAllowlistSessions(ctx context.Context, store sessionSweeper, dev bool, admission auth.AdmissionMode, allow auth.OperatorAllowlist, log *slog.Logger) error {
+	if dev || admission != auth.AdmissionAllowlist {
+		return nil
+	}
+	revoked, err := store.RevokeSessionsOutsideAllowlist(ctx, allow.IDs())
+	if err != nil {
+		return fmt.Errorf("web: revoke sessions outside the operator allowlist: %w", err)
+	}
+	if revoked > 0 {
+		log.Warn("revoked sessions of users not on the operator allowlist (ADR-0041)", "count", revoked)
+	}
+	return nil
+}
+
+// entitlementForMode picks the platform-key entitlement for the posture
+// (ADR-0054 seam (a), ADR-0055): allowlist grants every tenant the env
+// fallback (the ADR-0039 hybrid policy unchanged); open gates it on an active
+// platform-key-source subscription.
+func entitlementForMode(admission auth.AdmissionMode, subs llmbuild.PlatformSubscriptionChecker) llmbuild.PlatformKeyEntitlement {
+	if admission == auth.AdmissionOpen {
+		return llmbuild.SubscriptionKeyGate{Subs: subs}
+	}
+	return llmbuild.EnvFallbackAllowed{}
+}
+
+// allowanceForMode picks the monthly plan-allowance gate for the posture
+// (ADR-0055 gate (b)): nil in allowlist mode (a no-op for self-hosts),
+// store-backed in open mode.
+func allowanceForMode(admission auth.AdmissionMode, reader spend.AllowanceReader) session.AllowanceChecker {
+	if admission == auth.AdmissionOpen {
+		return spend.PlanAllowance{Reader: reader}
+	}
+	return nil
+}
+
+// signupPlanGetter is the plan read [signupPlanPreflight] needs.
+// *storage.Store satisfies it.
+type signupPlanGetter interface {
+	GetPlanBySlug(ctx context.Context, slug string) (storage.Plan, error)
+}
+
+// signupPlanPreflight is the `open`-Admission-Mode boot gate on the signup
+// default plan (ADR-0055): GLYPHOXA_SIGNUP_PLAN_SLUG must name a synced,
+// non-archived Plan, else the Web Instance refuses to boot — otherwise every
+// signup would fail at runtime, AFTER the user completed OAuth, forever. In the
+// FATAL boot-error class deliberately (the ADR says "refuse to boot").
+func signupPlanPreflight(ctx context.Context, plans signupPlanGetter, slug string) error {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return errors.New("open admission mode refuses to boot without a signup plan (ADR-0055): " +
+			"GLYPHOXA_SIGNUP_PLAN_SLUG is empty — name the free BYOK plan every signup binds to")
+	}
+	p, err := plans.GetPlanBySlug(ctx, slug)
+	if errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("open admission mode refuses to boot (ADR-0055): GLYPHOXA_SIGNUP_PLAN_SLUG "+
+			"%q matches no synced plan — run `glyphoxa billing plans-sync` (or enable the chart's "+
+			"plans hook) with a catalog containing it", slug)
+	}
+	if err != nil {
+		return fmt.Errorf("web: signup-plan preflight: %w", err)
+	}
+	if p.Archived {
+		return fmt.Errorf("open admission mode refuses to boot (ADR-0055): signup plan %q is archived — "+
+			"revive it in the catalog or point GLYPHOXA_SIGNUP_PLAN_SLUG at a live plan", slug)
 	}
 	return nil
 }

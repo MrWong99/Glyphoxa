@@ -19,6 +19,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/discordtag"
+	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/llm/gemini"
@@ -74,6 +75,10 @@ type VoiceServer struct {
 	store  voiceStore
 	cipher *crypto.Cipher
 	log    *slog.Logger
+
+	// keyEnt gates the env fallback on every provider-key resolution (ADR-0054
+	// seam (a)); nil grants everything. Wired via SetKeyEntitlement.
+	keyEnt llmbuild.PlatformKeyEntitlement
 
 	// newLister builds a TTS voice catalog client for an API key ("" -> the
 	// adapter's env fallback). Defaults to ElevenLabs.
@@ -174,6 +179,16 @@ func (s *VoiceServer) SetSessions(src activeSessionSource) {
 		_, active := src.Snapshot()
 		return active
 	}
+}
+
+// SetKeyEntitlement wires the platform-key entitlement every provider-key
+// resolution consults before riding the env fallback (ADR-0054 seam (a),
+// ADR-0055). Called once at boot before the server serves, so no lock is
+// needed; nil (the default) grants everything — the allowlist/self-host
+// posture. The Discord Bot token paths are deployment infrastructure and stay
+// outside the entitlement.
+func (s *VoiceServer) SetKeyEntitlement(ent llmbuild.PlatformKeyEntitlement) {
+	s.keyEnt = ent
 }
 
 // Handler builds the Connect HTTP handler for VoiceService and returns its mount
@@ -597,21 +612,46 @@ func degraded(provider string, err error) *managementv1.ProviderHealth {
 // no row / "env" placeholder -> "" (adapter env fallback); a real saved key ->
 // decrypted plaintext; a saved key with no cipher -> FailedPrecondition.
 //
-// PHASE-B GAP (ADR-0054 seam (a), ADR-0055): the "" env fallback here spends
-// the deployment's Platform Keys (health pings, catalogs, TTS preview) without
-// consulting llmbuild's PlatformKeyEntitlement. Fine while every principal is
-// allowlist-admitted; MUST be gated before `open` Admission Mode ships — see
-// internal/llmbuild/entitlement.go.
+// The env fallback spends the deployment's Platform Keys (health pings,
+// catalogs, TTS preview), so it runs through llmbuild.ResolveKeyGated: the
+// PlatformKeyEntitlement wired via [SetKeyEntitlement] refuses it for an
+// unentitled tenant in `open` Admission Mode (ADR-0054 seam (a), ADR-0055 —
+// the former PHASE-B GAP, closed). A nil entitlement grants everything (the
+// allowlist/self-host posture). A refusal is CodeFailedPrecondition with the
+// seam's deliberately user-actionable message; every other failure keeps the
+// RPC tier's redaction posture (logged detail, generic wire error).
 func (s *VoiceServer) resolveComponentKey(ctx context.Context, tenantID uuid.UUID, component storage.Component) (string, error) {
 	cfg, err := s.store.GetProviderConfigByComponent(ctx, tenantID, component)
-	if errors.Is(err, storage.ErrNotFound) {
-		return "", nil
-	}
-	if err != nil {
+	var cfgPtr *storage.ProviderConfig
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		// No row: an env-fallback candidate (nil cfg).
+	case err != nil:
 		s.log.Error("resolveComponentKey: store read failed", "component", component, "err", err)
 		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	case !isSaved(cfg.CredentialsLast4):
+		// A row without a saved key ("" or the "env" placeholder) is the same
+		// env-fallback candidate as no row. Normalize to nil: llmbuild treats
+		// only "env" (not "") as unsaved and would try to decrypt an empty row.
+	default:
+		cfgPtr = &cfg
 	}
-	return s.openKey(cfg.CredentialsLast4, cfg.CredentialsCiphertext)
+
+	key, err := llmbuild.ResolveKeyGated(ctx, s.keyEnt, tenantID, s.cipher, cfgPtr, component)
+	switch {
+	case err == nil:
+		return key, nil
+	case errors.Is(err, llmbuild.ErrNoPlatformKeyEntitlement):
+		return "", connect.NewError(connect.CodeFailedPrecondition, llmbuild.ErrNoPlatformKeyEntitlement)
+	case cfgPtr != nil && s.cipher == nil:
+		return "", connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("credential encryption is not configured ($GLYPHOXA_SECRET)"))
+	default:
+		// Decrypt or entitlement-read failure (the latter fails CLOSED): log
+		// the detail, return the generic wire error.
+		s.log.Error("resolveComponentKey: resolve failed", "component", component, "err", err)
+		return "", connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
 }
 
 // resolveDiscordToken resolves the deployment Bot token: no row / placeholder ->

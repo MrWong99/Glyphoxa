@@ -104,3 +104,16 @@ ADR-0045 (usage capture points the ledger tees into), ADR-0046 (price map,
 estimate posture, cap mechanics the future allowance gate mirrors), ADR-0031/
 0034 (migration + Helm hook conventions the plans-sync Job follows), ADR-0041
 (operator allowlist — the current SaaS admission control).
+
+*Amended by ADR-0055 (2026-07-18), which lands the deliberately deferred
+pieces: the two entitlement seams go live in `open` Admission Mode — (a)
+provider-key resolution fails closed for a Tenant without an active
+`key_source='platform'` Subscription (including the no-config-row path), and
+(b) a monthly allowance gate compares month-to-date estimated USD against
+`plan.included_usage_usd`, patterned on the ADR-0046 cap mechanics. In
+`allowlist` mode both are no-ops — self-hosts keep the hybrid env-fallback
+policy with zero subscription rows. The Usage Ledger itself stays
+attribution-only ("never a gate" stands): the gate is a separate mechanism
+that reads it. And the signup default-plan auto-bind widens the
+operator-CLI-only binding surface by exactly one automated caller; snapshot
+semantics are unchanged, platform-key Plans remain operator-CLI-assigned.*

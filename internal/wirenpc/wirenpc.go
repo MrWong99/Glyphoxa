@@ -334,9 +334,9 @@ type Config struct {
 	// resolution landing on "" (no Provider Config row, or the seeded "env"
 	// placeholder) is refused for a tenant the entitlement does not grant,
 	// instead of silently spending the deployment's *_API_KEY Platform Keys.
-	// nil (default, and the composition root's `allowlist`-Admission-Mode
-	// wiring today) grants everything — the ADR-0039 hybrid policy unchanged.
-	// `open` mode swaps in llmbuild.SubscriptionKeyGate when it lands.
+	// nil (default) and the composition root's `allowlist`-Admission-Mode
+	// EnvFallbackAllowed wiring grant everything — the ADR-0039 hybrid policy
+	// unchanged; `open` Admission Mode wires llmbuild.SubscriptionKeyGate.
 	KeyEntitlement llmbuild.PlatformKeyEntitlement
 }
 

@@ -17,7 +17,7 @@ import (
 // random secret minted by the auth tier (internal/auth) — this layer only
 // persists and validates it, never interprets it.
 
-const userColumns = `id, discord_user_id, name, avatar, role, created_at, updated_at`
+const userColumns = `id, discord_user_id, name, avatar, role, created_at, updated_at, suspended_at`
 
 // DevOperatorDiscordID is the synthetic Discord identity the GLYPHOXA_DEV_MODE
 // boot upserts as the dev operator (ADR-0041). It is deliberately NOT a real
@@ -31,7 +31,7 @@ func scanUser(row pgx.Row) (User, error) {
 	var u User
 	err := row.Scan(
 		&u.ID, &u.DiscordUserID, &u.Name, &u.Avatar, &u.Role,
-		&u.CreatedAt, &u.UpdatedAt,
+		&u.CreatedAt, &u.UpdatedAt, &u.SuspendedAt,
 	)
 	return u, err
 }
@@ -76,6 +76,26 @@ func (s *Store) GetUserByDiscordID(ctx context.Context, discordUserID string) (U
 		return User{}, fmt.Errorf("storage: get user %q: %w", discordUserID, err)
 	}
 	return u, nil
+}
+
+// SetUserSuspended stamps or clears users.suspended_at by Discord snowflake —
+// the open-mode revocation mechanism (ADR-0055). Suspension is enforced by
+// AuthenticateSession's per-request re-check, so it takes effect immediately
+// without deleting sessions; clearing it restores access with the same tokens.
+// Idempotent per direction; ErrNotFound for an unknown user.
+func (s *Store) SetUserSuspended(ctx context.Context, discordUserID string, suspended bool) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE users
+		    SET suspended_at = CASE WHEN $2 THEN COALESCE(suspended_at, now()) END,
+		        updated_at = now()
+		  WHERE discord_user_id = $1`, discordUserID, suspended)
+	if err != nil {
+		return fmt.Errorf("storage: set suspended for %q: %w", discordUserID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetActiveCampaign records the operator's durable Active Campaign choice (#108,
@@ -218,7 +238,12 @@ func (s *Store) CreateSession(ctx context.Context, n NewSession) (Session, error
 // AuthenticateSession validates a session token and returns the owning user. It
 // bumps last_seen_at as a side effect of a successful, non-expired lookup, in a
 // single round trip. A missing or expired token yields ErrNotFound — the RPC
-// layer maps that to CodeUnauthenticated.
+// layer maps that to CodeUnauthenticated. A SUSPENDED owner yields the same
+// ErrNotFound: this is the ADR-0055 per-request authorization re-check, and it
+// lives in this query because every gated request on both transports funnels
+// through here — suspension takes effect on the very next request with zero
+// extra round trips. The session row is not deleted (suspension is
+// non-destructive; unsuspending restores the same token).
 func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, error) {
 	row := s.db.QueryRow(ctx,
 		`WITH s AS (
@@ -227,8 +252,9 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (User, er
 		      RETURNING user_id
 		 )
 		 SELECT u.id, u.discord_user_id, u.name, u.avatar, u.role,
-		        u.created_at, u.updated_at
-		   FROM users u JOIN s ON s.user_id = u.id`, token)
+		        u.created_at, u.updated_at, u.suspended_at
+		   FROM users u JOIN s ON s.user_id = u.id
+		  WHERE u.suspended_at IS NULL`, token)
 	u, err := scanUser(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
@@ -251,12 +277,16 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 // RevokeSessionsOutsideAllowlist deletes every session whose owning user's
 // discord_user_id is not on the operator allowlist (ADR-0041 amendment, issue
 // #184). The allowlist gates only NEW logins at the OAuth callback; this sweep
-// is the revocation half, run at every non-dev web/all boot — which is exactly
-// when a grant change takes effect, since the env var is parsed at boot. It
-// also clears leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is
-// never allowlisted). An empty allowlist is refused defensively: it would
-// revoke every session, and the boot preflight guarantees a non-empty list at
-// the only call site.
+// is the revocation half, run at every non-dev ALLOWLIST-Admission-Mode web/all
+// boot — which is exactly when a grant change takes effect, since the env var
+// is parsed at boot. The sweep splits by Admission Mode (ADR-0055): an `open`
+// boot must never run it (it would log out every signup each restart —
+// revocation there is suspension-based), and flipping open -> allowlist plus a
+// restart evicts every signup, the deliberate lock-down. It also clears
+// leftover GLYPHOXA_DEV_MODE sessions ([DevOperatorDiscordID] is never
+// allowlisted). An empty allowlist is refused defensively: it would revoke
+// every session, and in allowlist mode the boot preflight guarantees a
+// non-empty list at the only call site (sweepAllowlistSessions).
 func (s *Store) RevokeSessionsOutsideAllowlist(ctx context.Context, discordUserIDs []string) (int64, error) {
 	if len(discordUserIDs) == 0 {
 		return 0, errors.New("storage: refusing to revoke sessions against an empty allowlist")
@@ -362,6 +392,7 @@ func (s *Store) ListTenantOperatorDiscordIDs(ctx context.Context) ([]string, err
 		`SELECT DISTINCT u.discord_user_id
 		   FROM tenant t JOIN users u ON u.id = t.operator_user_id
 		  WHERE u.discord_user_id <> $1
+		    AND u.suspended_at IS NULL
 		  ORDER BY u.discord_user_id`, DevOperatorDiscordID)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list tenant operator discord ids: %w", err)

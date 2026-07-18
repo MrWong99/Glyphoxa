@@ -212,7 +212,11 @@ jobs:
       # needed). This job is the auditable "did the DB tests actually run?"
       # gate the ADR requires, kept off the default PR suite.
       - name: Integration test (with Docker)
-        run: go test -race -tags=integration ./...
+        # -timeout 20m: the storage suite spins one pgvector container per test
+        # (per-test isolation, ADR-0033) and has outgrown go test's default
+        # 10-minute PER-PACKAGE timeout on slower machines. The generous bound
+        # only moves the flake ceiling; a hung test still fails the job.
+        run: go test -race -tags=integration -timeout 20m ./...
 
   audio:
     name: audio (opus + bench)

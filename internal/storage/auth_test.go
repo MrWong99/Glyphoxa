@@ -372,4 +372,26 @@ func TestListTenantOperatorDiscordIDs(t *testing.T) {
 	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
 		t.Errorf("ListTenantOperatorDiscordIDs = %v, want %v (sorted)", ids, want)
 	}
+
+	// A SUSPENDED operator drops out of the GM-identity source (ADR-0055): the
+	// open-mode revocation must reach the GM surfaces (transcript labels, slash
+	// commands, Butler voice addressing) on the next snapshot refresh, not just
+	// the web session chokepoint. Unsuspending restores the binding.
+	if err := st.SetUserSuspended(ctx, "111000000000000000", true); err != nil {
+		t.Fatalf("SetUserSuspended(A): %v", err)
+	}
+	ids, err = st.ListTenantOperatorDiscordIDs(ctx)
+	if err != nil {
+		t.Fatalf("ListTenantOperatorDiscordIDs(A suspended): %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "222000000000000000" {
+		t.Errorf("suspended-A listing = %v, want only B", ids)
+	}
+	if err := st.SetUserSuspended(ctx, "111000000000000000", false); err != nil {
+		t.Fatalf("SetUserSuspended(A, false): %v", err)
+	}
+	ids, err = st.ListTenantOperatorDiscordIDs(ctx)
+	if err != nil || len(ids) != 2 {
+		t.Errorf("unsuspended listing = %v, %v, want both again", ids, err)
+	}
 }

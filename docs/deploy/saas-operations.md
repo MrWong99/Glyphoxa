@@ -8,11 +8,15 @@ revenue out. The design and its deliberate boundaries are
 
 **Current honest scope, before you sell anything:**
 
-- The web tier is still the single-operator tier (ADR-0039/0041): every login
-  must be on the operator allowlist, and each allowlisted Discord User gets an
-  isolated Tenant. "SaaS" today means *you onboard each customer by adding
-  their snowflake to `GLYPHOXA_OPERATOR_IDS` and assigning a Plan*. Self-signup
-  is the next epic, not this one.
+- Admission is a switch now (ADR-0055). The default posture is still the
+  single-operator allowlist (ADR-0039/0041): you onboard each customer by
+  adding their snowflake to `GLYPHOXA_OPERATOR_IDS` and assigning a Plan. Set
+  `GLYPHOXA_ADMISSION_MODE=open` (chart: `web.admissionMode`) and any Discord
+  User who completes OAuth can sign up and found their own Tenant, bound at
+  creation to the `GLYPHOXA_SIGNUP_PLAN_SLUG` plan (chart:
+  `web.signupPlanSlug` — it must name a synced, non-archived plan or the boot
+  preflight is fatal); the allowlist then becomes the platform-administration
+  list rather than the admission gate.
 - There is **no payment processor integration**. You collect money out of band
   (PayPal, bank transfer, Stripe payment links) and record the result with
   `glyphoxa billing subscribe`. The tables are processor-ready (price
@@ -20,6 +24,14 @@ revenue out. The design and its deliberate boundaries are
   migration.
 - Every cost figure is an **estimate** from the static price map (ADR-0046) —
   good for attribution and margin sanity, never an invoice.
+
+> **Rollback caveat (ADR-0055):** the admission posture is persisted in the DB
+> so an ADR-0055-aware binary survives losing the env var without flipping an
+> open deployment back to allowlist (which would mass-revoke every signup's
+> session at the boot sweep). A binary OLDER than ADR-0055 never reads that
+> record: rolling an open deployment back across the 0055 boundary boots in
+> allowlist posture and evicts every signup. Treat that rollback as a
+> lock-down, not a no-op.
 
 ## 1. Plans (tiers)
 
@@ -57,8 +69,12 @@ Field notes:
   `platform`: the Tenant runs on the deployment's env keys (§2) and the
   subscription price covers the usage.
 - `included_usage_usd` — the monthly estimated-USD usage allowance a platform
-  tier includes. Today this is **reporting information** (the report shows
-  usage against it); automated gating on it is a named follow-up (ADR-0054).
+  tier includes. In `open` Admission Mode it GATES (ADR-0055 gate (b)): a
+  session start is refused once the month-to-date estimate spends it, and a
+  running session hard-caps at the remainder (end reason
+  `allowance_exhausted`). In `allowlist` mode it stays reporting information.
+  Known undercount: off-session Recap/Highlight-enrich spend is not yet
+  tenant-attributed (ADR-0054's documented gap).
 - `limits` — a free-form bag for future per-tier knobs. Consumers read the
   keys they know; unknown keys are inert, so you can annotate tiers ahead of
   enforcement.
@@ -99,12 +115,15 @@ BYOK Tenants coexist on the same deployment: they save real keys in the
 console (encrypted with `GLYPHOXA_SECRET`, ADR-0004), and a real saved key
 always wins over the env fallback.
 
-> **Deferred, deliberately:** nothing yet *prevents* a Tenant without a
-> platform plan from using env-placeholder configs — in the single-operator
-> tier every Tenant is you, so there is nobody to refuse. Before opening
-> self-signup, the entitlement checks land at Provider-Config save/resolve and
-> as a monthly allowance gate (ADR-0054 names the seams). Until then, don't
-> hand out logins you wouldn't trust with your keys.
+> **The entitlement seam is live in `open` mode (ADR-0054 gate (a), decided in
+> ADR-0055):** with `GLYPHOXA_ADMISSION_MODE=open`, a Tenant without an active
+> `key_source: "platform"` subscription is refused the env-fallback keys at
+> resolution — a BYOK-plan signup must save its own keys and can never silently
+> spend your platform pool. In the default `allowlist` mode the ADR-0039 hybrid
+> policy stands unchanged (every Tenant is someone you admitted, so nothing is
+> refused). The monthly allowance gate on `included_usage_usd` is live in
+> `open` mode too (ADR-0055 gate (b)): session starts refuse and running
+> sessions hard-cap once the month-to-date estimate spends the allowance.
 
 Per-session guardrails already exist today: set per-Tenant **spend caps**
 (soft/hard, ADR-0046) so a runaway Voice Session stops itself.

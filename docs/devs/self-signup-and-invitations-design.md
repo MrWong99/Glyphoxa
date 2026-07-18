@@ -1,11 +1,16 @@
 # Self-signup & tenant invitations — design note
 
-Status: **decisions recorded** — ADR-0055 (self-signup Admission Modes) and ADR-0056
+Status: **A and B implemented** — ADR-0055 (self-signup Admission Modes) and ADR-0056
 (Player Invitations / Linked Player access) were written 2026-07-18 from this note;
 the transcript-text consent decision (D3) is folded into ADR-0056 rather than a
-separate ADR. This note remains the implementation-grounding companion (verified
-code citations, critic findings, phasing). `tenant_members` and the voice-concurrency
-shape (D6) get their own ADRs when decided.
+separate ADR. Phase A (isolation hardening, §3.A) landed 2026-07-18 (PRs #474/#475,
+minus the deployment-config/presence rework deferred to the concurrency epic), and
+phase B (self-signup, §3.B) landed right after: admission modes, create-only
+provisioning, suspension + per-request re-check, both entitlement seams, the
+signup-plan preflight, onboarding UI, and the chart values. This note remains the
+grounding companion (verified code citations, critic findings, phasing).
+`tenant_members` and the voice-concurrency shape (D6) get their own ADRs when
+decided.
 
 Two asks from the operator:
 
@@ -394,17 +399,20 @@ consumer of the currently-unread `limits` jsonb bag; invitation mint checks it.
 Decisions D0–D3 are now made (see §4). The critical path runs through the voice
 concurrency epic, because D0 = concurrent voice.
 
-- **A. Isolation hardening (hard prerequisite, no new principal yet).**
-  Tenant-scope `SetActiveCampaign` / `GetActiveCampaignForUser` /
-  `resolveActiveCampaign` / the id-driven Archive/Delete/Update writes / session
-  start; fix `GetLatestDeploymentConfig` global read (Bot/deployment-config per
-  Tenant); fail-closed `ResolveKey`; per-tenant GM identity at all **four** allowlist
-  sites (`oauth.go`, `boot.go` gmSpeakerGate, `speaker/resolver.go`,
-  `presence/gate.go` `CheckGM`) incl. voice-only mode + resolver caching. Ships
-  behavior-preserving for the single operator **only after** the
-  NULL-`operator_user_id` fallback is handled. Also lands here (cheap, independent):
-  proto `User` growth, `SetTenantPlan` `ErrNotFound` fix, stale "ADR-0018" migration
-  comment → ADR-0002.
+- **A. Isolation hardening (hard prerequisite, no new principal yet).** ✅ LANDED
+  (PRs #474/#475, 2026-07-18) — tenant-scoped campaign CRUD + active-campaign
+  pivot, GM identity off the env allowlist (union interim), the platform-key
+  entitlement seam, proto `User` growth, `SetTenantPlan` `ErrNotFound` fix. The
+  TWO deliberate carve-outs, both pre-`open`-deployment blockers: (1) the
+  `GetLatestDeploymentConfig` global read (Bot/deployment-config per Tenant)
+  overlaps the presence rework and moved to the V epic — the Bot-identity
+  hijack on the Highlight distribution surface stands until then; (2) GM
+  identity (`auth.GMIdentity`) is DEPLOYMENT-scoped: any tenant-operator
+  binding grants GM on every tenant's transcript labels / slash commands /
+  Butler voice addressing — harmless while all operators are trusted, but an
+  open-mode signup founder would join the deployment-wide GM union, so
+  per-tenant GM scoping (or `tenant_members`) must land before a real `open`
+  deployment (the gmidentity.go doc comment carries the same warning).
 - **V. Concurrent-voice epic (critical path for paid product; its own ADR once the
   D6 shape is decided).**
   Recommended **Shape B**: `SessionID` on the `voiceevent` taxonomy; rekey
@@ -413,12 +421,20 @@ concurrency epic, because D0 = concurrent voice.
   `deployment_config` bot token actually drive `acquireClient`. Overlaps heavily with
   A's `GetLatestDeploymentConfig` fix — sequence A→V or merge them. (Shape A instead
   if you'd rather run a pod fleet + backplane now — see D6.)
-- **B. Self-signup.** ADR-0055; admission mode (DB-persisted + chart value);
-  create-only provisioning (transactional: tenant + plan-bind + session mint);
-  default-plan env slug + boot preflight; entitlement seams (a)+(b) conditioned on
-  mode; boot-sweep rework + per-request re-check; onboarding UI. **Gated on A. Can run
-  parallel to V** (signup is web-tier; V is voice-tier) — but a tenant that signs up
-  and can't run concurrent voice until V lands should be sold honestly.
+- **B. Self-signup.** ✅ LANDED (2026-07-18, right after A) — ADR-0055; admission
+  mode (env switch + DB-persisted posture + chart value); create-only
+  provisioning (one transaction: user upsert + tenant + plan-bind + session
+  mint); default-plan env slug + fatal open-mode boot preflight; entitlement
+  seams (a)+(b) live in `open` mode (incl. the RPC-tier key-resolve gap);
+  boot-sweep split by mode + suspension (`users.suspended_at`, `glyphoxa user`
+  CLI) + per-request re-check; login signup framing + `/onboarding/create-tenant`.
+  **Reminder: do NOT flip a real deployment to `open` until (a) V's
+  `GetLatestDeploymentConfig`/presence rework closes the Bot-identity hijack
+  (§0a) and (b) GM identity is scoped per-tenant — today a signup founder
+  would join the deployment-wide GM union (§3.A carve-out 2)** — and a tenant
+  that signs up can't run concurrent voice until V lands; sell that honestly.
+  Rollback note: reverting an `open` deployment to a pre-ADR-0055 binary
+  mass-evicts signups (the DB posture record cannot reach an older binary).
 - **P. Player invitations (this ask's "invite others").** ADR-0056 (written): Linked
   Player lane (`character.linked_user_id` write path); `player_invitation` + `/join`
   acceptance with the intent-fork callback; Player Access Levels; per-Campaign

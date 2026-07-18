@@ -320,9 +320,13 @@ burning; the durable per-Tenant ledger is the billing-grade view
 
 ## 10. Security posture for an internet-facing home lab
 
-- The operator allowlist (ADR-0041) is your admission control: nobody outside
-  `GLYPHOXA_OPERATOR_IDS` can complete a login, even with the console reachable
-  from the internet. Keep it tight.
+- The operator allowlist (ADR-0041) is your admission control — in the default
+  `allowlist` Admission Mode: nobody outside `GLYPHOXA_OPERATOR_IDS` can
+  complete a login, even with the console reachable from the internet. Keep it
+  tight. Setting `GLYPHOXA_ADMISSION_MODE=open` (chart: `web.admissionMode`,
+  ADR-0055) enables self-signup instead — any Discord User may found a Tenant —
+  and re-scopes the allowlist to the platform-admin list; only flip it once you
+  mean to host strangers.
 - Keep the VM patched (`unattended-upgrades`) and k3s current
   (`curl -sfL https://get.k3s.io | sh -` re-runs are in-place upgrades).
 - The container is `FROM scratch`, static binary, non-root, read-only rootfs
