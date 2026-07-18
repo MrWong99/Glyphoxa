@@ -23,10 +23,14 @@ appSecret: ""
 # voice pod reads DISCORD_BOT_TOKEN to join the gateway and the three provider
 # keys at request time (BYOK, ADR-0004): ELEVENLABS_API_KEY (STT + TTS),
 # GEMINI_API_KEY, and GROQ_API_KEY (LLM). They are stored in the Secret, never
-# baked into the image (ADR-0034). Defaults are empty: voice mode fails without a
-# real Discord token, and a migrate/seed-only install (voice.enabled=false) needs
-# none of them. For real deploys, prefer templating them from an external Secret
-# over committing them to values.
+# baked into the image (ADR-0034). The bot token is required whenever voice or
+# web is enabled — the pod joins the gateway with it. The three provider keys
+# are only the env FALLBACK of the hybrid BYOK policy (ADR-0004/ADR-0039):
+# leave them empty for a BYOK deployment where Tenants bring their own keys via
+# Provider Configs; fill them only if this deployment itself provides managed
+# provider usage (platform keys, ADR-0054). A migrate/seed-only install
+# (voice + web disabled) needs none of them. For real deploys, prefer
+# templating them from an external Secret over committing them to values.
 discordBotToken: ""
 elevenLabsApiKey: ""
 geminiApiKey: ""
