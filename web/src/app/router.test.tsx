@@ -16,9 +16,9 @@ import { makeQueryClient } from "@/lib/queryClient";
 import { routeTree } from "./router";
 
 // Pins the Go↔TS URL contracts owned by internal/auth/oauth.go:
-//   - /login?error=not_authorized (notAuthorizedRedirect, ADR-0041): the
-//     operator-allowlist denial signal the login route must surface as the
-//     banner.
+//   - /login?error=not_authorized (notAuthorizedRedirect): the admission
+//     denial signal — an allowlist miss (ADR-0041) or an open-mode suspension
+//     (ADR-0055) — the login route must surface as the banner.
 //   - /onboarding/create-tenant (onboardingRedirect, ADR-0055): where the OAuth
 //     callback 302s a fresh open-mode signup; the route must exist top-level and
 //     render the name-your-Tenant screen.
@@ -56,9 +56,11 @@ function renderAt(path: string) {
 }
 
 describe("loginRoute ?error=not_authorized contract", () => {
-  it("renders the allowlist banner for /login?error=not_authorized", async () => {
+  it("renders the not-authorized banner for /login?error=not_authorized", async () => {
     renderAt("/login?error=not_authorized");
-    expect(await screen.findByRole("alert")).toHaveTextContent(/allowlist/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /isn't authorized for this deployment/i,
+    );
   });
 
   it("renders no banner on a plain /login visit", async () => {

@@ -54,13 +54,7 @@ func (s *Store) ProvisionSignup(ctx context.Context, p SignupParams) (SignupResu
 		if err != nil {
 			return err
 		}
-		var suspended bool
-		if err := tx.db.QueryRow(ctx,
-			`SELECT suspended_at IS NOT NULL FROM users WHERE id = $1`, u.ID).
-			Scan(&suspended); err != nil {
-			return fmt.Errorf("storage: signup suspension check: %w", err)
-		}
-		if suspended {
+		if u.SuspendedAt != nil {
 			return ErrUserSuspended
 		}
 		res.User = u

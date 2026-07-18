@@ -184,8 +184,9 @@ spec:
                   key: admission-mode
             # The Plan every open-mode signup is bound to at Tenant creation.
             # The open-mode boot preflight is fatal unless it names a synced,
-            # non-archived plan (keep it in plans.catalog); ignored (and
-            # emitted empty) in allowlist mode.
+            # non-archived plan (keep it in plans.catalog). The Secret key
+            # always carries the configured web.signupPlanSlug ("" by default,
+            # in either mode); in allowlist mode the binary ignores it.
             - name: GLYPHOXA_SIGNUP_PLAN_SLUG
               valueFrom:
                 secretKeyRef:

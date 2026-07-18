@@ -18,8 +18,13 @@ import (
 // sessions, and fully reversible.
 const userUsage = `usage: glyphoxa user <suspend|unsuspend> <discord-user-id>
 
-  suspend    lock the user out on their next request (open Admission Mode
-             revocation, ADR-0055); their sessions survive, dormant
+  suspend    lock the user out of the web tier on their next request (open
+             Admission Mode revocation, ADR-0055); their sessions survive,
+             dormant. Their tenant-operator GM identity (transcript labels,
+             GM slash commands, Butler voice addressing) drops out within the
+             ~1-minute GM snapshot refresh — but a snowflake ALSO on
+             GLYPHOXA_OPERATOR_IDS keeps GM through the allowlist half of the
+             union; remove it from the env list too for a full GM revocation.
   unsuspend  restore access; surviving sessions work again immediately
 
 Connection string is read from $GLYPHOXA_DATABASE_URL (or $DATABASE_URL).`
@@ -70,7 +75,7 @@ func RunUser(ctx context.Context, args []string) error {
 		return fmt.Errorf("user %s: %w", args[0], err)
 	}
 	if suspend {
-		fmt.Printf("suspended %s — takes effect on their next request; sessions kept, reversible with `glyphoxa user unsuspend`\n", discordID)
+		fmt.Printf("suspended %s — web access ends on their next request; tenant-operator GM identity drops within ~1 min (env-allowlist GM survives); sessions kept, reversible with `glyphoxa user unsuspend`\n", discordID)
 	} else {
 		fmt.Printf("unsuspended %s — surviving sessions work again immediately\n", discordID)
 	}

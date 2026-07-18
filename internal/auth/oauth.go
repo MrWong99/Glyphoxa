@@ -160,6 +160,16 @@ func (o *OAuth) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// A suspended user (ADR-0055) is bounced on the allowlisted path too:
+	// AuthenticateSession would refuse every request on the minted session
+	// anyway, so minting it would only produce a silent login→401 loop. Same
+	// non-leaky signal as an allowlist rejection. Unset for every self-host
+	// that never touched `glyphoxa user suspend` — behavior-preserving.
+	if user.SuspendedAt != nil {
+		o.log.Warn("oauth callback: rejected suspended Discord user", "discord_user_id", du.ID)
+		http.Redirect(w, r, notAuthorizedRedirect, http.StatusFound)
+		return
+	}
 	if _, err := o.store.ResolveOperatorTenant(ctx, user.ID); err != nil {
 		o.log.Error("oauth callback: bind tenant", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

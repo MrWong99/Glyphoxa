@@ -12,10 +12,12 @@ import "./login.css";
 // with Google/GitHub rendered DISABLED + "coming soon" (wired in v1.5+). It is a
 // full-page link, not a Connect call — OAuth is HTML redirects (ADR-0015).
 //
-// notAuthorized surfaces the operator-allowlist rejection (ADR-0041): the OAuth
-// callback bounces a Discord User who is not on GLYPHOXA_OPERATOR_IDS back here
-// with ?error=not_authorized. The banner is non-leaky — it never echoes the
-// rejected account's id. A normal first visit renders unchanged.
+// notAuthorized surfaces an admission rejection: the OAuth callback bounces a
+// denied Discord User back here with ?error=not_authorized. The signal is
+// mode-broad — an allowlist miss (ADR-0041) or, in open admission mode, a
+// suspended account (ADR-0055) — and DELIBERATELY undifferentiated: the banner
+// is non-leaky, never echoing the rejected account's id or WHY it was denied,
+// so the copy must stay mode-neutral. A normal first visit renders unchanged.
 //
 // The lede frames signup per the deployment's Admission Mode (ADR-0055):
 // GetAdmissionMode is public (there is no session yet on this screen), and only
@@ -42,7 +44,7 @@ export function Login({ notAuthorized = false }: { notAuthorized?: boolean }) {
 
         {notAuthorized && (
           <p className="gx-login__error" role="alert">
-            This Discord account isn&apos;t on the operator allowlist for this instance.
+            This Discord account isn&apos;t authorized for this deployment.
           </p>
         )}
 

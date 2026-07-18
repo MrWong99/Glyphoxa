@@ -33,12 +33,18 @@ const APP_ENTRY = {
 // RenameTenant records what rode the wire into `renamed` so a test can assert
 // exactly what was sent — or that nothing was.
 function backend(
-  opts: { unauthenticated?: boolean; renameError?: boolean; renamed?: { name?: string } } = {},
+  opts: {
+    unauthenticated?: boolean;
+    probeError?: boolean;
+    renameError?: boolean;
+    renamed?: { name?: string };
+  } = {},
 ): Transport {
   return createRouterTransport(({ service }) => {
     service(AuthService, {
       getCurrentUser: () => {
         if (opts.unauthenticated) throw new ConnectError("no session", Code.Unauthenticated);
+        if (opts.probeError) throw new ConnectError("pg is down", Code.Unavailable);
         return create(GetCurrentUserResponseSchema, {
           user: create(UserSchema, { name: "Rin", role: "operator", avatar: "" }),
           tenantId: "5b3f7c1e-0000-0000-0000-000000000000",
@@ -69,6 +75,19 @@ describe("CreateTenant", () => {
   it("redirects to /login when there is no session", async () => {
     renderScreen(backend({ unauthenticated: true }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/login" }));
+  });
+
+  it("shows a generic inline error on a non-401 probe failure instead of bouncing to /login", async () => {
+    // The anti-redirect-loop guard: a real failure (server down, etc.) must NOT
+    // navigate to /login — that page would send the still-authenticated user
+    // right back — and must stay non-leaky about the cause.
+    const renamed: { name?: string } = {};
+    renderScreen(backend({ probeError: true, renamed }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/couldn.t load your account/i);
+    expect(alert).not.toHaveTextContent(/pg is down/i);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(renamed.name).toBeUndefined();
   });
 
   it("pre-fills the name field with the pre-provisioned Tenant name", async () => {

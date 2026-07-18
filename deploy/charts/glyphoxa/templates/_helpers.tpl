@@ -175,8 +175,10 @@ with an empty credential. The one deliberate exception is `operator-ids`
 (ADR-0055): `required` only in the `allowlist` Admission Mode, where it is the
 admission gate; in `open` mode it is the platform-admin list and may be empty —
 but the KEY still renders (as "") because the web Deployment's secretKeyRef
-would fail pod start on a missing key. `open` mode instead requires a signup
-plan slug, mirroring the binary's fatal open-mode boot preflight.
+would fail pod start on a missing key. `open` mode instead requires a non-blank
+signup plan slug (trimmed, exactly like the binary's fatal open-mode boot
+preflight); the slug value itself is passed through verbatim — the binary trims
+it again on read.
 */}}
 {{- define "glyphoxa.secretStringData" -}}
 database-url: {{ include "glyphoxa.databaseURL" . | quote }}
@@ -196,7 +198,11 @@ discord-oauth-client-secret: {{ required "web.oauth.clientSecret is required whe
 discord-oauth-redirect-url: {{ include "glyphoxa.web.oauthRedirectURL" . | quote }}
 {{- $admissionMode := include "glyphoxa.web.admissionMode" .Values.web.admissionMode }}
 {{- if eq $admissionMode "open" }}
-{{- if not .Values.web.signupPlanSlug }}
+{{- /* Trimmed, like the binary's boot preflight (signupPlanPreflight trims
+before its empty check): a whitespace-only slug would slip past a naive
+non-empty guard here yet still fatally refuse at boot — the whole point of
+this guard is to catch that at render time instead. */}}
+{{- if not (.Values.web.signupPlanSlug | default "" | trim) }}
 {{- fail "open admission needs a signup plan (ADR-0055): every open-mode signup is bound to a default Plan at Tenant creation, and the web pod's boot preflight is fatal without one. Set web.signupPlanSlug to a plan slug and include that plan in plans.catalog (plans.enabled=true) so the plans-sync hook syncs it before the pod boots." }}
 {{- end }}
 operator-ids: {{ .Values.web.operatorIds | default "" | quote }}

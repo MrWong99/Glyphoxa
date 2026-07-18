@@ -205,6 +205,10 @@ type User struct {
 	Role      string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// SuspendedAt, when non-nil, marks the user locked out under the
+	// open-Admission-Mode revocation mechanism (ADR-0055). Appended LAST —
+	// userColumns/scanUser are column-order-coupled.
+	SuspendedAt *time.Time
 }
 
 // Session is a server-side login session (ADR-0016): the Token is the opaque

@@ -381,8 +381,8 @@ func (s *Store) GetTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
 
 // RenameTenant sets the Tenant's display name — the ADR-0055 onboarding step
 // ("name your Tenant") for a freshly signed-up founder. Validation (non-empty,
-// length) lives at the RPC; storage stays faithful. ErrNotFound for an unknown
-// tenant.
+// 200-character cap) lives at the RPC (AuthServer.RenameTenant); storage stays
+// faithful. ErrNotFound for an unknown tenant.
 func (s *Store) RenameTenant(ctx context.Context, id uuid.UUID, name string) (Tenant, error) {
 	var t Tenant
 	err := s.db.QueryRow(ctx,

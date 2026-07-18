@@ -78,8 +78,9 @@ function NameTenantCard({ initialName }: { initialName: string }) {
 
   const rename = useMutation(AuthService.method.renameTenant, {
     onSuccess: () => {
-      // The shell reads tenantName off GetCurrentUser — drop the cached probe
-      // so the app boots with the new name instead of the placeholder.
+      // Drop the cached probe so the identity (incl. tenantName) is fresh for
+      // whichever surface reads it next — nothing renders tenantName today, so
+      // this keeps the cache honest rather than serving a known consumer.
       void queryClient.invalidateQueries({
         queryKey: createConnectQueryKey({
           schema: AuthService.method.getCurrentUser,

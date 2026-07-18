@@ -22,14 +22,17 @@ import (
 // `open` Admission Mode it swaps in [SubscriptionKeyGate] (cmd/glyphoxa runWeb,
 // the one construction point).
 //
-// Gated everywhere (the phase-B inventory is closed): the live voice session
-// (wirenpc resolveSessionKeys), the Recap engine, the Highlight image factory
-// (cmd/glyphoxa), and the RPC tier's provider-key resolution
-// (VoiceServer.resolveComponentKey — provider health pings, model/voice
-// catalogs, TTS preview). ProviderServer.openKey is closed by construction:
-// its only caller resolves the Discord Bot token, which is deployment
-// infrastructure and deliberately outside the entitlement (as are
+// Gated everywhere on the web/all path (the phase-B inventory is closed): the
+// live voice session (wirenpc resolveSessionKeys), the Recap engine, the
+// Highlight image factory (cmd/glyphoxa), and the RPC tier's provider-key
+// resolution (VoiceServer.resolveComponentKey — provider health pings,
+// model/voice catalogs, TTS preview). ProviderServer.openKey is closed by
+// construction: its only caller resolves the Discord Bot token, which is
+// deployment infrastructure and deliberately outside the entitlement (as are
 // VoiceServer.resolveDiscordToken and the presence/highlight token paths).
+// The STANDALONE voice node (-mode voice) wires no entitlement by design: it
+// is the single-operator self-host posture (deployment-scoped keys, tenant-
+// free reads) and is not part of an open-admission SaaS deployment.
 
 // ErrNoPlatformKeyEntitlement marks an env-fallback key resolution refused
 // because the tenant has no platform-key entitlement (ADR-0054 gate (a)): a

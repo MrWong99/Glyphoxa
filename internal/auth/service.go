@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -137,8 +138,8 @@ func (s *AuthServer) GetAdmissionMode(
 // RenameTenant sets the caller's bound Tenant display name — the ADR-0055
 // name-your-Tenant onboarding step. The Tenant is resolved server-side from
 // the session (ADR-0039); a caller with no bound Tenant yet fails with
-// CodeFailedPrecondition. The name is required (CodeInvalidArgument when
-// blank).
+// CodeFailedPrecondition. The name is required and capped at 200 characters
+// (CodeInvalidArgument otherwise) — a display name, not a document.
 func (s *AuthServer) RenameTenant(
 	ctx context.Context,
 	req *connect.Request[managementv1.RenameTenantRequest],
@@ -146,6 +147,9 @@ func (s *AuthServer) RenameTenant(
 	name := strings.TrimSpace(req.Msg.GetName())
 	if name == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
+	}
+	if utf8.RuneCountInString(name) > 200 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must be at most 200 characters"))
 	}
 	tid, ok := TenantID(ctx)
 	if !ok {

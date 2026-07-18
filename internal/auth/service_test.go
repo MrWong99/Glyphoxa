@@ -306,6 +306,20 @@ func TestRenameTenant(t *testing.T) {
 		}
 	})
 
+	t.Run("overlong name -> InvalidArgument", func(t *testing.T) {
+		t.Parallel()
+		ren := &fakeRenamer{}
+		client := newAuthClientWith(t, authn, &fakeDeleter{},
+			fakeTenant{id: uuid.New()}, fakeNamer{}, ren, auth.AdmissionOpen)
+		_, err := client.RenameTenant(context.Background(), authedReq(strings.Repeat("x", 201)))
+		if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+			t.Fatalf("code = %v, want CodeInvalidArgument for a 201-char name", got)
+		}
+		if ren.gotName != "" {
+			t.Error("renamer ran for an overlong name")
+		}
+	})
+
 	t.Run("blank name -> InvalidArgument", func(t *testing.T) {
 		t.Parallel()
 		client := newAuthClientWith(t, authn, &fakeDeleter{},

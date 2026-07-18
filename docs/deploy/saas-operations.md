@@ -25,6 +25,14 @@ revenue out. The design and its deliberate boundaries are
 - Every cost figure is an **estimate** from the static price map (ADR-0046) —
   good for attribution and margin sanity, never an invoice.
 
+> **Rollback caveat (ADR-0055):** the admission posture is persisted in the DB
+> so an ADR-0055-aware binary survives losing the env var without flipping an
+> open deployment back to allowlist (which would mass-revoke every signup's
+> session at the boot sweep). A binary OLDER than ADR-0055 never reads that
+> record: rolling an open deployment back across the 0055 boundary boots in
+> allowlist posture and evicts every signup. Treat that rollback as a
+> lock-down, not a no-op.
+
 ## 1. Plans (tiers)
 
 Tiers are pure configuration: a JSON catalog synced into the `plan` table.

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -199,6 +200,29 @@ func TestOAuthCallback_OpenMode_ProvisionFailure(t *testing.T) {
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "glyphoxa_session" || c.Name == "glyphoxa_csrf" {
 			t.Errorf("issued %s cookie on a failed signup", c.Name)
+		}
+	}
+}
+
+// A suspended ALLOWLISTED user is bounced at the callback too (any mode):
+// AuthenticateSession would refuse every request on the minted session anyway,
+// so minting it would only produce a silent login->401 loop.
+func TestOAuthCallback_AllowlistedSuspendedRejected(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	store := &fakeOAuthStore{userID: uuid.New(), tenantID: uuid.New(), suspendedAt: &now}
+	adm := auth.Admission{Allowlist: auth.ParseOperatorAllowlist("77")}
+	rec := signupCallback(t, adm, store, auth.DiscordUser{ID: "77", Username: "sora"})
+
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/login?error=not_authorized" {
+		t.Fatalf("status/Location = %d %q, want 302 not_authorized", rec.Code, rec.Header().Get("Location"))
+	}
+	if store.resolveN != 0 || store.createCalls != 0 {
+		t.Errorf("tenant bound or session minted for a suspended user: %+v", store)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "glyphoxa_session" || c.Name == "glyphoxa_csrf" {
+			t.Errorf("issued %s cookie to a suspended user", c.Name)
 		}
 	}
 }

@@ -403,10 +403,16 @@ concurrency epic, because D0 = concurrent voice.
   (PRs #474/#475, 2026-07-18) — tenant-scoped campaign CRUD + active-campaign
   pivot, GM identity off the env allowlist (union interim), the platform-key
   entitlement seam, proto `User` growth, `SetTenantPlan` `ErrNotFound` fix. The
-  ONE deliberate carve-out: the `GetLatestDeploymentConfig` global read
-  (Bot/deployment-config per Tenant) overlaps the presence rework and moved to
-  the V epic — it remains a pre-`open`-deployment blocker on the Highlight
-  distribution surface.
+  TWO deliberate carve-outs, both pre-`open`-deployment blockers: (1) the
+  `GetLatestDeploymentConfig` global read (Bot/deployment-config per Tenant)
+  overlaps the presence rework and moved to the V epic — the Bot-identity
+  hijack on the Highlight distribution surface stands until then; (2) GM
+  identity (`auth.GMIdentity`) is DEPLOYMENT-scoped: any tenant-operator
+  binding grants GM on every tenant's transcript labels / slash commands /
+  Butler voice addressing — harmless while all operators are trusted, but an
+  open-mode signup founder would join the deployment-wide GM union, so
+  per-tenant GM scoping (or `tenant_members`) must land before a real `open`
+  deployment (the gmidentity.go doc comment carries the same warning).
 - **V. Concurrent-voice epic (critical path for paid product; its own ADR once the
   D6 shape is decided).**
   Recommended **Shape B**: `SessionID` on the `voiceevent` taxonomy; rekey
@@ -422,10 +428,13 @@ concurrency epic, because D0 = concurrent voice.
   seams (a)+(b) live in `open` mode (incl. the RPC-tier key-resolve gap);
   boot-sweep split by mode + suspension (`users.suspended_at`, `glyphoxa user`
   CLI) + per-request re-check; login signup framing + `/onboarding/create-tenant`.
-  **Reminder: do NOT flip a real deployment to `open` until V's
-  `GetLatestDeploymentConfig`/presence rework closes the Bot-identity hijack**
-  (§0a) — and a tenant that signs up can't run concurrent voice until V lands;
-  sell that honestly.
+  **Reminder: do NOT flip a real deployment to `open` until (a) V's
+  `GetLatestDeploymentConfig`/presence rework closes the Bot-identity hijack
+  (§0a) and (b) GM identity is scoped per-tenant — today a signup founder
+  would join the deployment-wide GM union (§3.A carve-out 2)** — and a tenant
+  that signs up can't run concurrent voice until V lands; sell that honestly.
+  Rollback note: reverting an `open` deployment to a pre-ADR-0055 binary
+  mass-evicts signups (the DB posture record cannot reach an older binary).
 - **P. Player invitations (this ask's "invite others").** ADR-0056 (written): Linked
   Player lane (`character.linked_user_id` write path); `player_invitation` + `/join`
   acceptance with the intent-fork callback; Player Access Levels; per-Campaign

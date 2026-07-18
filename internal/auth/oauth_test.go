@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -39,6 +40,7 @@ type fakeOAuthStore struct {
 	created     storage.NewSession
 	userID      uuid.UUID
 	tenantID    uuid.UUID
+	suspendedAt *time.Time
 	upsertCalls int
 	resolveN    int
 	createCalls int
@@ -47,7 +49,7 @@ type fakeOAuthStore struct {
 func (f *fakeOAuthStore) UpsertUser(_ context.Context, p storage.UpsertUserParams) (storage.User, error) {
 	f.upsertCalls++
 	f.upserted = p
-	return storage.User{ID: f.userID, DiscordUserID: p.DiscordUserID, Name: p.Name, Avatar: p.Avatar, Role: "operator"}, nil
+	return storage.User{ID: f.userID, DiscordUserID: p.DiscordUserID, Name: p.Name, Avatar: p.Avatar, Role: "operator", SuspendedAt: f.suspendedAt}, nil
 }
 
 func (f *fakeOAuthStore) ResolveOperatorTenant(_ context.Context, userID uuid.UUID) (storage.Tenant, error) {

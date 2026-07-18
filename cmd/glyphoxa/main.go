@@ -45,7 +45,6 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spa"
 	"github.com/MrWong99/Glyphoxa/internal/speaker"
-	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 	"github.com/MrWong99/Glyphoxa/internal/transcript"
@@ -429,11 +428,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// preempts Admission Mode entirely (dev auto-auth + loopback force are the
 	// backstop) — the dev boot neither reads nor records the posture.
 	admission := auth.AdmissionAllowlist
+	var admissionRes admissionResolution
 	if !dev {
-		admission, err = resolveAdmissionMode(ctx, store, os.Getenv, log)
+		admissionRes, err = resolveAdmissionMode(ctx, store, os.Getenv)
 		if err != nil {
 			return err
 		}
+		admission = admissionRes.Effective
 	} else if envAdmissionSet {
 		log.Info("GLYPHOXA_DEV_MODE preempts Admission Mode: the admission switch is ignored on a dev instance (ADR-0055)")
 	}
@@ -454,15 +455,8 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// (users.suspended_at, enforced per-request by AuthenticateSession).
 	// Flipping open -> allowlist plus a restart therefore evicts every signup:
 	// the deliberate lock-down escape hatch.
-	if !dev && admission == auth.AdmissionAllowlist {
-		revoked, err := store.RevokeSessionsOutsideAllowlist(ctx, allow.IDs())
-		if err != nil {
-			return fmt.Errorf("web: revoke sessions outside the operator allowlist: %w", err)
-		}
-		if revoked > 0 {
-			log.Warn("revoked sessions of users not on the operator allowlist (ADR-0041)",
-				"count", revoked)
-		}
+	if err := sweepAllowlistSessions(ctx, store, dev, admission, allow, log); err != nil {
+		return err
 	}
 
 	// Signup default plan (ADR-0055): resolved once here, preflighted FATALLY in
@@ -470,6 +464,14 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	signupPlanSlug := strings.TrimSpace(os.Getenv("GLYPHOXA_SIGNUP_PLAN_SLUG"))
 	if !dev && admission == auth.AdmissionOpen {
 		if err := signupPlanPreflight(ctx, store, signupPlanSlug); err != nil {
+			return err
+		}
+	}
+	// Record the posture only now — AFTER the open-mode preflights — so a flip
+	// to `open` that refuses to boot never becomes the deployment's recorded
+	// state (a config revert then restores service without a manual override).
+	if !dev {
+		if err := admissionRes.record(ctx, store, log); err != nil {
 			return err
 		}
 	}
@@ -491,10 +493,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// tenant the env fallback — the ADR-0039 hybrid policy unchanged. `open`
 	// mode swaps in the subscription gate: only a tenant with an active
 	// platform-key-source subscription may spend the deployment's env keys.
-	keyEnt := llmbuild.PlatformKeyEntitlement(llmbuild.EnvFallbackAllowed{})
-	if admission == auth.AdmissionOpen {
-		keyEnt = llmbuild.SubscriptionKeyGate{Subs: store}
-	}
+	keyEnt := entitlementForMode(admission, store)
 	cfg.KeyEntitlement = keyEnt
 
 	// The BYOK credential cipher (ADR-0004) is best-effort at boot: without
@@ -673,10 +672,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// Monthly plan-allowance gate (ADR-0055 gate (b)): store-backed only in
 	// `open` Admission Mode; nil in allowlist mode, where the gate is a no-op
 	// for self-hosts — the exact posture split as the key entitlement above.
-	var allowanceGate session.AllowanceChecker
-	if admission == auth.AdmissionOpen {
-		allowanceGate = spend.PlanAllowance{Reader: store}
-	}
+	allowanceGate := allowanceForMode(admission, store)
 
 	// The Manager's construction-time deps (#448): the finalizers/pipelines it
 	// drives per session and the collaborators riding its base voice config — one
