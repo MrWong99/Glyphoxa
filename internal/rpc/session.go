@@ -50,9 +50,13 @@ type SessionManager interface {
 // live-first resolution step, #222), the latest ended session for the idle
 // last-session summary (#72), and the campaign-scoped transcript search (#120).
 type SessionStore interface {
-	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
-	GetActiveCampaignForUser(ctx context.Context, discordUserID string) (storage.Campaign, error)
-	GetActiveCampaign(ctx context.Context) (storage.Campaign, error)
+	// The three tenant-scoped resolver reads back the shared resolveActiveCampaign
+	// policy (#473): StartSession takes tenantID from ctx and the campaign from this
+	// SAME scoped resolver, so the session it starts (and meters spend to) can never
+	// be a foreign tenant's campaign (self-signup design §0a).
+	GetCampaignInTenant(ctx context.Context, tenantID, id uuid.UUID) (storage.Campaign, error)
+	GetActiveCampaignForUserInTenant(ctx context.Context, tenantID uuid.UUID, discordUserID string) (storage.Campaign, error)
+	GetActiveCampaignInTenant(ctx context.Context, tenantID uuid.UUID) (storage.Campaign, error)
 	GetLatestVoiceSession(ctx context.Context, campaignID uuid.UUID) (storage.VoiceSession, error)
 	ListVoiceSessions(ctx context.Context, campaignID uuid.UUID, limit int) ([]storage.VoiceSession, error)
 	SearchTranscriptLines(ctx context.Context, campaignID uuid.UUID, query string, limit int) ([]storage.TranscriptLine, error)

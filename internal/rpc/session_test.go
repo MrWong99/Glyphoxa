@@ -37,12 +37,16 @@ type fakeSessionManager struct {
 	rosterIDs        []string     // ids SetAllMute mutes (the campaign roster the real Manager lists)
 	campaignAgentIDs []string     // ids SetAgentMute accepts; others → ErrAgentNotInCampaign (Manager validates now)
 	spend            spend.Status // the live meter snapshot GetSession surfaces (#130)
+	startTenant      uuid.UUID    // the tenant id StartSession threaded into Start (#473 coherence)
+	startCampaign    uuid.UUID    // the campaign id StartSession resolved and passed to Start (#473 coherence)
 }
 
-func (f *fakeSessionManager) Start(_ context.Context, _, campaignID uuid.UUID) (storage.VoiceSession, error) {
+func (f *fakeSessionManager) Start(_ context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSession, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startCalls++
+	f.startTenant = tenantID
+	f.startCampaign = campaignID
 	if f.startErr != nil {
 		return storage.VoiceSession{}, f.startErr
 	}
@@ -182,9 +186,15 @@ type fakeSessionStore struct {
 	voiceSessions map[uuid.UUID]storage.VoiceSession // GenerateRecap ownership lookups (#274)
 	getVoiceErr   error                              // forced non-NotFound error for GetVoiceSession
 	getVoiceCalls int                                // GetVoiceSession call count (spend-cap guard test)
+
+	// resolveTenant records the last tenant id threaded into a scoped resolver read
+	// (#473) — the StartSession coherence test asserts the campaign is resolved under
+	// the SAME tenant the session is started with.
+	resolveTenant uuid.UUID
 }
 
-func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+func (f *fakeSessionStore) GetActiveCampaignForUserInTenant(_ context.Context, tenantID uuid.UUID, _ string) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
 	if f.forUserErr != nil {
 		return storage.Campaign{}, f.forUserErr
 	}
@@ -194,18 +204,21 @@ func (f *fakeSessionStore) GetActiveCampaignForUser(context.Context, string) (st
 	return f.forUser, nil
 }
 
-func (f *fakeSessionStore) GetActiveCampaign(context.Context) (storage.Campaign, error) {
+func (f *fakeSessionStore) GetActiveCampaignInTenant(_ context.Context, tenantID uuid.UUID) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
 	if f.campaignErr != nil {
 		return storage.Campaign{}, f.campaignErr
 	}
 	return f.campaign, nil
 }
 
-// GetCampaign is the live-first resolution's per-id load (#222). The SessionServer
-// idle/Start paths never reach it with a live session (GetSession returns the live
-// Snapshot directly; Start is guarded single-active), so a simple pass-through of
-// the implicit campaign satisfies the interface.
-func (f *fakeSessionStore) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+// GetCampaignInTenant is the live-first resolution's per-id load (#222), tenant-
+// scoped (#473). The SessionServer idle/Start paths never reach it with a live
+// session (GetSession returns the live Snapshot directly; Start is guarded
+// single-active), so a simple pass-through of the implicit campaign satisfies the
+// interface.
+func (f *fakeSessionStore) GetCampaignInTenant(_ context.Context, tenantID, _ uuid.UUID) (storage.Campaign, error) {
+	f.resolveTenant = tenantID
 	if f.campaignErr != nil {
 		return storage.Campaign{}, f.campaignErr
 	}
@@ -1327,5 +1340,48 @@ func TestGenerateRecap_CSRFGuardsAsMutation(t *testing.T) {
 		connect.NewRequest(&managementv1.GenerateRecapRequest{SessionIds: []string{uuid.NewString()}}))
 	if got := connect.CodeOf(err); got != connect.CodePermissionDenied {
 		t.Errorf("GenerateRecap code = %v, want PermissionDenied (CSRF-guarded mutation)", got)
+	}
+}
+
+// TestStartSessionTenantCampaignCoherence pins the #473 coherence guarantee: the
+// campaign StartSession resolves and the tenant it starts (and meters spend to) are
+// the SAME tenant from the request context — never a durable selection that pivots
+// to a foreign tenant. The scoped resolver receives the ctx tenant, and mgr.Start is
+// called with that same tenant plus the resolved campaign.
+func TestStartSessionTenantCampaignCoherence(t *testing.T) {
+	t.Parallel()
+	tenantID := uuid.New()
+	campaign := storage.Campaign{ID: uuid.New(), TenantID: tenantID, Name: "Coherent"}
+	store := &fakeSessionStore{campaign: campaign, latestErr: storage.ErrNotFound}
+	mgr := &fakeSessionManager{}
+
+	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			ctx = auth.WithTenant(ctx, tenantID)
+			ctx = auth.WithUser(ctx, storage.User{DiscordUserID: "op-1"})
+			return next(ctx, req)
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(rpc.NewSessionServer(mgr, store, nil, nil).Handler(connect.WithInterceptors(inject)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := managementv1connect.NewSessionServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON())
+
+	if _, err := client.StartSession(context.Background(),
+		connect.NewRequest(&managementv1.StartSessionRequest{})); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// The campaign was resolved under the ctx tenant (scoped resolver, #473)...
+	if store.resolveTenant != tenantID {
+		t.Errorf("campaign resolved under tenant %s, want ctx tenant %s", store.resolveTenant, tenantID)
+	}
+	// ...and the session was started with the SAME tenant + the resolved campaign.
+	if mgr.startTenant != tenantID {
+		t.Errorf("session started under tenant %s, want %s", mgr.startTenant, tenantID)
+	}
+	if mgr.startCampaign != campaign.ID {
+		t.Errorf("session started for campaign %s, want %s", mgr.startCampaign, campaign.ID)
 	}
 }

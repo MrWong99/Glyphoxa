@@ -128,6 +128,33 @@ func (s *Store) GetActiveCampaignForUser(ctx context.Context, discordUserID stri
 	return c, nil
 }
 
+// GetActiveCampaignForUserInTenant is the tenant-scoped durable-selection read
+// (#473): it resolves the operator's active_campaign_id ONLY when the selected
+// campaign is in the caller's tenant (`AND c.tenant_id = $2`). A selection pointing
+// at another tenant's campaign — which SetActiveCampaign's FK-only write cannot
+// prevent by itself — reads back as ErrNotFound here, so it can never pivot a
+// stranger's campaign-scoped surfaces onto the victim tenant (self-signup design
+// §0a). It is the web/RPC-tier analogue of GetActiveCampaignForUser; the standalone
+// voice node keeps the tenant-free variant. Same absent-selection semantics: no
+// row / no selection / deleted / archived → ErrNotFound, so the caller falls
+// through to the GetActiveCampaignInTenant most-recent fallback.
+func (s *Store) GetActiveCampaignForUserInTenant(ctx context.Context, tenantID uuid.UUID, discordUserID string) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT c.id, c.tenant_id, c.gm_member_id, c.name, c.system, c.language,
+		        c.created_at, c.updated_at, c.archived_at, c.tape_armed
+		   FROM users u JOIN campaign c ON c.id = u.active_campaign_id
+		  WHERE u.discord_user_id = $1 AND c.tenant_id = $2 AND c.archived_at IS NULL`,
+		discordUserID, tenantID)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: active campaign for %q in tenant %s: %w", discordUserID, tenantID, err)
+	}
+	return c, nil
+}
+
 // GetOperatorActiveCampaign returns the durable Active Campaign selection of the
 // single operator, for a surface with NO logged-in user context — the standalone
 // voice node (#323, ADR-0039 single-operator pass-through). It is the

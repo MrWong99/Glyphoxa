@@ -24,10 +24,10 @@ import (
 
 func TestCharacterCRUD_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, _ := seedStore(t, dsn) // seedStore inserts the (active) campaign
+	store, tenantID, _ := seedStoreTenant(t, dsn) // seedStore inserts the (active) campaign
 
 	mux := http.NewServeMux()
-	mux.Handle(rpc.NewCampaignServer(store).Handler())
+	mux.Handle(rpc.NewCampaignServer(store).Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-char"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(

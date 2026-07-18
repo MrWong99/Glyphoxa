@@ -89,13 +89,14 @@ func scanCampaign(row pgx.Row) (Campaign, error) {
 }
 
 // GetActiveCampaign returns the "active" campaign: the most-recently-created
-// one. Glyphoxa is single-operator today (one Tenant), so the global latest is
-// the sole Tenant's latest. Tenant scoping fills in behind the X-Tenant-Id
-// pass-through later (ADR-0039), at which point this gains a WHERE tenant_id = $1.
-// Archived campaigns are excluded from this fallback (#269): an only-archived DB
-// resolves to ErrNotFound, so an archived campaign can never be the implicit
-// Active Campaign nor start a Voice Session. No campaign yields ErrNotFound (the
-// RPC layer maps it to Connect CodeNotFound).
+// one, GLOBALLY. It is the deliberately tenant-FREE most-recent fallback the
+// standalone voice node's boot path uses (cmd/glyphoxa, ADR-0039 single-operator):
+// with one Tenant the global latest IS that Tenant's latest. The web/RPC tier
+// uses [Store.GetActiveCampaignInTenant] instead so a stranger never falls through
+// to another tenant's latest campaign (#473). Archived campaigns are excluded from
+// this fallback (#269): an only-archived DB resolves to ErrNotFound, so an archived
+// campaign can never be the implicit Active Campaign nor start a Voice Session. No
+// campaign yields ErrNotFound (the RPC layer maps it to Connect CodeNotFound).
 func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT `+campaignColumns+`
@@ -113,9 +114,35 @@ func (s *Store) GetActiveCampaign(ctx context.Context) (Campaign, error) {
 	return c, nil
 }
 
-// GetCampaign loads one Campaign by id, or ErrNotFound. It backs the /glyphoxa
-// use resolution step that turns a live Voice Session's campaign_id back into the
-// full Campaign (#108).
+// GetActiveCampaignInTenant returns the tenant's most-recently-created active
+// campaign, or ErrNotFound (#473) — the tenant-scoped most-recent fallback the
+// web/RPC Active-Campaign resolution walks last. The `WHERE tenant_id = $1` guard
+// keeps a caller from ever falling through to another tenant's latest campaign.
+// Archived campaigns are excluded (#269), matching GetActiveCampaign.
+func (s *Store) GetActiveCampaignInTenant(ctx context.Context, tenantID uuid.UUID) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+campaignColumns+`
+		   FROM campaign
+		  WHERE tenant_id = $1 AND archived_at IS NULL
+		  ORDER BY created_at DESC, id DESC
+		  LIMIT 1`, tenantID)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: get active campaign in tenant %s: %w", tenantID, err)
+	}
+	return c, nil
+}
+
+// GetCampaign loads one Campaign by id, or ErrNotFound. It is the tenant-FREE
+// read the standalone voice node / slash surface, the bundle export/import, and
+// the recap engine use — surfaces that carry a server-derived campaign id, never
+// a client-supplied one (ADR-0039 single-operator pass-through). The web/RPC tier
+// that takes a client id uses [Store.GetCampaignInTenant] instead so a foreign id
+// can never resolve. It backs the /glyphoxa use resolution step that turns a live
+// Voice Session's campaign_id back into the full Campaign (#108).
 func (s *Store) GetCampaign(ctx context.Context, id uuid.UUID) (Campaign, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+campaignColumns+` FROM campaign WHERE id = $1`, id)
 	c, err := scanCampaign(row)
@@ -128,14 +155,57 @@ func (s *Store) GetCampaign(ctx context.Context, id uuid.UUID) (Campaign, error)
 	return c, nil
 }
 
+// GetCampaignInTenant loads one Campaign by id WITHIN the tenant, or ErrNotFound
+// (#473). The `AND tenant_id = $2` guard means a campaign owned by another tenant
+// reads back as absent — never a permission-style error that would confirm the id
+// exists (self-signup design §0a). It is the web/RPC-tier read: every handler that
+// takes a client-supplied campaign id resolves it through here, threading
+// auth.TenantID(ctx) down, so cross-tenant reads/writes are refused at the query.
+func (s *Store) GetCampaignInTenant(ctx context.Context, tenantID, id uuid.UUID) (Campaign, error) {
+	row := s.db.QueryRow(ctx,
+		`SELECT `+campaignColumns+` FROM campaign WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	c, err := scanCampaign(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Campaign{}, ErrNotFound
+	}
+	if err != nil {
+		return Campaign{}, fmt.Errorf("storage: get campaign %s in tenant %s: %w", id, tenantID, err)
+	}
+	return c, nil
+}
+
 // ListCampaigns returns every ACTIVE Campaign ordered by name (then id for a
 // stable tie-break) — the /glyphoxa use autocomplete source (#108). Archived
 // campaigns are excluded (#269): the autocomplete inherits that filter with no
-// code change of its own. Single-operator today, so it is unscoped, mirroring
-// GetActiveCampaign; tenant scoping fills in behind the X-Tenant-Id pass-through
-// later (ADR-0039). See ListAllCampaigns for the archive-inclusive read.
+// code change of its own. It is the tenant-FREE list the standalone voice node's
+// slash surface uses (ADR-0039 single-operator); the web/RPC tier uses
+// [Store.ListCampaignsInTenant] so the picker shows only the caller's own
+// campaigns (#473). See ListAllCampaigns for the archive-inclusive read.
 func (s *Store) ListCampaigns(ctx context.Context) ([]Campaign, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+campaignColumns+` FROM campaign WHERE archived_at IS NULL ORDER BY name, id`)
+	return s.listCampaigns(ctx, `SELECT `+campaignColumns+` FROM campaign WHERE archived_at IS NULL ORDER BY name, id`)
+}
+
+// ListCampaignsInTenant is the tenant-scoped ACTIVE-only list (#473): the web/RPC
+// picker source, showing only the caller's own campaigns (`WHERE tenant_id = $1`).
+func (s *Store) ListCampaignsInTenant(ctx context.Context, tenantID uuid.UUID) ([]Campaign, error) {
+	return s.listCampaigns(ctx,
+		`SELECT `+campaignColumns+` FROM campaign WHERE tenant_id = $1 AND archived_at IS NULL ORDER BY name, id`,
+		tenantID)
+}
+
+// ListAllCampaignsInTenant is the tenant-scoped archive-INCLUSIVE list (#473): the
+// archive-management panel's read for the web/RPC tier, scoped to the caller's
+// tenant so it never surfaces another tenant's archived campaigns.
+func (s *Store) ListAllCampaignsInTenant(ctx context.Context, tenantID uuid.UUID) ([]Campaign, error) {
+	return s.listCampaigns(ctx,
+		`SELECT `+campaignColumns+` FROM campaign WHERE tenant_id = $1 ORDER BY name, id`,
+		tenantID)
+}
+
+// listCampaigns runs a campaign SELECT and scans the rows — the shared body of the
+// scoped and unscoped campaign lists.
+func (s *Store) listCampaigns(ctx context.Context, query string, args ...any) ([]Campaign, error) {
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list campaigns: %w", err)
 	}

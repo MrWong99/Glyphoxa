@@ -200,7 +200,13 @@ func (s *Store) SetTenantPlan(ctx context.Context, tenantID uuid.UUID, slug stri
 			Scan(&sub.ID, &sub.TenantID, &sub.PlanID, &sub.PlanSlug,
 				&sub.MonthlyPriceUSD, &sub.StartedAt, &sub.EndedAt)
 		if err != nil {
-			// The tenant FK is the only constraint an unknown tenant trips here.
+			// The tenant FK is the only constraint an unknown tenant trips here; map it
+			// to ErrNotFound as the doc comment promises (#473), so an unknown tenant and
+			// an unknown slug surface the same not-found signal instead of a raw wrapped
+			// pgx error.
+			if code, ok := pgErrCode(err); ok && code == "23503" { // foreign_key_violation
+				return ErrNotFound
+			}
 			return fmt.Errorf("storage: subscribe tenant %s to %q: %w", tenantID, slug, err)
 		}
 		return nil

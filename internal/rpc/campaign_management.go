@@ -29,11 +29,15 @@ func (s *campaignManagement) ListCampaigns(
 	ctx context.Context,
 	req *connect.Request[managementv1.ListCampaignsRequest],
 ) (*connect.Response[managementv1.ListCampaignsResponse], error) {
-	list := s.store.ListCampaigns
-	if req.Msg.GetIncludeArchived() {
-		list = s.store.ListAllCampaigns
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
 	}
-	campaigns, err := list(ctx)
+	list := s.store.ListCampaignsInTenant
+	if req.Msg.GetIncludeArchived() {
+		list = s.store.ListAllCampaignsInTenant
+	}
+	campaigns, err := list(ctx, tenantID)
 	if err != nil {
 		slog.Default().Error("ListCampaigns: store list failed", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -80,8 +84,9 @@ func (s *campaignManagement) CreateCampaign(
 	}
 
 	// Read the row back so the response carries the canonical persisted shape
-	// (server-assigned id, created_at/updated_at), mirroring CreateAgent.
-	created, err := s.store.GetCampaign(ctx, id)
+	// (server-assigned id, created_at/updated_at), mirroring CreateAgent. The
+	// read-back is tenant-scoped (#473) — the row was just created under this tenant.
+	created, err := s.store.GetCampaignInTenant(ctx, tenantID, id)
 	if err != nil {
 		slog.Default().Error("CreateCampaign: read-back failed", "campaign_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
@@ -108,7 +113,13 @@ func (s *campaignManagement) UpdateCampaign(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name must not be empty"))
 	}
 
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	}
+
 	updated, err := s.store.UpdateCampaign(ctx, storage.CampaignUpdate{
+		TenantID: tenantID,
 		ID:       id,
 		Name:     name,
 		System:   m.GetSystem(),
@@ -149,10 +160,17 @@ func (s *campaignManagement) SetActiveCampaign(
 	if !ok || u.DiscordUserID == "" {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no operator in context"))
 	}
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no tenant in context"))
+	}
 
-	// Validate the target exists before persisting the pointer — an unknown id is
-	// a client error (CodeNotFound), never a silently-stored dangling selection.
-	target, err := s.store.GetCampaign(ctx, id)
+	// Validate the target exists WITHIN THE CALLER'S TENANT before persisting the
+	// pointer (#473): a campaign outside the tenant resolves to ErrNotFound
+	// (CodeNotFound), so a stranger can never durably select the victim's campaign
+	// and pivot every campaign-scoped surface onto it (self-signup design §0a). An
+	// unknown id is likewise CodeNotFound, never a silently-stored dangling selection.
+	target, err := s.store.GetCampaignInTenant(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("campaign not found"))

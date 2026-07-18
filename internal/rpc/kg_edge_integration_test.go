@@ -24,7 +24,7 @@ import (
 
 func TestKGEdge_Integration(t *testing.T) {
 	dsn := startPostgres(t)
-	store, campaignID := seedStore(t, dsn)
+	store, tenantID, campaignID := seedStoreTenant(t, dsn)
 	ctx := context.Background()
 
 	mk := func(typ storage.KGNodeType, name string) storage.KGNode {
@@ -53,7 +53,7 @@ func TestKGEdge_Integration(t *testing.T) {
 	server := rpc.NewCampaignServer(store)
 	server.SetSessions(liveMgr(campaignID))
 	mux := http.NewServeMux()
-	mux.Handle(server.Handler())
+	mux.Handle(server.Handler(connect.WithInterceptors(tenantOperatorInterceptor(tenantID, "operator-kg"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	client := managementv1connect.NewCampaignServiceClient(

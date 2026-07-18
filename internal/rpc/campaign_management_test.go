@@ -155,10 +155,11 @@ func TestUpdateCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
 	store := newFakeManagementStore()
 	id := uuid.New()
+	tenantID := uuid.New()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{
-		id: {ID: id, TenantID: uuid.New(), Name: "Old", System: "old-sys", Language: "en"},
+		id: {ID: id, TenantID: tenantID, Name: "Old", System: "old-sys", Language: "en"},
 	}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, tenantID, nil)
 
 	resp, err := client.UpdateCampaign(context.Background(),
 		connect.NewRequest(&managementv1.UpdateCampaignRequest{
@@ -179,6 +180,10 @@ func TestUpdateCampaign_HappyPath(t *testing.T) {
 	if u.System != "dnd5e" || u.Language != "de" || u.Name != "Renamed" {
 		t.Errorf("store update not opaque round-trip: %+v", u)
 	}
+	// The write is scoped to the ctx tenant (#473) — never a client-supplied one.
+	if u.TenantID != tenantID {
+		t.Errorf("update tenant = %s, want the ctx tenant %s", u.TenantID, tenantID)
+	}
 }
 
 // TestUpdateCampaign_TapeArmed pins the rollover-tape opt-in through the RPC
@@ -189,10 +194,11 @@ func TestUpdateCampaign_TapeArmed(t *testing.T) {
 	t.Parallel()
 	store := newFakeManagementStore()
 	id := uuid.New()
+	tenantID := uuid.New()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{
-		id: {ID: id, TenantID: uuid.New(), Name: "Old", Language: "en"},
+		id: {ID: id, TenantID: tenantID, Name: "Old", Language: "en"},
 	}
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), nil)
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, tenantID, nil)
 
 	armed := true
 	resp, err := client.UpdateCampaign(context.Background(),
@@ -280,12 +286,13 @@ func TestUpdateCampaign_UnknownIDNotFound(t *testing.T) {
 func TestSetActiveCampaign_HappyPath(t *testing.T) {
 	t.Parallel()
 	store := newFakeManagementStore()
-	target := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Target"}
+	tenantID := uuid.New()
+	target := storage.Campaign{ID: uuid.New(), TenantID: tenantID, Name: "Target"}
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{target.ID: target}
 	// No live session and no durable selection lookup wired: the resolved read
 	// falls through to the durable selection, which the fake returns from forUser.
 	store.forUser = target
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "operator-42"}, uuid.New(), nil)
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "operator-42"}, tenantID, nil)
 
 	resp, err := client.SetActiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.SetActiveCampaignRequest{CampaignId: target.ID.String()}))
@@ -341,12 +348,13 @@ func TestSetActiveCampaign_UnknownIDNotFound(t *testing.T) {
 // honors the live session.
 func TestSetActiveCampaignLiveFirstWins(t *testing.T) {
 	t.Parallel()
-	live := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Live L"}
-	durable := storage.Campaign{ID: uuid.New(), TenantID: uuid.New(), Name: "Durable D"}
+	tenantID := uuid.New()
+	live := storage.Campaign{ID: uuid.New(), TenantID: tenantID, Name: "Live L"}
+	durable := storage.Campaign{ID: uuid.New(), TenantID: tenantID, Name: "Durable D"}
 	store := newFakeManagementStore()
 	store.campaignsByID = map[uuid.UUID]storage.Campaign{live.ID: live, durable.ID: durable}
 	store.forUser = durable // the durable selection, were live-first not in force
-	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, uuid.New(), liveMgr(live.ID))
+	client := mgmtClient(t, store, storage.User{DiscordUserID: "999"}, tenantID, liveMgr(live.ID))
 
 	resp, err := client.SetActiveCampaign(context.Background(),
 		connect.NewRequest(&managementv1.SetActiveCampaignRequest{CampaignId: durable.ID.String()}))

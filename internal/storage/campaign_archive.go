@@ -18,27 +18,12 @@ var ErrNotArchived = errors.New("storage: campaign not archived")
 // ListAllCampaigns returns every Campaign — active AND archived — ordered by name
 // (then id for a stable tie-break). It backs the archive-management panel's
 // include_archived read (#269); the default list surfaces (ListCampaigns, the
-// /glyphoxa use autocomplete) stay archive-excluding. Single-operator today, so
-// it is unscoped, mirroring ListCampaigns; tenant scoping fills in behind the
-// X-Tenant-Id pass-through later (ADR-0039).
+// /glyphoxa use autocomplete) stay archive-excluding. It is the tenant-FREE list
+// the standalone voice node uses (ADR-0039 single-operator); the web/RPC tier uses
+// [Store.ListAllCampaignsInTenant] so the panel shows only the caller's own
+// campaigns (#473).
 func (s *Store) ListAllCampaigns(ctx context.Context) ([]Campaign, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+campaignColumns+` FROM campaign ORDER BY name, id`)
-	if err != nil {
-		return nil, fmt.Errorf("storage: list all campaigns: %w", err)
-	}
-	defer rows.Close()
-	var out []Campaign
-	for rows.Next() {
-		c, err := scanCampaign(rows)
-		if err != nil {
-			return nil, fmt.Errorf("storage: scan campaign: %w", err)
-		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: list all campaigns: %w", err)
-	}
-	return out, nil
+	return s.listCampaigns(ctx, `SELECT `+campaignColumns+` FROM campaign ORDER BY name, id`)
 }
 
 // ArchiveCampaign marks a campaign archived and returns the updated row (#269).
@@ -50,14 +35,19 @@ func (s *Store) ListAllCampaigns(ctx context.Context) ([]Campaign, error) {
 // treated as absent" (#265): the slash surface then falls to its /use hint and
 // the web tier to its most-recent fallback, neither of which resolves an archived
 // campaign. A missing id yields ErrNotFound.
-func (s *Store) ArchiveCampaign(ctx context.Context, id uuid.UUID) (Campaign, error) {
+//
+// It is TENANT-SCOPED (#473): the UPDATE matches (id, tenant_id), so a
+// foreign-tenant id is invisible and yields ErrNotFound — a cross-tenant archive
+// can never land. The durable-selection clear stays keyed on the campaign id, so
+// it only nulls pointers at THIS campaign.
+func (s *Store) ArchiveCampaign(ctx context.Context, tenantID, id uuid.UUID) (Campaign, error) {
 	var c Campaign
 	err := s.InTx(ctx, func(tx *Store) error {
 		row := tx.db.QueryRow(ctx,
 			`UPDATE campaign
 			    SET archived_at = COALESCE(archived_at, now()), updated_at = now()
-			  WHERE id = $1
-			 RETURNING `+campaignColumns, id)
+			  WHERE id = $1 AND tenant_id = $2
+			 RETURNING `+campaignColumns, id, tenantID)
 		got, err := scanCampaign(row)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -85,17 +75,20 @@ func (s *Store) ArchiveCampaign(ctx context.Context, id uuid.UUID) (Campaign, er
 // set, and returns the updated row (#269). A missing id yields ErrNotFound.
 // Un-archiving does not restore any operator's cleared durable selection (that
 // pointer was nulled on archive) — the campaign simply becomes selectable again.
-func (s *Store) UnarchiveCampaign(ctx context.Context, id uuid.UUID) (Campaign, error) {
+//
+// It is TENANT-SCOPED (#473): the UPDATE matches (id, tenant_id), so a
+// foreign-tenant id is invisible and yields ErrNotFound.
+func (s *Store) UnarchiveCampaign(ctx context.Context, tenantID, id uuid.UUID) (Campaign, error) {
 	row := s.db.QueryRow(ctx,
 		`UPDATE campaign SET archived_at = NULL, updated_at = now()
-		  WHERE id = $1
-		 RETURNING `+campaignColumns, id)
+		  WHERE id = $1 AND tenant_id = $2
+		 RETURNING `+campaignColumns, id, tenantID)
 	c, err := scanCampaign(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound
 	}
 	if err != nil {
-		return Campaign{}, fmt.Errorf("storage: unarchive campaign %s: %w", id, err)
+		return Campaign{}, fmt.Errorf("storage: unarchive campaign %s in tenant %s: %w", id, tenantID, err)
 	}
 	return c, nil
 }
@@ -110,20 +103,26 @@ func (s *Store) UnarchiveCampaign(ctx context.Context, id uuid.UUID) (Campaign, 
 // Butler is removed through the agents CASCADE, deliberately NOT through
 // DeleteAgent's butler guard (ADR-0009): a campaign delete takes its Butler with
 // it. The WHERE archived_at IS NOT NULL clause makes the delete refuse a
-// non-archived campaign; when no row is affected, GetCampaign disambiguates a
-// missing campaign (ErrNotFound) from a live one (ErrNotArchived). This is
+// non-archived campaign; when no row is affected, GetCampaignInTenant disambiguates
+// a missing campaign (ErrNotFound) from a live one (ErrNotArchived). This is
 // irrecoverable removal of play history including transcript PII — no soft-delete
 // retention window (#265).
-func (s *Store) DeleteCampaign(ctx context.Context, id uuid.UUID) error {
+//
+// It is TENANT-SCOPED (#473): the DELETE matches (id, tenant_id), so a
+// foreign-tenant id is invisible — it disambiguates to ErrNotFound (never
+// ErrNotArchived, which would confirm the id exists), and a cross-tenant delete
+// can never cascade away the victim's play history.
+func (s *Store) DeleteCampaign(ctx context.Context, tenantID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
-		`DELETE FROM campaign WHERE id = $1 AND archived_at IS NOT NULL`, id)
+		`DELETE FROM campaign WHERE id = $1 AND tenant_id = $2 AND archived_at IS NOT NULL`, id, tenantID)
 	if err != nil {
-		return fmt.Errorf("storage: delete campaign %s: %w", id, err)
+		return fmt.Errorf("storage: delete campaign %s in tenant %s: %w", id, tenantID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Nothing deleted: either the campaign does not exist, or it exists but is
-		// not archived. Disambiguate so the RPC layer can map each to its own code.
-		if _, gerr := s.GetCampaign(ctx, id); errors.Is(gerr, ErrNotFound) {
+		// Nothing deleted: the campaign does not exist in this tenant, or it exists but
+		// is not archived. Disambiguate (tenant-scoped) so the RPC layer can map each to
+		// its own code — a foreign-tenant id resolves to ErrNotFound, never ErrNotArchived.
+		if _, gerr := s.GetCampaignInTenant(ctx, tenantID, id); errors.Is(gerr, ErrNotFound) {
 			return ErrNotFound
 		} else if gerr != nil {
 			return gerr
@@ -140,9 +139,10 @@ func (s *Store) DeleteCampaign(ctx context.Context, id uuid.UUID) error {
 // surviving campaign's clips, and a crash right after the delete never loses the
 // sweep. The delete's error mapping (ErrNotFound / ErrNotArchived) is unchanged.
 // jobPayload must be non-empty; callers with nothing to sweep use [DeleteCampaign].
-func (s *Store) DeleteCampaignWithJob(ctx context.Context, id uuid.UUID, jobKind string, jobPayload []byte) error {
+// It is TENANT-SCOPED (#473): the delete matches (id, tenant_id).
+func (s *Store) DeleteCampaignWithJob(ctx context.Context, tenantID, id uuid.UUID, jobKind string, jobPayload []byte) error {
 	return s.InTx(ctx, func(tx *Store) error {
-		if err := tx.DeleteCampaign(ctx, id); err != nil {
+		if err := tx.DeleteCampaign(ctx, tenantID, id); err != nil {
 			return err
 		}
 		if _, err := tx.EnqueueJob(ctx, jobKind, jobPayload, 0); err != nil {

@@ -110,16 +110,17 @@ func TestArchiveThenResolveNext(t *testing.T) {
 // manager is never even asked to Start.
 func TestStartSessionRefusedWhenOnlyCampaignArchived(t *testing.T) {
 	dsn := startPostgres(t)
-	store, campaignID := seedStore(t, dsn)
+	store, tenantID, campaignID := seedStoreTenant(t, dsn)
 	ctx := context.Background()
 
-	// Archive the sole campaign directly.
-	if _, err := store.ArchiveCampaign(ctx, campaignID); err != nil {
+	// Archive the sole campaign directly. Inject the SEEDED tenant below so the only
+	// reason resolution finds nothing is the archived-exclusion (#265), not a tenant
+	// mismatch — the archived campaign belongs to this very tenant (#473).
+	if _, err := store.ArchiveCampaign(ctx, tenantID, campaignID); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
 
 	mgr := &fakeSessionManager{}
-	tenantID := uuid.New()
 	inject := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			ctx = auth.WithTenant(ctx, tenantID)

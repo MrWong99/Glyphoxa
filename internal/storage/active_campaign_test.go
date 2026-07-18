@@ -224,7 +224,7 @@ func TestListAndGetCampaign(t *testing.T) {
 // unknown id is ErrNotFound.
 func TestUpdateCampaign(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, first := seedCampaign(t, dsn) // seeded: name "Lost Mine", system dnd5e, language en
+	pool, tenantID, first := seedCampaign(t, dsn) // seeded: name "Lost Mine", system dnd5e, language en
 	ctx := context.Background()
 	st := storage.New(pool)
 
@@ -234,7 +234,7 @@ func TestUpdateCampaign(t *testing.T) {
 	}
 
 	updated, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{
-		ID: first, Name: "Renamed Quest", System: "Homebrew: 3d6 ⚔️", Language: "Draconic (made up)",
+		TenantID: tenantID, ID: first, Name: "Renamed Quest", System: "Homebrew: 3d6 ⚔️", Language: "Draconic (made up)",
 	})
 	if err != nil {
 		t.Fatalf("UpdateCampaign: %v", err)
@@ -252,7 +252,7 @@ func TestUpdateCampaign(t *testing.T) {
 	}
 
 	// An unknown id is ErrNotFound (the RPC layer maps it to CodeNotFound).
-	if _, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{ID: uuid.New(), Name: "x"}); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{TenantID: tenantID, ID: uuid.New(), Name: "x"}); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("UpdateCampaign(random) = %v, want ErrNotFound", err)
 	}
 }
@@ -267,7 +267,7 @@ func TestUpdateCampaign(t *testing.T) {
 // agent-write path, #224).
 func TestUpdateCampaignLanguageLeavesAgentVoiceUntouched(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campID := seedCampaign(t, dsn) // seeded in language "en", auto-Butler fired
+	pool, tenantID, campID := seedCampaign(t, dsn) // seeded in language "en", auto-Butler fired
 	ctx := context.Background()
 	st := storage.New(pool)
 
@@ -291,7 +291,7 @@ func TestUpdateCampaignLanguageLeavesAgentVoiceUntouched(t *testing.T) {
 
 	// The change under test: Campaign Language en -> de.
 	if _, err := st.UpdateCampaign(ctx, storage.CampaignUpdate{
-		ID: campID, Name: "Lost Mine", System: "dnd5e", Language: "de",
+		TenantID: tenantID, ID: campID, Name: "Lost Mine", System: "dnd5e", Language: "de",
 	}); err != nil {
 		t.Fatalf("UpdateCampaign(lang en->de): %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	managementv1 "github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1"
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/highlight"
 	"github.com/MrWong99/Glyphoxa/internal/rpc"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -186,7 +187,7 @@ func TestDeleteCampaign_SweepsHighlightClips(t *testing.T) {
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
-	if _, err := srv.DeleteCampaign(context.Background(),
+	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
 		t.Fatalf("DeleteCampaign: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestDeleteCampaign_EnqueuesDurableClipSweep(t *testing.T) {
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
-	if _, err := srv.DeleteCampaign(context.Background(),
+	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: id.String()})); err != nil {
 		t.Fatalf("DeleteCampaign: %v", err)
 	}
@@ -237,7 +238,7 @@ func TestDeleteCampaign_NoClipsNoJob(t *testing.T) {
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
-	if _, err := srv.DeleteCampaign(context.Background(),
+	if _, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()})); err != nil {
 		t.Fatalf("DeleteCampaign: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestDeleteCampaign_RefusedKeepsClips(t *testing.T) {
 	srv := rpc.NewCampaignServerWith(rpc.CampaignStores{Active: store, Campaigns: store, Archive: store})
 	srv.SetHighlightClipSweeper(sweeper)
 
-	_, err := srv.DeleteCampaign(context.Background(),
+	_, err := srv.DeleteCampaign(auth.WithTenant(context.Background(), uuid.New()),
 		connect.NewRequest(&managementv1.DeleteCampaignRequest{Id: uuid.New().String()}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("want FailedPrecondition, got %v", err)

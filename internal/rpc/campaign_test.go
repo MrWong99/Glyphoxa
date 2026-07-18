@@ -26,11 +26,11 @@ type fakeReader struct {
 	forUserErr error
 }
 
-func (f fakeReader) GetActiveCampaign(context.Context) (storage.Campaign, error) {
+func (f fakeReader) GetActiveCampaignInTenant(context.Context, uuid.UUID) (storage.Campaign, error) {
 	return f.campaign, f.err
 }
 
-func (f fakeReader) GetActiveCampaignForUser(context.Context, string) (storage.Campaign, error) {
+func (f fakeReader) GetActiveCampaignForUserInTenant(context.Context, uuid.UUID, string) (storage.Campaign, error) {
 	if f.forUserErr != nil {
 		return storage.Campaign{}, f.forUserErr
 	}
@@ -40,7 +40,7 @@ func (f fakeReader) GetActiveCampaignForUser(context.Context, string) (storage.C
 	return f.forUser, nil
 }
 
-func (f fakeReader) GetCampaign(context.Context, uuid.UUID) (storage.Campaign, error) {
+func (f fakeReader) GetCampaignInTenant(context.Context, uuid.UUID, uuid.UUID) (storage.Campaign, error) {
 	return f.campaign, f.err
 }
 

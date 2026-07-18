@@ -80,7 +80,7 @@ func TestUseCommandExcludesArchivedCampaign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCampaign(archived): %v", err)
 	}
-	if _, err := st.ArchiveCampaign(ctx, archivedID); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, tenantID, archivedID); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
 

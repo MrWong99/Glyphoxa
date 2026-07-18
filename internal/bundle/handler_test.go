@@ -167,7 +167,7 @@ func TestServeExportForeignTenant(t *testing.T) {
 func TestServeExportArchivedCampaign(t *testing.T) {
 	ctx := context.Background()
 	st, cid, _ := seededCampaign(t)
-	if _, err := st.ArchiveCampaign(ctx, cid); err != nil {
+	if _, err := st.ArchiveCampaign(ctx, seededTenantID(t, st), cid); err != nil {
 		t.Fatalf("ArchiveCampaign: %v", err)
 	}
 	const token = "valid-session-token"
