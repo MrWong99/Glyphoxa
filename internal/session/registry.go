@@ -74,6 +74,26 @@ func (r *Registry) PublishToCampaign(campaignID uuid.UUID, e voiceevent.Event) b
 	return false
 }
 
+// Snapshot returns the single active Voice Session across all registered Managers
+// and true, or the zero value and false when none is active. It is the
+// pre-constructible single-active read the NON-bus, NOT-yet-session-scoped
+// consumers still depend on — the knowledge Tools adapter and the base config's
+// SpeakerName closure (#448 replaced their View; #487 keeps this seam for them).
+// Under the current single-active-per-Manager composition it is unambiguous; the
+// concurrency epic (#488+) migrates those consumers to per-session context and
+// this convenience read retires with them.
+func (r *Registry) Snapshot() (storage.VoiceSession, bool) {
+	r.mu.Lock()
+	mgrs := append([]*Manager(nil), r.mgrs...)
+	r.mu.Unlock()
+	for _, m := range mgrs {
+		if vs, ok := m.Snapshot(); ok {
+			return vs, true
+		}
+	}
+	return storage.VoiceSession{}, false
+}
+
 // Sessions is the narrow read a process-wide bus consumer needs: resolve a
 // stamped event's SessionID to its full Voice Session (hence its Campaign). It
 // replaces the old Snapshot() seam (#487): consumers no longer read a single

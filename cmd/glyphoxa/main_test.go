@@ -94,7 +94,10 @@ func TestRunWebTierBootsAndShutsDown(t *testing.T) {
 // the SSE tail below attaches to a live id without a Manager or DB.
 type staticSessions struct{ id uuid.UUID }
 
-func (s staticSessions) Snapshot() (storage.VoiceSession, bool) {
+func (s staticSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	if id != s.id {
+		return storage.VoiceSession{}, false
+	}
 	return storage.VoiceSession{ID: s.id}, true
 }
 
