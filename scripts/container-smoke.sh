@@ -3,8 +3,9 @@
 # container-smoke.sh — the executable acceptance spec for the Glyphoxa OCI image
 # (issue #31, ADR-0034; scratch image since #468). Runs against an already-built
 # image and asserts the image is actually runnable AND minimal: the CLI works,
-# the binary is fully static (CGO_ENABLED=0 — issue #468's acceptance
-# criterion), the image is genuinely scratch (no shell), CA certificates are
+# the binary is fully static (issue #468's acceptance criterion, kept through
+# the libopus encoder revert via a static CGO link — ADR-0034 amendment
+# 2026-07-19), the image is genuinely scratch (no shell), CA certificates are
 # present for outbound TLS, and the process is a non-root user.
 #
 # The image has no shell, so assertions that used to run inside the container
@@ -123,8 +124,10 @@ fi
 # ---------------------------------------------------------------------------
 # 2. The binary is fully static (issue #468 acceptance criterion): ldd on the
 #    extracted binary must report "not a dynamic executable". A static binary
-#    is the load-bearing property that lets the runtime stage be scratch —
-#    any CGO regression (a new native binding) fails here first.
+#    is the load-bearing property that lets the runtime stage be scratch. CGO
+#    is ON again for the libopus outbound encoder (ADR-0034 amendment
+#    2026-07-19), but libopus/libc are linked statically — so the assertion is
+#    unchanged, and any dynamically-linked native binding fails here first.
 # ---------------------------------------------------------------------------
 printf '[2] the binary is statically linked (ldd: "not a dynamic executable")\n'
 BIN_LOCAL="$EXTRACT_DIR/glyphoxa"
@@ -137,7 +140,7 @@ else
 	if printf '%s\n' "$ldd_out" | grep -qi 'not a dynamic executable'; then
 		ok 'ldd reports "not a dynamic executable" (fully static)'
 	else
-		bad 'binary is dynamically linked — the pure-Go/CGO_ENABLED=0 migration (#468) regressed'
+		bad 'binary is dynamically linked — the static-link property (#468, kept through the libopus encoder revert) regressed'
 	fi
 fi
 

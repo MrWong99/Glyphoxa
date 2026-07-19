@@ -164,6 +164,58 @@ func TestEngine_ToolUseRoundTrip_RunsDiceAndReturnsFinalText(t *testing.T) {
 	}
 }
 
+// TestEngine_FinalAnswerRound_SendsToolChoiceNoneToolsDeclared pins the wiring
+// half of the tool-budget degrade (the live Mehra 8-round silence): when the
+// loop exhausts its round budget on a model chain-calling a GRANTED tool and
+// issues its marked final-answer round, the adapter must send tool_choice none
+// with the Tools STILL DECLARED — the conversation holds prior tool_call/tool
+// messages, so stripping the declarations risks a provider 400 on the dangling
+// references (the #420/#427 rule) — and the marked round's prose is delivered
+// with a nil error instead of ErrMaxRoundsExceeded abandoning the turn.
+func TestEngine_FinalAnswerRound_SendsToolChoiceNoneToolsDeclared(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Round 0: executed. Round 1: over-budget (maxRounds=1) → budget error
+		// results → the marked final-answer round answers in prose.
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{calls: []llm.ToolCall{{ID: "t2", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "No more rolling, here is my answer.", stop: "end_turn"},
+	}}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 1)
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v (budget exhaustion must degrade to the final answer, not fail the turn)", err)
+	}
+	if strings.TrimSpace(got) != "No more rolling, here is my answer." {
+		t.Errorf("final text = %q, want the final-answer round's prose", got)
+	}
+
+	reqs := prov.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("provider called %d times, want 3 (1 executed + 1 over-budget + 1 marked final)", len(reqs))
+	}
+	// Regular rounds are unchanged: auto choice, tools declared.
+	for i := 0; i < 2; i++ {
+		if reqs[i].ToolChoice.Mode != llm.ToolChoiceAuto || len(reqs[i].Tools) != 1 {
+			t.Errorf("round %d choice=%q tools=%d, want auto with the dice decl", i, reqs[i].ToolChoice.Mode, len(reqs[i].Tools))
+		}
+	}
+	// The final-answer round: tool_choice none, tools STILL declared.
+	final := reqs[2]
+	if final.ToolChoice.Mode != llm.ToolChoiceNone {
+		t.Errorf("final-answer round tool_choice = %q, want none", final.ToolChoice.Mode)
+	}
+	if len(final.Tools) != 1 || final.Tools[0].Name != "dice" {
+		t.Errorf("final-answer round tools = %+v, want the dice decl still declared (#420/#427)", final.Tools)
+	}
+	// And its conversation ends with the budget-exhausted error result.
+	last := final.Messages[len(final.Messages)-1]
+	if last.Role != llm.RoleTool || len(last.ToolResults) != 1 ||
+		!last.ToolResults[0].IsError || !strings.Contains(last.ToolResults[0].Content, "tool budget exhausted") {
+		t.Errorf("final-answer round's last message = %+v, want the budget-exhausted error result", last)
+	}
+}
+
 // llmRound is one captured LLMRound span: the labels the metric carries.
 type llmRound struct {
 	provider    observe.Provider
@@ -1987,5 +2039,130 @@ func TestEngine_RecoveredPseudoDice_SuppressesInventedRollGuard(t *testing.T) {
 		if r.ToolChoice.Mode == llm.ToolChoiceTool {
 			t.Errorf("req[%d] used forced tool choice %+v; want no forced regeneration", i, r.ToolChoice)
 		}
+	}
+}
+
+// TestEngine_InventedRoll_OverBudgetRefusedDiceStillRegenerates is the degrade-
+// path leak regression (#399 x the tool-budget degrade): dice armed, the model
+// burns round 0 on an unavailable tool and emits its ONLY dice call on the
+// round that exhausts the budget — the loop REFUSES that call (budget-exhausted
+// note, never executed) — and the forced final answer then narrates a number.
+// No die ever rolled, so the guard MUST fire the forced regeneration: keying on
+// the requested call name would let the refused, never-run dice call vouch for
+// the fabricated 14 (ADR-0012: a spoken invented number cannot be unsaid).
+func TestEngine_InventedRoll_OverBudgetRefusedDiceStillRegenerates(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Round 0: an unavailable tool → error result (streak 1, no short-circuit).
+		{calls: []llm.ToolCall{{ID: "x1", Name: "remember_knowledge", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		// Round 1 (over-budget, MaxRounds=1): the dice call — refused, never run.
+		{calls: []llm.ToolCall{{ID: "d1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		// Marked final-answer round: narrates a number no die ever produced.
+		{text: "The d20 shows a 14!", stop: "end_turn"},
+		// Forced regen: a real round-trip narrating the actual roll (seeded 16).
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "The bones show a 16, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 1,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 16, traveler." {
+		t.Errorf("delivered = %q, want the regenerated reply — the refused dice call must not vouch for the invented 14", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedRollClaim {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [roll_claim]", paths)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 5 {
+		t.Fatalf("Complete calls = %d, want 5 (error round + refused round + final answer + forced regen round-trip)", len(reqs))
+	}
+	if reqs[3].ToolChoice.Mode != llm.ToolChoiceTool || reqs[3].ToolChoice.Tool != "dice" {
+		t.Errorf("regen round-0 tool_choice = %+v, want tool:dice (the forced regeneration must fire)", reqs[3].ToolChoice)
+	}
+}
+
+// TestEngine_InventedRoll_FinalAnswerRoundDiceCallStillRegenerates is the
+// final-answer-round variant of the same leak: after the no-progress
+// short-circuit, the marked final-answer round returns BOTH prose claiming a
+// roll AND a dice call — which the loop drops un-executed. The dropped call
+// must not be recorded as "called": the guard keys on EXECUTED results, so the
+// forced regeneration fires.
+func TestEngine_InventedRoll_FinalAnswerRoundDiceCallStillRegenerates(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Rounds 0+1: an unavailable tool, twice → no-progress short-circuit.
+		{calls: []llm.ToolCall{{ID: "x1", Name: "remember_knowledge", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		{calls: []llm.ToolCall{{ID: "x2", Name: "remember_knowledge", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		// Marked final-answer round: an invented claim plus a dice call the loop
+		// drops un-executed in favour of the prose.
+		{text: "The d20 shows a 14!", calls: []llm.ToolCall{{ID: "d9", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		// Forced regen: a real round-trip narrating the actual roll (seeded 16).
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "The bones show a 16, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 0,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 16, traveler." {
+		t.Errorf("delivered = %q, want the regenerated reply — the dropped final-round dice call must not vouch for the invented 14", got)
+	}
+	if paths := rec.malformedPaths(); len(paths) != 1 || paths[0] != observe.MalformedRollClaim {
+		t.Errorf("MalformedToolGen paths = %v, want exactly [roll_claim]", paths)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 5 {
+		t.Fatalf("Complete calls = %d, want 5 (2 error rounds + final answer + forced regen round-trip)", len(reqs))
+	}
+	if reqs[3].ToolChoice.Mode != llm.ToolChoiceTool || reqs[3].ToolChoice.Tool != "dice" {
+		t.Errorf("regen round-0 tool_choice = %+v, want tool:dice (the forced regeneration must fire)", reqs[3].ToolChoice)
+	}
+}
+
+// TestEngine_InventedRoll_OverBudgetPseudoDiceStillRegenerates is the pseudo-XML
+// variant on the over-budget round: the dice call arrives as text (#410) on the
+// round that exhausts the budget. It can never execute there, so the recovery
+// must be strip-only (recovered=false — the recovered=true contract promises the
+// call will run), the clean prose becomes the answer, and its invented claim
+// triggers the forced regeneration because zero dice results executed.
+func TestEngine_InventedRoll_OverBudgetPseudoDiceStillRegenerates(t *testing.T) {
+	prov := &scriptedProvider{steps: []step{
+		// Round 0: an unavailable tool → error result (streak 1).
+		{calls: []llm.ToolCall{{ID: "x1", Name: "remember_knowledge", Input: json.RawMessage(`{}`)}}, stop: "tool_use"},
+		// Round 1 (over-budget, MaxRounds=1): pseudo-XML dice + an invented claim.
+		{text: `Rolling! <function=dice {"count":1,"sides":20}</function> The d20 shows a 14!`, stop: "end_turn"},
+		// Forced regen: a real round-trip narrating the actual roll (seeded 16).
+		{calls: []llm.ToolCall{{ID: "t1", Name: "dice", Input: json.RawMessage(`{"count":1,"sides":20}`)}}, stop: "tool_use"},
+		{text: "The bones show a 16, traveler.", stop: "end_turn"},
+	}}
+	rec := &recordingStage{}
+	eng := agenttool.NewEngine(prov, diceGrants(t), "", "m", 256, 1,
+		agenttool.WithMetrics(rec, observe.ProviderGroq))
+
+	got, err := eng.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Text: "Roll a d20 for me."}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if strings.TrimSpace(got) != "The bones show a 16, traveler." {
+		t.Errorf("delivered = %q, want the regenerated reply — a stripped pseudo-dice call must not vouch for the invented 14", got)
+	}
+	// text_leak from the strip, then roll_claim from the guard.
+	if paths := rec.malformedPaths(); len(paths) != 2 ||
+		paths[0] != observe.MalformedTextLeak || paths[1] != observe.MalformedRollClaim {
+		t.Errorf("MalformedToolGen paths = %v, want [text_leak roll_claim]", paths)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 4 {
+		t.Fatalf("Complete calls = %d, want 4 (error round + stripped over-budget round + forced regen round-trip)", len(reqs))
+	}
+	if reqs[2].ToolChoice.Mode != llm.ToolChoiceTool || reqs[2].ToolChoice.Tool != "dice" {
+		t.Errorf("regen round-0 tool_choice = %+v, want tool:dice (the forced regeneration must fire)", reqs[2].ToolChoice)
 	}
 }

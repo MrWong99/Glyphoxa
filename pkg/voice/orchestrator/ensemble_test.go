@@ -35,10 +35,41 @@ type fakeEnsemble struct {
 	mu        sync.Mutex
 	spoke     []string
 	delivered map[string]string // agentID -> text Speak committed (deliver-then-commit)
+	speakers  map[string]string // agentID -> the SpeakerID the reconstructed route carried
+}
+
+// recordSpeaker stores the SpeakerID the coordinator's reconstructed
+// [voiceevent.AddressRouted] carried for id, so a test can pin the SpeakerID
+// propagation from the EnsembleRouted onto every per-candidate route.
+func (s *fakeEnsemble) recordSpeaker(id, speakerID string) {
+	s.mu.Lock()
+	if s.speakers == nil {
+		s.speakers = map[string]string{}
+	}
+	s.speakers[id] = speakerID
+	s.mu.Unlock()
+}
+
+func (s *fakeEnsemble) speakerFor(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.speakers[id]
+}
+
+// speakerRecorded reports the recorded SpeakerID and whether Draft/Speak was
+// invoked for id at all — a candidate cancelled before its draft goroutine ran
+// records nothing, which is legitimate coordinator behavior, not a propagation
+// failure.
+func (s *fakeEnsemble) speakerRecorded(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got, ok := s.speakers[id]
+	return got, ok
 }
 
 func (s *fakeEnsemble) Draft(ctx context.Context, e voiceevent.AddressRouted) (string, error) {
 	id := e.Target.AgentID
+	s.recordSpeaker(id, e.SpeakerID)
 	if s.started != nil {
 		s.started <- id
 	}
@@ -64,6 +95,7 @@ func (s *fakeEnsemble) Draft(ctx context.Context, e voiceevent.AddressRouted) (s
 
 func (s *fakeEnsemble) Speak(ctx context.Context, e voiceevent.AddressRouted, draft string, dispatch func(orchestrator.Reply) error) (string, error) {
 	id := e.Target.AgentID
+	s.recordSpeaker(id, e.SpeakerID)
 	s.mu.Lock()
 	s.spoke = append(s.spoke, id)
 	s.mu.Unlock()
@@ -162,7 +194,7 @@ func TestReplier_Ensemble_FastestDraftLeadsAndSpeaks(t *testing.T) {
 	replier := ensembleReplier(h, floor, spk)
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T7", Text: "Bart, Mira — thoughts?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T7", Text: "Bart, Mira — thoughts?", SpeakerID: "spk-ens", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
 
 	// The turn completes when the Lead's Speak returns.
 	select {
@@ -184,6 +216,18 @@ func TestReplier_Ensemble_FastestDraftLeadsAndSpeaks(t *testing.T) {
 	voicetest.AssertEvent(t, h, func(e voiceevent.TTSInvoked) bool { return e.Sentence == "Bart speaks." && e.TurnID == "T7" }, "one tts.invoked for Bart's line")
 	// Clean turn: no TurnEnded of any reason.
 	voicetest.AssertNoEvent[voiceevent.TurnEnded](t, h)
+	// SpeakerID propagation (the transcript-names seam): every reconstructed
+	// per-candidate route — the Drafts and the Lead's Speak — carries the
+	// EnsembleRouted's SpeakerID.
+	if got := spk.speakerFor(bartTarget.AgentID); got != "spk-ens" {
+		t.Errorf("Lead's route SpeakerID = %q, want spk-ens", got)
+	}
+	// The loser's draft may be cancelled before its goroutine ever invokes
+	// Draft (the winner completes instantly here) — assert the SpeakerID only
+	// when the draft actually ran; a wrong ID is a failure, absence is not.
+	if got, ok := spk.speakerRecorded(goblinTarget.AgentID); ok && got != "spk-ens" {
+		t.Errorf("losing candidate's Draft SpeakerID = %q, want spk-ens", got)
+	}
 }
 
 // TestReplier_Ensemble_SlowerLowerScoredCandidateStillLeads is the AC1 headline
@@ -493,20 +537,24 @@ func TestReplier_Ensemble_NoEnsembleSpeakerDegradesToTopScored(t *testing.T) {
 	h := voicetest.New(t)
 	floor := orchestrator.NewFloor()
 	ttsStage := orchestrator.NewTTS(h.Bus, selectiveSynth{})
-	var routedFor string
+	var routedFor, routedSpeaker string
 	replier := orchestrator.NewStreamReplier(ttsStage, func(_ context.Context, e voiceevent.AddressRouted, dispatch func(orchestrator.Reply) error) error {
 		routedFor = e.Target.AgentID
+		routedSpeaker = e.SpeakerID
 		return dispatch(orchestrator.Reply{Sentence: "hi"})
 	}, nil)
 	replier.SetFloor(floor)
 	// No SetEnsemble: r.ensemble stays nil → degrade.
 	t.Cleanup(replier.Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-deg", Text: "Bart, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-deg", Text: "Bart, Mira?", SpeakerID: "spk-deg", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
 
 	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TTSInvoked) bool { return e.TurnID == "T-deg" }, "single-route dispatch on degrade")
 	if routedFor != bartTarget.AgentID {
 		t.Fatalf("degrade routed to %q, want the top-scored Targets[0] Bart", routedFor)
+	}
+	if routedSpeaker != "spk-deg" {
+		t.Fatalf("degraded route SpeakerID = %q, want spk-deg (copied from the EnsembleRouted)", routedSpeaker)
 	}
 	voicetest.AssertEventCount[voiceevent.EnsembleLead](t, h, 0)
 }
@@ -625,4 +673,168 @@ func TestReplier_Ensemble_PostTakeMuteReFilter_EndsMute(t *testing.T) {
 	if len(spk.spokeIDs()) != 0 {
 		t.Fatal("no candidate may draft/speak after the post-Take mute re-filter")
 	}
+}
+
+// fallbackEnsemble is fakeEnsemble extended with the [orchestrator.FallbackSpeaker]
+// seam (#473 review): SpeakFallback dispatches one canned line for the named Agent
+// and records who it spoke for — unless the ctx is already cancelled or the test
+// models a voiceless persona via refuse, mirroring the real Cast's refusals.
+type fallbackEnsemble struct {
+	fakeEnsemble
+	refuse bool // model the Cast's voiceless-persona refusal
+
+	fbMu        sync.Mutex
+	fallbackFor []string
+}
+
+func (s *fallbackEnsemble) SpeakFallback(ctx context.Context, agentID string, dispatch func(orchestrator.Reply) error) bool {
+	if ctx.Err() != nil || s.refuse {
+		return false
+	}
+	s.fbMu.Lock()
+	s.fallbackFor = append(s.fallbackFor, agentID)
+	s.fbMu.Unlock()
+	_ = dispatch(orchestrator.Reply{Sentence: "canned stall", Voice: tts.Voice{VoiceID: agentID, Name: agentID}})
+	return true
+}
+
+func (s *fallbackEnsemble) fallbacks() []string {
+	s.fbMu.Lock()
+	defer s.fbMu.Unlock()
+	return append([]string(nil), s.fallbackFor...)
+}
+
+// TestReplier_Ensemble_AllDraftsErred_SpeaksTopCandidateFallback pins the #473-review
+// fix: when EVERY candidate's Draft fails with an engine error (one provider outage
+// killing the whole fan-out) the ensemble no longer ends in dead air while the
+// identical single-target failure speaks the canned line — the coordinator dispatches
+// the TOP-SCORED candidate's fallback through the optional
+// [orchestrator.FallbackSpeaker] seam, then still publishes the provider_error
+// terminal (the canned line is not the model's words, and the failure stays visible
+// to metrics/relay).
+func TestReplier_Ensemble_AllDraftsErred_SpeaksTopCandidateFallback(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fallbackEnsemble{fakeEnsemble: fakeEnsemble{
+		draftErr: map[string]error{bartTarget.AgentID: errors.New("groq boom"), goblinTarget.AgentID: errors.New("gemini boom")},
+		gate:     map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: closedGate()},
+	}}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-fb", Text: "Bart, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "T-fb" && e.Reason == voiceevent.TurnEndProviderError
+	}, "turn.ended provider_error still published after the fallback")
+	if got := spk.fallbacks(); len(got) != 1 || got[0] != bartTarget.AgentID {
+		t.Fatalf("SpeakFallback ran for %v, want exactly the top-scored Targets[0] Bart", got)
+	}
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 1)
+	voicetest.AssertEvent(t, h, func(e voiceevent.TTSInvoked) bool {
+		return e.TurnID == "T-fb" && e.Sentence == "canned stall"
+	}, "the canned line on the wire under the ensemble's TurnID")
+	voicetest.AssertEventCount[voiceevent.EnsembleLead](t, h, 0)
+	if len(spk.spokeIDs()) != 0 {
+		t.Fatalf("no Speak may run when every draft failed; spoke = %v", spk.spokeIDs())
+	}
+	if floor.Active() {
+		t.Fatal("the floor must be released after the fallback")
+	}
+}
+
+// TestReplier_Ensemble_AllDraftsErred_VoicelessTopCandidate_NoDispatch pins the
+// voiceless refusal at the coordinator: the speaker declines (an empty VoiceID
+// must never reach TTS) — nothing is dispatched and the provider_error terminal
+// is unchanged.
+func TestReplier_Ensemble_AllDraftsErred_VoicelessTopCandidate_NoDispatch(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fallbackEnsemble{
+		refuse: true,
+		fakeEnsemble: fakeEnsemble{
+			draftErr: map[string]error{bartTarget.AgentID: errors.New("boom"), goblinTarget.AgentID: errors.New("boom")},
+			gate:     map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: closedGate()},
+		},
+	}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-fb2", Text: "Bart, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "T-fb2" && e.Reason == voiceevent.TurnEndProviderError
+	}, "turn.ended provider_error for the refused fallback")
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 0)
+	if got := spk.fallbacks(); len(got) != 0 {
+		t.Fatalf("SpeakFallback dispatched for %v, want nothing (voiceless persona)", got)
+	}
+}
+
+// TestReplier_Ensemble_EmptyDeclinePlusError_NoFallback pins the decline gate: a
+// candidate that returned an EMPTY draft under no error chose silence — silence is
+// an Agent's answer, so the coordinator speaks no canned line (matching the routed
+// path's empty-completion rule) while the provider_error terminal is unchanged.
+func TestReplier_Ensemble_EmptyDeclinePlusError_NoFallback(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	spk := &fallbackEnsemble{fakeEnsemble: fakeEnsemble{
+		draft:    map[string]string{bartTarget.AgentID: "" /* declines */},
+		draftErr: map[string]error{goblinTarget.AgentID: errors.New("boom")},
+		gate:     map[string]chan struct{}{bartTarget.AgentID: closedGate(), goblinTarget.AgentID: closedGate()},
+	}}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-fb3", Text: "Bart, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	voicetest.WaitEvent(t, h, 2*time.Second, func(e voiceevent.TurnEnded) bool {
+		return e.TurnID == "T-fb3" && e.Reason == voiceevent.TurnEndProviderError
+	}, "turn.ended provider_error when a decline mixes with an error")
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 0)
+	if got := spk.fallbacks(); len(got) != 0 {
+		t.Fatalf("SpeakFallback dispatched for %v, want nothing (an Agent declined)", got)
+	}
+}
+
+// TestReplier_Ensemble_BargeDuringDrafts_NoFallback pins the barge exclusion: a
+// barge tearing the unit down mid-race speaks nothing — the fallback honors the
+// same post-barge silence as every other coordinator action, and no terminal is
+// published by the coordinator (the barge owns its own TurnEnded).
+func TestReplier_Ensemble_BargeDuringDrafts_NoFallback(t *testing.T) {
+	h := voicetest.New(t)
+	floor := orchestrator.NewFloor()
+	bartGate := make(chan struct{})
+	goblinGate := make(chan struct{})
+	spk := &fallbackEnsemble{fakeEnsemble: fakeEnsemble{
+		draftErr:  map[string]error{bartTarget.AgentID: errors.New("boom"), goblinTarget.AgentID: errors.New("boom")},
+		gate:      map[string]chan struct{}{bartTarget.AgentID: bartGate, goblinTarget.AgentID: goblinGate},
+		ignoreCtx: map[string]bool{bartTarget.AgentID: true, goblinTarget.AgentID: true},
+		started:   make(chan string, 2),
+	}}
+	replier := ensembleReplier(h, floor, spk)
+	t.Cleanup(replier.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.EnsembleRouted{TurnID: "T-fb4", Text: "Bart, Mira?", Targets: []voiceevent.AddressTarget{bartTarget, goblinTarget}})
+
+	// Both drafts are in flight (blocked on their gates); the barge lands.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-spk.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the drafts never started")
+		}
+	}
+	floor.Yield()
+	// The drafts now fail — but their results land AFTER the cancel.
+	close(bartGate)
+	close(goblinGate)
+
+	// Give the coordinator time to (wrongly) speak; it must not.
+	time.Sleep(200 * time.Millisecond)
+	voicetest.AssertEventCount[voiceevent.TTSInvoked](t, h, 0)
+	if got := spk.fallbacks(); len(got) != 0 {
+		t.Fatalf("SpeakFallback dispatched for %v after a barge, want nothing", got)
+	}
+	voicetest.AssertNoEvent[voiceevent.TurnEnded](t, h)
 }

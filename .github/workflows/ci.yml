@@ -160,15 +160,22 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # The pure-Go guarantee (#468): the production binary must build with
-      # CGO_ENABLED=0 and link fully statically — that property is what lets
-      # the container image be FROM scratch. Any new CGO dependency fails
-      # here, on the fast PR gate, before it reaches the image build.
-      - name: Static build assertion (CGO_ENABLED=0)
+      # The static-binary guarantee (#468, re-scoped by the libopus encoder
+      # revert, ADR-0034 amendment 2026-07-19): the production binary links ONE
+      # native lib — libopus, the outbound Opus encoder (pion/opus's encoder is
+      # below speech-quality parity) — so CGO is ON but the link must still be
+      # fully static; that property is what lets the container image stay FROM
+      # scratch. netgo/osusergo force the pure-Go resolvers (static glibc
+      # getaddrinfo would dlopen NSS libs that don't exist in scratch). Any
+      # dynamically-linked dependency fails here, on the fast PR gate, before
+      # it reaches the image build. Mirrors the Dockerfile's build invocation.
+      - name: Install libopus (static-link dep of the opus tag)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libopus-dev
+      - name: Static build assertion (CGO, fully static link)
         run: |
-          CGO_ENABLED=0 go build -tags "opus dave" -o /tmp/glyphoxa-static ./cmd/glyphoxa
+          CGO_ENABLED=1 go build -tags "opus dave nolibopusfile netgo osusergo" -ldflags '-extldflags "-static -lm"' -o /tmp/glyphoxa-static ./cmd/glyphoxa
           if ! ldd /tmp/glyphoxa-static 2>&1 | grep -q 'not a dynamic executable'; then
-            echo "FAIL: binary is dynamically linked — a CGO dependency crept back in:"
+            echo "FAIL: binary is dynamically linked — the static-link property behind the scratch image regressed:"
             ldd /tmp/glyphoxa-static
             exit 1
           fi
@@ -238,25 +245,31 @@ jobs:
           name: gen
           path: gen
 
-      # The opus codec (`//go:build opus`) and the DAVE build (`//go:build dave`)
-      # are pure Go since the pion/opus + dave-go migration — no system libopus,
-      # no libdave, nothing to apt-get. This is still the ADR-0033 "audio builds"
-      # job that keeps the live binary from silently breaking while the default
-      # suite stays lean (codec/DAVE stubbed); the `dave` tag is compiled here
-      # too now that it costs nothing.
+      # The opus codec (`//go:build opus`) links the system libopus again for
+      # the OUTBOUND encoder (hraban/opus, CGO; pion/opus stays decode-only
+      # until its encoder reaches speech-quality parity — ADR-0034 amendment
+      # 2026-07-19), so the job installs libopus-dev. `nolibopusfile` keeps
+      # hraban/opus from also requiring libopusfile (unused). The DAVE build
+      # (`//go:build dave`) is still pure Go (dave-go). This is the ADR-0033
+      # "audio builds" job that keeps the live binary from silently breaking
+      # while the default suite stays lean (codec/DAVE stubbed).
+      - name: Install libopus (CGO dep of the opus tag)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libopus-dev
+
       - name: Build + vet (opus + dave tags)
         run: |
-          go build -tags "opus dave" ./...
-          go vet -tags "opus dave" ./...
+          go build -tags "opus dave nolibopusfile" ./...
+          go vet -tags "opus dave nolibopusfile" ./...
 
       # The opus-tagged unit tests (real codec round-trip, PlaybackSource
-      # concurrency) are deterministic and keyless (ADR-0021), gated behind
-      # `//go:build opus`, so the default PR gate never compiles them. Run
-      # them HERE — separate from build+vet for concern clarity (#374). `-race`
-      # because codec/PlaybackSource pulls cross-goroutine. Targeted at the two
-      # packages that own opus-gated tests (mixdown decode, wire codec).
+      # concurrency, the speech-quality SNR gate) are deterministic and keyless
+      # (ADR-0021), gated behind `//go:build opus`, so the default PR gate
+      # never compiles them. Run them HERE — separate from build+vet for
+      # concern clarity (#374). `-race` because codec/PlaybackSource pulls
+      # cross-goroutine. Targeted at the two packages that own opus-gated
+      # tests (mixdown decode, wire codec).
       - name: Test (opus tags)
-        run: go test -race -tags "opus" ./internal/mixdown/... ./pkg/voice/wire/...
+        run: go test -race -tags "opus nolibopusfile" ./internal/mixdown/... ./pkg/voice/wire/...
 
       # The cassette-tier latency benchmark (Epic C): real silero VAD + codec,
       # cassettes for the network providers — keyless (no secrets, ADR-0021).
@@ -265,7 +278,7 @@ jobs:
       # It replays the corpus and diffs each stage's p95 against the committed
       # baseline (Report.CheckRegression); absolute SLOs are the live tier's job.
       - name: Cassette latency benchmark (regression gate)
-        run: go test -race -tags "bench opus" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
+        run: go test -race -tags "bench opus nolibopusfile" -run '^TestBench_CassetteRegression$' ./pkg/voice/voicebench/
 
   image:
     name: container image (build + smoke)

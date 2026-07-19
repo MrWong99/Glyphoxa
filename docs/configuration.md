@@ -314,7 +314,13 @@ points the GM at the top-bar campaign menu → Campaign settings, where the
 
 Every variable the shipped binary reads. See `.env.example` for a copy-paste
 template with placeholders. Provider keys are BYOK (ADR-0004): only the ones a
-used provider needs are required.
+used provider needs are required. Embeddings are the exception to the key
+matrix: v1.0 embeds through **Ollama only**
+([ADR-0011](adr/0011-transcript-chunks-async-embeddings.md)) — no key, just a
+reachable endpoint. The default is loopback, so any containerized run (the
+image ships no Ollama) must point `GLYPHOXA_OLLAMA_URL` at a real Ollama
+server (the Helm chart's `ollamaUrl` value renders it), or semantic memory
+(L2) stalls with a WARN loop while everything else keeps working.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -328,6 +334,7 @@ used provider needs are required.
 | `GLYPHOXA_OPERATOR_IDS` | `web`/`all` | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). Empty, separators-only, or non-numeric entries ⇒ fatal. |
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
+| `GLYPHOXA_OLLAMA_URL` | optional | Ollama embeddings endpoint override; default `http://127.0.0.1:11434`. v1.0 embeddings are **Ollama-only** (ADR-0011), so set it wherever the process has no local Ollama — containers and k8s pods (k3d: `http://host.k3d.internal:11434`). The server must serve `nomic-embed-text`. Unreachable ⇒ semantic memory (L2) stalls loudly; nothing else breaks. |
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
 | `GEMINI_API_KEY` | if Gemini used | LLM / S2S provider key. |

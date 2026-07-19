@@ -74,13 +74,15 @@ docs/configuration.md §9).
 
 ### Prerequisites
 
-- **Go 1.26+** — pure Go, `CGO_ENABLED=0`; no C toolchain
+- **Go 1.26+** — the default build is pure Go (`CGO_ENABLED=0`); no C toolchain
 - **Node.js 20+ and npm** — the console bundle is embedded into the binary
 - **[buf](https://buf.build/docs/installation)** — generates the Connect/protobuf stubs
 - **Postgres with the [pgvector](https://github.com/pgvector/pgvector) extension**
-- For the `voice` loop: nothing extra — the codec (pion/opus), DAVE/MLS
-  (dave-go), and the Silero VAD (bespoke pure-Go forward pass) are all in the
-  binary — see [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md)
+- For an **audible** `voice` loop: `pkg-config` + `libopus-dev` — the outbound
+  Opus encoder links libopus via CGO under `-tags opus` (paired with
+  `nolibopusfile`); DAVE/MLS (dave-go) and the Silero VAD (bespoke pure-Go
+  forward pass) stay in the binary — see
+  [docs/agents/live-npc-run.md](docs/agents/live-npc-run.md)
 
 ### Build & run
 

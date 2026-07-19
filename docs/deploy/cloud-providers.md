@@ -11,12 +11,17 @@ order-of-magnitude for comparison, and check current pricing before deciding.
 ## What Glyphoxa actually needs
 
 - **One always-on amd64 node**, 2–4 vCPU / 4–8 GiB — the `all`-mode web pod +
-  Postgres fit comfortably (the voice pipeline is pure Go, no GPU). The web
+  Postgres fit comfortably (the voice pipeline needs no GPU). The web
   tier is single-replica by design (ADR-0039), so a multi-node HA cluster buys
   you nothing yet — don't pay for it.
 - **Postgres with pgvector** — in-chart StatefulSet (default) or a managed DB
   *that supports the pgvector extension* (verify before committing; most
   managed Postgres offerings support it now, but plans/regions differ).
+- **A reachable Ollama server for embeddings** — v1.0 embeds through Ollama
+  only (ADR-0011), the image ships none, and the default is loopback: set the
+  chart's `ollamaUrl` value (env `GLYPHOXA_OLLAMA_URL`) to a server serving
+  `nomic-embed-text`, or semantic memory (L2) stalls with a WARN loop while
+  everything else keeps working. See docs/configuration.md.
 - **Ingress + TLS** on 80/443 — the chart's existing Traefik/nginx +
   cert-manager path.
 - **Modest, latency-sensitive traffic** — Discord voice is ~50–100 kbps Opus
@@ -41,8 +46,10 @@ order-of-magnitude for comparison, and check current pricing before deciding.
   separate volume for Postgres if you outgrow the root disk.
 - Caveat: their ARM instances (CAX) are cheaper still, but the published
   Glyphoxa image is **amd64-only** today — stick to CX/CPX, or build your own
-  arm64 image (the binary is pure Go and cross-compiles trivially; the
-  Dockerfile just isn't multi-arch yet).
+  arm64 image (the Dockerfile isn't multi-arch yet, and since the libopus
+  encoder revert — ADR-0034 amendment 2026-07-19 — the binary is no longer a
+  trivial pure-Go cross-compile: build on an arm64 host or under QEMU, where
+  the build stage installs the target arch's libopus).
 
 **Total: ~€5–10/mo.** This is the natural first step off the home lab: same
 operational model, real IP, real uptime, no CG-NAT worries.

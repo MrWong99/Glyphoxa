@@ -195,6 +195,15 @@ spec:
             # JSON logs for cluster log aggregation (ADR-0032).
             - name: GLYPHOXA_LOG_FORMAT
               value: json
+            {{- with .Values.ollamaUrl }}
+            # Embeddings endpoint (ADR-0011): the in-cluster pod has no local
+            # Ollama, so the binary's loopback default can never work here —
+            # point GLYPHOXA_OLLAMA_URL at a reachable server instead
+            # (k3d: http://host.k3d.internal:11434). Without it, semantic
+            # memory (L2) stalls loudly; nothing else breaks.
+            - name: GLYPHOXA_OLLAMA_URL
+              value: {{ . | quote }}
+            {{- end }}
           ports:
             # The PUBLIC Connect API + console port (the Service targets it).
             - name: http

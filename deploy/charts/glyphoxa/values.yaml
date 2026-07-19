@@ -36,6 +36,19 @@ elevenLabsApiKey: ""
 geminiApiKey: ""
 groqApiKey: ""
 
+# Embeddings endpoint override (ADR-0011). Glyphoxa v1.0 embeds through Ollama
+# ONLY, and the binary's built-in endpoint is loopback (http://127.0.0.1:11434)
+# — which can never work from inside a pod: the container ships no Ollama. Set
+# this to a reachable Ollama server (serving nomic-embed-text) to enable
+# semantic memory (L2): the embedding backfill worker and NPC memory recall
+# both dial it. Left empty, no GLYPHOXA_OLLAMA_URL env is emitted, the pods
+# keep the loopback default, and embeddings stall with a WARN loop while
+# everything else keeps working. Not a secret — rendered as a plain env value
+# on the web and voice pods (one shared value, so split-mode deployments keep
+# a single endpoint of record).
+# k3d example (Ollama on the host): http://host.k3d.internal:11434
+ollamaUrl: ""
+
 # DB connection. By default the chart stands up its own in-cluster Postgres and
 # assembles the connection URL against that Service. Set `database.url` to point
 # the migrate Job (and later the serving workloads) at an external Postgres

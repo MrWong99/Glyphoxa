@@ -18,6 +18,7 @@ require (
 require (
 	connectrpc.com/connect v1.20.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/hraban/opus v0.0.0-20260708213942-bde8e4304501 // libopus outbound encoder (CGO, -tags opus); pair with -tags nolibopusfile
 	github.com/openai/openai-go/v3 v3.43.0
 	github.com/pion/opus v0.1.1-0.20260714154015-8399d676d1e2 // pinned past v0.1.0: the public Encoder only exists on main; bump deliberately
 	github.com/prometheus/client_golang v1.23.2

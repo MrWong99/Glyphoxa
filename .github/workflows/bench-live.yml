@@ -37,6 +37,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The opus tag links the system libopus for the outbound encoder
+      # (hraban/opus, CGO — ADR-0034 amendment 2026-07-19).
+      - name: Install libopus (CGO dep of the opus tag)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libopus-dev
+
       # The live tier needs real silero VAD + codec (opus) AND real vendor keys
       # (live). GX_BENCH_OUT names the JSON report the next step uploads. The
       # test asserts CheckSLO and fails the run on an over-budget headline span.
@@ -50,7 +55,7 @@ jobs:
             echo "GROQ_API_KEY and ELEVENLABS_API_KEY secrets must be set under repo Settings → Secrets and variables → Actions." >&2
             exit 1
           fi
-          go test -v -tags "bench opus live" -run '^TestBench_LiveSLO$' ./pkg/voice/voicebench/
+          go test -v -tags "bench opus nolibopusfile live" -run '^TestBench_LiveSLO$' ./pkg/voice/voicebench/
 
       # Persist the per-stage p50/p95/p99 report regardless of pass/fail so a
       # reviewer can read the distribution even on an SLO breach.

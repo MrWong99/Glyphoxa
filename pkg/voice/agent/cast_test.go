@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
+	"github.com/MrWong99/Glyphoxa/pkg/voice/llm"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/orchestrator"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/tts"
 )
@@ -292,6 +293,53 @@ func TestCast_SpeakReaction_CommitsCompositeAndDelivered(t *testing.T) {
 	}
 }
 
+// TestCast_SpeakerID_ThreadedThroughEnsemblePaths pins that the Cast hands the
+// route's SpeakerID (ADR-0050) to its member Replier on the Draft/Speak and
+// Cross-talk paths, so an Ensemble Turn's committed user lines carry the same
+// "<Name>: " attribution as a routed turn's.
+func TestCast_SpeakerID_ThreadedThroughEnsemblePaths(t *testing.T) {
+	namer := func(id string) string {
+		if id == "111" {
+			return "Artusas"
+		}
+		return ""
+	}
+	b := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "b", Markdown: "You are b.", Voice: voiceNamed("b")},
+		Engine:      &fakeStreamEngine{deltas: []string{"unused"}},
+		Synthesizer: stubSynth{},
+		SpeakerName: namer,
+	})
+	cast := agent.NewCast(b)
+
+	// Speak (the Lead path): the committed user line is name-prefixed.
+	if _, err := cast.Speak(context.Background(), routedFrom("b", "111", "who are you?"), "I am B.", func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	hist := b.HistorySnapshot()
+	if len(hist) == 0 || hist[0].Text != "Artusas: who are you?" {
+		t.Fatalf("Speak committed user line = %+v, want \"Artusas: who are you?\" first", hist)
+	}
+
+	// SpeakReaction (the Cross-talk path): the committed composite is the
+	// name-prefixed utterance plus the Lead's attributed line.
+	c := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "c", Markdown: "You are c.", Voice: voiceNamed("c")},
+		Engine:      &fakeStreamEngine{deltas: []string{"unused"}},
+		Synthesizer: stubSynth{},
+		SpeakerName: namer,
+	})
+	cast.Add(c)
+	if _, err := cast.SpeakReaction(context.Background(), routedFrom("c", "111", "thoughts?"), "A", "The bridge is out.", "I disagree.", func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("SpeakReaction: %v", err)
+	}
+	hist = c.HistorySnapshot()
+	want := "Artusas: thoughts?\n\nA says: \"The bridge is out.\""
+	if len(hist) == 0 || hist[0].Text != want {
+		t.Fatalf("SpeakReaction committed composite = %+v, want %q first", hist, want)
+	}
+}
+
 // TestCast_Draft_RoutesByAgentID pins the EnsembleSpeaker.Draft half (#301): a
 // Draft for agent B produces B's would-be text (via B's Replier), and an unknown
 // Agent yields "", nil — the "no one answers" signal the coordinator treats as an
@@ -348,4 +396,207 @@ func TestCast_Speak_RoutesByAgentID(t *testing.T) {
 	if err != nil || delivered != "" || len(got) != 0 {
 		t.Fatalf("Speak(unknown) = (%q, %v) dispatched %d, want (\"\", nil) and no dispatch", delivered, err, len(got))
 	}
+}
+
+// capturingEngine records every prompt it is handed so a test can assert exactly
+// which user line the model reasoned over, then returns a fixed reply.
+type capturingEngine struct {
+	reply string
+	msgs  [][]llm.Message
+}
+
+func (e *capturingEngine) Generate(_ context.Context, msgs []llm.Message) (string, error) {
+	e.msgs = append(e.msgs, msgs)
+	return e.reply, nil
+}
+
+// lastUserMessage returns the newest prompt's last user message — the line the
+// engine's most recent call reasoned over.
+func lastUserMessage(t *testing.T, e *capturingEngine) string {
+	t.Helper()
+	if len(e.msgs) == 0 {
+		t.Fatal("engine was never called")
+	}
+	msgs := e.msgs[len(e.msgs)-1]
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleUser {
+			return msgs[i].Text
+		}
+	}
+	t.Fatal("no user message in the captured prompt")
+	return ""
+}
+
+// TestCast_EnsembleTurn_UserLineStableAcrossDraftAndSpeak pins the one-resolution
+// rule (#473 review): [agent.Config.SpeakerName] is a live cache lookup whose
+// answer can change between an Ensemble Turn's Draft (the prompt) and its Speak
+// (the history commit) — e.g. the Warm fill landing mid-turn. The Cast resolves
+// the attributed user line ONCE at Draft time and reuses the SAME string for the
+// turn's Speak, so the committed history is exactly what the draft reasoned over.
+func TestCast_EnsembleTurn_UserLineStableAcrossDraftAndSpeak(t *testing.T) {
+	resolved := "" // cold cache at Draft time → "Player / DM"
+	eng := &capturingEngine{reply: "I am B."}
+	b := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "b", Markdown: "You are b.", Voice: voiceNamed("b")},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+		SpeakerName: func(string) string { return resolved },
+	})
+	cast := agent.NewCast(b)
+	e := routedFrom("b", "111", "a round of ale")
+	e.TurnID = "T-ens"
+
+	draft, err := cast.Draft(context.Background(), e)
+	if err != nil || draft != "I am B." {
+		t.Fatalf("Draft = (%q, %v), want B's text", draft, err)
+	}
+	if got := lastUserMessage(t, eng); got != "Player / DM: a round of ale" {
+		t.Fatalf("Draft reasoned over %q, want the cold-cache line \"Player / DM: a round of ale\"", got)
+	}
+
+	// The Warm fill lands between Draft and Speak: the resolver now knows the name.
+	resolved = "Artusas"
+
+	if _, err := cast.Speak(context.Background(), e, draft, func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	hist := b.HistorySnapshot()
+	if len(hist) == 0 || hist[0].Text != "Player / DM: a round of ale" {
+		t.Fatalf("Speak committed %+v, want the SAME line Draft reasoned over, never the re-resolved name", hist)
+	}
+}
+
+// TestCast_EnsembleTurn_UserLineStableAcrossReactAndSpeakReaction extends the
+// one-resolution rule to the Cross-talk half: the reactor's line was pinned at
+// its OWN Draft in the fan-out, React's composite prompt reuses it even after
+// the resolver warms, and SpeakReaction commits the SAME composite React
+// reasoned over (the CrossTalker contract's never-drift guarantee).
+func TestCast_EnsembleTurn_UserLineStableAcrossReactAndSpeakReaction(t *testing.T) {
+	resolved := ""
+	engB := &capturingEngine{reply: "B leads."}
+	engC := &capturingEngine{reply: "I disagree."}
+	namer := func(string) string { return resolved }
+	b := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "b", Markdown: "You are b.", Voice: voiceNamed("b")},
+		Engine:      engB,
+		Synthesizer: stubSynth{},
+		SpeakerName: namer,
+	})
+	c := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "c", Markdown: "You are c.", Voice: voiceNamed("c")},
+		Engine:      engC,
+		Synthesizer: stubSynth{},
+		SpeakerName: namer,
+	})
+	cast := agent.NewCast(b, c)
+	eb := routedFrom("b", "111", "thoughts?")
+	eb.TurnID = "T-ens2"
+	ec := routedFrom("c", "111", "thoughts?")
+	ec.TurnID = "T-ens2"
+
+	// The speculative fan-out: both candidates draft, pinning their lines.
+	if _, err := cast.Draft(context.Background(), eb); err != nil {
+		t.Fatalf("Draft(b): %v", err)
+	}
+	if _, err := cast.Draft(context.Background(), ec); err != nil {
+		t.Fatalf("Draft(c): %v", err)
+	}
+
+	// The Warm fill lands during the Lead's playback.
+	resolved = "Artusas"
+
+	reaction, err := cast.React(context.Background(), ec, "B", "B leads.")
+	if err != nil || reaction != "I disagree." {
+		t.Fatalf("React = (%q, %v), want c's reaction", reaction, err)
+	}
+	want := "Player / DM: thoughts?\n\nB says: \"B leads.\""
+	if got := lastUserMessage(t, engC); got != want {
+		t.Fatalf("React reasoned over %q, want the Draft-time line composite %q", got, want)
+	}
+
+	if _, err := cast.SpeakReaction(context.Background(), ec, "B", "B leads.", reaction, func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("SpeakReaction: %v", err)
+	}
+	hist := c.HistorySnapshot()
+	if len(hist) == 0 || hist[0].Text != want {
+		t.Fatalf("SpeakReaction committed %+v, want the SAME composite React reasoned over %q", hist, want)
+	}
+}
+
+// TestCast_SpeakFallback pins the [orchestrator.FallbackSpeaker] seam (#473
+// review): when an Ensemble Turn's every candidate Draft failed terminally, the
+// coordinator speaks the top-scored candidate's canned line through the Cast —
+// the routed path's Config.FallbackLine mechanism: dispatched in the member's
+// Voice, never committed to history, refused for an unknown member, a voiceless
+// Persona, or a cancelled ctx.
+func TestCast_SpeakFallback(t *testing.T) {
+	t.Run("voiced member speaks the canned line", func(t *testing.T) {
+		b := castReplier("b", &fakeStreamEngine{deltas: []string{"unused"}})
+		cast := agent.NewCast(b)
+
+		var got []orchestrator.Reply
+		ok := cast.SpeakFallback(context.Background(), "b", func(rep orchestrator.Reply) error {
+			got = append(got, rep)
+			return nil
+		})
+		if !ok {
+			t.Fatal("SpeakFallback = false, want true for a voiced member")
+		}
+		if len(got) != 1 || got[0].Sentence != agent.DefaultFallbackLine || got[0].Voice.VoiceID != "b" {
+			t.Fatalf("dispatched = %+v, want exactly the canned line in b's voice", got)
+		}
+		if hist := b.HistorySnapshot(); len(hist) != 0 {
+			t.Fatalf("fallback committed to history: %+v", hist)
+		}
+	})
+
+	t.Run("unknown member speaks nothing", func(t *testing.T) {
+		cast := agent.NewCast()
+		var dispatched int
+		if cast.SpeakFallback(context.Background(), "ghost", func(orchestrator.Reply) error {
+			dispatched++
+			return nil
+		}) {
+			t.Fatal("SpeakFallback = true for an unknown member, want false")
+		}
+		if dispatched != 0 {
+			t.Fatalf("dispatched %d replies for an unknown member, want 0", dispatched)
+		}
+	})
+
+	t.Run("voiceless persona is refused", func(t *testing.T) {
+		v := agent.NewReplier(agent.Config{
+			Persona:     agent.Persona{AgentID: "v", Markdown: "You are v."}, // zero Voice: VoiceID ""
+			Engine:      &fakeStreamEngine{deltas: []string{"unused"}},
+			Synthesizer: stubSynth{},
+		})
+		cast := agent.NewCast(v)
+		var dispatched int
+		if cast.SpeakFallback(context.Background(), "v", func(orchestrator.Reply) error {
+			dispatched++
+			return nil
+		}) {
+			t.Fatal("SpeakFallback = true for a voiceless Persona, want false (empty VoiceID must never reach TTS)")
+		}
+		if dispatched != 0 {
+			t.Fatalf("dispatched %d replies for a voiceless Persona, want 0", dispatched)
+		}
+	})
+
+	t.Run("cancelled ctx is refused", func(t *testing.T) {
+		b := castReplier("b", &fakeStreamEngine{deltas: []string{"unused"}})
+		cast := agent.NewCast(b)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var dispatched int
+		if cast.SpeakFallback(ctx, "b", func(orchestrator.Reply) error {
+			dispatched++
+			return nil
+		}) {
+			t.Fatal("SpeakFallback = true under a cancelled ctx, want false (a barged unit stays silent)")
+		}
+		if dispatched != 0 {
+			t.Fatalf("dispatched %d replies under a cancelled ctx, want 0", dispatched)
+		}
+	})
 }

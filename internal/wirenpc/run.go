@@ -80,6 +80,21 @@ func RunFromDB(ctx context.Context, cfg Config, pool *pgxpool.Pool, cipher *cryp
 	cfg.llmProviderID = llmProviderID(primary.LLMConfig)
 	cfg.language = campaign.Language
 
+	// The campaign's bound player-character names (#276's `character` table) feed
+	// the system prompt's speaker-attribution section beside the roster's NPC
+	// names, so the model can read the "<Name>:" user-line prefixes the
+	// SpeakerName resolver produces. Loaded HERE, beside the roster, so both
+	// refresh on the same cadence: once per session start — a Character created
+	// mid-session (the same web editor flow that binds Discord users) appears on
+	// the next session (re)start, like a mid-session Agent edit.
+	chars, err := st.ListCharacters(ctx, cfg.CampaignID)
+	if err != nil {
+		return fmt.Errorf("wirenpc: load player characters: %w", err)
+	}
+	for _, c := range chars {
+		cfg.playerCharacters = append(cfg.playerCharacters, c.Name)
+	}
+
 	// Rollover tape (#306, ADR-0051): armed ONLY when the Campaign opted in
 	// (tape_armed). Seed it with the individually-consenting Speakers; agent speech
 	// is always captured regardless. The tape lives across reconnect cycles for the

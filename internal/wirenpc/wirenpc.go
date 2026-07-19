@@ -233,6 +233,15 @@ type Config struct {
 	// "", which — like any code without a registered encoder — resolves to "en"
 	// (see matcherLanguage), preserving the pre-#199 behavior.
 	language string
+	// playerCharacters are the campaign's bound player-character names (#276's
+	// `character` table): with SpeakerName wired they render the system prompt's
+	// speaker-attribution section ([agent.Config.PlayerCharacters]) beside the
+	// sibling-NPC names derived from npcs, so the model can read the "<Name>:"
+	// user-line prefixes instead of guessing from its persona. RunFromDB loads
+	// them beside the roster — once per session start, so a Character created
+	// mid-session appears on the next session (re)start, exactly the roster's
+	// refresh cadence. Empty (the env-only Run path) renders no section.
+	playerCharacters []string
 
 	// Memory is the NPC memory recaller injected into every NPC's Agent loop
 	// (#122, ADR-0011/0042): it fills the Hot Context memory slot each turn. The
@@ -251,6 +260,16 @@ type Config struct {
 	// Memory. nil (voice/bench standalone) disables facts entirely, so the prompt is
 	// byte-identical to the pre-facts behavior (#126).
 	Facts agent.FactsRecaller
+
+	// SpeakerName resolves a route's SpeakerID (ADR-0050) to the human speaker's
+	// display name for the agent-facing transcript: every NPC's Agent loop
+	// prefixes its user lines "<Name>: <text>" (the transcript-names seam,
+	// [agent.Config.SpeakerName]). The web tier wires the speaker.Resolver's
+	// cache-only Lookup over the active session's Campaign — it must never
+	// block (it runs on the turn's hot path; the resolver is warmed on
+	// VADSpeechStart). nil (voice/bench standalone) disables attribution: the
+	// prompt is byte-identical to the pre-seam behavior.
+	SpeakerName func(speakerID string) string
 
 	// Mutes is the live per-Agent mute view (#211): the session Manager satisfies it
 	// (its volatile, session-local mute set), and the web tier sets it on the base

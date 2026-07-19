@@ -47,3 +47,22 @@ Helm chart's `voice.onnxLib` value with them. The container smoke test now
 asserts the static property directly (ldd: "not a dynamic executable", no
 `/bin/sh` in the image) and CI's fast gate builds the production binary
 `CGO_ENABLED=0` to keep the property from regressing.
+
+**Amendment (2026-07-19, outbound Opus encoder back to statically-linked libopus):**
+the pion/opus half of the 2026-07-16 pure-Go migration is partially reverted.
+pion/opus's v0.1 encoder plateaus at ~4.1 dB aligned SNR on real speech
+regardless of bitrate (measured on the hello-test clip, decoded by reference
+libopus) vs ~6.0 dB for libopus at its VoIP defaults — an audibly metallic
+NPC voice. The OUTBOUND encoder therefore returns to hraban/opus (system
+libopus, CGO, `nolibopusfile` companion tag) until pion/opus reaches
+speech-quality parity; the INBOUND decode stays pion/opus (RFC-conformance-
+tested upstream, feeds only VAD/STT). A tagged SNR quality gate
+(`TestPlaybackSource_SpeechQualityGate`, floor 5.5 dB) pins the encode path
+against future silent regressions. The runtime stage stays `FROM scratch`:
+the image build installs `libopus-dev` + `pkg-config` in the build stage and
+links fully statically (`CGO_ENABLED=1`, `-extldflags "-static -lm"`, plus
+`netgo osusergo` so the pure-Go net/user resolvers are used — static glibc
+getaddrinfo would dlopen NSS libs absent from scratch). The live tags are
+`-tags "opus dave nolibopusfile"`; the smoke test's static assertion (ldd:
+"not a dynamic executable") is unchanged and CI's fast gate mirrors the
+static CGO build.

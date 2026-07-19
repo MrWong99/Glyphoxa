@@ -139,6 +139,29 @@ func TestAddressDetector_PublishesDecisionVerbatim(t *testing.T) {
 	)
 }
 
+// TestAddressDetector_CopiesSpeakerIDOntoRouted pins the SpeakerID carry (the
+// transcript-names seam): the detector stamps the STTFinal's Speaker Lane
+// attribution (ADR-0050) onto the published [voiceevent.AddressRouted] exactly
+// like the TurnID — the matcher knows nothing of either — so the Agent loop can
+// attribute the utterance to its human speaker.
+func TestAddressDetector_CopiesSpeakerIDOntoRouted(t *testing.T) {
+	h := voicetest.New(t)
+	m := matchFunc(func(text string) []voiceevent.AddressRouted {
+		return []voiceevent.AddressRouted{{At: time.Now(), Text: text, Target: goblinTarget}}
+	})
+	d := orchestrator.NewAddressDetector(m)
+	t.Cleanup(d.Bind(t.Context(), h.Bus))
+
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Goblin!", TurnID: "T-spk", SpeakerID: "spk-42"})
+
+	voicetest.AssertEvent(t, h,
+		func(e voiceevent.AddressRouted) bool {
+			return e.SpeakerID == "spk-42" && e.TurnID == "T-spk"
+		},
+		"address.routed carrying the STTFinal's SpeakerID",
+	)
+}
+
 // TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted pins the
 // multi-target half of the TargetMatcher contract under the Ensemble Turn design
 // (ADR-0025, #301): when the matcher returns several decisions the detector makes
@@ -157,16 +180,17 @@ func TestAddressDetector_MultiDecisionPublishesOneEnsembleRouted(t *testing.T) {
 	d := orchestrator.NewAddressDetector(m)
 	t.Cleanup(d.Bind(t.Context(), h.Bus))
 
-	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start fighting.", TurnID: "T-m"})
+	h.Bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "Bart and the Goblin start fighting.", TurnID: "T-m", SpeakerID: "spk-9"})
 
 	voicetest.AssertEventCount[voiceevent.EnsembleRouted](t, h, 1)
 	voicetest.AssertEventCount[voiceevent.AddressRouted](t, h, 0)
 	voicetest.AssertEvent(t, h,
 		func(e voiceevent.EnsembleRouted) bool {
 			return len(e.Targets) == 2 && e.Targets[0] == bartTarget && e.Targets[1] == goblinTarget &&
-				e.TurnID == "T-m" && e.Text == "Bart and the Goblin start fighting."
+				e.TurnID == "T-m" && e.Text == "Bart and the Goblin start fighting." &&
+				e.SpeakerID == "spk-9"
 		},
-		"address.ensemble carrying both targets in matcher order",
+		"address.ensemble carrying both targets in matcher order plus the SpeakerID",
 	)
 }
 

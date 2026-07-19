@@ -44,3 +44,18 @@ ONNX Runtime download/cache. The audio job remains for wall-time isolation of
 the tagged builds and the benchmark, not for any native toolchain. The fast
 `test` job now also asserts the production binary links statically
 ("not a dynamic executable"), keeping the scratch image buildable.
+
+**Amendment (2026-07-19, libopus outbound encoder — partial revert of the
+2026-07-16 pure-Go amendment):** the `opus` tag is CGO again: the OUTBOUND
+Opus encoder returns to hraban/opus (system libopus) because pion/opus's
+encoder is below speech-quality parity (ADR-0034 amendment 2026-07-19);
+inbound decode stays pion/opus. Consequences for the jobs this ADR governs:
+the audio CI job reinstalls `pkg-config` + `libopus-dev` (as do the cassette
+bench invocation and the live bench tier in `bench-live.yml`), and the
+`nolibopusfile` companion tag is un-retired — it is mandatory alongside
+`opus`, keeping hraban/opus from also demanding the unused libopusfile. The
+fast gate's static assertion now builds the production binary as static CGO
+(`CGO_ENABLED=1`, `-tags "opus dave nolibopusfile netgo osusergo"`,
+`-extldflags "-static -lm"`) and still requires "not a dynamic executable".
+The default keyless `go test -race ./...` PR gate remains CGO-free and
+unaffected — the codec stays stubbed there.

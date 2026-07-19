@@ -20,7 +20,7 @@ func TestReplier_React_CompositePrompt(t *testing.T) {
 		Synthesizer: stubSynth{},
 	})
 
-	reaction, err := r.React(t.Context(), "Bart, Mira — thoughts?", "Bart", "The bridge is out.")
+	reaction, err := r.React(t.Context(), "", "Bart, Mira — thoughts?", "Bart", "The bridge is out.")
 	if err != nil {
 		t.Fatalf("React errored: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestReplier_React_DeclineSentinel(t *testing.T) {
 				Synthesizer: stubSynth{},
 			})
 
-			reaction, err := r.React(t.Context(), "Bart, Mira?", "Bart", "The bridge is out.")
+			reaction, err := r.React(t.Context(), "", "Bart, Mira?", "Bart", "The bridge is out.")
 			if err != nil {
 				t.Fatalf("React errored: %v", err)
 			}
@@ -77,6 +77,42 @@ func TestReplier_React_DeclineSentinel(t *testing.T) {
 				t.Fatal("a declined Reaction must commit nothing to history")
 			}
 		})
+	}
+}
+
+// TestReplier_React_SpeakerName_CompositePrefixed pins speaker attribution on the
+// Cross-talk composite (ADR-0025 + the transcript-names seam): with a SpeakerName
+// resolver, the composite user message React reasons over carries the
+// name-prefixed utterance — `Artusas: <utterance>` — followed by the Lead's
+// attributed line, while memory recall stays keyed on the RAW utterance.
+func TestReplier_React_SpeakerName_CompositePrefixed(t *testing.T) {
+	rec := &recordingRecaller{}
+	prov := &fakeProvider{reply: "I disagree, actually."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "mira", Markdown: "You are Mira.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+		Memory:      rec,
+		SpeakerName: func(id string) string {
+			if id == "111" {
+				return "Artusas"
+			}
+			return ""
+		},
+	})
+
+	if _, err := r.React(t.Context(), "111", "Bart, Mira — thoughts?", "Bart", "The bridge is out."); err != nil {
+		t.Fatalf("React errored: %v", err)
+	}
+
+	last := prov.lastRequest(t)
+	userMsg := last.Messages[len(last.Messages)-1].Text
+	want := "Artusas: Bart, Mira — thoughts?\n\nBart says: \"The bridge is out.\""
+	if userMsg != want {
+		t.Fatalf("composite user msg = %q, want %q", userMsg, want)
+	}
+	if got := rec.got(); len(got) != 1 || got[0] != "Bart, Mira — thoughts?" {
+		t.Errorf("Recall keyed on %q, want the RAW utterance (ADR-0042)", got)
 	}
 }
 
@@ -91,7 +127,7 @@ func TestReplier_React_SentinelSubstringIsNotDecline(t *testing.T) {
 		Synthesizer: stubSynth{},
 	})
 
-	reaction, err := r.React(t.Context(), "Bart, Mira?", "Bart", "The bridge is out.")
+	reaction, err := r.React(t.Context(), "", "Bart, Mira?", "Bart", "The bridge is out.")
 	if err != nil {
 		t.Fatalf("React errored: %v", err)
 	}

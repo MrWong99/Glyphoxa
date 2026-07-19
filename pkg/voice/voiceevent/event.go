@@ -199,6 +199,13 @@ type AddressRouted struct {
 	// TurnID is the correlation id copied from the [STTFinal] this routing
 	// decision answers (A3); see [STTFinal.TurnID].
 	TurnID string
+	// SpeakerID is the Discord snowflake string of the Speaker Lane the routed
+	// utterance was segmented on (ADR-0050), copied from the originating
+	// [STTFinal] by the detector exactly like TurnID — the matcher never sees
+	// it. It lets the Agent loop attribute the user line to its human speaker
+	// ("<Name>: <text>" in Hot Context). "" for the default (unattributed)
+	// lane, the single-lane MVP path. Additive.
+	SpeakerID string
 }
 
 // EventName implements [Event].
@@ -215,14 +222,17 @@ func (AddressRouted) EventName() string { return "address.routed" }
 // branch is dead code.
 //
 // Targets are the post-GM-gate survivors in the matcher's score-sorted order
-// (Targets[0] is the top-scored), and len(Targets) >= 2 by construction. Text and
-// TurnID mirror [AddressRouted]: the utterance text and the correlation id copied
-// from the originating [STTFinal] (A3).
+// (Targets[0] is the top-scored), and len(Targets) >= 2 by construction. Text,
+// TurnID, and SpeakerID mirror [AddressRouted]: the utterance text plus the
+// correlation id and Speaker Lane attribution copied from the originating
+// [STTFinal] (A3, ADR-0050) — the coordinator stamps SpeakerID back onto every
+// per-candidate route it reconstructs from this set.
 type EnsembleRouted struct {
-	At      time.Time
-	Text    string
-	TurnID  string
-	Targets []AddressTarget
+	At        time.Time
+	Text      string
+	TurnID    string
+	SpeakerID string
+	Targets   []AddressTarget
 }
 
 // EventName implements [Event].

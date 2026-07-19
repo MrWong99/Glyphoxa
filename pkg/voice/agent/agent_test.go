@@ -188,6 +188,179 @@ func routed(agentID, text string) voiceevent.AddressRouted {
 	}
 }
 
+// routedFrom is routed with the utterance's Speaker Lane attribution set — the
+// ADR-0050 SpeakerID the detector copies off the STTFinal.
+func routedFrom(agentID, speakerID, text string) voiceevent.AddressRouted {
+	e := routed(agentID, text)
+	e.SpeakerID = speakerID
+	return e
+}
+
+// namerFor is a [agent.Config.SpeakerName] stub over a fixed map: a cache-only
+// lookup that never blocks, returning "" for an unknown speaker.
+func namerFor(names map[string]string) func(string) string {
+	return func(speakerID string) string { return names[speakerID] }
+}
+
+// TestReply_SpeakerName_PrefixesUserLine pins the agent-facing transcript
+// attribution: with a SpeakerName resolver configured, the utterance enters the
+// LLM conversation as "<Name>: <text>" — both in the engine-received prompt and
+// in the committed history — so multiple humans' turns stay distinguishable. The
+// assistant reply stays UNPREFIXED (RoleAssistant is self-attribution).
+func TestReply_SpeakerName_PrefixesUserLine(t *testing.T) {
+	prov := &fakeProvider{reply: "Well met, Artusas."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+		SpeakerName: namerFor(map[string]string{"111": "Artusas"}),
+	})
+
+	deliver(r.Reply()(t.Context(), routedFrom("bart", "111", "hey how are you?")))
+
+	req := prov.lastRequest(t)
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != llm.RoleUser || last.Text != "Artusas: hey how are you?" {
+		t.Errorf("user message = {%s %q}, want the name-prefixed line", last.Role, last.Text)
+	}
+	hist := r.HistorySnapshot()
+	if len(hist) != 2 {
+		t.Fatalf("history len = %d, want 2 (user + assistant)", len(hist))
+	}
+	if hist[0].Role != llm.RoleUser || hist[0].Text != "Artusas: hey how are you?" {
+		t.Errorf("committed user line = {%s %q}, want the name-prefixed line", hist[0].Role, hist[0].Text)
+	}
+	if hist[1].Role != llm.RoleAssistant || hist[1].Text != "Well met, Artusas." {
+		t.Errorf("assistant line = {%s %q}, want the reply UNPREFIXED", hist[1].Role, hist[1].Text)
+	}
+}
+
+// TestReply_SpeakerName_UnknownSpeakerLabeledPlayerDM pins the degraded label: a
+// resolver miss (cold cache, unmapped speaker, or an unattributed lane) labels
+// the line "Player / DM" — the relay/chunker's generic-human label (#281) — so
+// the prompt still marks the line as human speech rather than dropping the seam.
+func TestReply_SpeakerName_UnknownSpeakerLabeledPlayerDM(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		speakerID string
+	}{
+		{"resolver-miss", "999"},
+		{"unattributed-lane", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := &fakeProvider{reply: "Aye."}
+			r := agent.NewReplier(agent.Config{
+				Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+				Provider:    prov,
+				Synthesizer: stubSynth{},
+				SpeakerName: namerFor(map[string]string{"111": "Artusas"}),
+			})
+
+			deliver(r.Reply()(t.Context(), routedFrom("bart", tc.speakerID, "hey how are you?")))
+
+			req := prov.lastRequest(t)
+			last := req.Messages[len(req.Messages)-1]
+			if last.Text != "Player / DM: hey how are you?" {
+				t.Errorf("user message = %q, want the generic Player / DM label", last.Text)
+			}
+		})
+	}
+}
+
+// TestReply_NilSpeakerName_BareTextBytesIdentical pins the off default: without a
+// SpeakerName resolver (voice standalone, the benchmark, every pre-seam caller)
+// the user message is the BARE utterance — byte-identical to the pre-attribution
+// prompt — even when the route carries a SpeakerID.
+func TestReply_NilSpeakerName_BareTextBytesIdentical(t *testing.T) {
+	prov := &fakeProvider{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+	})
+
+	deliver(r.Reply()(t.Context(), routedFrom("bart", "111", "hey how are you?")))
+
+	req := prov.lastRequest(t)
+	last := req.Messages[len(req.Messages)-1]
+	if last.Text != "hey how are you?" {
+		t.Errorf("user message = %q, want the bare utterance (nil namer)", last.Text)
+	}
+}
+
+// recordingRecaller records the utterance argument of every Recall so a test can
+// pin what the memory retrieval is keyed on.
+type recordingRecaller struct {
+	mu         sync.Mutex
+	utterances []string
+}
+
+func (rr *recordingRecaller) Recall(_ context.Context, _, utterance string) agent.Memory {
+	rr.mu.Lock()
+	rr.utterances = append(rr.utterances, utterance)
+	rr.mu.Unlock()
+	return agent.Memory{}
+}
+
+func (rr *recordingRecaller) got() []string {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	return append([]string(nil), rr.utterances...)
+}
+
+// TestReply_SpeakerName_RecallKeyedOnRawUtterance pins the ADR-0042 constraint:
+// memory recall stays keyed on the RAW utterance text, never the name-prefixed
+// history line — the speculative-recall match compares the normalized STT final
+// against queries embedded from STT partials, which carry no prefix, so a
+// prefixed key would silently degrade every speculation hit to inline retrieval.
+func TestReply_SpeakerName_RecallKeyedOnRawUtterance(t *testing.T) {
+	rec := &recordingRecaller{}
+	prov := &fakeProvider{reply: "Aye."}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:    prov,
+		Synthesizer: stubSynth{},
+		Memory:      rec,
+		SpeakerName: namerFor(map[string]string{"111": "Artusas"}),
+	})
+
+	deliver(r.Reply()(t.Context(), routedFrom("bart", "111", "hey how are you?")))
+
+	got := rec.got()
+	if len(got) != 1 || got[0] != "hey how are you?" {
+		t.Errorf("Recall keyed on %q, want the RAW utterance %q (ADR-0042)", got, "hey how are you?")
+	}
+}
+
+// TestReplyStream_SpeakerName_PrefixesUserLine pins the same attribution on the
+// streaming path — the one production wires — including the raw-keyed recall.
+func TestReplyStream_SpeakerName_PrefixesUserLine(t *testing.T) {
+	rec := &recordingRecaller{}
+	eng := &fakeStreamEngine{deltas: []string{"Well met."}}
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      eng,
+		Synthesizer: stubSynth{},
+		Memory:      rec,
+		SpeakerName: namerFor(map[string]string{"111": "Artusas"}),
+	})
+
+	if err := r.ReplyStream()(context.Background(), routedFrom("bart", "111", "hey how are you?"), func(orchestrator.Reply) error { return nil }); err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+
+	hist := r.HistorySnapshot()
+	if len(hist) != 2 || hist[0].Text != "Artusas: hey how are you?" {
+		t.Fatalf("history = %+v, want the name-prefixed user line first", hist)
+	}
+	if hist[1].Role != llm.RoleAssistant || hist[1].Text != "Well met." {
+		t.Errorf("assistant line = {%s %q}, want the delivered text UNPREFIXED", hist[1].Role, hist[1].Text)
+	}
+	if got := rec.got(); len(got) != 1 || got[0] != "hey how are you?" {
+		t.Errorf("Recall keyed on %q, want the RAW utterance (ADR-0042)", got)
+	}
+}
+
 // TestReply_NotAddressed_ReturnsNilAndSkipsProvider pins the AgentID gate: a
 // route targeting a different Agent yields no reply and never calls the LLM, so
 // many Agents' loops can share one bus (the Ensemble Turn building block).
@@ -329,10 +502,13 @@ func TestReply_HistoryTurns_BoundsTranscript(t *testing.T) {
 	}
 }
 
-// TestReply_ProviderError_ReturnsNilAndReportsError pins the no-error seam: a
-// [orchestrator.ReplyFunc] cannot return an error, so a failed completion yields
-// no reply and is surfaced via OnError.
-func TestReply_ProviderError_ReturnsNilAndReportsError(t *testing.T) {
+// TestReply_ProviderError_SpeaksFallbackAndReportsError pins the no-error seam
+// plus the terminal-error fallback: a [orchestrator.ReplyFunc] cannot return an
+// error, so a failed completion surfaces via OnError — and instead of dead air
+// the turn now returns ONE Reply carrying the canned fallback line in the
+// Persona's Voice, with NO commit hook (the line is not the model's words and
+// must never enter history).
+func TestReply_ProviderError_SpeaksFallbackAndReportsError(t *testing.T) {
 	wantErr := errors.New("provider boom")
 	var gotErr error
 	r := agent.NewReplier(agent.Config{
@@ -343,11 +519,42 @@ func TestReply_ProviderError_ReturnsNilAndReportsError(t *testing.T) {
 	})
 
 	got := r.Reply()(t.Context(), routed("bart", "Hello."))
-	if got != nil {
-		t.Errorf("reply on provider error = %+v, want nil", got)
-	}
 	if !errors.Is(gotErr, wantErr) {
 		t.Errorf("OnError got %v, want %v", gotErr, wantErr)
+	}
+	if len(got) != 1 {
+		t.Fatalf("reply on provider error = %+v, want exactly the fallback line", got)
+	}
+	if got[0].Sentence != agent.DefaultFallbackLine {
+		t.Errorf("fallback sentence = %q, want DefaultFallbackLine", got[0].Sentence)
+	}
+	if v := got[0].Voice; v.ProviderID != "elevenlabs" || v.VoiceID != "v1" {
+		t.Errorf("fallback voice = %+v, want the Persona's voice", v)
+	}
+	if got[0].OnDelivered != nil {
+		t.Error("fallback Reply must carry no OnDelivered hook (never committed to history)")
+	}
+	deliver(got)
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("fallback line committed to history: %q", m.Text)
+		}
+	}
+}
+
+// TestReply_EngineError_CustomFallbackLine pins the [agent.Config.FallbackLine]
+// override: a configured line replaces the default on the terminal-error path.
+func TestReply_EngineError_CustomFallbackLine(t *testing.T) {
+	r := agent.NewReplier(agent.Config{
+		Persona:      agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Provider:     &fakeProvider{err: errors.New("boom")},
+		Synthesizer:  stubSynth{},
+		FallbackLine: "Einen Moment, Reisender.",
+	})
+
+	got := r.Reply()(t.Context(), routed("bart", "Hello."))
+	if len(got) != 1 || got[0].Sentence != "Einen Moment, Reisender." {
+		t.Fatalf("reply = %+v, want the configured fallback line", got)
 	}
 }
 
@@ -706,6 +913,221 @@ func TestReplyStream_FallbackStartError_CommitsNothing_NoProviderError(t *testin
 	}
 }
 
+// errEngine is an [agent.Engine] whose Generate always fails terminally — the
+// provider-outage / exhausted-tool-budget shape. It implements only Generate,
+// so a streaming Replier routes it through fallbackTurn.
+type errEngine struct{ err error }
+
+func (e errEngine) Generate(context.Context, []llm.Message) (string, error) { return "", e.err }
+
+// errStreamEngine is a [agent.StreamingEngine] that forwards its deltas (each a
+// sentence already "spoken") and then fails terminally with err. No deltas
+// models an engine dying before ANY audio; a pre-cancelled ctx returns the ctx
+// error, mirroring a real engine's barge unwind.
+type errStreamEngine struct {
+	deltas []string
+	err    error
+}
+
+func (e *errStreamEngine) Generate(context.Context, []llm.Message) (string, error) {
+	return "", e.err
+}
+
+func (e *errStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, onText func(string) error) (string, error) {
+	var full strings.Builder
+	for _, d := range e.deltas {
+		if err := ctx.Err(); err != nil {
+			return full.String(), err
+		}
+		full.WriteString(d)
+		if err := onText(d); err != nil {
+			return full.String(), err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return full.String(), err
+	}
+	return full.String(), e.err
+}
+
+// TestReplyStream_EngineErrorBeforeAudio_SpeaksFallback pins the streaming half
+// of the terminal-error fallback: an engine that dies before ANY audio was
+// dispatched still reports via OnError, then speaks the canned fallback line and
+// returns nil — the turn counts delivered (first_audio), not abandoned. The
+// canned line is never committed to history.
+func TestReplyStream_EngineErrorBeforeAudio_SpeaksFallback(t *testing.T) {
+	wantErr := errors.New("groq boom")
+	var gotErr error
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      &errStreamEngine{err: wantErr},
+		Synthesizer: stubSynth{},
+		OnError:     func(err error) { gotErr = err },
+	})
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("bart", "hi"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (the fallback turn counts delivered)", err)
+	}
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("OnError got %v, want %v (still reported before the fallback)", gotErr, wantErr)
+	}
+	if len(got) != 1 || got[0] != agent.DefaultFallbackLine {
+		t.Fatalf("dispatched = %q, want exactly the fallback line", got)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("fallback line committed to history: %q", m.Text)
+		}
+	}
+}
+
+// TestReplyStream_EngineErrorAfterAudio_NoFallback pins the audio-already-out
+// rule: once a sentence was delivered, a mid-completion engine death appends NO
+// canned line (the room heard a partial reply; a non-sequitur stall would make
+// it worse). The delivered sentence is committed and the error propagates.
+func TestReplyStream_EngineErrorAfterAudio_NoFallback(t *testing.T) {
+	wantErr := errors.New("mid-stream boom")
+	var gotErr error
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      &errStreamEngine{deltas: []string{"Aye, two rooms. "}, err: wantErr},
+		Synthesizer: stubSynth{},
+		OnError:     func(err error) { gotErr = err },
+	})
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("bart", "rooms?"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ReplyStream err = %v, want the engine error (audio already out → no fallback rescue)", err)
+	}
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("OnError got %v, want %v", gotErr, wantErr)
+	}
+	if len(got) != 1 || got[0] != "Aye, two rooms." {
+		t.Fatalf("dispatched = %q, want only the delivered sentence (no fallback appended)", got)
+	}
+	if !committedAssistant(r, "Aye, two rooms.") {
+		t.Errorf("delivered sentence not committed: %+v", r.HistorySnapshot())
+	}
+}
+
+// TestReplyStream_BargeCancel_NoFallbackNoOnError pins the barge exclusion: a
+// cancelled turn ctx produces neither a fallback line nor an OnError — the
+// superseded turn stays silent, exactly the pre-fallback barge semantics.
+func TestReplyStream_BargeCancel_NoFallbackNoOnError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var onErrCalls int
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      &errStreamEngine{err: errors.New("unreached")},
+		Synthesizer: stubSynth{},
+		OnError:     func(error) { onErrCalls++ },
+	})
+
+	var dispatched int
+	err := r.ReplyStream()(ctx, routed("bart", "hi"), func(orchestrator.Reply) error {
+		dispatched++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (a cancel is the expected barge path)", err)
+	}
+	if dispatched != 0 {
+		t.Errorf("dispatched %d sentences on a barged turn, want 0 (no fallback)", dispatched)
+	}
+	if onErrCalls != 0 {
+		t.Errorf("OnError called %d times on a barge cancel, want 0", onErrCalls)
+	}
+}
+
+// TestReplyStream_FallbackEngineError_SpeaksFallback pins the non-streaming
+// fallbackTurn path: a batch-only engine that fails terminally still speaks the
+// canned line and reports the turn delivered (nil), after OnError.
+func TestReplyStream_FallbackEngineError_SpeaksFallback(t *testing.T) {
+	wantErr := errors.New("batch boom")
+	var gotErr error
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      errEngine{err: wantErr},
+		Synthesizer: stubSynth{},
+		OnError:     func(err error) { gotErr = err },
+	})
+
+	var got []string
+	err := r.ReplyStream()(context.Background(), routed("bart", "hi"), func(rep orchestrator.Reply) error {
+		got = append(got, rep.Sentence)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (the fallback turn counts delivered)", err)
+	}
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("OnError got %v, want %v", gotErr, wantErr)
+	}
+	if len(got) != 1 || got[0] != agent.DefaultFallbackLine {
+		t.Fatalf("dispatched = %q, want exactly the fallback line", got)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("fallback line committed to history: %q", m.Text)
+		}
+	}
+}
+
+// TestReplyStream_TextSink_EngineError_FallbackOnlyWhenVoiced pins the Butler
+// path (textModalityTurn): a VOICED Butler speaks the canned fallback on a
+// terminal engine error (never posting to the TextSink — there is no answer to
+// post), while a VOICELESS Butler stays silent and propagates the error — an
+// empty VoiceID must never reach TTS (the structural-unreachability guarantee).
+func TestReplyStream_TextSink_EngineError_FallbackOnlyWhenVoiced(t *testing.T) {
+	wantErr := errors.New("butler boom")
+
+	t.Run("voiced butler speaks the fallback", func(t *testing.T) {
+		r := textSinkReplier(t, errEngine{err: wantErr}, false, func(context.Context, string) error {
+			t.Error("a failed turn must not post to the TextSink")
+			return nil
+		})
+		var got []string
+		err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, recap"), func(rep orchestrator.Reply) error {
+			got = append(got, rep.Sentence)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("ReplyStream err = %v, want nil (the fallback turn counts delivered)", err)
+		}
+		if len(got) != 1 || got[0] != agent.DefaultFallbackLine {
+			t.Fatalf("dispatched = %q, want exactly the fallback line", got)
+		}
+	})
+
+	t.Run("voiceless butler stays silent and propagates", func(t *testing.T) {
+		r := textSinkReplier(t, errEngine{err: wantErr}, true, func(context.Context, string) error {
+			t.Error("a failed turn must not post to the TextSink")
+			return nil
+		})
+		var dispatched int
+		err := r.ReplyStream()(context.Background(), routed("butler", "Glyphoxa, recap"), func(orchestrator.Reply) error {
+			dispatched++
+			return nil
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("ReplyStream err = %v, want the engine error (no voice to speak the fallback)", err)
+		}
+		if dispatched != 0 {
+			t.Errorf("voiceless Butler dispatched %d to TTS, want 0", dispatched)
+		}
+	})
+}
+
 // textSinkReplier builds a Butler-style Replier with a TextSink installed,
 // capturing text-delivered answers. voiceless picks whether the Persona carries a
 // Voice (empty VoiceID = text-only Butler).
@@ -1015,11 +1437,12 @@ func TestReplyStream_FirstAudioBeatsBatch(t *testing.T) {
 // reply seam without an adapter.
 var _ orchestrator.ReplyFunc = (&agent.Replier{}).Reply()
 
-// TestReply_TruncatedStream_ReturnsNilAndReportsError pins the truncation
+// TestReply_TruncatedStream_SpeaksFallbackAndReportsError pins the truncation
 // contract on the default engine: a stream that closes without [llm.EventDone]
 // (mid-stream network failure) must not be spoken as a complete reply — the
-// turn yields nothing and the failure surfaces via OnError.
-func TestReply_TruncatedStream_ReturnsNilAndReportsError(t *testing.T) {
+// failure surfaces via OnError, and the turn speaks the canned fallback line
+// instead of the partial text (never the truncated completion).
+func TestReply_TruncatedStream_SpeaksFallbackAndReportsError(t *testing.T) {
 	var gotErr error
 	r := agent.NewReplier(agent.Config{
 		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
@@ -1029,8 +1452,8 @@ func TestReply_TruncatedStream_ReturnsNilAndReportsError(t *testing.T) {
 	})
 
 	got := r.Reply()(t.Context(), routed("bart", "Hello."))
-	if got != nil {
-		t.Errorf("reply for truncated stream = %+v, want nil", got)
+	if len(got) != 1 || got[0].Sentence != agent.DefaultFallbackLine {
+		t.Errorf("reply for truncated stream = %+v, want the fallback line (never the partial text)", got)
 	}
 	if gotErr == nil || !strings.Contains(gotErr.Error(), "without done") {
 		t.Errorf("OnError got %v, want a truncation error", gotErr)
@@ -1166,5 +1589,180 @@ func TestReply_TurnTimeoutNegative_DisablesDeadline(t *testing.T) {
 	}
 	if _, ok := eng.ctx.Deadline(); ok {
 		t.Error("engine ctx has a deadline despite TurnTimeout < 0")
+	}
+}
+
+// hangingEngine blocks Generate until ctx dies — the hung-provider shape the
+// per-turn [agent.Config.TurnTimeout] deadline exists to kill.
+type hangingEngine struct{}
+
+func (hangingEngine) Generate(ctx context.Context, _ []llm.Message) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// hangingStreamEngine is hangingEngine's streaming twin: GenerateStream emits no
+// deltas and blocks until ctx dies.
+type hangingStreamEngine struct{ hangingEngine }
+
+func (hangingStreamEngine) GenerateStream(ctx context.Context, _ []llm.Message, _ func(string) error) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// bargeMidGenEngine models a barge landing DURING generation: Generate cancels
+// the PARENT turn ctx (what a floor yield does), then unwinds with the ctx error
+// like a real provider adapter would.
+type bargeMidGenEngine struct{ cancel context.CancelFunc }
+
+func (e bargeMidGenEngine) Generate(ctx context.Context, _ []llm.Message) (string, error) {
+	e.cancel()
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (e bargeMidGenEngine) GenerateStream(ctx context.Context, _ []llm.Message, _ func(string) error) (string, error) {
+	return e.Generate(ctx, nil)
+}
+
+// TestReplyStream_MidStreamTTSFailureThenEngineError_NoFallback pins the
+// audio-MAY-be-out exclusion (#473 review): a sentence whose dispatch returned
+// [orchestrator.ErrNotDelivered] was ATTEMPTED — per the #436 contract that
+// covers a mid-stream TTS failure where a fragment already played, not only a
+// start-error — so a terminal engine error afterwards must NOT speak the canned
+// fallback even though the COMMITTED text is empty. The engine error surfaces
+// instead of nil (the turn was not delivered).
+func TestReplyStream_MidStreamTTSFailureThenEngineError_NoFallback(t *testing.T) {
+	wantErr := errors.New("provider died with the tts")
+	var gotErr error
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      &errStreamEngine{deltas: []string{"The bridge is out. "}, err: wantErr},
+		Synthesizer: stubSynth{},
+		OnError:     func(err error) { gotErr = err },
+	})
+
+	var dispatched []string
+	err := r.ReplyStream()(context.Background(), routed("bart", "the bridge?"), func(rep orchestrator.Reply) error {
+		dispatched = append(dispatched, rep.Sentence)
+		return orchestrator.ErrNotDelivered // #436: the TTS stream died after a fragment
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ReplyStream err = %v, want the engine error (a dispatch was attempted → no fallback rescue)", err)
+	}
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("OnError got %v, want %v", gotErr, wantErr)
+	}
+	if len(dispatched) != 1 || dispatched[0] != "The bridge is out." {
+		t.Fatalf("dispatched = %q, want only the attempted sentence (never the canned line)", dispatched)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("committed assistant turn %q, want none (nothing delivered)", m.Text)
+		}
+	}
+}
+
+// TestReply_TurnTimeout_SpeaksFallback pins the batch half of the timeout/barge
+// distinction (#473 review): a provider hang killed by the turn's OWN TurnTimeout
+// deadline is a TERMINAL engine failure, not a barge — the caller's ctx is still
+// live, so the turn reports OnError and speaks the canned fallback line instead
+// of ending 60s of dead air with more silence.
+func TestReply_TurnTimeout_SpeaksFallback(t *testing.T) {
+	var gotErr error
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      hangingEngine{},
+		Synthesizer: stubSynth{},
+		TurnTimeout: 15 * time.Millisecond,
+		OnError:     func(err error) { gotErr = err },
+	})
+
+	got := r.Reply()(context.Background(), routed("bart", "hi"))
+	if len(got) != 1 || got[0].Sentence != agent.DefaultFallbackLine {
+		t.Fatalf("reply after TurnTimeout expiry = %+v, want exactly the fallback line (parent ctx live → not a barge)", got)
+	}
+	if !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Errorf("OnError got %v, want context.DeadlineExceeded", gotErr)
+	}
+	for _, m := range r.HistorySnapshot() {
+		if m.Role == llm.RoleAssistant {
+			t.Fatalf("fallback line committed to history: %q", m.Text)
+		}
+	}
+}
+
+// TestReplyStream_TurnTimeout_SpeaksFallback is the streaming twin of
+// TestReply_TurnTimeout_SpeaksFallback, over both streaming engines (streamTurn)
+// and batch-only ones (fallbackTurn): the deadline expiry of the turn's OWN
+// TurnTimeout — the caller's ctx still live — fires OnError and speaks the
+// canned line, reporting the turn delivered (nil).
+func TestReplyStream_TurnTimeout_SpeaksFallback(t *testing.T) {
+	engines := map[string]agent.Engine{
+		"streaming engine":  hangingStreamEngine{},
+		"batch-only engine": hangingEngine{},
+	}
+	for name, eng := range engines {
+		t.Run(name, func(t *testing.T) {
+			var gotErr error
+			r := agent.NewReplier(agent.Config{
+				Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+				Engine:      eng,
+				Synthesizer: stubSynth{},
+				TurnTimeout: 15 * time.Millisecond,
+				OnError:     func(err error) { gotErr = err },
+			})
+
+			var got []string
+			err := r.ReplyStream()(context.Background(), routed("bart", "hi"), func(rep orchestrator.Reply) error {
+				got = append(got, rep.Sentence)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("ReplyStream err = %v, want nil (the fallback turn counts delivered)", err)
+			}
+			if !errors.Is(gotErr, context.DeadlineExceeded) {
+				t.Errorf("OnError got %v, want context.DeadlineExceeded", gotErr)
+			}
+			if len(got) != 1 || got[0] != agent.DefaultFallbackLine {
+				t.Fatalf("dispatched = %q, want exactly the fallback line", got)
+			}
+			for _, m := range r.HistorySnapshot() {
+				if m.Role == llm.RoleAssistant {
+					t.Fatalf("fallback line committed to history: %q", m.Text)
+				}
+			}
+		})
+	}
+}
+
+// TestReplyStream_BargeDuringGeneration_NoFallback pins the other half of the
+// distinction: a PARENT-ctx cancel (barge/supersede) landing mid-generation stays
+// silent — no fallback line, no OnError, nil return — even though the engine
+// surfaced the cancellation as its terminal error.
+func TestReplyStream_BargeDuringGeneration_NoFallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var onErrCalls int
+	r := agent.NewReplier(agent.Config{
+		Persona:     agent.Persona{AgentID: "bart", Markdown: "You are Bart.", Voice: testVoice()},
+		Engine:      bargeMidGenEngine{cancel: cancel},
+		Synthesizer: stubSynth{},
+		OnError:     func(error) { onErrCalls++ },
+	})
+
+	var dispatched int
+	err := r.ReplyStream()(ctx, routed("bart", "hi"), func(orchestrator.Reply) error {
+		dispatched++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream err = %v, want nil (a barge is the expected path)", err)
+	}
+	if dispatched != 0 {
+		t.Errorf("dispatched %d sentences on a barged turn, want 0 (no fallback)", dispatched)
+	}
+	if onErrCalls != 0 {
+		t.Errorf("OnError called %d times on a barge cancel, want 0", onErrCalls)
 	}
 }

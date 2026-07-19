@@ -618,6 +618,21 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	}
 	speakerResolver := speaker.NewResolver(store, speakerNamer, gmID, log)
 
+	// Agent-facing transcript attribution (the transcript-names seam): every
+	// NPC's Agent loop prefixes its user lines "<Name>: <text>" via the SAME
+	// resolver the relay/chunker use (#281), scoped to the active session's
+	// Campaign. Lookup is cache-only and never blocks (the relay Warms it on
+	// VADSpeechStart, ~1.7s before the reply path reads it); a miss degrades to
+	// the loop's generic "Player / DM" label, matching the relay/chunker. Set on
+	// the base voice config BEFORE NewManager so every session's copy carries it.
+	cfg.SpeakerName = func(speakerID string) string {
+		vs, ok := sessions.Snapshot()
+		if !ok {
+			return ""
+		}
+		return speakerResolver.Lookup(vs.CampaignID, speakerID).Name
+	}
+
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
 	// process bus once and reads the active session from the session View (#448).
 	// The store backs incremental line persistence + replay-on-reload (#74,

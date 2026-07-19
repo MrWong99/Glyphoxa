@@ -70,6 +70,22 @@ type CrossTalker interface {
 	SpeakReaction(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText, reaction string, dispatch func(Reply) error) (delivered string, err error)
 }
 
+// FallbackSpeaker is the optional terminal-error extension of [EnsembleSpeaker]
+// (#473 review): when EVERY candidate's Draft failed with an engine error, the
+// coordinator has no draft to speak and — without this seam — the room gets dead
+// air, while the identical single-target failure speaks the routed path's canned
+// fallback line. SpeakFallback dispatches the named Agent's canned line (the
+// agent package's Config.FallbackLine mechanism): never committed to history,
+// refused under a cancelled ctx (a barged unit stays silent) and for a voiceless
+// Persona (an empty VoiceID must never reach TTS), reporting whether it was
+// spoken. The coordinator discovers it by a type assertion on the wired
+// [EnsembleSpeaker] (the production Cast implements it); a speaker without it
+// keeps the silent pre-#473 behavior. The TurnEnded{provider_error} terminal is
+// published either way — the canned line is not the model's words.
+type FallbackSpeaker interface {
+	SpeakFallback(ctx context.Context, agentID string, dispatch func(Reply) error) bool
+}
+
 // ReactionModality is the optional pre-render classification seam of a [CrossTalker]
 // (#389, ADR-0025/0027): given the reactor's generated Reaction, it reports whether
 // that reactor will deliver it as channel TEXT (a voiceless Butler, an explicit
@@ -114,7 +130,7 @@ func (r *Replier) handleEnsemble(ctx context.Context, bus *voiceevent.Bus, e voi
 	// (Targets[0] order preserved by the filter) answers via handleRouted.
 	if len(targets) == 1 || r.ensemble == nil || r.floor == nil {
 		r.handleRouted(ctx, bus, voiceevent.AddressRouted{
-			At: e.At, Text: e.Text, TurnID: e.TurnID, Target: targets[0],
+			At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: targets[0],
 		})
 		return
 	}
@@ -191,7 +207,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 		t := t
 		go func() {
 			text, err := r.ensemble.Draft(draftCtx, voiceevent.AddressRouted{
-				At: e.At, Text: e.Text, TurnID: e.TurnID, Target: t,
+				At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: t,
 			})
 			results <- draftResult{target: t, text: text, err: err}
 		}()
@@ -203,6 +219,11 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// publishes its own TurnEnded).
 	var lead draftResult
 	won := false
+	// allErred: every consumed draft result failed with an engine ERROR — the
+	// trigger for the canned fallback below. An empty draft under a nil error is
+	// an Agent DECLINING (silence was its answer), which keeps the ensemble
+	// silent, matching the routed path's empty-completion rule.
+	allErred := true
 	// pending counts the draft results not yet consumed. It carries past the race so
 	// the reactor pick below knows how many results can STILL arrive on the channel —
 	// keying the pick on the targets slice instead would wait on results the race loop
@@ -214,14 +235,31 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 			return // a barge/supersede tore the whole unit down mid-race
 		case res := <-results:
 			pending--
-			if res.err == nil && res.text != "" {
-				lead = res
-				won = true
+			if res.err == nil {
+				if res.text != "" {
+					lead = res
+					won = true
+				} else {
+					allErred = false
+				}
 			}
 		}
 	}
 	if !won {
 		if turnCtx.Err() == nil {
+			// Every candidate failed terminally and no draft exists to speak (#473
+			// review): mirror the routed path's terminal-error contract and dispatch
+			// the TOP-SCORED candidate's canned fallback through the optional
+			// [FallbackSpeaker] seam, so the room hears something instead of dead
+			// air. The speaker owns the refusals (voiceless persona, ctx cancel) and
+			// never commits the line to history. The provider_error terminal still
+			// publishes: the canned line is not the model's words, and the failure
+			// stays visible to metrics/relay.
+			if allErred {
+				if fb, ok := r.ensemble.(FallbackSpeaker); ok {
+					fb.SpeakFallback(turnCtx, targets[0].AgentID, r.newTurn(turnCtx).dispatch)
+				}
+			}
 			bus.Publish(voiceevent.TurnEnded{At: time.Now(), TurnID: e.TurnID, Reason: voiceevent.TurnEndProviderError})
 		}
 		return
@@ -370,7 +408,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 			}
 			go func() {
 				text, err := rt.React(turnCtx, voiceevent.AddressRouted{
-					At: e.At, Text: e.Text, TurnID: e.TurnID, Target: pick.target,
+					At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: pick.target,
 				}, lead.target.Name, lead.text)
 				reactCh <- reactionResult{text: text, err: err}
 			}()
@@ -389,7 +427,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 				return
 			}
 			text, err := rt.React(turnCtx, voiceevent.AddressRouted{
-				At: e.At, Text: e.Text, TurnID: e.TurnID, Target: pick.target,
+				At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: pick.target,
 			}, lead.target.Name, lead.text)
 			reactCh <- reactionResult{text: text, err: err}
 		}()
@@ -403,7 +441,7 @@ func (r *Replier) runEnsemble(turnCtx context.Context, release func(), bus *voic
 	// Speak commits the delivered text to the Lead's own history and stops the drain
 	// on a barge.
 	_, speakErr := r.ensemble.Speak(turnCtx, voiceevent.AddressRouted{
-		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: lead.target,
+		At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: lead.target,
 	}, lead.text, leadTurn.dispatch)
 
 	// A voiceless / long / text-requested Lead (#389) delivered its draft as channel
@@ -523,7 +561,7 @@ func (r *Replier) prerenderReaction(reactCtx context.Context, rt CrossTalker, e 
 		return reactTurn.dispatchHeld(rep, func(s string) { s1Ch <- s }, errReactionLookaheadAborted)
 	}
 	delivered, _ := rt.SpeakReaction(rctx, voiceevent.AddressRouted{
-		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
+		At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: reactor,
 	}, leadName, leadText, reaction, dispatch)
 
 	// Hand releaseReaction the all-start-error verdict (#391): true iff a sentence
@@ -647,7 +685,7 @@ type reactionDecision struct {
 func (r *Replier) postTextReaction(turnCtx context.Context, rt CrossTalker, bus *voiceevent.Bus, e voiceevent.EnsembleRouted, reactor voiceevent.AddressTarget, rID, leadName, leadText, reaction string) {
 	bus.Publish(voiceevent.EnsembleReaction{At: time.Now(), TurnID: rID, LeadTurnID: e.TurnID, Target: reactor})
 	_, err := rt.SpeakReaction(voiceevent.WithTurnID(turnCtx, rID), voiceevent.AddressRouted{
-		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
+		At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: reactor,
 	}, leadName, leadText, reaction, func(Reply) error { return ErrNotDelivered })
 	if turnCtx.Err() != nil {
 		return
@@ -689,7 +727,7 @@ func (r *Replier) speakReaction(turnCtx context.Context, rt CrossTalker, bus *vo
 	// (#444); its attempted/ttsFailed state feeds the terminal branches below.
 	reactTurn := r.newTurn(rctx)
 	delivered, reactErr := rt.SpeakReaction(rctx, voiceevent.AddressRouted{
-		At: e.At, Text: e.Text, TurnID: e.TurnID, Target: reactor,
+		At: e.At, Text: e.Text, TurnID: e.TurnID, SpeakerID: e.SpeakerID, Target: reactor,
 	}, leadName, leadText, reaction, reactTurn.dispatch)
 
 	// A voiceless / long / text-requested reactor (#389) delivered its Reaction as

@@ -104,17 +104,23 @@ func consumeForcedChoice(ctx context.Context) (llm.ToolChoice, bool) {
 }
 
 // calledToolsKey is the context key under which [withCalledTools] stores the
-// per-turn set of Tool names the adapter actually executed a call for. The
-// invented-roll guard (#399) reads it back to answer "was the dice Tool really
-// called this turn" — the signal the post-hoc regeneration hinges on.
+// per-turn recorder of Tool-call activity. The invented-roll guard (#399) reads
+// back the EXECUTED results (#438) to answer "did the dice Tool really run this
+// turn" — the signal the post-hoc regeneration hinges on. Requested-call names
+// are recorded alongside for observability only: a requested name proves
+// nothing about execution (the degrade path refuses an over-budget round's
+// calls and drops the final-answer round's, and an errored execution yields no
+// legitimate roll).
 type calledToolsKey struct{}
 
-// calledTools is the per-turn recorder behind [calledToolsKey]: the adapter marks
-// every Tool the model emitted a call for, and the loop's OnToolResult wiring
-// records each executed Tool's result content (#438) so the regen guard can
-// verify a narration against what was actually rolled. The guard queries it with
-// [has] / [resultsFor]. Safe for the loop's single goroutine plus the race
-// detector.
+// calledTools is the per-turn recorder behind [calledToolsKey]: the adapter
+// marks every Tool the model emitted a call for on rounds whose calls can still
+// execute (names — observability), and the loop's OnToolResult wiring records
+// each successfully executed Tool's result content (#438) so the regen guard
+// can verify a narration against what was actually rolled. The guard answers
+// "did dice run" with [resultsFor], never [has]: a name alone cannot tell a
+// refused, dropped, or errored call from a real roll (the #399 degrade-path
+// leak). Safe for the loop's single goroutine plus the race detector.
 type calledTools struct {
 	mu      sync.Mutex
 	names   map[string]bool
@@ -132,7 +138,9 @@ func withCalledTools(ctx context.Context, c *calledTools) context.Context {
 	return context.WithValue(ctx, calledToolsKey{}, c)
 }
 
-// has reports whether a call for name was recorded this turn.
+// has reports whether a call for name was REQUESTED this turn on a round that
+// could still execute it — observability only (the guard's regen log); whether
+// anything actually ran is answered by [resultsFor].
 func (c *calledTools) has(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -150,8 +158,14 @@ func (c *calledTools) resultsFor(name string) []string {
 
 // recordCalledTools marks every tool-call name in calls on the per-turn recorder
 // ctx carries, if any (a ctx without one is a silent no-op — the pre-#399 path and
-// the forced regeneration round both run without a recorder).
+// the forced regeneration round both run without a recorder). The loop's marked
+// final-answer round is skipped entirely: [tool.Loop] drops that round's calls
+// un-executed in favour of its prose, so recording them would mark a never-run
+// Tool as called for the rest of the turn (the #399 degrade-path leak).
 func recordCalledTools(ctx context.Context, calls []tool.ToolCall) {
+	if tool.IsFinalAnswerRound(ctx) {
+		return
+	}
 	c, _ := ctx.Value(calledToolsKey{}).(*calledTools)
 	if c == nil {
 		return
@@ -295,6 +309,16 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 	// completion (#399 seam), else the default auto. Consumed here so later rounds
 	// revert to auto.
 	choice := a.requestedChoice(ctx)
+	if tool.IsFinalAnswerRound(ctx) {
+		// The loop's forced final-answer round (tool budget exhausted / no
+		// progress): disarm tool use for this generation while keeping the
+		// Tools DECLARED — the conversation holds prior tool_call/tool
+		// messages, and stripping the declarations risks a provider 400 on the
+		// dangling references (the #420/#427 rule). If the provider rejects
+		// even the none-choice attempt, the #427 strip-tools escape below still
+		// applies under its usual no-tool-history guard.
+		choice = llm.ToolChoice{Mode: llm.ToolChoiceNone}
+	}
 
 	res := a.attempt(ctx, messages, tools, choice, onText)
 
@@ -350,8 +374,11 @@ func (a providerAdapter) complete(ctx context.Context, messages []tool.Message, 
 		}
 	}
 
-	// Record which Tools the resolved round actually asked to run, for the #399
-	// invented-roll guard; a no-op unless this turn installed a [calledTools] set.
+	// Record which Tools the resolved round asked to run (observability for the
+	// #399 invented-roll guard's log; the guard itself keys on EXECUTED results,
+	// fed by the loop's OnToolResult). A no-op unless this turn installed a
+	// [calledTools] set, and skipped on the final-answer round, whose calls the
+	// loop drops un-executed.
 	recordCalledTools(ctx, res.msg.ToolCalls)
 	return a.recordOutcome(ctx, round, start, messages, res)
 }
@@ -688,10 +715,12 @@ func NewEngine(provider llm.Provider, grants *tool.GrantSet, agentID, model stri
 			cfg.rec.MalformedToolGen(cfg.provName, observe.MalformedTextLeak)
 			// #399: a RECOVERED pseudo-XML dice call is promoted to a real executed
 			// ToolCall downstream in pkg/tool, so it never reached the adapter as a
-			// provider-native ToolCall — mark it in the turn's called-Tools set so the
-			// invented-roll guard does not mistake a correctly-rolled reply for an
-			// invented one (which would double-count with text_leak and force a
-			// needless second RNG draw + round-trip).
+			// provider-native ToolCall — mark it in the turn's requested set to keep
+			// the recorder complete. recovered=true only fires for calls that will
+			// genuinely run (the loop strips, rather than promotes, pseudo-calls on
+			// its budget-refused rounds), and the invented-roll guard itself keys on
+			// the EXECUTED result that run's OnToolResult records — so a stripped
+			// pseudo-dice call can never vouch for a narrated number.
 			if recovered {
 				markCalledTool(ctx, name)
 			}
@@ -786,18 +815,23 @@ func (e *Engine) generate(ctx context.Context, messages []llm.Message, onText fu
 		return "", err
 	}
 
-	// Post-hoc guard (Option C): dice was armed, the dice Tool was never actually
-	// called, and the reply narrates a numeric roll result → the model invented it.
+	// Post-hoc guard (Option C): dice was armed, no dice roll actually EXECUTED
+	// this turn, and the reply narrates a numeric roll result → the model
+	// invented it. The guard keys on executed results — fed only by the loop's
+	// OnToolResult, which never fires for the calls the degrade path refused
+	// (over-budget round) or dropped (final-answer round) and records no errored
+	// execution — never on requested call names: a requested-but-never-run dice
+	// call must not vouch for a narrated number (the #399 degrade-path leak).
 	// Regenerate with the dice Tool forced and the narration VERIFIED against the
 	// Tool's actual result (#438, see [Engine.regenWithForcedDice]); the forced
 	// rounds' provider failures flow into the #398 policy (no new retry). The
 	// discarded draft is NEVER delivered — on a regeneration error the turn fails
 	// rather than speak the invented number (ADR-0030: a discarded draft must not
 	// surface).
-	if !called.has(diceToolName) && claimsRollResult(text) {
+	if len(called.resultsFor(diceToolName)) == 0 && claimsRollResult(text) {
 		e.rec.MalformedToolGen(e.provName, observe.MalformedRollClaim)
 		slog.Warn("agenttool: dice armed but model narrated an unrolled result; regenerating with forced dice tool",
-			"provider", string(e.provName))
+			"provider", string(e.provName), "dice_requested", called.has(diceToolName))
 		regen, rerr := e.regenWithForcedDice(ctx, msgs)
 		if rerr != nil {
 			return "", rerr

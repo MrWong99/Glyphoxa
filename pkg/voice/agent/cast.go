@@ -31,6 +31,16 @@ import (
 type Cast struct {
 	mu       sync.RWMutex
 	repliers map[string]*Replier // AgentID -> Replier
+
+	// linesMu guards the per-Ensemble-Turn resolved user lines (#473 review):
+	// [Config.SpeakerName] is a live cache lookup, so the Cast pins each member's
+	// speaker-attributed line at Draft time and replays the identical string for
+	// the same turn's Speak/React/SpeakReaction — a single-slot store (ensemble
+	// turns are serialized by the floor), retired when the next turn's Drafts
+	// arrive. See [Cast.turnLine].
+	linesMu     sync.Mutex
+	linesTurnID string
+	lines       map[string]string // AgentID -> the user line resolved at Draft time
 }
 
 // NewCast builds a Cast from the given repliers, keyed by each one's
@@ -105,42 +115,97 @@ func (c *Cast) Reply() orchestrator.ReplyFunc {
 	}
 }
 
+// turnLine resolves the speaker-attributed user line for e ONCE per Ensemble
+// Turn and Agent (#473 review): [Config.SpeakerName] is a live cache lookup, so
+// its answer can change between a turn's Draft (the prompt) and its Speak/React/
+// SpeakReaction (the history commit) — e.g. the speaker Warm fill landing
+// mid-turn would commit "Artusas: ..." for a line the model reasoned over as
+// "Player / DM: ...". The FIRST resolution for a (TurnID, AgentID) is pinned and
+// every later same-turn call returns the identical string. start marks the Draft
+// entry point: only it may retire the previous turn's pins (a single-slot store
+// — ensemble turns are serialized by the floor), so a superseded turn's late
+// Speak racing the superseding turn's Drafts degrades to a fresh resolution (the
+// pre-pin behavior) instead of wiping the new turn's pins. A route without a
+// TurnID resolves fresh (nothing to pin to).
+func (c *Cast) turnLine(r *Replier, e voiceevent.AddressRouted, start bool) string {
+	if e.TurnID == "" {
+		return r.userLine(e.SpeakerID, e.Text)
+	}
+	c.linesMu.Lock()
+	defer c.linesMu.Unlock()
+	if c.linesTurnID != e.TurnID {
+		if !start {
+			return r.userLine(e.SpeakerID, e.Text)
+		}
+		c.linesTurnID = e.TurnID
+		c.lines = make(map[string]string, 2)
+	}
+	id := r.cfg.Persona.AgentID
+	if line, ok := c.lines[id]; ok {
+		return line
+	}
+	line := r.userLine(e.SpeakerID, e.Text)
+	c.lines[id] = line
+	return line
+}
+
 // Draft implements [orchestrator.EnsembleSpeaker]: it produces the addressed
 // Agent's would-be reply text WITHOUT mutating anything (the speculative fan-out
 // half of an Ensemble Turn, ADR-0025/#301), by delegating to that member's
-// [Replier.Draft]. An unknown (or removed) Agent yields "", nil — the same "no one
-// answers" signal the coordinator reads as an empty draft, never an error.
+// [Replier.draftWithLine] with the user line pinned via [Cast.turnLine] — so the
+// same turn's Speak commits the identical attribution the draft reasoned over.
+// An unknown (or removed) Agent yields "", nil — the same "no one answers"
+// signal the coordinator reads as an empty draft, never an error.
 func (c *Cast) Draft(ctx context.Context, e voiceevent.AddressRouted) (string, error) {
 	r := c.lookup(e.Target.AgentID)
 	if r == nil {
 		return "", nil // no Agent answers for this route
 	}
-	return r.Draft(ctx, e.Text)
+	return r.draftWithLine(ctx, c.turnLine(r, e, true), e.Text)
 }
 
 // Speak implements [orchestrator.EnsembleSpeaker]: it speaks the winning Lead's
 // pre-generated draft as the addressed Agent's turn (committing the delivered text
-// to that member's history, ADR-0012), by delegating to [Replier.SpeakDraft]. An
-// unknown Agent dispatches nothing and returns "", nil.
+// to that member's history, ADR-0012), reusing the user line pinned at Draft time
+// ([Cast.turnLine]) so the committed message is the one the draft reasoned over.
+// An unknown Agent dispatches nothing and returns "", nil.
 func (c *Cast) Speak(ctx context.Context, e voiceevent.AddressRouted, draft string, dispatch func(orchestrator.Reply) error) (string, error) {
 	r := c.lookup(e.Target.AgentID)
 	if r == nil {
 		return "", nil // no Agent answers for this route
 	}
-	return r.SpeakDraft(ctx, e.Text, draft, dispatch)
+	return r.speakDraftModality(ctx, c.turnLine(r, e, false), e.Text, draft, dispatch)
+}
+
+// SpeakFallback implements [orchestrator.FallbackSpeaker] (#473 review): when an
+// Ensemble Turn's EVERY candidate Draft failed terminally, the coordinator speaks
+// the top-scored candidate's canned fallback line through its member Replier —
+// the routed path's [Config.FallbackLine] mechanism: dispatched in the member's
+// Voice, never committed to history, refused under a cancelled ctx (a barged unit
+// stays silent) and for a voiceless Persona (an empty VoiceID must never reach
+// TTS). An unknown (or removed) Agent speaks nothing.
+func (c *Cast) SpeakFallback(ctx context.Context, agentID string, dispatch func(orchestrator.Reply) error) bool {
+	r := c.lookup(agentID)
+	if r == nil {
+		return false
+	}
+	return r.speakFallback(ctx, dispatch)
 }
 
 // React implements [orchestrator.CrossTalker]: it produces the addressed Agent's
 // would-be Cross-talk Reaction to the Lead's delivered line WITHOUT mutating
 // anything (the speculative half of the Reaction phase, ADR-0025/#302), by
-// delegating to that member's [Replier.React]. An unknown (or removed) Agent yields
-// "", nil — the "no one reacts" signal the coordinator reads as a decline.
+// delegating to that member's [Replier.reactWithLine] with the user line pinned
+// at the reactor's own Draft ([Cast.turnLine]) — so the composite prompt and the
+// composite SpeakReaction later commits can never drift. An unknown (or removed)
+// Agent yields "", nil — the "no one reacts" signal the coordinator reads as a
+// decline.
 func (c *Cast) React(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText string) (string, error) {
 	r := c.lookup(e.Target.AgentID)
 	if r == nil {
 		return "", nil // no Agent reacts for this route
 	}
-	return r.React(ctx, e.Text, leadName, leadText)
+	return r.reactWithLine(ctx, c.turnLine(r, e, false), e.Text, leadName, leadText)
 }
 
 // ReactsAsText implements [orchestrator.ReactionModality]: it reports whether the
@@ -157,12 +222,13 @@ func (c *Cast) ReactsAsText(agentID, utterance, reaction string) bool {
 
 // SpeakReaction implements [orchestrator.CrossTalker]: it speaks the addressed
 // Agent's pre-generated Reaction as its own sub-turn (committing the delivered text
-// to that member's history, ADR-0012), by delegating to [Replier.SpeakReaction]. An
-// unknown Agent dispatches nothing and returns "", nil.
+// to that member's history, ADR-0012), rebuilding the composite from the user line
+// pinned at Draft time ([Cast.turnLine]) so it commits the SAME composite React
+// reasoned over. An unknown Agent dispatches nothing and returns "", nil.
 func (c *Cast) SpeakReaction(ctx context.Context, e voiceevent.AddressRouted, leadName, leadText, reaction string, dispatch func(orchestrator.Reply) error) (string, error) {
 	r := c.lookup(e.Target.AgentID)
 	if r == nil {
 		return "", nil // no Agent reacts for this route
 	}
-	return r.SpeakReaction(ctx, e.Text, leadName, leadText, reaction, dispatch)
+	return r.speakDraftModality(ctx, crossTalkUserText(c.turnLine(r, e, false), leadName, leadText), e.Text, reaction, dispatch)
 }

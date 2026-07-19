@@ -265,6 +265,30 @@ tests:
             name: GLYPHOXA_LOG_FORMAT
             value: json
 
+  - it: omits GLYPHOXA_OLLAMA_URL when ollamaUrl is unset
+    # Left empty (the default), no env is emitted and the binary keeps its
+    # loopback default — the override only exists when the operator points the
+    # pod at a reachable Ollama server.
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OLLAMA_URL
+          any: true
+
+  - it: emits GLYPHOXA_OLLAMA_URL when ollamaUrl names an external Ollama server
+    # v1.0 embeds through Ollama ONLY (ADR-0011) and the container ships no
+    # local Ollama, so an in-cluster install needs this endpoint override for
+    # semantic memory to work at all (k3d: the host's Ollama).
+    set:
+      ollamaUrl: http://host.k3d.internal:11434
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GLYPHOXA_OLLAMA_URL
+            value: http://host.k3d.internal:11434
+
   - it: exposes the public http port and the internal metrics port as named ports
     asserts:
       - contains:

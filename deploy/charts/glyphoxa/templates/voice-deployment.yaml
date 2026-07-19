@@ -128,6 +128,16 @@ spec:
             # JSON logs for cluster log aggregation (ADR-0032).
             - name: GLYPHOXA_LOG_FORMAT
               value: json
+            {{- with .Values.ollamaUrl }}
+            # Embeddings endpoint (ADR-0011), the same shared value the web pod
+            # renders — split-mode parity, one endpoint of record. The pod has
+            # no local Ollama, so the binary's loopback default can never work
+            # in-cluster. (Today only web/`all` Mode resolves the embeddings
+            # provider, so voice Mode reads this only once it grows an embed
+            # consumer; emitting it now keeps the two pods from drifting.)
+            - name: GLYPHOXA_OLLAMA_URL
+              value: {{ . | quote }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.voice.metricsPort }}

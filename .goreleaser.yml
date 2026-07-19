@@ -8,21 +8,27 @@ builds:
   - id: glyphoxa
     main: ./cmd/glyphoxa
     binary: glyphoxa
-    # The whole stack is pure Go: opus + dave since the pion/opus + dave-go
-    # migration (#467), the Silero VAD since the bespoke pure-Go forward pass
-    # (#468). CGO_ENABLED=0 gives fully static binaries and native
-    # cross-compilation — no per-arch C toolchains.
+    # The outbound Opus encoder is libopus again (hraban/opus via CGO —
+    # ADR-0034 amendment 2026-07-19), so this mirrors the Dockerfile: CGO on,
+    # `nolibopusfile` paired with `opus`, `netgo osusergo` for the pure-Go
+    # net/user resolvers, and a fully static link (-extldflags "-static -lm").
+    # The release host needs pkg-config + libopus-dev (libopus.a) installed.
+    #
+    # linux/arm64 is dropped for now: static CGO needs a per-arch C toolchain
+    # + arm64 libopus.a, which the release environment does not provide. How
+    # (or whether) to cross-compile the arm64 archive is an open decision —
+    # see the ADR-0034 2026-07-19 amendment. The container image remains the
+    # canonical artifact.
     flags:
-      - -tags=opus,dave
+      - -tags=opus,dave,nolibopusfile,netgo,osusergo
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
     goos:
       - linux
     goarch:
       - amd64
-      - arm64
     ldflags:
-      - -s -w
+      - -s -w -extldflags "-static -lm"
 
 archives:
   - id: default

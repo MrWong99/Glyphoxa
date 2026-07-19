@@ -30,8 +30,11 @@ build with the audio tags** (see Build below).
 
 - **A Discord bot** with the **message content** and **voice** privileges, added
   to your test server, currently in (or able to join) a voice channel.
-- **No native toolchain**: the whole stack is pure Go (`CGO_ENABLED=0`, see
-  `Makefile`) — the Silero VAD runs as a bespoke pure-Go forward pass (#468).
+- **A native toolchain for audible builds**: the `opus` tag links system
+  libopus via CGO (ADR-0034 amendment 2026-07-19), so an audible build needs
+  `gcc`, `pkg-config`, and `libopus-dev`. Everything else is pure Go — the
+  default untagged build is `CGO_ENABLED=0` (see `Makefile`) and the Silero
+  VAD runs as a bespoke pure-Go forward pass (#468).
 - **Provider API keys** (BYOK, ADR-0004), supplied as environment variables —
   never compiled in. The live LLM is **Groq** (`providers.llm.name "groq"`, model
   `openai/gpt-oss-120b`, the #424 default; there is no Anthropic key). The binary reads, at
@@ -52,25 +55,29 @@ build with the audio tags** (see Build below).
 
 ## Build
 
-The audio codec (pion/opus) and DAVE/MLS encryption (thomas-vilte/dave-go) are
-pure Go, selected by build tags — no native libraries to install. For an
-**audible** run you need `opus`; for a real encrypted Discord session you also
-need `dave`.
+The audio codec and DAVE/MLS encryption (thomas-vilte/dave-go) are selected by
+build tags. For an **audible** run you need `opus` (which needs `pkg-config` +
+`libopus-dev`, see Prerequisites, and must be paired with `nolibopusfile`);
+for a real encrypted Discord session you also need `dave`.
 
 ```sh
 # Default build: codec + DAVE are stubs. The pipeline constructs and the gateway
 # connects, but the audio loop exits with `wire: audio codec unavailable` on the
-# first inbound frame — useful for wiring checks, NOT audible.
+# first inbound frame — useful for wiring checks, NOT audible. Pure Go,
+# CGO_ENABLED=0, no native prereqs.
 go build -o glyphoxa ./cmd/glyphoxa
 
-# Audible + encrypted live run. No native prereqs — everything is pure Go,
-# including the Silero VAD (#468); builds are CGO_ENABLED=0 and static.
-go build -tags "opus dave" -o glyphoxa ./cmd/glyphoxa
+# Audible + encrypted live run. The opus tag links system libopus via CGO
+# (ADR-0034 amendment 2026-07-19), so this needs gcc + pkg-config + libopus-dev.
+CGO_ENABLED=1 go build -tags "opus dave nolibopusfile" -o glyphoxa ./cmd/glyphoxa
 ```
 
-- `opus` — real Opus↔PCM codec (else the stub: no audio).
+- `opus` — real Opus↔PCM codec (else the stub: no audio). CGO; requires
+  `CGO_ENABLED=1` and system libopus.
+- `nolibopusfile` — always paired with `opus`: stops hraban/opus from also
+  demanding libopusfile, which the codec never uses.
 - `dave` — real DAVE/MLS encryption (mandatory on Discord since 2026-03-01 for
-  production; else the stub, `DaveAvailable() == false`, unencrypted).
+  production; else the stub, `DaveAvailable() == false`, unencrypted). Pure Go.
 
 ## Keys: keyring → env (never printed)
 
