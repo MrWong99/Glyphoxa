@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
@@ -93,11 +94,21 @@ type fakeSessions struct {
 	active     bool
 }
 
-func (f fakeSessions) Snapshot() (storage.VoiceSession, bool) {
+// Resolve models one live session for the speculative (bus) path (#487): it
+// resolves ANY stamped SessionID to this test's campaign, so a partial published
+// through the fwd bridge scopes its prefetch here.
+func (f fakeSessions) Resolve(uuid.UUID) (storage.VoiceSession, bool) {
 	if !f.active {
 		return storage.VoiceSession{}, false
 	}
 	return storage.VoiceSession{ID: uuid.New(), CampaignID: f.campaignID}, true
+}
+
+// recallCtx builds a run context carrying the session Identity the per-turn
+// Recall path reads its Campaign from (#487) — the ctx a manager-run turn
+// descends from.
+func recallCtx(sess fakeSessions) context.Context {
+	return session.NewContext(context.Background(), session.Identity{CampaignID: sess.campaignID})
 }
 
 type fakeMetrics struct {
@@ -165,9 +176,20 @@ func (c *fakeClock) sleep(_ context.Context, d time.Duration) error {
 	return nil
 }
 
+// stampedProc bridges the test's session bus onto a process bus stamping every
+// partial with a session id (mirrors voiceevent.Forward / the Manager wiring,
+// #487): the recaller subscribes to the process bus, tests publish on `bus`. The
+// fake Resolve ignores the specific id, so the stamp only needs to be a valid uuid.
+func stampedProc(t *testing.T, bus *voiceevent.Bus) *voiceevent.Bus {
+	t.Helper()
+	proc := voiceevent.NewBus()
+	t.Cleanup(voiceevent.Forward(bus, proc, uuid.New().String()))
+	return proc
+}
+
 func newTestRecaller(t *testing.T, emb embeddings.Provider, ret Retriever, sess Sessions, m Metrics, bus *voiceevent.Bus, cfg Config) *Recaller {
 	t.Helper()
-	r := New(emb, ret, sess, bus, m, testLogger(), cfg)
+	r := New(emb, ret, sess, stampedProc(t, bus), m, testLogger(), cfg)
 	t.Cleanup(r.Close)
 	return r
 }
@@ -179,7 +201,7 @@ func newSeamRecaller(t *testing.T, emb embeddings.Provider, ret Retriever, sess 
 	r := newRecaller(emb, ret, sess, m, testLogger(), cfg)
 	r.now = clock.now
 	r.sleep = clock.sleep
-	r.start(bus)
+	r.start(stampedProc(t, bus))
 	t.Cleanup(r.Close)
 	return r
 }
@@ -205,9 +227,10 @@ func TestRecall_NoPartials_InlineQueriesBothModes_CountsMiss(t *testing.T) {
 		campChunks:  []storage.ChunkMatch{chunkMatch("A dragon flew over the pass.")},
 	}
 	m := newFakeMetrics()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, voiceevent.NewBus(), Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, voiceevent.NewBus(), Config{})
 
-	mem := r.Recall(context.Background(), uuid.NewString(), "do you remember the ale")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "do you remember the ale")
 
 	if emb.callCount() != 1 {
 		t.Errorf("embed calls = %d, want 1 (inline embed)", emb.callCount())
@@ -238,7 +261,8 @@ func TestRecall_SpeculationHit_ReusesPrefetch_CountsHit(t *testing.T) {
 	}
 	m := newFakeMetrics()
 	bus := voiceevent.NewBus()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, bus, Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, bus, Config{})
 
 	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the knight?", UtteranceID: "u1"})
 	waitSpeculated(t, r)
@@ -253,7 +277,7 @@ func TestRecall_SpeculationHit_ReusesPrefetch_CountsHit(t *testing.T) {
 		t.Fatalf("NPC-knowledge must be deferred during speech; byAgent = %d, want 0", ret.agentN())
 	}
 
-	mem := r.Recall(context.Background(), uuid.NewString(), "do you remember the knight")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "do you remember the knight")
 
 	if emb.callCount() != 1 {
 		t.Errorf("embed called again on a hit: calls = %d, want 1", emb.callCount())
@@ -285,7 +309,8 @@ func TestRecall_SpeculationMiss_FallsBackInline_CountsMiss(t *testing.T) {
 	}
 	m := newFakeMetrics()
 	bus := voiceevent.NewBus()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, bus, Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, bus, Config{})
 
 	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the knight?", UtteranceID: "u1"})
 	waitSpeculated(t, r)
@@ -293,7 +318,7 @@ func TestRecall_SpeculationMiss_FallsBackInline_CountsMiss(t *testing.T) {
 		t.Fatalf("speculator embed = %d, want 1", emb.callCount())
 	}
 
-	mem := r.Recall(context.Background(), uuid.NewString(), "what about the golden crown")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "what about the golden crown")
 
 	if emb.callCount() != 2 {
 		t.Errorf("embed calls = %d, want 2 (speculation + inline miss)", emb.callCount())
@@ -316,11 +341,12 @@ func TestRecall_SpeculationMiss_FallsBackInline_CountsMiss(t *testing.T) {
 func TestRecall_BudgetExceeded_DegradesToSkip(t *testing.T) {
 	emb := &fakeEmbedder{block: true}
 	m := newFakeMetrics()
-	r := newTestRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true}, m,
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, &fakeRetriever{}, sess, m,
 		voiceevent.NewBus(), Config{Budget: 50 * time.Millisecond})
 
 	start := time.Now()
-	mem := r.Recall(context.Background(), uuid.NewString(), "do you remember the ale")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "do you remember the ale")
 	elapsed := time.Since(start)
 
 	if !mem.IsZero() {
@@ -340,9 +366,10 @@ func TestRecall_RetrieverError_DegradesToSkip(t *testing.T) {
 	emb := &fakeEmbedder{vec: fixedVec()}
 	ret := &fakeRetriever{campErr: errors.New("db down")}
 	m := newFakeMetrics()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, voiceevent.NewBus(), Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, voiceevent.NewBus(), Config{})
 
-	mem := r.Recall(context.Background(), uuid.NewString(), "do you remember the ale")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "do you remember the ale")
 	if !mem.IsZero() {
 		t.Errorf("want zero Memory on retriever error, got %+v", mem)
 	}
@@ -358,9 +385,10 @@ func TestRecall_BargeCancel_ZeroMemoryNoCounter(t *testing.T) {
 	emb := &fakeEmbedder{vec: fixedVec()}
 	ret := &fakeRetriever{agentChunks: []storage.ChunkMatch{chunkMatch("x")}}
 	m := newFakeMetrics()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, voiceevent.NewBus(), Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, voiceevent.NewBus(), Config{})
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(recallCtx(sess))
 	cancel() // barge cancelled the turn before recall started
 
 	mem := r.Recall(ctx, uuid.NewString(), "do you remember the ale")
@@ -380,9 +408,10 @@ func TestRecall_BargeCancel_ZeroMemoryNoCounter(t *testing.T) {
 func TestRecall_UnparseableAgentID_Skips(t *testing.T) {
 	emb := &fakeEmbedder{vec: fixedVec()}
 	m := newFakeMetrics()
-	r := newTestRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true}, m, voiceevent.NewBus(), Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, &fakeRetriever{}, sess, m, voiceevent.NewBus(), Config{})
 
-	mem := r.Recall(context.Background(), "not-a-uuid", "do you remember the ale")
+	mem := r.Recall(recallCtx(sess), "not-a-uuid", "do you remember the ale")
 	if !mem.IsZero() {
 		t.Errorf("want zero Memory for a bad agent id, got %+v", mem)
 	}
@@ -408,9 +437,10 @@ func TestRecall_DedupsPersonalOutOfWorld(t *testing.T) {
 		},
 	}
 	m := newFakeMetrics()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, voiceevent.NewBus(), Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, voiceevent.NewBus(), Config{})
 
-	mem := r.Recall(context.Background(), uuid.NewString(), "what happened at the ritual")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "what happened at the ritual")
 
 	if len(mem.Personal) != 1 || mem.Personal[0] != "I saw the ritual myself." {
 		t.Errorf("personal = %v, want the witnessed chunk", mem.Personal)
@@ -433,7 +463,8 @@ func TestRecall_HitWithFailedPrefetch_FetchesWorldInline(t *testing.T) {
 	}
 	m := newFakeMetrics()
 	bus := voiceevent.NewBus()
-	r := newTestRecaller(t, emb, ret, fakeSessions{campaignID: uuid.New(), active: true}, m, bus, Config{})
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newTestRecaller(t, emb, ret, sess, m, bus, Config{})
 
 	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the duke?", UtteranceID: "u1"})
 	waitSpeculated(t, r)
@@ -444,7 +475,7 @@ func TestRecall_HitWithFailedPrefetch_FetchesWorldInline(t *testing.T) {
 		t.Fatalf("byCamp = %d, want 1 (the failed prefetch)", ret.campN())
 	}
 
-	mem := r.Recall(context.Background(), uuid.NewString(), "do you remember the duke")
+	mem := r.Recall(recallCtx(sess), uuid.NewString(), "do you remember the duke")
 
 	if emb.callCount() != 1 {
 		t.Errorf("a hit must not re-embed; calls = %d, want 1", emb.callCount())
@@ -468,7 +499,8 @@ func TestRecall_HitWithFailedPrefetch_FetchesWorldInline(t *testing.T) {
 func TestSpeculator_SkipsShortPartials(t *testing.T) {
 	emb := &fakeEmbedder{vec: fixedVec()}
 	bus := voiceevent.NewBus()
-	r := newSeamRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newSeamRecaller(t, emb, &fakeRetriever{}, sess,
 		newFakeMetrics(), bus, Config{}, newFakeClock())
 
 	bus.Publish(voiceevent.STTPartial{Text: "do you", UtteranceID: "u1"}) // 2 words
@@ -484,7 +516,8 @@ func TestSpeculator_SkipsShortPartials(t *testing.T) {
 func TestSpeculator_SkipsUnchangedNorm(t *testing.T) {
 	emb := &fakeEmbedder{vec: fixedVec()}
 	bus := voiceevent.NewBus()
-	r := newSeamRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newSeamRecaller(t, emb, &fakeRetriever{}, sess,
 		newFakeMetrics(), bus, Config{}, newFakeClock())
 
 	bus.Publish(voiceevent.STTPartial{Text: "Do you remember the knight?", UtteranceID: "u1"})
@@ -508,7 +541,8 @@ func TestSpeculator_SkipsUnchangedNorm(t *testing.T) {
 func TestSpeculator_RateLimitDefersNotDrops(t *testing.T) {
 	emb := &fakeEmbedder{vec: fixedVec()}
 	bus := voiceevent.NewBus()
-	r := newSeamRecaller(t, emb, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newSeamRecaller(t, emb, &fakeRetriever{}, sess,
 		newFakeMetrics(), bus, Config{}, newFakeClock())
 
 	bus.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
@@ -529,7 +563,8 @@ func TestSpeculator_RateLimitDefersNotDrops(t *testing.T) {
 // only the newest text survives to the speculator. Tests the mailbox directly (no
 // goroutine) so it is deterministic.
 func TestMailbox_LatestWins(t *testing.T) {
-	r := newRecaller(&fakeEmbedder{}, &fakeRetriever{}, fakeSessions{campaignID: uuid.New(), active: true},
+	sess := fakeSessions{campaignID: uuid.New(), active: true}
+	r := newRecaller(&fakeEmbedder{}, &fakeRetriever{}, sess,
 		newFakeMetrics(), testLogger(), Config{})
 	t.Cleanup(r.cancel)
 
@@ -537,11 +572,65 @@ func TestMailbox_LatestWins(t *testing.T) {
 	r.onPartial(voiceevent.STTPartial{Text: "two"})
 	r.onPartial(voiceevent.STTPartial{Text: "three"})
 
-	got, ok := r.takePending()
+	got, _, ok := r.takePending()
 	if !ok || got != "three" {
 		t.Errorf("takePending = (%q, %v), want (three, true) — latest wins", got, ok)
 	}
-	if _, ok := r.takePending(); ok {
+	if _, _, ok := r.takePending(); ok {
 		t.Error("mailbox not empty after a drain")
 	}
+}
+
+// multiSessions resolves distinct stamped SessionIDs to distinct campaigns — the
+// registry stand-in for the #487 speculation isolation test.
+type multiSessions struct{ live map[uuid.UUID]uuid.UUID }
+
+func (m multiSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	camp, ok := m.live[id]
+	if !ok {
+		return storage.VoiceSession{}, false
+	}
+	return storage.VoiceSession{ID: id, CampaignID: camp}, true
+}
+
+// TestRecall_SpeculationScopedToPartialSession is the #487 recall isolation
+// invariant: session A's partial prefetches for campaign A, so a Recall running
+// in campaign B (its run-context Identity) must NOT reuse A's prefetch — it
+// misses and re-embeds inline, scoped to B. No cross-session leakage.
+func TestRecall_SpeculationScopedToPartialSession(t *testing.T) {
+	sidA, sidB := uuid.New(), uuid.New()
+	campA, campB := uuid.New(), uuid.New()
+	sess := multiSessions{live: map[uuid.UUID]uuid.UUID{sidA: campA, sidB: campB}}
+
+	emb := &fakeEmbedder{vec: fixedVec()}
+	ret := &fakeRetriever{
+		agentChunks: []storage.ChunkMatch{chunkMatch("b-personal")},
+		campChunks:  []storage.ChunkMatch{chunkMatch("b-world")},
+	}
+	m := newFakeMetrics()
+	busA := voiceevent.NewBus()
+	proc := voiceevent.NewBus()
+	t.Cleanup(voiceevent.Forward(busA, proc, sidA.String()))
+	r := New(emb, ret, sess, proc, m, testLogger(), Config{})
+	t.Cleanup(r.Close)
+
+	// Session A speculates on its partial (prefetch scoped to campaign A).
+	busA.Publish(voiceevent.STTPartial{Text: "do you remember the knight", UtteranceID: "u1"})
+	waitSpeculated(t, r)
+	if emb.callCount() != 1 || ret.campN() != 1 {
+		t.Fatalf("speculation embed=%d campN=%d, want 1/1", emb.callCount(), ret.campN())
+	}
+
+	// A Recall in campaign B with the SAME normalized text must miss A's prefetch
+	// (different campaign) and re-embed inline for B.
+	ctxB := session.NewContext(context.Background(), session.Identity{SessionID: sidB, CampaignID: campB})
+	mem := r.Recall(ctxB, uuid.NewString(), "do you remember the knight")
+
+	if emb.callCount() != 2 {
+		t.Errorf("embed calls = %d, want 2 (A's prefetch not reused by B — re-embedded)", emb.callCount())
+	}
+	if m.count(observe.RecallMiss) != 1 || m.count(observe.RecallHit) != 0 {
+		t.Errorf("outcomes: miss=%d hit=%d, want miss=1 hit=0 (no cross-session hit)", m.count(observe.RecallMiss), m.count(observe.RecallHit))
+	}
+	_ = mem
 }

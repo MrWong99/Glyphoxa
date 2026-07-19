@@ -110,20 +110,49 @@ const (
 	tapeConsentFailedReply  = "Sorry — could not update your choice. Please try again."
 )
 
+// TapeConsentPublisher routes a consent event to the live Voice Session running a
+// Campaign (#487): the presence/all-web topology wires *session.Registry so the
+// event lands on THAT session's own bus — where the session-local tape wiring
+// reconciles, and from where [voiceevent.Forward] stamps it onto the process bus.
+// PublishToCampaign returns false when no live session runs the campaign (nothing
+// to reconcile — the durable row still changed). The standalone voice-mode client
+// wires [BusPublisher] over its single per-cycle session bus.
+type TapeConsentPublisher interface {
+	PublishToCampaign(campaignID uuid.UUID, e voiceevent.Event) bool
+}
+
+// BusPublisher adapts a single [voiceevent.Bus] to [TapeConsentPublisher] for the
+// topologies that have exactly one session bus (the standalone voice-mode client,
+// tests): it publishes onto the bus regardless of campaign and reports true. A nil
+// bus reports false.
+type BusPublisher struct{ Bus *voiceevent.Bus }
+
+// PublishToCampaign publishes e onto the wrapped bus (campaign ignored — the bus
+// IS the one session's bus) and reports whether a bus was present.
+func (b BusPublisher) PublishToCampaign(_ uuid.UUID, e voiceevent.Event) bool {
+	if b.Bus == nil {
+		return false
+	}
+	b.Bus.Publish(e)
+	return true
+}
+
 // ApplyTapeConsent is the transport-agnostic core behind a consent button press
 // (#306, ADR-0051), shared by the all-mode presence handler and the voice-mode
 // client listener so both topologies behave identically. It parses the custom id,
 // writes (or deletes) the Speaker's durable consent row, then publishes
-// [voiceevent.TapeConsentChanged] on bus so the live tape reconciles — the DB write
-// happens BEFORE the event (the MuteChanged ordering precedent), so a reactor that
-// re-reads storage on the event always sees the change.
+// [voiceevent.TapeConsentChanged] via pub so the live tape reconciles — the DB
+// write happens BEFORE the event (the MuteChanged ordering precedent), so a
+// reactor that re-reads storage on the event always sees the change. pub routes
+// the event to the session running the button's Campaign (#487); a nil pub, or no
+// live session for the campaign, publishes nothing (the durable row still changed).
 //
 // ok is false for a custom id that is not a tape-consent button (the caller ignores
 // it). A storage failure returns ok=true (the button WAS ours) with an apologetic
 // reply and publishes nothing — the durable state did not change, so neither must
 // the live tape — and is LOGGED here (the presser only sees "try again"; the
 // operator needs the cause). A nil logger discards.
-func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, bus *voiceevent.Bus, now func() time.Time, log *slog.Logger, customID, userID string) (reply string, ok bool) {
+func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, pub TapeConsentPublisher, now func() time.Time, log *slog.Logger, customID, userID string) (reply string, ok bool) {
 	campaignID, granted, ok := ParseTapeConsentCustomID(customID)
 	if !ok {
 		return "", false
@@ -147,8 +176,8 @@ func ApplyTapeConsent(ctx context.Context, store TapeConsentStore, bus *voiceeve
 		}
 	}
 
-	if bus != nil {
-		bus.Publish(voiceevent.TapeConsentChanged{
+	if pub != nil {
+		pub.PublishToCampaign(campaignID, voiceevent.TapeConsentChanged{
 			At:         now(),
 			CampaignID: campaignID.String(),
 			SpeakerID:  userID,
@@ -172,7 +201,7 @@ func tapeConsentListener(store TapeConsentStore, bus *voiceevent.Bus, log *slog.
 		return nil
 	}
 	return func(e *events.ComponentInteractionCreate) {
-		reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, log, e.Data.CustomID(), e.User().ID.String())
+		reply, ok := ApplyTapeConsent(context.Background(), store, BusPublisher{Bus: bus}, time.Now, log, e.Data.CustomID(), e.User().ID.String())
 		if !ok {
 			return
 		}

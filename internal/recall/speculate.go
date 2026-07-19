@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
@@ -17,11 +19,15 @@ import (
 // failed, so a hit knows to fetch world inline rather than return empty. Guarded by
 // cacheMu.
 type specCache struct {
-	norm    string
-	vec     []float32
-	world   []storage.ChunkMatch
-	worldOK bool
-	valid   bool
+	norm string
+	// campaignID scopes the entry to the session the partial came from (#487): a
+	// Recall in a DIFFERENT campaign that normalizes to the same text must miss, so
+	// it never serves another concurrent session's prefetched world chunks.
+	campaignID uuid.UUID
+	vec        []float32
+	world      []storage.ChunkMatch
+	worldOK    bool
+	valid      bool
 }
 
 // onPartial is the bus callback for [voiceevent.STTPartial]. The bus delivers
@@ -34,6 +40,7 @@ type specCache struct {
 func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 	r.mailMu.Lock()
 	r.pending = p.Text
+	r.pendingSID = p.SessionID // #487: scope the prefetch to the partial's session
 	r.hasPending = true
 	r.mailMu.Unlock()
 	select {
@@ -42,15 +49,15 @@ func (r *Recaller) onPartial(p voiceevent.STTPartial) {
 	}
 }
 
-// takePending drains the latest-wins mailbox.
-func (r *Recaller) takePending() (string, bool) {
+// takePending drains the latest-wins mailbox (text + originating session id).
+func (r *Recaller) takePending() (text, sessionID string, ok bool) {
 	r.mailMu.Lock()
 	defer r.mailMu.Unlock()
 	if !r.hasPending {
-		return "", false
+		return "", "", false
 	}
 	r.hasPending = false
-	return r.pending, true
+	return r.pending, r.pendingSID, true
 }
 
 // speculateLoop is the single speculator goroutine: it wakes on the mailbox
@@ -81,20 +88,20 @@ func (r *Recaller) speculateLoop() {
 // partial inside the interval window would never be embedded — a systematic
 // speculation miss on exactly the utterance the final matches.
 func (r *Recaller) drainAndSpeculate() {
-	text, ok := r.takePending()
+	text, sid, ok := r.takePending()
 	if !ok {
 		return
 	}
 	for {
-		wait := r.maybeSpeculate(text)
+		wait := r.maybeSpeculate(text, sid)
 		if wait <= 0 {
 			return
 		}
 		if err := r.sleep(r.ctx, wait); err != nil {
 			return // Close cancelled the recaller
 		}
-		if newer, ok := r.takePending(); ok {
-			text = newer
+		if newer, newSID, ok := r.takePending(); ok {
+			text, sid = newer, newSID
 		}
 	}
 }
@@ -108,7 +115,7 @@ func (r *Recaller) drainAndSpeculate() {
 // prefetched here (the vector is in hand); NPC-knowledge is deferred to Recall (the
 // target agent is unknown during speech). On success it replaces the single-slot
 // cache.
-func (r *Recaller) maybeSpeculate(text string) time.Duration {
+func (r *Recaller) maybeSpeculate(text, sessionID string) time.Duration {
 	norm := normalize(text)
 	if wordCount(norm) < minSpeculateWords {
 		return 0 // no retrieval signal in a one/two-word interim
@@ -122,10 +129,18 @@ func (r *Recaller) maybeSpeculate(text string) time.Duration {
 			return minEmbedInterval - since // defer, do not drop (finding 2)
 		}
 	}
-	campaignID, ok := r.campaign()
-	if !ok {
-		return 0 // no active session to scope the prefetch
+	// Resolve the Campaign from the partial's OWN session (#487): an empty or
+	// unparsable SessionID (a pre-stamp / session-local straggler), or a session the
+	// registry no longer resolves, has nothing to scope the prefetch to.
+	sid, err := uuid.Parse(sessionID)
+	if err != nil {
+		return 0
 	}
+	vs, ok := r.sessions.Resolve(sid)
+	if !ok {
+		return 0
+	}
+	campaignID := vs.CampaignID
 	// Commit to this attempt BEFORE the call so a failing/hung provider is not
 	// hammered and the same text is not re-embedded on the next tick.
 	r.lastEmbedNorm = norm
@@ -148,23 +163,25 @@ func (r *Recaller) maybeSpeculate(text string) time.Duration {
 		r.log.Warn("memory speculation: world prefetch failed; caching vector only", "err", err)
 		world = nil
 	}
-	r.storeCache(norm, vecs[0], world, worldOK)
+	r.storeCache(norm, campaignID, vecs[0], world, worldOK)
 	return 0
 }
 
-// storeCache replaces the single speculated entry (latest utterance only).
-func (r *Recaller) storeCache(norm string, vec []float32, world []storage.ChunkMatch, worldOK bool) {
+// storeCache replaces the single speculated entry (latest utterance only),
+// tagged with the campaign it was prefetched for (#487).
+func (r *Recaller) storeCache(norm string, campaignID uuid.UUID, vec []float32, world []storage.ChunkMatch, worldOK bool) {
 	r.cacheMu.Lock()
-	r.cache = specCache{norm: norm, vec: vec, world: world, worldOK: worldOK, valid: true}
+	r.cache = specCache{norm: norm, campaignID: campaignID, vec: vec, world: world, worldOK: worldOK, valid: true}
 	r.cacheMu.Unlock()
 }
 
-// cacheLookup returns the cached entry when norm matches the speculated query, and
-// whether it was a hit.
-func (r *Recaller) cacheLookup(norm string) (specCache, bool) {
+// cacheLookup returns the cached entry when norm AND campaignID match the
+// speculated query, and whether it was a hit — the campaign match keeps a
+// concurrent session's prefetch from serving this turn (#487).
+func (r *Recaller) cacheLookup(norm string, campaignID uuid.UUID) (specCache, bool) {
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
-	if r.cache.valid && r.cache.norm == norm {
+	if r.cache.valid && r.cache.norm == norm && r.cache.campaignID == campaignID {
 		return r.cache, true
 	}
 	return specCache{}, false

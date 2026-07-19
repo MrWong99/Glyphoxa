@@ -12,6 +12,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/kgfacts"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 )
 
@@ -37,13 +38,11 @@ func (f *fakeNodes) AgentNodeFacts(ctx context.Context, agentID uuid.UUID) ([]st
 	return f.nodes, f.err
 }
 
-// fakeSessions is a scripted kgfacts.Sessions.
-type fakeSessions struct {
-	vs storage.VoiceSession
-	ok bool
+// liveCtx builds a run context carrying the session Identity the ctx-scoped Facts
+// guard reads (#487) — the context a manager-run turn descends from.
+func liveCtx(campaignID uuid.UUID) context.Context {
+	return session.NewContext(context.Background(), session.Identity{CampaignID: campaignID})
 }
-
-func (f fakeSessions) Snapshot() (storage.VoiceSession, bool) { return f.vs, f.ok }
 
 // fakeMetrics records the outcomes it was handed.
 type fakeMetrics struct{ outcomes []observe.FactsOutcome }
@@ -60,13 +59,9 @@ func (f *fakeMetrics) count(o observe.FactsOutcome) int {
 	return n
 }
 
-func activeSessions(campaignID uuid.UUID) fakeSessions {
-	return fakeSessions{vs: storage.VoiceSession{ID: uuid.New(), CampaignID: campaignID}, ok: true}
-}
-
-func newRecaller(t *testing.T, nodes kgfacts.PromptKG, sessions kgfacts.Sessions, m kgfacts.Metrics) *kgfacts.Recaller {
+func newRecaller(t *testing.T, nodes kgfacts.PromptKG, m kgfacts.Metrics) *kgfacts.Recaller {
 	t.Helper()
-	return kgfacts.New(nodes, sessions, m, nil, kgfacts.Config{})
+	return kgfacts.New(nodes, m, nil, kgfacts.Config{})
 }
 
 // TestFacts_RenderFormatExact pins #126 AC2's rendering contract: each fact is
@@ -80,9 +75,9 @@ func TestFacts_RenderFormatExact(t *testing.T) {
 		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodePlotThread, Name: "The Heist", Body: "Someone plans a robbery."},
 	}}
 	m := &fakeMetrics{}
-	r := newRecaller(t, nodes, activeSessions(camp), m)
+	r := newRecaller(t, nodes, m)
 
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) != 3 {
 		t.Fatalf("got %d facts, want 3", len(facts))
 	}
@@ -110,9 +105,9 @@ func TestFacts_EmptyBodyRendersHeaderOnly(t *testing.T) {
 	nodes := &fakeNodes{nodes: []storage.KGNode{
 		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Loose end", Body: "   "},
 	}}
-	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
+	r := newRecaller(t, nodes, &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) != 1 || facts[0] != "### Loose end (Note)" {
 		t.Errorf("empty-body fact = %q, want header only", facts)
 	}
@@ -125,9 +120,9 @@ func TestFacts_TruncatesBodyByRunes(t *testing.T) {
 	nodes := &fakeNodes{nodes: []storage.KGNode{
 		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Long", Body: body},
 	}}
-	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
+	r := newRecaller(t, nodes, &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) != 1 {
 		t.Fatalf("got %d facts, want 1", len(facts))
 	}
@@ -154,9 +149,9 @@ func TestFacts_TruncatesLongName(t *testing.T) {
 		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: huge, Body: "short"},
 		{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Small", Body: "also short"},
 	}}
-	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
+	r := newRecaller(t, nodes, &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) != 2 {
 		t.Fatalf("got %d facts, want 2 (a long name must not kill the block)", len(facts))
 	}
@@ -182,9 +177,9 @@ func TestFacts_CapsAtMaxFacts(t *testing.T) {
 		})
 	}
 	nodes := &fakeNodes{nodes: ns}
-	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
+	r := newRecaller(t, nodes, &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) != kgfacts.MaxFacts {
 		t.Fatalf("got %d facts, want the MaxFacts cap %d", len(facts), kgfacts.MaxFacts)
 	}
@@ -207,9 +202,9 @@ func TestFacts_CapsAtMaxBlockChars(t *testing.T) {
 		})
 	}
 	nodes := &fakeNodes{nodes: ns}
-	r := newRecaller(t, nodes, activeSessions(camp), &fakeMetrics{})
+	r := newRecaller(t, nodes, &fakeMetrics{})
 
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if len(facts) == 0 {
 		t.Fatal("no facts returned")
 	}
@@ -227,7 +222,7 @@ func TestFacts_CapsAtMaxBlockChars(t *testing.T) {
 // scope, so no facts are returned.
 func TestFacts_NoSession_Nil(t *testing.T) {
 	m := &fakeMetrics{}
-	r := newRecaller(t, &fakeNodes{}, fakeSessions{ok: false}, m)
+	r := newRecaller(t, &fakeNodes{}, m)
 
 	if facts := r.Facts(context.Background(), testAgent.String()); facts != nil {
 		t.Errorf("facts with no session = %v, want nil", facts)
@@ -244,9 +239,9 @@ func TestFacts_NoSession_Nil(t *testing.T) {
 func TestFacts_UnlinkedAgent_Empty(t *testing.T) {
 	camp := uuid.New()
 	m := &fakeMetrics{}
-	r := newRecaller(t, &fakeNodes{nodes: nil}, activeSessions(camp), m)
+	r := newRecaller(t, &fakeNodes{nodes: nil}, m)
 
-	if facts := r.Facts(context.Background(), testAgent.String()); facts != nil {
+	if facts := r.Facts(liveCtx(camp), testAgent.String()); facts != nil {
 		t.Errorf("facts = %v, want nil", facts)
 	}
 	if m.count(observe.FactsEmpty) != 1 || m.count(observe.FactsDegraded) != 0 {
@@ -264,9 +259,9 @@ func TestFacts_InvalidAgentID_Empty(t *testing.T) {
 		nodes := &fakeNodes{nodes: []storage.KGNode{
 			{ID: uuid.New(), CampaignID: camp, Type: storage.KGNodeNote, Name: "Unreached", Body: "x"},
 		}}
-		r := newRecaller(t, nodes, activeSessions(camp), m)
+		r := newRecaller(t, nodes, m)
 
-		if facts := r.Facts(context.Background(), bad); facts != nil {
+		if facts := r.Facts(liveCtx(camp), bad); facts != nil {
 			t.Errorf("facts for agentID %q = %v, want nil", bad, facts)
 		}
 		if nodes.gotAgent != uuid.Nil {
@@ -283,9 +278,9 @@ func TestFacts_InvalidAgentID_Empty(t *testing.T) {
 func TestFacts_DBError_DegradedNil(t *testing.T) {
 	camp := uuid.New()
 	m := &fakeMetrics{}
-	r := newRecaller(t, &fakeNodes{err: errors.New("db down")}, activeSessions(camp), m)
+	r := newRecaller(t, &fakeNodes{err: errors.New("db down")}, m)
 
-	if facts := r.Facts(context.Background(), testAgent.String()); facts != nil {
+	if facts := r.Facts(liveCtx(camp), testAgent.String()); facts != nil {
 		t.Errorf("facts on DB error = %v, want nil", facts)
 	}
 	if m.count(observe.FactsDegraded) != 1 {
@@ -298,9 +293,9 @@ func TestFacts_DBError_DegradedNil(t *testing.T) {
 func TestFacts_CtxCancel_SilentNil(t *testing.T) {
 	camp := uuid.New()
 	m := &fakeMetrics{}
-	r := newRecaller(t, &fakeNodes{}, activeSessions(camp), m)
+	r := newRecaller(t, &fakeNodes{}, m)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(liveCtx(camp))
 	cancel() // barge before the read starts
 
 	if facts := r.Facts(ctx, testAgent.String()); facts != nil {
@@ -316,11 +311,11 @@ func TestFacts_CtxCancel_SilentNil(t *testing.T) {
 func TestFacts_BudgetTimeout_DegradedNil(t *testing.T) {
 	camp := uuid.New()
 	m := &fakeMetrics{}
-	r := kgfacts.New(&fakeNodes{block: true}, activeSessions(camp), m, nil,
+	r := kgfacts.New(&fakeNodes{block: true}, m, nil,
 		kgfacts.Config{Budget: 20 * time.Millisecond})
 
 	start := time.Now()
-	facts := r.Facts(context.Background(), testAgent.String())
+	facts := r.Facts(liveCtx(camp), testAgent.String())
 	if facts != nil {
 		t.Errorf("facts on budget timeout = %v, want nil", facts)
 	}

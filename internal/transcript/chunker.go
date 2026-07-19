@@ -121,7 +121,8 @@ type openChunk struct {
 // Chunker projects bus events into Transcript Chunks and writes them async. Safe
 // for concurrent use: the bus callback, the window timer and FlushSession all take
 // the same lock — c.mu, shared with the busproject scaffold that owns the
-// subscription, the session rollover, and the turn map (#447).
+// subscription, the per-session attribution, and the per-session turn map
+// (#447/#487).
 type Chunker struct {
 	store  ChunkStore
 	gauge  BacklogGauge
@@ -131,25 +132,28 @@ type Chunker struct {
 
 	resolver SpeakerResolver // resolves SpeakerID → name for the line prefix (#281); nil = generic label
 
-	// proj is the shared projection scaffold (#447): it attributes every bus
-	// event to the active session under c.mu (ONE Snapshot per event, like the
-	// relay, #149), flushes a stale open chunk via finishSession BEFORE the FKs
-	// repoint on a session change, and owns the per-turn coalescing map. The
-	// chunker keeps only its fold rules (delivered-only, ADR-0012).
+	// proj is the shared projection scaffold (#447/#487): it attributes every
+	// stamped bus event to its Voice Session under c.mu, and owns each session's
+	// per-turn coalescing map. The chunker keeps only its fold rules
+	// (delivered-only, ADR-0012) and its per-session open chunk.
 	proj *busproject.Projection[chunkTurn]
 
-	mu   sync.Mutex
-	open *openChunk
+	mu sync.Mutex
+	// open holds each live session's current open chunk (#487), keyed by session
+	// id string — concurrent sessions never share a chunk. A session's entry
+	// appears on its first utterance (ensureOpen) and is cleared on close.
+	open map[string]*openChunk
 
 	// queue is the non-blocking write queue draining into the single writer
 	// goroutine; nil when persistence is disabled (store == nil).
 	queue *busproject.Queue[*storage.TranscriptChunk]
 }
 
-// NewChunker subscribes to the bus once and returns a Chunker ready to fold
-// events. The subscription lives for the process (single active session across
-// reconnects/sessions, ADR-0039). A nil store disables writes (no writer
-// goroutine); a nil gauge disables the backlog update.
+// NewChunker subscribes to the process bus once and returns a Chunker ready to
+// fold events. The subscription lives for the process; each event folds into its
+// stamped session's own open chunk (#487), so concurrent sessions never share a
+// chunk. A nil store disables writes (no writer goroutine); a nil gauge disables
+// the backlog update.
 func NewChunker(bus *voiceevent.Bus, sessions Sessions, store ChunkStore, gauge BacklogGauge, log *slog.Logger, cfg ChunkerConfig) *Chunker {
 	if log == nil {
 		log = slog.Default()
@@ -168,14 +172,14 @@ func NewChunker(bus *voiceevent.Bus, sessions Sessions, store ChunkStore, gauge 
 		log:    log,
 		window: window,
 		maxUtt: maxUtt,
+		open:   map[string]*openChunk{},
 	}
 	if store != nil {
 		c.queue = busproject.NewQueue(chunkQueue, c.writeChunk)
 	}
-	c.proj = busproject.New[chunkTurn](sessions, &c.mu, busproject.Hooks{
+	c.proj = busproject.New[chunkTurn](sessions, &c.mu, log, busproject.Hooks{
 		Fold:          c.fold,
 		FinishSession: c.finishSession,
-		StartSession:  c.startSession,
 	})
 	c.proj.Subscribe(bus)
 	return c
@@ -191,61 +195,55 @@ func (c *Chunker) SetResolver(res SpeakerResolver) {
 	c.mu.Unlock()
 }
 
-// fold applies one attributed event to the open chunk — the chunker's fold
-// rules (ADR-0012: delivered-only, commit at FirstAudio). The scaffold has
-// already taken the event's ONE session Snapshot (like the relay, #149) and
-// rolled over on a session change; fold runs under c.mu and must not block
-// (the bus delivers synchronously): the only outward call, closeChunk's
+// fold applies one attributed event to the session's open chunk — the chunker's
+// fold rules (ADR-0012: delivered-only, commit at FirstAudio). The scaffold has
+// already attributed the event to its stamped session (#487); fold looks the open
+// chunk up by session id and runs under c.mu and must not block (the bus delivers
+// synchronously): the only outward call, closeChunk's
 // enqueue, is non-blocking.
 func (c *Chunker) fold(e voiceevent.Event) {
+	sid := voiceevent.SessionIDOf(e)
 	switch ev := e.(type) {
 	case voiceevent.STTFinal:
-		c.appendHuman(ev)
+		c.appendHuman(sid, ev)
 	case voiceevent.AddressRouted:
-		c.proj.Turn(ev.TurnID).target = ev.Target
+		c.proj.Turn(sid, ev.TurnID).target = ev.Target
 	case voiceevent.TTSInvoked:
-		c.bufferAgentSentence(ev)
+		c.bufferAgentSentence(sid, ev)
 	case voiceevent.FirstAudio:
-		c.commitDelivered(ev)
+		c.commitDelivered(sid, ev)
 	case voiceevent.TTSStreamFailed:
-		c.abortSentence(ev)
+		c.abortSentence(sid, ev)
 	case voiceevent.TurnEnded:
 		// The turn is finalized: drop its undelivered tail (ADR-0012 — the room
 		// never heard those sentences) and refuse late dispatches.
-		t := c.proj.Turn(ev.TurnID)
+		t := c.proj.Turn(sid, ev.TurnID)
 		t.ended = true
 		t.pending = nil
 	}
 }
 
-// finishSession is the scaffold's pre-rollover hook: any stale open chunk from
-// the outgoing session is enqueue-flushed as a safety net (a session that ended
-// without a FlushSession still persists its last chunk). It runs BEFORE the
-// scaffold repoints the active FKs, so the flushed chunk keeps the OLD
-// session's ids.
-func (c *Chunker) finishSession() {
-	if c.open != nil {
-		c.closeChunk(c.open)
+// finishSession is the scaffold's Close hook (#487): any stale open chunk for the
+// closing session is enqueue-flushed as a safety net. It runs BEFORE the scaffold
+// deletes the entry, so Session(sid) still returns the OLD session's ids and the
+// flushed chunk keeps them. In practice FlushSession (the Manager's guaranteed
+// loop-exit hook) has already closed the chunk, so this is normally a no-op.
+func (c *Chunker) finishSession(sid string) {
+	if oc := c.open[sid]; oc != nil {
+		c.closeChunk(sid, oc)
 	}
-}
-
-// startSession is the scaffold's post-rollover hook: the scaffold has repointed
-// the FKs and reset the turn map; clearing open here is defensive (finishSession's
-// closeChunk already detached it).
-func (c *Chunker) startSession() {
-	c.open = nil
 }
 
 // appendHuman folds one human utterance (one STTFinal, attributed to its Speaker
 // Lane via SpeakerID since #278/ADR-0050) into the open chunk and re-checks the
 // close conditions. The line prefix resolves to the speaker's Character/guild name
 // when available (#281), else the generic "Player / DM".
-func (c *Chunker) appendHuman(ev voiceevent.STTFinal) {
-	oc := c.ensureOpen(ev.At)
-	oc.entries = append(oc.entries, &chunkLine{text: c.humanPrefix(ev.SpeakerID) + ": " + ev.Text})
+func (c *Chunker) appendHuman(sid string, ev voiceevent.STTFinal) {
+	oc := c.ensureOpen(sid, ev.At)
+	oc.entries = append(oc.entries, &chunkLine{text: c.humanPrefix(sid, ev.SpeakerID) + ": " + ev.Text})
 	c.recordSpeaker(oc, ev.SpeakerID)
 	oc.count++
-	c.afterAppend(oc)
+	c.afterAppend(sid, oc)
 }
 
 // humanPrefix is the "Who" prefix for a human chunk line (#281): the resolved
@@ -254,11 +252,11 @@ func (c *Chunker) appendHuman(ev voiceevent.STTFinal) {
 // persisted chunks are immutable (ADR-0011). The relay warms the resolver on
 // VADSpeechStart, so this shared cache is usually populated by the time a line
 // folds. GM lane routing is a live-view concern; chunk content just uses names.
-func (c *Chunker) humanPrefix(speakerID string) string {
+func (c *Chunker) humanPrefix(sid, speakerID string) string {
 	if c.resolver == nil || speakerID == "" {
 		return "Player / DM"
 	}
-	if name := c.resolver.Lookup(c.proj.Session().CampaignID, speakerID).Name; name != "" {
+	if name := c.resolver.Lookup(c.proj.Session(sid).CampaignID, speakerID).Name; name != "" {
 		return name
 	}
 	return "Player / DM"
@@ -292,8 +290,8 @@ func (c *Chunker) recordSpeaker(oc *openChunk, speakerID string) {
 // delivered — purge it (never commit unheard text, ADR-0012), else a mid-turn
 // start-error the turn recovers from would commit the lost sentence AND shift the
 // FirstAudio pairing of every later sentence by one.
-func (c *Chunker) bufferAgentSentence(ev voiceevent.TTSInvoked) {
-	t := c.proj.Turn(ev.TurnID)
+func (c *Chunker) bufferAgentSentence(sid string, ev voiceevent.TTSInvoked) {
+	t := c.proj.Turn(sid, ev.TurnID)
 	if t.ended {
 		c.log.Warn("transcript: chunk sentence after turn ended, dropping", "turn", ev.TurnID)
 		return
@@ -312,8 +310,8 @@ func (c *Chunker) bufferAgentSentence(ev voiceevent.TTSInvoked) {
 // turn's utterance (one utterance per Agent turn, records the Agent, bumps the
 // count); later delivered sentences append to that same line. A FirstAudio with
 // nothing pending — a straggler after TurnEnded cleared the buffer — is a no-op.
-func (c *Chunker) commitDelivered(ev voiceevent.FirstAudio) {
-	t := c.proj.Turn(ev.TurnID)
+func (c *Chunker) commitDelivered(sid string, ev voiceevent.FirstAudio) {
+	t := c.proj.Turn(sid, ev.TurnID)
 	if len(t.pending) == 0 {
 		c.log.Debug("transcript: first audio with no pending sentence, ignoring", "turn", ev.TurnID)
 		return
@@ -325,13 +323,13 @@ func (c *Chunker) commitDelivered(ev voiceevent.FirstAudio) {
 		// First delivered sentence of this turn's current utterance: open it. After
 		// a chunk close detached the line, this re-opens a CONTINUATION in the next
 		// chunk (started_at = this delivery's time, Agent in the new chunk's set).
-		oc := c.ensureOpen(ev.At)
+		oc := c.ensureOpen(sid, ev.At)
 		t.line = &chunkLine{text: nameOr(t.target.Name, "NPC") + ": " + s}
 		oc.entries = append(oc.entries, t.line)
 		oc.turnIDs = append(oc.turnIDs, ev.TurnID)
 		c.recordAgent(oc, t.target)
 		oc.count++
-		c.afterAppend(oc)
+		c.afterAppend(sid, oc)
 		return
 	}
 	if s == "" {
@@ -359,8 +357,8 @@ func (c *Chunker) commitDelivered(ev voiceevent.FirstAudio) {
 //     by a chunk close was persisted before the failure surfaced — logged and
 //     accepted (the close raced the failure; rare by construction since the
 //     dispatch is serial single-in-flight).
-func (c *Chunker) abortSentence(ev voiceevent.TTSStreamFailed) {
-	t := c.proj.Turn(ev.TurnID)
+func (c *Chunker) abortSentence(sid string, ev voiceevent.TTSStreamFailed) {
+	t := c.proj.Turn(sid, ev.TurnID)
 	if t.ended {
 		return
 	}
@@ -386,7 +384,7 @@ func (c *Chunker) abortSentence(ev voiceevent.TTSStreamFailed) {
 		// The failed sentence opened the line — no delivered text remains, so the
 		// line leaves the open chunk entirely and the turn re-opens on a later
 		// delivered sentence.
-		c.removeOpenLine(t.line)
+		c.removeOpenLine(sid, t.line)
 		t.line = nil
 	default:
 		c.log.Warn("transcript: mid-stream TTS failure did not match the committed tail, leaving line unchanged",
@@ -399,8 +397,8 @@ func (c *Chunker) abortSentence(ev voiceevent.TTSStreamFailed) {
 // neither persists an empty "Who:" line nor inflates the close thresholds. A
 // line not in the open chunk (already detached by a close) is a no-op — the
 // caller logs that case.
-func (c *Chunker) removeOpenLine(line *chunkLine) {
-	oc := c.open
+func (c *Chunker) removeOpenLine(sid string, line *chunkLine) {
+	oc := c.open[sid]
 	if oc == nil {
 		return
 	}
@@ -435,62 +433,62 @@ func (c *Chunker) recordAgent(oc *openChunk, target voiceevent.AddressTarget) {
 // ensureOpen returns the open chunk, creating one (armed with the window timer)
 // on first utterance. at is the utterance's event time, kept as the row's
 // started_at; the wall clock at open is the window-elapsed reference.
-func (c *Chunker) ensureOpen(at time.Time) *openChunk {
-	if c.open == nil {
+func (c *Chunker) ensureOpen(sid string, at time.Time) *openChunk {
+	if c.open[sid] == nil {
 		oc := &openChunk{
 			startedAt:   at,
 			openedWall:  time.Now(),
 			agentSeen:   map[uuid.UUID]struct{}{},
 			speakerSeen: map[string]struct{}{},
 		}
-		oc.timer = time.AfterFunc(c.window, func() { c.onTimer(oc) })
-		c.open = oc
+		oc.timer = time.AfterFunc(c.window, func() { c.onTimer(sid, oc) })
+		c.open[sid] = oc
 	}
-	return c.open
+	return c.open[sid]
 }
 
 // afterAppend closes the open chunk when a count threshold is met: at MaxUtterances
 // unconditionally, or once the window has elapsed with ≥2 utterances (a late
 // utterance arriving after the timer already fired closes here immediately).
-func (c *Chunker) afterAppend(oc *openChunk) {
+func (c *Chunker) afterAppend(sid string, oc *openChunk) {
 	if oc.count >= c.maxUtt {
-		c.closeChunk(oc)
+		c.closeChunk(sid, oc)
 		return
 	}
 	if oc.count >= 2 && time.Since(oc.openedWall) >= c.window {
-		c.closeChunk(oc)
+		c.closeChunk(sid, oc)
 	}
 }
 
 // onTimer fires when the window elapses. With ≥2 utterances it closes the chunk;
 // with a lone utterance it leaves the chunk open (the ONLY flush of a lone
 // utterance is session end), so the next append re-checks and closes immediately.
-func (c *Chunker) onTimer(oc *openChunk) {
+func (c *Chunker) onTimer(sid string, oc *openChunk) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.open != oc {
+	if c.open[sid] != oc {
 		return // already closed / superseded
 	}
 	if oc.count >= 2 {
-		c.closeChunk(oc)
+		c.closeChunk(sid, oc)
 	}
 }
 
-// closeChunk finalizes oc: it stops the timer, clears it as the open chunk,
-// DETACHES its Agent turns (line = nil) so a not-ended turn's next delivered
-// sentence opens a continuation utterance in the next chunk, and tees the built
-// chunk onto the writer queue. A count-0 chunk (a chunk only opens on a delivered
-// or human utterance, so this is defensive) is dropped without a write. Caller
-// holds c.mu.
-func (c *Chunker) closeChunk(oc *openChunk) {
+// closeChunk finalizes oc: it stops the timer, clears it as the session's open
+// chunk, DETACHES its Agent turns (line = nil) so a not-ended turn's next
+// delivered sentence opens a continuation utterance in the next chunk, and tees
+// the built chunk onto the writer queue. A count-0 chunk (a chunk only opens on a
+// delivered or human utterance, so this is defensive) is dropped without a write.
+// Caller holds c.mu.
+func (c *Chunker) closeChunk(sid string, oc *openChunk) {
 	if oc.timer != nil {
 		oc.timer.Stop()
 	}
-	if c.open == oc {
-		c.open = nil
+	if c.open[sid] == oc {
+		delete(c.open, sid)
 	}
 	for _, id := range oc.turnIDs {
-		if t := c.proj.Lookup(id); t != nil {
+		if t := c.proj.Lookup(sid, id); t != nil {
 			t.line = nil
 		}
 	}
@@ -505,7 +503,7 @@ func (c *Chunker) closeChunk(oc *openChunk) {
 	if speakers == nil {
 		speakers = []string{} // scan contract: non-nil empty when no attributed speaker
 	}
-	sess := c.proj.Session()
+	sess := c.proj.Session(sid)
 	chunk := storage.TranscriptChunk{
 		CampaignID:            sess.CampaignID,
 		VoiceSessionID:        sess.ID,
@@ -543,16 +541,24 @@ func (c *Chunker) writeChunk(chunk *storage.TranscriptChunk) {
 }
 
 // FlushSession closes the session's open chunk (even a lone utterance — the ONLY
-// place ADR-0011 flushes one) and drains the writer queue via a flush barrier,
-// returning once every enqueued insert has landed (#104). The Manager calls it at
-// every loop exit. It satisfies session.ChunkFinalizer. Persistence disabled (no
-// store) or a mismatched session id is a no-op.
+// place ADR-0011 flushes one), tears down its projection state (proj.Close), and
+// drains the writer queue via a flush barrier, returning once every enqueued
+// insert has landed (#104). The Manager calls it at every loop exit for exactly
+// the session that ended (#487). It satisfies session.ChunkFinalizer. Persistence
+// disabled (no store) still closes + tears down; a session with no open chunk
+// closes nothing.
 func (c *Chunker) FlushSession(ctx context.Context, sessionID uuid.UUID) error {
+	sid := sessionID.String()
 	c.mu.Lock()
-	if c.open != nil && c.proj.Session().ID == sessionID {
-		c.closeChunk(c.open)
+	if oc := c.open[sid]; oc != nil {
+		c.closeChunk(sid, oc)
 	}
 	c.mu.Unlock()
+
+	// Tear down the scaffold entry for this session (#487): its finishSession hook
+	// re-flushes any lingering open chunk (already closed above → no-op), then the
+	// entry is deleted so a straggler event can't revive it.
+	c.proj.Close(sid)
 
 	return c.queue.Flush(ctx, nil)
 }

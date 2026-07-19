@@ -44,7 +44,7 @@ func TestProjection_SayPersistenceTeeFires(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	store := newFakeLineStore()
-	r := NewRelay(bus, fs, store, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
 
 	bus.Publish(voiceevent.SpeakRequested{
 		At: at(1), TurnID: "s1", Text: "Aye.",
@@ -72,7 +72,7 @@ func TestProjection_ButlerSayLine(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	store := newFakeLineStore()
-	r := NewRelay(bus, fs, store, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
 
 	bus.Publish(voiceevent.SpeakRequested{
 		At: at(1), TurnID: "s1", Text: "At your service.",

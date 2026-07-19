@@ -41,7 +41,7 @@ func TestApplyTapeConsent_Grant(t *testing.T) {
 	events := captureConsent(bus)
 	cid := uuid.New()
 
-	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, discardLog(), tapeGrantCustomID(cid), "player-42")
+	reply, ok := ApplyTapeConsent(context.Background(), store, BusPublisher{Bus: bus}, time.Now, discardLog(), tapeGrantCustomID(cid), "player-42")
 	if !ok || reply == "" {
 		t.Fatalf("apply = (%q, %v), want a reply and ok", reply, ok)
 	}
@@ -65,7 +65,7 @@ func TestApplyTapeConsent_Revoke(t *testing.T) {
 	bus := voiceevent.NewBus()
 	events := captureConsent(bus)
 
-	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, discardLog(), tapeRevokeCustomID(cid), "player-7")
+	reply, ok := ApplyTapeConsent(context.Background(), store, BusPublisher{Bus: bus}, time.Now, discardLog(), tapeRevokeCustomID(cid), "player-7")
 	if !ok || reply == "" {
 		t.Fatalf("apply = (%q, %v), want a reply and ok", reply, ok)
 	}
@@ -87,7 +87,7 @@ func TestApplyTapeConsent_ForeignButtonIgnored(t *testing.T) {
 	bus := voiceevent.NewBus()
 	events := captureConsent(bus)
 
-	if _, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, discardLog(), "gx:mute:agent:123", "p1"); ok {
+	if _, ok := ApplyTapeConsent(context.Background(), store, BusPublisher{Bus: bus}, time.Now, discardLog(), "gx:mute:agent:123", "p1"); ok {
 		t.Fatalf("ok = true for a foreign button, want false")
 	}
 	if store.upserts+store.deletes != 0 || len(*events) != 0 {
@@ -106,7 +106,7 @@ func TestApplyTapeConsent_StorageFailurePublishesNothing(t *testing.T) {
 	var logbuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	reply, ok := ApplyTapeConsent(context.Background(), store, bus, time.Now, log, tapeGrantCustomID(uuid.New()), "p9")
+	reply, ok := ApplyTapeConsent(context.Background(), store, BusPublisher{Bus: bus}, time.Now, log, tapeGrantCustomID(uuid.New()), "p9")
 	if !ok || reply != tapeConsentFailedReply {
 		t.Fatalf("apply = (%q, %v), want the failure reply and ok", reply, ok)
 	}

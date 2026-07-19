@@ -126,7 +126,7 @@ type AllowanceChecker interface {
 // calls it on Stop / loop exit BEFORE EndVoiceSession so the recorded count
 // matches the persisted rows. *transcript.Relay satisfies it; defined here (not
 // imported) so the manager does NOT depend on the relay — the relay already
-// depends on the active-session read via its Sessions seam (a [View], #448), and
+// resolves each event's session via its Sessions seam (a [Registry], #487), and
 // the reverse import would cycle. nil (not wired / persistence off) leaves
 // line_count at the in-memory default.
 type TranscriptFinalizer interface {
@@ -151,8 +151,8 @@ type Highlighter interface {
 // (#104, ADR-0011): a lone trailing utterance is flushed ONLY here, at session
 // end. *transcript.Chunker satisfies it; defined here (not imported) so the
 // manager does NOT depend on the transcript package — the chunker already depends
-// on the active-session read via its Sessions seam (a [View], #448), and the
-// reverse import would cycle (mirrors TranscriptFinalizer). nil (no chunking /
+// resolves each event's session via its Sessions seam (a [Registry], #487), and
+// the reverse import would cycle (mirrors TranscriptFinalizer). nil (no chunking /
 // voice-standalone) is a no-op.
 type ChunkFinalizer interface {
 	FlushSession(ctx context.Context, sessionID uuid.UUID) error
@@ -183,10 +183,27 @@ type LoopRunner func(ctx context.Context, cfg wirenpc.Config) error
 // after <-done, so done is the synchronization point.
 type activeSession struct {
 	campaignID uuid.UUID
+	tenantID   uuid.UUID
 	session    storage.VoiceSession
 	endErr     error
 	cancel     context.CancelFunc
 	done       chan struct{}
+	// bus is this session's OWN voiceevent.Bus (#487): the session-local reactors
+	// (orchestrator, barge, mute/tape wiring, detector, observe StageSubscriber)
+	// subscribe here, and every Manager control publish for this session
+	// (softCap/hardCap, SayAs, mute, replay) lands here rather than on the process
+	// bus. stopForward detaches the [voiceevent.Forward] bridge that republishes
+	// this bus onto the process bus stamped with the session id; it is called once
+	// at loop exit. Both are nil only for a session built before its bus (never in
+	// practice — set in Start before the loop launches).
+	bus         *voiceevent.Bus
+	stopForward func()
+	// ended is set true under Manager.mu the instant the loop returns — BEFORE the
+	// finalizers Close the projections — so Lookup/Resolve/PublishToCampaign and
+	// hardCapTrip all treat the session as gone during the multi-second end window,
+	// closing the #487 resurrection race. Distinct from m.active clearing (which
+	// happens only after the terminal DB write).
+	ended bool
 	// muted is the volatile, session-local per-Agent mute set (#211), keyed by
 	// AgentID. Fresh-empty per Start, so every new Voice Session begins with all
 	// Agents unmuted (AC5) — there is NO DB column and NO migration; the set dies
@@ -264,11 +281,11 @@ type Manager struct {
 // ordering in the composition root. Every field is optional; the zero value is
 // a Manager with every collaborator off (the voice-standalone / test posture).
 //
-// Five of the collaborators themselves need the active-session read (the
-// Manager's Snapshot) — the old Manager ↔ projector construction cycle that
-// forced the setters. The cycle breaks at its true seam: they depend only on a
-// narrow Sessions{Snapshot} interface, so they are constructed FIRST against a
-// [View], and the View is bound to the Manager here at construction.
+// Several collaborators themselves need to resolve the session behind a bus event
+// (or the single-active read) — the old Manager ↔ projector construction cycle
+// that forced the setters. The cycle breaks at its true seam: they depend only on
+// a narrow [Sessions] interface, so they are constructed FIRST against a
+// [Registry], and each Manager registers itself in it here at construction (#487).
 type Deps struct {
 	// Transcript is the finalizer that drains the live transcript's writer queue on
 	// Stop / loop exit and returns the authoritative persisted line_count (#74,
@@ -312,11 +329,12 @@ type Deps struct {
 	// [spend.PlanAllowance] only in `open` Admission Mode; nil (allowlist /
 	// self-host / voice-standalone) is a no-op — byte-for-byte today's behavior.
 	Allowance AllowanceChecker
-	// View, when non-nil, is bound to the new Manager so the collaborators above —
-	// constructed against it BEFORE the Manager existed — read this Manager's
-	// active session. Binding inside NewManager is what makes the wiring order
-	// un-breakable (#448). A View binds to exactly one Manager.
-	View *View
+	// Registry, when non-nil, is the process-wide index the new Manager registers
+	// itself in (#487, replacing the single-bind View): process-wide bus consumers
+	// Resolve this Manager's live session by the SessionID stamped on each event,
+	// and control surfaces PublishToCampaign into it. Registration is additive and
+	// never panics, so any number of Managers (concurrent Voice Sessions) coexist.
+	Registry *Registry
 	// Clients, when non-nil, is the per-tenant Discord client registry (#489):
 	// every manager-started session borrows the standing client keyed by the
 	// session's Tenant's resolved Bot token, so a start touches only that Tenant's
@@ -376,8 +394,8 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 	// config's detector Sink (#308), so triggers land in the pipeline the Manager
 	// owns the lifecycle of.
 	m.base.Highlights = deps.Highlights
-	if deps.View != nil {
-		deps.View.bind(m)
+	if deps.Registry != nil {
+		deps.Registry.register(m)
 	}
 	return m
 }
@@ -517,12 +535,32 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// A background context so the loop survives the HTTP request that started it;
 	// the Manager holds cancel and reaps it on Stop / Shutdown.
 	runCtx, cancel := context.WithCancel(context.Background())
+
+	// This session gets its OWN bus (#487): the session-local reactors subscribe
+	// here, and a Forward bridge republishes every session event onto the process
+	// bus (m.base.Bus) stamped with this session's id, so process-wide consumers
+	// (relay, chunker, recall speculation) attribute it. A nil process bus (bench /
+	// voice-standalone) makes Forward a no-op — the session bus still drives the
+	// session-local reactors. The loop reads cfg.Bus, so point it at the session bus.
+	sessionBus := voiceevent.NewBus()
+	cfg.Bus = sessionBus
+	stopForward := voiceevent.Forward(sessionBus, m.base.Bus, vs.ID.String())
+
+	// Install the session Identity on the run context (#487): the per-turn consumers
+	// that do NOT ride the bus (memory Recall, KG-facts) resolve their session from
+	// here instead of a global snapshot, exactly as bus consumers resolve it from the
+	// event's stamped SessionID.
+	runCtx = NewContext(runCtx, Identity{SessionID: vs.ID, CampaignID: campaignID, TenantID: tenantID})
+
 	as := &activeSession{
-		campaignID: campaignID,
-		session:    vs,
-		cancel:     cancel,
-		done:       make(chan struct{}),
-		muted:      map[string]struct{}{}, // fresh: every new session starts all-unmuted (AC5)
+		campaignID:  campaignID,
+		tenantID:    tenantID,
+		session:     vs,
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		bus:         sessionBus,
+		stopForward: stopForward,
+		muted:       map[string]struct{}{}, // fresh: every new session starts all-unmuted (AC5)
 	}
 
 	// Spend meter (#130, ADR-0046): only when the Tenant configured at least one
@@ -588,9 +626,10 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 // so publishing (the relay takes its own lock) can't deadlock.
 func (m *Manager) softCapTrip(as *activeSession) func() {
 	return func() {
-		if m.base.Bus != nil {
-			m.base.Bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapSoft})
-		}
+		// Publish onto THIS session's bus (#487): Forward bridges it onto the
+		// process bus stamped, so the SSE relay attributes the spendcap to the
+		// right session even with a second session live.
+		as.bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapSoft})
 	}
 }
 
@@ -599,24 +638,26 @@ func (m *Manager) softCapTrip(as *activeSession) func() {
 // lock-order pattern): the meter fires it outside its own mutex, but it must take
 // Manager.mu to record the deliberate end_reason override, then publish + cancel
 // OUTSIDE Manager.mu — the relay's SpendCapReached handler calls Snapshot (Manager.mu),
-// so publishing under the lock would deadlock. Guarded by m.active == as so a trip
-// arriving after the session already rolled over is a no-op.
+// so publishing under the lock would deadlock. Guarded by m.active == as AND
+// !as.ended so a trip arriving after the session already rolled over — or during
+// the end window after the loop returned (#487) — is a no-op: publishing then
+// would race the bridge cut and try to stamp a hard-cap onto an ended session.
 func (m *Manager) hardCapTrip(as *activeSession, reason string) func() {
 	return func() {
 		go func() {
 			m.mu.Lock()
-			if m.active != as {
+			if m.active != as || as.ended {
 				m.mu.Unlock()
 				return // this session already ended / rolled over
 			}
 			as.endReasonOverride = reason
 			cancel := as.cancel
-			bus := m.base.Bus
+			bus := as.bus
 			m.mu.Unlock()
 
-			if bus != nil {
-				bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapHard})
-			}
+			// Onto this session's own bus (#487): Forward stamps it onto the process
+			// bus so the relay attributes the hard-cap to the right session.
+			bus.Publish(voiceevent.SpendCapReached{At: time.Now(), Level: voiceevent.SpendCapHard})
 			// Cancel the run ctx: runLoop then closes the row via the CLEAN path
 			// (ctx.Err() != nil ⇒ not 'failed') and stamps the endReasonOverride —
 			// 'ended' + spend_cap_hard reason, a deliberate policy stop.
@@ -644,6 +685,28 @@ func (m *Manager) runLoop(ctx context.Context, as *activeSession, cfg wirenpc.Co
 	defer close(as.done)
 
 	loopErr := m.run(ctx, cfg)
+
+	// End the session's bridge and resolvability IMMEDIATELY — before the
+	// multi-second finalizers (transcript/highlight/chunk flush, CloseVoiceSession)
+	// run and before m.active clears (#487 resurrection window). Bus.Publish is
+	// synchronous, so every tail event the loop produced (final TurnEnded, …) is
+	// already forwarded onto the process bus; nothing is lost by cutting here.
+	//
+	// Two cuts, together closing the window a straggler could resurrect a Closed
+	// projection through: (1) stopForward detaches the session→process bridge, so a
+	// late publish on the session bus (a tape-consent PublishToCampaign, a web
+	// mute/say, a racing hardCapTrip) no longer reaches the process-wide consumers;
+	// (2) ended=true makes Lookup/Resolve report this session gone at once, so even
+	// a direct Resolve during the finalizer window returns false. Without this a
+	// straggler arriving after relay.Finalize/chunker.FlushSession Closed their
+	// entry would re-create it — a fresh "status: live" frame after the terminal
+	// idle (#144 regression) and a permanently leaked entry (Close never fires
+	// again). ended is written under m.mu; hardCapTrip reads it there too.
+	m.mu.Lock()
+	as.ended = true
+	m.mu.Unlock()
+	as.stopForward()
+
 	// A non-nil loop error while ctx was NOT cancelled is a real failure, not the
 	// expected Stop/Shutdown cancellation: the session ends 'failed' with a readable
 	// reason instead of the clean 'ended' (#123). A fatal gateway rejection carries a
@@ -806,6 +869,38 @@ func (m *Manager) Snapshot() (storage.VoiceSession, bool) {
 		return storage.VoiceSession{}, false
 	}
 	return m.active.session, true
+}
+
+// Lookup returns this Manager's active Voice Session and true when its id is
+// sessionID, or the zero value and false otherwise (idle, or running a different
+// session). It is the per-Manager read [Registry.Resolve] fans out across every
+// registered Manager to attribute a stamped bus event to its origin session.
+func (m *Manager) Lookup(sessionID uuid.UUID) (storage.VoiceSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil || m.active.ended || m.active.session.ID != sessionID {
+		return storage.VoiceSession{}, false
+	}
+	return m.active.session, true
+}
+
+// PublishToCampaign publishes e onto this Manager's live session bus when it is
+// running campaignID, returning true, or false when idle / running a different
+// Campaign. The publish runs OUTSIDE Manager.mu (the session bus's Forward bridge
+// re-enters the process bus, whose consumers Resolve back through the Manager —
+// holding mu across the publish would deadlock): the bus pointer is captured
+// under the lock, then published unlocked. It is the per-Manager leg of
+// [Registry.PublishToCampaign].
+func (m *Manager) PublishToCampaign(campaignID uuid.UUID, e voiceevent.Event) bool {
+	m.mu.Lock()
+	if m.active == nil || m.active.ended || m.active.campaignID != campaignID {
+		m.mu.Unlock()
+		return false
+	}
+	bus := m.active.bus
+	m.mu.Unlock()
+	bus.Publish(e)
+	return true
 }
 
 // Shutdown moves the Manager to its terminal closed state (any later Start

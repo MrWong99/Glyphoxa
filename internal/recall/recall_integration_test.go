@@ -26,6 +26,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/MrWong99/Glyphoxa/internal/embedworker"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
@@ -149,6 +150,9 @@ func TestRecall_Integration_FactLandsInCorrectSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVoiceSession: %v", err)
 	}
+	// The turn ctx carries the session Identity Recall reads its Campaign from
+	// (#487) — in production it descends from Manager.Start's run context.
+	ctx = session.NewContext(ctx, session.Identity{SessionID: vs.ID, CampaignID: campaignID, TenantID: tenantID})
 
 	targetAgent, otherAgent := uuid.New(), uuid.New()
 

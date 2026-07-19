@@ -558,6 +558,15 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// surviving with no Voice Session active. Built only when this Instance drives
 	// voice (`all` mode); a web-only replica runs no Bot. Declared at function
 	// scope so the shutdown path below can Close it after the Manager drains.
+	// The process-wide session Registry (#487, replacing the #448 View): the
+	// process-wide bus consumers (relay, chunker, recall speculation) Resolve a
+	// stamped event's session through it, the presence tape-consent buttons route
+	// into a live session's bus by Campaign through it, and every Manager registers
+	// itself in it (Deps.Registry). Hoisted above the presence block because the
+	// ConsentButtons need it as their publisher. Pre-constructible (no Manager yet),
+	// which is what lets the Manager's collaborators be built before the Manager.
+	sessions := session.NewRegistry()
+
 	var clients *presence.Clients
 	var reg *presence.Registry
 	if withVoice {
@@ -583,7 +592,11 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// Consent/Revoke buttons write the presser's consent row and publish
 		// TapeConsentChanged on the SAME process-wide bus the session Manager uses, so
 		// a live tape arms or clears that Speaker's lane.
-		reg.RegisterComponentHandler(presence.NewConsentButtons(store, eventBus, log).HandleComponent)
+		// Rollover-tape consent buttons route into the live session's own bus via the
+		// session Registry (#487): NewConsentButtons' publisher is the Registry, so a
+		// press reaches the session running the button's Campaign (and, via Forward,
+		// the process bus stamped) rather than broadcasting on the process bus.
+		reg.RegisterComponentHandler(presence.NewConsentButtons(store, sessions, log).HandleComponent)
 		clients = presence.NewClients(store, cipher, reg, cfg.Token, log)
 		// Instrument EVERY standing client the registry builds — one per distinct Bot
 		// token, plus any rebuild — for the IDENTIFY-budget metrics (#486). Set before
@@ -606,11 +619,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	}
 	// The Manager's collaborators below (transcript projectors, highlight saver,
 	// recallers, knowledge Tools adapter) are its construction-time deps (#448),
-	// so they are built FIRST — against this pre-constructed View, the narrow
-	// active-session read they all consume — and NewManager then binds the View.
-	// A Manager cannot exist without its deps already wired, so the old "built
-	// first, back-wired after" ordering comments are gone with the setters.
-	sessions := session.NewView()
+	// built FIRST against the pre-constructed session Registry (declared above): the
+	// bus consumers Resolve each event's session through it, and the Manager
+	// registers itself in it at construction (Deps.Registry). A Manager cannot exist
+	// without its deps already wired.
 
 	// The one-shot recap Engine (#272) is constructed ONCE here so its consumers
 	// can share it: the /glyphoxa recap slash command (#273, registered below),
@@ -655,7 +667,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	}
 
 	// The SSE transcript relay (issue #73, ADR-0014 Hop-B) subscribes to the
-	// process bus once and reads the active session from the session View (#448).
+	// process bus once and reads each event's session from the session Registry (#487).
 	// The store backs incremental line persistence + replay-on-reload (#74,
 	// ADR-0040); the manager finalizes the relay's writer queue on Stop
 	// (Deps.Transcript below).
@@ -698,7 +710,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 
 	// Knowledge Tools' read sources (#296, S1): the storage-backed adapter behind
 	// the read-only transcript_search and kg_query built-ins. UNCONDITIONAL — like
-	// KG-facts recall it needs only the process store + the session View (for the
+	// KG-facts recall it needs only the process store + the session Registry (for the
 	// active Campaign), no embeddings provider — so a keyless deployment still lets a
 	// granted NPC recall the transcript and its own Node neighbourhood. It flows onto
 	// the base voice config every session copies; in web-only mode the Manager starts
@@ -715,7 +727,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// immutable struct instead of six back-wired setters. Everything here was
 	// constructed against the View that NewManager binds below.
 	deps := session.Deps{
-		View:       sessions,
+		Registry:   sessions,
 		Transcript: relay,
 		Chunker:    chunker,
 		Highlights: highlightSaver,
@@ -733,10 +745,10 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// slot, filled per turn from the active Campaign's gm-public Nodes.
 		// UNCONDITIONAL — unlike Memory below — because it needs no embeddings
 		// provider, only the process store (an indexed OLTP read) and the session
-		// View (the active Campaign). Gating it on the provider would silently lose
+		// Registry (the active Campaign). Gating it on the provider would silently lose
 		// the feature on keyless deployments. It owns no goroutine/subscription, so
 		// there is nothing to Close.
-		Facts: kgfacts.New(store.PromptKG(), sessions, metrics, log, kgfacts.Config{}),
+		Facts: kgfacts.New(store.PromptKG(), metrics, log, kgfacts.Config{}),
 		Tools: tool.Deps{
 			Transcripts: knowledgeAdapter,
 			KG:          knowledgeAdapter,
@@ -793,7 +805,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		go embedworker.New(store, provider, model, metrics, log, embedworker.Config{}).Run(ctx)
 
 		// NPC memory recall (#122, ADR-0011/0042): one recaller over the shared
-		// provider + the process store (ANN retriever, #119) + the session View
+		// provider + the process store (ANN retriever, #119) + the session Registry
 		// (the active Campaign) + the process bus (STTPartial speculation). Wired as
 		// Deps.Memory so every manager-started session's Agent loops fill the
 		// reserved Hot Context memory slot; a slow/unavailable path degrades

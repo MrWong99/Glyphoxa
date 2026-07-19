@@ -27,17 +27,17 @@ type subscriber struct {
 	lagged chan struct{} // closed when ch overflows; the handler then exits → reconnect
 }
 
-// push fans a frame out to every subscriber on the active session. A full
-// channel means a slow reader: it is signalled lagged (once) and from then on
-// receives NOTHING more (#148 Defect A) — delivering any frame past the
+// push fans a frame out to every subscriber on the session it belongs to (#487).
+// A full channel means a slow reader: it is signalled lagged (once) and from
+// then on receives NOTHING more (#148 Defect A) — delivering any frame past the
 // dropped one would let the client reconnect with a Last-Event-ID beyond the
 // hole and skip it forever. The connection sees a strict prefix of the
 // sequence, so its EventSource reconnect replays the dropped frame from the
 // ring losslessly. Caller holds r.mu, and the bus contract forbids blocking,
 // so the send is non-blocking.
-func (r *Relay) push(f Frame) {
+func (r *Relay) push(sid string, f Frame) {
 	for s := range r.subs {
-		if s.id != r.proj.ActiveID() {
+		if s.id != sid {
 			continue
 		}
 		select {
@@ -62,8 +62,8 @@ func (r *Relay) attach(id string, lastID uint64) (*subscriber, []Frame) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var replay []Frame
-	if id == r.proj.ActiveID() {
-		for _, f := range r.buf {
+	if st := r.states[id]; st != nil {
+		for _, f := range st.buf {
 			if f.Seq > lastID {
 				replay = append(replay, f)
 			}

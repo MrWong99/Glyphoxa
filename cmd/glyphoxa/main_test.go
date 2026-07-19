@@ -94,7 +94,10 @@ func TestRunWebTierBootsAndShutsDown(t *testing.T) {
 // the SSE tail below attaches to a live id without a Manager or DB.
 type staticSessions struct{ id uuid.UUID }
 
-func (s staticSessions) Snapshot() (storage.VoiceSession, bool) {
+func (s staticSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	if id != s.id {
+		return storage.VoiceSession{}, false
+	}
 	return storage.VoiceSession{ID: s.id}, true
 }
 
@@ -198,7 +201,10 @@ func TestRunWebTierClosesSSEStreamsOnShutdown(t *testing.T) {
 	var resp *http.Response
 	for {
 		if addr := srv.Addr(); addr != "127.0.0.1:0" {
-			bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "attach", TurnID: "t1"})
+			// Stamp the event with the session id (#487): on the process bus every
+			// event carries its origin SessionID via voiceevent.Forward, and the relay
+			// drops unstamped events — so this seeds the session's "status: live" frame.
+			bus.Publish(voiceevent.STTFinal{At: time.Now(), Text: "attach", TurnID: "t1", SessionID: sessions.id.String()})
 			r, err := http.Get("http://" + addr + "/api/v1/sessions/" + sessions.id.String() + "/events")
 			if err == nil {
 				resp = r
