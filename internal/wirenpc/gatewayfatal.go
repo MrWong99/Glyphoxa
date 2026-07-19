@@ -59,6 +59,13 @@ func (e *FatalError) Error() string {
 // Unwrap exposes the originating error so errors.Is/As traverse into the cause.
 func (e *FatalError) Unwrap() error { return e.Err }
 
+// ClassifyFatal exposes classifyFatal to the per-tenant Discord client registry
+// (#489): the registry marks a Tenant's Discord integration failed on exactly the
+// terminal gateway/REST rejections the reconnect loop treats as fatal (a revoked
+// token's close 4004 / REST 401), so the two surfaces classify identically
+// (ADR-0043). Returns nil for a transient or unclassifiable error.
+func ClassifyFatal(err error) *FatalError { return classifyFatal(err) }
+
 // classifyFatal inspects a connect-and-serve error and returns a *FatalError when
 // it is a terminal, non-retryable gateway/REST rejection — else nil, meaning the
 // failure is transient and the reconnect loop should keep backing off (#123).

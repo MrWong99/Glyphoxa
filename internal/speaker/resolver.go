@@ -43,7 +43,7 @@ type CharacterLookup interface {
 }
 
 // MemberNamer resolves a Discord snowflake to its guild display name — the
-// unmapped-speaker fallback (recorded decision 2). *presence.Presence satisfies
+// unmapped-speaker fallback (recorded decision 2). *presence.Clients satisfies
 // it; a nil namer means web-only mode with no guild fallback.
 type MemberNamer interface {
 	MemberDisplayName(ctx context.Context, discordUserID string) (string, error)

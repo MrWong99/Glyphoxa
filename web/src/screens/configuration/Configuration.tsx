@@ -201,6 +201,12 @@ export function Configuration() {
             // even while the config load is still resolving (#142).
             onSave={(secret) => saveDiscord.mutateAsync({ botToken: secret })}
           />
+          {config.isSuccess && (
+            <IntegrationBadge
+              state={config.data.integrationState}
+              detail={config.data.integrationDetail}
+            />
+          )}
           <DiscordLinkAutofill onFill={fillDiscordIds} />
           <div className="gx-discord__ids">
             <Input
@@ -386,6 +392,28 @@ function HealthBadge({ saved, health }: { saved: boolean; health?: ProviderHealt
   return (
     <Badge variant="success" dot size="sm">
       Healthy
+    </Badge>
+  );
+}
+
+// IntegrationBadge renders THIS tenant's standing Discord client health (#489):
+// the per-tenant registry reports "ok" (client up), "waiting" (no Bot token yet),
+// or "failed" (the token was rejected terminally — revoked/invalid) with a
+// human detail. Empty state (web-only mode, no standing presence) renders nothing.
+function IntegrationBadge({ state, detail }: { state: string; detail: string }) {
+  if (state === "" || state === "waiting") {
+    return null;
+  }
+  if (state === "failed") {
+    return (
+      <Badge variant="danger" dot size="sm" title={detail || undefined}>
+        Discord integration failed
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="success" dot size="sm">
+      Bot connected
     </Badge>
   );
 }

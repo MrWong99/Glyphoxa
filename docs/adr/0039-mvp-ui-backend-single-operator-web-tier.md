@@ -88,3 +88,7 @@ add" — no such proto was written; the split path's cheapness now rests on the
 claim plane and the per-tenant client registry, not a pre-authored control
 proto. `all` Mode's in-process `SessionManager` direct-call path, described
 elsewhere in this ADR, is unaffected.
+
+## Amendment: presence reads are per-tenant, not single-operator latest (2026-07-19, #489)
+
+This ADR framed the standing Discord presence as single-operator and read its config with the tenant-unscoped "latest" `deployment_config` row (`storage.GetLatestDeploymentConfig`). Under the multi-tenant tier that read is the presence-hijack vector, so it is DELETED: the presence is now a per-token client registry that reads the **tenant-scoped** `deployment_config` everywhere (see ADR-0010's #489 amendment). `ListDeploymentConfigs` seeds one standing client per distinct Bot token at boot. The Configuration "bot-connected" tag this ADR described is now a per-Tenant integration state (`ok`/`waiting`/`failed`) surfaced on the read.

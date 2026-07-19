@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disgoorg/disgo/bot"
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/billing"
@@ -157,6 +158,16 @@ type ChunkFinalizer interface {
 	FlushSession(ctx context.Context, sessionID uuid.UUID) error
 }
 
+// ClientSource resolves a Tenant's standing Discord client from the per-tenant
+// client registry (#489): every manager-started Voice Session borrows the client
+// keyed by that Tenant's resolved Bot token, so a session start touches only its
+// own Tenant's client (never the global-latest singleton). *presence.Clients
+// satisfies it. nil (web-only, or voice standalone) leaves cfg.Client on the base
+// config's provider — for the standalone bench path that dials its own client.
+type ClientSource interface {
+	ClientForTenant(ctx context.Context, tenantID uuid.UUID) (*bot.Client, error)
+}
+
 // LoopRunner runs the live voice loop until ctx is cancelled. Production wraps
 // wirenpc.RunFromDB (which loads the campaign roster and resolves the
 // credential-bridge keys, #69) bound to the app pool + cipher; tests inject a
@@ -222,6 +233,7 @@ type Manager struct {
 	highlights Highlighter         // persists Session Highlights + schedules purge on Stop (#308); nil = highlights off
 	usage      UsageWriter         // persists the Usage Ledger at loop exit (ADR-0054); nil = no durable usage
 	allowance  AllowanceChecker    // the Start-time plan-allowance gate (ADR-0055 gate (b)); nil = no gate
+	clients    ClientSource        // resolves the Tenant's standing Discord client per session (#489); nil = base provider
 	log        *slog.Logger
 	enabled    bool          // false in web-only mode: Start is rejected (ADR-0039)
 	endTimeout time.Duration // per-step end budget (Finalize, end-write); endTimeout in prod, shrunk in tests
@@ -302,6 +314,12 @@ type Deps struct {
 	// active session. Binding inside NewManager is what makes the wiring order
 	// un-breakable (#448). A View binds to exactly one Manager.
 	View *View
+	// Clients, when non-nil, is the per-tenant Discord client registry (#489):
+	// every manager-started session borrows the standing client keyed by the
+	// session's Tenant's resolved Bot token, so a start touches only that Tenant's
+	// client. nil (web-only / voice standalone) leaves cfg.Client on the base
+	// config's provider.
+	Clients ClientSource
 }
 
 // NewManager wraps the store, loop runner, base config and collaborator deps in
@@ -331,6 +349,7 @@ func NewManager(store Store, run LoopRunner, base wirenpc.Config, cipher *crypto
 		highlights: deps.Highlights,
 		usage:      deps.Usage,
 		allowance:  deps.Allowance,
+		clients:    deps.Clients,
 		log:        log,
 		enabled:    enabled,
 		endTimeout: endTimeout,
@@ -463,6 +482,17 @@ func (m *Manager) Start(ctx context.Context, tenantID, campaignID uuid.UUID) (st
 	// roster/language load, so the voiced roster can never diverge from the bound
 	// Active Campaign.
 	cfg.CampaignID = campaignID
+
+	// Borrow this Tenant's standing Discord client from the per-tenant registry
+	// (#489): the loop resolves the client keyed by THIS Tenant's resolved Bot
+	// token, so a start never touches another Tenant's client. nil registry
+	// (web-only / standalone) leaves cfg.Client on the base provider.
+	if m.clients != nil {
+		clients := m.clients
+		cfg.Client = func(cctx context.Context) (*bot.Client, error) {
+			return clients.ClientForTenant(cctx, tenantID)
+		}
+	}
 
 	// A background context so the loop survives the HTTP request that started it;
 	// the Manager holds cancel and reaps it on Stop / Shutdown.

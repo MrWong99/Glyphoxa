@@ -94,11 +94,17 @@ type ProviderServer struct {
 	// fixed key for up to a TTL. nil (not wired) skips.
 	invalidateHealth func(tenantID uuid.UUID)
 
-	// refreshPresence reconciles the standing Discord presence after a Discord
-	// settings change (#102), so a newly-saved Bot token / Guild registers the
-	// slash-command surface without a restart. Fired in a goroutine (presence
-	// Ensure does network I/O). nil (web-only, or not wired) skips.
-	refreshPresence func()
+	// refreshPresence reconciles the standing Discord presence for ONE Tenant after
+	// its Discord settings change (#489), so a newly-saved Bot token / Guild
+	// registers the slash-command surface without a restart and without touching
+	// any other Tenant's client. Fired in a goroutine (the per-tenant ensure does
+	// network I/O). nil (web-only, or not wired) skips.
+	refreshPresence func(tenantID uuid.UUID)
+
+	// integrationStatus reports a Tenant's standing Discord client health for the
+	// Configuration read (#489): state ∈ {"ok","waiting","failed"} plus a detail.
+	// nil (web-only, no standing presence) leaves both empty.
+	integrationStatus func(tenantID uuid.UUID) (state, detail string)
 
 	// discordAppID is the Discord application (client) id backing operator login
 	// (ADR-0016), surfaced on ListProviderConfigs so the SPA composes the
@@ -136,13 +142,20 @@ func (s *ProviderServer) SetHealthInvalidator(fn func(tenantID uuid.UUID)) {
 	s.invalidateHealth = fn
 }
 
-// SetPresenceRefresher wires the standing-presence reconciler fired after a
-// successful SaveDiscordSettings (#102), mirroring SetHealthInvalidator. Called
-// once at boot, before the server serves, so no lock is needed. fn is invoked in
-// a goroutine because presence.Ensure does network I/O (OpenGateway) that must
-// not block the RPC response.
-func (s *ProviderServer) SetPresenceRefresher(fn func()) {
+// SetPresenceRefresher wires the per-tenant standing-presence reconciler fired
+// after a successful SaveDiscordSettings (#489), mirroring SetHealthInvalidator.
+// Called once at boot, before the server serves, so no lock is needed. fn is
+// invoked in a goroutine because the per-tenant ensure does network I/O
+// (OpenGateway) that must not block the RPC response.
+func (s *ProviderServer) SetPresenceRefresher(fn func(tenantID uuid.UUID)) {
 	s.refreshPresence = fn
+}
+
+// SetIntegrationStatusSource wires the per-tenant Discord integration health read
+// surfaced on ListProviderConfigs (#489), mirroring SetPresenceRefresher. Called
+// once at boot; nil (web-only) leaves the state empty.
+func (s *ProviderServer) SetIntegrationStatusSource(fn func(tenantID uuid.UUID) (state, detail string)) {
+	s.integrationStatus = fn
 }
 
 // SetDiscordApplicationID wires the Discord application (client) id ListProviderConfigs
@@ -208,11 +221,20 @@ func (s *ProviderServer) ListProviderConfigs(
 		creds = append(creds, providerCredential(string(slot.components[0]), slot.provider, byProvider[slot.provider]))
 	}
 
+	// Per-tenant Discord integration health (#489): the standing client's state
+	// for THIS Tenant. Empty in web-only mode (no source wired).
+	var integrationState, integrationDetail string
+	if s.integrationStatus != nil {
+		integrationState, integrationDetail = s.integrationStatus(tenantID)
+	}
+
 	return connect.NewResponse(&managementv1.ListProviderConfigsResponse{
 		Credentials:          creds,
 		GuildId:              dep.GuildID,
 		VoiceChannelId:       dep.VoiceChannelID,
 		DiscordApplicationId: s.discordAppID,
+		IntegrationState:     integrationState,
+		IntegrationDetail:    integrationDetail,
 	}), nil
 }
 
@@ -402,12 +424,13 @@ func (s *ProviderServer) SaveDiscordSettings(
 		s.invalidateHealth(tenantID)
 	}
 
-	// Reconcile the standing presence out-of-band so the new token / Guild
-	// registers the slash-command surface without a restart (#102). Only after a
-	// successful save — the error returns above skip it. In a goroutine because
-	// Ensure opens a gateway (network I/O) and must not block this response.
+	// Reconcile THIS Tenant's standing presence out-of-band so the new token /
+	// Guild registers the slash-command surface without a restart and without
+	// touching any other Tenant's client (#489). Only after a successful save —
+	// the error returns above skip it. In a goroutine because the ensure opens a
+	// gateway (network I/O) and must not block this response.
 	if s.refreshPresence != nil {
-		go s.refreshPresence()
+		go s.refreshPresence(tenantID)
 	}
 
 	return connect.NewResponse(&managementv1.SaveDiscordSettingsResponse{

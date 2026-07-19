@@ -12,7 +12,11 @@ const (
 	strangerID = "222222222222"
 )
 
-func fixedGuild(id string) func() string { return func() string { return id } }
+// fixedGuild builds a KnownGuild predicate that treats a single id as the only
+// known Guild (a non-empty id). fixedGuild("") knows no Guild — the wait-state.
+func fixedGuild(id string) func(string) bool {
+	return func(g string) bool { return id != "" && g == id }
+}
 
 // gmList is a scripted GMChecker: the listed snowflakes are GMs.
 type gmList map[string]struct{}

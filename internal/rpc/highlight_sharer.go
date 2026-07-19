@@ -5,16 +5,20 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/google/uuid"
+
+	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/discordshare"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/internal/storage/crypto"
 )
 
 // DeploymentSharer is the production [HighlightSharer] (#310): it resolves the
-// Discord Bot token + guild from the single deployment config (ADR-0039) and its
-// cipher, then makes the plain net/http Discord REST calls via internal/discordshare
-// (ADR-0047 — never disgo's rest client). A missing/unsaved token is
-// [ErrNoDiscordToken], which the RPC renders as "save a Discord Bot token first".
+// Discord Bot token + guild from the request Tenant's deployment config (#489 —
+// tenant-scoped, never the global-latest read) and its cipher, then makes the
+// plain net/http Discord REST calls via internal/discordshare (ADR-0047 — never
+// disgo's rest client). A missing/unsaved token is [ErrNoDiscordToken], which the
+// RPC renders as "save a Discord Bot token first".
 type DeploymentSharer struct {
 	deps   deploymentReader
 	cipher *crypto.Cipher
@@ -27,9 +31,9 @@ type DeploymentSharer struct {
 }
 
 // deploymentReader is the narrow store surface DeploymentSharer needs; *storage.Store
-// satisfies it.
+// satisfies it. The read is tenant-scoped (#489), resolved from the request ctx.
 type deploymentReader interface {
-	GetLatestDeploymentConfig(ctx context.Context) (storage.DeploymentConfig, error)
+	GetDeploymentConfig(ctx context.Context, tenantID uuid.UUID) (storage.DeploymentConfig, error)
 }
 
 // NewDeploymentSharer builds the production sharer over deps + cipher. A nil cipher
@@ -48,10 +52,16 @@ func NewDeploymentSharer(deps deploymentReader, cipher *crypto.Cipher, log *slog
 	}
 }
 
-// resolve opens the saved Bot token and reads the guild id. An unsaved token (no
-// deployment row, empty last4, or no cipher) is ErrNoDiscordToken.
+// resolve opens the request Tenant's saved Bot token and reads the guild id. An
+// unsaved token (no deployment row, empty last4, or no cipher) is
+// ErrNoDiscordToken; a missing Tenant in ctx is ErrNoDiscordToken too (the share
+// path is behind the auth stack, so this only guards a mis-wired test).
 func (d *DeploymentSharer) resolve(ctx context.Context) (token, guildID string, err error) {
-	dep, derr := d.deps.GetLatestDeploymentConfig(ctx)
+	tenantID, ok := auth.TenantID(ctx)
+	if !ok {
+		return "", "", ErrNoDiscordToken
+	}
+	dep, derr := d.deps.GetDeploymentConfig(ctx, tenantID)
 	if errors.Is(derr, storage.ErrNotFound) {
 		return "", "", ErrNoDiscordToken
 	}

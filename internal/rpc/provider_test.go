@@ -152,6 +152,43 @@ func clientForServer(t *testing.T, server *rpc.ProviderServer) (managementv1conn
 	return managementv1connect.NewProviderServiceClient(http.DefaultClient, srv.URL, connect.WithProtoJSON()), tenantID
 }
 
+// TestProviderList_IntegrationStatus pins #489: the Configuration read surfaces
+// THIS tenant's standing Discord client health from the per-tenant registry —
+// "failed" with the classified detail after a terminal token death — so a
+// BYOK-token revocation is visible to the tenant. Without a source wired (web-only
+// mode) it reads empty.
+func TestProviderList_IntegrationStatus(t *testing.T) {
+	t.Parallel()
+
+	srv := rpc.NewProviderServer(newFakeProviderStore(), testCipher(t), nil)
+	srv.SetIntegrationStatusSource(func(_ uuid.UUID) (string, string) {
+		return "failed", "invalid_bot_token: gateway rejected identify (close 4004)"
+	})
+	client, _ := clientForServer(t, srv)
+
+	resp, err := client.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := resp.Msg.GetIntegrationState(); got != "failed" {
+		t.Errorf("integration_state = %q, want failed", got)
+	}
+	if got := resp.Msg.GetIntegrationDetail(); got == "" {
+		t.Errorf("integration_detail = empty, want the classified reason")
+	}
+
+	// No source wired (web-only) reads empty.
+	bare := rpc.NewProviderServer(newFakeProviderStore(), testCipher(t), nil)
+	bareClient, _ := clientForServer(t, bare)
+	bareResp, err := bareClient.ListProviderConfigs(context.Background(), connect.NewRequest(&managementv1.ListProviderConfigsRequest{}))
+	if err != nil {
+		t.Fatalf("List (bare): %v", err)
+	}
+	if got := bareResp.Msg.GetIntegrationState(); got != "" {
+		t.Errorf("integration_state without a source = %q, want empty", got)
+	}
+}
+
 // credByProvider finds a credential in a list by its provider slot.
 func credByProvider(creds []*managementv1.ProviderCredential, provider string) *managementv1.ProviderCredential {
 	for _, c := range creds {
