@@ -25,7 +25,7 @@ func TestChunker_ResolvedNamePrefix(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), campaign: uuid.New(), active: true}
 	store := &fakeChunkStore{}
-	c := NewChunker(bus, fs, store, nil, slog.New(slog.DiscardHandler), ChunkerConfig{MaxUtterances: 2})
+	c := NewChunker(fwd(t, bus, fs), fs, store, nil, slog.New(slog.DiscardHandler), ChunkerConfig{MaxUtterances: 2})
 	c.SetResolver(spy)
 
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "mapped line", TurnID: "t1", SpeakerID: kiraSpeaker})

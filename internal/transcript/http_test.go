@@ -24,8 +24,21 @@ type fakeSessions struct {
 	active bool
 }
 
-func (f *fakeSessions) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{ID: f.id}, f.active
+func (f *fakeSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	if !f.active || id != f.id {
+		return storage.VoiceSession{}, false
+	}
+	return storage.VoiceSession{ID: f.id}, true
+}
+
+// fwd bridges a test's session bus onto a fresh process bus stamped with fs's
+// session id (mirrors voiceevent.Forward / the Manager wiring, #487): the relay
+// subscribes to the returned bus, tests publish unstamped on the session bus.
+func fwd(t *testing.T, sessBus *voiceevent.Bus, fs *fakeSessions) *voiceevent.Bus {
+	t.Helper()
+	proc := voiceevent.NewBus()
+	t.Cleanup(voiceevent.Forward(sessBus, proc, fs.id.String()))
+	return proc
 }
 
 // sseFrame is one parsed SSE frame from the response stream.
@@ -134,7 +147,7 @@ func connect(t *testing.T, base, id string, lastID uint64) (<-chan sseFrame, con
 func TestSSE_ReplayThenLive(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	relay := transcript.NewRelay(bus, fs, nil, nil)
+	relay := transcript.NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 	id := fs.id.String()
@@ -177,7 +190,7 @@ func TestSSE_ReplayThenLive(t *testing.T) {
 func TestSSE_CloseStreamsEndsTail(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	relay := transcript.NewRelay(bus, fs, nil, nil)
+	relay := transcript.NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 	id := fs.id.String()
@@ -225,7 +238,7 @@ func TestSSE_CloseStreamsEndsTail(t *testing.T) {
 func TestSnapshotEndpoint(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	relay := transcript.NewRelay(bus, fs, nil, nil)
+	relay := transcript.NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 	id := fs.id.String()
@@ -300,7 +313,7 @@ func TestEventsRejectsUnparseableID(t *testing.T) {
 func TestSnapshotIdle(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: false}
-	relay := transcript.NewRelay(bus, fs, nil, nil)
+	relay := transcript.NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	srv := httptest.NewServer(mux(relay))
 	defer srv.Close()
 

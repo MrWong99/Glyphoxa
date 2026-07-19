@@ -171,11 +171,12 @@ type Frame struct {
 	Data  []byte
 }
 
-// Sessions is the narrow read the relay needs from the SessionManager: which
-// voice session (if any) is currently active. *session.Manager satisfies it via
-// Snapshot; tests fake it.
+// Sessions is the narrow read the relay needs (#487): resolve a stamped event's
+// SessionID to its full Voice Session, so each event folds into the right
+// session's state under concurrency. *session.Registry satisfies it via Resolve;
+// tests fake it. It replaces the old single-active Snapshot() seam.
 type Sessions interface {
-	Snapshot() (storage.VoiceSession, bool)
+	Resolve(sessionID uuid.UUID) (storage.VoiceSession, bool)
 }
 
 // SpeakerResolver resolves a Speaker Lane snowflake to a display name + GM flag
@@ -210,31 +211,43 @@ type turn struct {
 	ended  bool
 }
 
+// sessionState is one live Voice Session's projection + replay state (#487):
+// its coalesced lines, the ~500-frame replay ring, the derived typing indicator,
+// the latest gateway connection state, and the two monotonic sequence counters.
+// Keyed by session id in Relay.states, created by startSession and torn down by
+// finishSession, so concurrent sessions never share a buffer.
+type sessionState struct {
+	buf        []Frame
+	lines      []Line
+	typing     Typing
+	connection string // latest gateway connection state (#123); "" until the first transition
+	nextSeq    uint64
+	humanSeq   uint64
+}
+
 // Relay projects bus events into transcript lines and serves them over SSE +
 // JSON. Safe for concurrent use: the bus callback, the HTTP handlers and View
 // all take the same lock — r.mu, shared with the busproject scaffold that owns
-// the subscription, the session rollover, and the turn map (#447).
+// the subscription, the per-session attribution, and the turn map (#447/#487).
 type Relay struct {
-	sessions Sessions
 	store    LineStore       // persists projected lines (#74); nil disables persistence
 	resolver SpeakerResolver // resolves SpeakerID → name/GM (#281); nil = anonymous lane
 	scope    TenantScope     // tenant-ownership gate for the HTTP mounts (#439); nil = unscoped
 	log      *slog.Logger
 
-	// proj is the shared projection scaffold (#447): it attributes every bus
-	// event to the active session under r.mu (ONE Snapshot per event, #149),
-	// rolls the buffer over on a session change via startSession, and owns the
-	// per-turn coalescing map. The relay keeps only its fold rules.
+	// proj is the shared projection scaffold (#447/#487): it attributes every
+	// stamped bus event to its Voice Session under r.mu, creates/tears down each
+	// session via startSession/finishSession, and owns the per-session turn map.
+	// The relay keeps only its fold rules and per-session display state.
 	proj *busproject.Projection[turn]
 
-	mu         sync.Mutex
-	buf        []Frame
-	lines      []Line
-	typing     Typing
-	connection string // latest gateway connection state for the live session (#123); "" until the first transition
-	nextSeq    uint64
-	humanSeq   uint64
-	subs       map[*subscriber]struct{}
+	mu sync.Mutex
+	// states holds one sessionState per live Voice Session (#487), keyed by
+	// session id string. A session's entry exists between its first folded event
+	// (startSession) and its finalize (finishSession) — the "live" predicate the
+	// HTTP reads use.
+	states map[string]*sessionState
+	subs   map[*subscriber]struct{}
 
 	// queue is the non-blocking write queue draining into the single writer
 	// goroutine (#74): emitLine tees each Line in here under r.mu, the bus
@@ -265,22 +278,23 @@ func NewRelay(bus *voiceevent.Bus, sessions Sessions, store LineStore, log *slog
 		log = slog.Default()
 	}
 	r := &Relay{
-		sessions:     sessions,
 		store:        store,
 		log:          log,
+		states:       map[string]*sessionState{},
 		subs:         map[*subscriber]struct{}{},
 		writeTimeout: defaultWriteTimeout,
 		closing:      make(chan struct{}),
 	}
 	// One writer goroutine for the process drains the queue (#74). Only started
-	// when persistence is enabled, so the live-only relay keeps its single-state
-	// behaviour and unit tests with a nil store spawn nothing.
+	// when persistence is enabled, so the live-only relay keeps its behaviour and
+	// unit tests with a nil store spawn nothing.
 	if store != nil {
 		r.queue = busproject.NewQueue(persistQueue, r.writeLine)
 	}
-	r.proj = busproject.New[turn](sessions, &r.mu, busproject.Hooks{
-		Fold:         r.fold,
-		StartSession: r.startSession,
+	r.proj = busproject.New[turn](sessions, &r.mu, log, busproject.Hooks{
+		Fold:          r.fold,
+		StartSession:  r.startSession,
+		FinishSession: r.finishSession,
 	})
 	r.proj.Subscribe(bus)
 	return r
@@ -330,6 +344,13 @@ func (r *Relay) tenantScope() TenantScope {
 // (the bus delivers synchronously): all sends to live subscribers are
 // non-blocking.
 func (r *Relay) fold(e voiceevent.Event) {
+	sid := voiceevent.SessionIDOf(e)
+	st := r.states[sid]
+	if st == nil {
+		// startSession creates the state before the first fold, so this is
+		// defensive — a stray event whose session has no display state.
+		return
+	}
 	switch ev := e.(type) {
 	case voiceevent.VADSpeechStart:
 		// A human opened their mouth: warm the speaker resolver NOW (#281) so the
@@ -340,19 +361,19 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// TurnEnded, so without this the last agent line keeps the label through
 		// the following silence. Also correct for a barge (human over the Agent).
 		if r.resolver != nil && ev.SpeakerID != "" {
-			r.resolver.Warm(r.proj.Session().CampaignID, ev.SpeakerID)
+			r.resolver.Warm(r.proj.Session(sid).CampaignID, ev.SpeakerID)
 		}
-		r.setTyping(r.liveTyping())
+		r.setTyping(st, sid, r.liveTyping())
 	case voiceevent.STTFinal:
 		// A human utterance — one line per STTFinal. who/Kind resolve from the
 		// Speaker Lane's snowflake (#281): a mapped Character or guild display name
 		// with the GM lane for GM speakers (ADR-0055), falling back to the
 		// byte-identical anonymous "Player / DM" / KindPlayer label when the resolver
 		// is off, the speaker is unattributed, or the name is unresolved.
-		r.humanSeq++
-		who, kind := r.resolveHuman(ev.SpeakerID)
-		r.emitLine(Line{
-			ID:        "u:" + strconv.FormatUint(r.humanSeq, 10),
+		st.humanSeq++
+		who, kind := r.resolveHuman(sid, ev.SpeakerID)
+		r.emitLine(st, sid, Line{
+			ID:        "u:" + strconv.FormatUint(st.humanSeq, 10),
 			Who:       who,
 			Kind:      kind,
 			TS:        ev.At,
@@ -361,7 +382,7 @@ func (r *Relay) fold(e voiceevent.Event) {
 		})
 	case voiceevent.AddressRouted:
 		// Records WHO answers this turn; no line yet (no text).
-		t := r.proj.Turn(ev.TurnID)
+		t := r.proj.Turn(sid, ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.SpeakRequested:
 		// A GM /say (#295): like AddressRouted it records WHO speaks this turn (no line
@@ -369,7 +390,7 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// path below, so the /say line is assembled and persisted exactly like an LLM
 		// reply (ID "a:<turn>", NPC kind + pill) — no hand-crafted transcript row
 		// (ADR-0012/0040).
-		t := r.proj.Turn(ev.TurnID)
+		t := r.proj.Turn(sid, ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.EnsembleLead:
 		// An Ensemble Turn's elected Lead (#301, ADR-0025): the Lead speaks under the
@@ -377,7 +398,7 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// the coalescing TTSInvoked line is attributed to the Lead (a:<turn>, its name +
 		// NPC pill). The losing candidates publish no EnsembleLead and no TTSInvoked, so
 		// they leave no line.
-		t := r.proj.Turn(ev.TurnID)
+		t := r.proj.Turn(sid, ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.EnsembleReaction:
 		// An Ensemble Turn's Cross-talk Reaction (#302, ADR-0025): the reactor speaks
@@ -386,11 +407,11 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// lands as a SEPARATE line (a:<rID>, the reactor's name + NPC pill) beneath the
 		// Lead's rather than coalescing into it. A declined Reaction publishes no
 		// EnsembleReaction and no TTSInvoked, so it leaves no line.
-		t := r.proj.Turn(ev.TurnID)
+		t := r.proj.Turn(sid, ev.TurnID)
 		t.target = ev.Target
 	case voiceevent.TTSInvoked:
 		// One sentence of the Agent's reply — coalesced into the turn's line.
-		t := r.proj.Turn(ev.TurnID)
+		t := r.proj.Turn(sid, ev.TurnID)
 		if t.ended {
 			// A barge can deliver a sentence after TurnEnded; ignore it so the
 			// finalized reply is not clobbered (FIX 2). typing already cleared.
@@ -417,34 +438,34 @@ func (r *Relay) fold(e voiceevent.Event) {
 		// emitLine derives typing from the line's kind (FIX 1), so a clean turn
 		// (which emits NO TurnEnded) still shows "speaking" and a later human line
 		// returns to listening — no standalone setTyping here.
-		r.emitLine(*t.line)
+		r.emitLine(st, sid, *t.line)
 	case voiceevent.TurnEnded:
 		// Mark the turn finalized (keep the entry so a late sentence is dropped,
 		// FIX 2) and fall back to listening — correct for a barge that cut the
 		// Agent off mid-reply.
-		r.proj.Turn(ev.TurnID).ended = true
-		r.setTyping(r.liveTyping())
+		r.proj.Turn(sid, ev.TurnID).ended = true
+		r.setTyping(st, sid, r.liveTyping())
 	case voiceevent.MuteChanged:
 		// One Agent's mute flipped (#211): forward a "mute" frame so the web Voice
 		// panel tracks a Discord (or web) mute without a reload (AC5). It rides the
 		// ring for Last-Event-ID replay; there is NO transcript-line change and NO
 		// snapshot change — a mid-session reload reads the true state from GetSession.
-		r.emit(Frame{Event: "mute", Data: mustJSON(muteFrame{AgentID: ev.AgentID, Muted: ev.Muted})})
+		r.emit(st, sid, Frame{Event: "mute", Data: mustJSON(muteFrame{AgentID: ev.AgentID, Muted: ev.Muted})})
 	case voiceevent.SpendCapReached:
 		// The session's estimated spend crossed a cap (#130): forward a "spendcap"
 		// frame so the Session screen shows the spend-cap-reached state live. It rides
 		// the ring for Last-Event-ID replay; there is NO transcript-line change — a
 		// mid-session reload reads the authoritative state + estimate from GetSession
 		// (spend_cap_state / estimated_spend_usd).
-		r.emit(Frame{Event: "spendcap", Data: mustJSON(spendcapFrame{Level: string(ev.Level)})})
+		r.emit(st, sid, Frame{Event: "spendcap", Data: mustJSON(spendcapFrame{Level: string(ev.Level)})})
 	case voiceevent.ConnectionStateChanged:
 		// The gateway connection state moved (#123): forward a "connection" frame so
 		// the Session screen flips connecting→connected, or to failed with its reason,
 		// live and without a reload (AC3). It rides the ring for Last-Event-ID replay;
 		// the live snapshot carries the state via View.Connection, while a terminal
 		// failed session's reload truth is GetSession (status + end_reason).
-		r.connection = string(ev.State)
-		r.emit(Frame{Event: "connection", Data: mustJSON(connectionFrame{State: string(ev.State), Detail: ev.Detail})})
+		st.connection = string(ev.State)
+		r.emit(st, sid, Frame{Event: "connection", Data: mustJSON(connectionFrame{State: string(ev.State), Detail: ev.Detail})})
 	}
 }
 
@@ -458,47 +479,32 @@ func (r *Relay) CloseStreams() {
 	r.closeOnce.Do(func() { close(r.closing) })
 }
 
-// currentSessionID returns the active session's id, or "" when idle.
-func (r *Relay) currentSessionID() string {
-	vs, active := r.sessions.Snapshot()
-	if !active {
-		return ""
-	}
-	return vs.ID.String()
+// startSession is the scaffold's per-session hook (#487): it starts a fresh
+// display state for the newly-seen session — whose typed FKs the scaffold
+// captured on the same Resolve, so persistence can never attribute a line to a
+// different session than its buffer — and seeds it with the initial
+// live/listening status frame, so a client connecting mid-session replays a
+// coherent state. Runs under r.mu.
+func (r *Relay) startSession(sid string) {
+	st := &sessionState{typing: r.liveTyping()}
+	r.states[sid] = st
+	r.emit(st, sid, Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: st.typing})})
 }
 
-// startSession is the scaffold's rollover hook: it starts a fresh buffer for
-// the newly-active session — whose typed FKs the scaffold captured from the
-// SAME snapshot it compared ids against (#149), so persistence can never
-// attribute a line to a different session than the buffer — and seeds it with
-// the initial live/listening status frame, so a client connecting mid-session
-// replays a coherent state. Runs under r.mu; the scaffold has already reset
-// the turn map.
-func (r *Relay) startSession() {
-	r.buf = nil
-	r.lines = nil
-	r.nextSeq = 0
-	r.humanSeq = 0
-	r.typing = r.liveTyping()
-	r.connection = "" // a fresh session has no connection state until its first transition (#123)
-	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: r.typing})})
-}
-
-// endSession emits the terminal `status: idle` frame when session id ends
-// (#144). Called from Finalize — the Manager's loop-exit hook — so attached SSE
-// subscribers learn the session died (self-exit included) instead of watching a
-// silent stream; the frame rides the ring too, so a reconnect replays it.
-func (r *Relay) endSession(id uuid.UUID) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if id.String() != r.proj.ActiveID() {
-		// The relay never rolled over to this session (zero bus events) — there is
-		// no buffer to close, and emitting here would inject a spurious idle frame
-		// into the CURRENT session's stream.
+// finishSession is the scaffold's Close hook (#487): it emits the terminal
+// `status: idle` frame to the session's attached SSE subscribers — so a
+// self-terminated session's stream ends cleanly instead of hanging "Live"
+// forever (#144) — then drops the session's display state. Runs under r.mu,
+// BEFORE the scaffold deletes its own entry. A session that folded zero events
+// has no state and no scaffold entry, so Close (and this hook) never fire for it.
+func (r *Relay) finishSession(sid string) {
+	st := r.states[sid]
+	if st == nil {
 		return
 	}
-	r.typing = Typing{}
-	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "idle", Typing: Typing{}})})
+	st.typing = Typing{}
+	r.emit(st, sid, Frame{Event: "status", Data: mustJSON(status{Status: "idle", Typing: Typing{}})})
+	delete(r.states, sid)
 }
 
 // liveTyping is the indicator while a session is live but no Agent is mid-reply.
@@ -506,75 +512,77 @@ func (r *Relay) liveTyping() Typing {
 	return Typing{Active: true, Label: listenLabel}
 }
 
-// emitLine upserts the line into the current display state (replacing a turn's
+// emitLine upserts the line into the session's display state (replacing a turn's
 // coalescing reply in place), emits a "line" frame, and derives the typing
 // indicator from the line's kind (FIX 1). Deriving it from the LAST emitted line
 // — Agent line => "<who> is speaking…", human line => listening — matches the
 // design rule and is robust to a CLEAN turn, which emits no TurnEnded: without
 // this the label would stick on "speaking" through the following silence and
-// human turns.
-func (r *Relay) emitLine(l Line) {
+// human turns. Caller holds r.mu.
+func (r *Relay) emitLine(st *sessionState, sid string, l Line) {
 	replaced := false
-	for i := range r.lines {
-		if r.lines[i].ID == l.ID {
-			r.lines[i] = l
+	for i := range st.lines {
+		if st.lines[i].ID == l.ID {
+			st.lines[i] = l
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		r.lines = append(r.lines, l)
+		st.lines = append(st.lines, l)
 	}
-	r.emit(Frame{Event: "line", Data: mustJSON(l)})
-	// emit assigned this line frame's seq to r.nextSeq; tee the line for durable
+	r.emit(st, sid, Frame{Event: "line", Data: mustJSON(l)})
+	// emit assigned this line frame's seq to st.nextSeq; tee the line for durable
 	// persistence with that seq as its ordering key, BEFORE the typing status
 	// frame below bumps nextSeq again (#74).
-	r.persist(l, r.nextSeq)
+	r.persist(sid, l, st.nextSeq)
 
 	switch l.Kind {
 	case KindNPC, KindButler:
-		r.setTyping(Typing{Active: true, Label: l.Who + " is speaking…"})
+		r.setTyping(st, sid, Typing{Active: true, Label: l.Who + " is speaking…"})
 	default: // KindPlayer / KindGM — a human line means we are back to listening
-		r.setTyping(r.liveTyping())
+		r.setTyping(st, sid, r.liveTyping())
 	}
 }
 
-// setTyping emits a "status" frame only when the typing indicator changes, so an
-// idle session does not churn the stream.
-func (r *Relay) setTyping(t Typing) {
-	if t == r.typing {
+// setTyping emits a "status" frame only when the session's typing indicator
+// changes, so an idle session does not churn the stream. Caller holds r.mu.
+func (r *Relay) setTyping(st *sessionState, sid string, t Typing) {
+	if t == st.typing {
 		return
 	}
-	r.typing = t
-	r.emit(Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: t})})
+	st.typing = t
+	r.emit(st, sid, Frame{Event: "status", Data: mustJSON(status{Status: "live", Typing: t})})
 }
 
-// emit assigns the next seq, appends to the ring (dropping the oldest past cap)
-// and fans the frame out to live subscribers. Caller holds r.mu.
-func (r *Relay) emit(f Frame) {
-	r.nextSeq++
-	f.Seq = r.nextSeq
-	r.buf = append(r.buf, f)
-	if len(r.buf) > ringCap {
-		r.buf = append([]Frame(nil), r.buf[len(r.buf)-ringCap:]...)
+// emit assigns the session's next seq, appends to its ring (dropping the oldest
+// past cap) and fans the frame out to the session's live subscribers. Caller
+// holds r.mu.
+func (r *Relay) emit(st *sessionState, sid string, f Frame) {
+	st.nextSeq++
+	f.Seq = st.nextSeq
+	st.buf = append(st.buf, f)
+	if len(st.buf) > ringCap {
+		st.buf = append([]Frame(nil), st.buf[len(st.buf)-ringCap:]...)
 	}
-	r.push(f)
+	r.push(sid, f)
 }
 
-// View returns the current snapshot for id: the coalesced lines plus the derived
-// status/typing. status is recomputed from the live manager state, so it reads
-// idle the moment the session ends even though the buffer's last frame said live.
+// View returns the current snapshot for id: the session's coalesced lines plus
+// its derived status/typing. A session with no live display state (never
+// started, or already finalized) reads idle.
 func (r *Relay) View(id string) View {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.currentSessionID() != id || id != r.proj.ActiveID() {
+	st := r.states[id]
+	if st == nil {
 		return View{Lines: []Line{}, Status: "idle", Typing: Typing{}}
 	}
 	return View{
-		Lines:      copyLines(r.lines),
+		Lines:      copyLines(st.lines),
 		Status:     "live",
-		Typing:     r.typing,
-		Connection: r.connection,
+		Typing:     st.typing,
+		Connection: st.connection,
 	}
 }
 
@@ -585,15 +593,14 @@ func copyLines(lines []Line) []Line {
 	return append(make([]Line, 0, len(lines)), lines...)
 }
 
-// snapshot returns the initial-state View for id: the in-memory live state when id
-// IS the active session, else the DB-persisted history with status "idle" (#74).
-// Live behaviour is unchanged from View; the persisted path is the
+// snapshot returns the initial-state View for id: the in-memory live state when
+// id has live display state, else the DB-persisted history with status "idle"
+// (#74). Live behaviour is unchanged from View; the persisted path is the
 // reconnect/reload history for an ended session.
 func (r *Relay) snapshot(ctx context.Context, id string) View {
 	r.mu.Lock()
-	live := r.currentSessionID() == id && id == r.proj.ActiveID()
-	if live {
-		v := View{Lines: copyLines(r.lines), Status: "live", Typing: r.typing, Connection: r.connection}
+	if st := r.states[id]; st != nil {
+		v := View{Lines: copyLines(st.lines), Status: "live", Typing: st.typing, Connection: st.connection}
 		r.mu.Unlock()
 		return v
 	}
@@ -633,15 +640,16 @@ func (r *Relay) persistedView(ctx context.Context, id string) View {
 }
 
 // Frames returns the buffered frames for id with Seq > afterSeq — the
-// Last-Event-ID replay set. Empty when id is not the active session.
+// Last-Event-ID replay set. Empty when id has no live display state.
 func (r *Relay) Frames(id string, afterSeq uint64) []Frame {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if id != r.proj.ActiveID() {
+	st := r.states[id]
+	if st == nil {
 		return nil
 	}
 	var out []Frame
-	for _, f := range r.buf {
+	for _, f := range st.buf {
 		if f.Seq > afterSeq {
 			out = append(out, f)
 		}
@@ -655,11 +663,11 @@ func (r *Relay) Frames(id string, afterSeq uint64) []Frame {
 // name (Character > guild display > "") and the GM flag: a GM speaker (ADR-0055)
 // lands in the KindGM lane even when unmapped (name falls back to the generic
 // label), and a resolved name replaces the generic label. Caller holds r.mu.
-func (r *Relay) resolveHuman(speakerID string) (string, Kind) {
+func (r *Relay) resolveHuman(sid, speakerID string) (string, Kind) {
 	if r.resolver == nil || speakerID == "" {
 		return "Player / DM", KindPlayer
 	}
-	res := r.resolver.Lookup(r.proj.Session().CampaignID, speakerID)
+	res := r.resolver.Lookup(r.proj.Session(sid).CampaignID, speakerID)
 	kind := KindPlayer
 	if res.GM {
 		kind = KindGM

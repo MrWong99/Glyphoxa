@@ -85,7 +85,7 @@ func TestLaggedDrop_StrictPrefixAndLosslessReplay(t *testing.T) {
 	default:
 		t.Fatal("expected the overflowing subscriber to be signalled lagged")
 	}
-	dropped := r.nextSeq // seq of frame X: the last emitted frame overflowed
+	dropped := r.seqForTest(id) // seq of frame X: the last emitted frame overflowed
 
 	// Reader briefly resumes: drain a little capacity, then more frames arrive.
 	last := uint64(2) // the warm frames (seq 1, 2) predate attach; live starts at 3
@@ -207,4 +207,15 @@ func TestServeEvents_StalledH2CClientReleasedWithinWriteDeadline(t *testing.T) {
 	waitFor(t, 5*time.Second,
 		"stalled h2c client still holds its subscriber: SetWriteDeadline not honored under h2c",
 		func() bool { return r.subscriberCount() == 0 })
+}
+
+// seqForTest reads a session's current frame sequence counter (#487: per-session
+// state), for the lagged-drop white-box assertions.
+func (r *Relay) seqForTest(sid string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if st := r.states[sid]; st != nil {
+		return st.nextSeq
+	}
+	return 0
 }

@@ -57,7 +57,7 @@ func resolvingRelay(t *testing.T, res SpeakerResolver) (*voiceevent.Bus, *Relay,
 	t.Helper()
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), campaign: uuid.New(), active: true}
-	r := NewRelay(bus, fs, nil, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	r.SetResolver(res)
 	return bus, r, fs
 }
@@ -185,7 +185,7 @@ func TestResolve_RebindPropagatesToNextLine(t *testing.T) {
 
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), campaign: campaign, active: true}
-	r := NewRelay(bus, fs, nil, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	r.SetResolver(res)
 
 	// First utterance: warm (async), wait for the name, then the line renders "Kira".

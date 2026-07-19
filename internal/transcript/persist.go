@@ -33,8 +33,8 @@ const (
 // UPSERT and carrying seq as the ordering key. Caller holds r.mu; the send is
 // non-blocking (the bus must not block) so an overflow drops + logs. No-op when
 // persistence is disabled (nil queue).
-func (r *Relay) persist(l Line, seq uint64) {
-	sess := r.proj.Session()
+func (r *Relay) persist(sid string, l Line, seq uint64) {
+	sess := r.proj.Session(sid)
 	line := &storage.TranscriptLine{
 		VoiceSessionID:       sess.ID,
 		CampaignID:           sess.CampaignID,
@@ -78,7 +78,12 @@ func (r *Relay) writeLine(l *storage.TranscriptLine) {
 // enabled. Without it a self-terminated session leaves the open EventSource
 // silent and the screen "Live" forever.
 func (r *Relay) Finalize(ctx context.Context, id uuid.UUID) (int, error) {
-	r.endSession(id)
+	// Close the session's projection (#487): the scaffold runs the relay's
+	// finishSession hook — which emits the terminal `status: idle` frame and drops
+	// the display state — for exactly this session, then deletes its entry. A
+	// session that folded zero events has no entry, so Close is a no-op (no
+	// spurious idle frame into another session's stream).
+	r.proj.Close(id.String())
 	var (
 		n   int
 		err error

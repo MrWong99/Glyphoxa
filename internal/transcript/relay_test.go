@@ -14,20 +14,54 @@ import (
 	"github.com/MrWong99/Glyphoxa/pkg/voice/voiceevent"
 )
 
-// fakeSessions is a settable Snapshot source: the relay attributes events and
-// derives status from whatever active session it reports.
+// fakeSessions is a settable Resolve source modelling ONE live Voice Session
+// (#487): the relay/chunker attribute a stamped event to it when its SessionID
+// matches and the session is active.
 type fakeSessions struct {
 	id       uuid.UUID
 	campaign uuid.UUID
 	active   bool
 }
 
-func (f *fakeSessions) Snapshot() (storage.VoiceSession, bool) {
-	return storage.VoiceSession{ID: f.id, CampaignID: f.campaign}, f.active
+func (f *fakeSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	if !f.active || id != f.id {
+		return storage.VoiceSession{}, false
+	}
+	return storage.VoiceSession{ID: f.id, CampaignID: f.campaign}, true
+}
+
+// multiSessions resolves any of a fixed set of live Voice Sessions by id — the
+// registry stand-in for the #487 two-session isolation tests.
+type multiSessions struct {
+	live map[uuid.UUID]storage.VoiceSession
+}
+
+func newMultiSessions(vss ...storage.VoiceSession) *multiSessions {
+	m := &multiSessions{live: map[uuid.UUID]storage.VoiceSession{}}
+	for _, vs := range vss {
+		m.live[vs.ID] = vs
+	}
+	return m
+}
+
+func (m *multiSessions) Resolve(id uuid.UUID) (storage.VoiceSession, bool) {
+	vs, ok := m.live[id]
+	return vs, ok
 }
 
 func at(sec int) time.Time {
 	return time.Date(2026, 6, 27, 18, 0, sec, 0, time.UTC)
+}
+
+// fwd bridges a test's session bus onto a fresh process bus, stamping every event
+// with fs's session id (mirrors voiceevent.Forward and the Manager wiring, #487):
+// the relay/chunker subscribe to the returned process bus, while test bodies keep
+// publishing unstamped events on the session bus.
+func fwd(t *testing.T, sessBus *voiceevent.Bus, fs *fakeSessions) *voiceevent.Bus {
+	t.Helper()
+	proc := voiceevent.NewBus()
+	t.Cleanup(voiceevent.Forward(sessBus, proc, fs.id.String()))
+	return proc
 }
 
 // liveRelay returns a relay wired to a bus with one active session.
@@ -35,7 +69,7 @@ func liveRelay(t *testing.T) (*voiceevent.Bus, *Relay, *fakeSessions, string) {
 	t.Helper()
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	r := NewRelay(bus, fs, nil, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	return bus, r, fs, fs.id.String()
 }
 
@@ -94,7 +128,7 @@ func TestProjection_SpeakerID(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	store := newFakeLineStore()
-	r := NewRelay(bus, fs, store, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
 
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Hello", TurnID: "t1", SpeakerID: "111"})
 
@@ -130,7 +164,7 @@ func TestProjection_EmptySpeakerID(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	store := newFakeLineStore()
-	r := NewRelay(bus, fs, store, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
 
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "Silent", TurnID: "t1"})
 
@@ -273,7 +307,7 @@ func TestProjection_ConnectionState(t *testing.T) {
 	}
 
 	// The {failed} event arrives while the session is still active.
-	if _, active := fs.Snapshot(); !active {
+	if _, active := fs.Resolve(fs.id); !active {
 		t.Fatal("precondition: session must still be active when {failed} is published")
 	}
 	detail := "invalid_bot_token: wirenpc: open gateway: websocket: close 4004: Authentication failed"
@@ -338,8 +372,11 @@ func TestTypingAndStatus(t *testing.T) {
 		t.Fatalf("post-turn typing=%+v", v.Typing)
 	}
 
-	// Session stops → idle, inactive typing, no lines.
-	fs.active = false
+	// Session stops (the Manager's finalizer Closes the projection) → idle,
+	// inactive typing, no lines (#487: end is explicit, not a Snapshot flip).
+	if _, err := r.Finalize(context.Background(), fs.id); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
 	if v := r.View(id); v.Status != "idle" || v.Typing.Active || len(v.Lines) != 0 {
 		t.Fatalf("idle view=%+v", v)
 	}
@@ -388,25 +425,33 @@ func TestReplayAfterLastEventID(t *testing.T) {
 	}
 }
 
-// TestRolloverOnSessionChange checks a new active session id starts a fresh
-// buffer (old frames gone, seq reset).
-func TestRolloverOnSessionChange(t *testing.T) {
-	bus, r, fs, id1 := liveRelay(t)
-	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "old", TurnID: "t1"})
-	if len(r.Frames(id1, 0)) == 0 {
-		t.Fatal("session 1 buffered nothing")
-	}
+// TestRelay_TwoSessionsNoCrossTalk is the #487 relay isolation invariant: two
+// live sessions publishing interleaved events project into SEPARATE line buffers
+// — each View shows only its own session's lines, with no cross-session leakage.
+// (Replaces the old single-active rollover test — sessions now coexist rather
+// than one replacing another.)
+func TestRelay_TwoSessionsNoCrossTalk(t *testing.T) {
+	sessA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	sessB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
+	busA, busB := voiceevent.NewBus(), voiceevent.NewBus()
+	proc := voiceevent.NewBus()
+	t.Cleanup(voiceevent.Forward(busA, proc, sessA.ID.String()))
+	t.Cleanup(voiceevent.Forward(busB, proc, sessB.ID.String()))
+	r := NewRelay(proc, newMultiSessions(sessA, sessB), nil, nil)
 
-	fs.id = uuid.New()
-	id2 := fs.id.String()
-	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "new", TurnID: "t2"})
+	// Interleave the two sessions' human lines.
+	busA.Publish(voiceevent.STTFinal{At: at(1), Text: "a-one", TurnID: "t1"})
+	busB.Publish(voiceevent.STTFinal{At: at(2), Text: "b-one", TurnID: "t1"})
+	busA.Publish(voiceevent.STTFinal{At: at(3), Text: "a-two", TurnID: "t2"})
+	busB.Publish(voiceevent.STTFinal{At: at(4), Text: "b-two", TurnID: "t2"})
 
-	if got := r.Frames(id1, 0); got != nil {
-		t.Errorf("old session still buffered %d frames", len(got))
+	va := r.View(sessA.ID.String())
+	if len(va.Lines) != 2 || va.Lines[0].Text != "a-one" || va.Lines[1].Text != "a-two" {
+		t.Errorf("session A view = %+v, want only a-one/a-two (no B leakage)", va.Lines)
 	}
-	v := r.View(id2)
-	if len(v.Lines) != 1 || v.Lines[0].Text != "new" {
-		t.Errorf("session 2 view = %+v", v)
+	vb := r.View(sessB.ID.String())
+	if len(vb.Lines) != 2 || vb.Lines[0].Text != "b-one" || vb.Lines[1].Text != "b-two" {
+		t.Errorf("session B view = %+v, want only b-one/b-two (no A leakage)", vb.Lines)
 	}
 }
 
@@ -560,12 +605,12 @@ func TestPublish_DoesNotBlockOnLaggedSubscriber(t *testing.T) {
 	}
 }
 
-// TestFinalize_DeliversTerminalIdleFrame is issue #144: when the active session
-// ends (the Manager calls Finalize at every loop exit — Stop, self-exit,
-// Shutdown), an attached SSE subscriber receives a terminal `status: idle` frame
-// on the existing channel, and the frame lands in the ring so a reconnect
-// replays it. Without it the open EventSource just goes quiet and the screen
-// shows "Live" forever.
+// TestFinalize_DeliversTerminalIdleFrame is issue #144: when a session ends (the
+// Manager calls Finalize at every loop exit — Stop, self-exit, Shutdown), an
+// attached SSE subscriber receives a terminal `status: idle` frame on the
+// existing channel, and the session's live state is then torn down (#487: a
+// reconnect falls back to the persisted snapshot). Without the frame the open
+// EventSource just goes quiet and the screen shows "Live" forever.
 func TestFinalize_DeliversTerminalIdleFrame(t *testing.T) {
 	bus, r, fs, id := liveRelay(t)
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "hello", TurnID: "t1"})
@@ -593,18 +638,13 @@ func TestFinalize_DeliversTerminalIdleFrame(t *testing.T) {
 		t.Fatal("no terminal frame delivered to the attached subscriber after Finalize")
 	}
 
-	// The frame is buffered too, so a reconnecting EventSource replays it.
-	frames := r.Frames(id, 0)
-	last := frames[len(frames)-1]
-	if last.Event != "status" || !json.Valid(last.Data) {
-		t.Fatalf("ring's last frame = %+v, want the terminal status frame", last)
+	// The session's live state is torn down after Finalize (#487): View reads idle
+	// and the ring is gone (a reconnect falls back to the persisted snapshot).
+	if v := r.View(id); v.Status != "idle" {
+		t.Fatalf("View after Finalize = %q, want idle", v.Status)
 	}
-	var st status
-	if err := json.Unmarshal(last.Data, &st); err != nil {
-		t.Fatalf("unmarshal buffered terminal frame: %v", err)
-	}
-	if st.Status != "idle" {
-		t.Fatalf("buffered terminal frame status = %q, want idle", st.Status)
+	if got := r.Frames(id, 0); got != nil {
+		t.Fatalf("session ring still has %d frames after Finalize, want none (state torn down)", len(got))
 	}
 }
 
@@ -638,7 +678,7 @@ func TestFinalize_OtherSessionDoesNotPolluteBuffer(t *testing.T) {
 func TestDropWhenIdle(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: false}
-	r := NewRelay(bus, fs, nil, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, nil, nil)
 	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "ignored", TurnID: "t1"})
 	if got := r.Frames(fs.id.String(), 0); got != nil {
 		t.Errorf("idle relay buffered %d frames", len(got))
@@ -669,7 +709,7 @@ func TestProjection_LookaheadReaction_HappyAttributesReactor(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	store := newFakeLineStore()
-	r := NewRelay(bus, fs, store, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
 
 	// The Lead turn.
 	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
@@ -724,7 +764,7 @@ func TestProjection_LookaheadReaction_BargeBeforeReleaseNoLine(t *testing.T) {
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	store := newFakeLineStore()
-	r := NewRelay(bus, fs, store, nil)
+	r := NewRelay(fwd(t, bus, fs), fs, store, nil)
 
 	bus.Publish(voiceevent.EnsembleLead{At: at(1), TurnID: "Te", Target: voiceevent.AddressTarget{AgentID: "bart", AgentRole: "character", Name: "Bart"}})
 	bus.Publish(voiceevent.TTSInvoked{At: at(2), Sentence: "Bart leads.", TurnID: "Te"})

@@ -98,19 +98,19 @@ func newChunker(t *testing.T, store ChunkStore, gauge BacklogGauge, cfg ChunkerC
 	t.Helper()
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	c := NewChunker(bus, fs, store, gauge, slog.New(slog.DiscardHandler), cfg)
+	c := NewChunker(fwd(t, bus, fs), fs, store, gauge, slog.New(slog.DiscardHandler), cfg)
 	return bus, fs, c
 }
 
 // liveChunker wires a chunker to a bus with one active session that carries a
-// campaign id (fakeSessions reports uuid.Nil for the campaign; the funcSessions
-// script here lets a test assert campaign_id / voice_session_id on the row).
+// campaign id, so a test can assert campaign_id / voice_session_id on the row.
+// The returned bus is the session bus tests publish on; events are stamped with
+// vs.ID onto the process bus the chunker subscribes to (#487).
 func liveChunker(t *testing.T, store ChunkStore, gauge BacklogGauge, cfg ChunkerConfig, vs storage.VoiceSession) (*voiceevent.Bus, *Chunker) {
 	t.Helper()
 	bus := voiceevent.NewBus()
-	fs := &funcSessions{}
-	fs.set(func() (storage.VoiceSession, bool) { return vs, true })
-	c := NewChunker(bus, fs, store, gauge, slog.New(slog.DiscardHandler), cfg)
+	fs := &fakeSessions{id: vs.ID, campaign: vs.CampaignID, active: true}
+	c := NewChunker(fwd(t, bus, fs), fs, store, gauge, slog.New(slog.DiscardHandler), cfg)
 	return bus, c
 }
 
@@ -395,7 +395,7 @@ func TestChunker_UndeliveredTailDroppedOnBarge(t *testing.T) {
 	cap := &capHandler{}
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	c := NewChunker(bus, fs, store, nil, slog.New(cap), ChunkerConfig{})
+	c := NewChunker(fwd(t, bus, fs), fs, store, nil, slog.New(cap), ChunkerConfig{})
 	agentID := uuid.New()
 
 	bus.Publish(voiceevent.AddressRouted{
@@ -583,43 +583,49 @@ func TestChunker_ContinuationAcrossChunkClose(t *testing.T) {
 	}
 }
 
-// TestChunker_RolloverFlushKeepsOldSessionIDs is #104 WRITE PATH: when the active
-// session changes without a FlushSession, the rollover safety-net flushes the
-// stale open chunk under the PREVIOUS session's ids (not the new session's).
-func TestChunker_RolloverFlushKeepsOldSessionIDs(t *testing.T) {
+// TestChunker_TwoSessionsNoCrossTalk is the #487 chunker isolation invariant:
+// two live sessions' interleaved utterances fold into separate open chunks and
+// persist under their OWN FKs — never mixed, never cross-attributed. (Replaces
+// the old rollover-safety-net test: session end is now explicit per session, not
+// inferred from a new session's id.)
+func TestChunker_TwoSessionsNoCrossTalk(t *testing.T) {
 	store := &fakeChunkStore{}
 	sessA := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
 	sessB := storage.VoiceSession{ID: uuid.New(), CampaignID: uuid.New()}
-	bus := voiceevent.NewBus()
-	fs := &funcSessions{}
-	fs.set(func() (storage.VoiceSession, bool) { return sessA, true })
-	c := NewChunker(bus, fs, store, nil, slog.New(slog.DiscardHandler), ChunkerConfig{})
+	// Two session buses bridged onto ONE process bus, each stamping its own id.
+	busA, busB := voiceevent.NewBus(), voiceevent.NewBus()
+	proc := voiceevent.NewBus()
+	t.Cleanup(voiceevent.Forward(busA, proc, sessA.ID.String()))
+	t.Cleanup(voiceevent.Forward(busB, proc, sessB.ID.String()))
+	fs := newMultiSessions(sessA, sessB)
+	c := NewChunker(proc, fs, store, nil, slog.New(slog.DiscardHandler), ChunkerConfig{})
 
-	// Two utterances under A open a chunk (default 60s window — not closed).
-	bus.Publish(voiceevent.STTFinal{At: at(1), Text: "a1", TurnID: "t"})
-	bus.Publish(voiceevent.STTFinal{At: at(2), Text: "a2", TurnID: "t"})
+	// Interleave A and B utterances.
+	busA.Publish(voiceevent.STTFinal{At: at(1), Text: "a1", TurnID: "t"})
+	busB.Publish(voiceevent.STTFinal{At: at(2), Text: "b1", TurnID: "t"})
+	busA.Publish(voiceevent.STTFinal{At: at(3), Text: "a2", TurnID: "t"})
+	busB.Publish(voiceevent.STTFinal{At: at(4), Text: "b2", TurnID: "t"})
 
-	// Session rolls to B; the next event triggers the rollover that flushes A's chunk.
-	fs.set(func() (storage.VoiceSession, bool) { return sessB, true })
-	bus.Publish(voiceevent.STTFinal{At: at(3), Text: "b1", TurnID: "t"})
-
-	if err := c.FlushSession(context.Background(), sessB.ID); err != nil {
-		t.Fatalf("FlushSession: %v", err)
+	if err := c.FlushSession(context.Background(), sessA.ID); err != nil {
+		t.Fatalf("FlushSession(A): %v", err)
 	}
+	if err := c.FlushSession(context.Background(), sessB.ID); err != nil {
+		t.Fatalf("FlushSession(B): %v", err)
+	}
+
 	got := store.all()
 	if len(got) != 2 {
-		t.Fatalf("inserts = %d, want 2 (A's stale chunk + B's chunk)", len(got))
+		t.Fatalf("inserts = %d, want 2 (one chunk per session)", len(got))
 	}
-	// FIFO: the rollover flushed A's chunk first, then FlushSession closed B's.
-	if got[0].VoiceSessionID != sessA.ID || got[0].CampaignID != sessA.CampaignID {
-		t.Errorf("stale chunk FKs = session %s / campaign %s, want A's %s / %s",
-			got[0].VoiceSessionID, got[0].CampaignID, sessA.ID, sessA.CampaignID)
+	byID := map[uuid.UUID]storage.TranscriptChunk{}
+	for _, g := range got {
+		byID[g.VoiceSessionID] = g
 	}
-	if got[0].Content != "Player / DM: a1\nPlayer / DM: a2" {
-		t.Errorf("stale chunk content = %q", got[0].Content)
+	if a := byID[sessA.ID]; a.CampaignID != sessA.CampaignID || a.Content != "Player / DM: a1\nPlayer / DM: a2" {
+		t.Errorf("session A chunk = %+v, want only a1/a2 under A's campaign (no B leakage)", a)
 	}
-	if got[1].VoiceSessionID != sessB.ID || got[1].Content != "Player / DM: b1" {
-		t.Errorf("B's chunk = %+v, want session %s with b1", got[1], sessB.ID)
+	if b := byID[sessB.ID]; b.CampaignID != sessB.CampaignID || b.Content != "Player / DM: b1\nPlayer / DM: b2" {
+		t.Errorf("session B chunk = %+v, want only b1/b2 under B's campaign (no A leakage)", b)
 	}
 }
 
@@ -632,7 +638,7 @@ func TestChunker_NonUUIDAgentIDSkippedAndLogged(t *testing.T) {
 	cap := &capHandler{}
 	bus := voiceevent.NewBus()
 	fs := &fakeSessions{id: uuid.New(), active: true}
-	c := NewChunker(bus, fs, store, nil, slog.New(cap), ChunkerConfig{})
+	c := NewChunker(fwd(t, bus, fs), fs, store, nil, slog.New(cap), ChunkerConfig{})
 
 	bus.Publish(voiceevent.AddressRouted{
 		At: at(1), TurnID: "t1",
@@ -731,7 +737,7 @@ func TestChunker_BusCallbackNeverBlocks(t *testing.T) {
 	fs := &fakeSessions{id: uuid.New(), active: true}
 	// MaxUtterances=1: each STTFinal closes and enqueues its own chunk insert. The
 	// chunker is driven entirely through the bus, so it needs no local handle.
-	_ = NewChunker(bus, fs, store, nil, slog.New(cap), ChunkerConfig{MaxUtterances: 1})
+	_ = NewChunker(fwd(t, bus, fs), fs, store, nil, slog.New(cap), ChunkerConfig{MaxUtterances: 1})
 
 	// First close: the writer dequeues it and pins on release. entered confirms the
 	// queue is drained to empty before we fill it, so the accepted count is exact.
