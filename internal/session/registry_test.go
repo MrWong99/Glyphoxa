@@ -121,3 +121,49 @@ func TestIdentityContext_RoundTrip(t *testing.T) {
 		t.Error("FromContext(bare) reported present, want absent")
 	}
 }
+
+// TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity pins the
+// Start wiring (#487): the loop runs with cfg.Bus pointing at the session's OWN
+// bus, an event it publishes there arrives on the PROCESS bus stamped with the
+// session id (via Forward), and the run context carries the session Identity for
+// the non-bus per-turn consumers.
+func TestStart_SessionEventsStampedOnProcessBus_AndRunCtxCarriesIdentity(t *testing.T) {
+	reg := session.NewRegistry()
+	procBus := voiceevent.NewBus()
+	var got []voiceevent.Event
+	t.Cleanup(procBus.Subscribe(func(e voiceevent.Event) { got = append(got, e) }))
+
+	tenantID, campaignID := uuid.New(), uuid.New()
+	gotID := make(chan session.Identity, 1)
+	store := newFakeStore()
+	runner := func(ctx context.Context, cfg wirenpc.Config) error {
+		id, _ := session.FromContext(ctx)
+		gotID <- id
+		cfg.Bus.Publish(voiceevent.STTFinal{Text: "hi from the session loop"})
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	mgr := session.NewManager(store, runner, wirenpc.Config{Token: "test-token", Bus: procBus}, nil,
+		slog.New(slog.DiscardHandler), true, session.Deps{Registry: reg})
+	vs, err := mgr.Start(context.Background(), tenantID, campaignID)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _ = mgr.Stop(context.Background()) })
+
+	id := <-gotID
+	want := session.Identity{SessionID: vs.ID, CampaignID: campaignID, TenantID: tenantID}
+	if id != want {
+		t.Errorf("run ctx Identity = %+v, want %+v", id, want)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("process bus got %d events, want 1 (the loop's STTFinal, stamped)", len(got))
+	}
+	if _, ok := got[0].(voiceevent.STTFinal); !ok {
+		t.Fatalf("process bus event = %T, want STTFinal", got[0])
+	}
+	if sid := voiceevent.SessionIDOf(got[0]); sid != vs.ID.String() {
+		t.Errorf("session loop event stamped %q, want %q", sid, vs.ID.String())
+	}
+}
