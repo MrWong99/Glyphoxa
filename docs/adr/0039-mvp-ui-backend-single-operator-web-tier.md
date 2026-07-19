@@ -81,6 +81,10 @@ The claim above that "the `voice.v1 VoiceControlService` proto (`claim_session`
 contains only `management.proto`, and no such service was ever authored.
 **ADR-0057** decides the split-Mode session-assignment mechanism instead — a
 Postgres `voice_session_intents` claim plane (`FOR UPDATE SKIP LOCKED` plus
-heartbeat, poll-only), not a gRPC control service. `all` Mode's in-process
-`SessionManager` direct-call path, described elsewhere in this ADR, is
-unaffected.
+heartbeat, poll-only), not a gRPC control service. The same correction applies
+to the "Considered options" bullet "Loop `all` Mode through
+`VoiceControlService` … The proto is written so the split path is cheap to
+add" — no such proto was written; the split path's cheapness now rests on the
+claim plane and the per-tenant client registry, not a pre-authored control
+proto. `all` Mode's in-process `SessionManager` direct-call path, described
+elsewhere in this ADR, is unaffected.

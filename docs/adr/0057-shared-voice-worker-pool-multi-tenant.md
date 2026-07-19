@@ -12,7 +12,8 @@ the way of any shape: the presence layer reads the globally-newest
 `deployment_config` row regardless of Tenant, so one Tenant saving Discord
 settings tears down another Tenant's client (the presence-hijack blocker,
 `internal/storage/deployment.go:48-69`); and `session.Manager` holds one
-active-session pointer process-wide (`internal/session/manager.go:37-41`),
+active-session pointer process-wide (`internal/session/manager.go:213,230`,
+guard at `:394-396`),
 with the process-wide `voiceevent.Bus` carrying no SessionID for consumers to
 key on. Both are named prerequisites in `self-signup-and-invitations-design.md`
 and gate every option below, not just the one chosen here.
