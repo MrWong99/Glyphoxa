@@ -35,8 +35,13 @@ type agentStore interface {
 	// GetAgent backs the create read-back and UpdateAgent's campaign-scoped
 	// pre-read (#356) that preserves persisted voice tuning (#224).
 	GetAgent(ctx context.Context, id uuid.UUID) (storage.Agent, error)
-	CreateAgent(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
+	// CreateAgentWithNPCNode creates the Agent AND its linked NPC Knowledge
+	// Graph Node in one transaction (#479, ADR-0008 second amendment).
+	CreateAgentWithNPCNode(ctx context.Context, a storage.NewAgent) (uuid.UUID, error)
 	UpdateAgent(ctx context.Context, a storage.AgentUpdate) (storage.Agent, error)
+	// RenameAgentNode keeps the auto-created Node's name in step with an Agent
+	// rename while the two names still match (#479); a no-op otherwise.
+	RenameAgentNode(ctx context.Context, campaignID, agentID uuid.UUID, oldName, newName string) error
 	DeleteAgent(ctx context.Context, campaignID, id uuid.UUID) error
 }
 
@@ -91,7 +96,9 @@ func (s *agentRoster) GetCampaignRoster(
 // campaign is resolved live-first (the live Voice Session's campaign → durable
 // /glyphoxa use selection → most-recent fallback), the SAME resolution the roster
 // read uses, so mid-session a new NPC lands in the campaign the screen shows —
-// never a silent cross-campaign write (#222).
+// never a silent cross-campaign write (#222). A linked NPC Knowledge Graph Node
+// is created in the same transaction (#479, ADR-0008 second amendment): every
+// new Character NPC starts with a wiki entry carrying the "voiced by" link.
 func (s *agentRoster) CreateAgent(
 	ctx context.Context,
 	req *connect.Request[managementv1.CreateAgentRequest],
@@ -106,7 +113,7 @@ func (s *agentRoster) CreateAgent(
 	}
 
 	m := req.Msg
-	id, err := s.store.CreateAgent(ctx, storage.NewAgent{
+	id, err := s.store.CreateAgentWithNPCNode(ctx, storage.NewAgent{
 		CampaignID: c.ID,
 		Role:       storage.AgentRoleCharacter,
 		Name:       m.GetName(),
@@ -193,6 +200,18 @@ func (s *agentRoster) UpdateAgent(
 		}
 		slog.Default().Error("UpdateAgent: store update failed", "agent_id", id, "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("internal error"))
+	}
+
+	// Keep the auto-created NPC Node's name in step while the two names still
+	// match (#479, ADR-0008 second amendment) — the "New NPC" placeholder flow
+	// renames right after create. Once the GM renames the Node independently the
+	// names diverge and this is a no-op forever; bodies are never synced. A
+	// failure here never fails the agent save — the rename is best-effort
+	// (logged), the next matching rename catches up.
+	if existing.Role == storage.AgentRoleCharacter {
+		if rerr := s.store.RenameAgentNode(ctx, c.ID, id, existing.Name, updated.Name); rerr != nil {
+			slog.Default().Warn("UpdateAgent: rename linked node failed", "agent_id", id, "err", rerr)
+		}
 	}
 	return connect.NewResponse(&managementv1.UpdateAgentResponse{Agent: toProtoAgent(updated)}), nil
 }

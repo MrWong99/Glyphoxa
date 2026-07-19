@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MrWong99/Glyphoxa/gen/glyphoxa/management/v1/managementv1connect"
+	"github.com/MrWong99/Glyphoxa/internal/assist"
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/blob"
 	"github.com/MrWong99/Glyphoxa/internal/bundle"
@@ -605,6 +606,12 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	// metrics, and logs attribution — but never persists a recap (ADR-0040).
 	recapEngine := recap.NewEngine(store, cipher, metrics, log, recap.WithKeyEntitlement(keyEnt))
 
+	// The on-demand campaign-creation assist Engine (#479) drafts NPC Personas
+	// and linked Knowledge Graph entries from a GM prompt — strictly on button
+	// press, preview-first. Same posture as the recap engine: BYOK key via
+	// cipher, env fallback gated by keyEnt, usage metered but never cap-gated.
+	assistEngine := assist.NewEngine(store, cipher, metrics, log, assist.WithKeyEntitlement(keyEnt))
+
 	// The speaker resolver (#281, E4) resolves a Speaker Lane snowflake to its
 	// Character/GM display name for the relay + chunk prefix. It reads Characters
 	// from the store and, for an unmapped speaker, falls back to the Discord guild
@@ -925,7 +932,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 			return pres.VoiceChannelMembers(ctx, channelID)
 		}
 	}
-	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, presenceRefresh, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
+	mounts := managementMounts(store, blobStore, cipher, metrics, log, mgr, relay, speakerResolver, recapEngine, assistEngine, presenceRefresh, memberLister, embedProvider, admission, signupPlanSlug, keyEnt)
 	root := spa.Handler()
 	// GLYPHOXA_DEV_MODE opt-out (ADR-0041): seed + auto-authenticate the synthetic
 	// operator on every request and pin the bind to loopback, so a dev instance
@@ -1039,7 +1046,7 @@ var plainMountPolicy = map[string]auth.TenantMode{
 // its two plain net/http reads mount OUTSIDE the Connect /api prefix at
 // /api/v1/sessions/{id}[/events], each a row in the guarded mount table
 // (#446 — the Connect interceptor chain does not cover them).
-func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
+func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto.Cipher, metrics observe.StageRecorder, log *slog.Logger, mgr *session.Manager, relay *transcript.Relay, speakerResolver *speaker.Resolver, recapEngine *recap.Engine, assistEngine *assist.Engine, presenceRefresh func(), memberLister func(context.Context) ([]presence.Member, error), embedProvider embeddings.Provider, admission auth.AdmissionMode, signupPlanSlug string, keyEnt llmbuild.PlatformKeyEntitlement) []web.Mount {
 	// OAuth credentials are enforced at boot by requireWebEnv (ADR-0041, issue
 	// #112): a non-dev web/all Instance never reaches here without all three set,
 	// and GLYPHOXA_DEV_MODE serves an auto-authenticated session that never uses
@@ -1107,6 +1114,9 @@ func managementMounts(store *storage.Store, blobStore blob.Store, cipher *crypto
 	// (#308, ADR-0048): the highlight rows cascade with the campaign, but their clip
 	// blobs have no FK and must be dropped through the seam.
 	campaignSrv.SetHighlightClipSweeper(highlightClipSweeper{store: store, blobs: blobStore})
+	// The on-demand campaign-creation assist engine (#479): persona drafting and
+	// knowledge-draft generation, strictly on GM button press.
+	campaignSrv.SetAssist(assistEngine)
 	campaignPath, campaignHandler := campaignSrv.Handler(stack.HandlerOptions()...)
 	authPath, authHandler := authServer.Handler(stack.HandlerOptions()...)
 	// VoiceService (#70) serves the live provider data the Configuration +

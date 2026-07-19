@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/llmcall"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -213,13 +214,14 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	// alongside the production recorder — usage is recorded and priced, but the
 	// engine never reads a cap or calls AllowTurn (ADR-0046 is live-session-only).
 	rec, estimatedUSD := spend.PriceOnly(e.metrics, e.log)
-	caller := &llmCaller{
-		ctx:        ctx,
-		provider:   provider,
-		model:      model,
-		priceModel: priceModel,
-		label:      providerLabel(providerID),
-		rec:        rec,
+	caller := &llmcall.Caller{
+		Ctx:        ctx,
+		Provider:   provider,
+		Model:      model,
+		PriceModel: priceModel,
+		Label:      llmcall.ProviderLabel(providerID),
+		Rec:        rec,
+		ErrPrefix:  "recap",
 	}
 
 	chronIDs := make([]uuid.UUID, len(sessions))
@@ -233,8 +235,8 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 	defer func() {
 		e.log.Info("recap: llm usage",
 			"voice_session_ids", chronIDs,
-			"input_tokens", caller.totalIn,
-			"output_tokens", caller.totalOut,
+			"input_tokens", caller.TotalIn,
+			"output_tokens", caller.TotalOut,
 			"estimated_usd", estimatedUSD(),
 			"ok", err == nil,
 		)
@@ -290,10 +292,10 @@ func (e *Engine) Recap(ctx context.Context, sessionIDs []uuid.UUID) (res Result,
 // one Butler-flavoured call; above it, a map-reduce: each window of whole Lines is
 // mapped with a NEUTRAL factual prompt, then the ordered partials are reduced by one
 // Butler-flavoured call. Windowed reports which path ran.
-func (e *Engine) recapSession(c *llmCaller, butlerSys, neutralSys string, lines []storage.TranscriptLine) (text string, windowed bool, err error) {
+func (e *Engine) recapSession(c *llmcall.Caller, butlerSys, neutralSys string, lines []storage.TranscriptLine) (text string, windowed bool, err error) {
 	rendered := renderLines(lines)
 	if utf8.RuneCountInString(rendered) <= singleCallBudgetChars {
-		text, err = c.call(butlerSys, rendered, singleMaxTokens)
+		text, err = c.Call(butlerSys, rendered, singleMaxTokens)
 		return text, false, err
 	}
 
@@ -303,13 +305,13 @@ func (e *Engine) recapSession(c *llmCaller, butlerSys, neutralSys string, lines 
 	}
 	partials := make([]string, 0, len(windows))
 	for _, w := range windows {
-		p, err := c.call(neutralSys, renderLines(w), mapMaxTokens)
+		p, err := c.Call(neutralSys, renderLines(w), mapMaxTokens)
 		if err != nil {
 			return "", false, err
 		}
 		partials = append(partials, p)
 	}
-	reduced, err := c.call(butlerSys, strings.Join(partials, "\n\n"), reduceMaxTokens)
+	reduced, err := c.Call(butlerSys, strings.Join(partials, "\n\n"), reduceMaxTokens)
 	return reduced, true, err
 }
 
@@ -347,14 +349,4 @@ func dedupUUIDs(ids []uuid.UUID) []uuid.UUID {
 		out = append(out, id)
 	}
 	return out
-}
-
-// providerLabel maps a provider_config id to the bounded [observe.Provider] metric
-// label; the empty id (default) is Groq (ADR-0036). The three wired ids equal their
-// observe constants, so the cast is exact.
-func providerLabel(providerID string) observe.Provider {
-	if providerID == "" {
-		return observe.ProviderGroq
-	}
-	return observe.Provider(providerID)
 }

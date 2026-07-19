@@ -268,6 +268,23 @@ function AgentEditor({
   });
   const preview = useMutation(VoiceService.method.previewVoice);
 
+  // On-demand persona drafting (#479): runs ONLY when the GM presses Generate.
+  // The draft lands in the local persona field for review — nothing is saved
+  // until the GM presses "Save changes". Failures render an inline cue like the
+  // voice-preview one.
+  const [draftPrompt, setDraftPrompt] = useState("");
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const generate = useMutation(CampaignService.method.generatePersona);
+  const draftPersona = async () => {
+    setDraftError(null);
+    try {
+      const res = await generate.mutateAsync({ agentId: agent.id, prompt: draftPrompt });
+      setPersona(res.persona);
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   // Options come from the live catalog: value = vendor voice id, label =
   // "ElevenLabs · Name". The agent's persisted voice id is kept as a bare option
   // even when the catalog is empty/stale, so the current selection always shows.
@@ -341,6 +358,34 @@ function AgentEditor({
         <span className="gx-field__hint">
           Personality, backstory and speech style — injected into the prompt.
         </span>
+        {!butler && (
+          <div className="gx-editor__draft">
+            <Input
+              label="Draft with your LLM"
+              value={draftPrompt}
+              onChange={(e) => setDraftPrompt(e.target.value)}
+              placeholder="Short description — e.g. a grumpy dwarven blacksmith who secretly writes poetry"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              iconStart={<Sparkles size={14} />}
+              onClick={() => void draftPersona()}
+              disabled={!draftPrompt.trim() || generate.isPending}
+            >
+              {generate.isPending ? "Drafting…" : "Generate persona"}
+            </Button>
+            {draftError && (
+              <span className="gx-editor__status gx-editor__status--error" role="alert">
+                Couldn't generate: {draftError}
+              </span>
+            )}
+            <span className="gx-field__hint gx-editor__draft-hint">
+              Runs only when you press Generate. The draft replaces the Persona field above — review
+              and save to keep it.
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="gx-editor__voice">

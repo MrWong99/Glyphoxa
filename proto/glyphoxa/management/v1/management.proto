@@ -66,7 +66,10 @@ service CampaignService {
 
   // CreateAgent adds a Character NPC ("Add NPC") to the active campaign and
   // returns the created agent, including its server-assigned speaker-colour slot.
-  // The role is always 'character'; the Butler is auto-created (ADR-0009).
+  // The role is always 'character'; the Butler is auto-created (ADR-0009). A
+  // linked NPC Knowledge Graph Node is created in the same transaction (#479,
+  // ADR-0008 second amendment) — the wiki entry every new Character NPC now
+  // starts with.
   rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
 
   // UpdateAgent saves an agent's editor fields (name, title, persona, voice,
@@ -133,6 +136,38 @@ service CampaignService {
   rpc SearchNodes(SearchNodesRequest) returns (SearchNodesResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+
+  // GeneratePersona asks the campaign's configured LLM to draft a Character
+  // NPC's Persona markdown from a short GM prompt (#479). Strictly on-demand:
+  // it runs only when the GM presses Generate — nothing is ever suggested
+  // unprompted — and the draft is RETURNED for review in the editor, never
+  // persisted server-side. Usage is metered but never cap-gated (ADR-0046 is
+  // live-session-only). An empty/whitespace prompt or unparsable agent_id is
+  // CodeInvalidArgument; a missing/cross-campaign agent is CodeNotFound; an
+  // LLM/provider failure is CodeUnavailable. State-changing (it spends provider
+  // quota): the auth + CSRF interceptors guard it.
+  rpc GeneratePersona(GeneratePersonaRequest) returns (GeneratePersonaResponse);
+
+  // GenerateKnowledge asks the campaign's configured LLM to draft a small set of
+  // linked Knowledge Graph entries — Nodes plus Edges among them — from a short
+  // GM prompt (#479). Strictly on-demand and PREVIEW-ONLY: nothing is written;
+  // the GM reviews the draft and lands it via ApplyGeneratedKnowledge (the
+  // ADR-0052 posture: nothing enters the KG without GM approval). Usage is
+  // metered but never cap-gated. An empty/whitespace prompt is
+  // CodeInvalidArgument; an LLM/provider failure or an unusable LLM response is
+  // CodeUnavailable. State-changing (it spends provider quota): the auth + CSRF
+  // interceptors guard it.
+  rpc GenerateKnowledge(GenerateKnowledgeRequest) returns (GenerateKnowledgeResponse);
+
+  // ApplyGeneratedKnowledge lands a GM-confirmed knowledge draft (#479):
+  // every Node and Edge is created in ONE transaction with the same validation
+  // as CreateNode/CreateEdge — an invalid node type or empty name, or an edge
+  // whose index is out of range, is CodeInvalidArgument; a matrix-invalid or
+  // duplicate edge is CodeFailedPrecondition and rolls the whole draft back
+  // (nothing half-lands). The GM may edit the draft client-side before
+  // applying; the server re-validates everything. State-changing: the auth +
+  // CSRF interceptors guard it.
+  rpc ApplyGeneratedKnowledge(ApplyGeneratedKnowledgeRequest) returns (ApplyGeneratedKnowledgeResponse);
 
   // ListKnowledgeProposals returns the active campaign's PENDING Knowledge
   // Proposals oldest-first — the GM review queue an Agent's remember_knowledge
@@ -511,6 +546,85 @@ message SearchNodesResponse {
   // nodes are the matching Knowledge Graph Nodes, ranked by relevance; gm_private
   // Nodes are included (GM-facing search).
   repeated Node nodes = 1;
+}
+
+// GeneratePersonaRequest is the Agent editor's "Generate persona" payload
+// (#479). The campaign is resolved server-side; its name, System, and Language
+// season the draft.
+message GeneratePersonaRequest {
+  // agent_id is the Agent whose Persona to draft; its current name/title season
+  // the prompt. Must belong to the active campaign.
+  string agent_id = 1;
+  // prompt is the GM's short description of the wanted character; empty is
+  // rejected.
+  string prompt = 2;
+}
+
+// GeneratePersonaResponse carries the drafted Persona markdown — a proposal for
+// the editor field, never persisted server-side.
+message GeneratePersonaResponse {
+  // persona is the drafted Persona markdown.
+  string persona = 1;
+}
+
+// DraftNode is one LLM-drafted Knowledge Graph entry inside a knowledge draft
+// (#479): the CreateNodeRequest fields without an id — it exists only in the
+// preview until the GM applies the draft.
+message DraftNode {
+  // node_type is the drafted entry's type; UNSPECIFIED is rejected on apply.
+  NodeType node_type = 1;
+  // name is the drafted entry's display name; empty is rejected on apply.
+  string name = 2;
+  // body is the drafted entry's prose.
+  string body = 3;
+  // gm_private keeps the entry out of every NPC's prompt when applied.
+  bool gm_private = 4;
+}
+
+// DraftEdge is one LLM-drafted Edge between two DraftNodes of the SAME draft
+// (#479), referencing them by list position — the nodes have no ids yet.
+message DraftEdge {
+  // from_index is the subject DraftNode's position in the draft's nodes list.
+  uint32 from_index = 1;
+  // to_index is the object DraftNode's position in the draft's nodes list.
+  uint32 to_index = 2;
+  // edge_type is the relationship type; UNSPECIFIED is rejected on apply.
+  EdgeType edge_type = 3;
+}
+
+// GenerateKnowledgeRequest is the Knowledge panel's "Generate entries" payload
+// (#479). The campaign is resolved server-side.
+message GenerateKnowledgeRequest {
+  // prompt is the GM's short description of the entries to draft ("the thieves'
+  // guild of Saltmarsh: its leader, hideout and rivals"); empty is rejected.
+  string prompt = 1;
+}
+
+// GenerateKnowledgeResponse carries the drafted entries and the edges among
+// them — a PREVIEW; nothing has been written.
+message GenerateKnowledgeResponse {
+  // nodes are the drafted entries in display order.
+  repeated DraftNode nodes = 1;
+  // edges are the drafted relationships among the drafted entries.
+  repeated DraftEdge edges = 2;
+}
+
+// ApplyGeneratedKnowledgeRequest carries the GM-confirmed (possibly client-side
+// edited) draft to land atomically.
+message ApplyGeneratedKnowledgeRequest {
+  // nodes are the entries to create, in order (edge indices reference it).
+  repeated DraftNode nodes = 1;
+  // edges are the relationships to create among the created entries.
+  repeated DraftEdge edges = 2;
+}
+
+// ApplyGeneratedKnowledgeResponse carries the created Nodes; the client
+// refreshes edge lists lazily via ListNodeEdges.
+message ApplyGeneratedKnowledgeResponse {
+  // nodes are the created Nodes in draft order.
+  repeated Node nodes = 1;
+  // edges_created is how many draft edges landed.
+  uint32 edges_created = 2;
 }
 
 // ProposedFact is a remember_knowledge proposal to append a fact sentence to an
