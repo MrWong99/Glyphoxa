@@ -16,6 +16,7 @@ import (
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -1072,6 +1073,26 @@ func TestWarnClaimCadence(t *testing.T) {
 	}
 	if n := countWarns(session.ClaimLoopConfig{Heartbeat: 5 * time.Second, Expiry: 12 * time.Second}); n != 1 {
 		t.Errorf("thin headroom warned %d times, want 1", n)
+	}
+}
+
+// TestWarnElectorCadence pins the presence-owner headroom guard (#492): healthy
+// defaults (5s/15s) stay quiet; interval at/above expiry warns (flap), and expiry
+// under two intervals warns (a single missed renew self-demotes).
+func TestWarnElectorCadence(t *testing.T) {
+	countWarns := func(cfg presence.OwnerElectorConfig) int {
+		h := &countingHandler{}
+		warnElectorCadence(cfg, slog.New(h))
+		return h.warns
+	}
+	if n := countWarns(presence.OwnerElectorConfig{Interval: 5 * time.Second, Expiry: 15 * time.Second}); n != 0 {
+		t.Errorf("healthy defaults warned %d times, want 0", n)
+	}
+	if n := countWarns(presence.OwnerElectorConfig{Interval: 15 * time.Second, Expiry: 15 * time.Second}); n != 1 {
+		t.Errorf("interval >= expiry warned %d times, want 1", n)
+	}
+	if n := countWarns(presence.OwnerElectorConfig{Interval: 5 * time.Second, Expiry: 8 * time.Second}); n != 1 {
+		t.Errorf("thin headroom (expiry < 2*interval) warned %d times, want 1", n)
 	}
 }
 

@@ -269,7 +269,7 @@ func connectAndServe(ctx context.Context, cfg Config, guild, channel snowflake.I
 	// TapeConsentChanged, and post the in-channel consent disclosure with
 	// grant/revoke buttons. A nil Tape (campaign not armed) makes both inert, so the
 	// loop is unchanged.
-	defer wireTapeConsent(cycleCtx, bus, cfg.Tape, cfg.CampaignID, cfg.TapeConsent, log)()
+	defer wireTapeConsent(cycleCtx, bus, cfg.Tape, cfg.CampaignID, cfg.TapeConsent, cfg.TapeConsentReconcileInterval, log)()
 	if cfg.Tape != nil {
 		if err := postTapeDisclosure(cycleCtx, client, channel, cfg.CampaignID); err != nil {
 			// A failed disclosure post must not tear down the session — capture is

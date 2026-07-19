@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 )
 
 // replyKind names the responder method a recorded message came through, so a test can
@@ -349,4 +350,142 @@ func keys(m map[string]discord.SlashCommandCreate) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestSetActiveGatesDispatch covers sequence (4): an inactive Registry (a
+// non-elected presence owner, #492) drops a slash-command interaction entirely —
+// the handler never runs and NOTHING is replied — while an active one dispatches
+// normally. This is the mechanism that makes N Voice Instances on one shared
+// central token safe: every session receives every INTERACTION_CREATE (P5), and
+// only the elected owner acts on it.
+func TestSetActiveGatesDispatch(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	ran := false
+	reg.Register(Command{Path: "ping", Handle: func(_ context.Context, ic *Interaction) error {
+		ran = true
+		return ic.Reply("pong")
+	}})
+
+	reg.SetActive(false)
+	resp := &fakeResponder{}
+	reg.dispatch(context.Background(), "ping", &Interaction{guildID: testGuild, userID: strangerID, resp: resp})
+	if ran {
+		t.Error("inactive Registry must not run the handler")
+	}
+	if len(resp.replies) != 0 {
+		t.Errorf("inactive Registry must not reply, got %+v", resp.replies)
+	}
+
+	reg.SetActive(true)
+	resp2 := &fakeResponder{}
+	reg.dispatch(context.Background(), "ping", &Interaction{guildID: testGuild, userID: strangerID, resp: resp2})
+	if !ran {
+		t.Error("active Registry must run the handler")
+	}
+	if len(resp2.replies) != 1 || resp2.replies[0].content != "pong" {
+		t.Errorf("active Registry should reply once with pong, got %+v", resp2.replies)
+	}
+}
+
+// recordingAutocompleteResponder records whether a result was sent, so a test can
+// assert a non-owner sends NOTHING (not an empty result).
+type recordingAutocompleteResponder struct {
+	sent    bool
+	choices []discord.AutocompleteChoice
+}
+
+func (r *recordingAutocompleteResponder) result(choices []discord.AutocompleteChoice) error {
+	r.sent = true
+	r.choices = choices
+	return nil
+}
+
+// TestSetActiveGatesAutocomplete covers sequence (4) for autocomplete: an inactive
+// Registry DROPS the interaction — it sends NO AutocompleteResult at all (not an
+// empty list), and never runs the handler — while an active one responds normally.
+// Drives handleAutocomplete (the send seam) so the drop-vs-empty distinction is
+// observable.
+func TestSetActiveGatesAutocomplete(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	ran := false
+	reg.Register(Command{Path: "pick", Handle: func(context.Context, *Interaction) error { return nil },
+		Autocomplete: func(context.Context, *Autocomplete) ([]discord.AutocompleteChoice, error) {
+			ran = true
+			return []discord.AutocompleteChoice{discord.AutocompleteChoiceString{Name: "x", Value: "x"}}, nil
+		}})
+
+	reg.SetActive(false)
+	inactive := &recordingAutocompleteResponder{}
+	reg.handleAutocomplete(context.Background(), "pick", &Autocomplete{guildID: testGuild, userID: strangerID}, inactive)
+	if ran {
+		t.Error("inactive Registry must not run the autocomplete handler")
+	}
+	if inactive.sent {
+		t.Error("inactive Registry must send NO autocomplete result at all (drop, not empty)")
+	}
+
+	reg.SetActive(true)
+	active := &recordingAutocompleteResponder{}
+	reg.handleAutocomplete(context.Background(), "pick", &Autocomplete{guildID: testGuild, userID: strangerID}, active)
+	if !ran {
+		t.Error("active Registry must run the handler")
+	}
+	if !active.sent || len(active.choices) != 1 {
+		t.Errorf("active Registry should send one choice, sent=%v choices=%d", active.sent, len(active.choices))
+	}
+}
+
+// TestSetActiveGatesComponent covers sequence (4) for message components: an
+// inactive Registry fans no component interaction out to its handlers.
+func TestSetActiveGatesComponent(t *testing.T) {
+	reg := testRegistry(testGuild, "")
+	ran := false
+	reg.RegisterComponentHandler(func(*events.ComponentInteractionCreate) { ran = true })
+
+	reg.SetActive(false)
+	reg.HandleComponent(nil)
+	if ran {
+		t.Error("inactive Registry must not invoke component handlers")
+	}
+
+	reg.SetActive(true)
+	reg.HandleComponent(nil)
+	if !ran {
+		t.Error("active Registry must invoke component handlers")
+	}
+}
+
+// TestExactlyOnceAcrossTwoRegistries covers sequence (5): the exactly-once
+// guarantee behind ADR-0057 (c). Two Voice Instances' command Registries receive
+// the SAME interaction (Discord delivers it to every session on the shared token);
+// only the elected owner is active, so the handler runs exactly once total and the
+// non-owner replies nothing.
+func TestExactlyOnceAcrossTwoRegistries(t *testing.T) {
+	owner := testRegistry(testGuild, "")
+	nonOwner := testRegistry(testGuild, "")
+	dispatches := 0
+	handler := func(_ context.Context, ic *Interaction) error {
+		dispatches++
+		return ic.Reply("done")
+	}
+	owner.Register(Command{Path: "roll", Handle: handler})
+	nonOwner.Register(Command{Path: "roll", Handle: handler})
+
+	owner.SetActive(true)
+	nonOwner.SetActive(false)
+
+	ownerResp := &fakeResponder{}
+	nonOwnerResp := &fakeResponder{}
+	owner.dispatch(context.Background(), "roll", &Interaction{guildID: testGuild, userID: strangerID, resp: ownerResp})
+	nonOwner.dispatch(context.Background(), "roll", &Interaction{guildID: testGuild, userID: strangerID, resp: nonOwnerResp})
+
+	if dispatches != 1 {
+		t.Fatalf("handler ran %d times, want exactly once across the fleet", dispatches)
+	}
+	if len(ownerResp.replies) != 1 {
+		t.Errorf("owner should reply once, got %+v", ownerResp.replies)
+	}
+	if len(nonOwnerResp.replies) != 0 {
+		t.Errorf("non-owner must reply nothing, got %+v", nonOwnerResp.replies)
+	}
 }

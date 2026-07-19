@@ -1,0 +1,28 @@
+{{/*
+Voice-mode PodDisruptionBudget (#492, ADR-0057) — availability protection for the
+shared voice-worker pool.
+
+Armed ONLY when voice is enabled AND voice.replicas > 1. With a fleet it keeps at
+least minAvailable pods serving through a VOLUNTARY disruption (a node drain or
+cluster upgrade), so interaction dispatch (the elected presence owner) and live
+Voice Sessions are never all torn down at once. A single-replica install renders no
+PDB: it has no availability to protect, and a minAvailable-1 PDB over one pod would
+BLOCK every voluntary drain (the node could never be cordoned). The claim plane
+(#491) and the elected-owner gate (ADR-0057 (c)) are what make several pods
+genuinely fungible here, so protecting a subset is meaningful.
+*/}}
+{{- if and .Values.voice.enabled (gt (int .Values.voice.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "glyphoxa.voice.fullname" . }}
+  labels:
+    {{- include "glyphoxa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: voice
+spec:
+  minAvailable: {{ .Values.voice.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "glyphoxa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: voice
+{{- end }}

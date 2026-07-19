@@ -18,6 +18,7 @@ import (
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
+	"github.com/MrWong99/Glyphoxa/internal/presence"
 	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/spend"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
@@ -434,6 +435,45 @@ func voiceIntentControlConfig(getenv func(string) string) session.IntentControlC
 		// Matches the worker's reaper horizon so Start's zero-worker escape (review
 		// item 4) judges a blocking claim stale on the same clock the worker would.
 		Expiry: envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_EXPIRY", defaultVoiceHeartbeatExpiry),
+	}
+}
+
+// Presence-owner election defaults (#492, ADR-0057 (c)): the -mode voice worker
+// renews the singleton presence_owner claim every 5s and an owner's silence past
+// 15s marks its row dead so a challenger takes over. Interval must sit well under
+// Expiry so a healthy owner never loses the row between renewals (three renew
+// attempts fit inside one expiry).
+const (
+	defaultPresenceOwnerInterval = 5 * time.Second
+	defaultPresenceOwnerExpiry   = 15 * time.Second
+)
+
+// voicePresenceElectorConfig reads the presence-owner election cadence from
+// GLYPHOXA_PRESENCE_OWNER_INTERVAL / _EXPIRY (#492). Parsed here in the composition
+// root so the cadence stays a deployment knob, never baked into internal/presence.
+func voicePresenceElectorConfig(getenv func(string) string) presence.OwnerElectorConfig {
+	return presence.OwnerElectorConfig{
+		Interval: envDuration(getenv, "GLYPHOXA_PRESENCE_OWNER_INTERVAL", defaultPresenceOwnerInterval),
+		Expiry:   envDuration(getenv, "GLYPHOXA_PRESENCE_OWNER_EXPIRY", defaultPresenceOwnerExpiry),
+	}
+}
+
+// warnElectorCadence checks the presence-owner election cadence has sane headroom
+// (#492), mirroring warnClaimCadence: the renew Interval must sit well under Expiry
+// or a healthy owner risks losing its own lease between renewals (a flapping
+// active/inactive Registry — duplicate or dropped interaction dispatch). It warns
+// (never clamps — an operator may know their timing) when Interval >= Expiry, and on
+// thin headroom (Expiry under two Intervals, so a single missed renew expires the
+// lease).
+func warnElectorCadence(cfg presence.OwnerElectorConfig, log *slog.Logger) {
+	if cfg.Interval >= cfg.Expiry {
+		log.Warn("GLYPHOXA_PRESENCE_OWNER_INTERVAL >= _EXPIRY: the owner will flap — its lease expires before it can renew",
+			"interval", cfg.Interval, "expiry", cfg.Expiry)
+		return
+	}
+	if cfg.Expiry < 2*cfg.Interval {
+		log.Warn("thin presence-owner headroom: EXPIRY under two INTERVALs; a single missed renew self-demotes the owner",
+			"interval", cfg.Interval, "expiry", cfg.Expiry)
 	}
 }
 
