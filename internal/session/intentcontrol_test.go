@@ -42,7 +42,7 @@ func (f *fakeControlStore) putSession(vs storage.VoiceSession) {
 
 func (f *fakeControlStore) CreateVoiceSessionIntent(_ context.Context, tenantID, campaignID uuid.UUID) (storage.VoiceSessionIntent, error) {
 	f.fakeIntentStore.mu.Lock()
-	for _, i := range f.fakeIntentStore.intents {
+	for _, i := range f.intents {
 		if i.TenantID == tenantID &&
 			(i.Status == storage.VoiceIntentPending || i.Status == storage.VoiceIntentClaimed || i.Status == storage.VoiceIntentLive) {
 			f.fakeIntentStore.mu.Unlock()
@@ -56,7 +56,7 @@ func (f *fakeControlStore) CreateVoiceSessionIntent(_ context.Context, tenantID,
 func (f *fakeControlStore) GetVoiceSessionIntent(_ context.Context, id uuid.UUID) (storage.VoiceSessionIntent, error) {
 	f.fakeIntentStore.mu.Lock()
 	defer f.fakeIntentStore.mu.Unlock()
-	i, ok := f.fakeIntentStore.intents[id]
+	i, ok := f.intents[id]
 	if !ok {
 		return storage.VoiceSessionIntent{}, storage.ErrNotFound
 	}
@@ -66,7 +66,7 @@ func (f *fakeControlStore) GetVoiceSessionIntent(_ context.Context, id uuid.UUID
 func (f *fakeControlStore) RequestVoiceSessionStop(_ context.Context, id uuid.UUID) (storage.VoiceSessionIntent, error) {
 	f.fakeIntentStore.mu.Lock()
 	defer f.fakeIntentStore.mu.Unlock()
-	i, ok := f.fakeIntentStore.intents[id]
+	i, ok := f.intents[id]
 	if !ok {
 		return storage.VoiceSessionIntent{}, storage.ErrNotFound
 	}
@@ -82,7 +82,7 @@ func (f *fakeControlStore) RequestVoiceSessionStop(_ context.Context, id uuid.UU
 func (f *fakeControlStore) GetLiveVoiceSessionIntentForTenant(_ context.Context, tenantID uuid.UUID) (storage.VoiceSessionIntent, error) {
 	f.fakeIntentStore.mu.Lock()
 	defer f.fakeIntentStore.mu.Unlock()
-	for _, i := range f.fakeIntentStore.intents {
+	for _, i := range f.intents {
 		if i.TenantID == tenantID &&
 			(i.Status == storage.VoiceIntentPending || i.Status == storage.VoiceIntentClaimed || i.Status == storage.VoiceIntentLive) {
 			return *i, nil
@@ -104,7 +104,7 @@ func (f *fakeControlStore) GetVoiceSession(_ context.Context, id uuid.UUID) (sto
 func (f *fakeControlStore) IsCampaignLiveIntent(_ context.Context, campaignID uuid.UUID) (bool, error) {
 	f.fakeIntentStore.mu.Lock()
 	defer f.fakeIntentStore.mu.Unlock()
-	for _, i := range f.fakeIntentStore.intents {
+	for _, i := range f.intents {
 		if i.CampaignID == campaignID &&
 			(i.Status == storage.VoiceIntentPending || i.Status == storage.VoiceIntentClaimed || i.Status == storage.VoiceIntentLive) {
 			return true, nil
@@ -116,7 +116,7 @@ func (f *fakeControlStore) IsCampaignLiveIntent(_ context.Context, campaignID uu
 func (f *fakeControlStore) AnyLiveVoiceSessionIntent(_ context.Context) (bool, error) {
 	f.fakeIntentStore.mu.Lock()
 	defer f.fakeIntentStore.mu.Unlock()
-	for _, i := range f.fakeIntentStore.intents {
+	for _, i := range f.intents {
 		switch i.Status {
 		case storage.VoiceIntentPending, storage.VoiceIntentClaimed, storage.VoiceIntentLive:
 			return true, nil

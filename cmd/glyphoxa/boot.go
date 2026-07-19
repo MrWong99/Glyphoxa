@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/auth"
 	"github.com/MrWong99/Glyphoxa/internal/llmbuild"
@@ -384,6 +387,64 @@ func maxVoiceSessions(getenv func(string) string) int {
 		return defaultMaxVoiceSessions
 	}
 	return n
+}
+
+// Claim-plane cadence defaults (#491, ADR-0057 (b)): the -mode voice worker polls
+// every 2s, heartbeats a live claim every 5s, and a claim goes stale (worker
+// presumed dead) after 30s. Heartbeat must sit well under Expiry so a healthy
+// worker never trips the reaper. The web tier's IntentControl reuses the same
+// env knobs for its Start/Stop poll cadence.
+const (
+	defaultVoiceClaimPoll         = 2 * time.Second
+	defaultVoiceHeartbeatInterval = 5 * time.Second
+	defaultVoiceHeartbeatExpiry   = 30 * time.Second
+)
+
+// envDuration parses a Go duration env var, falling back to def on a blank,
+// unparsable or non-positive value — a mis-set knob must never wedge the claim
+// loop at zero or flip it negative.
+func envDuration(getenv func(string) string, key string, def time.Duration) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(getenv(key)))
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+// voiceClaimLoopConfig reads the -mode voice worker's claim-loop cadence from the
+// GLYPHOXA_VOICE_CLAIM_POLL / _HEARTBEAT_INTERVAL / _HEARTBEAT_EXPIRY env vars
+// (#491). Parsed HERE in the composition root, never in internal/session, so the
+// cadence stays a deployment knob.
+func voiceClaimLoopConfig(getenv func(string) string) session.ClaimLoopConfig {
+	return session.ClaimLoopConfig{
+		Poll:      envDuration(getenv, "GLYPHOXA_VOICE_CLAIM_POLL", defaultVoiceClaimPoll),
+		Heartbeat: envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_INTERVAL", defaultVoiceHeartbeatInterval),
+		Expiry:    envDuration(getenv, "GLYPHOXA_VOICE_HEARTBEAT_EXPIRY", defaultVoiceHeartbeatExpiry),
+	}
+}
+
+// voiceIntentControlConfig reads the web tier's IntentControl poll cadence from
+// the same claim-poll env var (#491): its Start/Stop poll the claim plane at the
+// claim-poll interval, with fixed 20s/30s budgets for the queue-until-live and
+// wind-down waits. The budgets are internal defaults (IntentControl clamps them),
+// so a blank cadence env still yields sane behaviour.
+func voiceIntentControlConfig(getenv func(string) string) session.IntentControlConfig {
+	return session.IntentControlConfig{
+		Poll: envDuration(getenv, "GLYPHOXA_VOICE_CLAIM_POLL", defaultVoiceClaimPoll),
+	}
+}
+
+// newVoiceInstanceID mints this Voice Instance's identity for the claim plane
+// (#491): hostname + "-" + the first 8 hex of a fresh uuid, minted once per boot.
+// It fences the worker's claim/heartbeat/finish writes and is the natural handle
+// the presence-owner election (#492) will reuse. A hostname read failure falls
+// back to "voice".
+func newVoiceInstanceID() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "voice"
+	}
+	return host + "-" + uuid.NewString()[:8]
 }
 
 // forceLoopback rewrites a listen address to bind 127.0.0.1, preserving the port

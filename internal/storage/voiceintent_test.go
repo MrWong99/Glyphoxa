@@ -299,6 +299,80 @@ func TestGetLiveVoiceSessionIntentForTenant(t *testing.T) {
 	}
 }
 
+// TestReconcileWorkerOrphanedScoping covers sequence (9) orphan-reconcile
+// scoping: a worker boot closes a 'running' voice_sessions row whose intent went
+// dead, but NEVER one whose intent is still live (another worker owns it) — the
+// reviewer-flagged process-blindness fix.
+func TestReconcileWorkerOrphanedScoping(t *testing.T) {
+	dsn := startPostgres(t)
+	pool, tenantA, campA := seedCampaign(t, dsn)
+	ctx := context.Background()
+	st := storage.New(pool)
+	tenantB, campB := secondCampaign(t, pool)
+
+	// Crashed worker: a live intent (heartbeat aged) + its running voice_sessions
+	// row, then reaped dead — this row is a true orphan to close.
+	deadVS := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO voice_sessions (id, campaign_id, status) VALUES ($1,$2,'running')`, deadVS, campA); err != nil {
+		t.Fatalf("insert dead vs: %v", err)
+	}
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantA, campA); err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	deadClaim, err := st.ClaimVoiceSessionIntent(ctx, "dead-worker")
+	if err != nil {
+		t.Fatalf("claim A: %v", err)
+	}
+	if _, err := st.MarkVoiceSessionIntentLive(ctx, deadClaim.ID, "dead-worker", deadVS); err != nil {
+		t.Fatalf("mark A live: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE voice_session_intents SET heartbeat_at = now() - interval '10 minutes' WHERE id=$1`, deadClaim.ID); err != nil {
+		t.Fatalf("age A: %v", err)
+	}
+	if _, err := st.ReapDeadVoiceSessionIntents(ctx, 30*time.Second); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+
+	// Live worker: a live intent + its running voice_sessions row, fresh heartbeat
+	// — another worker owns it, must NOT be closed.
+	liveVS := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO voice_sessions (id, campaign_id, status) VALUES ($1,$2,'running')`, liveVS, campB); err != nil {
+		t.Fatalf("insert live vs: %v", err)
+	}
+	if _, err := st.CreateVoiceSessionIntent(ctx, tenantB, campB); err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	liveClaim, err := st.ClaimVoiceSessionIntent(ctx, "live-worker")
+	if err != nil {
+		t.Fatalf("claim B: %v", err)
+	}
+	if _, err := st.MarkVoiceSessionIntentLive(ctx, liveClaim.ID, "live-worker", liveVS); err != nil {
+		t.Fatalf("mark B live: %v", err)
+	}
+
+	n, err := st.ReconcileWorkerOrphanedVoiceSessions(ctx)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reconciled %d, want 1 (only the dead-intent row)", n)
+	}
+	gotDead, err := st.GetVoiceSession(ctx, deadVS)
+	if err != nil {
+		t.Fatalf("get dead vs: %v", err)
+	}
+	if gotDead.Status != storage.VoiceSessionEnded {
+		t.Fatalf("dead worker's row not closed: %+v", gotDead)
+	}
+	gotLive, err := st.GetVoiceSession(ctx, liveVS)
+	if err != nil {
+		t.Fatalf("get live vs: %v", err)
+	}
+	if gotLive.Status != storage.VoiceSessionRunning {
+		t.Fatalf("live worker's row wrongly closed: %+v", gotLive)
+	}
+}
+
 // TestFinishVoiceSessionIntent covers the terminal write fencing: a foreign
 // instance cannot finish, and once dead the owner cannot finish either.
 func TestFinishVoiceSessionIntent(t *testing.T) {

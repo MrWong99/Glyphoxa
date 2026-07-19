@@ -213,6 +213,33 @@ func (s *Store) ReapDeadVoiceSessionIntents(ctx context.Context, expiry time.Dur
 	return tag.RowsAffected(), nil
 }
 
+// ReconcileWorkerOrphanedVoiceSessions closes 'running' voice_sessions rows that
+// a -mode voice worker left behind on a crash — but ONLY those whose owning intent
+// has gone terminal (dead/done/failed), NEVER a row an intent still holds
+// live/claimed (#491, the reviewer-flagged process-blindness): a plain
+// ReconcileOrphanedVoiceSessions is process-blind, so two workers booting would
+// close each other's live 'running' rows. Scoping the sweep to rows behind a
+// terminal intent makes it safe for a pool: a live worker's row (its intent still
+// live) is untouched, while a crashed worker's row (its intent reaped dead, or
+// finished done/failed) is closed. Returns how many rows were closed. The -mode
+// all path keeps the broad [ReconcileOrphanedVoiceSessions] (it writes no intents).
+func (s *Store) ReconcileWorkerOrphanedVoiceSessions(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE voice_sessions vs
+		    SET ended_at = now(), status = $1, end_reason = $2
+		  WHERE vs.status = $3
+		    AND EXISTS (
+		          SELECT 1 FROM voice_session_intents i
+		           WHERE i.voice_session_id = vs.id
+		             AND i.status IN ('dead', 'done', 'failed')
+		    )`,
+		VoiceSessionEnded, VoiceSessionReasonOrphaned, VoiceSessionRunning)
+	if err != nil {
+		return 0, fmt.Errorf("storage: reconcile worker-orphaned voice sessions: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // GetVoiceSessionIntent loads one intent by id, or ErrNotFound. It backs the
 // IntentControl poll (the web tier watching a Start it wrote) and tests.
 func (s *Store) GetVoiceSessionIntent(ctx context.Context, id uuid.UUID) (VoiceSessionIntent, error) {

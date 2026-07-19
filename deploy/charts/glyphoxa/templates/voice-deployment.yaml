@@ -87,10 +87,20 @@ spec:
           args:
             - -mode
             - voice
+            # -guild/-channel render ONLY when set (#491, ADR-0057): with both set
+            # this is the legacy standalone node joining one static channel; with
+            # both empty it is the claim-plane worker, which takes its guild/channel
+            # per-session from each Tenant's saved deployment config and needs no
+            # static target. Setting one without the other is a misconfiguration the
+            # binary rejects at boot.
+            {{- with .Values.voice.guild }}
             - -guild
-            - {{ include "glyphoxa.voice.snowflake" (required "voice.guild is required when voice.enabled: the Discord guild (server) snowflake ID the bot joins." .Values.voice.guild) | quote }}
+            - {{ include "glyphoxa.voice.snowflake" . | quote }}
+            {{- end }}
+            {{- with .Values.voice.channel }}
             - -channel
-            - {{ include "glyphoxa.voice.snowflake" (required "voice.channel is required when voice.enabled: the Discord voice channel snowflake ID the bot joins." .Values.voice.channel) | quote }}
+            - {{ include "glyphoxa.voice.snowflake" . | quote }}
+            {{- end }}
             - -metrics-addr
             - {{ $metricsAddr | quote }}
           env:

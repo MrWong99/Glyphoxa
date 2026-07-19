@@ -993,3 +993,64 @@ func TestArmVoiceGMGate(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvDuration pins the claim-plane duration parse (#491): a valid Go duration
+// wins; blank, unparsable, zero and negative values fall back to the default —
+// a mis-set knob must never wedge the claim loop at zero or flip it negative.
+func TestEnvDuration(t *testing.T) {
+	const def = 7 * time.Second
+	cases := []struct {
+		val  string
+		want time.Duration
+	}{
+		{"", def},
+		{"   ", def},
+		{"nope", def},
+		{"0s", def},
+		{"-3s", def},
+		{"2s", 2 * time.Second},
+		{"500ms", 500 * time.Millisecond},
+	}
+	for _, c := range cases {
+		if got := envDuration(envMap(map[string]string{"K": c.val}), "K", def); got != c.want {
+			t.Errorf("envDuration(%q) = %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
+// TestVoiceClaimLoopConfig pins the three claim-loop cadence knobs (#491): unset
+// yields the 2s/5s/30s defaults, and each env var overrides its field.
+func TestVoiceClaimLoopConfig(t *testing.T) {
+	def := voiceClaimLoopConfig(envMap(nil))
+	if def.Poll != defaultVoiceClaimPoll || def.Heartbeat != defaultVoiceHeartbeatInterval || def.Expiry != defaultVoiceHeartbeatExpiry {
+		t.Fatalf("defaults = %+v, want 2s/5s/30s", def)
+	}
+	got := voiceClaimLoopConfig(envMap(map[string]string{
+		"GLYPHOXA_VOICE_CLAIM_POLL":         "1s",
+		"GLYPHOXA_VOICE_HEARTBEAT_INTERVAL": "3s",
+		"GLYPHOXA_VOICE_HEARTBEAT_EXPIRY":   "20s",
+	}))
+	if got.Poll != time.Second || got.Heartbeat != 3*time.Second || got.Expiry != 20*time.Second {
+		t.Fatalf("overridden = %+v, want 1s/3s/20s", got)
+	}
+}
+
+// TestNewVoiceInstanceID pins the instance-id shape (#491): hostname + "-" +
+// 8 hex, distinct per call (the uuid suffix), never empty.
+func TestNewVoiceInstanceID(t *testing.T) {
+	a, b := newVoiceInstanceID(), newVoiceInstanceID()
+	if a == "" || b == "" {
+		t.Fatal("instance id is empty")
+	}
+	if a == b {
+		t.Fatalf("instance ids not distinct: %q == %q", a, b)
+	}
+	var host, suffix string
+	if i := strings.LastIndex(a, "-"); i >= 0 {
+		host = a[:i]
+		suffix = a[i+1:]
+	}
+	if host == "" || len(suffix) != 8 {
+		t.Fatalf("instance id %q is not <host>-<8hex>", a)
+	}
+}
