@@ -109,11 +109,12 @@ func (l *LiveSession) SetAgentMute(ctx context.Context, agentID string, muted bo
 	}); err != nil {
 		return nil, err
 	}
-	// base is immutable after NewManager (#448), so the Bus read needs no lock;
-	// the publish itself runs outside Manager.mu (subscribers re-read Muted) but
-	// inside pubMu (the #211 ordering).
-	if changed && l.m.base.Bus != nil {
-		l.m.base.Bus.Publish(voiceevent.MuteChanged{At: time.Now(), AgentID: agentID, Muted: muted})
+	// Publish onto THIS session's own bus (#487): the session-local mute reactor
+	// subscribes there, and Forward stamps it onto the process bus for the relay.
+	// The publish runs outside Manager.mu (subscribers re-read Muted) but inside
+	// pubMu (the #211 ordering); l.as is still the active session (revalidate above).
+	if changed {
+		l.as.bus.Publish(voiceevent.MuteChanged{At: time.Now(), AgentID: agentID, Muted: muted})
 	}
 	return ids, nil
 }
@@ -158,12 +159,10 @@ func (l *LiveSession) SetAllMute(ctx context.Context, muted bool) ([]string, err
 	}); err != nil {
 		return nil, err
 	}
-	if l.m.base.Bus != nil {
-		now := time.Now()
-		for _, c := range changes {
-			c.At = now
-			l.m.base.Bus.Publish(c)
-		}
+	now := time.Now()
+	for _, c := range changes {
+		c.At = now
+		l.as.bus.Publish(c) // #487: onto this session's bus (Forward stamps to process)
 	}
 	return ids, nil
 }
@@ -215,18 +214,16 @@ func (l *LiveSession) SayAs(ctx context.Context, agentID, text string) error {
 	if err := l.revalidate(nil); err != nil {
 		return err
 	}
-	if l.m.base.Bus != nil {
-		l.m.base.Bus.Publish(voiceevent.SpeakRequested{
-			At:     time.Now(),
-			TurnID: voiceevent.NewTurnID(),
-			Target: voiceevent.AddressTarget{
-				AgentID:   agentID,
-				AgentRole: sayRole(target.Role),
-				Name:      target.Name,
-			},
-			Text: text,
-		})
-	}
+	l.as.bus.Publish(voiceevent.SpeakRequested{ // #487: onto this session's bus (Forward stamps to process)
+		At:     time.Now(),
+		TurnID: voiceevent.NewTurnID(),
+		Target: voiceevent.AddressTarget{
+			AgentID:   agentID,
+			AgentRole: sayRole(target.Role),
+			Name:      target.Name,
+		},
+		Text: text,
+	})
 	return nil
 }
 
@@ -281,13 +278,11 @@ func (l *LiveSession) ReplayHighlight(_ context.Context, clipKey string) error {
 	if err := l.revalidate(nil); err != nil {
 		return err
 	}
-	if l.m.base.Bus != nil {
-		l.m.base.Bus.Publish(voiceevent.ReplayRequested{
-			At:      time.Now(),
-			TurnID:  voiceevent.NewTurnID(),
-			ClipKey: clipKey,
-		})
-	}
+	l.as.bus.Publish(voiceevent.ReplayRequested{ // #487: onto this session's bus (Forward stamps to process)
+		At:      time.Now(),
+		TurnID:  voiceevent.NewTurnID(),
+		ClipKey: clipKey,
+	})
 	return nil
 }
 

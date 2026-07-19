@@ -182,67 +182,33 @@ func TestLiveSession_StaleAfterRolloverRefused(t *testing.T) {
 	}
 }
 
-// TestView_SnapshotTracksBoundManager pins the View seam (#448): unbound (the
-// projectors' state between their construction and NewManager) it reports no
-// active session; bound via Deps.View it mirrors the Manager's Snapshot through
-// the whole lifecycle.
-func TestView_SnapshotTracksBoundManager(t *testing.T) {
-	view := session.NewView()
-	if _, ok := view.Snapshot(); ok {
-		t.Fatal("an unbound View reports an active session, want idle")
-	}
-
+// TestRegistry_ResolveTracksManagerLifecycle pins the Registry seam (#487,
+// replacing the View): an idle Manager Resolves no session; a live one Resolves
+// its started session by id through the lifecycle; after Stop the id no longer
+// Resolves. (The old View's Snapshot-tracking, re-expressed against the keyed
+// Registry — the double-bind panic it also guarded is gone by design, covered by
+// TestRegistry_TwoManagersNoPanic.)
+func TestRegistry_ResolveTracksManagerLifecycle(t *testing.T) {
+	reg := session.NewRegistry()
 	store := newFakeStore()
-	bus := voiceeventBusForView()
-	mgr := newViewManager(t, store, bus, view)
-	if _, ok := view.Snapshot(); ok {
-		t.Fatal("a bound-but-idle View reports an active session, want idle")
-	}
+	mgr := session.NewManager(store, reRunnableRunner,
+		wirenpc.Config{Token: "test-token", Bus: voiceevent.NewBus()}, nil, slog.New(slog.DiscardHandler), true,
+		session.Deps{Registry: reg})
 
 	started, err := mgr.Start(context.Background(), uuid.New(), uuid.New())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
-	vs, ok := view.Snapshot()
+	vs, ok := reg.Resolve(started.ID)
 	if !ok || vs.ID != started.ID {
-		t.Fatalf("bound View snapshot = (%v, %v), want the started session %s", vs.ID, ok, started.ID)
+		t.Fatalf("Resolve(started) = (%v, %v), want the started session %s", vs.ID, ok, started.ID)
 	}
 
 	if _, err := mgr.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, ok := view.Snapshot(); ok {
-		t.Fatal("View still reports an active session after Stop, want idle")
+	if _, ok := reg.Resolve(started.ID); ok {
+		t.Fatal("Registry still Resolves the session after Stop, want gone")
 	}
-}
-
-// TestView_SecondBindPanics pins the bind-once guard (#448): two Managers
-// sharing one View would silently split the active-session truth, so the second
-// NewManager panics loudly at boot instead.
-func TestView_SecondBindPanics(t *testing.T) {
-	view := session.NewView()
-	store := newFakeStore()
-	bus := voiceeventBusForView()
-	newViewManager(t, store, bus, view)
-
-	defer func() {
-		if recover() == nil {
-			t.Fatal("binding a View to a second Manager did not panic")
-		}
-	}()
-	newViewManager(t, store, bus, view)
-}
-
-// voiceeventBusForView keeps the View tests' Manager construction shaped like
-// muteManager without threading its return pair around.
-func voiceeventBusForView() *voiceevent.Bus { return voiceevent.NewBus() }
-
-// newViewManager builds a Manager bound to view over store, mirroring
-// muteManager's config.
-func newViewManager(t *testing.T, store session.Store, bus *voiceevent.Bus, view *session.View) *session.Manager {
-	t.Helper()
-	return session.NewManager(store, reRunnableRunner,
-		wirenpc.Config{Token: "test-token", Bus: bus}, nil, slog.New(slog.DiscardHandler), true,
-		session.Deps{View: view})
 }
