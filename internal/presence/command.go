@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/disgoorg/disgo/discord"
@@ -76,6 +77,17 @@ type Registry struct {
 	// killed. Field (not the const) so tests drive it with a short deadline.
 	responseTimeout time.Duration
 
+	// active gates every inbound-interaction path (#492, ADR-0057 (c)). Discord
+	// delivers every INTERACTION_CREATE to EVERY gateway session on a shared central
+	// token (P5), so N Voice Instances would each try to handle the same interaction.
+	// Only the elected presence owner is active; a non-owner drops the duplicate
+	// events it still receives. Atomic so the OwnerElector can flip it from its own
+	// goroutine while the disgo event goroutines read it. Default true: a -mode all
+	// node and the legacy standalone node are always their own single owner; the
+	// -mode voice WORKER flips this false at boot and the elector turns it on only
+	// once this Instance wins the presence_owner row.
+	active atomic.Bool
+
 	mu    sync.RWMutex
 	cmds  map[string]Command // dispatch key -> command
 	order []string           // registration order, for deterministic Definitions
@@ -93,8 +105,23 @@ func NewRegistry(gate *Gate, log *slog.Logger) *Registry {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Registry{gate: gate, log: log, cmds: map[string]Command{}, responseTimeout: interactionTimeout}
+	r := &Registry{gate: gate, log: log, cmds: map[string]Command{}, responseTimeout: interactionTimeout}
+	// Default active: -mode all and the legacy standalone node are always their own
+	// single presence owner. The -mode voice worker calls SetActive(false) at boot
+	// and lets its OwnerElector flip it on only when it wins the election (#492).
+	r.active.Store(true)
+	return r
 }
+
+// SetActive flips whether this Registry acts on inbound interactions (#492,
+// ADR-0057 (c)). The OwnerElector calls it: true once this Voice Instance wins the
+// presence_owner election, false when it loses or drains. An inactive Registry
+// early-returns from every interaction path — HandleCommand, HandleAutocomplete,
+// HandleComponent — so a non-owner drops the duplicate events Discord still
+// delivers to it (every session on a shared token receives the full stream, P5),
+// making N Voice Instances on one central token safe. Atomic; safe to call from
+// the elector goroutine while disgo event goroutines read it.
+func (r *Registry) SetActive(active bool) { r.active.Store(active) }
 
 // Register adds commands to the surface. Boot-time only (before the first
 // Ensure); the dispatch key is the command's Path.
@@ -122,6 +149,11 @@ func (r *Registry) RegisterComponentHandler(h func(*events.ComponentInteractionC
 // fans the event out to every registered component handler, each of which decides
 // by custom id whether the interaction is theirs.
 func (r *Registry) HandleComponent(e *events.ComponentInteractionCreate) {
+	if !r.active.Load() {
+		// Non-owner (#492): drop the duplicate component interaction; the elected owner
+		// runs its handlers.
+		return
+	}
 	r.mu.RLock()
 	handlers := r.componentHandlers
 	r.mu.RUnlock()
@@ -198,6 +230,12 @@ func (r *Registry) HandleCommand(e *events.ApplicationCommandInteractionCreate) 
 // is separated from HandleCommand so it can be unit-tested with a fake
 // Interaction (a fake responder + fake options), no live Discord event needed.
 func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
+	if !r.active.Load() {
+		// Not the elected presence owner (#492): drop the duplicate interaction Discord
+		// delivered to this session's token. No reply — another Voice Instance (the
+		// owner) answers it; replying here would double-respond the user.
+		return
+	}
 	cmd, ok := r.lookup(key)
 	if !ok {
 		_ = ic.ReplyEphemeral("Unknown command.")
@@ -254,6 +292,10 @@ func (r *Registry) HandleAutocomplete(e *events.AutocompleteInteractionCreate) {
 // fails.
 func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Autocomplete) []discord.AutocompleteChoice {
 	empty := []discord.AutocompleteChoice{}
+	if !r.active.Load() {
+		// Non-owner (#492): no choices, no handler — the elected owner answers.
+		return empty
+	}
 	cmd, ok := r.lookup(key)
 	if !ok || cmd.Autocomplete == nil {
 		return empty
