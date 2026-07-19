@@ -203,6 +203,43 @@ schema change.
 - [ ] Terms with your users about recording/consent (the Rollover Tape is
       consent-gated by design, ADR-0051 — point users at it).
 
+## 7. Gateway IDENTIFY budget (token-reset alarm)
+
+Discord allows a bot token **1000 IDENTIFYs per 24 hours**. Blowing that budget
+terminates every session **and resets the token** — in central-token mode (one
+shared Bot across all Tenants) that is a platform-wide outage, not a single
+Tenant's problem. A RESUME reattaches an existing session and does **not** spend
+the budget; only a fresh IDENTIFY does. So a healthy deployment resumes across
+brief network blips and identifies rarely (a restart, a token change, a long
+disconnect).
+
+Two Prometheus counters on `/metrics` (the `-metrics-addr` listener, default
+`:9090`) make this observable, labelled by the non-secret bot **application id**
+(never the token):
+
+- `glyphoxa_gateway_identify_total{application_id="…"}` — **IDENTIFYs sent**
+  (budget-consuming). Counted at the point the gateway sends the IDENTIFY, not
+  when a session reaches `Ready` — so a connect that spends the budget but never
+  succeeds (an `InvalidSession` reply, a close before dispatch, a reconnect loop
+  that keeps re-identifying) is still counted. That is the whole point: a silent
+  connect-fail loop is the fastest way to burn the budget.
+- `glyphoxa_gateway_resume_total{application_id="…"}` — reattached sessions
+  (budget-free), counted on the `Resumed` event.
+
+**What to watch.** A rising `identify_total` rate — especially a reconnect loop
+that identifies instead of resuming — is the early sign of budget burn. Alert on
+`increase(glyphoxa_gateway_identify_total[24h])` approaching 1000 per
+application id; investigate well before it, because a reset is an outage you
+cannot undo (you wait it out or rotate the token).
+
+The process also logs a structured **warning** (`application_id`,
+`identifies_24h`, `threshold`) when one application crosses a configurable 24h
+IDENTIFY count. It defaults to **500** — half the hard limit, for head-room —
+and is tuned with `GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD` (a positive
+integer; a blank, non-numeric, zero or negative value keeps the default, so a
+fat-fingered override never silently disables the alarm). Both the standing
+presence gateway and the per-session voice clients are counted.
+
 ## See also
 
 - [ADR-0054](../adr/0054-saas-plans-platform-keys-usage-ledger.md) — the

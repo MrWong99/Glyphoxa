@@ -78,6 +78,13 @@ func main() {
 	log := observe.NewLogger(os.Stderr, format, slog.LevelInfo, metrics.DAVEDecryptHook())
 	slog.SetDefault(log)
 
+	// Gateway IDENTIFY-budget observer (#486): registers the identify/resume
+	// counters on the metrics registry and warns when one bot application's 24h
+	// IDENTIFYs cross the configured threshold (default 500, below Discord's
+	// 1000/token/24h token-reset limit). Attached to the standing presence client
+	// and to per-cycle voice clients below.
+	gatewayBudget := observe.NewGatewayBudget(metrics.Registry(), gatewayIdentifyWarnThreshold(os.Getenv), log)
+
 	// `migrate` and `seed` are subcommands with their own argument grammar,
 	// dispatched before flag parsing. `voice`, `web`, and `all` are the Modes
 	// (ADR-0005). The default Mode is now `all` (ADR-0005/ADR-0034 self-host
@@ -130,6 +137,12 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", ":9090", "address for the /metrics + /healthz + /readyz listener (all Modes; kept off the public web API port, ADR-0032); empty disables it")
 	webAddr := flag.String("web-addr", ":8080", "address for the web/all-mode Connect RPC API listener (ADR-0039); observability is on -metrics-addr")
 	flag.Parse()
+
+	// Instrument per-cycle (owned) voice clients with the IDENTIFY-budget observer
+	// (#486). In `all` mode the voice loop borrows the standing presence client
+	// (instrumented in runWeb), so this only bites in standalone `voice` mode where
+	// each cycle dials its own client; the borrow path leaves it unused.
+	cfg.GatewayBudget = gatewayBudget
 
 	switch *mode {
 	case "voice":
@@ -577,6 +590,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		// a live tape arms or clears that Speaker's lane.
 		reg.RegisterComponentHandler(presence.NewConsentButtons(store, eventBus, log).HandleComponent)
 		clients = presence.NewClients(store, cipher, reg, cfg.Token, log)
+		// Instrument EVERY standing client the registry builds — one per distinct Bot
+		// token, plus any rebuild — for the IDENTIFY-budget metrics (#486). Set before
+		// the first EnsureAll (below) so the initial gateway opens already carry the
+		// identify/resume listeners. The voice-cycle clients borrow these same
+		// instrumented clients, so they need no per-cycle listeners (cfg.GatewayBudget
+		// stays used only on the owned bench path).
+		clients.SetGatewayBudget(cfg.GatewayBudget)
 		// The voice loop borrows the Tenant's standing client from the registry via
 		// the session Manager's Deps.Clients (wired below), NOT a single shared
 		// ClientProvider on the base config — a per-session start resolves the client

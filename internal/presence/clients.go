@@ -127,6 +127,19 @@ type Clients struct {
 	// default 30s).
 	reconcile time.Duration
 
+	// budget observes EVERY standing client's gateway session establishments for
+	// the IDENTIFY-budget metrics (#486). Set once at boot via SetGatewayBudget
+	// before the first EnsureAll/EnsureTenant; read lazily by the default client
+	// builder (each build, incl. rebuilds), so a nil budget attaches no
+	// instrumentation and a mid-life set lands on the next rebuild.
+	//
+	// This write is intentionally NOT mu-guarded: SetGatewayBudget must be called
+	// on the boot goroutine BEFORE the first Ensure — which is what spawns the
+	// gateway read goroutines that (indirectly) read it — so boot ordering, not a
+	// mutex, establishes the happens-before edge. Calling it after a gateway is
+	// open would be a data race.
+	budget wirenpc.GatewayBudgetRecorder
+
 	// ensureMu serializes EnsureTenant/EnsureAll so builds and registrations never
 	// overlap; it is held ACROSS gateway/REST I/O. mu guards the entries/tenants
 	// maps and their non-atomic fields and is NEVER held across I/O — the read-hot
@@ -156,12 +169,26 @@ func NewClients(store TenantStore, cipher *crypto.Cipher, reg *Registry, envToke
 		entries:   map[string]*clientEntry{},
 		tenants:   map[uuid.UUID]*tenantState{},
 	}
-	c.build = defaultClientBuilder(reg, log, c.invalidate)
+	// The budget opts are read at build time (each Ensure that builds/rebuilds an
+	// entry's client), so a SetGatewayBudget between NewClients and the first
+	// Ensure still lands on every standing client.
+	c.build = defaultClientBuilder(reg, log, c.invalidate, func(token string) []bot.ConfigOpt {
+		return wirenpc.GatewayBudgetClientOpts(token, c.budget)
+	})
 	c.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	c.register = restRegister
 	c.closeClient = func(client *bot.Client) { client.Close(context.Background()) }
 	c.fetchMember = c.restGetMember
 	return c
+}
+
+// SetGatewayBudget installs the IDENTIFY-budget observer (#486) the default
+// client builder attaches to EVERY standing client the registry builds. Call it
+// once at boot before the first Ensure; a later Ensure that builds/rebuilds a
+// client (a new token, or a rebuild after a gateway death) re-reads it, so a
+// mid-life set also takes effect on the next build.
+func (c *Clients) SetGatewayBudget(b wirenpc.GatewayBudgetRecorder) {
+	c.budget = b
 }
 
 // reconcileInterval reads GLYPHOXA_PRESENCE_RECONCILE_INTERVAL (a Go duration),
@@ -560,13 +587,13 @@ func (c *Clients) Close() {
 // disgo client with the SAME options the per-session voice wiring used (so a
 // shared-client Voice Session keeps its DAVE encryption and voice-state intents,
 // ADR-0006) plus the interaction listeners and async event delivery.
-func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error)) ClientBuilder {
+func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error), budgetOpts func(token string) []bot.ConfigOpt) ClientBuilder {
 	return func(token string) (*bot.Client, error) {
 		// client is captured by the close handler below; disgo.New assigns it
 		// before any gateway open, so it is non-nil by the time a close can fire.
 		var client *bot.Client
 		var err error
-		client, err = disgo.New(token,
+		opts := []bot.ConfigOpt{
 			bot.WithLogger(log),
 			bot.WithDefaultGateway(),
 			// Guilds + GuildVoiceStates are the minimum for the voice join path
@@ -591,7 +618,14 @@ func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot
 			// Deliver events asynchronously so an interaction handler never runs on
 			// the gateway read goroutine and starves voice events (ADR-0010).
 			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
-		)
+		}
+		// Gateway IDENTIFY-budget observability (#486): count this standing client's
+		// IDENTIFYs at send time (identify rate-limiter wrapper) and RESUMEs on the
+		// Resumed event. Empty when no budget is set. The voice-cycle clients that
+		// BORROW this client (session.ClientSource) inherit this instrumentation, so
+		// they are NOT re-instrumented on the borrow path — no double-counting.
+		opts = append(opts, budgetOpts(token)...)
+		client, err = disgo.New(token, opts...)
 		return client, err
 	}
 }

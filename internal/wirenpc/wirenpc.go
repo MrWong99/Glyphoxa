@@ -181,6 +181,13 @@ type Config struct {
 	// runWithReconnect backs off and retries — self-healing across presence
 	// rebuilds. nil keeps today's per-cycle client (env-only voice mode, unchanged).
 	Client ClientProvider
+	// GatewayBudget observes this loop's gateway session establishments, classifying
+	// IDENTIFY vs RESUME and warning as the per-application IDENTIFY budget nears
+	// Discord's 1000/token/24h limit (#486). It is attached ONLY to a per-cycle
+	// (owned) client this loop builds; the borrowed standing client (Client != nil)
+	// is instrumented by the presence that owns it, so it is not double-counted. nil
+	// disables the observation (env-only bench paths).
+	GatewayBudget GatewayBudgetRecorder
 	// Logger receives structured logs; nil discards them.
 	Logger *slog.Logger
 	// Metrics receives the hot-path voice counters/gauges (A2): inbound frame

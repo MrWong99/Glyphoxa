@@ -334,6 +334,7 @@ server (the Helm chart's `ollamaUrl` value renders it), or semantic memory
 | `GLYPHOXA_OPERATOR_IDS` | `web`/`all` | Allowlisted Discord snowflakes (comma/whitespace-separated, digits only). Empty, separators-only, or non-numeric entries ⇒ fatal. |
 | `GLYPHOXA_DEV_MODE` | never in prod | Non-empty (except `0`/`false`/`no`/`off`) ⇒ OAuth-less local dev on `127.0.0.1` with auto-auth. |
 | `GLYPHOXA_LOG_FORMAT` | optional | `json`, or `text` (the default for any other value). |
+| `GLYPHOXA_GATEWAY_IDENTIFY_WARN_THRESHOLD` | optional | Per-application 24h Discord gateway IDENTIFY count above which a structured warning fires (token-reset early-warning, #486). Positive integer; blank/non-numeric/≤0 ⇒ default `500` (below Discord's 1000/token/24h limit). See [deploy/saas-operations.md §7](deploy/saas-operations.md). |
 | `GLYPHOXA_OLLAMA_URL` | optional | Ollama embeddings endpoint override; default `http://127.0.0.1:11434`. v1.0 embeddings are **Ollama-only** (ADR-0011), so set it wherever the process has no local Ollama — containers and k8s pods (k3d: `http://host.k3d.internal:11434`). The server must serve `nomic-embed-text`. Unreachable ⇒ semantic memory (L2) stalls loudly; nothing else breaks. |
 | `GROQ_API_KEY` | if Groq used | LLM provider key. |
 | `ELEVENLABS_API_KEY` | if ElevenLabs used | STT/TTS provider key. |
