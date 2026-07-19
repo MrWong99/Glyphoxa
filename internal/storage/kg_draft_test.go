@@ -78,12 +78,21 @@ func TestCreateAgentWithNPCNode(t *testing.T) {
 }
 
 // TestCreateAgentWithNPCNode_ButlerCreatesNoNode: only a Character gets the
-// auto-node; the (auto-created) Butler role does not.
+// auto-node; the butler role does not. The campaign_auto_butler trigger
+// (ADR-0009, migration 00002) already seeded a Butler with the campaign, so
+// that row is removed by raw SQL first — the store's DeleteAgent refuses
+// butlers by design — to free the one-butler-per-campaign slot for the create
+// under test.
 func TestCreateAgentWithNPCNode_ButlerCreatesNoNode(t *testing.T) {
 	dsn := startPostgres(t)
 	pool, _, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
+
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM agents WHERE campaign_id = $1 AND agent_role = 'butler'`, campaignID); err != nil {
+		t.Fatalf("remove auto-butler: %v", err)
+	}
 
 	agentID, err := st.CreateAgentWithNPCNode(ctx, storage.NewAgent{
 		CampaignID: campaignID, Role: storage.AgentRoleButler, Name: "Glyphoxa",
