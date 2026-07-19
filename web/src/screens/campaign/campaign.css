@@ -76,6 +76,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
+  /* Grid items default to min-width:auto, so a long unwrappable draft snippet
+     would widen this column past its 1fr track and push row controls
+     off-screen. */
+  min-width: 0;
 }
 
 /* Each node type is its own titled group in the list. */
@@ -94,8 +98,13 @@
   color: var(--text-subtle);
 }
 
-.gx-kg-card {
+/* The gx-card base is a column; this card is an icon | text | actions row.
+   Row direction is also what lets __meta shrink and the snippet ellipsize
+   instead of pushing the card wider than the list. The compound selector
+   outranks the base rule, which the bundle emits after this file. */
+.gx-card.gx-kg-card {
   display: flex;
+  flex-direction: row;
   align-items: flex-start;
   gap: var(--spacing-sm);
   padding: var(--spacing-sm) var(--spacing-md);
