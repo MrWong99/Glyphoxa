@@ -33,6 +33,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/embeddings"
@@ -47,12 +48,14 @@ type Retriever interface {
 	SearchChunksByCampaign(ctx context.Context, campaignID uuid.UUID, query []float32, k int) ([]storage.ChunkMatch, error)
 }
 
-// Sessions is the narrow read the recaller needs from the SessionManager: which
-// Voice Session (hence which Campaign) is active, so retrieval is campaign-scoped.
-// *session.Manager satisfies it via Snapshot (the same shape the transcript relay
-// depends on); defined locally so recall does not import session.
+// Sessions is the narrow read the SPECULATIVE (bus) path needs (#487): resolve a
+// stamped [voiceevent.STTPartial]'s SessionID to its Campaign, so a prefetch is
+// scoped to the session the partial came from — never a global snapshot that
+// could belong to a different concurrent session. *session.Registry satisfies it
+// via Resolve. The per-turn [Recaller.Recall] path instead reads the Campaign
+// from the run context's [session.Identity].
 type Sessions interface {
-	Snapshot() (storage.VoiceSession, bool)
+	Resolve(sessionID uuid.UUID) (storage.VoiceSession, bool)
 }
 
 // Metrics records recall outcomes (#122, ADR-0032). *observe.PrometheusRecorder
@@ -123,6 +126,7 @@ type Recaller struct {
 
 	mailMu     sync.Mutex
 	pending    string
+	pendingSID string // session id of the latest pending partial (#487)
 	hasPending bool
 
 	// lastEmbed* gate the speculator; touched only by the speculator goroutine.
@@ -217,13 +221,15 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 		r.metrics.MemoryRecall(observe.RecallSkip)
 		return agent.Memory{}
 	}
-	campaignID, ok := r.campaign()
+	id, ok := session.FromContext(ctx)
 	if !ok {
-		// No active session to scope retrieval — recall runs during a live turn, so
-		// this is defensive; count it as a skip.
+		// No session Identity on the run context to scope retrieval — recall runs
+		// during a live turn descended from the Manager's run context, so this is
+		// defensive; count it as a skip.
 		r.metrics.MemoryRecall(observe.RecallSkip)
 		return agent.Memory{}
 	}
+	campaignID := id.CampaignID
 
 	ctx, cancel := context.WithTimeout(ctx, r.budget)
 	defer cancel()
@@ -234,7 +240,10 @@ func (r *Recaller) Recall(ctx context.Context, agentID, utterance string) agent.
 	}
 
 	norm := normalize(utterance)
-	cached, hit := r.cacheLookup(norm)
+	// A speculation hit requires the SAME campaign the partial prefetched for
+	// (#487): a cross-session partial that happened to normalize identically must
+	// not serve another session's prefetched world chunks.
+	cached, hit := r.cacheLookup(norm, campaignID)
 
 	var vec []float32
 	var world []storage.ChunkMatch
@@ -303,15 +312,6 @@ func (r *Recaller) degrade(ctx context.Context, cause error) agent.Memory {
 	r.log.Warn("memory recall degraded to no-memory", "err", cause)
 	r.metrics.MemoryRecall(observe.RecallSkip)
 	return agent.Memory{}
-}
-
-// campaign reads the active session's Campaign id, or false when idle.
-func (r *Recaller) campaign() (uuid.UUID, bool) {
-	vs, ok := r.sessions.Snapshot()
-	if !ok {
-		return uuid.Nil, false
-	}
-	return vs.CampaignID, true
 }
 
 // chunkContents projects ANN matches to their chunk contents in rank order

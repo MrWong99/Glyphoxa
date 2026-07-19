@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/MrWong99/Glyphoxa/internal/observe"
+	"github.com/MrWong99/Glyphoxa/internal/session"
 	"github.com/MrWong99/Glyphoxa/internal/storage"
 	"github.com/MrWong99/Glyphoxa/pkg/kgvocab"
 	"github.com/MrWong99/Glyphoxa/pkg/voice/agent"
@@ -78,15 +79,6 @@ type PromptKG interface {
 // Compile-time assertion: the storage prompt view satisfies the seam.
 var _ PromptKG = storage.PromptKGView{}
 
-// Sessions is the narrow read kgfacts needs from the SessionManager: whether a
-// Voice Session is active this turn — the guard that keeps Facts a no-op when idle
-// (the read itself is Agent-scoped, not campaign-scoped). *session.Manager
-// satisfies it via Snapshot (the same shape recall depends on); defined locally so
-// kgfacts does not import session.
-type Sessions interface {
-	Snapshot() (storage.VoiceSession, bool)
-}
-
 // Metrics records KG-fact-read outcomes (#126, ADR-0032). *observe.PrometheusRecorder
 // satisfies it; a nil Metrics is replaced with a no-op so call sites never check.
 type Metrics interface {
@@ -110,17 +102,17 @@ func (c Config) withDefaults() Config {
 // subscription (unlike recall) — the read is inline per turn. Safe for concurrent
 // use (its deps are).
 type Recaller struct {
-	nodes    PromptKG
-	sessions Sessions
-	metrics  Metrics
-	log      *slog.Logger
-	budget   time.Duration
+	nodes   PromptKG
+	metrics Metrics
+	log     *slog.Logger
+	budget  time.Duration
 }
 
 // New builds a Recaller wired to the prompt-facing KG read seam (pass storage's
-// PromptKG() view), the session source (for the active Campaign), and the
-// metrics sink. Unlike recall it starts nothing and owns no resources to release.
-func New(nodes PromptKG, sessions Sessions, metrics Metrics, log *slog.Logger, cfg Config) *Recaller {
+// PromptKG() view) and the metrics sink. The active-session guard is now the run
+// context's [session.Identity] (#487), so there is no session seam. Unlike recall
+// it starts nothing and owns no resources to release.
+func New(nodes PromptKG, metrics Metrics, log *slog.Logger, cfg Config) *Recaller {
 	cfg = cfg.withDefaults()
 	if log == nil {
 		log = slog.Default()
@@ -129,11 +121,10 @@ func New(nodes PromptKG, sessions Sessions, metrics Metrics, log *slog.Logger, c
 		metrics = discardMetrics{}
 	}
 	return &Recaller{
-		nodes:    nodes,
-		sessions: sessions,
-		metrics:  metrics,
-		log:      log,
-		budget:   cfg.Budget,
+		nodes:   nodes,
+		metrics: metrics,
+		log:     log,
+		budget:  cfg.Budget,
 	}
 }
 
@@ -144,9 +135,10 @@ func New(nodes PromptKG, sessions Sessions, metrics Metrics, log *slog.Logger, c
 // UNLINKED Character NPC gets an empty slot (no campaign-wide fallback); an
 // unparseable/empty agentID yields nil, counted empty. It never errors or panics.
 func (r *Recaller) Facts(ctx context.Context, agentID string) []string {
-	if _, ok := r.sessions.Snapshot(); !ok {
-		// No active session (defensive — Facts runs during a live turn): nothing to
-		// inject. Count it as an empty read, not a degradation.
+	if _, ok := session.FromContext(ctx); !ok {
+		// No session Identity on the run context (defensive — Facts runs during a live
+		// turn descended from the Manager's run context): nothing to scope, inject
+		// nothing. Count it as an empty read, not a degradation (#487).
 		r.metrics.KGFacts(observe.FactsEmpty)
 		return nil
 	}
