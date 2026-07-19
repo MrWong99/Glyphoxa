@@ -492,7 +492,9 @@ func runVoiceWorker(log *slog.Logger, cfg wirenpc.Config, metrics *observe.Prome
 	// the owner claim is the LAST coordination write, so a survivor takes over
 	// interaction dispatch only once this instance has cleanly wound its sessions
 	// down.
-	elector := presence.NewOwnerElector(store, instanceID, reg.SetActive, log, voicePresenceElectorConfig(os.Getenv))
+	electorCfg := voicePresenceElectorConfig(os.Getenv)
+	warnElectorCadence(electorCfg, log)
+	elector := presence.NewOwnerElector(store, instanceID, reg.SetActive, log, electorCfg)
 	electorCtx, electorStop := context.WithCancel(context.Background())
 	electorDone := make(chan struct{})
 	go func() { defer close(electorDone); elector.Run(electorCtx) }()

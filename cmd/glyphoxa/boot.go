@@ -458,6 +458,25 @@ func voicePresenceElectorConfig(getenv func(string) string) presence.OwnerElecto
 	}
 }
 
+// warnElectorCadence checks the presence-owner election cadence has sane headroom
+// (#492), mirroring warnClaimCadence: the renew Interval must sit well under Expiry
+// or a healthy owner risks losing its own lease between renewals (a flapping
+// active/inactive Registry — duplicate or dropped interaction dispatch). It warns
+// (never clamps — an operator may know their timing) when Interval >= Expiry, and on
+// thin headroom (Expiry under two Intervals, so a single missed renew expires the
+// lease).
+func warnElectorCadence(cfg presence.OwnerElectorConfig, log *slog.Logger) {
+	if cfg.Interval >= cfg.Expiry {
+		log.Warn("GLYPHOXA_PRESENCE_OWNER_INTERVAL >= _EXPIRY: the owner will flap — its lease expires before it can renew",
+			"interval", cfg.Interval, "expiry", cfg.Expiry)
+		return
+	}
+	if cfg.Expiry < 2*cfg.Interval {
+		log.Warn("thin presence-owner headroom: EXPIRY under two INTERVALs; a single missed renew self-demotes the owner",
+			"interval", cfg.Interval, "expiry", cfg.Expiry)
+	}
+}
+
 // warnClaimCadence checks the claim-plane cadence has sane headroom (#491 review
 // item 9): the heartbeat expiry must sit comfortably above one heartbeat interval
 // plus a session's wind-down, or a healthy-but-slow worker risks being reaped
