@@ -29,6 +29,11 @@ type VADSpeechStart struct {
 	At          time.Time
 	Probability float64
 	SpeakerID   string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -47,6 +52,11 @@ type VADSpeechEnd struct {
 	At          time.Time
 	Probability float64
 	SpeakerID   string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -65,6 +75,11 @@ type VADVoicingStopped struct {
 	At          time.Time
 	Probability float64
 	SpeakerID   string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -81,6 +96,11 @@ type VADVoicingResumed struct {
 	At          time.Time
 	Probability float64
 	SpeakerID   string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -114,6 +134,11 @@ type STTPartial struct {
 	// stream belongs to (ADR-0050), or "" for the default lane. Stamped by the
 	// per-lane [StreamManager] on the partials it publishes.
 	SpeakerID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -149,6 +174,11 @@ type STTFinal struct {
 	// MVP path. Stamped by [STT.PublishFinal] on both the batch and streamed-commit
 	// paths.
 	SpeakerID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -206,6 +236,11 @@ type AddressRouted struct {
 	// ("<Name>: <text>" in Hot Context). "" for the default (unattributed)
 	// lane, the single-lane MVP path. Additive.
 	SpeakerID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -233,6 +268,11 @@ type EnsembleRouted struct {
 	TurnID    string
 	SpeakerID string
 	Targets   []AddressTarget
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -249,6 +289,11 @@ type EnsembleLead struct {
 	At     time.Time
 	TurnID string
 	Target AddressTarget
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -275,6 +320,11 @@ type EnsembleReaction struct {
 	TurnID     string // FRESH NewTurnID for the reaction sub-turn
 	LeadTurnID string // the Lead's (ensemble original) TurnID this reacts to
 	Target     AddressTarget
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -295,6 +345,11 @@ type SpeakRequested struct {
 	TurnID string
 	Target AddressTarget
 	Text   string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -320,6 +375,11 @@ type TTSInvoked struct {
 	// TurnID is the correlation id of the turn this sentence belongs to (A3),
 	// threaded from the reply reactor; see [STTFinal.TurnID].
 	TurnID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -337,6 +397,11 @@ func (TTSInvoked) EventName() string { return "tts.invoked" }
 type TTSStreamFailed struct {
 	At     time.Time
 	TurnID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -357,6 +422,11 @@ func (TTSStreamFailed) EventName() string { return "tts.stream_failed" }
 type FirstAudio struct {
 	At     time.Time
 	TurnID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -378,6 +448,11 @@ func (FirstAudio) EventName() string { return "voice.first_audio" }
 type FirstOpus struct {
 	At     time.Time
 	TurnID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -454,6 +529,11 @@ type TurnEnded struct {
 	TurnID string
 	Reason TurnEndReason
 	Text   string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -472,6 +552,11 @@ func (TurnEnded) EventName() string { return "turn.ended" }
 type BargeDetected struct {
 	At        time.Time
 	SpeakerID string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -492,6 +577,11 @@ type MuteChanged struct {
 	At      time.Time
 	AgentID string
 	Muted   bool
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -509,6 +599,11 @@ type TapeConsentChanged struct {
 	CampaignID string
 	SpeakerID  string
 	Granted    bool
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -530,6 +625,11 @@ type ReplayRequested struct {
 	At      time.Time
 	TurnID  string
 	ClipKey string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -560,6 +660,11 @@ const (
 type SpendCapReached struct {
 	At    time.Time
 	Level SpendCapLevel
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
@@ -594,6 +699,11 @@ type ConnectionStateChanged struct {
 	At     time.Time
 	State  ConnectionState
 	Detail string
+	// SessionID is the voice_sessions uuid string of the Voice Session this event
+	// originated in (#487, session-scoped attribution). "" means session-local /
+	// pre-stamp — the single-session default before [Forward] stamps it onto the
+	// process bus. Additive per ADR-0020 (wire names unchanged).
+	SessionID string
 }
 
 // EventName implements [Event].
