@@ -3,6 +3,7 @@ package rpc_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -385,6 +386,74 @@ func TestUpdateAgent_HappyPathRoundTrips(t *testing.T) {
 	}
 	if a.GetSpeakerColor() != 3 {
 		t.Errorf("speaker_color must be immutable across update: %d", a.GetSpeakerColor())
+	}
+}
+
+// TestUpdateAgent_RenameFollowsLinkedNode is the #479 name-follow: renaming a
+// Character routes the (old, new) pair into RenameAgentNode — the store then
+// renames the linked Node only while the names still match. The Butler never
+// triggers a rename (it has no auto-node).
+func TestUpdateAgent_RenameFollowsLinkedNode(t *testing.T) {
+	t.Parallel()
+	store := newFakeAgentStore()
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID}
+	id := uuid.New()
+	store.agents[id] = storage.Agent{ID: id, CampaignID: campID, Role: storage.AgentRoleCharacter, Name: "New NPC"}
+	client := crudClient(t, store)
+
+	if _, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "Bart"})); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+	if len(store.renames) != 1 {
+		t.Fatalf("RenameAgentNode calls = %d, want 1", len(store.renames))
+	}
+	got := store.renames[0]
+	if got.campaignID != campID || got.agentID != id || got.oldName != "New NPC" || got.newName != "Bart" {
+		t.Errorf("rename = %+v, want (campaign, agent, New NPC → Bart)", got)
+	}
+}
+
+// TestUpdateAgent_ButlerNeverRenamesNode: editing the Butler routes no rename —
+// only Characters carry an auto-node (#479).
+func TestUpdateAgent_ButlerNeverRenamesNode(t *testing.T) {
+	t.Parallel()
+	store := newFakeAgentStore()
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID}
+	id := uuid.New()
+	store.agents[id] = storage.Agent{ID: id, CampaignID: campID, Role: storage.AgentRoleButler, Name: "Glyphoxa"}
+	client := crudClient(t, store)
+
+	if _, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "Jeeves"})); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+	if len(store.renames) != 0 {
+		t.Errorf("RenameAgentNode calls = %d, want 0 for the Butler", len(store.renames))
+	}
+}
+
+// TestUpdateAgent_RenameFailureNeverFailsSave: the node rename is best-effort —
+// a failing RenameAgentNode logs and the agent save still succeeds (#479).
+func TestUpdateAgent_RenameFailureNeverFailsSave(t *testing.T) {
+	t.Parallel()
+	store := newFakeAgentStore()
+	campID := uuid.New()
+	store.campaign = storage.Campaign{ID: campID}
+	id := uuid.New()
+	store.agents[id] = storage.Agent{ID: id, CampaignID: campID, Role: storage.AgentRoleCharacter, Name: "Old"}
+	store.renameErr = errors.New("node table on fire")
+	client := crudClient(t, store)
+
+	resp, err := client.UpdateAgent(context.Background(),
+		connect.NewRequest(&managementv1.UpdateAgentRequest{Id: id.String(), Name: "New"}))
+	if err != nil {
+		t.Fatalf("UpdateAgent must succeed despite the rename failure: %v", err)
+	}
+	if resp.Msg.GetAgent().GetName() != "New" {
+		t.Errorf("agent name = %q, want New", resp.Msg.GetAgent().GetName())
 	}
 }
 

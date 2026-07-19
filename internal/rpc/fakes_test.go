@@ -271,6 +271,19 @@ type fakeAgentStore struct {
 	deleteAgentCampaign uuid.UUID
 
 	created []storage.NewAgent
+
+	// renames records RenameAgentNode calls (#479); renameErr forces its
+	// failure path.
+	renames   []agentNodeRename
+	renameErr error
+}
+
+// agentNodeRename is one recorded RenameAgentNode call (#479).
+type agentNodeRename struct {
+	campaignID uuid.UUID
+	agentID    uuid.UUID
+	oldName    string
+	newName    string
 }
 
 func newFakeAgentStore() *fakeAgentStore {
@@ -313,6 +326,18 @@ func (f *fakeAgentStore) CreateAgent(_ context.Context, a storage.NewAgent) (uui
 	}
 	f.nextColor++
 	return id, nil
+}
+
+// CreateAgentWithNPCNode is the transactional create the handler calls (#479);
+// the fake has no node table, so it behaves exactly like CreateAgent — the
+// node half is covered by the storage integration test.
+func (f *fakeAgentStore) CreateAgentWithNPCNode(ctx context.Context, a storage.NewAgent) (uuid.UUID, error) {
+	return f.CreateAgent(ctx, a)
+}
+
+func (f *fakeAgentStore) RenameAgentNode(_ context.Context, campaignID, agentID uuid.UUID, oldName, newName string) error {
+	f.renames = append(f.renames, agentNodeRename{campaignID, agentID, oldName, newName})
+	return f.renameErr
 }
 
 func (f *fakeAgentStore) UpdateAgent(_ context.Context, u storage.AgentUpdate) (storage.Agent, error) {

@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useMutation, createConnectQueryKey } from "@connectrpc/connect-query";
 import { useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   EyeOff,
   Plus,
   Pencil,
   Search,
+  Sparkles,
   Trash2,
   User,
   VenetianMask,
@@ -16,11 +18,12 @@ import {
   GitBranch,
   StickyNote,
   Link as LinkIcon,
+  X,
   type LucideIcon,
 } from "lucide-react";
 
-import { CampaignService, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
-import type { Node } from "@gen/glyphoxa/management/v1/management_pb";
+import { CampaignService, EdgeType, NodeType } from "@gen/glyphoxa/management/v1/management_pb";
+import type { DraftEdge, DraftNode, Node } from "@gen/glyphoxa/management/v1/management_pb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Input } from "@/components/ui/Input";
@@ -214,6 +217,12 @@ export function KnowledgePanel() {
   return (
     <div className="gx-kg-layout">
       <div className="gx-kg-list">
+        <KnowledgeDraftCard
+          onApplied={() => {
+            invalidateNodes();
+            invalidateEdges();
+          }}
+        />
         <Input
           type="search"
           aria-label="Search entries"
@@ -290,6 +299,251 @@ export function KnowledgePanel() {
         />
       )}
     </div>
+  );
+}
+
+// EDGE_TYPE_LABEL mirrors NodeRelations' label map for the draft preview's
+// relation rows.
+const EDGE_TYPE_LABEL = new Map<EdgeType, string>([
+  [EdgeType.RESIDES_IN, "resides_in"],
+  [EdgeType.MEMBER_OF, "member_of"],
+  [EdgeType.OWNS, "owns"],
+  [EdgeType.KNOWS, "knows"],
+  [EdgeType.ENEMY_OF, "enemy_of"],
+  [EdgeType.ALLY_OF, "ally_of"],
+  [EdgeType.PARENT_OF, "parent_of"],
+  [EdgeType.PARTICIPATED_IN, "participated_in"],
+  [EdgeType.MENTIONED_IN, "mentioned_in"],
+]);
+
+// KnowledgeDraftCard is the on-demand "generate entries" flow (#479). Strictly
+// button-driven: collapsed it is a single affordance; expanded, the GM writes a
+// prompt and presses "Generate draft" — only then does an LLM call run. The
+// result is a PREVIEW (nothing written): the GM can drop individual entries or
+// relations, then lands the rest atomically via ApplyGeneratedKnowledge, or
+// discards the whole draft.
+function KnowledgeDraftCard({ onApplied }: { onApplied: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  // The reviewable draft. Held locally so remove-buttons can edit it before the
+  // apply; edge indices are remapped on every node removal.
+  const [draft, setDraft] = useState<{ nodes: DraftNode[]; edges: DraftEdge[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const generate = useMutation(CampaignService.method.generateKnowledge);
+  const apply = useMutation(CampaignService.method.applyGeneratedKnowledge);
+
+  const runGenerate = async () => {
+    setError(null);
+    try {
+      const res = await generate.mutateAsync({ prompt });
+      setDraft({ nodes: res.nodes, edges: res.edges });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const removeNode = (idx: number) => {
+    setDraft((d) => {
+      if (!d) return d;
+      const nodes = d.nodes.filter((_, i) => i !== idx);
+      // Drop edges touching the removed entry; shift indices past it down.
+      const edges = d.edges
+        .filter((e) => e.fromIndex !== idx && e.toIndex !== idx)
+        .map((e) => ({
+          ...e,
+          fromIndex: e.fromIndex > idx ? e.fromIndex - 1 : e.fromIndex,
+          toIndex: e.toIndex > idx ? e.toIndex - 1 : e.toIndex,
+        })) as DraftEdge[];
+      return { nodes, edges };
+    });
+  };
+  const removeEdge = (idx: number) => {
+    setDraft((d) => (d ? { ...d, edges: d.edges.filter((_, i) => i !== idx) } : d));
+  };
+
+  const reset = () => {
+    setDraft(null);
+    setPrompt("");
+    setError(null);
+  };
+
+  const runApply = async () => {
+    if (!draft || draft.nodes.length === 0) return;
+    setError(null);
+    try {
+      const res = await apply.mutateAsync({ nodes: draft.nodes, edges: draft.edges });
+      onApplied();
+      reset();
+      setOpen(false);
+      toast.success(
+        `Added ${res.nodes.length} entr${res.nodes.length === 1 ? "y" : "ies"}` +
+          (res.edgesCreated > 0
+            ? ` and ${res.edgesCreated} relationship${res.edgesCreated === 1 ? "" : "s"}`
+            : ""),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  if (!open) {
+    return (
+      <Button
+        variant="secondary"
+        iconStart={<Sparkles size={14} />}
+        className="gx-kg-draft-open"
+        onClick={() => setOpen(true)}
+      >
+        Generate entries with your LLM…
+      </Button>
+    );
+  }
+
+  return (
+    <Card accent className="gx-kg-draft">
+      <div className="gx-kg-editor__bar">
+        <h2 className="gx-kg-editor__title">
+          <Sparkles size={15} /> Generate entries
+        </h2>
+        <button
+          type="button"
+          className="gx-kg-iconbtn"
+          aria-label="Close generator"
+          onClick={() => {
+            reset();
+            setOpen(false);
+          }}
+        >
+          <X size={15} />
+        </button>
+      </div>
+
+      {draft === null ? (
+        <>
+          <div className="gx-field">
+            <label className="gx-field__label" htmlFor="gx-kg-draft-prompt">
+              What should be drafted?
+            </label>
+            <textarea
+              id="gx-kg-draft-prompt"
+              className="gx-input gx-textarea"
+              rows={3}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="e.g. The thieves' guild of Saltmarsh — its leader, hideout, prized relic and rival faction"
+            />
+            <span className="gx-field__hint">
+              Your configured LLM drafts linked entries from this. Nothing is saved until you review
+              and apply the draft.
+            </span>
+          </div>
+          <div className="gx-kg-editor__actions">
+            <Button
+              variant="primary"
+              iconStart={<Sparkles size={14} />}
+              onClick={() => void runGenerate()}
+              disabled={!prompt.trim() || generate.isPending}
+            >
+              {generate.isPending ? "Drafting…" : "Generate draft"}
+            </Button>
+            {error && (
+              <span className="gx-editor__status gx-editor__status--error" role="alert">
+                Couldn't generate: {error}
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <span className="gx-field__hint">
+            A draft — nothing is saved yet. Remove what doesn't fit, then apply.
+          </span>
+          <ul className="gx-kg-draft__nodes">
+            {draft.nodes.map((n, i) => {
+              const meta = metaOf(n.nodeType);
+              return (
+                <li key={i} className="gx-kg-draft__node">
+                  <span
+                    className="gx-kg-card__icon"
+                    style={{ color: meta.color, background: alphaBg(meta.color) }}
+                    aria-hidden
+                  >
+                    <meta.Icon size={16} />
+                  </span>
+                  <div className="gx-kg-card__meta">
+                    <div className="gx-kg-card__head">
+                      <span className="gx-kg-card__name">{n.name}</span>
+                      <Badge
+                        size="sm"
+                        style={{ color: meta.color, background: alphaBg(meta.color) }}
+                      >
+                        {meta.label}
+                      </Badge>
+                      {n.gmPrivate && (
+                        <Badge variant="neutral" size="sm">
+                          <EyeOff size={11} /> GM private
+                        </Badge>
+                      )}
+                    </div>
+                    {n.body && <span className="gx-kg-card__snippet">{n.body}</span>}
+                  </div>
+                  <button
+                    type="button"
+                    className="gx-kg-iconbtn gx-kg-iconbtn--danger"
+                    aria-label={`Remove ${n.name} from the draft`}
+                    onClick={() => removeNode(i)}
+                  >
+                    <X size={14} />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {draft.edges.length > 0 && (
+            <ul className="gx-kg-draft__edges">
+              {draft.edges.map((e, i) => (
+                <li key={i} className="gx-kg-draft__edge">
+                  <span className="gx-kg-draft__edge-text">
+                    {draft.nodes[e.fromIndex]?.name} →{" "}
+                    <em>{EDGE_TYPE_LABEL.get(e.edgeType) ?? ""}</em> → {draft.nodes[e.toIndex]?.name}
+                  </span>
+                  <button
+                    type="button"
+                    className="gx-kg-iconbtn gx-kg-iconbtn--danger"
+                    aria-label="Remove this relation from the draft"
+                    onClick={() => removeEdge(i)}
+                  >
+                    <X size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="gx-kg-editor__actions">
+            <Button
+              variant="primary"
+              iconStart={<Plus size={14} />}
+              onClick={() => void runApply()}
+              disabled={apply.isPending || draft.nodes.length === 0}
+            >
+              {apply.isPending
+                ? "Adding…"
+                : `Add ${draft.nodes.length} entr${draft.nodes.length === 1 ? "y" : "ies"}` +
+                  (draft.edges.length > 0 ? ` + ${draft.edges.length} relation${draft.edges.length === 1 ? "" : "s"}` : "")}
+            </Button>
+            <Button variant="ghost" onClick={reset} disabled={apply.isPending}>
+              Discard draft
+            </Button>
+            {error && (
+              <span className="gx-editor__status gx-editor__status--error" role="alert">
+                Couldn't apply: {error}
+              </span>
+            )}
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

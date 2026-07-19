@@ -46,6 +46,7 @@ type CampaignServer struct {
 	*kgEdges
 	*knowledgeProposals
 	*toolGrants
+	*campaignAssist
 }
 
 // CampaignStores groups the per-feature store slices CampaignServer composes
@@ -75,6 +76,10 @@ type CampaignStores struct {
 	Proposals knowledgeProposalStore
 	// Grants backs the Tool Grant editor (#117).
 	Grants toolGrantStore
+	// Assist backs the on-demand LLM campaign-creation helpers' store surface
+	// (#479): the persona draft's agent read and the knowledge-draft apply. The
+	// drafting engine itself is wired separately via SetAssist.
+	Assist assistStore
 }
 
 // NewCampaignServer wires every feature module over the one concrete store —
@@ -93,6 +98,7 @@ func NewCampaignServer(s *storage.Store) *CampaignServer {
 		KGEdges:    s,
 		Proposals:  s,
 		Grants:     s,
+		Assist:     s,
 	})
 }
 
@@ -112,6 +118,7 @@ func NewCampaignServerWith(stores CampaignStores) *CampaignServer {
 		kgEdges:            &kgEdges{store: stores.KGEdges, active: active},
 		knowledgeProposals: &knowledgeProposals{store: stores.Proposals, active: active},
 		toolGrants:         &toolGrants{store: stores.Grants, active: active, tools: tool.BuiltinRegistry(tool.Deps{})},
+		campaignAssist:     &campaignAssist{store: stores.Assist, active: active},
 	}
 }
 
@@ -129,6 +136,15 @@ func (s *CampaignServer) SetSessions(src activeSessionSource) {
 		vs, active := src.Snapshot()
 		return vs.CampaignID, active
 	}
+}
+
+// SetAssist wires the on-demand LLM campaign-creation engine (#479) the
+// generate handlers draft with. Called once at boot before the server serves,
+// so no lock is needed — mirrors SetSessions. Left unset (a composition that
+// doesn't exercise it), GeneratePersona/GenerateKnowledge fail with
+// CodeUnavailable; ApplyGeneratedKnowledge needs no engine and still works.
+func (s *CampaignServer) SetAssist(engine AssistEngine) {
+	s.engine = engine
 }
 
 // SetSpeakerInvalidator wires the live speaker resolver's campaign invalidation

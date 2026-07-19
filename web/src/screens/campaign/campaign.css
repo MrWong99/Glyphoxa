@@ -188,6 +188,60 @@
   font-size: var(--body-sm);
 }
 
+/* --- LLM knowledge draft (#479) ------------------------------------------- */
+/* The on-demand "Generate entries" flow at the top of the list column: a single
+   collapsed affordance, expanding into prompt → preview → apply. */
+.gx-kg-draft-open {
+  align-self: flex-start;
+}
+
+.gx-kg-draft {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+}
+
+.gx-kg-draft .gx-kg-editor__title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.gx-kg-draft__nodes,
+.gx-kg-draft__edges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.gx-kg-draft__node {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.gx-kg-draft__node .gx-kg-iconbtn {
+  margin-left: auto;
+}
+
+.gx-kg-draft__edge {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: var(--body-sm);
+  color: var(--text-subtle);
+  padding-left: var(--spacing-md);
+}
+
+.gx-kg-draft__edge-text em {
+  font-style: normal;
+  color: var(--text-strong);
+}
+
 /* Sticky create card on the right. */
 .gx-kg-editor {
   display: flex;
@@ -448,6 +502,25 @@
 
 .gx-editor__status--error {
   color: var(--status-danger);
+}
+
+/* On-demand persona drafting row (#479): prompt input + Generate button under
+ * the Persona textarea. Mirrors the voice row; the hint takes its own line. */
+.gx-editor__draft {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  margin-top: var(--spacing-xs);
+}
+
+.gx-editor__draft .gx-field {
+  flex: 1;
+  min-width: 220px;
+}
+
+.gx-editor__draft-hint {
+  flex-basis: 100%;
 }
 
 /* Voice select + Preview-voice button row (#70). Wraps so the inline preview
