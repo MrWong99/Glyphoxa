@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
@@ -72,6 +73,7 @@ type clientsRig struct {
 	closed      []*bot.Client
 	regs        []regCall
 	openErr     error
+	registerErr error
 }
 
 func newClientsRig(t *testing.T, envToken string) *clientsRig {
@@ -108,7 +110,7 @@ func newClientsRig(t *testing.T, envToken string) *clientsRig {
 		rig.mu.Lock()
 		defer rig.mu.Unlock()
 		rig.regs = append(rig.regs, regCall{guild: guild, defsLen: len(defs), cleared: defs == nil})
-		return nil
+		return rig.registerErr
 	}
 	rig.c = c
 	return rig
@@ -219,12 +221,14 @@ func TestEnsureTenantB_DoesNotDisconnectTenantA(t *testing.T) {
 	}
 	buildsBefore := rig.numBuilds()
 	clearsBefore := rig.regsForGuild("GA", true)
+	fullRegsBefore := rig.regsForGuild("GA", false)
 
 	// Tenant B changes its token AND guild, then re-ensures.
 	rig.store.set(b, rig.savedDep(t, "GB2", "tok-B2"))
 	mustEnsure(t, rig.c, b)
 
-	// A is completely untouched: same client pointer, no A rebuild, no GA clear.
+	// A is completely untouched: same client pointer, no A rebuild, no GA clear,
+	// and no re-PUT churn against GA.
 	aAfter, err := rig.c.ClientForTenant(ctx, a)
 	if err != nil {
 		t.Fatalf("ClientForTenant(A) after B save: %v", err)
@@ -234,6 +238,10 @@ func TestEnsureTenantB_DoesNotDisconnectTenantA(t *testing.T) {
 	}
 	if rig.regsForGuild("GA", true) != clearsBefore {
 		t.Errorf("Tenant A's GA commands were cleared by a Tenant B save (HIJACK)")
+	}
+	if rig.regsForGuild("GA", false) != fullRegsBefore {
+		t.Errorf("Tenant A's GA commands were re-PUT by a Tenant B save (churn): got %d, want %d",
+			rig.regsForGuild("GA", false), fullRegsBefore)
 	}
 	// B rebuilt (new token → new client).
 	if rig.numBuilds() != buildsBefore+1 {
@@ -491,4 +499,75 @@ func TestInvalidateTransientDoesNotFail(t *testing.T) {
 	if st := rig.c.IntegrationStatus(a); st.State == IntegrationFailed {
 		t.Errorf("transient death marked Tenant failed: %+v", st)
 	}
+}
+
+// (1, register-failure) A register failure after a successful buildOpen must not
+// leak a phantom ref / zombie entry: the tenant state + ref are committed BEFORE
+// the fallible register, so a later wait-state still detaches and closes the
+// client. A missing tenants entry would strand the gateway forever (IDENTIFY burn
+// + conn leak).
+func TestRegisterFailureDoesNotLeakEntry(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+
+	rig.mu.Lock()
+	rig.registerErr = errors.New("discord 500 on SetGuildCommands")
+	rig.mu.Unlock()
+	if err := rig.c.EnsureTenant(context.Background(), a); err == nil {
+		t.Fatal("EnsureTenant with a failing register = nil, want the register error")
+	}
+	if rig.numBuilds() != 1 {
+		t.Fatalf("builds = %d, want 1 (client built, registration failed)", rig.numBuilds())
+	}
+
+	// The Tenant now removes its token → wait-state. A phantom ref (no committed
+	// tenants entry) would leave setWaiting unable to detach; with state committed
+	// the orphaned entry closes.
+	rig.store.set(a, storage.DeploymentConfig{GuildID: "GA"}) // no token
+	mustEnsure(t, rig.c, a)
+	if rig.numClosed() != 1 {
+		t.Errorf("closed = %d, want 1 (entry not leaked after a register failure)", rig.numClosed())
+	}
+}
+
+// (9, concurrency) invalidate (disgo gateway goroutine) racing EnsureTenant and
+// ClientForTenant must not deadlock or data-race — run under -race. The gateway
+// I/O runs off the state mutex (atomic client pointers), so none of the three
+// blocks the others.
+func TestConcurrentEnsureInvalidateBorrow(t *testing.T) {
+	rig := newClientsRig(t, "")
+	a := uuid.New()
+	rig.store.set(a, rig.savedDep(t, "GA", "tok-A"))
+	mustEnsure(t, rig.c, a)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	spin := func(f func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					f()
+				}
+			}
+		}()
+	}
+
+	spin(func() { _, _ = rig.c.ClientForTenant(context.Background(), a) })
+	spin(func() { _ = rig.c.EnsureTenant(context.Background(), a) })
+	spin(func() {
+		if cl := rig.c.clientFor(a); cl != nil {
+			rig.c.invalidate(cl, &websocket.CloseError{Code: 4004, Text: "Authentication failed"})
+		}
+	})
+	spin(func() { rig.c.IntegrationStatus(a); rig.c.KnownGuild("GA") })
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

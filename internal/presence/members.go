@@ -24,6 +24,19 @@ type voiceOccupant struct {
 	userID  snowflake.ID
 }
 
+// parseGuild parses a Guild snowflake string; ok is false for "" (wait-state) or
+// an unparseable id, so the caller scopes the member read to nothing.
+func parseGuild(guild string) (id snowflake.ID, ok bool) {
+	if guild == "" {
+		return 0, false
+	}
+	id, err := snowflake.Parse(guild)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
 // VoiceChannelMembers lists the Discord Users currently in channelID, read from
 // the standing gateway's voice-state cache — populated by the GuildVoiceStates
 // intent the Bot already carries (see defaultClientBuilder), NOT the privileged
@@ -57,6 +70,16 @@ func (c *Clients) VoiceChannelMembers(ctx context.Context, tenantID uuid.UUID, c
 		return nil, err
 	}
 
+	// A central-token client's voice-state cache holds occupants of EVERY Tenant's
+	// Guild that shares the token. channelID alone does not scope to this Tenant, so
+	// a Tenant configuring another Tenant's channel snowflake would otherwise list
+	// that Guild's occupants (finding 2). Scope to this Tenant's own Guild; an
+	// unconfigured/unparseable Guild (wait-state) scopes to nothing.
+	wantGuild, guildKnown := parseGuild(c.GuildForTenant(tenantID))
+	if !guildKnown {
+		return []Member{}, nil
+	}
+
 	// Filter the Bot itself out only when we actually know its id; if SelfUser is
 	// not cached yet, an unknown-and-zero selfID must not masquerade as a real user.
 	self, selfKnown := client.Caches.SelfUser()
@@ -64,6 +87,9 @@ func (c *Clients) VoiceChannelMembers(ctx context.Context, tenantID uuid.UUID, c
 	// Snapshot occupants under the cache lock, then release before any REST call.
 	var occupants []voiceOccupant
 	for guildID, vs := range client.Caches.VoiceStateCache().All() {
+		if guildID != wantGuild {
+			continue
+		}
 		if vs.ChannelID == nil || *vs.ChannelID != channelID {
 			continue
 		}

@@ -940,7 +940,13 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 	var presenceRefresh func(tenantID uuid.UUID)
 	if clients != nil {
 		presenceRefresh = func(tenantID uuid.UUID) {
-			if err := clients.EnsureTenant(context.Background(), tenantID); err != nil {
+			// Bound the ensure: EnsureTenant holds the registry's ensureMu across
+			// gateway + REST I/O, so a Tenant whose Discord endpoint hangs would
+			// otherwise pin the lock and stall EVERY other Tenant's save + Voice
+			// Session start behind it (finding 4). 60s is well past a healthy open.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := clients.EnsureTenant(ctx, tenantID); err != nil {
 				log.Warn("presence: refresh after Discord settings save failed; "+
 					"will retry on the next save or Voice Session cycle", "tenant", tenantID, "err", err)
 			}

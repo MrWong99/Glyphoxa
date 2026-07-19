@@ -162,3 +162,49 @@ func TestVoiceChannelMembers_BotAppearsWhenSelfUnknown(t *testing.T) {
 		t.Fatalf("VoiceChannelMembers = %+v, want both botUser and the zero-id occupant to appear when SelfUser is unknown", members)
 	}
 }
+
+// TestVoiceChannelMembers_ScopedToTenantGuild pins finding 2: a central-token
+// client's voice-state cache holds occupants of every Tenant's Guild that shares
+// the token. VoiceChannelMembers must scope to the CALLING Tenant's own Guild, so
+// Tenant A configuring Tenant B's channel snowflake never lists B's occupants.
+func TestVoiceChannelMembers_ScopedToTenantGuild(t *testing.T) {
+	const guildA snowflake.ID = 100
+	const guildB snowflake.ID = 200
+	const channel snowflake.ID = 999
+	const userInB snowflake.ID = 7
+
+	c := &Clients{entries: map[string]*clientEntry{}, tenants: map[uuid.UUID]*tenantState{}}
+	c.fetchMember = func(_ context.Context, _ rest.Rest, _, userID snowflake.ID) (*discord.Member, error) {
+		return &discord.Member{User: discord.User{ID: userID, Username: "u"}}, nil
+	}
+	cl := &bot.Client{Caches: cache.New(cache.WithCaches(cache.FlagsAll))}
+	entry := &clientEntry{token: "central", refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
+	entry.client.Store(cl)
+	a, b := uuid.New(), uuid.New()
+	entry.refs[a] = struct{}{}
+	entry.refs[b] = struct{}{}
+	c.entries["central"] = entry
+	c.tenants[a] = &tenantState{token: "central", guild: guildA.String()}
+	c.tenants[b] = &tenantState{token: "central", guild: guildB.String()}
+
+	// A user sits in Tenant B's Guild, in a channel snowflake Tenant A also names.
+	putVoiceState(cl, guildB, channel, userInB)
+
+	// Tenant A lists that channel: scoped to Guild A → B's occupant is invisible.
+	membersA, err := c.VoiceChannelMembers(context.Background(), a, channel)
+	if err != nil {
+		t.Fatalf("A members: %v", err)
+	}
+	if len(membersA) != 0 {
+		t.Fatalf("Tenant A saw %d members in another Tenant's Guild (cross-tenant leak), want 0", len(membersA))
+	}
+
+	// Tenant B lists the same channel: its own Guild → the occupant appears.
+	membersB, err := c.VoiceChannelMembers(context.Background(), b, channel)
+	if err != nil {
+		t.Fatalf("B members: %v", err)
+	}
+	if len(membersB) != 1 || membersB[0].ID != userInB {
+		t.Fatalf("Tenant B members = %+v, want its own Guild's occupant", membersB)
+	}
+}

@@ -247,41 +247,76 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 	entry := c.entries[token]
 	c.mu.Unlock()
 
-	// Ensure the entry has a live client, building/rebuilding off mu.
+	// Ensure the entry has a live client, building/rebuilding off mu. client is
+	// carried out of the build (NOT re-Loaded): a concurrent invalidate could
+	// CAS the freshly-Stored pointer back to nil between the Store and a re-Load,
+	// and a re-Loaded nil handed to register() would nil-deref on the gateway
+	// goroutine (finding 3).
 	rebuilt := false
+	var client *bot.Client
 	switch {
 	case entry == nil:
-		client, err := c.buildOpen(ctx, token)
+		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
 			return err
 		}
 		entry = &clientEntry{token: token, refs: map[uuid.UUID]struct{}{}, registeredGuilds: map[string]bool{}}
-		entry.client.Store(client)
+		entry.client.Store(cl)
+		client = cl
 		rebuilt = true
 		c.mu.Lock()
 		c.entries[token] = entry
 		c.mu.Unlock()
 	case entry.client.Load() == nil:
-		client, err := c.buildOpen(ctx, token)
+		cl, err := c.buildOpen(ctx, token)
 		if err != nil {
 			return err
 		}
 		c.mu.Lock()
 		entry.registeredGuilds = map[string]bool{}
 		c.mu.Unlock()
-		entry.client.Store(client)
+		entry.client.Store(cl)
+		client = cl
 		rebuilt = true
+	default:
+		client = entry.client.Load()
 	}
-	client := entry.client.Load()
+	if client == nil {
+		// The entry's client died between the snapshot and here (a concurrent
+		// invalidate). Transient: the next ClientForTenant/refresher re-ensures and
+		// rebuilds — no commands are PUT against a nil client.
+		return fmt.Errorf("presence: standing client for tenant %s died during ensure", tenantID)
+	}
 
 	// Token change: release this Tenant's ref on the OLD entry (refcounted close).
 	if prevToken != "" && prevToken != token {
 		c.detachFromEntry(prevToken, tenantID)
 	}
 
+	// Commit the ref AND the tenant state together, BEFORE the (fallible)
+	// registration: otherwise a register failure returns with the ref added but
+	// c.tenants[tenantID] never stored, so a later setWaiting/token-change (which
+	// resolves the old entry via c.tenants) can't detach the phantom ref and the
+	// entry leaks a live gateway forever (finding 1). Registration is idempotent
+	// and self-heals on the next ensure (registeredGuilds tracks what actually
+	// landed), so committing state first only means a transient "client up,
+	// commands pending" window, never a leak.
 	c.mu.Lock()
 	entry.refs[tenantID] = struct{}{}
+	c.tenants[tenantID] = &tenantState{token: token, guild: guild}
 	c.mu.Unlock()
+
+	// Clear this Tenant's stale OLD-Guild commands when its Guild changed on the
+	// SAME entry (Discord-side registration survives a gateway death, so a rebuild
+	// must clear it too — finding 5) and no other ref still serves that Guild.
+	if prevToken == token && prevGuild != "" && prevGuild != guild && !c.guildUsedByOther(entry, tenantID, prevGuild) {
+		if err := c.register(ctx, client, prevGuild, nil); err != nil {
+			c.log.Warn("presence: clear old guild commands", "guild", prevGuild, "err", err)
+		}
+		c.mu.Lock()
+		delete(entry.registeredGuilds, prevGuild)
+		c.mu.Unlock()
+	}
 
 	if rebuilt {
 		// A fresh client carries no registrations: re-PUT every ref-Tenant's Guild
@@ -294,35 +329,21 @@ func (c *Clients) reconcileTenant(ctx context.Context, tenantID uuid.UUID, token
 			entry.registeredGuilds[g] = true
 			c.mu.Unlock()
 		}
-	} else {
-		// Same client. Clear this Tenant's previous Guild only when it changed on the
-		// SAME entry and no other ref still uses it, then PUT the new Guild once.
-		if prevToken == token && prevGuild != "" && prevGuild != guild && !c.guildUsedByOther(entry, tenantID, prevGuild) {
-			if err := c.register(ctx, client, prevGuild, nil); err != nil {
-				c.log.Warn("presence: clear old guild commands", "guild", prevGuild, "err", err)
+	} else if guild != "" {
+		// Same live client: PUT this Tenant's Guild once (idempotent — skip when it
+		// is already registered so a repeat ensure re-PUTs nothing).
+		c.mu.Lock()
+		already := entry.registeredGuilds[guild]
+		c.mu.Unlock()
+		if !already {
+			if err := c.register(ctx, client, guild, c.reg.Definitions()); err != nil {
+				return fmt.Errorf("presence: register guild commands: %w", err)
 			}
 			c.mu.Lock()
-			delete(entry.registeredGuilds, prevGuild)
+			entry.registeredGuilds[guild] = true
 			c.mu.Unlock()
-		}
-		if guild != "" {
-			c.mu.Lock()
-			already := entry.registeredGuilds[guild]
-			c.mu.Unlock()
-			if !already {
-				if err := c.register(ctx, client, guild, c.reg.Definitions()); err != nil {
-					return fmt.Errorf("presence: register guild commands: %w", err)
-				}
-				c.mu.Lock()
-				entry.registeredGuilds[guild] = true
-				c.mu.Unlock()
-			}
 		}
 	}
-
-	c.mu.Lock()
-	c.tenants[tenantID] = &tenantState{token: token, guild: guild}
-	c.mu.Unlock()
 	return nil
 }
 
@@ -415,8 +436,15 @@ func (c *Clients) detachFromEntry(token string, tenantID uuid.UUID) {
 }
 
 // EnsureAll seeds the registry from every saved deployment config at boot
-// (ADR-0039: presence-before-request). A per-Tenant ensure failure is logged
-// non-fatal so one broken token never blocks the others from standing up.
+// (ADR-0039: presence-before-request) and is the periodic reconcile (Run). A
+// per-Tenant ensure failure is logged non-fatal so one broken token never blocks
+// the others from standing up.
+//
+// TODO(#489): EnsureAll only ADDS/updates Tenants present in the config table; it
+// never reconciles a DELETED deployment_config row — a removed Tenant's ref +
+// KnownGuild entry persist until process restart. Latent today (there is no
+// deployment-config delete path), so it is left for the reconcile to grow a
+// "prune tenants absent from the list" pass when a delete path lands.
 func (c *Clients) EnsureAll(ctx context.Context) error {
 	deps, err := c.store.ListDeploymentConfigs(ctx)
 	if err != nil {

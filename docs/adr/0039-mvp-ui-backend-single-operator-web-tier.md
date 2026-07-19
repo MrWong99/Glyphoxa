@@ -73,3 +73,7 @@ The whole increment is built **test-first, slice by slice** (ADR-0019): each ver
 ## Amendment: the anonymous human lane ends (2026-07-07, #275)
 
 The `SpeakerID` seam this ADR anticipated is now specified: **ADR-0050** decides N-lane per-speaker segmentation and adds `SpeakerID` to `STTPartial`/`STTFinal`/`VADSpeechStart`/`BargeDetected`. Speaker-to-Character rendering policy is decided on #281 (persist-time snapshots; guild-display-name fallback).
+
+## Amendment: presence reads are per-tenant, not single-operator latest (2026-07-19, #489)
+
+This ADR framed the standing Discord presence as single-operator and read its config with the tenant-unscoped "latest" `deployment_config` row (`storage.GetLatestDeploymentConfig`). Under the multi-tenant tier that read is the presence-hijack vector, so it is DELETED: the presence is now a per-token client registry that reads the **tenant-scoped** `deployment_config` everywhere (see ADR-0010's #489 amendment). `ListDeploymentConfigs` seeds one standing client per distinct Bot token at boot. The Configuration "bot-connected" tag this ADR described is now a per-Tenant integration state (`ok`/`waiting`/`failed`) surfaced on the read.
