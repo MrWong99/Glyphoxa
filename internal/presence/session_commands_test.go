@@ -419,6 +419,64 @@ func TestEndNoneRunning(t *testing.T) {
 	}
 }
 
+// TestStartIntentPending covers the #491-residual (#492): in split/worker mode a
+// Start that queues an intent but is not claimed within the budget returns
+// ErrIntentPending — a retryable state, not a failure — so the operator gets a
+// clear "not claimed yet, try again" message, never the generic error.
+func TestStartIntentPending(t *testing.T) {
+	lost := campaign("Lost Mine")
+	store := &fakeSessionStore{forUser: &lost}
+	voice := &fakeVoice{startErr: session.ErrIntentPending}
+	reg := testRegistry(testGuild, operatorID)
+	reg.Register(StartCommand(store, voice))
+
+	resp := dispatchAs(reg, "glyphoxa start", operatorID, nil)
+
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("pending reply = %+v, want one ephemeral message", resp.followups)
+	}
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "try again") {
+		t.Errorf("pending reply = %q, want a retryable 'not claimed yet' hint", resp.followups[0].content)
+	}
+}
+
+// TestStartIntentCancelled covers the #491-residual (#492): a Start cancelled
+// before any worker claimed it reports a distinct, clear outcome.
+func TestStartIntentCancelled(t *testing.T) {
+	lost := campaign("Lost Mine")
+	store := &fakeSessionStore{forUser: &lost}
+	voice := &fakeVoice{startErr: session.ErrIntentCancelled}
+	reg := testRegistry(testGuild, operatorID)
+	reg.Register(StartCommand(store, voice))
+
+	resp := dispatchAs(reg, "glyphoxa start", operatorID, nil)
+
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("cancelled reply = %+v, want one ephemeral message", resp.followups)
+	}
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "cancel") {
+		t.Errorf("cancelled reply = %q, want a clear 'cancelled' message", resp.followups[0].content)
+	}
+}
+
+// TestEndStopPending covers the #491-residual (#492): in split/worker mode an end
+// whose stop the worker has not yet confirmed within the budget returns
+// ErrStopPending — a retryable state, reported as such rather than generically.
+func TestEndStopPending(t *testing.T) {
+	voice := &fakeVoice{stopErr: session.ErrStopPending}
+	reg := testRegistry(testGuild, operatorID)
+	reg.Register(EndCommand(voice))
+
+	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
+
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("stop-pending reply = %+v, want one ephemeral message", resp.followups)
+	}
+	if !strings.Contains(strings.ToLower(resp.followups[0].content), "try again") {
+		t.Errorf("stop-pending reply = %q, want a retryable hint", resp.followups[0].content)
+	}
+}
+
 // TestEndForeignTenantSessionRefused pins the cross-tenant guard (#490): the
 // Manager is single-active, so a GM in Tenant A must NOT stop a live session that
 // belongs to Tenant B — end refuses and never calls Stop.

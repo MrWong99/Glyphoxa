@@ -177,6 +177,11 @@ func EndCommand(voice VoiceControl) Command {
 				if errors.Is(err, session.ErrNoActiveSession) {
 					return ic.ReplyEphemeral("No voice session is running.")
 				}
+				if errors.Is(err, session.ErrStopPending) {
+					// Split/worker mode (#491): the stop was requested but the worker has
+					// not confirmed it within the budget. Retryable, not a failure.
+					return ic.ReplyEphemeral("Ending the voice session is taking longer than expected — the worker hasn't confirmed the stop yet. Try again in a moment.")
+				}
 				return fmt.Errorf("presence: stop voice session: %w", err)
 			}
 			return ic.ReplyEphemeral("Voice session ended.")
@@ -245,6 +250,14 @@ func startErrorMessage(err error) (string, bool) {
 		return "Voice isn't available in this deployment mode.", true
 	case errors.Is(err, session.ErrManagerClosed):
 		return "The server is shutting down — try again shortly.", true
+	case errors.Is(err, session.ErrIntentPending):
+		// Split/worker mode (#491): the intent is queued but no worker claimed it
+		// within the budget. Retryable, not a failure.
+		return "Starting the voice session is taking longer than expected — no worker has claimed it yet. Try again in a moment.", true
+	case errors.Is(err, session.ErrIntentCancelled):
+		// Split/worker mode (#491): the start was cancelled before any worker claimed
+		// it — a distinct outcome from a still-queued pending.
+		return "The voice session start was cancelled before a worker picked it up.", true
 	default:
 		return "", false
 	}
