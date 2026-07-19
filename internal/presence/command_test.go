@@ -387,8 +387,24 @@ func TestSetActiveGatesDispatch(t *testing.T) {
 	}
 }
 
+// recordingAutocompleteResponder records whether a result was sent, so a test can
+// assert a non-owner sends NOTHING (not an empty result).
+type recordingAutocompleteResponder struct {
+	sent    bool
+	choices []discord.AutocompleteChoice
+}
+
+func (r *recordingAutocompleteResponder) result(choices []discord.AutocompleteChoice) error {
+	r.sent = true
+	r.choices = choices
+	return nil
+}
+
 // TestSetActiveGatesAutocomplete covers sequence (4) for autocomplete: an inactive
-// Registry returns no choices without running the autocomplete handler.
+// Registry DROPS the interaction — it sends NO AutocompleteResult at all (not an
+// empty list), and never runs the handler — while an active one responds normally.
+// Drives handleAutocomplete (the send seam) so the drop-vs-empty distinction is
+// observable.
 func TestSetActiveGatesAutocomplete(t *testing.T) {
 	reg := testRegistry(testGuild, "")
 	ran := false
@@ -399,12 +415,23 @@ func TestSetActiveGatesAutocomplete(t *testing.T) {
 		}})
 
 	reg.SetActive(false)
-	choices := reg.autocompleteChoices(context.Background(), "pick", &Autocomplete{guildID: testGuild, userID: strangerID})
+	inactive := &recordingAutocompleteResponder{}
+	reg.handleAutocomplete(context.Background(), "pick", &Autocomplete{guildID: testGuild, userID: strangerID}, inactive)
 	if ran {
 		t.Error("inactive Registry must not run the autocomplete handler")
 	}
-	if len(choices) != 0 {
-		t.Errorf("inactive Registry must return no choices, got %d", len(choices))
+	if inactive.sent {
+		t.Error("inactive Registry must send NO autocomplete result at all (drop, not empty)")
+	}
+
+	reg.SetActive(true)
+	active := &recordingAutocompleteResponder{}
+	reg.handleAutocomplete(context.Background(), "pick", &Autocomplete{guildID: testGuild, userID: strangerID}, active)
+	if !ran {
+		t.Error("active Registry must run the handler")
+	}
+	if !active.sent || len(active.choices) != 1 {
+		t.Errorf("active Registry should send one choice, sent=%v choices=%d", active.sent, len(active.choices))
 	}
 }
 

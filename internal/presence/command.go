@@ -282,8 +282,19 @@ func (r *Registry) HandleAutocomplete(e *events.AutocompleteInteractionCreate) {
 		userID:  e.User().ID.String(),
 		data:    data,
 	}
-	choices := r.autocompleteChoices(context.Background(), dispatchKey(data.CommandName, data.SubCommandName), ac)
-	_ = e.AutocompleteResult(choices)
+	r.handleAutocomplete(context.Background(), dispatchKey(data.CommandName, data.SubCommandName), ac, eventAutocompleteResponder{event: e})
+}
+
+// handleAutocomplete is the testable autocomplete core: the send is injectable so a
+// test can assert whether ANY response was sent. A non-owner (#492) DROPS the
+// interaction entirely — it sends NO AutocompleteResult at all (not an empty choice
+// list), because the elected owner answers it; a stray empty result from a non-owner
+// would race the owner's real choices.
+func (r *Registry) handleAutocomplete(base context.Context, key string, ac *Autocomplete, resp autocompleteResponder) {
+	if !r.active.Load() {
+		return
+	}
+	_ = resp.result(r.autocompleteChoices(base, key, ac))
 }
 
 // autocompleteChoices is the testable autocomplete core: it returns the handler
@@ -292,10 +303,6 @@ func (r *Registry) HandleAutocomplete(e *events.AutocompleteInteractionCreate) {
 // fails.
 func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Autocomplete) []discord.AutocompleteChoice {
 	empty := []discord.AutocompleteChoice{}
-	if !r.active.Load() {
-		// Non-owner (#492): no choices, no handler — the elected owner answers.
-		return empty
-	}
 	cmd, ok := r.lookup(key)
 	if !ok || cmd.Autocomplete == nil {
 		return empty
@@ -524,6 +531,23 @@ type responder interface {
 	deferResponse(ephemeral bool) error
 	followup(content string, ephemeral bool) error
 	editOriginal(content string) error
+}
+
+// autocompleteResponder is the injectable autocomplete-result sink: production wraps
+// the disgo event, tests record whether a result was sent (so the non-owner DROP is
+// verifiable — no result at all, #492).
+type autocompleteResponder interface {
+	result(choices []discord.AutocompleteChoice) error
+}
+
+// eventAutocompleteResponder is the production autocomplete responder over a live
+// autocomplete event.
+type eventAutocompleteResponder struct {
+	event *events.AutocompleteInteractionCreate
+}
+
+func (r eventAutocompleteResponder) result(choices []discord.AutocompleteChoice) error {
+	return r.event.AutocompleteResult(choices)
 }
 
 // eventResponder is the production responder over a live slash-command event.
