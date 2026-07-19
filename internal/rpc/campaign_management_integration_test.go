@@ -208,9 +208,9 @@ func TestCampaignManagement_Integration(t *testing.T) {
 	}
 	// The durable selection is the SAME row /glyphoxa use reads — both surfaces in
 	// lockstep (migration 00014).
-	forUser, err := store.GetActiveCampaignForUser(ctx, operator)
+	forUser, err := store.GetActiveCampaignForUserInTenant(ctx, seeded.TenantID, operator)
 	if err != nil || forUser.ID.String() != alpha.GetId() {
-		t.Errorf("GetActiveCampaignForUser = %+v, %v, want Alpha %s", forUser, err, alpha.GetId())
+		t.Errorf("GetActiveCampaignForUserInTenant = %+v, %v, want Alpha %s", forUser, err, alpha.GetId())
 	}
 
 	// An unknown campaign_id is CodeNotFound and persists nothing.

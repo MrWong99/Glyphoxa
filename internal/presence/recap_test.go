@@ -593,6 +593,45 @@ func TestRecapVoicedHappyPath(t *testing.T) {
 	}
 }
 
+// TestRecapVoicedForeignTenantSessionDegradesToText pins the cross-tenant voiced
+// guard (#490): the Manager is single-active, so when the LIVE session belongs to
+// another Tenant a `voiced` recap must NOT be spoken into that Tenant's channel
+// (SpeakAsButler) nor persisted as a KindButler line there — it degrades to public
+// text instead. The invoking Tenant's Active Campaign is its own durable selection.
+func TestRecapVoicedForeignTenantSessionDegradesToText(t *testing.T) {
+	mine := campaignIn(tenantA, "My Campaign") // durable selection (tenantA = testGuild)
+	foreign := campaignIn(tenantB, "Foreign live")
+	ended := endedSession(mine.ID, time.Now(), 12) // recappable session of MY campaign
+	store := &fakeRecapStore{
+		fakeSessionStore: &fakeSessionStore{
+			forUser: &mine,
+			byID:    map[uuid.UUID]storage.Campaign{mine.ID: mine, foreign.ID: foreign},
+		},
+		sessions: []storage.VoiceSession{ended},
+		byID:     map[uuid.UUID]storage.VoiceSession{ended.ID: ended},
+	}
+	eng := &fakeRecapEngine{result: recap.Result{Text: "The keep fell at dawn."}}
+	voicer := &fakeButlerVoicer{}
+	// A live session for ANOTHER Tenant's campaign.
+	live := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: foreign.ID}}
+
+	resp := dispatchRecap(t, store, live, eng, voicer, map[string]string{"delivery": deliveryVoiced})
+
+	if voicer.calls != 0 {
+		t.Fatalf("SpeakAsButler called %d times — a foreign Tenant's channel was voiced", voicer.calls)
+	}
+	// Degraded to public text: the recap prose lands as a public Followup.
+	var sawPublicProse bool
+	for _, f := range resp.followups {
+		if !f.ephemeral && strings.Contains(f.content, "The keep fell at dawn.") {
+			sawPublicProse = true
+		}
+	}
+	if !sawPublicProse {
+		t.Errorf("recap not delivered as public text after the foreign-tenant degrade; followups = %+v", resp.followups)
+	}
+}
+
 // TestRecapPublicErrorStaysEphemeral is finding 5c: delivery=public with an error
 // path (no Active Campaign) must NOT leave a public reply — the Defer is ephemeral
 // and the error reply is ephemeral, so no dangling public "thinking…" for the

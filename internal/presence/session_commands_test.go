@@ -376,7 +376,7 @@ func TestStartDiscordNotConfigured(t *testing.T) {
 func TestEndSuccess(t *testing.T) {
 	voice := &fakeVoice{stopVS: storage.VoiceSession{ID: uuid.New()}}
 	reg := testRegistry(testGuild, operatorID)
-	reg.Register(EndCommand(voice))
+	reg.Register(EndCommand(voice, &fakeSessionStore{}))
 
 	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
 
@@ -395,7 +395,7 @@ func TestEndSuccess(t *testing.T) {
 func TestEndNoneRunning(t *testing.T) {
 	voice := &fakeVoice{stopErr: session.ErrNoActiveSession}
 	reg := testRegistry(testGuild, operatorID)
-	reg.Register(EndCommand(voice))
+	reg.Register(EndCommand(voice, &fakeSessionStore{}))
 
 	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
 
@@ -407,12 +407,32 @@ func TestEndNoneRunning(t *testing.T) {
 	}
 }
 
+// TestEndForeignTenantSessionRefused pins the cross-tenant guard (#490): the
+// Manager is single-active, so a GM in Tenant A must NOT stop a live session that
+// belongs to Tenant B — end refuses and never calls Stop.
+func TestEndForeignTenantSessionRefused(t *testing.T) {
+	foreign := campaignIn(tenantB, "Tenant B session")
+	store := &fakeSessionStore{byID: map[uuid.UUID]storage.Campaign{foreign.ID: foreign}}
+	voice := &fakeVoice{active: true, snap: storage.VoiceSession{CampaignID: foreign.ID}}
+	reg := testRegistry(testGuild, operatorID) // testGuild → tenantA
+	reg.Register(EndCommand(voice, store))
+
+	resp := dispatchAs(reg, "glyphoxa end", operatorID, nil)
+
+	if voice.stopCalled {
+		t.Fatal("end stopped a foreign Tenant's live session")
+	}
+	if len(resp.followups) != 1 || !resp.followups[0].ephemeral {
+		t.Fatalf("reply = %+v, want one ephemeral refusal", resp.followups)
+	}
+}
+
 func TestSessionCommandsRefusedForNonGM(t *testing.T) {
 	lost := campaign("Lost Mine")
 	store := &fakeSessionStore{list: []storage.Campaign{lost}, forUser: &lost}
 	voice := &fakeVoice{}
 	reg := testRegistry(testGuild, operatorID) // only operatorID is allowlisted
-	reg.Register(UseCommand(store), StartCommand(store, voice), EndCommand(voice))
+	reg.Register(UseCommand(store), StartCommand(store, voice), EndCommand(voice, store))
 
 	for _, key := range []string{"glyphoxa use", "glyphoxa start", "glyphoxa end"} {
 		resp := dispatchAs(reg, key, strangerID, map[string]string{"campaign": "Lost Mine"})

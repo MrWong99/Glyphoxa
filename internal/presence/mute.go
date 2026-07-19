@@ -38,11 +38,21 @@ type AgentLister interface {
 	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
 }
 
+// campaignTenantReader loads one Campaign by id — the narrow read the cross-tenant
+// session guard needs (#490). *storage.Store, AgentLister and SessionStore all
+// satisfy it.
+type campaignTenantReader interface {
+	GetCampaign(ctx context.Context, id uuid.UUID) (storage.Campaign, error)
+}
+
 // sessionInTenant reports whether the live Voice Session (its campaign) belongs to
-// tenantID — the mute/say cross-tenant guard (#490). A missing/foreign campaign
-// reads as false, so the caller treats the session as "not active for this Tenant".
-func sessionInTenant(ctx context.Context, agents AgentLister, vs storage.VoiceSession, tenantID uuid.UUID) bool {
-	c, err := agents.GetCampaign(ctx, vs.CampaignID)
+// tenantID — the cross-tenant guard shared by mute/say/muteall/end and the voiced
+// recap (#490): the Manager is single-active (#488 not merged) and its Snapshot
+// carries no Tenant, so a GM in Tenant B must confirm the running session's campaign
+// is its OWN before driving it. A missing/foreign campaign reads as false, so the
+// caller treats the session as "not active for this Tenant".
+func sessionInTenant(ctx context.Context, r campaignTenantReader, vs storage.VoiceSession, tenantID uuid.UUID) bool {
+	c, err := r.GetCampaign(ctx, vs.CampaignID)
 	return err == nil && c.TenantID == tenantID
 }
 

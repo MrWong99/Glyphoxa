@@ -117,6 +117,49 @@ func TestMuteCommand_IdleEphemeral(t *testing.T) {
 	}
 }
 
+// TestMuteCommand_ForeignTenantSessionRefused pins the cross-tenant guard (#490):
+// the Manager is single-active, so a GM in Tenant A whose live session actually
+// belongs to Tenant B must NOT mute it — the handler refuses ephemerally and mutes
+// nothing. (If sessionInTenant wrongly returned true, the mute would proceed.)
+func TestMuteCommand_ForeignTenantSessionRefused(t *testing.T) {
+	bart := storage.Agent{ID: uuid.New(), Name: "Bart"}
+	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
+	// The live session's campaign belongs to tenantB; the interaction is tenantA.
+	agents := &fakeLister{agents: []storage.Agent{bart}, tenantID: tenantB}
+	cmd := MuteCommand(mgr, agents)
+	resp := &fakeResponder{}
+	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, opts: fakeOpts{s: map[string]string{"npc": bart.ID.String()}}, resp: resp}
+
+	if err := cmd.Handle(context.Background(), ic); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(mgr.agentCalls) != 0 {
+		t.Fatalf("muted a foreign Tenant's session: %+v", mgr.agentCalls)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
+		t.Fatalf("reply = %+v, want one ephemeral refusal", resp.replies)
+	}
+}
+
+// TestMuteAllCommand_ForeignTenantSessionRefused is the muteall sibling of the guard.
+func TestMuteAllCommand_ForeignTenantSessionRefused(t *testing.T) {
+	mgr := &fakeMuter{active: true, campaignID: uuid.New()}
+	agents := &fakeLister{tenantID: tenantB}
+	cmd := MuteAllCommand(mgr, agents)
+	resp := &fakeResponder{}
+	ic := &Interaction{guildID: testGuild, userID: operatorID, tenantID: tenantA, resp: resp}
+
+	if err := cmd.Handle(context.Background(), ic); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(mgr.allCalls) != 0 {
+		t.Fatalf("muteall drove a foreign Tenant's session: %v", mgr.allCalls)
+	}
+	if len(resp.replies) != 1 || !resp.replies[0].ephemeral {
+		t.Fatalf("reply = %+v, want one ephemeral refusal", resp.replies)
+	}
+}
+
 // TestMuteCommand_ResolvesUUIDValue pins the autocomplete-picked path: the npc
 // value is an Agent UUID, resolved against the roster, and muted.
 func TestMuteCommand_ResolvesUUIDValue(t *testing.T) {

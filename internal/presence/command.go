@@ -20,6 +20,12 @@ import (
 // reply fails. Every dispatched handler runs on a context deadlined to this.
 const interactionTimeout = 2500 * time.Millisecond
 
+// gateAuthTimeout bounds the Gate's Guild→Tenant DB read (#490) so a hung DB can
+// never pin the disgo event goroutine — dispatch runs there before the first-response
+// watchdog is armed. Well under Discord's 3s deadline; a timeout fails closed as a
+// clean ErrWrongGuild reject.
+const gateAuthTimeout = 2 * time.Second
+
 // commandGroup is the single grouped-command prefix v1.0 ships (ADR-0010):
 // admin/session commands register as `/glyphoxa <sub>`, merged into one
 // SlashCommandCreate. High-frequency commands (e.g. /roll) stay flat.
@@ -198,7 +204,12 @@ func (r *Registry) dispatch(base context.Context, key string, ic *Interaction) {
 		r.log.Warn("presence: unknown slash command", "command", key)
 		return
 	}
-	tenantID, err := r.gate.Authorize(base, ic.guildID, ic.userID, cmd.GMOnly)
+	// Authorize does a Guild→Tenant DB read (#490); bound it well under Discord's 3s
+	// deadline and OFF the base ctx (this runs on the disgo event goroutine, so a hung
+	// DB must not stall it — the watchdog below is not armed yet).
+	authCtx, authCancel := context.WithTimeout(base, gateAuthTimeout)
+	tenantID, err := r.gate.Authorize(authCtx, ic.guildID, ic.userID, cmd.GMOnly)
+	authCancel()
 	if err != nil {
 		_ = ic.ReplyEphemeral(gateMessage(err))
 		return
@@ -247,7 +258,9 @@ func (r *Registry) autocompleteChoices(base context.Context, key string, ac *Aut
 	if !ok || cmd.Autocomplete == nil {
 		return empty
 	}
-	tenantID, err := r.gate.Authorize(base, ac.guildID, ac.userID, cmd.GMOnly)
+	authCtx, authCancel := context.WithTimeout(base, gateAuthTimeout)
+	tenantID, err := r.gate.Authorize(authCtx, ac.guildID, ac.userID, cmd.GMOnly)
+	authCancel()
 	if err != nil {
 		return empty
 	}

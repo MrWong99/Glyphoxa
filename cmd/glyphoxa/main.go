@@ -904,7 +904,7 @@ func runWeb(log *slog.Logger, cfg wirenpc.Config, metrics *observe.PrometheusRec
 		reg.Register(
 			presence.UseCommand(store),
 			presence.StartCommand(store, mgr),
-			presence.EndCommand(mgr),
+			presence.EndCommand(mgr, store),
 			presence.SearchCommand(store, mgr),
 			// /glyphoxa recap (#273): recaps the Active Campaign's latest ended Voice
 			// Session via the SAME shared slash resolver, delivered per the invoker's

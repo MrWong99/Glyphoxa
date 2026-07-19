@@ -152,7 +152,7 @@ func StartCommand(store SessionStore, voice VoiceControl) Command {
 // running returns a clear ephemeral error (AC3). Like start it Defers, because
 // Stop waits on the loop unwinding plus the ended_at write, and follows up
 // ephemerally.
-func EndCommand(voice VoiceControl) Command {
+func EndCommand(voice VoiceControl, store campaignTenantReader) Command {
 	return Command{
 		Path:        "glyphoxa end",
 		Description: "End the active voice session.",
@@ -163,6 +163,14 @@ func EndCommand(voice VoiceControl) Command {
 			}
 			ctx, cancel := context.WithTimeout(ctx, sessionOpTimeout)
 			defer cancel()
+
+			// Cross-tenant guard (#490): the Manager is single-active (#488 not merged),
+			// so a Tenant B GM authorized in its OWN Guild must NOT stop a live session
+			// belonging to Tenant A. Refuse when the running session isn't this Tenant's,
+			// treating it as "nothing to end here".
+			if vs, active := voice.Snapshot(); active && !sessionInTenant(ctx, store, vs, ic.TenantID()) {
+				return ic.ReplyEphemeral("No voice session is running.")
+			}
 
 			if _, err := voice.Stop(ctx); err != nil {
 				if errors.Is(err, session.ErrNoActiveSession) {

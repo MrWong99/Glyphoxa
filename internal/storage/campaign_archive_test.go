@@ -42,7 +42,7 @@ func TestArchiveCampaign(t *testing.T) {
 	}
 
 	// The durable selection pointing at the archived campaign was cleared.
-	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("durable selection after archive = %v, want ErrNotFound (cleared)", err)
 	}
 
@@ -117,7 +117,7 @@ func TestArchivedExcludedFromResolution(t *testing.T) {
 // campaign resolves to ErrNotFound so the caller falls to the fallback.
 func TestGetActiveCampaignForUserNeverReturnsArchived(t *testing.T) {
 	dsn := startPostgres(t)
-	pool, _, campaignID := seedCampaign(t, dsn)
+	pool, tenantID, campaignID := seedCampaign(t, dsn)
 	ctx := context.Background()
 	st := storage.New(pool)
 
@@ -129,7 +129,7 @@ func TestGetActiveCampaignForUserNeverReturnsArchived(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE campaign SET archived_at = now() WHERE id = $1`, campaignID); err != nil {
 		t.Fatalf("archive via SQL: %v", err)
 	}
-	if _, err := st.GetActiveCampaignForUser(ctx, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := st.GetActiveCampaignForUserInTenant(ctx, tenantID, gmSnowflake); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("GetActiveCampaignForUser with archived target = %v, want ErrNotFound", err)
 	}
 }
