@@ -77,6 +77,14 @@ func acquireClient(ctx context.Context, cfg Config, bus *voiceevent.Bus, log *sl
 		)),
 		gxvoice.DaveOption(),
 	}
+	// Gateway IDENTIFY-budget observability (#486): classify this per-cycle client's
+	// session establishments (Ready→identify, Resumed→resume) onto the Prometheus
+	// counters and the threshold warning. Only the OWNED client is instrumented here;
+	// the borrowed standing client (handled above) is instrumented by the presence,
+	// so no session is double-counted. A nil budget yields no listeners.
+	if ls := GatewayBudgetListeners(cfg.GatewayBudget); len(ls) > 0 {
+		opts = append(opts, bot.WithEventListeners(ls...))
+	}
 	// Standalone voice mode has no boot-owned presence to answer the tape consent
 	// disclosure's buttons (#306, finding 5), so THIS per-cycle client must carry
 	// the listener itself — otherwise every Consent/Revoke press fails. The all-mode

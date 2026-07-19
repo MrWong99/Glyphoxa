@@ -86,6 +86,13 @@ type Presence struct {
 	token   string                     // token the current client was built with
 	client  atomic.Pointer[bot.Client] // nil = wait-state
 	guildID atomic.Value               // string; last-ensured configured Guild ("" in wait-state)
+
+	// budget observes the standing client's gateway session establishments for the
+	// IDENTIFY-budget metrics (#486). Set once at boot via SetGatewayBudget before
+	// the first Ensure; read lazily by the default client builder, so a nil budget
+	// (never set) simply attaches no listeners. Not mu-guarded: it is written once
+	// before any Ensure and only read thereafter.
+	budget wirenpc.GatewayBudgetRecorder
 }
 
 // New builds a Presence. envToken is the DISCORD_BOT_TOKEN fallback (the
@@ -103,12 +110,24 @@ func New(store Store, cipher *crypto.Cipher, reg *Registry, envToken string, log
 		log:      log,
 	}
 	p.guildID.Store("")
-	p.build = defaultClientBuilder(reg, log, p.invalidate)
+	// The listener provider is read at build time (each Ensure that rebuilds the
+	// client), so a SetGatewayBudget between New and the first Ensure still lands.
+	p.build = defaultClientBuilder(reg, log, p.invalidate, func() []bot.EventListener {
+		return wirenpc.GatewayBudgetListeners(p.budget)
+	})
 	p.open = func(ctx context.Context, client *bot.Client) error { return client.OpenGateway(ctx) }
 	p.register = restRegister
 	p.closeClient = func(client *bot.Client) { client.Close(context.Background()) }
 	p.fetchMember = p.restGetMember
 	return p
+}
+
+// SetGatewayBudget installs the IDENTIFY-budget observer (#486) the default
+// client builder attaches to the standing gateway client. Call it once at boot
+// before the first Ensure; a later Ensure that rebuilds the client (token change)
+// re-reads it, so a mid-life set also takes effect on the next rebuild.
+func (p *Presence) SetGatewayBudget(b wirenpc.GatewayBudgetRecorder) {
+	p.budget = b
 }
 
 // Ensure reconciles the standing client and command registration against the
@@ -272,7 +291,7 @@ func (p *Presence) Close() {
 // disgo client with the SAME options the per-session voice wiring used (so a
 // shared-client Voice Session keeps its DAVE encryption and voice-state intents,
 // ADR-0006) plus the interaction listeners and async event delivery.
-func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error)) ClientBuilder {
+func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot.Client, cause error), budgetListeners func() []bot.EventListener) ClientBuilder {
 	return func(token string) (*bot.Client, error) {
 		// client is captured by the close handler below; disgo.New assigns it
 		// before any gateway open, so it is non-nil by the time a close can fire.
@@ -300,6 +319,12 @@ func defaultClientBuilder(reg *Registry, log *slog.Logger, onDead func(dead *bot
 			// Message-component (button) interactions: the rollover-tape consent
 			// buttons (#306) and any future component surface fan out from here.
 			bot.WithEventListenerFunc(reg.HandleComponent),
+			// Gateway IDENTIFY-budget observability (#486): classify the standing
+			// client's session establishments (Ready→identify, Resumed→resume). Empty
+			// when no budget is set. The voice-cycle clients that BORROW this client
+			// (wirenpc.Config.Client) inherit these listeners, so they are not
+			// re-instrumented on the borrow path — no double-counting.
+			bot.WithEventListeners(budgetListeners()...),
 			// Deliver events asynchronously so an interaction handler never runs on
 			// the gateway read goroutine and starves voice events (ADR-0010).
 			bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
